@@ -1,0 +1,323 @@
+package llmagent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"iter"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/policy"
+	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
+)
+
+// Config controls behavior of LLMAgent.
+type Config struct {
+	Name              string
+	SystemPrompt      string
+	MaxSteps          int
+	StreamModel       bool
+	Reasoning         model.ReasoningConfig
+	EmitPartialEvents bool
+	ToolTruncation    tool.TruncationPolicy
+}
+
+// Agent is a minimal model-tool loop agent.
+type Agent struct {
+	cfg Config
+}
+
+func New(cfg Config) (*Agent, error) {
+	if cfg.Name == "" {
+		return nil, fmt.Errorf("llmagent: name is required")
+	}
+	if cfg.MaxSteps < 0 {
+		return nil, fmt.Errorf("llmagent: max_steps must be >= 0")
+	}
+	if cfg.ToolTruncation.MaxTokens <= 0 && cfg.ToolTruncation.MaxBytes <= 0 {
+		cfg.ToolTruncation = tool.DefaultTruncationPolicy()
+	}
+	return &Agent{cfg: cfg}, nil
+}
+
+func (a *Agent) Name() string {
+	return a.cfg.Name
+}
+
+func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if ctx == nil {
+			yield(nil, fmt.Errorf("llmagent: invocation context is nil"))
+			return
+		}
+		if ctx.Model() == nil {
+			yield(nil, fmt.Errorf("llmagent: model is nil"))
+			return
+		}
+
+		messages := toMessages(ctx.History(), a.cfg.SystemPrompt)
+		hooks := ctx.Policies()
+		dupCount := map[string]int{}
+
+		for step := 0; ; step++ {
+			if a.cfg.MaxSteps > 0 && step >= a.cfg.MaxSteps {
+				yield(nil, fmt.Errorf("llmagent: max steps exceeded"))
+				return
+			}
+			toolDecls := tool.Declarations(ctx.Tools())
+			in, err := policy.ApplyBeforeModel(ctx, hooks, policy.ModelInput{Messages: messages, Tools: toolDecls})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			req := &model.Request{
+				Messages:  in.Messages,
+				Tools:     in.Tools,
+				Stream:    a.cfg.StreamModel,
+				Reasoning: a.cfg.Reasoning,
+			}
+			resp, err := collectLast(ctx, ctx.Model().Generate(ctx, req), func(partial *model.Response) error {
+				if partial == nil || !a.cfg.EmitPartialEvents || !partial.Partial {
+					return nil
+				}
+				if strings.TrimSpace(partial.Message.Reasoning) != "" {
+					ev := &session.Event{
+						ID:   newEventID(),
+						Time: time.Now(),
+						Message: model.Message{
+							Role:      model.RoleAssistant,
+							Reasoning: partial.Message.Reasoning,
+						},
+						Meta: map[string]any{
+							"partial": true,
+							"channel": "reasoning",
+						},
+					}
+					if !yield(ev, nil) {
+						return errYieldStopped
+					}
+				}
+				if strings.TrimSpace(partial.Message.Text) != "" {
+					ev := &session.Event{
+						ID:      newEventID(),
+						Time:    time.Now(),
+						Message: model.Message{Role: model.RoleAssistant, Text: partial.Message.Text},
+						Meta: map[string]any{
+							"partial": true,
+							"channel": "answer",
+						},
+					}
+					if !yield(ev, nil) {
+						return errYieldStopped
+					}
+				}
+				return nil
+			})
+			if errors.Is(err, errYieldStopped) {
+				return
+			}
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if resp == nil {
+				yield(nil, fmt.Errorf("llmagent: empty model response"))
+				return
+			}
+
+			out, err := policy.ApplyBeforeOutput(ctx, hooks, policy.Output{Message: resp.Message})
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			assistantMsg := out.Message
+			if assistantMsg.Role == "" {
+				assistantMsg.Role = model.RoleAssistant
+			}
+			assistantEvent := &session.Event{
+				ID:      newEventID(),
+				Time:    time.Now(),
+				Message: assistantMsg,
+				Meta:    responseMeta(resp),
+			}
+			if !yield(assistantEvent, nil) {
+				return
+			}
+
+			messages = append(messages, assistantMsg)
+			if len(assistantMsg.ToolCalls) == 0 {
+				return
+			}
+
+			for _, call := range assistantMsg.ToolCalls {
+				sig, sigErr := toolCallSignature(call)
+				if sigErr != nil {
+					yield(nil, sigErr)
+					return
+				}
+				dupCount[sig]++
+				if dupCount[sig] > 2 {
+					errMsg := "duplicate tool call detected"
+					toolMsg := model.Message{
+						Role: model.RoleTool,
+						ToolResponse: &model.ToolResponse{
+							ID:     call.ID,
+							Name:   call.Name,
+							Result: map[string]any{"error": errMsg},
+						},
+					}
+					ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+					if !yield(ev, nil) {
+						return
+					}
+					messages = append(messages, toolMsg)
+					return
+				}
+
+				beforeIn, err := policy.ApplyBeforeTool(ctx, hooks, policy.ToolInput{Call: call})
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				call = beforeIn.Call
+
+				execOut := policy.ToolOutput{Call: call}
+				t, ok := ctx.Tool(call.Name)
+				if !ok {
+					execOut.Err = fmt.Errorf("llmagent: unknown tool %q", call.Name)
+					execOut.Result = map[string]any{"error": execOut.Err.Error()}
+				} else {
+					result, runErr := t.Run(ctx, call.Args)
+					execOut.Err = runErr
+					if runErr != nil {
+						execOut.Result = map[string]any{"error": runErr.Error()}
+					} else {
+						execOut.Result = result
+					}
+				}
+
+				afterOut, err := policy.ApplyAfterTool(ctx, hooks, execOut)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
+				finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
+				toolMsg := model.Message{
+					Role:         model.RoleTool,
+					ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
+				}
+				ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+				if !yield(ev, nil) {
+					return
+				}
+				messages = append(messages, toolMsg)
+			}
+		}
+
+	}
+}
+
+func toMessages(events []*session.Event, systemPrompt string) []model.Message {
+	out := make([]model.Message, 0, len(events)+1)
+	if systemPrompt != "" {
+		out = append(out, model.Message{Role: model.RoleSystem, Text: systemPrompt})
+	}
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		out = append(out, ev.Message)
+	}
+	return out
+}
+
+var errYieldStopped = errors.New("llmagent: downstream yield stopped")
+
+func collectLast(ctx context.Context, seq iter.Seq2[*model.Response, error], onPartial func(*model.Response) error) (*model.Response, error) {
+	var last *model.Response
+	for res, err := range seq {
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		if res != nil {
+			if res.Partial && onPartial != nil {
+				if err := onPartial(res); err != nil {
+					return nil, err
+				}
+			}
+			last = res
+		}
+	}
+	return last, nil
+}
+
+func toolCallSignature(call model.ToolCall) (string, error) {
+	norm := normalize(call.Args)
+	raw, err := json.Marshal(norm)
+	if err != nil {
+		return "", err
+	}
+	return call.Name + ":" + string(raw), nil
+}
+
+func normalize(input map[string]any) any {
+	if input == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(input))
+	for k := range input {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]any, 0, len(keys)*2)
+	for _, k := range keys {
+		out = append(out, k, input[k])
+	}
+	return out
+}
+
+func newEventID() string {
+	return fmt.Sprintf("ev_%d", time.Now().UnixNano())
+}
+
+func responseMeta(resp *model.Response) map[string]any {
+	if resp == nil {
+		return nil
+	}
+	meta := map[string]any{}
+	if value := strings.TrimSpace(resp.Provider); value != "" {
+		meta["provider"] = value
+	}
+	if value := strings.TrimSpace(resp.Model); value != "" {
+		meta["model"] = value
+	}
+	usage := map[string]any{}
+	if resp.Usage.PromptTokens > 0 {
+		usage["prompt_tokens"] = resp.Usage.PromptTokens
+	}
+	if resp.Usage.CompletionTokens > 0 {
+		usage["completion_tokens"] = resp.Usage.CompletionTokens
+	}
+	if resp.Usage.TotalTokens > 0 {
+		usage["total_tokens"] = resp.Usage.TotalTokens
+	}
+	if len(usage) > 0 {
+		meta["usage"] = usage
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
+}

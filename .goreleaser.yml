@@ -1,0 +1,44 @@
+version: 2
+
+project_name: caelis
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: caelis
+    main: ./cmd/cli
+    binary: caelis
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/OnslaughtSnail/caelis/internal/version.Version={{ .Version }}
+      - -X github.com/OnslaughtSnail/caelis/internal/version.Commit={{ .Commit }}
+      - -X github.com/OnslaughtSnail/caelis/internal/version.Date={{ .Date }}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
