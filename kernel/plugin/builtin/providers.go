@@ -142,12 +142,17 @@ func (p workspaceToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	writeTool, err := toolfs.NewWriteWithRuntime(runtime)
+	if err != nil {
+		return nil, err
+	}
 	return []tool.Tool{
 		listTool,
 		globTool,
 		statTool,
 		searchTool,
 		patchTool,
+		writeTool,
 	}, nil
 }
 

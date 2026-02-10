@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -21,7 +22,7 @@ import (
 type Config struct {
 	Name              string
 	SystemPrompt      string
-	MaxSteps          int
+	MaxSteps          int // Deprecated: kept for compatibility and ignored.
 	StreamModel       bool
 	Reasoning         model.ReasoningConfig
 	EmitPartialEvents bool
@@ -33,12 +34,12 @@ type Agent struct {
 	cfg Config
 }
 
+const uiOnlyResultKeyPrefix = "_ui_"
+const toolResultMetadataKey = "metadata"
+
 func New(cfg Config) (*Agent, error) {
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("llmagent: name is required")
-	}
-	if cfg.MaxSteps < 0 {
-		return nil, fmt.Errorf("llmagent: max_steps must be >= 0")
 	}
 	if cfg.ToolTruncation.MaxTokens <= 0 && cfg.ToolTruncation.MaxBytes <= 0 {
 		cfg.ToolTruncation = tool.DefaultTruncationPolicy()
@@ -65,11 +66,7 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 		hooks := ctx.Policies()
 		dupCount := map[string]int{}
 
-		for step := 0; ; step++ {
-			if a.cfg.MaxSteps > 0 && step >= a.cfg.MaxSteps {
-				yield(nil, fmt.Errorf("llmagent: max steps exceeded"))
-				return
-			}
+		for {
 			toolDecls := tool.Declarations(ctx.Tools())
 			in, err := policy.ApplyBeforeModel(ctx, hooks, policy.ModelInput{Messages: messages, Tools: toolDecls})
 			if err != nil {
@@ -82,7 +79,7 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 				Stream:    a.cfg.StreamModel,
 				Reasoning: a.cfg.Reasoning,
 			}
-			resp, err := collectLast(ctx, ctx.Model().Generate(ctx, req), func(partial *model.Response) error {
+			resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
 				if partial == nil || !a.cfg.EmitPartialEvents || !partial.Partial {
 					return nil
 				}
@@ -196,6 +193,10 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 					result, runErr := t.Run(ctx, call.Args)
 					execOut.Err = runErr
 					if runErr != nil {
+						if toolexec.IsApprovalAborted(runErr) {
+							yield(nil, runErr)
+							return
+						}
 						execOut.Result = map[string]any{"error": runErr.Error()}
 					} else {
 						execOut.Result = result
@@ -209,6 +210,8 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 				}
 				truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
 				finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
+				finalResult = ensureToolResultMetadata(finalResult)
+				modelResult := sanitizeToolResultForModel(finalResult)
 				toolMsg := model.Message{
 					Role:         model.RoleTool,
 					ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
@@ -217,7 +220,14 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 				if !yield(ev, nil) {
 					return
 				}
-				messages = append(messages, toolMsg)
+				messages = append(messages, model.Message{
+					Role: model.RoleTool,
+					ToolResponse: &model.ToolResponse{
+						ID:     afterOut.Call.ID,
+						Name:   afterOut.Call.Name,
+						Result: modelResult,
+					},
+				})
 			}
 		}
 
@@ -233,12 +243,78 @@ func toMessages(events []*session.Event, systemPrompt string) []model.Message {
 		if ev == nil {
 			continue
 		}
-		out = append(out, ev.Message)
+		msg := ev.Message
+		if msg.ToolResponse != nil {
+			resp := *msg.ToolResponse
+			resp.Result = sanitizeToolResultForModel(resp.Result)
+			msg.ToolResponse = &resp
+		}
+		out = append(out, msg)
 	}
 	return out
 }
 
+func sanitizeToolResultForModel(result map[string]any) map[string]any {
+	if len(result) == 0 {
+		return result
+	}
+	out := make(map[string]any, len(result))
+	for key, value := range result {
+		if isModelHiddenToolResultKey(key) {
+			continue
+		}
+		out[key] = sanitizeToolResultValue(value)
+	}
+	return out
+}
+
+func isModelHiddenToolResultKey(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	if strings.HasPrefix(trimmed, uiOnlyResultKeyPrefix) {
+		return true
+	}
+	return strings.EqualFold(trimmed, toolResultMetadataKey)
+}
+
+func ensureToolResultMetadata(result map[string]any) map[string]any {
+	if result == nil {
+		return map[string]any{toolResultMetadataKey: map[string]any{}}
+	}
+	if _, exists := result[toolResultMetadataKey]; !exists {
+		result[toolResultMetadataKey] = map[string]any{}
+		return result
+	}
+	if _, ok := result[toolResultMetadataKey].(map[string]any); ok {
+		return result
+	}
+	result[toolResultMetadataKey] = map[string]any{
+		"raw_value": fmt.Sprint(result[toolResultMetadataKey]),
+	}
+	return result
+}
+
+func sanitizeToolResultValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return sanitizeToolResultForModel(typed)
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, one := range typed {
+			out = append(out, sanitizeToolResultValue(one))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
 var errYieldStopped = errors.New("llmagent: downstream yield stopped")
+
+var (
+	modelRequestMaxRetries = 5
+	modelRetryBaseDelay    = 250 * time.Millisecond
+	modelRetryMaxDelay     = 4 * time.Second
+)
 
 func collectLast(ctx context.Context, seq iter.Seq2[*model.Response, error], onPartial func(*model.Response) error) (*model.Response, error) {
 	var last *model.Response
@@ -261,6 +337,64 @@ func collectLast(ctx context.Context, seq iter.Seq2[*model.Response, error], onP
 		}
 	}
 	return last, nil
+}
+
+func (a *Agent) generateWithRetry(
+	ctx agent.InvocationContext,
+	req *model.Request,
+	onPartial func(*model.Response) error,
+) (*model.Response, error) {
+	retries := 0
+	for {
+		emittedPartial := false
+		resp, err := collectLast(ctx, ctx.Model().Generate(ctx, req), func(partial *model.Response) error {
+			if partial != nil && partial.Partial {
+				emittedPartial = true
+			}
+			if onPartial == nil {
+				return nil
+			}
+			return onPartial(partial)
+		})
+		if err == nil {
+			return resp, nil
+		}
+		if emittedPartial {
+			return nil, err
+		}
+		if errors.Is(err, errYieldStopped) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
+		if retries >= modelRequestMaxRetries {
+			return nil, fmt.Errorf("llmagent: model request failed after %d retries: %w", modelRequestMaxRetries, err)
+		}
+		delay := retryDelayForAttempt(retries)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		retries++
+	}
+}
+
+func retryDelayForAttempt(retry int) time.Duration {
+	if retry < 0 {
+		retry = 0
+	}
+	delay := modelRetryBaseDelay
+	for i := 0; i < retry; i++ {
+		delay *= 2
+		if delay >= modelRetryMaxDelay {
+			return modelRetryMaxDelay
+		}
+	}
+	if delay > modelRetryMaxDelay {
+		return modelRetryMaxDelay
+	}
+	return delay
 }
 
 func toolCallSignature(call model.ToolCall) (string, error) {

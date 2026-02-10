@@ -51,6 +51,7 @@ type RunRequest struct {
 	CoreTools            tool.CoreToolsConfig
 	Policies             []policy.Hook
 	LSPBroker            *lspbroker.Broker
+	AutoActivateLSP      []string
 	PersistPartialEvents bool
 	ContextWindowTokens  int
 }
@@ -172,7 +173,8 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			lsp:      req.LSPBroker,
 			active:   map[string]struct{}{},
 		}
-		for _, language := range restoreActivatedLSPFromEvents(allEvents) {
+		activateLanguages := mergeActivationLanguages(restoreActivatedLSPFromEvents(allEvents), req.AutoActivateLSP)
+		for _, language := range activateLanguages {
 			_, activateErr := inv.ActivateLSP(ctx, lspbroker.ActivateRequest{Language: language})
 			if activateErr != nil {
 				yield(nil, activateErr)
@@ -340,6 +342,25 @@ func restoreActivatedLSPFromEvents(events []*session.Event) []string {
 		}
 		seen[language] = struct{}{}
 		out = append(out, language)
+	}
+	return out
+}
+
+func mergeActivationLanguages(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 4)
+	for _, group := range groups {
+		for _, one := range group {
+			language := strings.ToLower(strings.TrimSpace(one))
+			if language == "" {
+				continue
+			}
+			if _, exists := seen[language]; exists {
+				continue
+			}
+			seen[language] = struct{}{}
+			out = append(out, language)
+		}
 	}
 	return out
 }

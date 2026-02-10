@@ -14,15 +14,17 @@ import (
 
 const (
 	// BashToolName is the conventional shell execution tool name.
-	BashToolName = "BASH"
+	BashToolName       = "BASH"
+	defaultBashTimeout = 90 * time.Second
+	defaultBashIdle    = 45 * time.Second
 )
 
 // BashConfig configures the optional BASH tool.
 type BashConfig struct {
-	Timeout         time.Duration
-	PreRun          func(command, workingDir string) error
-	AllowedCommands []string
-	Runtime         toolexec.Runtime
+	Timeout     time.Duration
+	IdleTimeout time.Duration
+	PreRun      func(command, workingDir string) error
+	Runtime     toolexec.Runtime
 }
 
 // BashTool executes shell commands.
@@ -36,6 +38,12 @@ func NewBash(cfg BashConfig) (*BashTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(cfg.Runtime)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = defaultBashTimeout
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = defaultBashIdle
 	}
 	return &BashTool{
 		cfg:     cfg,
@@ -60,6 +68,18 @@ func (t *BashTool) Declaration() model.ToolDefinition {
 			"properties": map[string]any{
 				"command": map[string]any{"type": "string", "description": "shell command"},
 				"dir":     map[string]any{"type": "string", "description": "working directory"},
+				"timeout_ms": map[string]any{
+					"type":        "integer",
+					"description": "optional timeout in milliseconds, overrides default tool timeout",
+				},
+				"idle_timeout_ms": map[string]any{
+					"type":        "integer",
+					"description": "optional no-output timeout in milliseconds, overrides default idle timeout",
+				},
+				"sandbox_permissions": map[string]any{
+					"type":        "string",
+					"description": "sandbox permission mode: auto|require_escalated",
+				},
 			},
 			"required": []string{"command"},
 		},
@@ -75,24 +95,76 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
+	sandboxPermissionArg, err := argparse.String(args, "sandbox_permissions", false)
+	if err != nil {
+		return nil, err
+	}
+	timeoutMS, err := argparse.Int(args, "timeout_ms", 0)
+	if err != nil {
+		return nil, err
+	}
+	if timeoutMS < 0 {
+		return nil, fmt.Errorf("tool: arg %q must be >= 0", "timeout_ms")
+	}
+	idleTimeoutMS, err := argparse.Int(args, "idle_timeout_ms", 0)
+	if err != nil {
+		return nil, err
+	}
+	if idleTimeoutMS < 0 {
+		return nil, fmt.Errorf("tool: arg %q must be >= 0", "idle_timeout_ms")
+	}
+	sandboxPermission, err := parseSandboxPermission(sandboxPermissionArg)
+	if err != nil {
+		return nil, err
+	}
+	timeout := t.cfg.Timeout
+	if timeoutMS > 0 {
+		timeout = time.Duration(timeoutMS) * time.Millisecond
+	}
+	idleTimeout := t.cfg.IdleTimeout
+	if idleTimeoutMS > 0 {
+		idleTimeout = time.Duration(idleTimeoutMS) * time.Millisecond
+	}
+
 	if t.cfg.PreRun != nil {
 		if err := t.cfg.PreRun(command, workingDir); err != nil {
 			return nil, err
 		}
 	}
-	policy := t.runtime.BashPolicy()
-	if len(t.cfg.AllowedCommands) > 0 {
-		policy.Allowlist = append([]string(nil), t.cfg.AllowedCommands...)
-	}
-	if err := ensureAllowedCommand(ctx, command, policy); err != nil {
+
+	decision := t.runtime.DecideRoute(command, sandboxPermission)
+	runner, needApproval, reason, err := t.resolveRunner(decision)
+	if err != nil {
 		return nil, err
 	}
-
-	result, err := t.runtime.Runner().Run(ctx, toolexec.CommandRequest{
-		Command: command,
-		Dir:     workingDir,
-		Timeout: t.cfg.Timeout,
+	if needApproval {
+		if err := requestApproval(ctx, command, reason); err != nil {
+			return nil, err
+		}
+	}
+	result, err := runner.Run(ctx, toolexec.CommandRequest{
+		Command:     command,
+		Dir:         workingDir,
+		Timeout:     timeout,
+		IdleTimeout: idleTimeout,
 	})
+	if err != nil && shouldEscalateWhenSandboxUnavailable(t.runtime, decision, command, result) {
+		hostRunner := t.runtime.HostRunner()
+		if hostRunner == nil {
+			return nil, fmt.Errorf("tool: host runner is unavailable")
+		}
+		base := commandBaseName(command)
+		reason := fmt.Sprintf("sandbox image lacks command %q; approve host execution", base)
+		if reqErr := requestApproval(ctx, command, reason); reqErr != nil {
+			return nil, reqErr
+		}
+		result, err = hostRunner.Run(ctx, toolexec.CommandRequest{
+			Command:     command,
+			Dir:         workingDir,
+			Timeout:     timeout,
+			IdleTimeout: idleTimeout,
+		})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("tool: BASH failed: %w", err)
 	}
@@ -103,76 +175,89 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	}, nil
 }
 
-func ensureAllowedCommand(ctx context.Context, command string, policy toolexec.BashPolicy) error {
-	command = strings.TrimSpace(command)
-	if command == "" {
-		return fmt.Errorf("tool: permission denied: empty command")
+func shouldEscalateWhenSandboxUnavailable(rt toolexec.Runtime, decision toolexec.CommandDecision, command string, result toolexec.CommandResult) bool {
+	if rt == nil || decision.Route != toolexec.ExecutionRouteSandbox {
+		return false
 	}
-	if policy.Strategy == toolexec.BashStrategyFullAccess {
-		return nil
+	if rt.PermissionMode() != toolexec.PermissionModeDefault {
+		return false
 	}
-	hasMeta := strings.ContainsAny(command, "|;&><`$\\")
-	fields := strings.Fields(command)
+	base := commandBaseName(command)
+	if base == "" {
+		return false
+	}
+	if result.ExitCode != 127 {
+		return false
+	}
+	lowerErr := strings.ToLower(strings.TrimSpace(result.Stderr))
+	if lowerErr == "" {
+		return false
+	}
+	// Common shell errors: "go: not found", "sh: go: command not found", etc.
+	if strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "command not found") {
+		return true
+	}
+	return false
+}
+
+func commandBaseName(command string) string {
+	fields := strings.Fields(strings.TrimSpace(command))
 	if len(fields) == 0 {
-		return fmt.Errorf("tool: permission denied: empty command")
+		return ""
 	}
-	base := filepath.Base(fields[0])
-	allowed := map[string]struct{}{}
-	for _, one := range policy.Allowlist {
-		one = strings.TrimSpace(one)
-		if one == "" {
-			continue
-		}
-		allowed[one] = struct{}{}
+	return filepath.Base(fields[0])
+}
+
+func parseSandboxPermission(raw string) (toolexec.SandboxPermission, error) {
+	value := toolexec.SandboxPermission(strings.TrimSpace(strings.ToLower(raw)))
+	switch value {
+	case "", toolexec.SandboxPermissionAuto:
+		return toolexec.SandboxPermissionAuto, nil
+	case toolexec.SandboxPermissionRequireEscalated:
+		return toolexec.SandboxPermissionRequireEscalated, nil
+	default:
+		return "", fmt.Errorf("tool: invalid sandbox_permissions %q, expected auto|require_escalated", raw)
 	}
-	isAllowed := false
-	if len(allowed) > 0 {
-		if _, ok := allowed[base]; ok {
-			isAllowed = true
-		}
+}
+
+func (t *BashTool) resolveRunner(decision toolexec.CommandDecision) (toolexec.CommandRunner, bool, string, error) {
+	reason := ""
+	if decision.Escalation != nil {
+		reason = strings.TrimSpace(decision.Escalation.Message)
 	}
 
-	switch policy.Strategy {
-	case toolexec.BashStrategyStrict:
-		needApproval := false
-		reasons := make([]string, 0, 2)
-		if policy.DenyMetaChars && hasMeta {
-			needApproval = true
-			reasons = append(reasons, "shell meta characters detected")
+	switch decision.Route {
+	case toolexec.ExecutionRouteSandbox:
+		runner := t.runtime.SandboxRunner()
+		if runner == nil {
+			return nil, false, "", fmt.Errorf("tool: sandbox runner is unavailable")
 		}
-		if !isAllowed {
-			needApproval = true
-			reasons = append(reasons, fmt.Sprintf("command %q is outside allowlist", base))
+		return runner, false, "", nil
+	case toolexec.ExecutionRouteHost:
+		runner := t.runtime.HostRunner()
+		if runner == nil {
+			return nil, false, "", fmt.Errorf("tool: host runner is unavailable")
 		}
-		if !needApproval {
-			return nil
+		if t.runtime.PermissionMode() == toolexec.PermissionModeFullControl {
+			return runner, false, "", nil
 		}
-		return requestApproval(ctx, command, strings.Join(reasons, "; "))
-	case toolexec.BashStrategyAgentDecide:
-		needApproval := false
-		reasons := make([]string, 0, 2)
-		if hasMeta && policy.DenyMetaChars {
-			needApproval = true
-			reasons = append(reasons, "shell meta characters detected")
+		if reason == "" {
+			reason = "host execution requires approval in default permission mode"
 		}
-		if !isAllowed {
-			needApproval = true
-			reasons = append(reasons, fmt.Sprintf("command %q is outside allowlist", base))
-		}
-		if !needApproval {
-			return nil
-		}
-		reason := strings.Join(reasons, "; ")
-		return requestApproval(ctx, command, reason)
+		return runner, true, reason, nil
 	default:
-		return fmt.Errorf("tool: permission denied: command %q is not in whitelist", base)
+		return nil, false, "", fmt.Errorf("tool: unsupported execution route %q", decision.Route)
 	}
 }
 
 func requestApproval(ctx context.Context, command string, reason string) error {
 	approver, ok := toolexec.ApproverFromContext(ctx)
 	if !ok {
-		return &toolexec.ApprovalRequiredError{Reason: reason}
+		suggestion := "approve in interactive mode or rerun with -permission-mode full_control"
+		if strings.TrimSpace(reason) == "" {
+			return &toolexec.ApprovalRequiredError{Reason: suggestion}
+		}
+		return &toolexec.ApprovalRequiredError{Reason: reason + "; " + suggestion}
 	}
 	allowed, err := approver.Approve(ctx, toolexec.ApprovalRequest{
 		ToolName: BashToolName,
@@ -184,7 +269,7 @@ func requestApproval(ctx context.Context, command string, reason string) error {
 		return err
 	}
 	if !allowed {
-		return fmt.Errorf("tool: permission denied: approval denied")
+		return &toolexec.ApprovalAbortedError{Reason: "approval denied"}
 	}
 	return nil
 }

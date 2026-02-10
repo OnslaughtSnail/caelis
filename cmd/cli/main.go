@@ -4,10 +4,8 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	launcherfull "github.com/OnslaughtSnail/caelis/cmd/launcher/full"
@@ -23,7 +21,6 @@ import (
 	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/promptpipeline"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
-	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/filestore"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
@@ -82,23 +79,23 @@ func runCLI(ctx context.Context, args []string) error {
 		sessionIndexFile = fs.String("session-index", defaultSessionIndexPath, "Session index sqlite file path")
 		systemPrompt     = fs.String("system-prompt", "You are a helpful assistant.", "Base system prompt")
 		promptConfigDir  = fs.String("prompt-config-dir", "", "Prompt config directory (default ~/.{app}/prompts)")
-		maxSteps         = fs.Int("max-steps", configStore.MaxSteps(), "Max LLM-tool loop steps (0 means unlimited)")
 		credentialStore  = fs.String("credential-store", configStore.CredentialStoreMode(), "Credential store mode: auto|file|ephemeral")
 		skillsDirs       = fs.String("skills-dirs", "~/.agents/skills,.agents/skills", "Comma-separated skill directories")
-		streamModel      = fs.Bool("stream", false, "Enable model streaming mode")
-		thinkingMode     = fs.String("thinking-mode", "auto", "Thinking mode: auto|on|off")
-		thinkingBudget   = fs.Int("thinking-budget", 1024, "Thinking token budget when thinking-mode=on")
-		reasoningEffort  = fs.String("reasoning-effort", "", "Reasoning effort hint: low|medium|high")
+		streamModel      = fs.Bool("stream", configStore.StreamModel(), "Enable model streaming mode")
+		thinkingMode     = fs.String("thinking-mode", configStore.ThinkingMode(), "Thinking mode: auto|on|off")
+		thinkingBudget   = fs.Int("thinking-budget", configStore.ThinkingBudget(), "Thinking token budget when thinking-mode=on")
+		reasoningEffort  = fs.String("reasoning-effort", configStore.ReasoningEffort(), "Reasoning effort hint: low|medium|high")
 		compactWatermark = fs.Float64("compact-watermark", 0.7, "Auto compaction watermark ratio (0.5-0.9)")
 		contextWindow    = fs.Int("context-window", 0, "Model context window tokens override")
-		execMode         = fs.String("exec-mode", string(toolexec.ModeNoSandbox), "Tool execution mode: no_sandbox|sandbox")
-		sandboxType      = fs.String("sandbox-type", "", "Sandbox backend type when exec-mode=sandbox")
-		bashStrategy     = fs.String("bash-strategy", string(toolexec.BashStrategyAuto), "BASH strategy: auto|full_access|agent_decided|strict (strict asks approval for non-allowlist or meta commands)")
-		bashAllowlist    = fs.String("bash-allowlist", "", "Comma-separated allowed base commands for BASH strategy")
-		bashDenyMeta     = fs.Bool("bash-deny-meta", true, "Deny shell meta chars in strict/agent_decided strategy")
+		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
+		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default")
+		safeCommands     = fs.String("safe-commands", "", "Comma-separated safe base commands for sandbox execution")
 		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
 		showVersion      = fs.Bool("version", false, "Show version and exit")
 	)
+	if err := rejectRemovedExecutionFlags(args); err != nil {
+		return err
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -119,6 +116,17 @@ func runCLI(ctx context.Context, args []string) error {
 	if err := migrateInlineProviderTokens(configStore, credentials); err != nil {
 		return err
 	}
+	if err := configStore.SetRuntimeSettings(runtimeSettings{
+		StreamModel:     *streamModel,
+		ThinkingMode:    *thinkingMode,
+		ThinkingBudget:  *thinkingBudget,
+		ReasoningEffort: *reasoningEffort,
+		ShowReasoning:   configStore.ShowReasoning(),
+		PermissionMode:  *permissionMode,
+		SandboxType:     *sandboxType,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: persist runtime settings failed: %v\n", err)
+	}
 
 	if _, err := envload.LoadNearest(); err != nil {
 		return err
@@ -133,16 +141,20 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 
 	execRuntime, err := toolexec.New(toolexec.Config{
-		Mode:        toolexec.Mode(strings.TrimSpace(*execMode)),
-		SandboxType: strings.TrimSpace(*sandboxType),
-		BashPolicy: toolexec.BashPolicy{
-			Strategy:      toolexec.BashStrategy(strings.TrimSpace(*bashStrategy)),
-			Allowlist:     splitCSV(*bashAllowlist),
-			DenyMetaChars: *bashDenyMeta,
-		},
+		PermissionMode: toolexec.PermissionMode(strings.TrimSpace(*permissionMode)),
+		SandboxType:    strings.TrimSpace(*sandboxType),
+		SafeCommands:   splitCSV(*safeCommands),
 	})
 	if err != nil {
 		return err
+	}
+	defer func() {
+		if closeErr := toolexec.Close(execRuntime); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: close execution runtime failed: %v\n", closeErr)
+		}
+	}()
+	if execRuntime.FallbackToHost() {
+		fmt.Fprintf(os.Stderr, "warn: sandbox unavailable, fallback to host+approval: %s\n", execRuntime.FallbackReason())
 	}
 	ctx = pluginbuiltin.WithExecutionRuntime(ctx, execRuntime)
 	var mcpManager *toolmcp.Manager
@@ -262,7 +274,7 @@ func runCLI(ctx context.Context, args []string) error {
 			PromptConfigDir:        *promptConfigDir,
 			EnableLSPRoutingPolicy: hasToolName(resolved.Tools, "LSP_ACTIVATE"),
 			BasePrompt:             *systemPrompt,
-			MaxSteps:               *maxSteps,
+			RuntimeHint:            buildRuntimePromptHint(execRuntime),
 			SkillDirs:              splitCSV(*skillsDirs),
 			StreamModel:            *streamModel,
 			ThinkingMode:           *thinkingMode,
@@ -283,9 +295,10 @@ func runCLI(ctx context.Context, args []string) error {
 			CoreTools:           tool.CoreToolsConfig{Runtime: execRuntime},
 			Policies:            resolved.Policies,
 			LSPBroker:           lspBroker,
+			AutoActivateLSP:     autoActivateLSPLanguages(workspace.CWD, resolved.Tools),
 			ContextWindowTokens: *contextWindow,
 		}, runRenderConfig{
-			ShowReasoning: true,
+			ShowReasoning: configStore.ShowReasoning(),
 			Writer:        os.Stdout,
 		})
 	}
@@ -300,6 +313,8 @@ func runCLI(ctx context.Context, args []string) error {
 		Workspace:              workspace,
 		Resolved:               resolved,
 		ExecRuntime:            execRuntime,
+		SandboxType:            strings.TrimSpace(*sandboxType),
+		AutoActivateLSP:        autoActivateLSPLanguages(workspace.CWD, resolved.Tools),
 		ModelAlias:             alias,
 		Model:                  llm,
 		ModelFactory:           factory,
@@ -309,13 +324,12 @@ func runCLI(ctx context.Context, args []string) error {
 		SystemPrompt:           *systemPrompt,
 		PromptConfigDir:        *promptConfigDir,
 		EnableLSPRoutingPolicy: hasToolName(resolved.Tools, "LSP_ACTIVATE"),
-		MaxSteps:               *maxSteps,
 		SkillDirs:              splitCSV(*skillsDirs),
 		StreamModel:            *streamModel,
 		ThinkingMode:           *thinkingMode,
 		ThinkingBudget:         *thinkingBudget,
 		ReasoningEffort:        *reasoningEffort,
-		ShowReasoning:          true,
+		ShowReasoning:          configStore.ShowReasoning(),
 		HistoryFile:            historyPath,
 		LSPBroker:              lspBroker,
 		Version:                version.String(),
@@ -329,7 +343,7 @@ type buildAgentInput struct {
 	PromptConfigDir        string
 	EnableLSPRoutingPolicy bool
 	BasePrompt             string
-	MaxSteps               int
+	RuntimeHint            string
 	SkillDirs              []string
 	StreamModel            bool
 	ThinkingMode           string
@@ -342,6 +356,7 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 		AppName:                in.AppName,
 		WorkspaceDir:           in.WorkspaceDir,
 		BasePrompt:             in.BasePrompt,
+		RuntimeHint:            in.RuntimeHint,
 		SkillDirs:              in.SkillDirs,
 		ConfigDir:              in.PromptConfigDir,
 		EnableLSPRoutingPolicy: in.EnableLSPRoutingPolicy,
@@ -361,7 +376,6 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:              "main",
 		SystemPrompt:      assembled.Prompt,
-		MaxSteps:          in.MaxSteps,
 		StreamModel:       in.StreamModel,
 		Reasoning:         reasoning,
 		EmitPartialEvents: in.StreamModel,
@@ -381,6 +395,146 @@ func splitCSV(input string) []string {
 	return out
 }
 
+func buildRuntimePromptHint(execRuntime toolexec.Runtime) string {
+	if execRuntime == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(string(execRuntime.PermissionMode()))
+	if mode == "" {
+		return ""
+	}
+	lines := []string{
+		"## Runtime Execution",
+		"- Informational runtime hints; higher-priority instructions may override.",
+	}
+	if policyHint := runtimePolicyHint(execRuntime.SandboxPolicy()); policyHint != "" {
+		lines = append(lines, "- "+policyHint)
+	}
+	if safeSummary := summarizeSafeCommands(execRuntime.SafeCommands(), 10); safeSummary != "-" {
+		lines = append(lines, "- safe_commands="+safeSummary)
+	}
+	switch execRuntime.PermissionMode() {
+	case toolexec.PermissionModeFullControl:
+		lines = append(lines, "- permission_mode=full_control route=host")
+		lines = append(lines, "- Rule: BASH commands run on host directly with no approval gate.")
+	default:
+		lines = append(lines, fmt.Sprintf("- permission_mode=default sandbox_type=%s", execRuntime.SandboxType()))
+		if execRuntime.FallbackToHost() {
+			lines = append(lines, "- Rule: sandbox is unavailable; all BASH commands require approval then run on host.")
+			if reason := strings.TrimSpace(execRuntime.FallbackReason()); reason != "" {
+				lines = append(lines, fmt.Sprintf("- Fallback reason: %s", truncateInline(reason, 160)))
+			}
+			lines = append(lines, "- Approval UX: y=allow once, a=allow this command for current session, n=cancel current run.")
+		} else {
+			lines = append(lines, "- Rule: commands run in sandbox by default; only require_escalated requests need host approval.")
+			lines = append(lines, "- Approval UX: host escalation uses y/a/n; denied approval stops current run and returns control to user.")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func runtimePolicyHint(policy toolexec.SandboxPolicy) string {
+	policyType := strings.TrimSpace(string(policy.Type))
+	if policyType == "" {
+		return ""
+	}
+	network := "off"
+	if policy.NetworkAccess {
+		network = "on"
+	}
+	return fmt.Sprintf(
+		"sandbox_policy=%s network=%s writable_roots=%s read_only_subpaths=%s",
+		policyType,
+		network,
+		csvOrDash(policy.WritableRoots),
+		csvOrDash(policy.ReadOnlySubpaths),
+	)
+}
+
+func csvOrDash(items []string) string {
+	if len(items) == 0 {
+		return "-"
+	}
+	filtered := make([]string, 0, len(items))
+	for _, one := range items {
+		trimmed := strings.TrimSpace(one)
+		if trimmed == "" {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	if len(filtered) == 0 {
+		return "-"
+	}
+	return strings.Join(filtered, ",")
+}
+
+func summarizeSafeCommands(commands []string, limit int) string {
+	if len(commands) == 0 {
+		return "-"
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	normalized := make([]string, 0, len(commands))
+	seen := map[string]struct{}{}
+	for _, one := range commands {
+		trimmed := strings.TrimSpace(one)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	if len(normalized) == 0 {
+		return "-"
+	}
+	if len(normalized) <= limit {
+		return strings.Join(normalized, ",")
+	}
+	return fmt.Sprintf("%s,+%d more", strings.Join(normalized[:limit], ","), len(normalized)-limit)
+}
+
+func rejectRemovedExecutionFlags(args []string) error {
+	removed := map[string]string{
+		"exec-mode":      "-permission-mode",
+		"bash-strategy":  "-permission-mode",
+		"bash-allowlist": "-safe-commands",
+		"bash-deny-meta": "-permission-mode",
+	}
+	for _, arg := range args {
+		for flagName, replacement := range removed {
+			short := "-" + flagName
+			long := "--" + flagName
+			if arg == short || arg == long || strings.HasPrefix(arg, short+"=") || strings.HasPrefix(arg, long+"=") {
+				return fmt.Errorf("flag %q 已移除，请使用 %s", flagName, replacement)
+			}
+		}
+	}
+	return nil
+}
+
+func autoActivateLSPLanguages(workspaceDir string, tools []tool.Tool) []string {
+	if !hasToolName(tools, "LSP_ACTIVATE") {
+		return nil
+	}
+	if strings.TrimSpace(workspaceDir) == "" {
+		return nil
+	}
+	goModPath := filepath.Join(workspaceDir, "go.mod")
+	if _, err := os.Stat(goModPath); err == nil {
+		return []string{"go"}
+	}
+	matches, err := filepath.Glob(filepath.Join(workspaceDir, "*.go"))
+	if err == nil && len(matches) > 0 {
+		return []string{"go"}
+	}
+	return nil
+}
+
 func hasToolName(tools []tool.Tool, name string) bool {
 	target := strings.TrimSpace(name)
 	if target == "" {
@@ -395,213 +549,6 @@ func hasToolName(tools []tool.Tool, name string) bool {
 		}
 	}
 	return false
-}
-
-type runRenderConfig struct {
-	ShowReasoning bool
-	Writer        io.Writer
-}
-
-func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, renderCfg runRenderConfig) error {
-	invokeCtx := ctx
-	out := renderCfg.Writer
-	if out == nil {
-		out = os.Stdout
-	}
-	render := &renderState{
-		showReasoning: renderCfg.ShowReasoning,
-		out:           out,
-	}
-	for ev, err := range rt.Run(invokeCtx, req) {
-		if err != nil {
-			return err
-		}
-		if ev == nil {
-			continue
-		}
-		printEvent(ev, render)
-	}
-	if render.partialOpen {
-		fmt.Fprintln(render.out)
-	}
-	return nil
-}
-
-type renderState struct {
-	partialOpen          bool
-	partialChannel       string
-	seenAnswerPartial    bool
-	seenReasoningPartial bool
-	showReasoning        bool
-	out                  io.Writer
-}
-
-func printEvent(ev *session.Event, state *renderState) {
-	if ev == nil {
-		return
-	}
-	if state != nil && eventIsPartial(ev) {
-		channel := eventChannel(ev)
-		chunk := ev.Message.Text
-		if channel == "reasoning" {
-			chunk = ev.Message.Reasoning
-			if !state.showReasoning {
-				return
-			}
-		}
-		if chunk == "" {
-			return
-		}
-		if state.partialOpen && state.partialChannel != channel {
-			fmt.Fprintln(state.out)
-			state.partialOpen = false
-		}
-		if !state.partialOpen {
-			if channel == "reasoning" {
-				fmt.Fprint(state.out, "~ ")
-			} else {
-				fmt.Fprint(state.out, "* ")
-			}
-		}
-		fmt.Fprint(state.out, chunk)
-		state.partialOpen = true
-		state.partialChannel = channel
-		if channel == "reasoning" {
-			state.seenReasoningPartial = true
-		} else {
-			state.seenAnswerPartial = true
-		}
-		return
-	}
-	if state != nil && state.partialOpen {
-		fmt.Fprintln(state.out)
-		state.partialOpen = false
-	}
-
-	msg := ev.Message
-	if msg.Role == model.RoleUser {
-		return
-	}
-	if msg.ToolResponse != nil {
-		fmt.Fprintf(state.out, "= %s %s\n", msg.ToolResponse.Name, summarizeToolResponse(msg.ToolResponse.Result))
-		return
-	}
-	if len(msg.ToolCalls) > 0 {
-		for i, call := range msg.ToolCalls {
-			fmt.Fprintf(state.out, "#%d %s %s\n", i+1, call.Name, summarizeToolArgs(call.Args))
-		}
-		return
-	}
-	if msg.Role == model.RoleAssistant && state != nil && state.showReasoning && msg.Reasoning != "" && !state.seenReasoningPartial {
-		fmt.Fprintf(state.out, "~ %s\n", strings.TrimSpace(msg.Reasoning))
-	}
-	if msg.Role == model.RoleAssistant && state != nil && state.seenAnswerPartial && msg.Text != "" {
-		// Streaming mode already printed partial answer chunks.
-	} else {
-		text := strings.TrimSpace(msg.Text)
-		if text != "" {
-			switch msg.Role {
-			case model.RoleAssistant:
-				fmt.Fprintf(state.out, "* %s\n", text)
-			case model.RoleSystem:
-				fmt.Fprintf(state.out, "! %s\n", text)
-			default:
-				fmt.Fprintf(state.out, "- %s\n", text)
-			}
-		}
-	}
-	if state != nil && msg.Role == model.RoleAssistant {
-		state.seenAnswerPartial = false
-		state.seenReasoningPartial = false
-	}
-}
-
-func summarizeToolArgs(args map[string]any) string {
-	if len(args) == 0 {
-		return "{}"
-	}
-	keys := make([]string, 0, len(args))
-	for k := range args {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		value := fmt.Sprint(args[key])
-		parts = append(parts, fmt.Sprintf("%s=%s", key, truncateInline(value, 72)))
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
-}
-
-func summarizeToolResponse(result map[string]any) string {
-	if len(result) == 0 {
-		return "{}"
-	}
-	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
-		return truncateInline(value, 160)
-	}
-	if value := firstNonEmpty(result, "summary", "output", "result"); value != "" {
-		return truncateInline(value, 160)
-	}
-	keys := make([]string, 0, len(result))
-	for k := range result {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return fmt.Sprintf("{keys=%s}", strings.Join(keys, ","))
-}
-
-func firstNonEmpty(values map[string]any, keys ...string) string {
-	for _, key := range keys {
-		raw, ok := values[key]
-		if !ok {
-			continue
-		}
-		text := strings.TrimSpace(fmt.Sprint(raw))
-		if text != "" && text != "<nil>" {
-			return text
-		}
-	}
-	return ""
-}
-
-func truncateInline(input string, limit int) string {
-	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
-	rs := []rune(text)
-	if limit <= 0 || len(rs) <= limit {
-		return text
-	}
-	if limit <= 3 {
-		return string(rs[:limit])
-	}
-	return string(rs[:limit-3]) + "..."
-}
-
-func eventIsPartial(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	raw, ok := ev.Meta["partial"]
-	if !ok {
-		return false
-	}
-	flag, ok := raw.(bool)
-	return ok && flag
-}
-
-func eventChannel(ev *session.Event) string {
-	if ev == nil || ev.Meta == nil {
-		return "answer"
-	}
-	raw, ok := ev.Meta["channel"]
-	if !ok {
-		return "answer"
-	}
-	channel, ok := raw.(string)
-	if !ok || channel == "" {
-		return "answer"
-	}
-	return channel
 }
 
 func parseReasoning(mode string, budget int, effort string) (model.ReasoningConfig, error) {
