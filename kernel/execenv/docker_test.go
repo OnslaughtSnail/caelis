@@ -296,7 +296,7 @@ func TestDockerRunner_RunTimeout(t *testing.T) {
 	}
 	_, err := r.Run(context.Background(), CommandRequest{
 		Command: "echo hi",
-		Timeout: 50 * time.Millisecond,
+		Timeout: 250 * time.Millisecond,
 	})
 	if err == nil {
 		t.Fatal("expected timeout error")

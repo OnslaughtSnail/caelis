@@ -271,6 +271,13 @@ func (d *dockerRunner) runSandboxCommand(runCtx context.Context, req CommandRequ
 	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput}
 	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput}
 	if err := cmd.Start(); err != nil {
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			label := "context deadline"
+			if req.Timeout > 0 {
+				label = req.Timeout.String()
+			}
+			return CommandResult{}, fmt.Errorf("tool: docker sandbox command timed out after %s (mode=%s network=%s): %w; stderr=", label, mode, d.network, err)
+		}
 		return CommandResult{}, fmt.Errorf("tool: docker sandbox command start failed (%s): %w", mode, err)
 	}
 	err := waitWithIdleTimeout(runCtx, cmd, req.IdleTimeout, &lastOutput)
