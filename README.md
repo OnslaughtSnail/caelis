@@ -58,6 +58,7 @@ Launcher modes:
 Tool execution runtime flags:
 - `-exec-mode`: `no_sandbox|sandbox`
 - `-sandbox-type`: sandbox backend type (when `-exec-mode=sandbox`, pluggable by runtime registry)
+  - built-in: `docker` (requires local Docker daemon; image defaults to `alpine:3.20`, override via `CAELIS_SANDBOX_DOCKER_IMAGE`)
 - `-bash-strategy`: `auto|full_access|agent_decided|strict`
 - `-bash-allowlist`: override command allowlist (comma-separated)
 - `-bash-deny-meta`: deny shell meta characters (`|;&><\`$\\`) in strict/agent-decided checks
