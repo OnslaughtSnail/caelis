@@ -3,6 +3,7 @@ package filesystem
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io/fs"
 	"strings"
 
@@ -14,6 +15,8 @@ import (
 const (
 	SearchToolName = "SEARCH"
 )
+
+var errSearchLimitReached = errors.New("search: limit reached")
 
 type SearchTool struct {
 	runtime toolexec.Runtime
@@ -99,43 +102,63 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 		queryToMatch = strings.ToLower(query)
 	}
 	results := make([]map[string]any, 0, limit)
-	appendMatch := func(path string, lineNum int, text string) bool {
+	filesWithHits := map[string]struct{}{}
+	truncated := false
+	appendMatch := func(path string, lineNum, column int, text string) bool {
+		filesWithHits[path] = struct{}{}
 		results = append(results, map[string]any{
-			"path": path,
-			"line": lineNum,
-			"text": text,
+			"path":   path,
+			"line":   lineNum,
+			"column": column,
+			"text":   text,
 		})
+		if len(results) >= limit {
+			truncated = true
+		}
 		return len(results) >= limit
 	}
+	scannedFiles := 0
 
 	if info.IsDir() {
-		_ = walkDir(t.runtime.FileSystem(), target, func(path string, d fs.DirEntry, walkErr error) error {
+		walkErr := walkDir(t.runtime.FileSystem(), target, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return nil
 			}
 			if d == nil || d.IsDir() {
 				return nil
 			}
+			scannedFiles++
 			matched, stop := searchInFile(t.runtime.FileSystem(), path, queryToMatch, caseSensitive, appendMatch)
 			_ = matched
 			if stop {
-				return context.Canceled
+				return errSearchLimitReached
 			}
 			return nil
 		})
+		if walkErr != nil && !errors.Is(walkErr, errSearchLimitReached) {
+			return nil, walkErr
+		}
 	} else {
-		_, _ = searchInFile(t.runtime.FileSystem(), target, queryToMatch, caseSensitive, appendMatch)
+		scannedFiles = 1
+		_, stop := searchInFile(t.runtime.FileSystem(), target, queryToMatch, caseSensitive, appendMatch)
+		if stop {
+			truncated = true
+		}
 	}
 
 	return map[string]any{
-		"path":  target,
-		"query": query,
-		"count": len(results),
-		"hits":  results,
+		"path":          target,
+		"query":         query,
+		"count":         len(results),
+		"file_count":    len(filesWithHits),
+		"scanned_files": scannedFiles,
+		"limit":         limit,
+		"truncated":     truncated,
+		"hits":          results,
 	}, nil
 }
 
-func searchInFile(fsys toolexec.FileSystem, path, query string, caseSensitive bool, appendMatch func(string, int, string) bool) (bool, bool) {
+func searchInFile(fsys toolexec.FileSystem, path, query string, caseSensitive bool, appendMatch func(string, int, int, string) bool) (bool, bool) {
 	file, err := fsys.Open(path)
 	if err != nil {
 		return false, false
@@ -155,7 +178,11 @@ func searchInFile(fsys toolexec.FileSystem, path, query string, caseSensitive bo
 		}
 		if strings.Contains(candidate, query) {
 			matched = true
-			if appendMatch(path, lineNum, text) {
+			column := strings.Index(candidate, query) + 1
+			if column <= 0 {
+				column = 1
+			}
+			if appendMatch(path, lineNum, column, text) {
 				return true, true
 			}
 		}

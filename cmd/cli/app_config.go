@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	stdruntime "runtime"
 	"sort"
 	"strings"
 	"time"
@@ -16,16 +17,39 @@ import (
 const (
 	configVersion    = 1
 	defaultModel     = ""
-	defaultMaxSteps  = 64
 	configFileSuffix = "_config.json"
+	defaultStream    = false
+
+	defaultThinkingMode    = "auto"
+	defaultThinkingBudget  = 1024
+	defaultReasoningEffort = ""
+	defaultShowReasoning   = true
+
+	defaultPermissionMode = "default"
 )
 
 type appConfig struct {
 	Version             int              `json:"version"`
 	DefaultModel        string           `json:"default_model"`
-	MaxSteps            *int             `json:"max_steps,omitempty"`
 	CredentialStoreMode string           `json:"credential_store_mode,omitempty"`
+	StreamModel         *bool            `json:"stream_model,omitempty"`
+	ThinkingMode        string           `json:"thinking_mode,omitempty"`
+	ThinkingBudget      *int             `json:"thinking_budget,omitempty"`
+	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
+	ShowReasoning       *bool            `json:"show_reasoning,omitempty"`
+	PermissionMode      string           `json:"permission_mode,omitempty"`
+	SandboxType         string           `json:"sandbox_type,omitempty"`
 	Providers           []providerRecord `json:"providers,omitempty"`
+}
+
+type runtimeSettings struct {
+	StreamModel     bool
+	ThinkingMode    string
+	ThinkingBudget  int
+	ReasoningEffort string
+	ShowReasoning   bool
+	PermissionMode  string
+	SandboxType     string
 }
 
 type providerRecord struct {
@@ -93,18 +117,64 @@ func (s *appConfigStore) DefaultModel() string {
 	return strings.ToLower(value)
 }
 
-func (s *appConfigStore) MaxSteps() int {
-	if s == nil || s.data.MaxSteps == nil {
-		return defaultMaxSteps
-	}
-	return *s.data.MaxSteps
-}
-
 func (s *appConfigStore) CredentialStoreMode() string {
 	if s == nil {
 		return defaultCredentialStoreMode
 	}
 	return normalizeCredentialStoreMode(s.data.CredentialStoreMode)
+}
+
+func (s *appConfigStore) StreamModel() bool {
+	if s == nil || s.data.StreamModel == nil {
+		return defaultStream
+	}
+	return *s.data.StreamModel
+}
+
+func (s *appConfigStore) ThinkingMode() string {
+	if s == nil {
+		return defaultThinkingMode
+	}
+	return normalizeThinkingMode(s.data.ThinkingMode)
+}
+
+func (s *appConfigStore) ThinkingBudget() int {
+	if s == nil || s.data.ThinkingBudget == nil {
+		return defaultThinkingBudget
+	}
+	value := *s.data.ThinkingBudget
+	if value <= 0 {
+		return defaultThinkingBudget
+	}
+	return value
+}
+
+func (s *appConfigStore) ReasoningEffort() string {
+	if s == nil {
+		return defaultReasoningEffort
+	}
+	return normalizeReasoningEffort(s.data.ReasoningEffort)
+}
+
+func (s *appConfigStore) ShowReasoning() bool {
+	if s == nil || s.data.ShowReasoning == nil {
+		return defaultShowReasoning
+	}
+	return *s.data.ShowReasoning
+}
+
+func (s *appConfigStore) PermissionMode() string {
+	if s == nil {
+		return defaultPermissionMode
+	}
+	return normalizePermissionMode(s.data.PermissionMode)
+}
+
+func (s *appConfigStore) SandboxType() string {
+	if s == nil {
+		return platformDefaultSandboxType()
+	}
+	return normalizeSandboxType(s.data.SandboxType)
 }
 
 func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
@@ -212,6 +282,57 @@ func (s *appConfigStore) SetCredentialStoreMode(mode string) error {
 	return s.save()
 }
 
+func (s *appConfigStore) SetRuntimeSettings(settings runtimeSettings) error {
+	if s == nil {
+		return nil
+	}
+	thinkingMode := normalizeThinkingMode(settings.ThinkingMode)
+	thinkingBudget := settings.ThinkingBudget
+	if thinkingBudget <= 0 {
+		thinkingBudget = defaultThinkingBudget
+	}
+	reasoningEffort := normalizeReasoningEffort(settings.ReasoningEffort)
+	permissionMode := normalizePermissionMode(settings.PermissionMode)
+	sandboxType := normalizeSandboxType(settings.SandboxType)
+
+	changed := false
+	if s.data.StreamModel == nil || *s.data.StreamModel != settings.StreamModel {
+		v := settings.StreamModel
+		s.data.StreamModel = &v
+		changed = true
+	}
+	if s.data.ThinkingMode != thinkingMode {
+		s.data.ThinkingMode = thinkingMode
+		changed = true
+	}
+	if s.data.ThinkingBudget == nil || *s.data.ThinkingBudget != thinkingBudget {
+		v := thinkingBudget
+		s.data.ThinkingBudget = &v
+		changed = true
+	}
+	if s.data.ReasoningEffort != reasoningEffort {
+		s.data.ReasoningEffort = reasoningEffort
+		changed = true
+	}
+	if s.data.ShowReasoning == nil || *s.data.ShowReasoning != settings.ShowReasoning {
+		v := settings.ShowReasoning
+		s.data.ShowReasoning = &v
+		changed = true
+	}
+	if s.data.PermissionMode != permissionMode {
+		s.data.PermissionMode = permissionMode
+		changed = true
+	}
+	if s.data.SandboxType != sandboxType {
+		s.data.SandboxType = sandboxType
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.save()
+}
+
 func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 	if s == nil {
 		return nil
@@ -283,12 +404,20 @@ func (s *appConfigStore) save() error {
 }
 
 func defaultAppConfig() appConfig {
-	maxSteps := defaultMaxSteps
+	streamModel := defaultStream
+	thinkingBudget := defaultThinkingBudget
+	showReasoning := defaultShowReasoning
 	return appConfig{
 		Version:             configVersion,
 		DefaultModel:        defaultModel,
-		MaxSteps:            &maxSteps,
 		CredentialStoreMode: defaultCredentialStoreMode,
+		StreamModel:         &streamModel,
+		ThinkingMode:        defaultThinkingMode,
+		ThinkingBudget:      &thinkingBudget,
+		ReasoningEffort:     defaultReasoningEffort,
+		ShowReasoning:       &showReasoning,
+		PermissionMode:      defaultPermissionMode,
+		SandboxType:         platformDefaultSandboxType(),
 		Providers:           nil,
 	}
 }
@@ -304,11 +433,71 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	if cfg.DefaultModel == "fake" {
 		cfg.DefaultModel = ""
 	}
-	if cfg.MaxSteps == nil {
-		maxSteps := defaultMaxSteps
-		cfg.MaxSteps = &maxSteps
-	}
 	cfg.CredentialStoreMode = normalizeCredentialStoreMode(cfg.CredentialStoreMode)
+	if cfg.StreamModel == nil {
+		v := defaultStream
+		cfg.StreamModel = &v
+	}
+	cfg.ThinkingMode = normalizeThinkingMode(cfg.ThinkingMode)
+	if cfg.ThinkingBudget == nil || *cfg.ThinkingBudget <= 0 {
+		v := defaultThinkingBudget
+		cfg.ThinkingBudget = &v
+	}
+	cfg.ReasoningEffort = normalizeReasoningEffort(cfg.ReasoningEffort)
+	if cfg.ShowReasoning == nil {
+		v := defaultShowReasoning
+		cfg.ShowReasoning = &v
+	}
+	cfg.PermissionMode = normalizePermissionMode(cfg.PermissionMode)
+	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
+}
+
+func normalizeThinkingMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "on":
+		return "on"
+	case "off":
+		return "off"
+	default:
+		return defaultThinkingMode
+	}
+}
+
+func normalizeReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "high":
+		return "high"
+	default:
+		return defaultReasoningEffort
+	}
+}
+
+func normalizePermissionMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "full_control":
+		return "full_control"
+	default:
+		return defaultPermissionMode
+	}
+}
+
+func normalizeSandboxType(sandboxType string) string {
+	value := strings.TrimSpace(strings.ToLower(sandboxType))
+	if value == "" {
+		return platformDefaultSandboxType()
+	}
+	return value
+}
+
+func platformDefaultSandboxType() string {
+	if stdruntime.GOOS == "darwin" {
+		return "seatbelt"
+	}
+	return "docker"
 }
 
 func configPath(appName string) (string, error) {

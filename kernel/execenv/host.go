@@ -3,12 +3,15 @@ package execenv
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 type hostFileSystem struct{}
@@ -68,14 +71,27 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "bash", "-lc", req.Command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
 	}
+	cmd.Env = append(os.Environ(),
+		"CI=1",
+		"TERM=dumb",
+		"GIT_TERMINAL_PROMPT=0",
+		"PAGER=cat",
+		"NO_COLOR=1",
+	)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	lastOutput := atomic.Int64{}
+	lastOutput.Store(time.Now().UnixNano())
+	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput}
+	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput}
+	if err := cmd.Start(); err != nil {
+		return CommandResult{}, fmt.Errorf("tool: command start failed: %w", err)
+	}
+	err := waitWithIdleTimeout(runCtx, cmd, req.IdleTimeout, &lastOutput)
 
 	result := CommandResult{
 		Stdout: stdout.String(),
@@ -85,6 +101,20 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 		return result, nil
 	}
 	result.ExitCode = resolveExitCode(err)
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		label := "context deadline"
+		if req.Timeout > 0 {
+			label = req.Timeout.String()
+		}
+		return result, fmt.Errorf("tool: command timed out after %s: %w; stderr=%s", label, err, result.Stderr)
+	}
+	if errors.Is(err, errIdleTimeout) {
+		label := "idle limit"
+		if req.IdleTimeout > 0 {
+			label = req.IdleTimeout.String()
+		}
+		return result, fmt.Errorf("tool: command produced no output for %s and was terminated (likely interactive/long-running); stderr=%s", label, result.Stderr)
+	}
 	return result, fmt.Errorf("tool: command failed: %w; stderr=%s", err, result.Stderr)
 }
 

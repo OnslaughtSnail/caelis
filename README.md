@@ -31,8 +31,7 @@ go run ./cmd/cli \
   -tool-providers local_tools,workspace_tools,shell_tools,lsp_activation,mcp_tools \
   -policy-providers default_allow \
   -model deepseek/deepseek-chat \
-  -exec-mode no_sandbox \
-  -bash-strategy strict \
+  -permission-mode default \
   -mcp-config ~/.agents/mcp_servers.json \
   -stream=true \
   -thinking-mode=off \
@@ -56,15 +55,43 @@ Launcher modes:
 - reserved placeholders: `go run ./cmd/cli api ...`, `go run ./cmd/cli web ...`
 
 Tool execution runtime flags:
-- `-exec-mode`: `no_sandbox|sandbox`
-- `-sandbox-type`: sandbox backend type (when `-exec-mode=sandbox`, pluggable by runtime registry)
+- `-permission-mode`: `default|full_control`
+  - `full_control`: run commands on host directly, no approval required
+  - `default`: run commands in sandbox by default; escalated host command requires approval
+- `-sandbox-type`: sandbox backend type (when `-permission-mode=default`, pluggable by runtime registry)
+  - default: macOS uses `seatbelt`; other platforms use `docker`
+  - built-in: `seatbelt` (macOS `sandbox-exec`)
   - built-in: `docker` (requires local Docker daemon; image defaults to `alpine:3.20`, override via `CAELIS_SANDBOX_DOCKER_IMAGE`)
-- `-bash-strategy`: `auto|full_access|agent_decided|strict`
-- `-bash-allowlist`: override command allowlist (comma-separated)
-- `-bash-deny-meta`: deny shell meta characters (`|;&><\`$\\`) in strict/agent-decided checks
+  - docker network defaults to `bridge`, override via `CAELIS_SANDBOX_DOCKER_NETWORK` (for stricter isolation use `none`)
+  - sandbox does not fully mirror host toolchain; for language-specific workflows (go/node/python) use a richer image via `CAELIS_SANDBOX_DOCKER_IMAGE`
+- `-safe-commands`: override sandbox safe command set (comma-separated)
+  - default: `pwd,ls,find,cat,head,tail,wc,echo,grep,sed,awk,rg`
+  - note: this list is currently not used for approval routing; host approval in `default` is only triggered by fallback or explicit `sandbox_permissions=require_escalated`
 - `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
 - `-prompt-config-dir`: override prompt config directory; empty means `~/.{app}/prompts`
 - `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
+
+Fallback behavior:
+- In `default` mode on macOS, runtime tries sandbox backends in order: `seatbelt -> docker -> host+approval`.
+- In `default` mode on other platforms, runtime tries: `docker -> host+approval`.
+- If all sandbox backends are unavailable at startup (for example `sandbox-exec` missing and Docker daemon unavailable), CLI falls back to `host+approval` and prints a warning.
+- In non-interactive runs without approver context, escalated commands return `ApprovalRequiredError` with a hint to use interactive approval or `-permission-mode full_control`.
+- If a command is routed to sandbox but fails with "command not found" (`exit code 127`), BASH asks for approval and retries on host.
+
+Approval UX in interactive CLI:
+- Safe read-style commands are default-approved for host escalation in current session (`cat`, `head`, `grep`, and other `safe-commands`, plus `git status`).
+- Approval prompt options:
+  - `y`: allow once
+  - `a`: allow this exact command for current session (no more prompts for same command text)
+  - `n` / empty: cancel
+- On cancel, current agent run stops immediately and control returns to the user prompt.
+
+BASH timeout behavior:
+- BASH tool has a default timeout of `90s` for host and sandbox execution.
+- BASH tool has a default no-output timeout of `45s` (idle timeout) to stop interactive/long-running commands that stop producing output.
+- Optional tool args `timeout_ms` and `idle_timeout_ms` can override per call.
+- For commands that may start interactive loops (`go run ...`, `npm start`, etc), prefer one-shot/non-interactive flags and set explicit `timeout_ms`.
+- Host/sandbox execution enforces non-interactive environment defaults (`CI=1`, `TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `PAGER=cat`, `NO_COLOR=1`).
 
 System prompt pipeline order (high -> low):
 1. `~/.{app}/prompts/IDENTITY.md`
@@ -98,6 +125,8 @@ Interactive slash commands:
 - `/help`: show command help
 - `/version`: show version info
 - `/status`: show current model/thinking/stream/execution status
+- `/permission [default|full_control]`: show or switch permission mode
+- `/sandbox [<type>]`: show or switch sandbox backend type
 - `/models`: list available model aliases
 - `/model <alias>`: switch model
 - `/thinking <auto|on|off> [budget]`: switch thinking mode
@@ -107,6 +136,12 @@ Interactive slash commands:
 - `/tools`: show current assembled tool list
 - `/compact [note]`: trigger one manual compaction
 - `/exit`: quit
+
+CLI runtime preferences (`stream`, `thinking-mode`, `thinking-budget`, `reasoning-effort`, `reasoning display`, `permission-mode`, `sandbox-type`) are persisted in app config and reused on next start.
+
+LSP behavior:
+- `LSP_ACTIVATE` is still available.
+- For Go workspaces (`go.mod` exists or root has `*.go`), CLI auto-activates Go LSP tools at run start to reduce missed tool-loading.
 
 Manual compaction command in interactive mode:
 ```text

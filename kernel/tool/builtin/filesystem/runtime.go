@@ -22,7 +22,7 @@ func runtimeOrDefault(runtime toolexec.Runtime) (toolexec.Runtime, error) {
 	}
 	defaultRuntimeOnce.Do(func() {
 		defaultRuntimeInst, defaultRuntimeErr = toolexec.New(toolexec.Config{
-			Mode: toolexec.ModeNoSandbox,
+			PermissionMode: toolexec.PermissionModeFullControl,
 		})
 	})
 	if defaultRuntimeErr != nil {

@@ -181,6 +181,33 @@ func TestRuntime_RestoreActivatedLSPToolsFromHistory(t *testing.T) {
 	}
 }
 
+func TestRuntime_AutoActivateLSPTools(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	broker := lspbroker.New()
+	if err := broker.RegisterAdapter(lspTestAdapter{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:         "app",
+		UserID:          "u",
+		SessionID:       "s-lsp-auto",
+		Input:           "hello",
+		Agent:           assertLSPAgent{t: t},
+		Model:           llm,
+		LSPBroker:       broker,
+		AutoActivateLSP: []string{"go"},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+}
+
 func TestRuntime_ContextUsage(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})

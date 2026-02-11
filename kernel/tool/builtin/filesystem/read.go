@@ -200,6 +200,10 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		startLine = offset + 1
 		endLine = offset + len(lines)
 	}
+	nextOffset := endLine
+	if len(lines) == 0 {
+		nextOffset = offset
+	}
 
 	return map[string]any{
 		"path":               targetPath,
@@ -208,9 +212,11 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		"applied_max_tokens": maxTokens,
 		"start_line":         startLine,
 		"end_line":           endLine,
+		"next_offset":        nextOffset,
 		"line_count":         len(lines),
 		"used_tokens":        usedToken,
 		"has_more":           hasMore,
+		"truncated":          hasMore,
 		"truncated_reason":   truncatedReason,
 		"content":            content.String(),
 	}, nil

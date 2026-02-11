@@ -26,6 +26,7 @@ type AssembleSpec struct {
 	AppName                string
 	WorkspaceDir           string
 	BasePrompt             string
+	RuntimeHint            string
 	SkillDirs              []string
 	ConfigDir              string
 	EnableLSPRoutingPolicy bool
@@ -147,6 +148,13 @@ func Assemble(spec AssembleSpec) (AssembleResult, error) {
 			Content: defaultLSPRoutingPolicy,
 		})
 	}
+	if runtimeHint := normalizeText(spec.RuntimeHint); runtimeHint != "" {
+		out.Fragments = append(out.Fragments, PromptFragment{
+			Stage:   "runtime_context",
+			Source:  "runtime execution context",
+			Content: runtimeHint,
+		})
+	}
 
 	userParts := make([]string, 0, 2)
 	if text, readErr := readRequiredPrompt(files.UserPath); readErr != nil {
@@ -262,7 +270,7 @@ func readOptionalPrompt(path string) (string, error) {
 func renderPrompt(fragments []PromptFragment) string {
 	var b bytes.Buffer
 	b.WriteString("Priority rule: higher sections override lower sections.\n")
-	b.WriteString("Order: identity > global_agents > workspace_agents > lsp_routing_policy > user_custom > skills_meta.")
+	b.WriteString("Order: identity > global_agents > workspace_agents > lsp_routing_policy > runtime_context > user_custom > skills_meta.")
 	for _, f := range fragments {
 		text := normalizeText(f.Content)
 		if text == "" {
@@ -292,6 +300,8 @@ func stageTitle(stage string) string {
 		return "User Custom Instructions"
 	case "lsp_routing_policy":
 		return "LSP Routing Policy"
+	case "runtime_context":
+		return "Runtime Context"
 	case "skills_meta":
 		return "Skills Metadata"
 	default:

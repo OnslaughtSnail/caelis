@@ -129,3 +129,29 @@ func TestAssembleSkipsLSPPolicyWhenDisabled(t *testing.T) {
 		t.Fatalf("did not expect LSP policy section when disabled:\n%s", result.Prompt)
 	}
 }
+
+func TestAssembleIncludesRuntimeContext(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := t.TempDir()
+
+	result, err := Assemble(AssembleSpec{
+		AppName:                "demo-app",
+		WorkspaceDir:           workspace,
+		BasePrompt:             "base override",
+		RuntimeHint:            "## Runtime Execution\n- permission_mode=default sandbox_type=docker",
+		EnableLSPRoutingPolicy: true,
+	})
+	if err != nil {
+		t.Fatalf("Assemble failed: %v", err)
+	}
+	text := result.Prompt
+	if !strings.Contains(text, "### Runtime Context") {
+		t.Fatalf("expected runtime context section:\n%s", text)
+	}
+	idxRuntime := strings.Index(text, "### Runtime Context")
+	idxUser := strings.Index(text, "### User Custom Instructions")
+	if !(idxRuntime > 0 && idxUser > 0 && idxRuntime < idxUser) {
+		t.Fatalf("unexpected runtime/user ordering: runtime=%d user=%d", idxRuntime, idxUser)
+	}
+}

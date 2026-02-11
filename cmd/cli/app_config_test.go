@@ -25,11 +25,26 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	if store.DefaultModel() != "" {
 		t.Fatalf("unexpected default model: %q", store.DefaultModel())
 	}
-	if store.MaxSteps() != 64 {
-		t.Fatalf("unexpected default max steps: %d", store.MaxSteps())
-	}
 	if store.CredentialStoreMode() != credentialStoreModeAuto {
 		t.Fatalf("unexpected default credential store mode: %q", store.CredentialStoreMode())
+	}
+	if store.StreamModel() {
+		t.Fatalf("unexpected default stream mode: %v", store.StreamModel())
+	}
+	if store.ThinkingMode() != "auto" {
+		t.Fatalf("unexpected default thinking mode: %q", store.ThinkingMode())
+	}
+	if store.ThinkingBudget() != 1024 {
+		t.Fatalf("unexpected default thinking budget: %d", store.ThinkingBudget())
+	}
+	if store.ShowReasoning() != true {
+		t.Fatalf("unexpected default show reasoning: %v", store.ShowReasoning())
+	}
+	if store.PermissionMode() != "default" {
+		t.Fatalf("unexpected default permission mode: %q", store.PermissionMode())
+	}
+	if store.SandboxType() != platformDefaultSandboxType() {
+		t.Fatalf("unexpected default sandbox type: %q", store.SandboxType())
 	}
 
 	cfgPath, err := configPath("demo-app")
@@ -84,6 +99,40 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	}
 	if got := store2.ResolveModelAlias("OPENAI/GPT-4O-MINI"); got != "openai/gpt-4o-mini" {
 		t.Fatalf("unexpected resolved alias: %q", got)
+	}
+
+	if err := store2.SetRuntimeSettings(runtimeSettings{
+		StreamModel:     true,
+		ThinkingMode:    "on",
+		ThinkingBudget:  2048,
+		ReasoningEffort: "high",
+		ShowReasoning:   false,
+		PermissionMode:  "full_control",
+		SandboxType:     "docker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store3, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store3.StreamModel() {
+		t.Fatalf("expected stream mode persisted")
+	}
+	if store3.ThinkingMode() != "on" {
+		t.Fatalf("expected thinking mode on, got %q", store3.ThinkingMode())
+	}
+	if store3.ThinkingBudget() != 2048 {
+		t.Fatalf("expected thinking budget 2048, got %d", store3.ThinkingBudget())
+	}
+	if store3.ReasoningEffort() != "high" {
+		t.Fatalf("expected reasoning effort high, got %q", store3.ReasoningEffort())
+	}
+	if store3.ShowReasoning() {
+		t.Fatalf("expected show reasoning persisted false")
+	}
+	if store3.PermissionMode() != "full_control" {
+		t.Fatalf("expected permission mode full_control, got %q", store3.PermissionMode())
 	}
 }
 
