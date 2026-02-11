@@ -20,6 +20,30 @@ func TestDockerFactoryBuildsRunner(t *testing.T) {
 	}
 }
 
+func TestDockerFactoryBuild_AppliesSandboxPolicy(t *testing.T) {
+	t.Setenv(dockerNetEnvKey, "bridge")
+	factory := dockerSandboxFactory{}
+	runner, err := factory.Build(Config{
+		SandboxPolicy: SandboxPolicy{
+			Type:          SandboxPolicyReadOnly,
+			NetworkAccess: false,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed, ok := runner.(*dockerRunner)
+	if !ok {
+		t.Fatalf("expected dockerRunner, got %T", runner)
+	}
+	if typed.network != "none" {
+		t.Fatalf("expected network=none from policy, got %q", typed.network)
+	}
+	if !typed.readOnly {
+		t.Fatal("expected readonly mount mode for read_only sandbox policy")
+	}
+}
+
 func TestNewDockerRunner_DefaultNetworkBridge(t *testing.T) {
 	t.Setenv(dockerNetEnvKey, "")
 	t.Setenv(dockerImageEnvKey, "")
@@ -300,6 +324,44 @@ func TestDockerRunner_RunTimeout(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("expected timeout message, got %v", err)
+	}
+}
+
+func TestDockerRunner_RunTimeoutExcludesSessionStartup(t *testing.T) {
+	var startupCalls int
+	var execCalls int
+	r := &dockerRunner{
+		image:     "alpine:3.20",
+		network:   "bridge",
+		setupTTL:  2 * time.Second,
+		container: "caelis-test",
+		execCommand: func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			_ = name
+			joined := strings.Join(args, " ")
+			if strings.HasPrefix(joined, "run -d --rm") {
+				startupCalls++
+				// Startup intentionally slower than per-command timeout.
+				return exec.CommandContext(ctx, "bash", "-lc", "sleep 0.15 && echo started")
+			}
+			execCalls++
+			return exec.CommandContext(ctx, "bash", "-lc", "sleep 1")
+		},
+	}
+	_, err := r.Run(context.Background(), CommandRequest{
+		Command: "echo hi",
+		Timeout: 80 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if startupCalls != 1 {
+		t.Fatalf("expected one startup call, got %d", startupCalls)
+	}
+	if execCalls != 1 {
+		t.Fatalf("expected command exec to run once after startup, got %d", execCalls)
 	}
 	if !strings.Contains(err.Error(), "timed out after") {
 		t.Fatalf("expected timeout message, got %v", err)

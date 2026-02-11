@@ -54,6 +54,24 @@ func TestTerminalApprover_DefaultWhitelistAllowsSafeCommands(t *testing.T) {
 	}
 }
 
+func TestTerminalApprover_DefaultWhitelistRejectsSingleAmpersandChain(t *testing.T) {
+	editor := &stubLineEditor{lines: []string{"n"}}
+	approver := newTerminalApprover(editor, io.Discard, []string{"ls"})
+
+	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{
+		Command: "ls & rm -rf /tmp/x",
+	})
+	if allowed {
+		t.Fatal("expected '&' chained command not to be auto-approved")
+	}
+	if err == nil || !toolexec.IsApprovalAborted(err) {
+		t.Fatalf("expected approval aborted error, got %v", err)
+	}
+	if editor.reads != 1 {
+		t.Fatalf("expected prompt read once, got %d", editor.reads)
+	}
+}
+
 func TestTerminalApprover_DefaultWhitelistAllowsGitStatus(t *testing.T) {
 	editor := &stubLineEditor{}
 	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})

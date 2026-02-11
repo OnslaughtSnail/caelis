@@ -24,6 +24,7 @@ const (
 	dockerDefaultNet   = "bridge"
 	dockerNetEnvKey    = "CAELIS_SANDBOX_DOCKER_NETWORK"
 	dockerSessionName  = "caelis-sandbox"
+	dockerSetupTimeout = 20 * time.Second
 )
 
 var dockerSessionCounter atomic.Int64
@@ -35,14 +36,15 @@ func (f dockerSandboxFactory) Type() string {
 }
 
 func (f dockerSandboxFactory) Build(cfg Config) (CommandRunner, error) {
-	_ = cfg
-	return newDockerRunner(), nil
+	return newDockerRunnerWithConfig(cfg), nil
 }
 
 type dockerRunner struct {
 	execCommand func(context.Context, string, ...string) *exec.Cmd
 	image       string
 	network     string
+	readOnly    bool
+	setupTTL    time.Duration
 	mu          sync.Mutex
 	container   string
 	rootDir     string
@@ -51,6 +53,10 @@ type dockerRunner struct {
 }
 
 func newDockerRunner() CommandRunner {
+	return newDockerRunnerWithConfig(Config{})
+}
+
+func newDockerRunnerWithConfig(cfg Config) CommandRunner {
 	image := strings.TrimSpace(os.Getenv(dockerImageEnvKey))
 	if image == "" {
 		image = dockerDefaultImage
@@ -59,10 +65,21 @@ func newDockerRunner() CommandRunner {
 	if network == "" {
 		network = dockerDefaultNet
 	}
+	readOnly := false
+	if cfg.SandboxPolicy.Type == SandboxPolicyReadOnly {
+		readOnly = true
+	}
+	// Runtime.New derives policy before building backends. Honor explicit
+	// policy network intent without breaking plain newDockerRunner() defaults.
+	if cfg.SandboxPolicy.Type != "" && !cfg.SandboxPolicy.NetworkAccess {
+		network = "none"
+	}
 	return &dockerRunner{
 		execCommand: exec.CommandContext,
 		image:       image,
 		network:     network,
+		readOnly:    readOnly,
+		setupTTL:    dockerSetupTimeout,
 		container:   nextDockerContainerName(),
 	}
 }
@@ -103,20 +120,27 @@ func (d *dockerRunner) runCommand(ctx context.Context, name string, args ...stri
 }
 
 func (d *dockerRunner) Run(ctx context.Context, req CommandRequest) (CommandResult, error) {
-	runCtx := ctx
-	cancel := func() {}
-	if req.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, req.Timeout)
-	}
-	defer cancel()
-
 	hostWorkDir, err := resolveHostWorkDir(req.Dir)
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("tool: resolve docker workdir failed: %w", err)
 	}
-	if err := d.ensureSession(runCtx, hostWorkDir); err != nil {
+	setupCtx := ctx
+	cancelSetup := func() {}
+	if d.setupTTL > 0 {
+		setupCtx, cancelSetup = context.WithTimeout(ctx, d.setupTTL)
+	}
+	if err := d.ensureSession(setupCtx, hostWorkDir); err != nil {
+		cancelSetup()
 		return CommandResult{}, fmt.Errorf("tool: docker sandbox session unavailable: %w", err)
 	}
+	cancelSetup()
+
+	runCtx := ctx
+	cancelRun := func() {}
+	if req.Timeout > 0 {
+		runCtx, cancelRun = context.WithTimeout(ctx, req.Timeout)
+	}
+	defer cancelRun()
 	containerDir, ok := d.containerWorkDir(hostWorkDir)
 	if ok {
 		args := []string{
@@ -141,7 +165,7 @@ func (d *dockerRunner) Run(ctx context.Context, req CommandRequest) (CommandResu
 		"-e", "GIT_TERMINAL_PROMPT=0",
 		"-e", "PAGER=cat",
 		"-e", "NO_COLOR=1",
-		"-v", hostWorkDir + ":" + dockerWorkspaceDir,
+		"-v", d.workspaceMountArg(hostWorkDir),
 		"-w", dockerWorkspaceDir,
 		d.image,
 		"sh", "-lc", req.Command,
@@ -201,7 +225,7 @@ func (d *dockerRunner) ensureSession(ctx context.Context, workDir string) error 
 		"-e", "GIT_TERMINAL_PROMPT=0",
 		"-e", "PAGER=cat",
 		"-e", "NO_COLOR=1",
-		"-v", rootDir + ":" + dockerWorkspaceDir,
+		"-v", d.workspaceMountArg(rootDir),
 		"-w", dockerWorkspaceDir,
 		d.image,
 		"sh", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600; done",
@@ -220,6 +244,14 @@ func (d *dockerRunner) ensureSession(ctx context.Context, workDir string) error 
 	d.started = true
 	d.mu.Unlock()
 	return nil
+}
+
+func (d *dockerRunner) workspaceMountArg(hostDir string) string {
+	mount := hostDir + ":" + dockerWorkspaceDir
+	if d.readOnly {
+		return mount + ":ro"
+	}
+	return mount
 }
 
 func (d *dockerRunner) containerWorkDir(hostDir string) (string, bool) {

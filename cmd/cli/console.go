@@ -911,7 +911,7 @@ func (a *terminalApprover) isAllowedByDefault(command string) bool {
 	if len(segments) == 0 {
 		return false
 	}
-	if strings.ContainsAny(command, "<>$`\\") {
+	if strings.ContainsAny(command, "<>$`\\&") {
 		return false
 	}
 	a.mu.RLock()
