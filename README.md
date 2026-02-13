@@ -60,21 +60,25 @@ Tool execution runtime flags:
   - `default`: run commands in sandbox by default; escalated host command requires approval
 - `-sandbox-type`: sandbox backend type (when `-permission-mode=default`, pluggable by runtime registry)
   - default: macOS uses `seatbelt`; other platforms use `docker`
+  - on macOS, only `seatbelt` is supported in `default` mode
   - built-in: `seatbelt` (macOS `sandbox-exec`)
-  - built-in: `docker` (requires local Docker daemon; image defaults to `alpine:3.20`, override via `CAELIS_SANDBOX_DOCKER_IMAGE`)
+  - built-in: `docker` (non-macOS default backend; requires local Docker daemon, image defaults to `alpine:3.20`, override via `CAELIS_SANDBOX_DOCKER_IMAGE`)
   - docker network defaults to `bridge`, override via `CAELIS_SANDBOX_DOCKER_NETWORK` (for stricter isolation use `none`)
   - sandbox does not fully mirror host toolchain; for language-specific workflows (go/node/python) use a richer image via `CAELIS_SANDBOX_DOCKER_IMAGE`
 - `-safe-commands`: override sandbox safe command set (comma-separated)
   - default: `pwd,ls,find,cat,head,tail,wc,echo,grep,sed,awk,rg`
-  - note: this list is currently not used for approval routing; host approval in `default` is only triggered by fallback or explicit `sandbox_permissions=require_escalated`
+  - in `default` mode, command routing uses unified strategy:
+    - base command in `safe-commands` and no shell meta characters -> sandbox execution (no approval)
+    - otherwise -> host execution with approval
+  - explicit `sandbox_permissions=require_escalated` always forces host approval path
 - `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
 - `-prompt-config-dir`: override prompt config directory; empty means `~/.{app}/prompts`
 - `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
 
 Fallback behavior:
-- In `default` mode on macOS, runtime tries sandbox backends in order: `seatbelt -> docker -> host+approval`.
+- In `default` mode on macOS, runtime only supports `seatbelt`; when unavailable it falls back to `host+approval`.
 - In `default` mode on other platforms, runtime tries: `docker -> host+approval`.
-- If all sandbox backends are unavailable at startup (for example `sandbox-exec` missing and Docker daemon unavailable), CLI falls back to `host+approval` and prints a warning.
+- If sandbox backend is unavailable at startup (for example `sandbox-exec` missing on macOS or Docker daemon unavailable on Linux), CLI falls back to `host+approval` and prints a warning.
 - In non-interactive runs without approver context, escalated commands return `ApprovalRequiredError` with a hint to use interactive approval or `-permission-mode full_control`.
 - If a command is routed to sandbox but fails with "command not found" (`exit code 127`), BASH asks for approval and retries on host.
 
@@ -125,6 +129,7 @@ Interactive slash commands:
 - `/help`: show command help
 - `/version`: show version info
 - `/status`: show current model/thinking/stream/execution status
+- `/new`: start a fresh conversation session
 - `/permission [default|full_control]`: show or switch permission mode
 - `/sandbox [<type>]`: show or switch sandbox backend type
 - `/models`: list available model aliases
@@ -136,6 +141,11 @@ Interactive slash commands:
 - `/tools`: show current assembled tool list
 - `/compact [note]`: trigger one manual compaction
 - `/exit`: quit
+
+Session behavior:
+- Interactive CLI starts in a new session by default.
+- Pass `-session <id>` to resume or continue an existing session.
+- Sessions with no conversation events are not persisted.
 
 CLI runtime preferences (`stream`, `thinking-mode`, `thinking-budget`, `reasoning-effort`, `reasoning display`, `permission-mode`, `sandbox-type`) are persisted in app config and reused on next start.
 
@@ -164,10 +174,10 @@ go run ./eval/cmd \
 ```
 
 ## Security Notes
-- `/connect` defaults to `api_key_env` (e.g. `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`).
-- `/connect` stores API key/token in `~/.{app}/{app}_credentials.json` by default (`-credential-store=auto`), with owner-only permissions (`0700` dir, `0600` file) and atomic writes.
-- Provider config (`~/.{app}/{app}_config.json`) persists only non-secret auth metadata (`token_env`, `credential_ref`), no inline token by default.
-- Existing inline tokens in provider config are auto-migrated to credential store on startup.
+- `/connect` always prompts for `api_key` and updates provider config immediately.
+- CLI runtime uses provider config (`~/.{app}/{app}_config.json`) as the single source for model auth at request time.
+- Credential store (`~/.{app}/{app}_credentials.json`) is auxiliary only (`-credential-store=auto` by default, `0700` dir + `0600` file + atomic writes). Existing credential entries are merged into provider config on startup when config token is missing.
+- `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
 
 ## Release
 - Current target release: `v0.0.1` (see `VERSION` and `CHANGELOG.md`).

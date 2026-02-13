@@ -2,11 +2,9 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
@@ -93,38 +91,15 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	}
 
 	c.printf("auth: api_key\n")
-	defaultTokenEnv := defaultAPIKeyEnvForProvider(tpl.provider)
-	tokenEnv, err := c.promptText("api_key_env", defaultTokenEnv, false)
+	token, err := c.promptText("api_key", "", true)
 	if err != nil {
 		return false, err
 	}
-	tokenEnv = sanitizeEnvName(tokenEnv)
-	if tokenEnv == "" {
-		tokenEnv = defaultTokenEnv
-	}
-	credentialRef := defaultCredentialRef(tpl.provider, baseURL)
-	token := strings.TrimSpace(os.Getenv(tokenEnv))
-	tokenFromInput := false
-	tokenFromStore := false
-	if token == "" {
-		if c.credentialStore != nil && credentialRef != "" {
-			if saved, ok := c.credentialStore.Get(credentialRef); ok {
-				token = strings.TrimSpace(saved.Token)
-				tokenFromStore = token != ""
-			}
-		}
-	}
-	if token == "" {
-		token, err = c.promptText("api_key", "", true)
-		if err != nil {
-			return false, err
-		}
-		token = strings.TrimSpace(token)
-		tokenFromInput = token != ""
-	}
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return false, fmt.Errorf("api_key is required")
 	}
+	credentialRef := defaultCredentialRef(tpl.provider, baseURL)
 
 	baseCfg := modelproviders.Config{
 		Provider: strings.TrimSpace(tpl.provider),
@@ -133,7 +108,6 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 		Timeout:  time.Duration(timeoutSeconds) * time.Second,
 		Auth: modelproviders.AuthConfig{
 			Type:          modelproviders.AuthAPIKey,
-			TokenEnv:      tokenEnv,
 			Token:         token,
 			CredentialRef: credentialRef,
 		},
@@ -194,7 +168,6 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	cfg.MaxOutputTok = maxOutput
 	cfg.Auth.CredentialRef = credentialRef
 	persistCfg := cfg
-	persistCfg.Auth.Token = ""
 
 	if err := c.modelFactory.Register(cfg); err != nil {
 		return false, err
@@ -223,15 +196,11 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	c.modelAlias = alias
 	c.llm = llm
 	c.printf("connected: %s\n", alias)
-	if tokenFromStore {
-		c.printf("note: reused saved api_key from local credential store.\n")
+	if c.configStore != nil {
+		c.printf("note: api_key saved in provider config.\n")
 	}
-	if tokenFromInput {
-		if c.credentialStore != nil {
-			c.printf("note: api_key saved locally with owner-only permissions.\n")
-		} else {
-			c.printf("note: api_key only used in current process; set %s in env for future runs.\n", tokenEnv)
-		}
+	if c.credentialStore != nil {
+		c.printf("note: api_key also saved locally with owner-only permissions.\n")
 	}
 	return false, nil
 }
@@ -302,33 +271,4 @@ func promptIntInRange(c *cliConsole, name string, minValue, maxValue, defaultVal
 		return 0, fmt.Errorf("invalid %s: %d (expected %d..%d)", name, value, minValue, maxValue)
 	}
 	return value, nil
-}
-
-func defaultAPIKeyEnvForProvider(provider string) string {
-	prefix := sanitizeEnvName(provider)
-	if prefix == "" {
-		prefix = "MODEL"
-	}
-	return prefix + "_API_KEY"
-}
-
-func sanitizeEnvName(input string) string {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(input))
-	for _, r := range input {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(unicode.ToUpper(r))
-			continue
-		}
-		b.WriteByte('_')
-	}
-	out := strings.Trim(b.String(), "_")
-	for strings.Contains(out, "__") {
-		out = strings.ReplaceAll(out, "__", "_")
-	}
-	return out
 }

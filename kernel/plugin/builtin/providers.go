@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"time"
 
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolfs "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/filesystem"
 	toollsp "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/lsp"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
+	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 )
 
 const (
@@ -22,27 +24,33 @@ const (
 	ProviderDefaultPolicy  = "default_allow"
 )
 
+// RegisterOptions carries explicit dependencies for builtin providers.
+type RegisterOptions struct {
+	ExecutionRuntime toolexec.Runtime
+	MCPToolManager   *toolmcp.Manager
+}
+
 // RegisterAll registers built-in providers into a plugin registry.
-func RegisterAll(r *plugin.Registry) error {
+func RegisterAll(r *plugin.Registry, options RegisterOptions) error {
 	if r == nil {
 		return fmt.Errorf("builtin: registry is nil")
 	}
 	if err := r.RegisterToolProvider(localToolProvider{}); err != nil {
 		return err
 	}
-	if err := r.RegisterToolProvider(workspaceToolProvider{}); err != nil {
+	if err := r.RegisterToolProvider(workspaceToolProvider{runtime: options.ExecutionRuntime}); err != nil {
 		return err
 	}
-	if err := r.RegisterToolProvider(shellToolProvider{}); err != nil {
+	if err := r.RegisterToolProvider(shellToolProvider{runtime: options.ExecutionRuntime}); err != nil {
 		return err
 	}
 	if err := r.RegisterToolProvider(lspActivationToolProvider{}); err != nil {
 		return err
 	}
-	if err := r.RegisterToolProvider(mcpToolProvider{}); err != nil {
+	if err := r.RegisterToolProvider(mcpToolProvider{manager: options.MCPToolManager}); err != nil {
 		return err
 	}
-	if err := r.RegisterPolicyProvider(defaultPolicyProvider{}); err != nil {
+	if err := r.RegisterPolicyProvider(defaultPolicyProvider{runtime: options.ExecutionRuntime}); err != nil {
 		return err
 	}
 	return nil
@@ -98,15 +106,18 @@ func (p localToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
 	return []tool.Tool{echoTool, nowTool}, nil
 }
 
-type shellToolProvider struct{}
+type shellToolProvider struct {
+	runtime toolexec.Runtime
+}
 
 func (p shellToolProvider) Name() string {
 	return ProviderShellTools
 }
 
 func (p shellToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
+	_ = ctx
 	bashTool, err := toolshell.NewBash(toolshell.BashConfig{
-		Runtime: executionRuntimeFromContext(ctx),
+		Runtime: p.runtime,
 	})
 	if err != nil {
 		return nil, err
@@ -114,35 +125,37 @@ func (p shellToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
 	return []tool.Tool{bashTool}, nil
 }
 
-type workspaceToolProvider struct{}
+type workspaceToolProvider struct {
+	runtime toolexec.Runtime
+}
 
 func (p workspaceToolProvider) Name() string {
 	return ProviderWorkspaceTools
 }
 
 func (p workspaceToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
-	runtime := executionRuntimeFromContext(ctx)
-	listTool, err := toolfs.NewListWithRuntime(runtime)
+	_ = ctx
+	listTool, err := toolfs.NewListWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
 	}
-	globTool, err := toolfs.NewGlobWithRuntime(runtime)
+	globTool, err := toolfs.NewGlobWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
 	}
-	statTool, err := toolfs.NewStatWithRuntime(runtime)
+	statTool, err := toolfs.NewStatWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
 	}
-	searchTool, err := toolfs.NewSearchWithRuntime(runtime)
+	searchTool, err := toolfs.NewSearchWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
 	}
-	patchTool, err := toolfs.NewPatchWithRuntime(runtime)
+	patchTool, err := toolfs.NewPatchWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
 	}
-	writeTool, err := toolfs.NewWriteWithRuntime(runtime)
+	writeTool, err := toolfs.NewWriteWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +169,9 @@ func (p workspaceToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
 	}, nil
 }
 
-type defaultPolicyProvider struct{}
+type defaultPolicyProvider struct {
+	runtime toolexec.Runtime
+}
 
 func (p defaultPolicyProvider) Name() string {
 	return ProviderDefaultPolicy
@@ -164,7 +179,17 @@ func (p defaultPolicyProvider) Name() string {
 
 func (p defaultPolicyProvider) Policies(ctx context.Context) ([]policy.Hook, error) {
 	_ = ctx
-	return []policy.Hook{policy.DefaultAllow()}, nil
+	hooks := []policy.Hook{
+		policy.DefaultAllow(),
+	}
+	if p.runtime != nil {
+		hooks = append(hooks, policy.RouteCommandExecution(policy.CommandExecutionConfig{
+			Runtime:  p.runtime,
+			ToolName: toolshell.BashToolName,
+		}))
+	}
+	hooks = append(hooks, policy.RequireReadBeforeWrite(policy.ReadBeforeWriteConfig{}))
+	return hooks, nil
 }
 
 type lspActivationToolProvider struct{}
@@ -182,16 +207,17 @@ func (p lspActivationToolProvider) Tools(ctx context.Context) ([]tool.Tool, erro
 	return []tool.Tool{activateTool}, nil
 }
 
-type mcpToolProvider struct{}
+type mcpToolProvider struct {
+	manager *toolmcp.Manager
+}
 
 func (p mcpToolProvider) Name() string {
 	return ProviderMCPTools
 }
 
 func (p mcpToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
-	manager := mcpManagerFromContext(ctx)
-	if manager == nil {
+	if p.manager == nil {
 		return nil, nil
 	}
-	return manager.Tools(ctx)
+	return p.manager.Tools(ctx)
 }

@@ -94,6 +94,33 @@ func (s *Store) ListEvents(ctx context.Context, req *session.Session) ([]*sessio
 	return out, nil
 }
 
+func (s *Store) ListContextWindowEvents(ctx context.Context, req *session.Session) ([]*session.Event, error) {
+	_ = ctx
+	k, err := makeKey(req)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, ok := s.data[k]
+	if !ok {
+		return nil, session.ErrSessionNotFound
+	}
+	start := 0
+	for i := len(e.events) - 1; i >= 0; i-- {
+		if isCompactionEvent(e.events[i]) {
+			start = i
+			break
+		}
+	}
+	out := make([]*session.Event, 0, len(e.events)-start)
+	for _, ev := range e.events[start:] {
+		cp := *ev
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
 func (s *Store) SnapshotState(ctx context.Context, req *session.Session) (map[string]any, error) {
 	_ = ctx
 	k, err := makeKey(req)
@@ -109,4 +136,12 @@ func (s *Store) SnapshotState(ctx context.Context, req *session.Session) (map[st
 	out := map[string]any{}
 	maps.Copy(out, e.state)
 	return out, nil
+}
+
+func isCompactionEvent(ev *session.Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	kind, _ := ev.Meta["kind"].(string)
+	return kind == "compaction"
 }

@@ -18,7 +18,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
-	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
@@ -38,6 +37,7 @@ type cliConsole struct {
 	execRuntime toolexec.Runtime
 	sandboxType string
 	autoLSP     []string
+	lspActivate []string
 	lspBroker   *lspbroker.Broker
 
 	modelAlias             string
@@ -77,7 +77,7 @@ type slashCommand struct {
 }
 
 func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
-	commands := []string{"help", "version", "exit", "compact", "status", "permission", "sandbox", "sessions", "models", "model", "connect", "thinking", "effort", "stream", "reasoning", "tools"}
+	commands := []string{"help", "version", "exit", "new", "compact", "status", "permission", "sandbox", "sessions", "models", "model", "connect", "thinking", "effort", "stream", "reasoning", "tools"}
 	editor, _ := newLineEditor(lineEditorConfig{
 		HistoryFile: cfg.HistoryFile,
 		Commands:    commands,
@@ -98,6 +98,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		execRuntime:            cfg.ExecRuntime,
 		sandboxType:            strings.TrimSpace(cfg.SandboxType),
 		autoLSP:                append([]string(nil), cfg.AutoActivateLSP...),
+		lspActivate:            append([]string(nil), cfg.LSPActivationTools...),
 		lspBroker:              cfg.LSPBroker,
 		modelAlias:             cfg.ModelAlias,
 		llm:                    cfg.Model,
@@ -127,6 +128,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		"help":    {Usage: "/help", Description: "显示命令帮助", Handle: handleHelp},
 		"version": {Usage: "/version", Description: "显示版本信息", Handle: handleVersion},
 		"exit":    {Usage: "/exit", Description: "退出 CLI", Handle: handleExit},
+		"new":     {Usage: "/new", Description: "开始新的对话会话", Handle: handleNew},
 		"compact": {Usage: "/compact [note]", Description: "手动触发一次上下文压缩", Handle: handleCompact},
 		"status":  {Usage: "/status", Description: "查看当前会话配置", Handle: handleStatus},
 		"permission": {
@@ -165,6 +167,7 @@ type cliConsoleConfig struct {
 	ExecRuntime            toolexec.Runtime
 	SandboxType            string
 	AutoActivateLSP        []string
+	LSPActivationTools     []string
 	LSPBroker              *lspbroker.Broker
 	ModelAlias             string
 	Model                  model.LLM
@@ -326,6 +329,7 @@ func (c *cliConsole) runPrompt(input string) error {
 		CoreTools:           tool.CoreToolsConfig{Runtime: c.execRuntime},
 		Policies:            c.resolved.Policies,
 		LSPBroker:           c.lspBroker,
+		LSPActivationTools:  append([]string(nil), c.lspActivate...),
 		AutoActivateLSP:     append([]string(nil), c.autoLSP...),
 		ContextWindowTokens: c.contextWindow,
 	}, runRenderConfig{
@@ -386,7 +390,7 @@ func (c *cliConsole) resetInterruptWindow() {
 func handleHelp(c *cliConsole, args []string) (bool, error) {
 	_ = args
 	c.printf("Available commands:\n")
-	order := []string{"help", "version", "status", "permission", "sandbox", "sessions", "models", "model", "connect", "thinking", "effort", "stream", "reasoning", "tools", "compact", "exit"}
+	order := []string{"help", "version", "status", "new", "permission", "sandbox", "sessions", "models", "model", "connect", "thinking", "effort", "stream", "reasoning", "tools", "compact", "exit"}
 	for _, name := range order {
 		cmd := c.commands[name]
 		c.printf("  %-24s %s\n", cmd.Usage, cmd.Description)
@@ -408,6 +412,20 @@ func handleExit(c *cliConsole, args []string) (bool, error) {
 	_ = c
 	_ = args
 	return true, nil
+}
+
+func handleNew(c *cliConsole, args []string) (bool, error) {
+	if len(args) != 0 {
+		return false, fmt.Errorf("usage: /new")
+	}
+	previous := strings.TrimSpace(c.sessionID)
+	c.sessionID = nextConversationSessionID()
+	if previous == "" {
+		c.printf("new session started: %s\n", c.sessionID)
+		return false, nil
+	}
+	c.printf("new session started: %s (from %s)\n", c.sessionID, previous)
+	return false, nil
 }
 
 func handleCompact(c *cliConsole, args []string) (bool, error) {
@@ -473,6 +491,27 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 		}
 	}
 	c.printf("sandbox_policy=%s\n", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
+	if c.rt != nil {
+		runState, err := c.rt.RunState(c.baseCtx, runtime.RunStateRequest{
+			AppName:   c.appName,
+			UserID:    c.userID,
+			SessionID: c.sessionID,
+		})
+		if err != nil {
+			return false, err
+		}
+		if runState.HasLifecycle {
+			c.printf("run_state=%s phase=%s\n", runState.Status, stringOrDash(runState.Phase))
+			if strings.TrimSpace(runState.Error) != "" {
+				c.printf("run_state_error=%s\n", truncateInline(runState.Error, 160))
+			}
+			if strings.TrimSpace(string(runState.ErrorCode)) != "" {
+				c.printf("run_state_error_code=%s\n", runState.ErrorCode)
+			}
+		} else {
+			c.printf("run_state=none\n")
+		}
+	}
 	if c.llm == nil {
 		c.printf("context_usage=not available (no model configured)\n")
 		return false, nil
@@ -782,7 +821,6 @@ func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandbo
 		safeCommands = c.execRuntime.SafeCommands()
 	}
 	prevRuntime := c.execRuntime
-	prevCtx := c.baseCtx
 	nextRuntime, err := toolexec.New(toolexec.Config{
 		PermissionMode: mode,
 		SandboxType:    sandboxType,
@@ -792,10 +830,8 @@ func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandbo
 		return err
 	}
 	c.execRuntime = nextRuntime
-	c.baseCtx = pluginbuiltin.WithExecutionRuntime(c.baseCtx, nextRuntime)
 	if err := c.refreshShellToolRuntime(); err != nil {
 		c.execRuntime = prevRuntime
-		c.baseCtx = prevCtx
 		_ = toolexec.Close(nextRuntime)
 		return err
 	}
@@ -1056,4 +1092,12 @@ func formatUsage(usage runtime.ContextUsage) string {
 		return "0/0"
 	}
 	return fmt.Sprintf("%d/%d (%.1f%%)", usage.CurrentTokens, usage.WindowTokens, usage.Ratio*100)
+}
+
+func stringOrDash(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }

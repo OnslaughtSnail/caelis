@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,33 @@ func TestListModelsRequiresRegistration(t *testing.T) {
 	list := factory.ListModels()
 	if len(list) != 1 || list[0] != cfg.Alias {
 		t.Fatalf("unexpected list models: %v", list)
+	}
+}
+
+func TestFactoryRequiresTokenFromConfig(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "env-token-should-be-ignored")
+
+	factory := NewFactory()
+	cfg := Config{
+		Alias:    "openai/gpt-4o-mini",
+		Provider: "openai",
+		API:      APIOpenAI,
+		Model:    "gpt-4o-mini",
+		BaseURL:  "https://api.openai.com/v1",
+		Auth: AuthConfig{
+			Type:     AuthAPIKey,
+			TokenEnv: "OPENAI_API_KEY",
+		},
+	}
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register provider config: %v", err)
+	}
+	_, err := factory.NewByAlias(cfg.Alias)
+	if err == nil {
+		t.Fatalf("expected missing token error")
+	}
+	if !strings.Contains(err.Error(), "auth token is empty") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

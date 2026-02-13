@@ -139,6 +139,40 @@ func (s *Store) ListEvents(ctx context.Context, req *session.Session) ([]*sessio
 	return out, nil
 }
 
+func (s *Store) ListContextWindowEvents(ctx context.Context, req *session.Session) ([]*session.Event, error) {
+	_ = ctx
+	dir, err := s.sessionDir(req)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, "events.jsonl")
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	out := []*session.Event{}
+	dec := json.NewDecoder(f)
+	for {
+		ev := &session.Event{}
+		if err := dec.Decode(ev); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("filestore: decode events: %w", err)
+		}
+		if isCompactionEvent(ev) {
+			out = out[:0]
+		}
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
 func (s *Store) SnapshotState(ctx context.Context, req *session.Session) (map[string]any, error) {
 	_ = ctx
 	dir, err := s.sessionDir(req)
@@ -201,4 +235,12 @@ func validateSessionPathComponent(name, value string) error {
 		return fmt.Errorf("filestore: invalid %s", name)
 	}
 	return nil
+}
+
+func isCompactionEvent(ev *session.Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	kind, _ := ev.Meta["kind"].(string)
+	return kind == "compaction"
 }

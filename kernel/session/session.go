@@ -35,6 +35,12 @@ type Store interface {
 	SnapshotState(context.Context, *Session) (map[string]any, error)
 }
 
+// ContextWindowStore optionally provides a reduced event window optimized for
+// model context construction (typically latest compaction event and newer).
+type ContextWindowStore interface {
+	ListContextWindowEvents(context.Context, *Session) ([]*Event, error)
+}
+
 // Iterator returns a sequence over events.
 func Iterator(events []*Event) iter.Seq[*Event] {
 	return func(yield func(*Event) bool) {

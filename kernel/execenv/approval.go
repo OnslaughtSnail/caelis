@@ -34,6 +34,10 @@ func (e *ApprovalAbortedError) Error() string {
 	return fmt.Sprintf("tool: approval canceled: %s", reason)
 }
 
+func (e *ApprovalAbortedError) Code() ErrorCode {
+	return ErrorCodeApprovalAborted
+}
+
 // IsApprovalAborted reports whether err indicates user canceled approval.
 func IsApprovalAborted(err error) bool {
 	if err == nil {

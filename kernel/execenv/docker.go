@@ -308,7 +308,14 @@ func (d *dockerRunner) runSandboxCommand(runCtx context.Context, req CommandRequ
 			if req.Timeout > 0 {
 				label = req.Timeout.String()
 			}
-			return CommandResult{}, fmt.Errorf("tool: docker sandbox command timed out after %s (mode=%s network=%s): %w; stderr=", label, mode, d.network, err)
+			return CommandResult{}, WrapCodedError(
+				ErrorCodeSandboxCommandTimeout,
+				err,
+				"tool: docker sandbox command timed out after %s (mode=%s network=%s); stderr=",
+				label,
+				mode,
+				d.network,
+			)
 		}
 		return CommandResult{}, fmt.Errorf("tool: docker sandbox command start failed (%s): %w", mode, err)
 	}
@@ -327,14 +334,29 @@ func (d *dockerRunner) runSandboxCommand(runCtx context.Context, req CommandRequ
 		if req.Timeout > 0 {
 			label = req.Timeout.String()
 		}
-		return result, fmt.Errorf("tool: docker sandbox command timed out after %s (mode=%s network=%s): %w; stderr=%s", label, mode, d.network, err, result.Stderr)
+		return result, WrapCodedError(
+			ErrorCodeSandboxCommandTimeout,
+			err,
+			"tool: docker sandbox command timed out after %s (mode=%s network=%s); stderr=%s",
+			label,
+			mode,
+			d.network,
+			result.Stderr,
+		)
 	}
 	if errors.Is(err, errIdleTimeout) {
 		label := "idle limit"
 		if req.IdleTimeout > 0 {
 			label = req.IdleTimeout.String()
 		}
-		return result, fmt.Errorf("tool: docker sandbox command produced no output for %s and was terminated (mode=%s network=%s, likely interactive/long-running); stderr=%s", label, mode, d.network, result.Stderr)
+		return result, NewCodedError(
+			ErrorCodeSandboxIdleTimeout,
+			"tool: docker sandbox command produced no output for %s and was terminated (mode=%s network=%s, likely interactive/long-running); stderr=%s",
+			label,
+			mode,
+			d.network,
+			result.Stderr,
+		)
 	}
 	return result, fmt.Errorf("tool: docker sandbox command failed (mode=%s network=%s): %w; stderr=%s", mode, d.network, err, result.Stderr)
 }

@@ -2,6 +2,7 @@ package providers
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -26,6 +27,15 @@ func ListModels() []string {
 }
 
 func defaultFactory() (*modelproviders.Factory, error) {
+	deepseekToken := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	geminiToken := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	if deepseekToken == "" {
+		return nil, fmt.Errorf("eval providers: DEEPSEEK_API_KEY is required")
+	}
+	if geminiToken == "" {
+		return nil, fmt.Errorf("eval providers: GEMINI_API_KEY is required")
+	}
+
 	factory := modelproviders.NewFactory()
 	configs := []modelproviders.Config{
 		{
@@ -36,8 +46,8 @@ func defaultFactory() (*modelproviders.Factory, error) {
 			BaseURL:             "https://api.deepseek.com/v1",
 			ContextWindowTokens: 64000,
 			Auth: modelproviders.AuthConfig{
-				Type:     modelproviders.AuthAPIKey,
-				TokenEnv: "DEEPSEEK_API_KEY",
+				Type:  modelproviders.AuthAPIKey,
+				Token: deepseekToken,
 			},
 		},
 		{
@@ -48,8 +58,8 @@ func defaultFactory() (*modelproviders.Factory, error) {
 			BaseURL:             "https://api.deepseek.com/v1",
 			ContextWindowTokens: 64000,
 			Auth: modelproviders.AuthConfig{
-				Type:     modelproviders.AuthAPIKey,
-				TokenEnv: "DEEPSEEK_API_KEY",
+				Type:  modelproviders.AuthAPIKey,
+				Token: deepseekToken,
 			},
 		},
 		{
@@ -60,8 +70,8 @@ func defaultFactory() (*modelproviders.Factory, error) {
 			BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
 			ContextWindowTokens: 128000,
 			Auth: modelproviders.AuthConfig{
-				Type:     modelproviders.AuthAPIKey,
-				TokenEnv: "GEMINI_API_KEY",
+				Type:  modelproviders.AuthAPIKey,
+				Token: geminiToken,
 			},
 		},
 		{
@@ -72,8 +82,8 @@ func defaultFactory() (*modelproviders.Factory, error) {
 			BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
 			ContextWindowTokens: 128000,
 			Auth: modelproviders.AuthConfig{
-				Type:     modelproviders.AuthAPIKey,
-				TokenEnv: "GEMINI_API_KEY",
+				Type:  modelproviders.AuthAPIKey,
+				Token: geminiToken,
 			},
 		},
 	}

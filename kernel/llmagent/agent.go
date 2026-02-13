@@ -16,6 +16,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 // Config controls behavior of LLMAgent.
@@ -27,11 +28,15 @@ type Config struct {
 	Reasoning         model.ReasoningConfig
 	EmitPartialEvents bool
 	ToolTruncation    tool.TruncationPolicy
+	// ToolResultSanitizer controls how tool results are transformed before
+	// being sent back to model context. Nil uses default sanitizer.
+	ToolResultSanitizer func(map[string]any) map[string]any
 }
 
 // Agent is a minimal model-tool loop agent.
 type Agent struct {
-	cfg Config
+	cfg                 Config
+	toolResultSanitizer func(map[string]any) map[string]any
 }
 
 const uiOnlyResultKeyPrefix = "_ui_"
@@ -44,7 +49,14 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.ToolTruncation.MaxTokens <= 0 && cfg.ToolTruncation.MaxBytes <= 0 {
 		cfg.ToolTruncation = tool.DefaultTruncationPolicy()
 	}
-	return &Agent{cfg: cfg}, nil
+	sanitizer := cfg.ToolResultSanitizer
+	if sanitizer == nil {
+		sanitizer = defaultSanitizeToolResultForModel
+	}
+	return &Agent{
+		cfg:                 cfg,
+		toolResultSanitizer: sanitizer,
+	}, nil
 }
 
 func (a *Agent) Name() string {
@@ -62,7 +74,7 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 			return
 		}
 
-		messages := toMessages(ctx.History(), a.cfg.SystemPrompt)
+		messages := toMessagesWithSanitizer(ctx.History(), a.cfg.SystemPrompt, a.toolResultSanitizer)
 		hooks := ctx.Policies()
 		dupCount := map[string]int{}
 
@@ -177,20 +189,42 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 					return
 				}
 
-				beforeIn, err := policy.ApplyBeforeTool(ctx, hooks, policy.ToolInput{Call: call})
+				capability := toolcap.Capability{Risk: toolcap.RiskUnknown}
+				if toolForCap, exists := ctx.Tool(call.Name); exists {
+					capability = toolcap.Of(toolForCap)
+				}
+				beforeIn, err := policy.ApplyBeforeTool(ctx, hooks, policy.ToolInput{
+					Call:       call,
+					Capability: capability,
+				})
 				if err != nil {
 					yield(nil, err)
 					return
 				}
 				call = beforeIn.Call
+				decision := policy.NormalizeDecision(beforeIn.Decision)
 
-				execOut := policy.ToolOutput{Call: call}
+				execOut := policy.ToolOutput{
+					Call:       call,
+					Capability: beforeIn.Capability,
+					Decision:   decision,
+				}
 				t, ok := ctx.Tool(call.Name)
 				if !ok {
 					execOut.Err = fmt.Errorf("llmagent: unknown tool %q", call.Name)
 					execOut.Result = map[string]any{"error": execOut.Err.Error()}
+				} else if decision.Effect == policy.DecisionEffectDeny {
+					reason := strings.TrimSpace(decision.Reason)
+					if reason == "" {
+						reason = "tool denied by policy"
+					}
+					execOut.Err = fmt.Errorf("llmagent: tool %q denied by policy: %s", call.Name, reason)
+					execOut.Result = map[string]any{"error": execOut.Err.Error()}
 				} else {
-					result, runErr := t.Run(ctx, call.Args)
+					execOut.Capability = toolcap.Of(t)
+					toolCtx := context.Context(ctx)
+					toolCtx = policy.WithToolDecision(toolCtx, decision)
+					result, runErr := t.Run(toolCtx, call.Args)
 					execOut.Err = runErr
 					if runErr != nil {
 						if toolexec.IsApprovalAborted(runErr) {
@@ -202,6 +236,9 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 						execOut.Result = result
 					}
 				}
+				if len(execOut.Capability.Operations) == 0 && execOut.Capability.Risk == "" {
+					execOut.Capability = beforeIn.Capability
+				}
 
 				afterOut, err := policy.ApplyAfterTool(ctx, hooks, execOut)
 				if err != nil {
@@ -210,8 +247,8 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 				}
 				truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
 				finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
-				finalResult = ensureToolResultMetadata(finalResult)
-				modelResult := sanitizeToolResultForModel(finalResult)
+				finalResult = annotateToolResultMetadata(finalResult, afterOut.Err)
+				modelResult := a.toolResultSanitizer(finalResult)
 				toolMsg := model.Message{
 					Role:         model.RoleTool,
 					ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
@@ -235,6 +272,17 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 }
 
 func toMessages(events []*session.Event, systemPrompt string) []model.Message {
+	return toMessagesWithSanitizer(events, systemPrompt, defaultSanitizeToolResultForModel)
+}
+
+func toMessagesWithSanitizer(
+	events []*session.Event,
+	systemPrompt string,
+	sanitizer func(map[string]any) map[string]any,
+) []model.Message {
+	if sanitizer == nil {
+		sanitizer = defaultSanitizeToolResultForModel
+	}
 	out := make([]model.Message, 0, len(events)+1)
 	if systemPrompt != "" {
 		out = append(out, model.Message{Role: model.RoleSystem, Text: systemPrompt})
@@ -246,7 +294,7 @@ func toMessages(events []*session.Event, systemPrompt string) []model.Message {
 		msg := ev.Message
 		if msg.ToolResponse != nil {
 			resp := *msg.ToolResponse
-			resp.Result = sanitizeToolResultForModel(resp.Result)
+			resp.Result = sanitizer(resp.Result)
 			msg.ToolResponse = &resp
 		}
 		out = append(out, msg)
@@ -254,21 +302,21 @@ func toMessages(events []*session.Event, systemPrompt string) []model.Message {
 	return out
 }
 
-func sanitizeToolResultForModel(result map[string]any) map[string]any {
+func defaultSanitizeToolResultForModel(result map[string]any) map[string]any {
 	if len(result) == 0 {
 		return result
 	}
 	out := make(map[string]any, len(result))
 	for key, value := range result {
-		if isModelHiddenToolResultKey(key) {
+		if defaultIsModelHiddenToolResultKey(key) {
 			continue
 		}
-		out[key] = sanitizeToolResultValue(value)
+		out[key] = sanitizeToolResultValue(value, defaultSanitizeToolResultForModel)
 	}
 	return out
 }
 
-func isModelHiddenToolResultKey(key string) bool {
+func defaultIsModelHiddenToolResultKey(key string) bool {
 	trimmed := strings.TrimSpace(key)
 	if strings.HasPrefix(trimmed, uiOnlyResultKeyPrefix) {
 		return true
@@ -293,14 +341,32 @@ func ensureToolResultMetadata(result map[string]any) map[string]any {
 	return result
 }
 
-func sanitizeToolResultValue(value any) any {
+func annotateToolResultMetadata(result map[string]any, execErr error) map[string]any {
+	result = ensureToolResultMetadata(result)
+	meta, ok := result[toolResultMetadataKey].(map[string]any)
+	if !ok {
+		return result
+	}
+	if execErr == nil {
+		return result
+	}
+	if code := toolexec.ErrorCodeOf(execErr); strings.TrimSpace(string(code)) != "" {
+		meta["error_code"] = string(code)
+	}
+	return result
+}
+
+func sanitizeToolResultValue(value any, sanitizer func(map[string]any) map[string]any) any {
+	if sanitizer == nil {
+		sanitizer = defaultSanitizeToolResultForModel
+	}
 	switch typed := value.(type) {
 	case map[string]any:
-		return sanitizeToolResultForModel(typed)
+		return sanitizer(typed)
 	case []any:
 		out := make([]any, 0, len(typed))
 		for _, one := range typed {
-			out = append(out, sanitizeToolResultValue(one))
+			out = append(out, sanitizeToolResultValue(one, sanitizer))
 		}
 		return out
 	default:

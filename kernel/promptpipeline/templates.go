@@ -1,5 +1,13 @@
 package promptpipeline
 
+// DefaultTemplates contains baseline prompt module templates used by
+// application layers when seeding prompt files.
+type DefaultTemplates struct {
+	Identity     string
+	GlobalAgents string
+	User         string
+}
+
 const (
 	defaultIdentityTemplate = `<!-- version: v1 -->
 # Agent Identity
@@ -32,3 +40,11 @@ Add your long-lived custom preferences here.
 Use SEARCH/GLOB for coarse file discovery only.
 Prefer LSP results over text matching when both are available.`
 )
+
+func Defaults() DefaultTemplates {
+	return DefaultTemplates{
+		Identity:     defaultIdentityTemplate,
+		GlobalAgents: defaultGlobalAgentsTemplate,
+		User:         defaultUserTemplate,
+	}
+}
