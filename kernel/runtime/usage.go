@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -34,15 +35,16 @@ func (r *Runtime) ContextUsage(ctx context.Context, req UsageRequest) (ContextUs
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return ContextUsage{}, fmt.Errorf("runtime: app_name, user_id and session_id are required")
 	}
-	sess, err := r.store.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
+	sess := &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID}
+	events, err := r.listContextWindowEvents(ctx, sess)
 	if err != nil {
-		return ContextUsage{}, err
+		if errors.Is(err, session.ErrSessionNotFound) {
+			events = nil
+		} else {
+			return ContextUsage{}, err
+		}
 	}
-	events, err := r.store.ListEvents(ctx, sess)
-	if err != nil {
-		return ContextUsage{}, err
-	}
-	window := contextWindowEvents(events)
+	window := agentHistoryEvents(contextWindowEvents(events))
 	windowTokens := resolveContextWindowTokens(req.ContextWindowTokens, req.Model, r.compaction.DefaultContextWindowTokens)
 	inputBudget := windowTokens - r.compaction.ReserveOutputTokens - r.compaction.SafetyMarginTokens
 	if inputBudget < 1 {

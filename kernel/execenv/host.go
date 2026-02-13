@@ -106,14 +106,25 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 		if req.Timeout > 0 {
 			label = req.Timeout.String()
 		}
-		return result, fmt.Errorf("tool: command timed out after %s: %w; stderr=%s", label, err, result.Stderr)
+		return result, WrapCodedError(
+			ErrorCodeHostCommandTimeout,
+			err,
+			"tool: command timed out after %s; stderr=%s",
+			label,
+			result.Stderr,
+		)
 	}
 	if errors.Is(err, errIdleTimeout) {
 		label := "idle limit"
 		if req.IdleTimeout > 0 {
 			label = req.IdleTimeout.String()
 		}
-		return result, fmt.Errorf("tool: command produced no output for %s and was terminated (likely interactive/long-running); stderr=%s", label, result.Stderr)
+		return result, NewCodedError(
+			ErrorCodeHostIdleTimeout,
+			"tool: command produced no output for %s and was terminated (likely interactive/long-running); stderr=%s",
+			label,
+			result.Stderr,
+		)
 	}
 	return result, fmt.Errorf("tool: command failed: %w; stderr=%s", err, result.Stderr)
 }

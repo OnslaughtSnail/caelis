@@ -198,7 +198,7 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 			MaxOutputTok:        rec.MaxOutputTok,
 			Auth: modelproviders.AuthConfig{
 				Type:          modelproviders.AuthType(strings.TrimSpace(rec.Auth.Type)),
-				TokenEnv:      strings.TrimSpace(rec.Auth.TokenEnv),
+				TokenEnv:      "",
 				Token:         strings.TrimSpace(rec.Auth.Token),
 				CredentialRef: strings.TrimSpace(rec.Auth.CredentialRef),
 				HeaderKey:     strings.TrimSpace(rec.Auth.HeaderKey),
@@ -352,7 +352,7 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		MaxOutputTok:        cfg.MaxOutputTok,
 		Auth: authRecord{
 			Type:          string(cfg.Auth.Type),
-			TokenEnv:      strings.TrimSpace(cfg.Auth.TokenEnv),
+			TokenEnv:      "",
 			Token:         strings.TrimSpace(cfg.Auth.Token),
 			CredentialRef: strings.TrimSpace(cfg.Auth.CredentialRef),
 			HeaderKey:     strings.TrimSpace(cfg.Auth.HeaderKey),

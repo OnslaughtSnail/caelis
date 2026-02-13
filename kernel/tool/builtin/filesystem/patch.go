@@ -2,7 +2,6 @@ package filesystem
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,8 +9,8 @@ import (
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 const (
@@ -45,7 +44,14 @@ func (t *PatchTool) Name() string {
 }
 
 func (t *PatchTool) Description() string {
-	return "Patch one file by exact old->new replacement. File must be read by READ before patch."
+	return "Patch one file by exact old->new replacement."
+}
+
+func (t *PatchTool) Capability() toolcap.Capability {
+	return toolcap.Capability{
+		Operations: []toolcap.Operation{toolcap.OperationFileWrite},
+		Risk:       toolcap.RiskMedium,
+	}
 }
 
 func (t *PatchTool) Declaration() model.ToolDefinition {
@@ -104,9 +110,6 @@ func (t *PatchTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	fileExists := statErr == nil
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return nil, statErr
-	}
-	if fileExists && !hasReadEvidence(ctx, target) {
-		return nil, fmt.Errorf("tool: permission denied: PATCH requires prior READ of %q", target)
 	}
 	count := 0
 	next := ""
@@ -256,54 +259,4 @@ func patchLineCount(text string) int {
 		return 0
 	}
 	return strings.Count(text, "\n") + 1
-}
-
-func hasReadEvidence(ctx context.Context, normalizedPath string) bool {
-	type historyReader interface {
-		History() []*session.Event
-	}
-	h, ok := ctx.(historyReader)
-	if !ok {
-		return false
-	}
-	for _, ev := range h.History() {
-		if ev == nil || ev.Message.ToolResponse == nil {
-			continue
-		}
-		resp := ev.Message.ToolResponse
-		if resp.Name != ReadToolName {
-			continue
-		}
-		path, ok := readPathFromResult(resp.Result)
-		if !ok {
-			continue
-		}
-		if path == normalizedPath {
-			return true
-		}
-	}
-	return false
-}
-
-func readPathFromResult(result map[string]any) (string, bool) {
-	if result == nil {
-		return "", false
-	}
-	if value, ok := result["path"].(string); ok && strings.TrimSpace(value) != "" {
-		return value, true
-	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		return "", false
-	}
-	var decoded struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return "", false
-	}
-	if strings.TrimSpace(decoded.Path) == "" {
-		return "", false
-	}
-	return decoded.Path, true
 }

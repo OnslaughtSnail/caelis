@@ -9,6 +9,7 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 const (
@@ -37,7 +38,14 @@ func (t *WriteTool) Name() string {
 }
 
 func (t *WriteTool) Description() string {
-	return "Write full file content by path. Existing file requires prior READ evidence."
+	return "Write full file content by path."
+}
+
+func (t *WriteTool) Capability() toolcap.Capability {
+	return toolcap.Capability{
+		Operations: []toolcap.Operation{toolcap.OperationFileWrite},
+		Risk:       toolcap.RiskMedium,
+	}
 }
 
 func (t *WriteTool) Declaration() model.ToolDefinition {
@@ -86,9 +94,6 @@ func (t *WriteTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	if statErr == nil {
 		if info.IsDir() {
 			return nil, fmt.Errorf("tool: target %q is directory", target)
-		}
-		if !hasReadEvidence(ctx, target) {
-			return nil, fmt.Errorf("tool: permission denied: WRITE requires prior READ of %q", target)
 		}
 		mode = info.Mode()
 	} else if !os.IsNotExist(statErr) {

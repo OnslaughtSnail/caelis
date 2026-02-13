@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 // ModelInput is the mutable request envelope for BeforeModel hooks.
@@ -14,14 +15,18 @@ type ModelInput struct {
 
 // ToolInput is the mutable request envelope for BeforeTool hooks.
 type ToolInput struct {
-	Call model.ToolCall
+	Call       model.ToolCall
+	Capability toolcap.Capability
+	Decision   Decision
 }
 
 // ToolOutput is the mutable response envelope for AfterTool hooks.
 type ToolOutput struct {
-	Call   model.ToolCall
-	Result map[string]any
-	Err    error
+	Call       model.ToolCall
+	Capability toolcap.Capability
+	Decision   Decision
+	Result     map[string]any
+	Err        error
 }
 
 // Output is the mutable envelope before final response emission.

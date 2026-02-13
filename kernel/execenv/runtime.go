@@ -136,6 +136,10 @@ func (e *ApprovalRequiredError) Error() string {
 	return fmt.Sprintf("tool: approval required: %s", e.Reason)
 }
 
+func (e *ApprovalRequiredError) Code() ErrorCode {
+	return ErrorCodeApprovalRequired
+}
+
 type runtimeImpl struct {
 	permissionMode PermissionMode
 	sandboxType    string
@@ -195,7 +199,7 @@ func (r *runtimeImpl) DenyMetaChars() bool {
 	return r.denyMetaChars
 }
 
-func (r *runtimeImpl) DecideRoute(_ string, sandboxPermission SandboxPermission) CommandDecision {
+func (r *runtimeImpl) DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision {
 	if r.permissionMode == PermissionModeFullControl {
 		return CommandDecision{Route: ExecutionRouteHost}
 	}
@@ -219,7 +223,34 @@ func (r *runtimeImpl) DecideRoute(_ string, sandboxPermission SandboxPermission)
 			Escalation: &EscalationReason{Message: "sandbox_permissions=require_escalated requested"},
 		}
 	}
+	if reason, unsafe := r.sandboxSafetyReason(command); unsafe {
+		return CommandDecision{
+			Route: ExecutionRouteHost,
+			Escalation: &EscalationReason{
+				Message: reason,
+			},
+		}
+	}
 	return CommandDecision{Route: ExecutionRouteSandbox}
+}
+
+func (r *runtimeImpl) sandboxSafetyReason(command string) (string, bool) {
+	reasons := make([]string, 0, 2)
+	if r.denyMetaChars && hasShellMeta(command) {
+		reasons = append(reasons, "shell meta characters detected")
+	}
+	base := baseCommand(command)
+	if !isAllowedCommand(base, r.safeCommands) {
+		if base == "" {
+			reasons = append(reasons, "empty command")
+		} else {
+			reasons = append(reasons, fmt.Sprintf("command %q is outside safe command set", base))
+		}
+	}
+	if len(reasons) == 0 {
+		return "", false
+	}
+	return strings.Join(reasons, "; "), true
 }
 
 func (r *runtimeImpl) Close() error {
@@ -323,9 +354,12 @@ func New(cfg Config) (Runtime, error) {
 	}
 
 	requestedSandboxType := strings.TrimSpace(strings.ToLower(cfg.SandboxType))
+	if strings.EqualFold(runtimeGOOS, "darwin") && requestedSandboxType != "" && requestedSandboxType != seatbeltSandboxType {
+		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on darwin, expected %q", requestedSandboxType, seatbeltSandboxType)
+	}
 	candidates := sandboxTypeCandidates(requestedSandboxType)
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("execenv: no sandbox backend candidates")
+		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: no sandbox backend candidates")
 	}
 	runtime.sandboxType = candidates[0]
 
@@ -338,7 +372,7 @@ func New(cfg Config) (Runtime, error) {
 			sandboxFactoriesMu.RUnlock()
 			if !ok {
 				if requestedSandboxType == candidate {
-					return nil, fmt.Errorf("execenv: unknown sandbox type %q", candidate)
+					return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: unknown sandbox type %q", candidate)
 				}
 				failures = append(failures, fmt.Sprintf("%s: unknown sandbox type", candidate))
 				continue
@@ -403,14 +437,14 @@ func sandboxTypeCandidates(requested string) []string {
 
 func sandboxTypeCandidatesForPlatform(requested string, goos string) []string {
 	value := strings.TrimSpace(strings.ToLower(requested))
-	if value == "" {
-		if strings.TrimSpace(strings.ToLower(goos)) == "darwin" {
-			return []string{seatbeltSandboxType, dockerSandboxType}
+	if strings.TrimSpace(strings.ToLower(goos)) == "darwin" {
+		if value == "" || value == seatbeltSandboxType {
+			return []string{seatbeltSandboxType}
 		}
-		return []string{dockerSandboxType}
+		return nil
 	}
-	if strings.TrimSpace(strings.ToLower(goos)) == "darwin" && value == seatbeltSandboxType {
-		return []string{seatbeltSandboxType, dockerSandboxType}
+	if value == "" {
+		return []string{dockerSandboxType}
 	}
 	return []string{value}
 }

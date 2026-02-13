@@ -1,42 +1,36 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
 
-func TestDefaultAPIKeyEnvForProvider(t *testing.T) {
-	tests := []struct {
-		provider string
-		want     string
-	}{
-		{provider: "deepseek", want: "DEEPSEEK_API_KEY"},
-		{provider: "openai-compatible", want: "OPENAI_COMPATIBLE_API_KEY"},
-		{provider: "  xiaomi ", want: "XIAOMI_API_KEY"},
+	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+)
+
+func TestDescribeRemoteModel(t *testing.T) {
+	got := describeRemoteModel("deepseek", modelproviders.RemoteModel{
+		Name:                "deepseek-chat",
+		ContextWindowTokens: 64000,
+		MaxOutputTokens:     4096,
+		Capabilities:        []string{"tools", "reasoning"},
+	})
+	if !strings.Contains(got, "deepseek/deepseek-chat") {
+		t.Fatalf("expected model ref in output, got %q", got)
 	}
-	for _, tt := range tests {
-		t.Run(tt.provider, func(t *testing.T) {
-			got := defaultAPIKeyEnvForProvider(tt.provider)
-			if got != tt.want {
-				t.Fatalf("defaultAPIKeyEnvForProvider(%q)=%q, want %q", tt.provider, got, tt.want)
-			}
-		})
+	if !strings.Contains(got, "ctx=64000") || !strings.Contains(got, "out=4096") {
+		t.Fatalf("expected token metadata in output, got %q", got)
+	}
+	if !strings.Contains(got, "cap=tools|reasoning") {
+		t.Fatalf("expected capabilities in output, got %q", got)
 	}
 }
 
-func TestSanitizeEnvName(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{input: "deepseek", want: "DEEPSEEK"},
-		{input: "openai-compatible", want: "OPENAI_COMPATIBLE"},
-		{input: "a b*c", want: "A_B_C"},
-		{input: "__x__", want: "X"},
+func TestDescribeRemoteModelWithoutMetadata(t *testing.T) {
+	got := describeRemoteModel("openai", modelproviders.RemoteModel{Name: "gpt-4o-mini"})
+	if got != "openai/gpt-4o-mini" {
+		t.Fatalf("unexpected output: %q", got)
 	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := sanitizeEnvName(tt.input)
-			if got != tt.want {
-				t.Fatalf("sanitizeEnvName(%q)=%q, want %q", tt.input, got, tt.want)
-			}
-		})
+	if strings.Contains(got, "(") {
+		t.Fatalf("did not expect metadata suffix when fields are empty, got %q", got)
 	}
 }

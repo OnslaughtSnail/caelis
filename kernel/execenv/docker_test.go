@@ -328,6 +328,9 @@ func TestDockerRunner_RunTimeout(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out after") {
 		t.Fatalf("expected timeout message, got %v", err)
 	}
+	if !IsErrorCode(err, ErrorCodeSandboxCommandTimeout) {
+		t.Fatalf("expected timeout error code %q, got %q", ErrorCodeSandboxCommandTimeout, ErrorCodeOf(err))
+	}
 }
 
 func TestDockerRunner_RunTimeoutExcludesSessionStartup(t *testing.T) {
@@ -366,6 +369,9 @@ func TestDockerRunner_RunTimeoutExcludesSessionStartup(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out after") {
 		t.Fatalf("expected timeout message, got %v", err)
 	}
+	if !IsErrorCode(err, ErrorCodeSandboxCommandTimeout) {
+		t.Fatalf("expected timeout error code %q, got %q", ErrorCodeSandboxCommandTimeout, ErrorCodeOf(err))
+	}
 }
 
 func TestDockerRunner_RunIdleTimeout(t *testing.T) {
@@ -392,6 +398,9 @@ func TestDockerRunner_RunIdleTimeout(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "produced no output") {
 		t.Fatalf("expected idle-timeout message, got %v", err)
+	}
+	if !IsErrorCode(err, ErrorCodeSandboxIdleTimeout) {
+		t.Fatalf("expected idle-timeout error code %q, got %q", ErrorCodeSandboxIdleTimeout, ErrorCodeOf(err))
 	}
 }
 

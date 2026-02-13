@@ -57,3 +57,32 @@ func TestRegistry_Duplicate(t *testing.T) {
 		t.Fatalf("expected duplicate registration error")
 	}
 }
+
+type schemaToolProvider struct{}
+
+func (schemaToolProvider) Name() string { return "schema_tool" }
+func (schemaToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
+	_ = ctx
+	return nil, nil
+}
+func (schemaToolProvider) ConfigSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{"enabled": map[string]any{"type": "boolean"}}}
+}
+
+func TestRegistry_ProviderLookupAndSchema(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterToolProvider(schemaToolProvider{}); err != nil {
+		t.Fatalf("register schema tool provider: %v", err)
+	}
+	providers, err := r.ToolProviders([]string{"schema_tool"})
+	if err != nil {
+		t.Fatalf("lookup tool providers: %v", err)
+	}
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider, got %d", len(providers))
+	}
+	schemas := r.ToolProviderSchemas()
+	if _, ok := schemas["schema_tool"]; !ok {
+		t.Fatalf("expected schema entry for schema_tool")
+	}
+}

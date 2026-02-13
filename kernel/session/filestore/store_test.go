@@ -107,3 +107,42 @@ func TestStore_RejectsPathTraversalInSessionKeys(t *testing.T) {
 		t.Fatalf("expected snapshot with path traversal session id to fail")
 	}
 }
+
+func TestStore_ListContextWindowEvents(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{AppName: "app", UserID: "u", ID: "s"}
+	if _, err := store.GetOrCreate(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	events := []*session.Event{
+		{ID: "old", Message: model.Message{Role: model.RoleUser, Text: "old"}},
+		{
+			ID:      "compact",
+			Message: model.Message{Role: model.RoleSystem, Text: "summary"},
+			Meta: map[string]any{
+				"kind": "compaction",
+			},
+		},
+		{ID: "new", Message: model.Message{Role: model.RoleUser, Text: "new"}},
+	}
+	for _, ev := range events {
+		if err := store.AppendEvent(context.Background(), s, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	window, err := store.ListContextWindowEvents(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window) != 2 {
+		t.Fatalf("expected 2 events in context window, got %d", len(window))
+	}
+	if window[0].ID != "compact" || window[1].ID != "new" {
+		t.Fatalf("unexpected window ids: %s, %s", window[0].ID, window[1].ID)
+	}
+}

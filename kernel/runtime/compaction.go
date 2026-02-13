@@ -44,6 +44,7 @@ type CompactionConfig struct {
 	PreserveRecentTurns        int
 	SummaryChunkTokens         int
 	MaxModelSummaryRetries     int
+	Strategy                   CompactionStrategy
 }
 
 func normalizeCompactionConfig(cfg CompactionConfig) CompactionConfig {
@@ -83,7 +84,7 @@ func normalizeCompactionConfig(cfg CompactionConfig) CompactionConfig {
 }
 
 func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*session.Event, error) {
-	windowEvents := contextWindowEvents(in.Events)
+	windowEvents := agentHistoryEvents(contextWindowEvents(in.Events))
 	if len(windowEvents) == 0 {
 		return nil, nil
 	}
@@ -152,85 +153,20 @@ func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, eve
 	if len(events) == 0 {
 		return "", 0, nil
 	}
-	retries := r.compaction.MaxModelSummaryRetries
-	if retries < 1 {
-		retries = 1
+	strategy := r.compactionStrategy
+	if strategy == nil {
+		strategy = DefaultCompactionStrategy()
 	}
-
-	working := append([]*session.Event(nil), events...)
-	for attempt := 0; attempt < retries; attempt++ {
-		chunkBudget := r.compaction.SummaryChunkTokens / (attempt + 1)
-		if chunkBudget < 800 {
-			chunkBudget = 800
-		}
-		summary, err := summarizeByMapReduce(ctx, llm, working, chunkBudget)
-		if err == nil && strings.TrimSpace(summary) != "" {
-			return summary, len(working), nil
-		}
-		if err == nil {
-			break
-		}
-		if !isContextOverflowError(err) {
-			break
-		}
-		if len(working) <= 4 {
-			break
-		}
-		// Binary truncation fallback: keep newer half to avoid full compaction failure.
-		working = working[len(working)/2:]
+	result, err := strategy.Summarize(ctx, llm, CompactionSummarizeInput{
+		Events:                 append([]*session.Event(nil), events...),
+		InputBudget:            inputBudget,
+		SummaryChunkTokens:     r.compaction.SummaryChunkTokens,
+		MaxModelSummaryRetries: r.compaction.MaxModelSummaryRetries,
+	})
+	if err != nil {
+		return "", 0, err
 	}
-
-	return heuristicFallbackSummary(working, inputBudget), len(working), nil
-}
-
-func summarizeByMapReduce(ctx context.Context, llm model.LLM, events []*session.Event, chunkBudget int) (string, error) {
-	chunks := splitByTokenBudget(events, chunkBudget)
-	summaries := make([]string, 0, len(chunks))
-	for _, chunk := range chunks {
-		text := eventsToTranscript(chunk)
-		out, err := callCompactionModel(ctx, llm, text)
-		if err != nil {
-			return "", err
-		}
-		summaries = append(summaries, out)
-	}
-	if len(summaries) == 0 {
-		return "", nil
-	}
-	if len(summaries) == 1 {
-		return summaries[0], nil
-	}
-	merged := strings.Join(summaries, "\n\n")
-	return callCompactionModel(ctx, llm, "请基于以下分块摘要生成最终摘要：\n\n"+merged)
-}
-
-func callCompactionModel(ctx context.Context, llm model.LLM, transcript string) (string, error) {
-	req := &model.Request{
-		Messages: []model.Message{
-			{
-				Role: model.RoleSystem,
-				Text: "你是对话压缩器。输出结构化摘要，必须覆盖：目标约束、关键事实、已完成动作、未完成事项、重要工件引用。",
-			},
-			{
-				Role: model.RoleUser,
-				Text: "请压缩以下会话历史，不要遗漏关键工具结果。仅输出摘要正文：\n\n" + transcript,
-			},
-		},
-		Stream: false,
-	}
-	var last *model.Response
-	for res, err := range llm.Generate(ctx, req) {
-		if err != nil {
-			return "", err
-		}
-		if res != nil {
-			last = res
-		}
-	}
-	if last == nil {
-		return "", fmt.Errorf("runtime: compaction got empty model response")
-	}
-	return strings.TrimSpace(last.Message.Text), nil
+	return strings.TrimSpace(result.Text), result.SummarizedEvents, nil
 }
 
 func splitByTokenBudget(events []*session.Event, budget int) [][]*session.Event {

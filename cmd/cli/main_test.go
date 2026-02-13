@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -10,6 +11,13 @@ import (
 )
 
 type noopCommandRunner struct{}
+
+func cliTestSandboxType() string {
+	if runtime.GOOS == "darwin" {
+		return "seatbelt"
+	}
+	return "docker"
+}
 
 func (noopCommandRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
 	_ = ctx
@@ -63,7 +71,7 @@ func TestRejectRemovedExecutionFlags_AcceptsNewFlags(t *testing.T) {
 func TestBuildRuntimePromptHint_IncludesPolicySummary(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
-		SandboxType:    "docker",
+		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  noopCommandRunner{},
 		SafeCommands:   []string{"cat", "head", "grep"},
 	})
@@ -102,7 +110,7 @@ func TestBuildRuntimePromptHint_FullControl(t *testing.T) {
 func TestBuildRuntimePromptHint_DefaultFallbackIncludesReason(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
-		SandboxType:    "docker",
+		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  failingProbeRunner{},
 	})
 	if err != nil {
@@ -121,5 +129,28 @@ func TestSummarizeSafeCommands(t *testing.T) {
 	got := summarizeSafeCommands([]string{"cat", "head", "cat", "grep"}, 2)
 	if got != "cat,head,+1 more" {
 		t.Fatalf("unexpected summary: %q", got)
+	}
+}
+
+func TestFlagProvided(t *testing.T) {
+	if !flagProvided([]string{"-session", "abc"}, "session") {
+		t.Fatal("expected short flag to be detected")
+	}
+	if !flagProvided([]string{"--session=abc"}, "session") {
+		t.Fatal("expected long equals flag to be detected")
+	}
+	if flagProvided([]string{"-model", "x"}, "session") {
+		t.Fatal("did not expect unrelated flag to be detected")
+	}
+}
+
+func TestNextConversationSessionID(t *testing.T) {
+	a := nextConversationSessionID()
+	b := nextConversationSessionID()
+	if !strings.HasPrefix(a, "s-") || !strings.HasPrefix(b, "s-") {
+		t.Fatalf("expected session ids to have s- prefix, got %q, %q", a, b)
+	}
+	if a == b {
+		t.Fatalf("expected unique session ids, got duplicated %q", a)
 	}
 }

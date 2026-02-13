@@ -55,51 +55,7 @@ func TestCredentialStore_LoadInitAndPersist(t *testing.T) {
 	}
 }
 
-func TestHydrateProviderAuthToken(t *testing.T) {
-	store := &credentialStore{
-		data: credentialFile{
-			Version: credentialFileVersion,
-			Credentials: map[string]credentialRecord{
-				"openai_api_openai_com": {
-					Type:  string(modelproviders.AuthAPIKey),
-					Token: "stored-token",
-				},
-			},
-		},
-	}
-
-	cfg := modelproviders.Config{
-		Alias:    "openai/gpt-4o-mini",
-		Provider: "openai",
-		BaseURL:  "https://api.openai.com/v1",
-		Auth: modelproviders.AuthConfig{
-			Type:          modelproviders.AuthAPIKey,
-			TokenEnv:      "OPENAI_API_KEY",
-			CredentialRef: "openai_api_openai_com",
-		},
-	}
-
-	if err := os.Unsetenv("OPENAI_API_KEY"); err != nil {
-		t.Fatal(err)
-	}
-	hydrated := hydrateProviderAuthToken(cfg, store)
-	if hydrated.Auth.Token != "stored-token" {
-		t.Fatalf("expected hydrated token, got %q", hydrated.Auth.Token)
-	}
-
-	if err := os.Setenv("OPENAI_API_KEY", "env-token"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.Unsetenv("OPENAI_API_KEY")
-	})
-	hydrated = hydrateProviderAuthToken(cfg, store)
-	if hydrated.Auth.Token != "" {
-		t.Fatalf("expected env to take precedence, got token %q", hydrated.Auth.Token)
-	}
-}
-
-func TestMigrateInlineProviderTokens(t *testing.T) {
+func TestMergeCredentialStoreProviderTokens(t *testing.T) {
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
 	if err := os.Setenv("HOME", home); err != nil {
@@ -120,8 +76,9 @@ func TestMigrateInlineProviderTokens(t *testing.T) {
 		Model:    "gpt-4o-mini",
 		BaseURL:  "https://api.openai.com/v1",
 		Auth: modelproviders.AuthConfig{
-			Type:  modelproviders.AuthAPIKey,
-			Token: "legacy-inline-token",
+			Type:          modelproviders.AuthAPIKey,
+			TokenEnv:      "OPENAI_API_KEY",
+			CredentialRef: "openai_api_openai_com",
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -131,7 +88,13 @@ func TestMigrateInlineProviderTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := migrateInlineProviderTokens(cfgStore, credStore); err != nil {
+	if err := credStore.Upsert("openai_api_openai_com", credentialRecord{
+		Type:  string(modelproviders.AuthAPIKey),
+		Token: "stored-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeCredentialStoreProviderTokens(cfgStore, credStore); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,17 +106,13 @@ func TestMigrateInlineProviderTokens(t *testing.T) {
 	if len(providers) != 1 {
 		t.Fatalf("expected 1 provider, got %d", len(providers))
 	}
-	if providers[0].Auth.Token != "" {
-		t.Fatalf("expected inline token cleared after migration")
+	if providers[0].Auth.Token != "stored-token" {
+		t.Fatalf("expected token merged into config, got %q", providers[0].Auth.Token)
 	}
-	if providers[0].Auth.CredentialRef == "" {
-		t.Fatalf("expected credential_ref after migration")
+	if providers[0].Auth.TokenEnv != "" {
+		t.Fatalf("expected token_env cleared, got %q", providers[0].Auth.TokenEnv)
 	}
-	record, ok := credStore.Get(providers[0].Auth.CredentialRef)
-	if !ok {
-		t.Fatalf("expected migrated credential for ref %q", providers[0].Auth.CredentialRef)
-	}
-	if record.Token != "legacy-inline-token" {
-		t.Fatalf("unexpected migrated token")
+	if providers[0].Auth.CredentialRef != "openai_api_openai_com" {
+		t.Fatalf("unexpected credential_ref: %q", providers[0].Auth.CredentialRef)
 	}
 }

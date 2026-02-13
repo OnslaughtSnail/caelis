@@ -7,9 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	launcherfull "github.com/OnslaughtSnail/caelis/cmd/launcher/full"
-	"github.com/OnslaughtSnail/caelis/internal/envload"
 	"github.com/OnslaughtSnail/caelis/internal/version"
 	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -18,6 +19,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	"github.com/OnslaughtSnail/caelis/kernel/plugin"
 	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/promptpipeline"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
@@ -26,6 +28,8 @@ import (
 	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 )
 
+var conversationSessionCounter atomic.Uint64
+
 func main() {
 	launcher := launcherfull.NewLauncher(
 		runCLI,
@@ -33,9 +37,6 @@ func main() {
 		notImplementedLauncher("web"),
 	)
 	if err := launcher.Execute(context.Background(), os.Args[1:]); err != nil {
-		if strings.Contains(os.Getenv("DEBUG"), "1") {
-			fmt.Fprintf(os.Stderr, "%s\n", launcher.CommandLineSyntax())
-		}
 		exitErr(err)
 	}
 }
@@ -106,6 +107,9 @@ func runCLI(ctx context.Context, args []string) error {
 	if len(fs.Args()) > 0 {
 		return fmt.Errorf("unknown arguments: %v", fs.Args())
 	}
+	if !flagProvided(args, "session") {
+		*sessionID = nextConversationSessionID()
+	}
 	if err := configStore.SetCredentialStoreMode(*credentialStore); err != nil {
 		return err
 	}
@@ -113,7 +117,7 @@ func runCLI(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := migrateInlineProviderTokens(configStore, credentials); err != nil {
+	if err := mergeCredentialStoreProviderTokens(configStore, credentials); err != nil {
 		return err
 	}
 	if err := configStore.SetRuntimeSettings(runtimeSettings{
@@ -128,9 +132,6 @@ func runCLI(ctx context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "warn: persist runtime settings failed: %v\n", err)
 	}
 
-	if _, err := envload.LoadNearest(); err != nil {
-		return err
-	}
 	workspace, err := resolveWorkspaceContext()
 	if err != nil {
 		return err
@@ -156,7 +157,6 @@ func runCLI(ctx context.Context, args []string) error {
 	if execRuntime.FallbackToHost() {
 		fmt.Fprintf(os.Stderr, "warn: sandbox unavailable, fallback to host+approval: %s\n", execRuntime.FallbackReason())
 	}
-	ctx = pluginbuiltin.WithExecutionRuntime(ctx, execRuntime)
 	var mcpManager *toolmcp.Manager
 	mcpManager, err = loadMCPToolManager(*mcpConfigPath)
 	if err != nil {
@@ -168,7 +168,6 @@ func runCLI(ctx context.Context, args []string) error {
 				fmt.Fprintf(os.Stderr, "warn: close mcp manager failed: %v\n", closeErr)
 			}
 		}()
-		ctx = pluginbuiltin.WithMCPToolManager(ctx, mcpManager)
 	}
 	lspBroker := lspbroker.New()
 	goAdapter, err := gopls.New(gopls.Config{Runtime: execRuntime})
@@ -178,18 +177,31 @@ func runCLI(ctx context.Context, args []string) error {
 	if err := lspBroker.RegisterAdapter(goAdapter); err != nil {
 		return err
 	}
+	pluginRegistry := plugin.NewRegistry()
+	if err := pluginbuiltin.RegisterAll(pluginRegistry, pluginbuiltin.RegisterOptions{
+		ExecutionRuntime: execRuntime,
+		MCPToolManager:   mcpManager,
+	}); err != nil {
+		return err
+	}
 
 	resolved, err := bootstrap.Assemble(ctx, bootstrap.AssembleSpec{
+		Registry:        pluginRegistry,
 		ToolProviders:   splitCSV(*toolProviders),
 		PolicyProviders: splitCSV(*policyProviders),
 	})
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := resolved.Close(context.Background()); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: close assembled providers failed: %v\n", closeErr)
+		}
+	}()
+	lspActivationTools := lspActivationToolNames(resolved.Tools)
 
 	factory := modelproviders.NewFactory()
 	for _, providerCfg := range configStore.ProviderConfigs() {
-		providerCfg = hydrateProviderAuthToken(providerCfg, credentials)
 		if registerErr := factory.Register(providerCfg); registerErr != nil {
 			fmt.Fprintf(os.Stderr, "warn: skip provider %q: %v\n", providerCfg.Alias, registerErr)
 		}
@@ -295,6 +307,7 @@ func runCLI(ctx context.Context, args []string) error {
 			CoreTools:           tool.CoreToolsConfig{Runtime: execRuntime},
 			Policies:            resolved.Policies,
 			LSPBroker:           lspBroker,
+			LSPActivationTools:  lspActivationTools,
 			AutoActivateLSP:     autoActivateLSPLanguages(workspace.CWD, resolved.Tools),
 			ContextWindowTokens: *contextWindow,
 		}, runRenderConfig{
@@ -315,6 +328,7 @@ func runCLI(ctx context.Context, args []string) error {
 		ExecRuntime:            execRuntime,
 		SandboxType:            strings.TrimSpace(*sandboxType),
 		AutoActivateLSP:        autoActivateLSPLanguages(workspace.CWD, resolved.Tools),
+		LSPActivationTools:     lspActivationTools,
 		ModelAlias:             alias,
 		Model:                  llm,
 		ModelFactory:           factory,
@@ -352,19 +366,15 @@ type buildAgentInput struct {
 }
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
-	assembled, err := promptpipeline.Assemble(promptpipeline.AssembleSpec{
-		AppName:                in.AppName,
-		WorkspaceDir:           in.WorkspaceDir,
-		BasePrompt:             in.BasePrompt,
-		RuntimeHint:            in.RuntimeHint,
-		SkillDirs:              in.SkillDirs,
-		ConfigDir:              in.PromptConfigDir,
-		EnableLSPRoutingPolicy: in.EnableLSPRoutingPolicy,
-	})
+	promptInput, err := buildPromptAssembleSpec(in)
 	if err != nil {
 		return nil, err
 	}
-	for _, warn := range assembled.Warnings {
+	assembled, err := promptpipeline.Assemble(promptInput.Spec)
+	if err != nil {
+		return nil, err
+	}
+	for _, warn := range promptInput.Warnings {
 		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
 	}
 
@@ -498,6 +508,30 @@ func summarizeSafeCommands(commands []string, limit int) string {
 	return fmt.Sprintf("%s,+%d more", strings.Join(normalized[:limit], ","), len(normalized)-limit)
 }
 
+func nextConversationSessionID() string {
+	seq := conversationSessionCounter.Add(1)
+	return fmt.Sprintf("s-%d-%d", time.Now().UTC().UnixNano(), seq)
+}
+
+func flagProvided(args []string, flagName string) bool {
+	flagName = strings.TrimSpace(flagName)
+	if flagName == "" {
+		return false
+	}
+	short := "-" + flagName
+	long := "--" + flagName
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == short || trimmed == long {
+			return true
+		}
+		if strings.HasPrefix(trimmed, short+"=") || strings.HasPrefix(trimmed, long+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 func rejectRemovedExecutionFlags(args []string) error {
 	removed := map[string]string{
 		"exec-mode":      "-permission-mode",
@@ -531,6 +565,13 @@ func autoActivateLSPLanguages(workspaceDir string, tools []tool.Tool) []string {
 	matches, err := filepath.Glob(filepath.Join(workspaceDir, "*.go"))
 	if err == nil && len(matches) > 0 {
 		return []string{"go"}
+	}
+	return nil
+}
+
+func lspActivationToolNames(tools []tool.Tool) []string {
+	if hasToolName(tools, "LSP_ACTIVATE") {
+		return []string{"LSP_ACTIVATE"}
 	}
 	return nil
 }

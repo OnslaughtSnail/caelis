@@ -53,6 +53,17 @@ func (s *indexedSessionStore) SnapshotState(ctx context.Context, req *session.Se
 	return s.inner.SnapshotState(ctx, req)
 }
 
+func (s *indexedSessionStore) ListContextWindowEvents(ctx context.Context, req *session.Session) ([]*session.Event, error) {
+	if withWindow, ok := s.inner.(session.ContextWindowStore); ok {
+		return withWindow.ListContextWindowEvents(ctx, req)
+	}
+	events, err := s.inner.ListEvents(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 func sessNow() time.Time {
 	return time.Now()
 }

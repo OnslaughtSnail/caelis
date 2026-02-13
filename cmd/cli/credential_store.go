@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-
-	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
 const (
@@ -257,57 +255,13 @@ func normalizeCredentialRef(input string) string {
 	return strings.Trim(b.String(), "_")
 }
 
-func credentialRefForProvider(cfg modelproviders.Config) string {
-	if ref := normalizeCredentialRef(cfg.Auth.CredentialRef); ref != "" {
-		return ref
-	}
-	if ref := defaultCredentialRef(cfg.Provider, cfg.BaseURL); ref != "" {
-		return ref
-	}
-	return normalizeCredentialRef(cfg.Alias)
-}
-
-func hydrateProviderAuthToken(cfg modelproviders.Config, credentials *credentialStore) modelproviders.Config {
-	if credentials == nil {
-		return cfg
-	}
-	if strings.TrimSpace(cfg.Auth.Token) != "" {
-		return cfg
-	}
-	if env := strings.TrimSpace(cfg.Auth.TokenEnv); env != "" && strings.TrimSpace(os.Getenv(env)) != "" {
-		return cfg
-	}
-	ref := credentialRefForProvider(cfg)
-	if ref == "" {
-		return cfg
-	}
-	stored, ok := credentials.Get(ref)
-	if !ok {
-		return cfg
-	}
-	token := strings.TrimSpace(stored.Token)
-	if token == "" {
-		return cfg
-	}
-	cfg.Auth.CredentialRef = ref
-	cfg.Auth.Token = token
-	if cfg.Auth.Type == "" && strings.TrimSpace(stored.Type) != "" {
-		cfg.Auth.Type = modelproviders.AuthType(strings.TrimSpace(stored.Type))
-	}
-	return cfg
-}
-
-func migrateInlineProviderTokens(configStore *appConfigStore, credentials *credentialStore) error {
+func mergeCredentialStoreProviderTokens(configStore *appConfigStore, credentials *credentialStore) error {
 	if configStore == nil || credentials == nil {
 		return nil
 	}
 	changed := false
 	for i := range configStore.data.Providers {
 		rec := &configStore.data.Providers[i]
-		token := strings.TrimSpace(rec.Auth.Token)
-		if token == "" {
-			continue
-		}
 		ref := normalizeCredentialRef(rec.Auth.CredentialRef)
 		if ref == "" {
 			ref = defaultCredentialRef(rec.Provider, rec.BaseURL)
@@ -315,17 +269,33 @@ func migrateInlineProviderTokens(configStore *appConfigStore, credentials *crede
 		if ref == "" {
 			ref = normalizeCredentialRef(rec.Alias)
 		}
+		if rec.Auth.TokenEnv != "" {
+			rec.Auth.TokenEnv = ""
+			changed = true
+		}
+		if strings.TrimSpace(rec.Auth.Token) != "" {
+			if ref != "" && rec.Auth.CredentialRef != ref {
+				rec.Auth.CredentialRef = ref
+				changed = true
+			}
+			continue
+		}
 		if ref == "" {
 			continue
 		}
-		if err := credentials.Upsert(ref, credentialRecord{
-			Type:  strings.TrimSpace(rec.Auth.Type),
-			Token: token,
-		}); err != nil {
-			return err
+		stored, ok := credentials.Get(ref)
+		if !ok {
+			continue
 		}
+		token := strings.TrimSpace(stored.Token)
+		if token == "" {
+			continue
+		}
+		rec.Auth.Token = token
 		rec.Auth.CredentialRef = ref
-		rec.Auth.Token = ""
+		if rec.Auth.Type == "" && strings.TrimSpace(stored.Type) != "" {
+			rec.Auth.Type = strings.TrimSpace(stored.Type)
+		}
 		changed = true
 	}
 	if !changed {

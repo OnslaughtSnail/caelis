@@ -13,6 +13,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 type testCtx struct {
@@ -50,6 +51,85 @@ func (t namedTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		return map[string]any{}, nil
 	}
 	return t.run(ctx, args)
+}
+
+type capabilityNamedTool struct {
+	namedTool
+	capability toolcap.Capability
+}
+
+func (t capabilityNamedTool) Capability() toolcap.Capability {
+	return t.capability
+}
+
+type captureCapabilityHook struct {
+	before []toolcap.Capability
+	after  []toolcap.Capability
+}
+
+func (h *captureCapabilityHook) Name() string { return "capture_capability" }
+func (h *captureCapabilityHook) BeforeModel(ctx context.Context, in policy.ModelInput) (policy.ModelInput, error) {
+	_ = ctx
+	return in, nil
+}
+func (h *captureCapabilityHook) BeforeTool(ctx context.Context, in policy.ToolInput) (policy.ToolInput, error) {
+	_ = ctx
+	h.before = append(h.before, in.Capability)
+	return in, nil
+}
+func (h *captureCapabilityHook) AfterTool(ctx context.Context, out policy.ToolOutput) (policy.ToolOutput, error) {
+	_ = ctx
+	h.after = append(h.after, out.Capability)
+	return out, nil
+}
+func (h *captureCapabilityHook) BeforeOutput(ctx context.Context, out policy.Output) (policy.Output, error) {
+	_ = ctx
+	return out, nil
+}
+
+type requireApprovalHook struct{}
+
+func (h requireApprovalHook) Name() string { return "require_approval_hook" }
+func (h requireApprovalHook) BeforeModel(ctx context.Context, in policy.ModelInput) (policy.ModelInput, error) {
+	_ = ctx
+	return in, nil
+}
+func (h requireApprovalHook) BeforeTool(ctx context.Context, in policy.ToolInput) (policy.ToolInput, error) {
+	_ = ctx
+	in.Decision = policy.DecisionWithRoute(policy.Decision{
+		Effect: policy.DecisionEffectRequireApproval,
+		Reason: "approval required by policy hook",
+	}, policy.DecisionRouteHost)
+	return in, nil
+}
+func (h requireApprovalHook) AfterTool(ctx context.Context, out policy.ToolOutput) (policy.ToolOutput, error) {
+	_ = ctx
+	return out, nil
+}
+func (h requireApprovalHook) BeforeOutput(ctx context.Context, out policy.Output) (policy.Output, error) {
+	_ = ctx
+	return out, nil
+}
+
+type denyToolHook struct{}
+
+func (h denyToolHook) Name() string { return "deny_tool_hook" }
+func (h denyToolHook) BeforeModel(ctx context.Context, in policy.ModelInput) (policy.ModelInput, error) {
+	_ = ctx
+	return in, nil
+}
+func (h denyToolHook) BeforeTool(ctx context.Context, in policy.ToolInput) (policy.ToolInput, error) {
+	_ = ctx
+	in.Decision = policy.Decision{Effect: policy.DecisionEffectDeny, Reason: "denied by hook"}
+	return in, nil
+}
+func (h denyToolHook) AfterTool(ctx context.Context, out policy.ToolOutput) (policy.ToolOutput, error) {
+	_ = ctx
+	return out, nil
+}
+func (h denyToolHook) BeforeOutput(ctx context.Context, out policy.Output) (policy.Output, error) {
+	_ = ctx
+	return out, nil
 }
 
 type echoArgs struct {
@@ -108,6 +188,70 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	}
 	if events[len(events)-1].Message.Text != "done" {
 		t.Fatalf("unexpected final text: %q", events[len(events)-1].Message.Text)
+	}
+}
+
+func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
+	capTool := capabilityNamedTool{
+		namedTool: namedTool{
+			name: "cap_tool",
+			run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+				_ = ctx
+				_ = args
+				return map[string]any{"ok": true}, nil
+			},
+		},
+		capability: toolcap.Capability{
+			Operations: []toolcap.Operation{toolcap.OperationExec},
+			Risk:       toolcap.RiskHigh,
+		},
+	}
+	hook := &captureCapabilityHook{}
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "cap_tool",
+					Args: map[string]any{},
+				}},
+			}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{capTool},
+		toolMap: map[string]tool.Tool{"cap_tool": capTool},
+		policies: []policy.Hook{
+			hook,
+		},
+	}
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	if len(hook.before) == 0 {
+		t.Fatal("expected before-tool policy to capture capability")
+	}
+	if len(hook.after) == 0 {
+		t.Fatal("expected after-tool policy to capture capability")
+	}
+	if !hook.before[0].HasOperation(toolcap.OperationExec) || hook.before[0].Risk != toolcap.RiskHigh {
+		t.Fatalf("unexpected before capability: %#v", hook.before[0])
+	}
+	if !hook.after[0].HasOperation(toolcap.OperationExec) || hook.after[0].Risk != toolcap.RiskHigh {
+		t.Fatalf("unexpected after capability: %#v", hook.after[0])
 	}
 }
 
@@ -203,6 +347,135 @@ func TestLLMAgent_RetryExhaustedReturnsError(t *testing.T) {
 		}
 	}
 	t.Fatal("expected retry exhausted error")
+}
+
+func TestLLMAgent_PropagatesPolicyDecisionToToolContext(t *testing.T) {
+	toolCalled := false
+	hostRouteSeen := false
+	approvalEffectSeen := false
+	checkTool := namedTool{
+		name: "check_ctx",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = args
+			toolCalled = true
+			decision, ok := policy.ToolDecisionFromContext(ctx)
+			if !ok {
+				return nil, fmt.Errorf("missing policy decision in tool context")
+			}
+			if decision.Effect == policy.DecisionEffectRequireApproval {
+				approvalEffectSeen = true
+			}
+			if route, ok := policy.DecisionRouteFromMetadata(decision); ok && route == policy.DecisionRouteHost {
+				hostRouteSeen = true
+			}
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "check_ctx",
+					Args: map[string]any{},
+				}},
+			}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{checkTool},
+		toolMap: map[string]tool.Tool{"check_ctx": checkTool},
+		policies: []policy.Hook{
+			requireApprovalHook{},
+		},
+	}
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	if !toolCalled {
+		t.Fatal("expected tool to be called")
+	}
+	if !approvalEffectSeen {
+		t.Fatal("expected require_approval effect in tool context")
+	}
+	if !hostRouteSeen {
+		t.Fatal("expected host route metadata in tool context decision")
+	}
+}
+
+func TestLLMAgent_DenyDecisionSkipsToolExecution(t *testing.T) {
+	toolCalled := false
+	checkTool := namedTool{
+		name: "check_ctx",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			toolCalled = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "check_ctx",
+					Args: map[string]any{},
+				}},
+			}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{checkTool},
+		toolMap: map[string]tool.Tool{"check_ctx": checkTool},
+		policies: []policy.Hook{
+			denyToolHook{},
+		},
+	}
+	var toolEvent *session.Event
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.ToolResponse != nil {
+			toolEvent = ev
+		}
+	}
+	if toolCalled {
+		t.Fatal("expected tool execution to be skipped by deny decision")
+	}
+	if toolEvent == nil || toolEvent.Message.ToolResponse == nil {
+		t.Fatal("expected tool response event")
+	}
+	if got := fmt.Sprint(toolEvent.Message.ToolResponse.Result["error"]); !strings.Contains(got, "denied by policy") {
+		t.Fatalf("expected denial error in tool response, got %q", got)
+	}
 }
 
 func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
@@ -368,6 +641,34 @@ func TestToMessages_StripsUIOnlyToolResultKeys(t *testing.T) {
 	}
 }
 
+func TestToMessagesWithSanitizer_UsesCustomSanitizer(t *testing.T) {
+	history := []*session.Event{
+		{
+			Message: model.Message{
+				Role: model.RoleTool,
+				ToolResponse: &model.ToolResponse{
+					ID:   "call_1",
+					Name: "PATCH",
+					Result: map[string]any{
+						"path":     "a.txt",
+						"metadata": map[string]any{"preview": "visible"},
+					},
+				},
+			},
+		},
+	}
+	keepAll := func(input map[string]any) map[string]any {
+		return input
+	}
+	msgs := toMessagesWithSanitizer(history, "sys", keepAll)
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if _, exists := msgs[1].ToolResponse.Result["metadata"]; !exists {
+		t.Fatalf("expected metadata to be preserved with custom sanitizer")
+	}
+}
+
 func TestLLMAgent_DoesNotSendUIOnlyToolFieldsToModel(t *testing.T) {
 	previewTool := namedTool{
 		name: "preview_tool",
@@ -489,6 +790,130 @@ func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 	}
 	if len(meta) != 0 {
 		t.Fatalf("expected empty default metadata map, got %#v", meta)
+	}
+}
+
+func TestLLMAgent_AddsErrorCodeToToolResultMetadata(t *testing.T) {
+	codedErrTool := namedTool{
+		name: "coded_tool",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			return nil, &toolexec.ApprovalRequiredError{Reason: "needs approval"}
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		switch step {
+		case 1:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "coded_tool",
+					Args: map[string]any{},
+				}},
+			}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{codedErrTool},
+		toolMap: map[string]tool.Tool{"coded_tool": codedErrTool},
+	}
+
+	var toolEvent *session.Event
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.ToolResponse != nil {
+			toolEvent = ev
+		}
+	}
+	if toolEvent == nil {
+		t.Fatal("expected tool response event")
+	}
+	meta, ok := toolEvent.Message.ToolResponse.Result["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata map, got %#v", toolEvent.Message.ToolResponse.Result["metadata"])
+	}
+	if meta["error_code"] != string(toolexec.ErrorCodeApprovalRequired) {
+		t.Fatalf("expected error_code %q, got %#v", toolexec.ErrorCodeApprovalRequired, meta["error_code"])
+	}
+}
+
+func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
+	plainErrTool := namedTool{
+		name: "plain_tool",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			return nil, errors.New("plain failure")
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		switch step {
+		case 1:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "plain_tool",
+					Args: map[string]any{},
+				}},
+			}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{plainErrTool},
+		toolMap: map[string]tool.Tool{"plain_tool": plainErrTool},
+	}
+
+	var toolEvent *session.Event
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.ToolResponse != nil {
+			toolEvent = ev
+		}
+	}
+	if toolEvent == nil {
+		t.Fatal("expected tool response event")
+	}
+	meta, ok := toolEvent.Message.ToolResponse.Result["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata map, got %#v", toolEvent.Message.ToolResponse.Result["metadata"])
+	}
+	if _, exists := meta["error_code"]; exists {
+		t.Fatalf("expected no error_code for plain errors, got %#v", meta["error_code"])
 	}
 }
 

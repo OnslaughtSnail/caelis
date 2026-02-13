@@ -10,6 +10,7 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 const (
@@ -41,6 +42,13 @@ func (t *SearchTool) Name() string {
 
 func (t *SearchTool) Description() string {
 	return "Search text in a file or directory recursively."
+}
+
+func (t *SearchTool) Capability() toolcap.Capability {
+	return toolcap.Capability{
+		Operations: []toolcap.Operation{toolcap.OperationFileRead},
+		Risk:       toolcap.RiskLow,
+	}
 }
 
 func (t *SearchTool) Declaration() model.ToolDefinition {

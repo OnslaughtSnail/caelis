@@ -52,6 +52,13 @@ type staticFactory struct {
 	err    error
 }
 
+func platformDefaultSandboxType() string {
+	if strings.EqualFold(runtimeGOOS, "darwin") {
+		return seatbeltSandboxType
+	}
+	return dockerSandboxType
+}
+
 func (f staticFactory) Type() string {
 	return f.typ
 }
@@ -84,7 +91,7 @@ func TestNew_FullControlRoutesToHost(t *testing.T) {
 func TestNew_DefaultRoutesSafeCommandToSandbox(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  noopRunner{},
 	})
 	if err != nil {
@@ -102,28 +109,52 @@ func TestNew_DefaultRoutesSafeCommandToSandbox(t *testing.T) {
 	}
 }
 
-func TestNew_DefaultRunsAnyCommandInSandbox(t *testing.T) {
+func TestNew_DefaultUnsafeCommandRoutesToHostWithEscalation(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  noopRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	decision := rt.DecideRoute("python3 app.py", SandboxPermissionAuto)
-	if decision.Route != ExecutionRouteSandbox {
-		t.Fatalf("expected sandbox route, got %q", decision.Route)
+	if decision.Route != ExecutionRouteHost {
+		t.Fatalf("expected host route, got %q", decision.Route)
 	}
-	if decision.Escalation != nil {
-		t.Fatalf("expected no escalation, got %+v", decision.Escalation)
+	if decision.Escalation == nil {
+		t.Fatal("expected escalation reason for unsafe command")
+	}
+	if !strings.Contains(decision.Escalation.Message, "outside safe command set") {
+		t.Fatalf("expected safe-set escalation reason, got %+v", decision.Escalation)
+	}
+}
+
+func TestNew_DefaultMetaCharactersRequireHostEscalation(t *testing.T) {
+	rt, err := New(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    platformDefaultSandboxType(),
+		SandboxRunner:  noopRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := rt.DecideRoute("ls | head -1", SandboxPermissionAuto)
+	if decision.Route != ExecutionRouteHost {
+		t.Fatalf("expected host route, got %q", decision.Route)
+	}
+	if decision.Escalation == nil {
+		t.Fatal("expected escalation reason")
+	}
+	if !strings.Contains(decision.Escalation.Message, "shell meta characters detected") {
+		t.Fatalf("expected meta-char escalation reason, got %+v", decision.Escalation)
 	}
 }
 
 func TestNew_DefaultRequireEscalatedForcesHost(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  noopRunner{},
 	})
 	if err != nil {
@@ -141,7 +172,7 @@ func TestNew_DefaultRequireEscalatedForcesHost(t *testing.T) {
 func TestNew_DefaultFallbackWhenSandboxProbeFails(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  probeRunner{probeErr: errors.New("daemon unavailable")},
 	})
 	if err != nil {
@@ -162,7 +193,7 @@ func TestNew_DefaultFallbackWhenSandboxProbeFails(t *testing.T) {
 func TestNew_DefaultDerivesWorkspaceWritePolicy(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  noopRunner{},
 	})
 	if err != nil {
@@ -198,7 +229,7 @@ func TestClose_ClosesRuntimeResources(t *testing.T) {
 	runner := &closeableRunner{}
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  runner,
 	})
 	if err != nil {
@@ -237,7 +268,7 @@ func TestNew_DefaultSandboxTypeFollowsPlatform(t *testing.T) {
 	}
 }
 
-func TestNew_DarwinSeatbeltFallsBackToDocker(t *testing.T) {
+func TestNew_DarwinSeatbeltUnavailableFallsBackToHost(t *testing.T) {
 	oldGoos := runtimeGOOS
 	oldFactories := sandboxFactories
 	runtimeGOOS = "darwin"
@@ -267,15 +298,18 @@ func TestNew_DarwinSeatbeltFallsBackToDocker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rt.FallbackToHost() {
-		t.Fatalf("expected fallback to docker sandbox, got host fallback: %s", rt.FallbackReason())
+	if !rt.FallbackToHost() {
+		t.Fatalf("expected host fallback when seatbelt is unavailable, got sandbox=%s", rt.SandboxType())
 	}
-	if rt.SandboxType() != dockerSandboxType {
-		t.Fatalf("expected sandbox type %q after fallback, got %q", dockerSandboxType, rt.SandboxType())
+	if rt.SandboxType() != seatbeltSandboxType {
+		t.Fatalf("expected sandbox type %q, got %q", seatbeltSandboxType, rt.SandboxType())
+	}
+	if !strings.Contains(rt.FallbackReason(), "seatbelt") {
+		t.Fatalf("expected seatbelt reason in fallback, got %q", rt.FallbackReason())
 	}
 }
 
-func TestNew_DarwinDefaultAllSandboxesUnavailableFallbackToHost(t *testing.T) {
+func TestNew_DarwinDefaultSeatbeltUnavailableFallbackToHost(t *testing.T) {
 	oldGoos := runtimeGOOS
 	oldFactories := sandboxFactories
 	runtimeGOOS = "darwin"
@@ -303,11 +337,11 @@ func TestNew_DarwinDefaultAllSandboxesUnavailableFallbackToHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !rt.FallbackToHost() {
-		t.Fatal("expected host fallback when seatbelt and docker are unavailable")
+		t.Fatal("expected host fallback when seatbelt is unavailable")
 	}
 	reason := rt.FallbackReason()
-	if !strings.Contains(reason, "seatbelt") || !strings.Contains(reason, "docker") {
-		t.Fatalf("expected fallback reason to include both candidates, got %q", reason)
+	if !strings.Contains(reason, "seatbelt") {
+		t.Fatalf("expected fallback reason to include seatbelt failure, got %q", reason)
 	}
 }
 
@@ -318,10 +352,10 @@ func TestSandboxTypeCandidatesForPlatform(t *testing.T) {
 		goos     string
 		expected []string
 	}{
-		{name: "darwin default", request: "", goos: "darwin", expected: []string{"seatbelt", "docker"}},
+		{name: "darwin default", request: "", goos: "darwin", expected: []string{"seatbelt"}},
 		{name: "linux default", request: "", goos: "linux", expected: []string{"docker"}},
-		{name: "darwin explicit seatbelt", request: "seatbelt", goos: "darwin", expected: []string{"seatbelt", "docker"}},
-		{name: "darwin explicit docker", request: "docker", goos: "darwin", expected: []string{"docker"}},
+		{name: "darwin explicit seatbelt", request: "seatbelt", goos: "darwin", expected: []string{"seatbelt"}},
+		{name: "darwin explicit docker", request: "docker", goos: "darwin", expected: nil},
 		{name: "linux explicit seatbelt", request: "seatbelt", goos: "linux", expected: []string{"seatbelt"}},
 	}
 	for _, tc := range cases {
@@ -336,5 +370,27 @@ func TestSandboxTypeCandidatesForPlatform(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNew_DarwinExplicitDockerUnsupported(t *testing.T) {
+	oldGoos := runtimeGOOS
+	runtimeGOOS = "darwin"
+	defer func() {
+		runtimeGOOS = oldGoos
+	}()
+	_, err := New(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    dockerSandboxType,
+		SandboxRunner:  noopRunner{},
+	})
+	if err == nil {
+		t.Fatal("expected explicit docker to be unsupported on darwin")
+	}
+	if !IsErrorCode(err, ErrorCodeSandboxUnsupported) {
+		t.Fatalf("expected error code %q, got %q", ErrorCodeSandboxUnsupported, ErrorCodeOf(err))
+	}
+	if !strings.Contains(err.Error(), "unsupported on darwin") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

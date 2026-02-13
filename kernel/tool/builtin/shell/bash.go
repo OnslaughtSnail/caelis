@@ -9,7 +9,9 @@ import (
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
+	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
 const (
@@ -57,6 +59,13 @@ func (t *BashTool) Name() string {
 
 func (t *BashTool) Description() string {
 	return "Execute a shell command and return stdout/stderr."
+}
+
+func (t *BashTool) Capability() toolcap.Capability {
+	return toolcap.Capability{
+		Operations: []toolcap.Operation{toolcap.OperationExec},
+		Risk:       toolcap.RiskHigh,
+	}
 }
 
 func (t *BashTool) Declaration() model.ToolDefinition {
@@ -132,7 +141,10 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		}
 	}
 
-	decision := t.runtime.DecideRoute(command, sandboxPermission)
+	decision, policyDecision, err := t.resolveCommandDecision(ctx, command, sandboxPermission)
+	if err != nil {
+		return nil, err
+	}
 	runner, needApproval, reason, err := t.resolveRunner(decision)
 	if err != nil {
 		return nil, err
@@ -148,7 +160,7 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		Timeout:     timeout,
 		IdleTimeout: idleTimeout,
 	})
-	if err != nil && shouldEscalateWhenSandboxUnavailable(t.runtime, decision, command, result) {
+	if err != nil && shouldEscalateWhenSandboxUnavailable(decision, command, result, policyDecision) {
 		hostRunner := t.runtime.HostRunner()
 		if hostRunner == nil {
 			return nil, fmt.Errorf("tool: host runner is unavailable")
@@ -175,11 +187,16 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	}, nil
 }
 
-func shouldEscalateWhenSandboxUnavailable(rt toolexec.Runtime, decision toolexec.CommandDecision, command string, result toolexec.CommandResult) bool {
-	if rt == nil || decision.Route != toolexec.ExecutionRouteSandbox {
+func shouldEscalateWhenSandboxUnavailable(
+	decision toolexec.CommandDecision,
+	command string,
+	result toolexec.CommandResult,
+	policyDecision policy.Decision,
+) bool {
+	if decision.Route != toolexec.ExecutionRouteSandbox {
 		return false
 	}
-	if rt.PermissionMode() != toolexec.PermissionModeDefault {
+	if !fallbackOnCommandNotFoundEnabled(policyDecision) {
 		return false
 	}
 	base := commandBaseName(command)
@@ -200,12 +217,71 @@ func shouldEscalateWhenSandboxUnavailable(rt toolexec.Runtime, decision toolexec
 	return false
 }
 
+func fallbackOnCommandNotFoundEnabled(decision policy.Decision) bool {
+	if decision.Metadata == nil {
+		return false
+	}
+	raw, ok := decision.Metadata[policy.DecisionMetaFallbackOnCommandNotFound]
+	if !ok {
+		return false
+	}
+	switch typed := raw.(type) {
+	case bool:
+		return typed
+	case string:
+		value := strings.TrimSpace(strings.ToLower(typed))
+		return value == "1" || value == "true" || value == "yes" || value == "on"
+	default:
+		return false
+	}
+}
+
 func commandBaseName(command string) string {
 	fields := strings.Fields(strings.TrimSpace(command))
 	if len(fields) == 0 {
 		return ""
 	}
 	return filepath.Base(fields[0])
+}
+
+func (t *BashTool) resolveCommandDecision(
+	ctx context.Context,
+	command string,
+	sandboxPermission toolexec.SandboxPermission,
+) (toolexec.CommandDecision, policy.Decision, error) {
+	if decision, ok := policy.ToolDecisionFromContext(ctx); ok {
+		decision = policy.NormalizeDecision(decision)
+		if decision.Effect == policy.DecisionEffectDeny {
+			reason := strings.TrimSpace(decision.Reason)
+			if reason == "" {
+				reason = "command denied by policy"
+			}
+			return toolexec.CommandDecision{}, decision, fmt.Errorf("tool: command denied by policy: %s", reason)
+		}
+		if route, ok := policy.DecisionRouteFromMetadata(decision); ok {
+			switch route {
+			case policy.DecisionRouteSandbox:
+				return toolexec.CommandDecision{Route: toolexec.ExecutionRouteSandbox}, decision, nil
+			case policy.DecisionRouteHost:
+				out := toolexec.CommandDecision{Route: toolexec.ExecutionRouteHost}
+				if decision.Effect == policy.DecisionEffectRequireApproval {
+					out.Escalation = &toolexec.EscalationReason{
+						Message: strings.TrimSpace(decision.Reason),
+					}
+				}
+				return out, decision, nil
+			}
+		}
+		if decision.Effect == policy.DecisionEffectRequireApproval {
+			return toolexec.CommandDecision{
+				Route: toolexec.ExecutionRouteHost,
+				Escalation: &toolexec.EscalationReason{
+					Message: strings.TrimSpace(decision.Reason),
+				},
+			}, decision, nil
+		}
+	}
+	return t.runtime.DecideRoute(command, sandboxPermission), policy.Decision{}, nil
 }
 
 func parseSandboxPermission(raw string) (toolexec.SandboxPermission, error) {
@@ -253,7 +329,7 @@ func (t *BashTool) resolveRunner(decision toolexec.CommandDecision) (toolexec.Co
 func requestApproval(ctx context.Context, command string, reason string) error {
 	approver, ok := toolexec.ApproverFromContext(ctx)
 	if !ok {
-		suggestion := "approve in interactive mode or rerun with -permission-mode full_control"
+		suggestion := "approve in interactive mode or run with a host-permissive execution policy"
 		if strings.TrimSpace(reason) == "" {
 			return &toolexec.ApprovalRequiredError{Reason: suggestion}
 		}

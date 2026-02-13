@@ -2,7 +2,6 @@ package providers
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -105,11 +104,8 @@ func ListModels() []string {
 
 func resolveToken(cfg AuthConfig) (string, error) {
 	token := strings.TrimSpace(cfg.Token)
-	if token == "" && cfg.TokenEnv != "" {
-		token = strings.TrimSpace(os.Getenv(cfg.TokenEnv))
-	}
 	if token == "" {
-		return "", fmt.Errorf("providers: auth token is empty (env=%q)", cfg.TokenEnv)
+		return "", fmt.Errorf("providers: auth token is empty")
 	}
 	return token, nil
 }

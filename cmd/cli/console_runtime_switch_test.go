@@ -38,7 +38,7 @@ func TestHandlePermission_SwitchMode(t *testing.T) {
 	console := &cliConsole{
 		baseCtx:       context.Background(),
 		execRuntime:   rt,
-		sandboxType:   "docker",
+		sandboxType:   cliTestSandboxType(),
 		resolved:      &bootstrap.ResolvedSpec{Tools: []tool.Tool{bashTool}},
 		showReasoning: true,
 	}
@@ -59,7 +59,7 @@ func TestHandlePermission_InvalidMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	console := &cliConsole{execRuntime: rt, sandboxType: "docker"}
+	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
 	_, err = handlePermission(console, []string{"invalid"})
 	if err == nil {
 		t.Fatal("expected error")
@@ -71,12 +71,12 @@ func TestHandleSandbox_UnknownType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	console := &cliConsole{execRuntime: rt, sandboxType: "docker"}
+	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
 	_, err = handleSandbox(console, []string{"unknown-type"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "unknown sandbox type") {
+	if !strings.Contains(err.Error(), "unknown sandbox type") && !strings.Contains(err.Error(), "unsupported on darwin") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -86,13 +86,13 @@ func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	console := &cliConsole{execRuntime: rt, sandboxType: "docker"}
-	_, err = handleSandbox(console, []string{"docker"})
+	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
+	_, err = handleSandbox(console, []string{cliTestSandboxType()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if console.sandboxType != "docker" {
-		t.Fatalf("expected sandbox type docker, got %q", console.sandboxType)
+	if console.sandboxType != cliTestSandboxType() {
+		t.Fatalf("expected sandbox type %s, got %q", cliTestSandboxType(), console.sandboxType)
 	}
 	if console.execRuntime.PermissionMode() != toolexec.PermissionModeFullControl {
 		t.Fatalf("expected mode to remain full_control, got %q", console.execRuntime.PermissionMode())
@@ -103,7 +103,7 @@ func TestUpdateExecutionRuntime_ClosesPreviousRuntime(t *testing.T) {
 	sandboxRunner := &closeableSwitchRunner{}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
-		SandboxType:    "docker",
+		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  sandboxRunner,
 	})
 	if err != nil {
@@ -112,10 +112,10 @@ func TestUpdateExecutionRuntime_ClosesPreviousRuntime(t *testing.T) {
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		execRuntime: rt,
-		sandboxType: "docker",
+		sandboxType: cliTestSandboxType(),
 		resolved:    &bootstrap.ResolvedSpec{},
 	}
-	if err := console.updateExecutionRuntime(toolexec.PermissionModeFullControl, "docker"); err != nil {
+	if err := console.updateExecutionRuntime(toolexec.PermissionModeFullControl, cliTestSandboxType()); err != nil {
 		t.Fatal(err)
 	}
 	if sandboxRunner.closed != 1 {
