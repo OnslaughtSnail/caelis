@@ -99,10 +99,20 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		if !r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusRunning, "run", nil, yield) {
 			return
 		}
+		emitRunError := func(err error) {
+			if err == nil {
+				return
+			}
+			status := lifecycleStatusForError(err)
+			if !r.appendAndYieldLifecycle(ctx, sess, status, "run", err, yield) {
+				return
+			}
+			yield(nil, err)
+		}
 
 		existing, err := r.listContextWindowEvents(ctx, sess)
 		if err != nil {
-			yield(nil, err)
+			emitRunError(err)
 			return
 		}
 		recoveryEvents := buildRecoveryEvents(existing)
@@ -118,7 +128,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 				recoveryEvent.Time = time.Now()
 			}
 			if err := r.store.AppendEvent(ctx, sess, recoveryEvent); err != nil {
-				yield(nil, err)
+				emitRunError(err)
 				return
 			}
 			if !yield(recoveryEvent, nil) {
@@ -133,7 +143,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			Message:   model.Message{Role: model.RoleUser, Text: req.Input},
 		}
 		if err := r.store.AppendEvent(ctx, sess, userEvent); err != nil {
-			yield(nil, err)
+			emitRunError(err)
 			return
 		}
 		if !yield(userEvent, nil) {
@@ -142,7 +152,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 
 		allEvents, err := r.listContextWindowEvents(ctx, sess)
 		if err != nil {
-			yield(nil, err)
+			emitRunError(err)
 			return
 		}
 
@@ -156,7 +166,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 				Force:               false,
 			})
 			if compactErr != nil {
-				yield(nil, compactErr)
+				emitRunError(compactErr)
 				return
 			}
 			if compactionEvent != nil {
@@ -165,7 +175,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 				}
 				allEvents, err = r.listContextWindowEvents(ctx, sess)
 				if err != nil {
-					yield(nil, err)
+					emitRunError(err)
 					return
 				}
 			}
@@ -174,12 +184,12 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		history := agentHistoryEvents(contextWindowEvents(allEvents))
 		allTools, err := tool.EnsureCoreTools(req.Tools, req.CoreTools)
 		if err != nil {
-			yield(nil, err)
+			emitRunError(err)
 			return
 		}
 		toolMap, err := tool.BuildMap(allTools)
 		if err != nil {
-			yield(nil, err)
+			emitRunError(err)
 			return
 		}
 		inv := &invocationContext{
@@ -200,7 +210,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		for _, language := range activateLanguages {
 			_, activateErr := inv.ActivateLSP(ctx, lspbroker.ActivateRequest{Language: language})
 			if activateErr != nil {
-				yield(nil, activateErr)
+				emitRunError(activateErr)
 				return
 			}
 		}
@@ -212,7 +222,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 					if attempt == 0 && r.compaction.Enabled && isContextOverflowError(err) {
 						allEvents, listErr := r.listContextWindowEvents(ctx, sess)
 						if listErr != nil {
-							yield(nil, listErr)
+							emitRunError(listErr)
 							return
 						}
 						compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
@@ -224,7 +234,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 							Force:               true,
 						})
 						if compactErr != nil {
-							yield(nil, compactErr)
+							emitRunError(compactErr)
 							return
 						}
 						if compactionEvent != nil {
@@ -234,7 +244,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 						}
 						refreshed, refreshErr := r.listContextWindowEvents(ctx, sess)
 						if refreshErr != nil {
-							yield(nil, refreshErr)
+							emitRunError(refreshErr)
 							return
 						}
 						inv.history = agentHistoryEvents(contextWindowEvents(refreshed))
@@ -260,7 +270,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 				ev.SessionID = sess.ID
 				if shouldPersistEvent(ev, req.PersistPartialEvents) {
 					if err := r.store.AppendEvent(ctx, sess, ev); err != nil {
-						yield(nil, err)
+						emitRunError(err)
 						return
 					}
 					cp := *ev

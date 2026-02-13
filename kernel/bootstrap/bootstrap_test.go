@@ -38,6 +38,32 @@ func TestAssemble_LocalToolsAndPolicy(t *testing.T) {
 	}
 }
 
+func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
+	got, err := Assemble(context.Background(), AssembleSpec{
+		ToolProviders:   []string{pluginbuiltin.ProviderLocalTools},
+		PolicyProviders: []string{pluginbuiltin.ProviderDefaultPolicy},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil resolved spec")
+	}
+	foundEcho := false
+	for _, one := range got.Tools {
+		if one.Name() == "echo" {
+			foundEcho = true
+			break
+		}
+	}
+	if !foundEcho {
+		t.Fatalf("expected %q tool in assembled result", "echo")
+	}
+	if len(got.Policies) != 2 {
+		t.Fatalf("expected 2 policy hooks, got %d", len(got.Policies))
+	}
+}
+
 func TestAssemble_CoreReadInjectedByRuntime(t *testing.T) {
 	got, err := Assemble(context.Background(), AssembleSpec{
 		Registry:      mustBuiltinRegistry(t),

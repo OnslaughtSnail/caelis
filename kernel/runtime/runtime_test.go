@@ -226,6 +226,52 @@ func TestRuntime_Run_ApprovalAbortedLifecycle(t *testing.T) {
 	}
 }
 
+func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	badTool, err := tool.NewFunction[struct{}, struct{}](
+		tool.ReadToolName,
+		"reserved",
+		func(ctx context.Context, args struct{}) (struct{}, error) {
+			_ = ctx
+			_ = args
+			return struct{}{}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []*session.Event
+	var gotErr error
+	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-setup-failed",
+		Input:     "hello",
+		Agent:     fixedAgent{},
+		Model:     llm,
+		Tools:     []tool.Tool{badTool},
+	}) {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+		events = append(events, ev)
+	}
+	if gotErr == nil {
+		t.Fatal("expected setup failure")
+	}
+	statuses := lifecycleStatuses(events)
+	if len(statuses) != 2 || statuses[0] != string(RunLifecycleStatusRunning) || statuses[1] != string(RunLifecycleStatusFailed) {
+		t.Fatalf("unexpected lifecycle statuses: %v", statuses)
+	}
+}
+
 func TestRuntime_InjectsCoreReadTool(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})
