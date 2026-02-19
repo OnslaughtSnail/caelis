@@ -34,7 +34,6 @@ type compactInput struct {
 
 // CompactionConfig configures runtime history compaction behavior.
 type CompactionConfig struct {
-	Enabled                    bool
 	WatermarkRatio             float64
 	MinWatermarkRatio          float64
 	MaxWatermarkRatio          float64
@@ -76,9 +75,6 @@ func normalizeCompactionConfig(cfg CompactionConfig) CompactionConfig {
 	}
 	if cfg.MaxModelSummaryRetries <= 0 {
 		cfg.MaxModelSummaryRetries = 3
-	}
-	if !cfg.Enabled {
-		cfg.Enabled = true
 	}
 	return cfg
 }

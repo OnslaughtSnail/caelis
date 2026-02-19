@@ -156,28 +156,26 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			return
 		}
 
-		if r.compaction.Enabled {
-			compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
-				Session:             sess,
-				Model:               req.Model,
-				Events:              allEvents,
-				ContextWindowTokens: req.ContextWindowTokens,
-				Trigger:             triggerAuto,
-				Force:               false,
-			})
-			if compactErr != nil {
-				emitRunError(compactErr)
+		compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
+			Session:             sess,
+			Model:               req.Model,
+			Events:              allEvents,
+			ContextWindowTokens: req.ContextWindowTokens,
+			Trigger:             triggerAuto,
+			Force:               false,
+		})
+		if compactErr != nil {
+			emitRunError(compactErr)
+			return
+		}
+		if compactionEvent != nil {
+			if !yield(compactionEvent, nil) {
 				return
 			}
-			if compactionEvent != nil {
-				if !yield(compactionEvent, nil) {
-					return
-				}
-				allEvents, err = r.listContextWindowEvents(ctx, sess)
-				if err != nil {
-					emitRunError(err)
-					return
-				}
+			allEvents, err = r.listContextWindowEvents(ctx, sess)
+			if err != nil {
+				emitRunError(err)
+				return
 			}
 		}
 
@@ -219,7 +217,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			retry := false
 			for ev, err := range req.Agent.Run(inv) {
 				if err != nil {
-					if attempt == 0 && r.compaction.Enabled && isContextOverflowError(err) {
+					if attempt == 0 && isContextOverflowError(err) {
 						allEvents, listErr := r.listContextWindowEvents(ctx, sess)
 						if listErr != nil {
 							emitRunError(listErr)

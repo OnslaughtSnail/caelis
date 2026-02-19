@@ -18,6 +18,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	kernelpolicy "github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
@@ -312,6 +313,7 @@ func (c *cliConsole) runPrompt(input string) error {
 		return err
 	}
 	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
+	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
 	runCtx, cancel := context.WithCancel(ctx)
 	c.setActiveRunCancel(cancel)
 	defer func() {
@@ -886,6 +888,7 @@ type terminalApprover struct {
 	mu             sync.RWMutex
 	defaultAllowed map[string]struct{}
 	sessionAllowed map[string]struct{}
+	toolAllowed    map[string]struct{}
 }
 
 func newTerminalApprover(editor lineEditor, out io.Writer, safeCommands []string) *terminalApprover {
@@ -894,6 +897,7 @@ func newTerminalApprover(editor lineEditor, out io.Writer, safeCommands []string
 		out:            out,
 		defaultAllowed: map[string]struct{}{},
 		sessionAllowed: map[string]struct{}{},
+		toolAllowed:    map[string]struct{}{},
 	}
 	for _, key := range defaultApprovalKeys(safeCommands) {
 		approver.defaultAllowed[key] = struct{}{}
@@ -942,6 +946,47 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 	}
 }
 
+func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
+	_ = ctx
+	toolKey := toolApprovalKey(req.ToolName)
+	if toolKey == "" {
+		return true, nil
+	}
+	if a.isToolAllowedInSession(toolKey) {
+		return true, nil
+	}
+
+	fmt.Fprintf(a.out, "\n? 工具授权请求 %s\n", toolKey)
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		fmt.Fprintf(a.out, "! %s\n", reason)
+	}
+	if a.editor == nil {
+		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
+	}
+	line, err := a.editor.ReadLine("? allow [y]同意 / [a]本会话放行该工具 / [N]取消: ")
+	if err != nil {
+		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
+		}
+		return false, err
+	}
+	line = strings.ToLower(strings.TrimSpace(line))
+	switch line {
+	case "y", "yes":
+		return true, nil
+	case "a", "always":
+		a.mu.Lock()
+		a.toolAllowed[toolKey] = struct{}{}
+		a.mu.Unlock()
+		fmt.Fprintf(a.out, "! 已加入当前会话工具白名单: %s\n", toolKey)
+		return true, nil
+	case "n", "no", "", "c", "cancel":
+		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
+	default:
+		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
+	}
+}
+
 func (a *terminalApprover) isAllowedByDefault(command string) bool {
 	segments := splitApprovalSegments(command)
 	if len(segments) == 0 {
@@ -975,6 +1020,13 @@ func (a *terminalApprover) isAllowedInSession(command string) bool {
 	return ok
 }
 
+func (a *terminalApprover) isToolAllowedInSession(toolKey string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	_, ok := a.toolAllowed[toolKey]
+	return ok
+}
+
 func defaultApprovalKeys(safeCommands []string) []string {
 	keys := make([]string, 0, len(safeCommands)+1)
 	for _, one := range safeCommands {
@@ -991,6 +1043,10 @@ func defaultApprovalKeys(safeCommands []string) []string {
 
 func sessionApprovalKey(command string) string {
 	return strings.TrimSpace(command)
+}
+
+func toolApprovalKey(toolName string) string {
+	return strings.ToUpper(strings.TrimSpace(toolName))
 }
 
 func splitApprovalSegments(command string) []string {

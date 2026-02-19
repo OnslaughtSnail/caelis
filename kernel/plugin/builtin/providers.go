@@ -180,7 +180,7 @@ func (p defaultPolicyProvider) Name() string {
 func (p defaultPolicyProvider) Policies(ctx context.Context) ([]policy.Hook, error) {
 	_ = ctx
 	hooks := []policy.Hook{
-		policy.DefaultAllow(),
+		policy.DefaultSecurityBaseline(),
 	}
 	if p.runtime != nil {
 		hooks = append(hooks, policy.RouteCommandExecution(policy.CommandExecutionConfig{

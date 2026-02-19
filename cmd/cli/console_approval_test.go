@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	kernelpolicy "github.com/OnslaughtSnail/caelis/kernel/policy"
 )
 
 type stubLineEditor struct {
@@ -154,6 +155,56 @@ func TestTerminalApprover_EOFIsCancel(t *testing.T) {
 	_, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "go test ./..."})
 	if err == nil {
 		t.Fatal("expected cancel error")
+	}
+	if !toolexec.IsApprovalAborted(err) {
+		t.Fatalf("expected approval aborted, got %v", err)
+	}
+}
+
+func TestTerminalApprover_AuthorizeToolAlwaysCachesByToolName(t *testing.T) {
+	editor := &stubLineEditor{lines: []string{"a"}}
+	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+	req := kernelpolicy.ToolAuthorizationRequest{
+		ToolName: "WRITE",
+		Reason:   "filesystem mutation tool",
+	}
+
+	allowed, err := approver.AuthorizeTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected tool authorization to pass")
+	}
+	if editor.reads != 1 {
+		t.Fatalf("expected one prompt read, got %d", editor.reads)
+	}
+
+	allowed, err = approver.AuthorizeTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected session-whitelisted tool to pass")
+	}
+	if editor.reads != 1 {
+		t.Fatalf("expected second authorization to skip prompt, reads=%d", editor.reads)
+	}
+}
+
+func TestTerminalApprover_AuthorizeToolCancelReturnsApprovalAborted(t *testing.T) {
+	editor := &stubLineEditor{lines: []string{"n"}}
+	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+
+	allowed, err := approver.AuthorizeTool(context.Background(), kernelpolicy.ToolAuthorizationRequest{
+		ToolName: "PATCH",
+		Reason:   "filesystem mutation tool",
+	})
+	if allowed {
+		t.Fatal("expected cancel to deny tool authorization")
+	}
+	if err == nil {
+		t.Fatal("expected approval aborted error")
 	}
 	if !toolexec.IsApprovalAborted(err) {
 		t.Fatalf("expected approval aborted, got %v", err)

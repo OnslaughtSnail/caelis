@@ -248,7 +248,6 @@ func runCLI(ctx context.Context, args []string) error {
 	rt, err := runtime.New(runtime.Config{
 		Store: store,
 		Compaction: runtime.CompactionConfig{
-			Enabled:        true,
 			WatermarkRatio: *compactWatermark,
 		},
 	})
