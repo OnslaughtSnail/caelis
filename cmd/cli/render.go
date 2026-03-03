@@ -134,7 +134,7 @@ func printEvent(ev *session.Event, state *renderState) {
 				if state.ui != nil {
 					fmt.Fprint(state.out, state.ui.ReasoningPrefix())
 				} else {
-					fmt.Fprint(state.out, "~ ")
+					fmt.Fprint(state.out, "│ ")
 				}
 			} else {
 				if state.ui != nil {
@@ -196,7 +196,14 @@ func printEvent(ev *session.Event, state *renderState) {
 				delete(state.pendingToolCalls, msg.ToolResponse.ID)
 			}
 		}
+		// Suppress result line for read-only FS tools (the call line is sufficient).
+		if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
+			return
+		}
 		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		if strings.TrimSpace(summary) == "" {
+			return
+		}
 		if state.ui != nil {
 			fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolResultPrefix(), msg.ToolResponse.Name, summary)
 		} else {
@@ -227,7 +234,7 @@ func printEvent(ev *session.Event, state *renderState) {
 		if state.ui != nil {
 			fmt.Fprintf(state.out, "%s%s\n", state.ui.ReasoningPrefix(), strings.TrimSpace(msg.Reasoning))
 		} else {
-			fmt.Fprintf(state.out, "~ %s\n", strings.TrimSpace(msg.Reasoning))
+			fmt.Fprintf(state.out, "│ %s\n", strings.TrimSpace(msg.Reasoning))
 		}
 	}
 	text := strings.TrimSpace(msg.Text)
@@ -293,21 +300,18 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "READ":
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
-			return fmt.Sprintf("{path=%s, offset=%s, limit=%s}", path, valueOrDash(args["offset"]), valueOrDash(args["limit"]))
+			return displayFileName(path)
 		}
 	case "PATCH":
 		path := strings.TrimSpace(asString(args["path"]))
-		oldValue := asString(args["old"])
-		newValue := asString(args["new"])
-		return fmt.Sprintf("{path=%s, lines -%d/+%d}", path, countLines(oldValue), countLines(newValue))
+		return displayFileName(path)
 	case "WRITE":
 		path := strings.TrimSpace(asString(args["path"]))
-		content := asString(args["content"])
-		return fmt.Sprintf("{path=%s, lines=%d}", path, countLines(content))
+		return displayFileName(path)
 	case "SEARCH":
 		path := strings.TrimSpace(asString(args["path"]))
 		query := strings.TrimSpace(asString(args["query"]))
-		return fmt.Sprintf("{path=%s, query=%s}", path, truncateInline(query, 60))
+		return fmt.Sprintf("%s {query=%s}", displayFileName(path), truncateInline(query, 60))
 	case "GLOB":
 		pattern := strings.TrimSpace(asString(args["pattern"]))
 		if pattern != "" {
@@ -316,7 +320,7 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "LIST", "STAT":
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
-			return fmt.Sprintf("{path=%s}", path)
+			return displayFileName(path)
 		}
 	}
 	keys := make([]string, 0, len(args))
@@ -372,25 +376,10 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		}
 		return tailLines(output, 5)
 	case "READ":
-		path := strings.TrimSpace(asString(result["path"]))
-		start, _ := asInt(result["start_line"])
-		end, _ := asInt(result["end_line"])
-		nextOffset, _ := asInt(result["next_offset"])
-		hasMore := fmt.Sprint(result["has_more"]) == "true"
-		if path != "" {
-			display := displayFileName(path)
-			if start > 0 && end > 0 {
-				if hasMore {
-					return fmt.Sprintf("read %s lines %d-%d (truncated, next_offset=%d)", display, start, end, nextOffset)
-				}
-				return fmt.Sprintf("read %s lines %d-%d", display, start, end)
-			}
-			return fmt.Sprintf("read %s (empty)", display)
-		}
+		// Suppressed in printEvent; return empty for read-only tools.
+		return ""
 	case "PATCH":
 		path := strings.TrimSpace(asString(result["path"]))
-		replaced, _ := asInt(result["replaced"])
-		oldCount, _ := asInt(result["old_count"])
 		created := fmt.Sprint(result["created"]) == "true"
 		preview := patchPreviewFromEvent(callArgs)
 		if strings.TrimSpace(preview) == "" {
@@ -400,12 +389,13 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		if strings.TrimSpace(hunk) != "" && strings.TrimSpace(preview) != "" {
 			preview = hunk + "\n" + preview
 		}
+		display := displayFileName(path)
 		if path != "" {
 			action := "edited"
 			if created {
 				action = "created"
 			}
-			summary := fmt.Sprintf("%s %s (replaced=%d/%d)", action, path, replaced, oldCount)
+			summary := fmt.Sprintf("%s %s", action, display)
 			if strings.TrimSpace(preview) == "" {
 				return summary
 			}
@@ -415,37 +405,31 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		path := strings.TrimSpace(asString(result["path"]))
 		created := fmt.Sprint(result["created"]) == "true"
 		lineCount, _ := asInt(result["line_count"])
+		display := displayFileName(path)
 		if path != "" {
 			if created {
-				return fmt.Sprintf("created %s (%d lines)", path, lineCount)
+				return fmt.Sprintf("created %s (%d lines)", display, lineCount)
 			}
-			return fmt.Sprintf("wrote %s (%d lines)", path, lineCount)
+			return fmt.Sprintf("wrote %s (%d lines)", display, lineCount)
 		}
 	case "SEARCH":
-		path := strings.TrimSpace(asString(result["path"]))
 		count, _ := asInt(result["count"])
 		fileCount, _ := asInt(result["file_count"])
 		truncated := fmt.Sprint(result["truncated"]) == "true"
 		if truncated {
-			return fmt.Sprintf("found %d matches in %d files under %s (truncated)", count, fileCount, path)
+			return fmt.Sprintf("found %d matches in %d files (truncated)", count, fileCount)
 		}
-		return fmt.Sprintf("found %d matches in %d files under %s", count, fileCount, path)
+		return fmt.Sprintf("found %d matches in %d files", count, fileCount)
 	case "GLOB":
-		pattern := strings.TrimSpace(asString(result["pattern"]))
 		count, _ := asInt(result["count"])
-		return fmt.Sprintf("matched %d paths for %s", count, pattern)
+		return fmt.Sprintf("matched %d paths", count)
 	case "LIST":
 		path := strings.TrimSpace(asString(result["path"]))
 		count, _ := asInt(result["count"])
-		return fmt.Sprintf("listed %d entries in %s", count, path)
+		return fmt.Sprintf("listed %d entries in %s", count, displayFileName(path))
 	case "STAT":
-		path := strings.TrimSpace(asString(result["path"]))
-		size, _ := asInt(result["size"])
-		isDir := fmt.Sprint(result["is_dir"]) == "true"
-		if isDir {
-			return fmt.Sprintf("directory %s", path)
-		}
-		return fmt.Sprintf("file %s (size=%d)", path, size)
+		// Suppressed in printEvent; return empty for read-only tools.
+		return ""
 	}
 	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
 		return truncateInline(value, 160)
@@ -462,7 +446,7 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 }
 
 const (
-	patchPreviewSideLines = 4
+	patchPreviewSideLines = 30
 	patchPreviewLineWidth = 120
 )
 
@@ -640,6 +624,21 @@ func displayFileName(path string) string {
 		return text
 	}
 	return base
+}
+
+// isReadOnlyFSTool returns true for FS tools whose result line can be suppressed.
+func isReadOnlyFSTool(toolName string) bool {
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "READ", "STAT":
+		return true
+	default:
+		return false
+	}
+}
+
+// hasToolError returns true when a tool result contains an error field.
+func hasToolError(result map[string]any) bool {
+	return strings.TrimSpace(asString(result["error"])) != ""
 }
 
 // tailLines returns the last n non-empty lines of text.  When the total line

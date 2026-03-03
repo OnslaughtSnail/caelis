@@ -113,12 +113,53 @@ func TestRuntime_Run(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 4 {
-		t.Fatalf("expected persisted 4 events, got %d", len(listed))
+	if len(listed) != 2 {
+		t.Fatalf("expected persisted 2 events (user,assistant), got %d", len(listed))
+	}
+	for _, ev := range listed {
+		if isLifecycleEvent(ev) {
+			t.Fatalf("did not expect lifecycle event to be persisted: %+v", ev)
+		}
 	}
 	statuses := lifecycleStatuses(events)
 	if len(statuses) != 2 || statuses[0] != string(RunLifecycleStatusRunning) || statuses[1] != string(RunLifecycleStatusCompleted) {
 		t.Fatalf("unexpected lifecycle statuses: %v", statuses)
+	}
+}
+
+func TestRuntime_RunState_UsesInMemoryLifecycle(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	for _, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-state",
+		Input:     "hello",
+		Agent:     fixedAgent{},
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	state, err := rt.RunState(context.Background(), RunStateRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-state",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.HasLifecycle {
+		t.Fatalf("expected in-memory lifecycle state, got %+v", state)
+	}
+	if state.Status != RunLifecycleStatusCompleted {
+		t.Fatalf("expected completed status, got %+v", state)
 	}
 }
 

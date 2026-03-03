@@ -75,6 +75,7 @@ type cliConsole struct {
 	activeRunCancel context.CancelFunc
 	interruptMu     sync.Mutex
 	lastInterruptAt time.Time
+	outMu           sync.Mutex
 
 	imageCache          *image.Cache
 	pendingAttachments  []model.ContentPart
@@ -169,7 +170,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type",
 			Handle:      handleSandbox,
 		},
-		"model":   {Usage: "/model <alias>", Description: "Switch active model", Handle: handleModel},
+		"model":   {Usage: "/model <alias> [reasoning]", Description: "Switch active model and reasoning level", Handle: handleModel},
 		"connect": {Usage: "/connect [provider] [model] [base_url] [timeout_seconds]", Description: "Add or update a model provider", Handle: handleConnect},
 		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
 		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
@@ -412,6 +413,7 @@ func (c *cliConsole) runPrompt(input string) error {
 		c.clearActiveRunCancel()
 		cancel()
 	}()
+	pendingTUIToolCalls := map[string]toolCallSnapshot{}
 	return runOnce(runCtx, c.rt, runtime.RunRequest{
 		AppName:             c.appName,
 		UserID:              c.userID,
@@ -434,32 +436,105 @@ func (c *cliConsole) runPrompt(input string) error {
 				return false
 			}
 			msg := ev.Message
+			if len(msg.ToolCalls) > 0 {
+				for _, call := range msg.ToolCalls {
+					parsedArgs := parseToolArgsForDisplay(call.Args)
+					if call.ID != "" {
+						pendingTUIToolCalls[call.ID] = toolCallSnapshot{
+							Args: cloneAnyMap(parsedArgs),
+						}
+					}
+				}
+				return false
+			}
+			if msg.ToolResponse != nil {
+				var callArgs map[string]any
+				if msg.ToolResponse.ID != "" {
+					if snapshot, ok := pendingTUIToolCalls[msg.ToolResponse.ID]; ok {
+						callArgs = snapshot.Args
+						delete(pendingTUIToolCalls, msg.ToolResponse.ID)
+					}
+				}
+				diffMsg, tooLarge, ok := buildPatchDiffBlockMsg(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+				if ok {
+					if tooLarge {
+						summary := strings.TrimSpace(summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
+						if summary == "" {
+							summary = "rich diff skipped: too large"
+						} else {
+							summary += " (rich diff skipped: too large)"
+						}
+						c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+						return true
+					}
+					c.tuiSender.Send(diffMsg)
+					return true
+				}
+				return false
+			}
 			if msg.Role != model.RoleAssistant {
 				return false
 			}
-			if eventIsPartial(ev) {
-				if eventChannel(ev) != "answer" || msg.Text == "" {
-					return false
-				}
-				c.tuiSender.Send(tuievents.AssistantStreamMsg{
-					Text:  msg.Text,
-					Final: false,
-				})
-				return true
-			}
-			if len(msg.ToolCalls) > 0 || strings.TrimSpace(msg.Text) == "" {
-				return false
-			}
-			c.tuiSender.Send(tuievents.AssistantStreamMsg{
-				Text:  msg.Text,
-				Final: true,
-			})
+			c.emitAssistantEventToTUI(ev)
 			return true
 		},
 		OnUsage: func(pt int) {
 			c.lastPromptTokens = pt
 		},
 	})
+}
+
+func (c *cliConsole) emitAssistantEventToTUI(ev *session.Event) {
+	if c == nil || c.tuiSender == nil || ev == nil {
+		return
+	}
+	msg := ev.Message
+	if msg.Role != model.RoleAssistant {
+		return
+	}
+	if eventIsPartial(ev) {
+		channel := strings.ToLower(strings.TrimSpace(eventChannel(ev)))
+		switch channel {
+		case "reasoning":
+			c.emitAssistantChunkToTUI("reasoning", msg.Reasoning, false)
+			c.emitAssistantChunkToTUI("answer", msg.Text, false)
+		case "answer":
+			// Mixed chunk payloads are rare but valid; keep deterministic order.
+			c.emitAssistantChunkToTUI("reasoning", msg.Reasoning, false)
+			c.emitAssistantChunkToTUI("answer", msg.Text, false)
+		default:
+			c.emitAssistantChunkToTUI("reasoning", msg.Reasoning, false)
+			c.emitAssistantChunkToTUI("answer", msg.Text, false)
+		}
+		return
+	}
+	// Final assistant events may contain both reasoning and answer.
+	c.emitAssistantChunkToTUI("reasoning", strings.TrimSpace(msg.Reasoning), true)
+	c.emitAssistantChunkToTUI("answer", strings.TrimSpace(msg.Text), true)
+}
+
+func (c *cliConsole) emitAssistantChunkToTUI(kind string, text string, final bool) {
+	if c == nil || c.tuiSender == nil || text == "" {
+		return
+	}
+	streamKind := strings.ToLower(strings.TrimSpace(kind))
+	switch streamKind {
+	case "reasoning":
+		if !c.showReasoning {
+			return
+		}
+		c.tuiSender.Send(tuievents.AssistantStreamMsg{
+			Kind:  "reasoning",
+			Text:  text,
+			Final: final,
+		})
+	default:
+		c.tuiSender.Send(tuievents.AssistantStreamMsg{
+			Kind:  "answer",
+			Text:  text,
+			Final: final,
+		})
+	}
 }
 
 func (c *cliConsole) setActiveRunCancel(cancel context.CancelFunc) {
@@ -765,8 +840,8 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 }
 
 func handleModel(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /model <alias>")
+	if len(args) < 1 || len(args) > 2 {
+		return false, fmt.Errorf("usage: /model <alias> [reasoning]")
 	}
 	if c.modelFactory == nil {
 		return false, fmt.Errorf("model factory is not configured")
@@ -775,19 +850,56 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 	if c.configStore != nil {
 		alias = c.configStore.ResolveModelAlias(alias)
 	}
+	targetAlias := strings.ToLower(alias)
 	llm, err := c.modelFactory.NewByAlias(alias)
 	if err != nil {
 		return false, err
 	}
-	c.modelAlias = strings.ToLower(alias)
-	c.llm = llm
-	c.applyModelRuntimeSettings(c.modelAlias)
+	settings := defaultModelRuntimeSettings()
 	if c.configStore != nil {
-		if err := c.configStore.SetDefaultModel(c.modelAlias); err != nil {
+		settings = c.configStore.ModelRuntimeSettings(targetAlias)
+	}
+	if len(args) == 2 {
+		cfg, ok := c.modelFactory.ConfigForAlias(targetAlias)
+		if !ok {
+			return false, fmt.Errorf("model config not found for alias %q", targetAlias)
+		}
+		opt, err := resolveModelReasoningOption(cfg, args[1])
+		if err != nil {
+			return false, err
+		}
+		settings.ThinkingMode = opt.ThinkingMode
+		settings.ReasoningEffort = opt.ReasoningEffort
+	}
+
+	c.modelAlias = targetAlias
+	c.llm = llm
+	if len(args) == 2 {
+		c.thinkingMode = settings.ThinkingMode
+		c.thinkingBudget = settings.ThinkingBudget
+		c.reasoningEffort = settings.ReasoningEffort
+		if c.configStore != nil {
+			if err := c.configStore.SetModelRuntimeSettings(targetAlias, settings); err != nil {
+				return false, err
+			}
+		}
+	} else {
+		c.applyModelRuntimeSettings(targetAlias)
+	}
+	if c.configStore != nil {
+		if err := c.configStore.SetDefaultModel(targetAlias); err != nil {
 			fmt.Fprintf(c.out, "warn: update default model failed: %v\n", err)
 		}
 	}
-	c.printf("model switched to %s\n", alias)
+	if len(args) == 2 {
+		if strings.TrimSpace(c.reasoningEffort) != "" {
+			c.printf("model switched to %s (reasoning=%s effort=%s)\n", alias, c.thinkingMode, c.reasoningEffort)
+		} else {
+			c.printf("model switched to %s (reasoning=%s)\n", alias, c.thinkingMode)
+		}
+	} else {
+		c.printf("model switched to %s\n", alias)
+	}
 	return false, nil
 }
 
@@ -960,8 +1072,29 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 					delete(pendingToolCalls, msg.ToolResponse.ID)
 				}
 			}
+			diffMsg, tooLarge, ok := buildPatchDiffBlockMsg(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+			if ok {
+				if tooLarge {
+					summary := strings.TrimSpace(summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
+					if summary == "" {
+						summary = "rich diff skipped: too large"
+					} else {
+						summary += " (rich diff skipped: too large)"
+					}
+					c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+					continue
+				}
+				c.tuiSender.Send(diffMsg)
+				continue
+			}
+			// Suppress result line for read-only FS tools.
+			if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
+				continue
+			}
 			summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
-			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+			if strings.TrimSpace(summary) != "" {
+				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+			}
 			continue
 		}
 		if len(msg.ToolCalls) > 0 {
@@ -978,21 +1111,15 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 			}
 			continue
 		}
-		if msg.Role == model.RoleAssistant && c.showReasoning && strings.TrimSpace(msg.Reasoning) != "" {
-			c.tuiSender.Send(tuievents.LogChunkMsg{
-				Chunk: fmt.Sprintf("~ %s\n", strings.TrimSpace(msg.Reasoning)),
-			})
+		if msg.Role == model.RoleAssistant {
+			c.emitAssistantEventToTUI(ev)
+			continue
 		}
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			continue
 		}
 		switch msg.Role {
-		case model.RoleAssistant:
-			c.tuiSender.Send(tuievents.AssistantStreamMsg{
-				Text:  text,
-				Final: true,
-			})
 		case model.RoleSystem:
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("! %s\n", text)})
 		default:
@@ -1261,6 +1388,8 @@ func (c *cliConsole) printf(format string, args ...any) {
 	if out == nil {
 		out = os.Stdout
 	}
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
 	fmt.Fprintf(out, format, args...)
 }
 

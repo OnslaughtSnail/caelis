@@ -169,7 +169,7 @@ func TestUI_EventPrefixes_NoColor(t *testing.T) {
 	if got := u.AssistantPrefix(); got != "* " {
 		t.Fatalf("AssistantPrefix: %q", got)
 	}
-	if got := u.ReasoningPrefix(); got != "~ " {
+	if got := u.ReasoningPrefix(); got != "│ " {
 		t.Fatalf("ReasoningPrefix: %q", got)
 	}
 	if got := u.ToolCallPrefix(1); got != "▸ " {

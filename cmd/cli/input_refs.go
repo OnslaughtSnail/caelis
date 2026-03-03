@@ -121,19 +121,8 @@ func (r *inputReferenceResolver) RewriteInput(input string) (RewriteResult, erro
 		}
 	}
 
-	if len(referenced) == 0 {
-		return RewriteResult{Text: rewritten, Notes: notes, ResolvedPaths: referenced}, nil
-	}
-	var b strings.Builder
-	b.WriteString(strings.TrimSpace(rewritten))
-	b.WriteString("\n\nReferenced files:\n")
-	for _, one := range referenced {
-		b.WriteString("- ")
-		b.WriteString(one)
-		b.WriteString("\n")
-	}
 	return RewriteResult{
-		Text:          strings.TrimSpace(b.String()),
+		Text:          strings.TrimSpace(rewritten),
 		Notes:         notes,
 		ResolvedPaths: referenced,
 	}, nil
@@ -173,8 +162,7 @@ func (r *inputReferenceResolver) rewriteFileMentions(text string) (string, []str
 				if resolvedPath, ok, err := r.ResolveMention(query); err != nil {
 					return "", nil, nil, err
 				} else if ok {
-					b.WriteRune('@')
-					b.WriteString(resolvedPath)
+					b.WriteString(formatResolvedMentionPrompt(r.AbsPath(resolvedPath)))
 					addResolved(resolvedPath)
 				} else {
 					b.WriteString(string(runes[i:j]))
@@ -188,6 +176,14 @@ func (r *inputReferenceResolver) rewriteFileMentions(text string) (string, []str
 		i++
 	}
 	return b.String(), resolved, unresolved, nil
+}
+
+func formatResolvedMentionPrompt(absPath string) string {
+	cleaned := filepath.ToSlash(filepath.Clean(strings.TrimSpace(absPath)))
+	if cleaned == "" {
+		return ""
+	}
+	return "Please read file: " + cleaned
 }
 
 func (r *inputReferenceResolver) ResolveMention(query string) (string, bool, error) {

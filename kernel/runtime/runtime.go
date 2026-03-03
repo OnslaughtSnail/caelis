@@ -28,6 +28,8 @@ type Runtime struct {
 	compactionStrategy CompactionStrategy
 	runMu              sync.Mutex
 	activeRuns         map[string]struct{}
+	runStateMu         sync.RWMutex
+	runStates          map[string]RunState
 }
 
 func New(cfg Config) (*Runtime, error) {
@@ -44,6 +46,7 @@ func New(cfg Config) (*Runtime, error) {
 		compaction:         compactionCfg,
 		compactionStrategy: strategy,
 		activeRuns:         map[string]struct{}{},
+		runStates:          map[string]RunState{},
 	}, nil
 }
 
@@ -400,6 +403,9 @@ func shouldPersistEvent(ev *session.Event, persistPartial bool) bool {
 	if ev == nil {
 		return false
 	}
+	if isLifecycleEvent(ev) {
+		return false
+	}
 	if persistPartial {
 		return true
 	}
@@ -429,14 +435,12 @@ func (r *Runtime) appendAndYieldLifecycle(
 	cause error,
 	yield func(*session.Event, error) bool,
 ) bool {
+	_ = ctx
 	if r == nil || sess == nil {
 		return true
 	}
 	ev := lifecycleEvent(sess, status, phase, cause)
-	if err := r.store.AppendEvent(ctx, sess, ev); err != nil {
-		yield(nil, err)
-		return false
-	}
+	r.updateCachedRunState(sess, ev)
 	if !yield(ev, nil) {
 		return false
 	}

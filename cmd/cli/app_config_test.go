@@ -132,6 +132,21 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	if settings.ThinkingMode != "on" || settings.ThinkingBudget != 2048 || settings.ReasoningEffort != "high" {
 		t.Fatalf("expected provider runtime settings persisted, got %#v", settings)
 	}
+	if err := store3.SetModelRuntimeSettings("openai/gpt-4o-mini", modelRuntimeSettings{
+		ThinkingMode:    "true",
+		ThinkingBudget:  2048,
+		ReasoningEffort: "very-high",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store4, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = store4.ModelRuntimeSettings("openai/gpt-4o-mini")
+	if settings.ThinkingMode != "on" || settings.ReasoningEffort != "very_high" {
+		t.Fatalf("expected normalized runtime settings, got %#v", settings)
+	}
 }
 
 func TestAppNameFromArgs(t *testing.T) {

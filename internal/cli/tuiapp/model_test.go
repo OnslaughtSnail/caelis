@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
@@ -87,6 +88,20 @@ func TestConnectWizardQueryAtCursor(t *testing.T) {
 	_, ok = connectWizardQueryAtCursor([]rune("/model x"), len([]rune("/model x")))
 	if ok {
 		t.Fatal("did not expect connect wizard query for non-connect input")
+	}
+}
+
+func TestModelWizardQueryAtCursor(t *testing.T) {
+	query, ok := modelWizardQueryAtCursor([]rune("/model high"), len([]rune("/model high")))
+	if !ok {
+		t.Fatal("expected model wizard query")
+	}
+	if query != "high" {
+		t.Fatalf("unexpected query %q", query)
+	}
+	_, ok = modelWizardQueryAtCursor([]rune("/connect x"), len([]rune("/connect x")))
+	if ok {
+		t.Fatal("did not expect model wizard query for non-model input")
 	}
 }
 
@@ -283,13 +298,20 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 			return tuievents.TaskResultMsg{}
 		},
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			if command != "model" {
+			switch {
+			case command == "model":
+				return []SlashArgCandidate{
+					{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
+					{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
+				}, nil
+			case strings.HasPrefix(command, "model-reasoning:"):
+				return []SlashArgCandidate{
+					{Value: "off", Display: "off"},
+					{Value: "on", Display: "on"},
+				}, nil
+			default:
 				return nil, nil
 			}
-			return []SlashArgCandidate{
-				{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
-				{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
-			}, nil
 		},
 	})
 	resizeModel(m)
@@ -297,6 +319,14 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected 2 slash-arg candidates, got %d", len(m.slashArgCandidates))
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.HasPrefix(m.slashArgCommand, "model-reasoning:") {
+		t.Fatalf("expected model reasoning step, got %q", m.slashArgCommand)
+	}
+	if len(m.slashArgCandidates) != 2 {
+		t.Fatalf("expected 2 reasoning candidates, got %d", len(m.slashArgCandidates))
 	}
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -311,8 +341,8 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 	if !found {
 		t.Fatal("expected TaskResultMsg in batch")
 	}
-	if called != "/model xiaomi/mimo-v2-flash" {
-		t.Fatalf("expected '/model xiaomi/mimo-v2-flash', got %q", called)
+	if called != "/model xiaomi/mimo-v2-flash on" {
+		t.Fatalf("expected '/model xiaomi/mimo-v2-flash on', got %q", called)
 	}
 }
 
@@ -854,7 +884,7 @@ func TestLogChunkCommitsCompletedLines(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, cmd := m.Update(tuievents.LogChunkMsg{Chunk: "* hello\n~ reasoning\n"})
+	_, cmd := m.Update(tuievents.LogChunkMsg{Chunk: "* hello\n│ reasoning\n"})
 
 	// In fullscreen mode, committed lines go to historyLines (no tea.Println cmd).
 	if cmd != nil {
@@ -927,7 +957,7 @@ func TestBlockContinuationTracking(t *testing.T) {
 	resizeModel(m)
 
 	// Send reasoning line.
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "~ first reasoning line\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "│ first reasoning line\n"})
 
 	// Send continuation line (no prefix) → should inherit reasoning style.
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "continuation of reasoning\n"})
@@ -983,6 +1013,101 @@ func TestAssistantStreamUpdatesMarkdownBlockInPlace(t *testing.T) {
 	}
 }
 
+func TestReasoningStreamKeepsBlockStyleAcrossParagraphs(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ReasoningStreamMsg{
+		Text:  "第一段\n\n第二段",
+		Final: true,
+	})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "· 第一段") {
+		t.Fatalf("expected first reasoning paragraph, got %q", joined)
+	}
+	if !strings.Contains(joined, "  第二段") {
+		t.Fatalf("expected second reasoning paragraph with reasoning prefix, got %q", joined)
+	}
+}
+
+func TestAssistantAfterReasoningHasNoExtraGap(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ReasoningStreamMsg{
+		Text:  "thinking",
+		Final: true,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Text:  "final answer",
+		Final: true,
+	})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if strings.Contains(joined, "· thinking\n\n* final answer") {
+		t.Fatalf("expected no blank gap between reasoning and assistant, got %q", joined)
+	}
+	if !strings.Contains(joined, "· thinking\n* final answer") {
+		t.Fatalf("expected assistant immediately after reasoning, got %q", joined)
+	}
+}
+
+func TestAssistantStreamMergesCumulativeChunks(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "Hello",
+		Final: false,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "Hello world",
+		Final: false,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "",
+		Final: true,
+	})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if strings.Count(joined, "Hello world") != 1 {
+		t.Fatalf("expected merged cumulative output once, got %q", joined)
+	}
+}
+
+func TestReasoningThenFinalAnswerReusesExistingAnswerBlock(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "Hello",
+		Final: false,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "reasoning",
+		Text:  "thinking",
+		Final: true,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "Hello world",
+		Final: true,
+	})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if strings.Count(joined, "Hello world") != 1 {
+		t.Fatalf("expected one finalized answer block, got %q", joined)
+	}
+	if strings.Contains(joined, "* Hello\n* Hello world") {
+		t.Fatalf("expected final answer to replace partial block in place, got %q", joined)
+	}
+}
+
 func TestClearHistoryMsgResetsViewportContent(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine:     noopExecute,
@@ -1006,16 +1131,99 @@ func TestClearHistoryMsgResetsViewportContent(t *testing.T) {
 	}
 }
 
-func TestViewShowsSpinnerWhenRunning(t *testing.T) {
+func TestDiffBlockMsgRendersStructuredDiff(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	_, _ = m.Update(tuievents.DiffBlockMsg{
+		Tool:    "PATCH",
+		Path:    "a.txt",
+		Hunk:    "@@ -1,2 +1,2 @@",
+		Old:     "line1\nold",
+		New:     "line1\nnew",
+		Preview: "--- old\n+++ new\n-line1\n-old\n+line1\n+new",
+	})
+
+	if len(m.diffBlocks) != 1 {
+		t.Fatalf("expected one diff block, got %d", len(m.diffBlocks))
+	}
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "PATCH edited a.txt") {
+		t.Fatalf("expected diff header, got %q", joined)
+	}
+	if !strings.Contains(joined, "@@ -1,2 +1,2 @@") {
+		t.Fatalf("expected hunk line, got %q", joined)
+	}
+}
+
+func TestDiffBlockResizeRerendersAdaptiveLayout(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	_, _ = m.Update(tuievents.DiffBlockMsg{
+		Tool: "PATCH",
+		Path: "a.txt",
+		Old:  "line1\nold",
+		New:  "line1\nnew",
+	})
+	before := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	after := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if before == after {
+		t.Fatalf("expected resize to rerender diff block, got identical output: %q", after)
+	}
+	if !strings.Contains(after, " │ ") {
+		t.Fatalf("expected split diff separator after wide resize, got %q", after)
+	}
+}
+
+func TestClearHistoryResetsDiffBlocks(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	_, _ = m.Update(tuievents.DiffBlockMsg{
+		Tool: "PATCH",
+		Path: "a.txt",
+		Old:  "old",
+		New:  "new",
+	})
+	if len(m.diffBlocks) != 1 {
+		t.Fatalf("expected one diff block, got %d", len(m.diffBlocks))
+	}
+	_, _ = m.Update(tuievents.ClearHistoryMsg{})
+	if len(m.diffBlocks) != 0 {
+		t.Fatalf("expected diff blocks reset on clear history, got %d", len(m.diffBlocks))
+	}
+}
+
+func TestViewShowsThinkingHintWhenRunning(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
 	m.running = true
+	m.startRunningAnimation()
 	m.syncViewportContent()
 	view := m.View()
 
 	if !strings.Contains(view, "thinking") {
-		t.Fatalf("expected spinner text in view when running, got:\n%s", view)
+		t.Fatalf("expected running hint text in view when running, got:\n%s", view)
+	}
+	if strings.Contains(strings.Join(m.viewportPlainLines, "\n"), "thinking") {
+		t.Fatalf("did not expect running hint to be rendered inside viewport history, got: %q", strings.Join(m.viewportPlainLines, "\n"))
+	}
+}
+
+func TestRunningHintAnimationAdvancesOnSpinnerTicks(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.startRunningAnimation()
+	before := m.buildHintText()
+
+	for i := 0; i < runningHintRotateEveryTicks+2; i++ {
+		_, _ = m.Update(spinner.TickMsg{})
+	}
+	after := m.buildHintText()
+	if before == after {
+		t.Fatalf("expected running hint to animate/rotate, got unchanged text: %q", after)
 	}
 }
 
@@ -1391,6 +1599,47 @@ func TestAutoScrollOnNewContent(t *testing.T) {
 	}
 }
 
+func TestSubmitLineForcesAutoScrollToBottom(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	for i := 0; i < 80; i++ {
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* line %d\n", i)})
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if !m.userScrolledUp {
+		t.Fatal("expected userScrolledUp after pgup")
+	}
+	typeAndEnter(m, "hello")
+	if !m.viewport.AtBottom() {
+		t.Fatal("expected viewport at bottom after user submit")
+	}
+}
+
+func TestToolCallSpacing_GapBetweenCalls_NoGapBeforeResult(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ build.sh\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ PATCH build.sh\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ PATCH edited build.sh\n"})
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "▸ READ build.sh\n\n▸ PATCH build.sh") {
+		t.Fatalf("expected blank line between consecutive tool calls, got %q", joined)
+	}
+	if strings.Contains(joined, "▸ PATCH build.sh\n\n✓ PATCH edited build.sh") {
+		t.Fatalf("did not expect blank line between PATCH call and result, got %q", joined)
+	}
+}
+
+func TestAssistantStreamAddsPrefixMarker(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "hello", Final: true})
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "* hello") {
+		t.Fatalf("expected assistant prefix marker, got %q", joined)
+	}
+}
+
 func TestViewportHardWrapLongLine(t *testing.T) {
 	m := newTestModel()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 30, Height: 20})
@@ -1443,6 +1692,10 @@ func TestPageUpPreventsAutoScroll(t *testing.T) {
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
 	if !m.userScrolledUp {
 		t.Fatal("expected userScrolledUp after pgup")
+	}
+	view := ansi.Strip(m.View())
+	if strings.Contains(view, "scroll:") {
+		t.Fatalf("did not expect scroll percent indicator, got %q", view)
 	}
 }
 

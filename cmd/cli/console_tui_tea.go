@@ -51,12 +51,15 @@ func (s *teaProgramSender) Send(msg any) {
 type teaOutputWriter struct {
 	sender *teaProgramSender
 	diag   *tuiDiagnostics
+	mu     sync.Mutex
 }
 
 func (w *teaOutputWriter) Write(p []byte) (int, error) {
 	if w == nil || len(p) == 0 {
 		return len(p), nil
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.diag != nil {
 		w.diag.ObserveLogBytes(len(p))
 	}
@@ -374,6 +377,12 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 	rawCmd := strings.TrimSpace(command)
 	cmd := strings.ToLower(rawCmd)
 	switch {
+	case strings.HasPrefix(cmd, "model-reasoning:"):
+		alias, ok := parseModelReasoningPayload(rawCmd)
+		if !ok {
+			return nil, nil
+		}
+		return c.completeModelReasoningCandidates(alias, query, limit), nil
 	case strings.HasPrefix(cmd, "connect-model:"):
 		payload := strings.TrimPrefix(rawCmd, "connect-model:")
 		provider, baseURL, timeoutSeconds, apiKey, hasRemoteContext := parseConnectModelPayload(payload)
@@ -401,6 +410,22 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 	default:
 		return nil, nil
 	}
+}
+
+func parseModelReasoningPayload(command string) (string, bool) {
+	payload := strings.TrimSpace(strings.TrimPrefix(command, "model-reasoning:"))
+	if payload == "" {
+		return "", false
+	}
+	decoded, err := url.QueryUnescape(payload)
+	if err != nil {
+		return "", false
+	}
+	alias := strings.ToLower(strings.TrimSpace(decoded))
+	if alias == "" {
+		return "", false
+	}
+	return alias, true
 }
 
 func parseConnectModelPayload(payload string) (provider, baseURL string, timeoutSeconds int, apiKey string, hasRemoteContext bool) {
@@ -533,6 +558,56 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 			Value:   one.alias,
 			Display: display,
 		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (c *cliConsole) completeModelReasoningCandidates(alias string, query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	if alias == "" {
+		return nil
+	}
+	if c.configStore != nil {
+		alias = c.configStore.ResolveModelAlias(alias)
+	}
+	cfg := modelproviders.Config{Alias: alias}
+	if c.modelFactory != nil {
+		if foundCfg, ok := c.modelFactory.ConfigForAlias(alias); ok {
+			cfg = foundCfg
+		}
+	}
+	if strings.TrimSpace(cfg.Provider) == "" || strings.TrimSpace(cfg.Model) == "" {
+		parts := strings.SplitN(alias, "/", 2)
+		if len(parts) == 2 {
+			cfg.Provider = strings.TrimSpace(parts[0])
+			cfg.Model = strings.TrimSpace(parts[1])
+		}
+	}
+	options := modelReasoningOptionsForConfig(cfg)
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]tuiapp.SlashArgCandidate, 0, minInt(limit, len(options)))
+	for _, one := range options {
+		value := strings.TrimSpace(one.Value)
+		if value == "" {
+			continue
+		}
+		display := strings.TrimSpace(one.Display)
+		if display == "" {
+			display = value
+		}
+		if q != "" {
+			text := strings.ToLower(display + " " + value)
+			if !strings.Contains(text, q) {
+				continue
+			}
+		}
+		out = append(out, tuiapp.SlashArgCandidate{Value: value, Display: display})
 		if len(out) >= limit {
 			break
 		}

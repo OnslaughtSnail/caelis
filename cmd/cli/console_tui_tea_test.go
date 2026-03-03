@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -59,6 +60,61 @@ func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 	}
 	if got[0].Value != "xiaomi/mimo-v2-flash" {
 		t.Fatalf("unexpected candidate: %+v", got[0])
+	}
+}
+
+func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:    "deepseek/deepseek-chat",
+		Provider: "deepseek",
+		API:      modelproviders.APIDeepSeek,
+		Model:    "deepseek-chat",
+		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+	}
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+	c := &cliConsole{modelFactory: factory}
+	got := c.completeModelReasoningCandidates("deepseek/deepseek-chat", "", 10)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 reasoning candidates, got %d", len(got))
+	}
+	if got[0].Value != "off" || got[1].Value != "on" {
+		t.Fatalf("unexpected reasoning candidates: %+v", got)
+	}
+}
+
+func TestCompleteModelReasoningCandidates_EffortModel(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:    "openai/o3",
+		Provider: "openai",
+		API:      modelproviders.APIOpenAI,
+		Model:    "o3",
+		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+	}
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+	c := &cliConsole{modelFactory: factory}
+	got := c.completeModelReasoningCandidates("openai/o3", "", 10)
+	if len(got) < 5 {
+		t.Fatalf("expected effort reasoning candidates, got %d", len(got))
+	}
+	if got[0].Value != "off" || got[4].Value != "very_high" {
+		t.Fatalf("unexpected reasoning candidates: %+v", got)
+	}
+}
+
+func TestParseModelReasoningPayload(t *testing.T) {
+	payload := "model-reasoning:" + url.QueryEscape("deepseek/deepseek-chat")
+	alias, ok := parseModelReasoningPayload(payload)
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if alias != "deepseek/deepseek-chat" {
+		t.Fatalf("unexpected alias %q", alias)
 	}
 }
 

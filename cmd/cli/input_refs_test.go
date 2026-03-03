@@ -38,11 +38,11 @@ description: atlas skill
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, "@") || !strings.Contains(result.Text, "SKILL.md") {
-		t.Fatalf("expected SKILL mention, got %q", result.Text)
+	if !strings.Contains(result.Text, "请阅读文件: ") || !strings.Contains(result.Text, "SKILL.md") {
+		t.Fatalf("expected SKILL rewritten to read-file prompt, got %q", result.Text)
 	}
-	if !strings.Contains(result.Text, "Referenced files:") {
-		t.Fatalf("expected referenced files section, got %q", result.Text)
+	if strings.Contains(result.Text, "Referenced files:") {
+		t.Fatalf("did not expect referenced files section, got %q", result.Text)
 	}
 }
 
@@ -62,8 +62,9 @@ func TestInputReferenceResolver_RewriteInput_FileMentionFuzzy(t *testing.T) {
 	if len(result.Notes) != 0 {
 		t.Fatalf("expected no unresolved notes, got %v", result.Notes)
 	}
-	if !strings.Contains(result.Text, "@kernel/tool/schema.go") {
-		t.Fatalf("expected fuzzy mention resolved, got %q", result.Text)
+	want := "请阅读文件: " + filepath.ToSlash(filepath.Join(workspace, "kernel", "tool", "schema.go"))
+	if !strings.Contains(result.Text, want) {
+		t.Fatalf("expected fuzzy mention resolved to absolute read prompt %q, got %q", want, result.Text)
 	}
 }
 
@@ -144,6 +145,13 @@ func TestInputReferenceResolver_CompleteFiles(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected kernel/skills/meta.go in candidates: %v", candidates)
+	}
+}
+
+func TestFormatResolvedMentionPrompt_UsesAbsolutePath(t *testing.T) {
+	got := formatResolvedMentionPrompt("/tmp/workspace/build.sh")
+	if got != "请阅读文件: /tmp/workspace/build.sh" {
+		t.Fatalf("unexpected read prompt: %q", got)
 	}
 }
 

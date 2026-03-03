@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuidiff"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
@@ -28,6 +29,18 @@ import (
 const maxInputBarRows = 6
 const ctrlCExitWindow = 2 * time.Second
 const reservedHintRows = 1
+const runningHintRotateEveryTicks = 20
+
+var runningBreathFrames = []string{"·", "•", "●", "•"}
+
+var runningCarouselLines = []string{
+	"Tip: queue your next prompt now; it will run after this one.",
+	"Tip: use @path to anchor the model on exact files.",
+	"Joke: There are 10 types of people; binary readers and others.",
+	"Tip: /model can switch both model and reasoning level.",
+	"Joke: I would tell you a UDP joke, but you might not get it.",
+	"Tip: press Esc to interrupt, Enter to queue your next message.",
+}
 
 // ---------------------------------------------------------------------------
 // Diagnostics
@@ -127,13 +140,19 @@ type assistantBlockState struct {
 	raw   string
 }
 
+type diffBlockState struct {
+	start int
+	end   int
+	msg   tuievents.DiffBlockMsg
+}
+
 // ---------------------------------------------------------------------------
 // Model — inline (non-fullscreen) Bubble Tea model
 //
 // Architecture:
 //   - Completed log lines are committed above via tea.Println()
 //   - View() only renders the bottom "control area":
-//     current streaming line + spinner + input bar + status bar
+//     current streaming line + hint area + input bar + status bar
 //   - Terminal scrollback provides natural history browsing
 // ---------------------------------------------------------------------------
 
@@ -147,8 +166,11 @@ type Model struct {
 	// Streaming state — the current incomplete line being received.
 	streamLine         string
 	lastCommittedStyle tuikit.LineStyle
+	lastCommittedRaw   string
 	hasCommittedLine   bool // true after at least one line has been committed
 	assistantBlock     *assistantBlockState
+	reasoningBlock     *assistantBlockState
+	diffBlocks         []diffBlockState
 
 	// Fullscreen viewport — replaces tea.Println scrollback.
 	historyLines        []string // committed lines (pre-colorized)
@@ -180,6 +202,9 @@ type Model struct {
 
 	// Task hint message (e.g., "▸ running: read_file")
 	runningHint string
+	runningTick uint64
+	runningBeat int
+	runningTip  int
 
 	// Status bar
 	statusModel   string
@@ -227,6 +252,7 @@ type Model struct {
 	slashArgQuery      string
 	slashArgCandidates []SlashArgCandidate
 	slashArgIndex      int
+	modelReasoningRef  string
 	connectProvider    string
 	connectModel       string
 	connectBaseURL     string
@@ -407,6 +433,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vpHeight, _ := m.computeLayout()
 		m.viewport.Width = m.width
 		m.viewport.Height = vpHeight
+		m.rerenderDiffBlocks()
 		m.syncViewportContent()
 
 		if !m.ready {
@@ -422,16 +449,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleLogChunk(typed.Chunk)
 
 	case tuievents.AssistantStreamMsg:
-		return m.handleAssistantStream(typed.Text, typed.Final)
+		return m.handleStreamBlock(typed.Kind, typed.Text, typed.Final)
+
+	case tuievents.ReasoningStreamMsg:
+		return m.handleStreamBlock("reasoning", typed.Text, typed.Final)
+
+	case tuievents.DiffBlockMsg:
+		return m.handleDiffBlock(typed)
 
 	case tuievents.SetHintMsg:
 		m.hint = strings.TrimSpace(typed.Hint)
 		return m, nil
 
 	case tuievents.SetRunningMsg:
+		wasRunning := m.running
 		m.running = typed.Running
+		if typed.Running && !wasRunning {
+			m.startRunningAnimation()
+		}
 		if !typed.Running {
 			m.runningHint = ""
+			m.stopRunningAnimation()
 		}
 		return m, nil
 
@@ -457,8 +495,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Commit any remaining streaming content.
 		m.flushStream()
 		m.finalizeAssistantBlock()
+		m.finalizeReasoningBlock()
 		m.running = false
 		m.runningHint = ""
+		m.stopRunningAnimation()
 		m.attachmentCount = 0
 		if typed.Err != nil {
 			// Suppress prompt interrupt/EOF errors — these are user-initiated
@@ -503,7 +543,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.running {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
-			m.syncViewportContent()
+			if m.activePrompt == nil {
+				m.advanceRunningAnimation()
+			}
 			return m, cmd
 		}
 		return m, nil
@@ -556,41 +598,7 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleAssistantStream(text string, final bool) (tea.Model, tea.Cmd) {
-	if text == "" {
-		return m, nil
-	}
-	if m.assistantBlock == nil {
-		if m.hasCommittedLine {
-			m.historyLines = append(m.historyLines, "")
-		}
-		start := len(m.historyLines)
-		lines := m.renderAssistantBlockLines(text)
-		m.historyLines = append(m.historyLines, lines...)
-		m.assistantBlock = &assistantBlockState{
-			start: start,
-			end:   start + len(lines),
-			raw:   text,
-		}
-		m.hasCommittedLine = true
-		m.lastCommittedStyle = tuikit.LineStyleAssistant
-		m.syncViewportContent()
-		return m, nil
-	}
-
-	block := m.assistantBlock
-	if final {
-		block.raw = text
-	} else {
-		block.raw += text
-	}
-	lines := m.renderAssistantBlockLines(block.raw)
-	m.replaceHistoryRange(block.start, block.end, lines)
-	block.end = block.start + len(lines)
-	if final {
-		m.assistantBlock = nil
-	}
-	m.syncViewportContent()
-	return m, nil
+	return m.handleStreamBlock("answer", text, final)
 }
 
 func (m *Model) finalizeAssistantBlock() {
@@ -598,6 +606,125 @@ func (m *Model) finalizeAssistantBlock() {
 		return
 	}
 	m.assistantBlock = nil
+}
+
+func (m *Model) handleReasoningStream(text string, final bool) (tea.Model, tea.Cmd) {
+	return m.handleStreamBlock("reasoning", text, final)
+}
+
+func normalizeStreamKind(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "reasoning", "thinking":
+		return "reasoning"
+	default:
+		return "answer"
+	}
+}
+
+func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Model, tea.Cmd) {
+	if text == "" {
+		return m, nil
+	}
+	streamKind := normalizeStreamKind(kind)
+	blockStyle := tuikit.LineStyleAssistant
+	blockMarker := "* "
+	render := m.renderAssistantBlockLines
+
+	var activeBlock **assistantBlockState
+	if streamKind == "reasoning" {
+		blockStyle = tuikit.LineStyleReasoning
+		blockMarker = "│ "
+		render = m.renderReasoningBlockLines
+		activeBlock = &m.reasoningBlock
+	} else {
+		activeBlock = &m.assistantBlock
+	}
+	if *activeBlock == nil {
+		if m.hasCommittedLine && m.lastCommittedStyle != blockStyle &&
+			!(m.lastCommittedStyle == tuikit.LineStyleAssistant && blockStyle == tuikit.LineStyleReasoning) &&
+			!(m.lastCommittedStyle == tuikit.LineStyleReasoning && blockStyle == tuikit.LineStyleAssistant) {
+			m.historyLines = append(m.historyLines, "")
+		}
+		start := len(m.historyLines)
+		lines := render(text)
+		m.historyLines = append(m.historyLines, lines...)
+		*activeBlock = &assistantBlockState{
+			start: start,
+			end:   start + len(lines),
+			raw:   text,
+		}
+		m.hasCommittedLine = true
+		m.lastCommittedStyle = blockStyle
+		m.lastCommittedRaw = blockMarker
+		m.syncViewportContent()
+		return m, nil
+	}
+	block := *activeBlock
+	block.raw = mergeStreamChunk(block.raw, text, final)
+	lines := render(block.raw)
+	m.replaceHistoryRange(block.start, block.end, lines)
+	block.end = block.start + len(lines)
+	if final {
+		*activeBlock = nil
+	}
+	m.lastCommittedStyle = blockStyle
+	m.lastCommittedRaw = blockMarker
+	m.syncViewportContent()
+	return m, nil
+}
+
+func mergeStreamChunk(existing string, incoming string, final bool) string {
+	if final {
+		incoming = strings.TrimSpace(incoming)
+		if incoming == "" {
+			return existing
+		}
+		return incoming
+	}
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if strings.HasPrefix(incoming, existing) {
+		// Cumulative stream chunk.
+		return incoming
+	}
+	if strings.HasPrefix(existing, incoming) {
+		// Replayed/duplicated old chunk.
+		return existing
+	}
+	return existing + incoming
+}
+
+func (m *Model) finalizeReasoningBlock() {
+	if m.reasoningBlock == nil {
+		return
+	}
+	m.reasoningBlock = nil
+}
+
+func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd) {
+	m.flushStream()
+	m.finalizeAssistantBlock()
+	m.finalizeReasoningBlock()
+	if m.hasCommittedLine && !isToolCallLine(m.lastCommittedRaw) {
+		m.historyLines = append(m.historyLines, "")
+	}
+	start := len(m.historyLines)
+	lines := m.renderDiffBlockLines(msg)
+	m.historyLines = append(m.historyLines, lines...)
+	m.diffBlocks = append(m.diffBlocks, diffBlockState{
+		start: start,
+		end:   start + len(lines),
+		msg:   msg,
+	})
+	m.hasCommittedLine = true
+	m.lastCommittedStyle = tuikit.LineStyleDefault
+	m.lastCommittedRaw = ""
+	m.syncViewportContent()
+	return m, nil
 }
 
 func (m *Model) replaceHistoryRange(start int, end int, replacement []string) {
@@ -623,26 +750,89 @@ func (m *Model) renderAssistantBlockLines(raw string) []string {
 	isMarkdown := looksLikeMarkdown(trimmed)
 	rendered := renderAssistantMarkdown(trimmed)
 	if rendered == "" {
-		return []string{""}
+		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
 	}
 	lines := strings.Split(rendered, "\n")
+	if len(lines) > 0 {
+		lines[0] = tuikit.ColorizeLogLine("* "+lines[0], tuikit.LineStyleAssistant, m.theme)
+	}
 	if isMarkdown {
 		return lines
 	}
 	for i := range lines {
+		if i == 0 {
+			continue
+		}
 		lines[i] = tuikit.ColorizeLogLine(lines[i], tuikit.LineStyleAssistant, m.theme)
 	}
 	return lines
 }
 
+func (m *Model) renderReasoningBlockLines(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return []string{tuikit.ColorizeLogLine("· ", tuikit.LineStyleReasoning, m.theme)}
+	}
+	lines := strings.Split(trimmed, "\n")
+	for i, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		if i == 0 {
+			line = "· " + line
+		} else {
+			line = "  " + line
+		}
+		lines[i] = tuikit.ColorizeLogLine(line, tuikit.LineStyleReasoning, m.theme)
+	}
+	return lines
+}
+
+func (m *Model) renderDiffBlockLines(msg tuievents.DiffBlockMsg) []string {
+	model := tuidiff.BuildModel(tuidiff.Payload{
+		Tool:      msg.Tool,
+		Path:      msg.Path,
+		Created:   msg.Created,
+		Hunk:      msg.Hunk,
+		Old:       msg.Old,
+		New:       msg.New,
+		Preview:   msg.Preview,
+		Truncated: msg.Truncated,
+	})
+	wrapWidth := maxInt(40, m.viewport.Width)
+	return tuidiff.Render(model, wrapWidth, m.theme)
+}
+
+func (m *Model) rerenderDiffBlocks() {
+	if len(m.diffBlocks) == 0 {
+		return
+	}
+	for i := range m.diffBlocks {
+		block := &m.diffBlocks[i]
+		lines := m.renderDiffBlockLines(block.msg)
+		oldLen := block.end - block.start
+		m.replaceHistoryRange(block.start, block.end, lines)
+		block.end = block.start + len(lines)
+		delta := len(lines) - oldLen
+		if delta == 0 {
+			continue
+		}
+		for j := i + 1; j < len(m.diffBlocks); j++ {
+			m.diffBlocks[j].start += delta
+			m.diffBlocks[j].end += delta
+		}
+	}
+}
+
 func (m *Model) resetConversationView() {
 	m.flushStream()
 	m.assistantBlock = nil
+	m.reasoningBlock = nil
+	m.diffBlocks = m.diffBlocks[:0]
 	m.historyLines = m.historyLines[:0]
 	m.viewportStyledLines = m.viewportStyledLines[:0]
 	m.viewportPlainLines = m.viewportPlainLines[:0]
 	m.hasCommittedLine = false
 	m.lastCommittedStyle = tuikit.LineStyleDefault
+	m.lastCommittedRaw = ""
 	m.clearSelection()
 	m.clearInputSelection()
 	m.userScrolledUp = false
@@ -661,7 +851,7 @@ func (m *Model) commitLine(line string) {
 	style := tuikit.DetectLineStyleWithContext(line, m.lastCommittedStyle)
 
 	// Insert visual gap before conversation turns.
-	if m.hasCommittedLine && tuikit.ShouldInsertGap(true, m.lastCommittedStyle, style) {
+	if m.hasCommittedLine && (tuikit.ShouldInsertGap(true, m.lastCommittedStyle, style) || shouldInsertToolGap(m.lastCommittedRaw, line)) {
 		m.historyLines = append(m.historyLines, "")
 	}
 
@@ -669,6 +859,7 @@ func (m *Model) commitLine(line string) {
 	m.historyLines = append(m.historyLines, colored)
 
 	m.lastCommittedStyle = style
+	m.lastCommittedRaw = line
 	m.hasCommittedLine = true
 }
 
@@ -680,6 +871,19 @@ func (m *Model) flushStream() {
 	}
 	m.commitLine(m.streamLine)
 	m.streamLine = ""
+}
+
+func shouldInsertToolGap(prevLine string, currentLine string) bool {
+	prev := strings.TrimSpace(prevLine)
+	curr := strings.TrimSpace(currentLine)
+	if prev == "" || curr == "" {
+		return false
+	}
+	return strings.HasPrefix(prev, "▸ ") && strings.HasPrefix(curr, "▸ ")
+}
+
+func isToolCallLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "▸ ")
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -1109,6 +1313,8 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 	m.clearSlashCompletion()
 
 	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = false
 	m.syncViewportContent()
 
 	if m.cfg.ExecuteLine == nil {
@@ -1214,54 +1420,46 @@ func (m *Model) View() string {
 	// 1. Viewport (scrollable history + streaming + spinner).
 	sections = append(sections, m.viewport.View())
 
-	// 2. Scroll indicator (when not at bottom).
-	if m.userScrolledUp && !m.viewport.AtBottom() {
-		pct := int(m.viewport.ScrollPercent() * 100)
-		indicator := m.theme.ScrollHintStyle().Render(
-			fmt.Sprintf(" -- scroll: %d%% (pgdn to resume) -- ", pct))
-		sections = append(sections, indicator)
-	}
-
-	// 3. Dedicated hint area above input (always reserved to avoid layout jitter).
+	// 2. Dedicated hint area above input (always reserved to avoid layout jitter).
 	sections = append(sections, m.renderHintArea())
 
-	// 4. Separator between viewport area and input controls.
+	// 3. Separator between viewport area and input controls.
 	if m.width > 0 {
 		sep := m.theme.SeparatorStyle().Render(strings.Repeat("─", m.width))
 		sections = append(sections, sep)
 	}
 
-	// 5. External prompt (modal-style).
+	// 4. External prompt (modal-style).
 	if m.activePrompt != nil {
 		sections = append(sections, m.renderPromptModal())
 	}
 
-	// 6. Input bar.
+	// 5. Input bar.
 	if m.activePrompt == nil {
 		sections = append(sections, m.renderInputBar())
 	}
 
-	// 6b. @mention candidates inline list (below input, above status).
+	// 5b. @mention candidates inline list (below input, above status).
 	if len(m.mentionCandidates) > 0 {
 		sections = append(sections, m.renderMentionList())
 	}
 
-	// 6c. $skill candidates inline list (below input, above status).
+	// 5c. $skill candidates inline list (below input, above status).
 	if len(m.skillCandidates) > 0 {
 		sections = append(sections, m.renderSkillList())
 	}
 
-	// 6d. /resume candidates inline list (below input, above status).
+	// 5d. /resume candidates inline list (below input, above status).
 	if len(m.resumeCandidates) > 0 {
 		sections = append(sections, m.renderResumeList())
 	}
 
-	// 6e. Generic slash argument candidates inline list.
+	// 5e. Generic slash argument candidates inline list.
 	if len(m.slashArgCandidates) > 0 {
 		sections = append(sections, m.renderSlashArgList())
 	}
 
-	// 6f. Slash command candidates inline list.
+	// 5f. Slash command candidates inline list.
 	if len(m.slashCandidates) > 0 {
 		sections = append(sections, m.renderSlashCommandList())
 	}
@@ -1299,11 +1497,6 @@ func (m *Model) computeLayout() (int, int) {
 // bottomSectionHeight calculates how many lines the fixed bottom area needs.
 func (m *Model) bottomSectionHeight() int {
 	lines := 0
-
-	// Scroll indicator (0 or 1).
-	if m.userScrolledUp && !m.viewport.AtBottom() {
-		lines++
-	}
 
 	// Dedicated hint area (always reserved).
 	lines += reservedHintRows
@@ -1365,7 +1558,7 @@ func (m *Model) bottomSectionHeight() int {
 }
 
 // syncViewportContent rebuilds the viewport content from the history buffer
-// plus any in-progress streaming content and spinner, then sets it on the
+// plus any in-progress streaming content, then sets it on the
 // viewport. Handles auto-scroll when the user hasn't manually scrolled up.
 func (m *Model) syncViewportContent() {
 	wrapWidth := maxInt(1, m.viewport.Width)
@@ -1395,22 +1588,6 @@ func (m *Model) syncViewportContent() {
 				lines = append(lines, strings.Split(wrapped, "\n")...)
 			}
 			prevStyle = style
-		}
-	}
-
-	// 3. Spinner line (if running and not waiting for user prompt).
-	if m.running && m.activePrompt == nil {
-		spinnerText := m.spinner.View() + " "
-		if m.runningHint != "" {
-			spinnerText += m.theme.ReasoningStyle().Render("running: " + m.runningHint)
-		} else {
-			spinnerText += m.theme.ReasoningStyle().Render("thinking\u2026")
-		}
-		wrapped := hardWrapDisplayLine(spinnerText, wrapWidth)
-		if wrapped == "" {
-			lines = append(lines, "")
-		} else {
-			lines = append(lines, strings.Split(wrapped, "\n")...)
 		}
 	}
 
@@ -1497,9 +1674,6 @@ func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 		return 0, 0, false
 	}
 	y := m.viewport.Height
-	if m.userScrolledUp && !m.viewport.AtBottom() {
-		y++
-	}
 	y += reservedHintRows
 	y++ // separator
 	h := maxInt(1, m.textarea.Height())
@@ -1569,6 +1743,9 @@ func (m *Model) buildHintText() string {
 	if h := strings.TrimSpace(m.hint); h != "" {
 		return h
 	}
+	if m.running && m.activePrompt == nil {
+		return m.buildRunningHintText()
+	}
 	if len(m.pendingQueue) > 0 {
 		n := len(m.pendingQueue)
 		if n == 1 {
@@ -1585,6 +1762,8 @@ func (m *Model) buildHintText() string {
 		label := "/" + m.slashArgCommand
 		if strings.EqualFold(strings.TrimSpace(m.slashArgCommand), "connect") {
 			label = "/connect provider"
+		} else if strings.HasPrefix(m.slashArgCommand, "model-reasoning:") {
+			label = "/model reasoning"
 		} else if strings.HasPrefix(m.slashArgCommand, "connect-model:") {
 			label = "/connect model"
 		} else if strings.HasPrefix(m.slashArgCommand, "connect-baseurl:") {
@@ -1593,6 +1772,9 @@ func (m *Model) buildHintText() string {
 			label = "/connect timeout"
 		} else if strings.HasPrefix(strings.TrimSpace(m.slashArgCommand), "connect-apikey:") {
 			return "/connect api_key: type and press enter"
+		}
+		if strings.HasPrefix(m.slashArgCommand, "model-reasoning:") && len(m.slashArgCandidates) == 0 {
+			return "/model reasoning: type option and press enter"
 		}
 		if strings.HasPrefix(m.slashArgCommand, "connect-model:") && len(m.slashArgCandidates) == 0 {
 			return "/connect model: type model name and press enter"
@@ -1607,6 +1789,57 @@ func (m *Model) buildHintText() string {
 		return "/: ↑/↓ select │ enter: run │ tab: fill"
 	}
 	return ""
+}
+
+func (m *Model) startRunningAnimation() {
+	m.runningTick = 0
+	m.runningBeat = 0
+	if len(runningCarouselLines) > 0 {
+		seed := int(time.Now().UnixNano() % int64(len(runningCarouselLines)))
+		if seed < 0 {
+			seed = -seed
+		}
+		m.runningTip = seed
+	} else {
+		m.runningTip = 0
+	}
+}
+
+func (m *Model) stopRunningAnimation() {
+	m.runningTick = 0
+	m.runningBeat = 0
+	m.runningTip = 0
+}
+
+func (m *Model) advanceRunningAnimation() {
+	if len(runningBreathFrames) > 0 {
+		m.runningBeat = (m.runningBeat + 1) % len(runningBreathFrames)
+	}
+	if len(runningCarouselLines) > 0 {
+		m.runningTick++
+		if m.runningTick%runningHintRotateEveryTicks == 0 {
+			m.runningTip = (m.runningTip + 1) % len(runningCarouselLines)
+		}
+	}
+}
+
+func (m *Model) buildRunningHintText() string {
+	frame := "·"
+	if len(runningBreathFrames) > 0 {
+		frame = runningBreathFrames[m.runningBeat%len(runningBreathFrames)]
+	}
+	status := "thinking..."
+	if h := strings.TrimSpace(m.runningHint); h != "" {
+		status = "running: " + h
+	}
+	parts := []string{frame + " " + status}
+	if len(m.pendingQueue) > 0 {
+		parts = append(parts, fmt.Sprintf("queued: %d", len(m.pendingQueue)))
+	}
+	if len(runningCarouselLines) > 0 {
+		parts = append(parts, runningCarouselLines[m.runningTip%len(runningCarouselLines)])
+	}
+	return strings.Join(parts, "  |  ")
 }
 
 func (m *Model) renderHintArea() string {
@@ -2190,6 +2423,7 @@ func (m *Model) clearSlashArg() {
 	m.slashArgQuery = ""
 	m.slashArgCandidates = nil
 	m.slashArgIndex = 0
+	m.modelReasoningRef = ""
 	m.connectProvider = ""
 	m.connectModel = ""
 	m.connectBaseURL = ""
@@ -2208,6 +2442,7 @@ func (m *Model) openSlashArgPicker(command string) {
 	m.clearSlashCompletion()
 	m.slashArgActive = true
 	m.slashArgCommand = cmd
+	m.modelReasoningRef = ""
 	m.connectProvider = ""
 	m.connectModel = ""
 	m.connectBaseURL = ""
@@ -2236,7 +2471,9 @@ func (m *Model) updateSlashArgCandidates() {
 	command := m.slashArgCommand
 	query := ""
 	ok := false
-	if strings.EqualFold(strings.TrimSpace(command), "connect") ||
+	if strings.HasPrefix(command, "model-reasoning:") {
+		query, ok = modelWizardQueryAtCursor(m.input, m.cursor)
+	} else if strings.EqualFold(strings.TrimSpace(command), "connect") ||
 		strings.HasPrefix(command, "connect-model:") ||
 		strings.HasPrefix(command, "connect-baseurl:") ||
 		strings.HasPrefix(strings.TrimSpace(command), "connect-timeout:") ||
@@ -2309,6 +2546,8 @@ func (m *Model) applySlashArgCompletion() {
 	}
 	command := strings.TrimSpace(m.slashArgCommand)
 	switch {
+	case strings.HasPrefix(command, "model-reasoning:"):
+		m.setInputText("/model " + choice)
 	case strings.EqualFold(command, "connect"):
 		m.setInputText("/connect " + choice)
 	case strings.HasPrefix(command, "connect-model:"):
@@ -2320,7 +2559,8 @@ func (m *Model) applySlashArgCompletion() {
 	default:
 		m.setInputText("/" + m.slashArgCommand + " " + choice + " ")
 	}
-	if strings.EqualFold(command, "connect") ||
+	if strings.HasPrefix(command, "model-reasoning:") ||
+		strings.EqualFold(command, "connect") ||
 		strings.HasPrefix(command, "connect-model:") ||
 		strings.HasPrefix(command, "connect-baseurl:") ||
 		strings.HasPrefix(command, "connect-timeout:") ||
@@ -2363,6 +2603,37 @@ func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		selected := ""
 		if len(m.slashArgCandidates) > 0 && m.slashArgIndex >= 0 && m.slashArgIndex < len(m.slashArgCandidates) {
 			selected = strings.TrimSpace(m.slashArgCandidates[m.slashArgIndex].Value)
+		}
+		if strings.EqualFold(command, "model") {
+			if selected == "" {
+				selected = strings.TrimSpace(m.slashArgQuery)
+			}
+			modelRef := strings.ToLower(strings.TrimSpace(selected))
+			if modelRef == "" {
+				return true, nil
+			}
+			m.modelReasoningRef = modelRef
+			m.slashArgCommand = buildModelReasoningStepCommand(modelRef)
+			m.setInputText("/model ")
+			m.syncTextareaFromInput()
+			m.slashArgIndex = 0
+			m.updateSlashArgCandidates()
+			return true, nil
+		}
+		if strings.HasPrefix(command, "model-reasoning:") {
+			reasoning := strings.TrimSpace(selected)
+			if reasoning == "" {
+				reasoning = strings.TrimSpace(m.slashArgQuery)
+			}
+			modelRef, ok := parseModelReasoningStepCommand(command)
+			if !ok {
+				modelRef = strings.ToLower(strings.TrimSpace(m.modelReasoningRef))
+			}
+			if modelRef == "" || reasoning == "" {
+				return true, nil
+			}
+			_, cmd := m.submitLine("/model " + modelRef + " " + reasoning)
+			return true, cmd
 		}
 		if strings.EqualFold(command, "connect") {
 			if selected == "" {
@@ -2970,6 +3241,50 @@ func connectWizardQueryAtCursor(input []rune, cursor int) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(strings.TrimPrefix(raw, "/connect ")), true
+}
+
+func modelWizardQueryAtCursor(input []rune, cursor int) (string, bool) {
+	if len(input) == 0 {
+		return "", false
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	raw := string(input[:cursor])
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "/model") {
+		return "", false
+	}
+	if strings.EqualFold(trimmed, "/model") {
+		return "", true
+	}
+	if !strings.HasPrefix(raw, "/model ") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(raw, "/model ")), true
+}
+
+func buildModelReasoningStepCommand(alias string) string {
+	return "model-reasoning:" + url.QueryEscape(strings.ToLower(strings.TrimSpace(alias)))
+}
+
+func parseModelReasoningStepCommand(command string) (string, bool) {
+	payload := strings.TrimSpace(strings.TrimPrefix(command, "model-reasoning:"))
+	if payload == "" {
+		return "", false
+	}
+	decoded, err := url.QueryUnescape(payload)
+	if err != nil {
+		return "", false
+	}
+	alias := strings.ToLower(strings.TrimSpace(decoded))
+	if alias == "" {
+		return "", false
+	}
+	return alias, true
 }
 
 func buildConnectModelStepCommand(provider, baseURL, timeout, apiKey string) string {

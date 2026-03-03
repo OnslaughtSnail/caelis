@@ -446,6 +446,47 @@ func (s *appConfigStore) SetRuntimeSettings(settings runtimeSettings) error {
 	return s.save()
 }
 
+func (s *appConfigStore) SetModelRuntimeSettings(alias string, settings modelRuntimeSettings) error {
+	if s == nil {
+		return nil
+	}
+	target := strings.ToLower(strings.TrimSpace(alias))
+	if target == "" {
+		return nil
+	}
+	normalized := modelRuntimeSettings{
+		ThinkingMode:    normalizeThinkingMode(settings.ThinkingMode),
+		ThinkingBudget:  normalizeThinkingBudget(settings.ThinkingBudget),
+		ReasoningEffort: normalizeReasoningEffort(settings.ReasoningEffort),
+	}
+
+	changed := false
+	for i := range s.data.Providers {
+		rec := &s.data.Providers[i]
+		recAlias := strings.ToLower(strings.TrimSpace(rec.Alias))
+		recRef := canonicalModelRef(rec.Provider, rec.Model)
+		if recAlias != target && recRef != target {
+			continue
+		}
+		if rec.ThinkingMode != normalized.ThinkingMode {
+			rec.ThinkingMode = normalized.ThinkingMode
+			changed = true
+		}
+		if rec.ThinkingBudget != normalized.ThinkingBudget {
+			rec.ThinkingBudget = normalized.ThinkingBudget
+			changed = true
+		}
+		if rec.ReasoningEffort != normalized.ReasoningEffort {
+			rec.ReasoningEffort = normalized.ReasoningEffort
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.save()
+}
+
 func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 	if s == nil {
 		return nil
@@ -551,9 +592,9 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 
 func normalizeThinkingMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "on":
+	case "on", "true", "enabled", "enable", "1":
 		return "on"
-	case "off":
+	case "off", "false", "disabled", "disable", "0":
 		return "off"
 	default:
 		return defaultThinkingMode
@@ -575,6 +616,8 @@ func normalizeReasoningEffort(effort string) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "very_high", "very-high", "veryhigh":
+		return "very_high"
 	default:
 		return defaultReasoningEffort
 	}

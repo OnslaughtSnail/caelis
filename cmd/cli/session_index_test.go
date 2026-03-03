@@ -297,6 +297,92 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	}
 }
 
+func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "resume-patch"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:   "ev-call",
+		Time: time.Now(),
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{
+					ID:   "call_patch_1",
+					Name: "PATCH",
+					Args: `{"path":"a.txt","old":"line1\nold","new":"line1\nnew"}`,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:   "ev-result",
+		Time: time.Now().Add(time.Second),
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_patch_1",
+				Name: "PATCH",
+				Result: map[string]any{
+					"path":      "a.txt",
+					"created":   false,
+					"replaced":  1,
+					"old_count": 1,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "resume-patch", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	sender := &testSender{}
+	c := &cliConsole{
+		baseCtx:       context.Background(),
+		rt:            rt,
+		appName:       "app",
+		userID:        "u",
+		workspace:     workspace,
+		sessionIndex:  idx,
+		sessionID:     "default",
+		out:           &out,
+		ui:            newUI(&out, true, false),
+		showReasoning: true,
+		tuiSender:     sender,
+	}
+	if _, err := handleResume(c, []string{"resume-patch"}); err != nil {
+		t.Fatal(err)
+	}
+	foundDiff := false
+	for _, raw := range sender.msgs {
+		if _, ok := raw.(tuievents.DiffBlockMsg); ok {
+			foundDiff = true
+			break
+		}
+	}
+	if !foundDiff {
+		t.Fatalf("expected DiffBlockMsg in replay events, got %#v", sender.msgs)
+	}
+}
+
 func TestHandleResume_DefaultUsesMostRecentNonCurrent(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {

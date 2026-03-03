@@ -27,16 +27,27 @@ type Theme struct {
 	CommandSubText lipgloss.Color
 
 	// Line-level semantic colors (conversation / tool / diff).
-	AssistantFg  lipgloss.Color
-	ReasoningFg  lipgloss.Color
-	UserFg       lipgloss.Color
-	ToolFg       lipgloss.Color
-	DiffAddFg    lipgloss.Color
-	DiffRemoveFg lipgloss.Color
-	DiffHeaderFg lipgloss.Color
-	SectionFg    lipgloss.Color
-	KeyLabelFg   lipgloss.Color
-	NoteFg       lipgloss.Color
+	AssistantFg        lipgloss.Color
+	ReasoningFg        lipgloss.Color
+	UserFg             lipgloss.Color
+	UserBg             lipgloss.Color
+	UserPrefixFg       lipgloss.Color
+	UserMentionFg      lipgloss.Color
+	ToolFg             lipgloss.Color
+	DiffAddFg          lipgloss.Color
+	DiffRemoveFg       lipgloss.Color
+	DiffHeaderFg       lipgloss.Color
+	DiffHunkFg         lipgloss.Color
+	DiffAddBg          lipgloss.Color
+	DiffAddStrongBg    lipgloss.Color
+	DiffRemoveBg       lipgloss.Color
+	DiffRemoveStrongBg lipgloss.Color
+	DiffLineNoFg       lipgloss.Color
+	DiffGutterFg       lipgloss.Color
+	DiffPanelBorder    lipgloss.Color
+	SectionFg          lipgloss.Color
+	KeyLabelFg         lipgloss.Color
+	NoteFg             lipgloss.Color
 
 	// Input area
 	PromptFg     lipgloss.Color
@@ -74,19 +85,30 @@ func DefaultTheme() Theme {
 		CommandText:    lipgloss.Color("#d4d8e0"),
 		CommandSubText: lipgloss.Color("#8d96a5"),
 
-		AssistantFg:  lipgloss.Color("#56d364"),
-		ReasoningFg:  lipgloss.Color("#8d96a5"),
-		UserFg:       lipgloss.Color("#d9dce3"),
-		ToolFg:       lipgloss.Color("#22d3ee"),
-		DiffAddFg:    lipgloss.Color("#56d364"),
-		DiffRemoveFg: lipgloss.Color("#ff7b72"),
-		DiffHeaderFg: lipgloss.Color("#8d96a5"),
-		SectionFg:    lipgloss.Color("#d9dce3"),
-		KeyLabelFg:   lipgloss.Color("#4da3ff"),
-		NoteFg:       lipgloss.Color("#8d96a5"),
-		PromptFg:     lipgloss.Color("#4da3ff"),
-		CursorFg:     lipgloss.Color("#ffffff"),
-		ScrollHintFg: lipgloss.Color("#f5c451"),
+		AssistantFg:        lipgloss.Color("#56d364"),
+		ReasoningFg:        lipgloss.Color("#8d96a5"),
+		UserFg:             lipgloss.Color("#d9dce3"),
+		UserBg:             lipgloss.Color("#22344e"),
+		UserPrefixFg:       lipgloss.Color("#8fb7ff"),
+		UserMentionFg:      lipgloss.Color("#7cc5ff"),
+		ToolFg:             lipgloss.Color("#22d3ee"),
+		DiffAddFg:          lipgloss.Color("#56d364"),
+		DiffRemoveFg:       lipgloss.Color("#ff7b72"),
+		DiffHeaderFg:       lipgloss.Color("#8d96a5"),
+		DiffHunkFg:         lipgloss.Color("#4da3ff"),
+		DiffAddBg:          lipgloss.Color("#1d3328"),
+		DiffAddStrongBg:    lipgloss.Color("#285f3a"),
+		DiffRemoveBg:       lipgloss.Color("#3a2329"),
+		DiffRemoveStrongBg: lipgloss.Color("#6e2b34"),
+		DiffLineNoFg:       lipgloss.Color("#758195"),
+		DiffGutterFg:       lipgloss.Color("#8d96a5"),
+		DiffPanelBorder:    lipgloss.Color("#2f3f5f"),
+		SectionFg:          lipgloss.Color("#d9dce3"),
+		KeyLabelFg:         lipgloss.Color("#4da3ff"),
+		NoteFg:             lipgloss.Color("#8d96a5"),
+		PromptFg:           lipgloss.Color("#4da3ff"),
+		CursorFg:           lipgloss.Color("#ffffff"),
+		ScrollHintFg:       lipgloss.Color("#f5c451"),
 
 		InputBarBg:   lipgloss.Color("#151b26"),
 		InputBarFg:   lipgloss.Color("#d9dce3"),
@@ -153,9 +175,9 @@ func (t Theme) AssistantStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.AssistantFg)
 }
 
-// ReasoningStyle renders reasoning/thinking text (dimmed).
+// ReasoningStyle renders reasoning/thinking text (dimmed + italic).
 func (t Theme) ReasoningStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(t.ReasoningFg)
+	return lipgloss.NewStyle().Foreground(t.ReasoningFg).Italic(true)
 }
 
 // ToolStyle renders tool call/result prefixes (cyan).
@@ -166,6 +188,29 @@ func (t Theme) ToolStyle() lipgloss.Style {
 // ToolNameStyle renders tool names (bold + cyan).
 func (t Theme) ToolNameStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.ToolFg).Bold(true)
+}
+
+// UserStyle renders user messages in a subtle chat bubble-like background.
+func (t Theme) UserStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.UserFg).
+		Background(t.UserBg)
+}
+
+// UserPrefixStyle renders the leading "> " marker for user messages.
+func (t Theme) UserPrefixStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.UserPrefixFg).
+		Background(t.UserBg).
+		Bold(true)
+}
+
+// UserMentionStyle renders @path mentions inside user messages.
+func (t Theme) UserMentionStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.UserMentionFg).
+		Background(t.UserBg).
+		Bold(true)
 }
 
 // DiffAddStyle renders added lines in diffs (green).
@@ -181,6 +226,26 @@ func (t Theme) DiffRemoveStyle() lipgloss.Style {
 // DiffHeaderStyle renders diff headers (dimmed + bold).
 func (t Theme) DiffHeaderStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.DiffHeaderFg).Bold(true)
+}
+
+// DiffHunkStyle renders diff hunk headers (@@ ... @@) in blue.
+func (t Theme) DiffHunkStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.DiffHunkFg).Bold(true)
+}
+
+// DiffLineNoStyle renders diff line numbers.
+func (t Theme) DiffLineNoStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.DiffLineNoFg)
+}
+
+// DiffGutterStyle renders diff markers/gutters.
+func (t Theme) DiffGutterStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.DiffGutterFg)
+}
+
+// DiffPanelBorderStyle renders split-view separator lines.
+func (t Theme) DiffPanelBorderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.DiffPanelBorder)
 }
 
 // WarnStyle renders warning text (yellow).

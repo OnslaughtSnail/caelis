@@ -1,6 +1,9 @@
 package tuikit
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDetectLineStyle(t *testing.T) {
 	tests := []struct {
@@ -8,7 +11,7 @@ func TestDetectLineStyle(t *testing.T) {
 		want LineStyle
 	}{
 		{"* Hello world", LineStyleAssistant},
-		{"~ thinking about it", LineStyleReasoning},
+		{"│ thinking about it", LineStyleReasoning},
 		{"> user input", LineStyleUser},
 		{"▸ tool_call {}", LineStyleTool},
 		{"✓ tool_result ok", LineStyleTool},
@@ -20,6 +23,7 @@ func TestDetectLineStyle(t *testing.T) {
 		{"  -removed line", LineStyleDiffRemove},
 		{"  --- old/file.go", LineStyleDiffHeader},
 		{"  +++ new/file.go", LineStyleDiffHeader},
+		{"  @@ -5,1 +5,1 @@", LineStyleDiffHunk},
 		{"  key  value", LineStyleKeyValue},
 		{"Section Title", LineStyleSection},
 		{"", LineStyleDefault},
@@ -73,7 +77,7 @@ func TestShouldInsertGap(t *testing.T) {
 func TestColorizeLogLine(t *testing.T) {
 	theme := DefaultTheme()
 	// Just verify the function doesn't panic and returns non-empty for each style.
-	for style := LineStyleDefault; style <= LineStyleDiffHeader; style++ {
+	for style := LineStyleDefault; style <= LineStyleDiffHunk; style++ {
 		line := "test line"
 		result := ColorizeLogLine(line, style, theme)
 		if result == "" {
@@ -111,6 +115,17 @@ func TestColorizeToolResult(t *testing.T) {
 	}
 }
 
+func TestColorizeUserLine_PreservesMentionToken(t *testing.T) {
+	theme := DefaultTheme()
+	result := ColorizeLogLine("> please check @deploy/build.sh, now", LineStyleUser, theme)
+	if result == "" {
+		t.Fatal("expected non-empty user line")
+	}
+	if !strings.Contains(result, "@deploy/build.sh") {
+		t.Fatalf("expected mention token preserved, got %q", result)
+	}
+}
+
 func TestColorizeDiffLines(t *testing.T) {
 	theme := DefaultTheme()
 	add := ColorizeLogLine("  +new code", LineStyleDiffAdd, theme)
@@ -141,7 +156,7 @@ func TestCountLeadingSpaces(t *testing.T) {
 
 func TestBlockContinuationFromReasoning(t *testing.T) {
 	// First line detected as reasoning.
-	first := DetectLineStyleWithContext("~ thinking about it", LineStyleDefault)
+	first := DetectLineStyleWithContext("│ thinking about it", LineStyleDefault)
 	if first != LineStyleReasoning {
 		t.Fatalf("expected reasoning, got %d", first)
 	}

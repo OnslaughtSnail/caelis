@@ -16,6 +16,12 @@ It is designed to be extracted as a standalone repository.
 - Tool execution runtime abstraction (`no_sandbox` / `sandbox` with extensible backend type).
 - Token-budget based auto compaction (append-only event strategy).
 - MCP ToolSet integration (`stdio` / `sse` / `streamable`), assembled via `mcp_tools` provider.
+- Full Bubble Tea TUI with streaming output, tool display, approval UX, reasoning blocks, and inline diff.
+- Model catalog (static snapshot + remote refresh) with per-model reasoning capability discovery.
+- Tool-level authorization baseline with per-tool allow/deny policy evaluation.
+- Workspace boundary policy restricting filesystem tools to project root.
+- `@file` / `@image` input reference parsing in user prompts; clipboard image capture.
+- Headless execution mode for non-interactive single-shot runs.
 
 ## Quick Start
 ```bash
@@ -128,17 +134,18 @@ Interactive slash commands:
 - `/version`: show version info
 - `/status`: show current model/thinking/stream/execution status
 - `/new`: start a fresh conversation session
+- `/fork`: fork current conversation into a new named session
 - `/permission [default|full_control]`: show or switch permission mode
 - `/sandbox [<type>]`: show or switch sandbox backend type
 - `/models`: list available model aliases
-- `/model <alias>`: switch model
+- `/model <alias> [reasoning]`: switch model; optionally set reasoning level (`off|on|low|medium|high|very_high`)
 - `/thinking <auto|on|off> [budget]`: switch thinking mode
 - `/effort <low|medium|high|off>`: set reasoning effort
 - `/stream <on|off>`: switch stream mode
 - `/reasoning <on|off>`: toggle reasoning content rendering
 - `/tools`: show current assembled tool list
 - `/compact [note]`: trigger one manual compaction
-- `/exit`: quit
+- `/exit` / `/quit`: quit
 
 Session behavior:
 - Interactive CLI starts in a new session by default.
@@ -193,7 +200,7 @@ go run ./eval/cmd \
 - `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
 
 ## Release
-- Current target release: `v0.0.1` (see `VERSION` and `CHANGELOG.md`).
+- Current release: `v0.0.2` (see `VERSION` and `CHANGELOG.md`).
 - Local dry-run package:
 ```bash
 make release-dry-run

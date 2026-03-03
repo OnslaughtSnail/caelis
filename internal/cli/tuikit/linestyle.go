@@ -2,6 +2,7 @@ package tuikit
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -12,7 +13,7 @@ type LineStyle int
 const (
 	LineStyleDefault    LineStyle = iota
 	LineStyleAssistant            // "* " prefix
-	LineStyleReasoning            // "~ " prefix
+	LineStyleReasoning            // "│ " prefix
 	LineStyleUser                 // "> " prefix
 	LineStyleTool                 // "▸" / "✓" / "? " prefix
 	LineStyleWarn                 // "warn:" prefix
@@ -23,6 +24,7 @@ const (
 	LineStyleDiffAdd              // "  +line" (unified diff add)
 	LineStyleDiffRemove           // "  -line" (unified diff remove)
 	LineStyleDiffHeader           // "  --- old" / "  +++ new"
+	LineStyleDiffHunk             // "  @@ -n,m +n,m @@" (hunk header)
 )
 
 // DetectLineStyle determines the semantic style of a log line in isolation.
@@ -50,7 +52,7 @@ func DetectLineStyleWithContext(line string, prevStyle LineStyle) LineStyle {
 		return LineStyleNote
 	case strings.HasPrefix(trimmed, "* "):
 		return LineStyleAssistant
-	case strings.HasPrefix(trimmed, "~ "):
+	case strings.HasPrefix(trimmed, "│ ") || strings.HasPrefix(trimmed, "│"):
 		return LineStyleReasoning
 	case strings.HasPrefix(trimmed, "> "):
 		return LineStyleUser
@@ -69,6 +71,8 @@ func DetectLineStyleWithContext(line string, prevStyle LineStyle) LineStyle {
 		switch {
 		case strings.HasPrefix(rest, "+++ ") || strings.HasPrefix(rest, "--- "):
 			return LineStyleDiffHeader
+		case strings.HasPrefix(rest, "@@ "):
+			return LineStyleDiffHunk
 		case len(rest) > 0 && rest[0] == '+':
 			return LineStyleDiffAdd
 		case len(rest) > 0 && rest[0] == '-':
@@ -138,7 +142,7 @@ func ColorizeLogLine(line string, style LineStyle, theme Theme) string {
 	case LineStyleReasoning:
 		return theme.ReasoningStyle().Render(line)
 	case LineStyleUser:
-		return line
+		return colorizeUserLine(line, theme)
 	case LineStyleTool:
 		return colorizeToolLine(line, theme)
 	case LineStyleWarn:
@@ -157,6 +161,8 @@ func ColorizeLogLine(line string, style LineStyle, theme Theme) string {
 		return theme.DiffRemoveStyle().Render(line)
 	case LineStyleDiffHeader:
 		return theme.DiffHeaderStyle().Render(line)
+	case LineStyleDiffHunk:
+		return theme.DiffHunkStyle().Render(line)
 	default:
 		return line
 	}
@@ -168,6 +174,57 @@ func colorizeAssistantLine(line string, theme Theme) string {
 		return prefix + line[len("* "):]
 	}
 	return theme.AssistantStyle().Render(line)
+}
+
+func colorizeUserLine(line string, theme Theme) string {
+	content := line
+	if strings.HasPrefix(content, "> ") {
+		content = content[len("> "):]
+	}
+	if content == "" {
+		return theme.UserPrefixStyle().Render("> ")
+	}
+	styledBody := styleUserMentions(content, theme)
+	return theme.UserPrefixStyle().Render("> ") + styledBody
+}
+
+func styleUserMentions(text string, theme Theme) string {
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	for i := 0; i < len(runes); {
+		if runes[i] == '@' {
+			j := i + 1
+			for j < len(runes) && isUserMentionRune(runes[j]) {
+				j++
+			}
+			if j > i+1 {
+				out.WriteString(theme.UserMentionStyle().Render(string(runes[i:j])))
+				i = j
+				continue
+			}
+		}
+		start := i
+		for i < len(runes) && runes[i] != '@' {
+			i++
+		}
+		out.WriteString(theme.UserStyle().Render(string(runes[start:i])))
+	}
+	return out.String()
+}
+
+func isUserMentionRune(r rune) bool {
+	if unicode.IsSpace(r) {
+		return false
+	}
+	switch r {
+	case ',', '，', '。', ':', '：', ';', '；', '!', '?', '！', '？', '"', '\'', '(', ')', '[', ']', '{', '}', '<', '>', '|':
+		return false
+	default:
+		return true
+	}
 }
 
 func colorizeToolLine(line string, theme Theme) string {

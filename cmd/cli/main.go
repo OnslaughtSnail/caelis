@@ -602,12 +602,10 @@ func hasLSPTools(tools []tool.Tool) bool {
 
 func parseReasoning(mode string, budget int, effort string, provider string, modelName string) (model.ReasoningConfig, error) {
 	cfg := model.ReasoningConfig{Effort: strings.TrimSpace(effort)}
-	switch strings.ToLower(strings.TrimSpace(mode)) {
+	switch normalizeReasoningSelection(mode) {
 	case "", "auto":
-		// For "auto" mode, look up the model catalog to decide.
-		// If the model is known to support reasoning, enable it.
-		caps, found := modelproviders.LookupModelCapabilities(provider, modelName)
-		if found && caps.SupportsReasoning {
+		// For "auto" mode, look up known capabilities to decide.
+		if modelSupportsReasoning(provider, modelName) {
 			enabled := true
 			cfg.Enabled = &enabled
 			if budget > 0 {

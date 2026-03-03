@@ -162,9 +162,9 @@ func (u *ui) AssistantPrefix() string {
 	return u.successColor.Sprint("* ")
 }
 
-// ReasoningPrefix returns the dimmed "~ " prefix for reasoning text.
+// ReasoningPrefix returns the dimmed "│ " prefix for reasoning text.
 func (u *ui) ReasoningPrefix() string {
-	return u.dimColor.Sprint("~ ")
+	return u.dimColor.Sprint("│ ")
 }
 
 // ToolCallPrefix returns the cyan "▸ " prefix for tool calls.
