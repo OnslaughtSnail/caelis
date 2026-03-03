@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -644,5 +645,35 @@ func TestBash_SandboxErrorNonMissingDoesNotEscalate(t *testing.T) {
 	}
 	if len(host.calls) != 0 {
 		t.Fatalf("expected host not called on non-missing sandbox error, got %d", len(host.calls))
+	}
+}
+
+func TestBash_ErrorIncludesRouteForDebug(t *testing.T) {
+	sandbox := &recordingRunner{
+		result: toolexec.CommandResult{
+			Stdout:   "node: cannot find module",
+			ExitCode: 1,
+		},
+		err: errors.New("sandbox command failed"),
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		HostRunner:     &recordingRunner{},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{"command": "node script.js"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "route=sandbox") {
+		t.Fatalf("expected route in error message, got: %v", err)
 	}
 }

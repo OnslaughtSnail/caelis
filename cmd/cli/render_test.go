@@ -112,3 +112,31 @@ func TestPrintEventBuffersAnswerPartialsUntilFinal(t *testing.T) {
 		t.Fatalf("expected list markdown to be rendered, got %q", got)
 	}
 }
+
+func TestPrintEvent_AssistantReasoningRendersBeforeToolCall(t *testing.T) {
+	var out bytes.Buffer
+	state := &renderState{
+		out:              &out,
+		showReasoning:    true,
+		pendingToolCalls: map[string]toolCallSnapshot{},
+	}
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role:      model.RoleAssistant,
+			Reasoning: "think first",
+			ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "LIST", Args: `{"path":"."}`},
+			},
+		},
+	}, state)
+
+	got := ansi.Strip(out.String())
+	reasoningPos := strings.Index(got, "│ think first")
+	callPos := strings.Index(got, "▸ LIST")
+	if reasoningPos < 0 || callPos < 0 {
+		t.Fatalf("expected reasoning and tool call output, got %q", got)
+	}
+	if reasoningPos > callPos {
+		t.Fatalf("expected reasoning to render before tool call, got %q", got)
+	}
+}

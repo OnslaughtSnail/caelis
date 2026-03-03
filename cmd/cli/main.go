@@ -104,10 +104,9 @@ func runCLI(ctx context.Context, args []string) error {
 		fmt.Println(version.String())
 		return nil
 	}
-	// Initialise the dynamic model capability catalog (remote fetch + local overrides).
-	// This runs concurrently with the rest of startup; errors fall back gracefully to
-	// the embedded snapshot so we do not block or fail on network issues.
-	modelproviders.InitModelCatalog(ctx, nil, *modelCapsPath)
+	// Initialise the dynamic model capability catalog (remote fetch + local overrides)
+	// in background so interactive/headless startup is never blocked by network I/O.
+	go modelproviders.InitModelCatalog(context.Background(), nil, *modelCapsPath)
 
 	if len(fs.Args()) > 0 {
 		return fmt.Errorf("unknown arguments: %v", fs.Args())

@@ -188,6 +188,52 @@ func printEvent(ev *session.Event, state *renderState) {
 		}
 		return
 	}
+	if msg.Role == model.RoleAssistant {
+		if state != nil && state.showReasoning && msg.Reasoning != "" && !state.seenReasoningPartial {
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s\n", state.ui.ReasoningPrefix(), strings.TrimSpace(msg.Reasoning))
+			} else {
+				fmt.Fprintf(state.out, "│ %s\n", strings.TrimSpace(msg.Reasoning))
+			}
+		}
+		text := strings.TrimSpace(msg.Text)
+		if state != nil && state.seenAnswerPartial {
+			if text == "" {
+				text = strings.TrimSpace(state.answerPartialBuffer.String())
+			}
+		}
+		if text != "" {
+			formatted := renderAssistantMarkdown(text)
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s\n", state.ui.AssistantPrefix(), formatted)
+			} else {
+				fmt.Fprintf(state.out, "* %s\n", formatted)
+			}
+		}
+		if state != nil {
+			state.seenAnswerPartial = false
+			state.seenReasoningPartial = false
+			state.answerPartialBuffer.Reset()
+		}
+	}
+	if len(msg.ToolCalls) > 0 {
+		for i, call := range msg.ToolCalls {
+			parsedArgs := parseToolArgsForDisplay(call.Args)
+			if state != nil && call.ID != "" {
+				if state.pendingToolCalls == nil {
+					state.pendingToolCalls = map[string]toolCallSnapshot{}
+				}
+				state.pendingToolCalls[call.ID] = toolCallSnapshot{
+					Args: cloneAnyMap(parsedArgs),
+				}
+			}
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), call.Name, summarizeToolArgs(call.Name, parsedArgs))
+			} else {
+				fmt.Fprintf(state.out, "▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs))
+			}
+		}
+	}
 	if msg.ToolResponse != nil {
 		var callArgs map[string]any
 		if state != nil && msg.ToolResponse.ID != "" && state.pendingToolCalls != nil {
@@ -211,47 +257,12 @@ func printEvent(ev *session.Event, state *renderState) {
 		}
 		return
 	}
-	if len(msg.ToolCalls) > 0 {
-		for i, call := range msg.ToolCalls {
-			parsedArgs := parseToolArgsForDisplay(call.Args)
-			if state != nil && call.ID != "" {
-				if state.pendingToolCalls == nil {
-					state.pendingToolCalls = map[string]toolCallSnapshot{}
-				}
-				state.pendingToolCalls[call.ID] = toolCallSnapshot{
-					Args: cloneAnyMap(parsedArgs),
-				}
-			}
-			if state.ui != nil {
-				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), call.Name, summarizeToolArgs(call.Name, parsedArgs))
-			} else {
-				fmt.Fprintf(state.out, "▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs))
-			}
-		}
+	if msg.Role == model.RoleAssistant {
 		return
 	}
-	if msg.Role == model.RoleAssistant && state != nil && state.showReasoning && msg.Reasoning != "" && !state.seenReasoningPartial {
-		if state.ui != nil {
-			fmt.Fprintf(state.out, "%s%s\n", state.ui.ReasoningPrefix(), strings.TrimSpace(msg.Reasoning))
-		} else {
-			fmt.Fprintf(state.out, "│ %s\n", strings.TrimSpace(msg.Reasoning))
-		}
-	}
 	text := strings.TrimSpace(msg.Text)
-	if msg.Role == model.RoleAssistant && state != nil && state.seenAnswerPartial {
-		if text == "" {
-			text = strings.TrimSpace(state.answerPartialBuffer.String())
-		}
-	}
 	if text != "" {
 		switch msg.Role {
-		case model.RoleAssistant:
-			formatted := renderAssistantMarkdown(text)
-			if state.ui != nil {
-				fmt.Fprintf(state.out, "%s%s\n", state.ui.AssistantPrefix(), formatted)
-			} else {
-				fmt.Fprintf(state.out, "* %s\n", formatted)
-			}
 		case model.RoleSystem:
 			if state.ui != nil {
 				fmt.Fprintf(state.out, "%s%s\n", state.ui.SystemPrefix(), text)
@@ -261,11 +272,6 @@ func printEvent(ev *session.Event, state *renderState) {
 		default:
 			fmt.Fprintf(state.out, "- %s\n", text)
 		}
-	}
-	if state != nil && msg.Role == model.RoleAssistant {
-		state.seenAnswerPartial = false
-		state.seenReasoningPartial = false
-		state.answerPartialBuffer.Reset()
 	}
 }
 

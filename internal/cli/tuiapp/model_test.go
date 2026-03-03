@@ -1108,6 +1108,85 @@ func TestReasoningThenFinalAnswerReusesExistingAnswerBlock(t *testing.T) {
 	}
 }
 
+func TestReasoningStreamDoesNotAccumulateAcrossToolTurns(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "reasoning",
+		Text:  "phase1",
+		Final: false,
+	})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ a.txt\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "reasoning",
+		Text:  "phase2",
+		Final: false,
+	})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if strings.Contains(joined, "phase1phase2") {
+		t.Fatalf("expected reasoning blocks separated by tool turn, got %q", joined)
+	}
+	if !strings.Contains(joined, "· phase1") || !strings.Contains(joined, "· phase2") {
+		t.Fatalf("expected both reasoning blocks rendered, got %q", joined)
+	}
+}
+
+func TestAssistantFinalDuplicateEventIsSuppressed(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+	if m.assistantBlock != nil {
+		t.Fatal("expected final one-shot answer block to close immediately")
+	}
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if strings.Count(joined, "* done") != 1 {
+		t.Fatalf("expected duplicated final answer suppressed, got %q", joined)
+	}
+}
+
+func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt:   "  [y] allow  [a] always  [N] deny: ",
+		Response: respCh,
+	})
+	if m.activePrompt == nil {
+		t.Fatal("expected active prompt")
+	}
+	if len(m.activePrompt.choices) != 3 {
+		t.Fatalf("expected 3 approval choices, got %d", len(m.activePrompt.choices))
+	}
+	if m.activePrompt.choiceIndex != 2 {
+		t.Fatalf("expected default selection at deny, got %d", m.activePrompt.choiceIndex)
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "allow") || !strings.Contains(view, "always") || !strings.Contains(view, "deny") {
+		t.Fatalf("expected approval list options in modal, got %q", view)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case resp := <-respCh:
+		if resp.Err != nil {
+			t.Fatalf("expected successful prompt response, got err=%v", resp.Err)
+		}
+		if resp.Line != "a" {
+			t.Fatalf("expected selected value 'a', got %q", resp.Line)
+		}
+	default:
+		t.Fatal("expected prompt response after enter")
+	}
+}
+
 func TestClearHistoryMsgResetsViewportContent(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine:     noopExecute,

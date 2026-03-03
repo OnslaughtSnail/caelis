@@ -37,6 +37,30 @@ func TestDetectPrimaryLanguage_PrefersRootMarker(t *testing.T) {
 	}
 }
 
+func TestDetectPrimaryLanguage_RequiresWorkspaceEvidence(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte("print('hi')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	specs := []lspLanguageSpec{
+		{
+			Language:    "go",
+			Priority:    100,
+			RootMarkers: []string{"go.mod"},
+			Extensions:  []string{".go"},
+		},
+		{
+			Language:    "python",
+			Priority:    90,
+			RootMarkers: []string{"pyproject.toml"},
+			Extensions:  []string{".py"},
+		},
+	}
+	if got := detectPrimaryLanguage(root, specs); got != "python" {
+		t.Fatalf("expected python from extension evidence, got %q", got)
+	}
+}
+
 func TestResolveLSPServerCommand_PrefersWorkspaceNodeBin(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "node_modules", ".bin")

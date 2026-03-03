@@ -180,11 +180,18 @@ func detectPrimaryLanguage(workspaceDir string, specs []lspLanguageSpec) string 
 	bestLanguage := ""
 	bestScore := -1
 	for _, spec := range specs {
+		hasMarker := workspaceHasRootMarker(workspaceDir, spec.RootMarkers)
+		extMatches := countWorkspaceExtensionMatches(workspaceDir, spec.Extensions, 1200)
+		// Require positive workspace evidence so high static priorities cannot
+		// select unrelated languages when multiple servers are installed.
+		if !hasMarker && extMatches == 0 {
+			continue
+		}
 		score := spec.Priority
-		if workspaceHasRootMarker(workspaceDir, spec.RootMarkers) {
+		if hasMarker {
 			score += 100
 		}
-		score += minInt(countWorkspaceExtensionMatches(workspaceDir, spec.Extensions, 1200), 30)
+		score += minInt(extMatches, 30)
 		if score > bestScore {
 			bestScore = score
 			bestLanguage = spec.Language

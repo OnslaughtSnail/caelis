@@ -432,51 +432,7 @@ func (c *cliConsole) runPrompt(input string) error {
 		Writer:        c.out,
 		UI:            c.ui,
 		OnEvent: func(ev *session.Event) bool {
-			if c.tuiSender == nil || ev == nil {
-				return false
-			}
-			msg := ev.Message
-			if len(msg.ToolCalls) > 0 {
-				for _, call := range msg.ToolCalls {
-					parsedArgs := parseToolArgsForDisplay(call.Args)
-					if call.ID != "" {
-						pendingTUIToolCalls[call.ID] = toolCallSnapshot{
-							Args: cloneAnyMap(parsedArgs),
-						}
-					}
-				}
-				return false
-			}
-			if msg.ToolResponse != nil {
-				var callArgs map[string]any
-				if msg.ToolResponse.ID != "" {
-					if snapshot, ok := pendingTUIToolCalls[msg.ToolResponse.ID]; ok {
-						callArgs = snapshot.Args
-						delete(pendingTUIToolCalls, msg.ToolResponse.ID)
-					}
-				}
-				diffMsg, tooLarge, ok := buildPatchDiffBlockMsg(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
-				if ok {
-					if tooLarge {
-						summary := strings.TrimSpace(summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
-						if summary == "" {
-							summary = "rich diff skipped: too large"
-						} else {
-							summary += " (rich diff skipped: too large)"
-						}
-						c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
-						return true
-					}
-					c.tuiSender.Send(diffMsg)
-					return true
-				}
-				return false
-			}
-			if msg.Role != model.RoleAssistant {
-				return false
-			}
-			c.emitAssistantEventToTUI(ev)
-			return true
+			return c.forwardEventToTUI(ev, pendingTUIToolCalls)
 		},
 		OnUsage: func(pt int) {
 			c.lastPromptTokens = pt
@@ -535,6 +491,67 @@ func (c *cliConsole) emitAssistantChunkToTUI(kind string, text string, final boo
 			Final: final,
 		})
 	}
+}
+
+func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[string]toolCallSnapshot) bool {
+	if c == nil || c.tuiSender == nil || ev == nil {
+		return false
+	}
+	msg := ev.Message
+	handled := false
+	if msg.Role == model.RoleAssistant {
+		// Keep assistant rendering deterministic, even for mixed assistant+toolcall events.
+		c.emitAssistantEventToTUI(ev)
+		handled = true
+	}
+	if len(msg.ToolCalls) > 0 {
+		for _, call := range msg.ToolCalls {
+			parsedArgs := parseToolArgsForDisplay(call.Args)
+			if pendingToolCalls != nil && call.ID != "" {
+				pendingToolCalls[call.ID] = toolCallSnapshot{
+					Args: cloneAnyMap(parsedArgs),
+				}
+			}
+			c.tuiSender.Send(tuievents.LogChunkMsg{
+				Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
+			})
+		}
+		handled = true
+	}
+	if msg.ToolResponse != nil {
+		var callArgs map[string]any
+		if pendingToolCalls != nil && msg.ToolResponse.ID != "" {
+			if snapshot, ok := pendingToolCalls[msg.ToolResponse.ID]; ok {
+				callArgs = snapshot.Args
+				delete(pendingToolCalls, msg.ToolResponse.ID)
+			}
+		}
+		diffMsg, tooLarge, ok := buildPatchDiffBlockMsg(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		if ok {
+			if tooLarge {
+				summary := strings.TrimSpace(summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
+				if summary == "" {
+					summary = "rich diff skipped: too large"
+				} else {
+					summary += " (rich diff skipped: too large)"
+				}
+				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+				return true
+			}
+			c.tuiSender.Send(diffMsg)
+			return true
+		}
+		// Suppress result line for read-only FS tools (the call line is sufficient).
+		if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
+			return true
+		}
+		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		if strings.TrimSpace(summary) != "" {
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+		}
+		return true
+	}
+	return handled
 }
 
 func (c *cliConsole) setActiveRunCancel(cancel context.CancelFunc) {
@@ -1064,55 +1081,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 			}
 			continue
 		}
-		if msg.ToolResponse != nil {
-			var callArgs map[string]any
-			if msg.ToolResponse.ID != "" {
-				if snapshot, ok := pendingToolCalls[msg.ToolResponse.ID]; ok {
-					callArgs = snapshot.Args
-					delete(pendingToolCalls, msg.ToolResponse.ID)
-				}
-			}
-			diffMsg, tooLarge, ok := buildPatchDiffBlockMsg(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
-			if ok {
-				if tooLarge {
-					summary := strings.TrimSpace(summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
-					if summary == "" {
-						summary = "rich diff skipped: too large"
-					} else {
-						summary += " (rich diff skipped: too large)"
-					}
-					c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
-					continue
-				}
-				c.tuiSender.Send(diffMsg)
-				continue
-			}
-			// Suppress result line for read-only FS tools.
-			if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
-				continue
-			}
-			summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
-			if strings.TrimSpace(summary) != "" {
-				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
-			}
-			continue
-		}
-		if len(msg.ToolCalls) > 0 {
-			for _, call := range msg.ToolCalls {
-				parsedArgs := parseToolArgsForDisplay(call.Args)
-				if call.ID != "" {
-					pendingToolCalls[call.ID] = toolCallSnapshot{
-						Args: cloneAnyMap(parsedArgs),
-					}
-				}
-				c.tuiSender.Send(tuievents.LogChunkMsg{
-					Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
-				})
-			}
-			continue
-		}
-		if msg.Role == model.RoleAssistant {
-			c.emitAssistantEventToTUI(ev)
+		if c.forwardEventToTUI(ev, pendingToolCalls) {
 			continue
 		}
 		text := strings.TrimSpace(msg.Text)

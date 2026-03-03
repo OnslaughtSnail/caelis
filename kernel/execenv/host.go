@@ -109,9 +109,9 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 		return result, WrapCodedError(
 			ErrorCodeHostCommandTimeout,
 			err,
-			"tool: command timed out after %s; stderr=%s",
+			"tool: command timed out after %s; %s",
 			label,
-			result.Stderr,
+			commandOutputSummary(result),
 		)
 	}
 	if errors.Is(err, errIdleTimeout) {
@@ -121,12 +121,12 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 		}
 		return result, NewCodedError(
 			ErrorCodeHostIdleTimeout,
-			"tool: command produced no output for %s and was terminated (likely interactive/long-running); stderr=%s",
+			"tool: command produced no output for %s and was terminated (likely interactive/long-running; try larger idle_timeout_ms); %s",
 			label,
-			result.Stderr,
+			commandOutputSummary(result),
 		)
 	}
-	return result, fmt.Errorf("tool: command failed: %w; stderr=%s", err, result.Stderr)
+	return result, fmt.Errorf("tool: command failed: %w; %s", err, commandOutputSummary(result))
 }
 
 func resolveExitCode(err error) int {

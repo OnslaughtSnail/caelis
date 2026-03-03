@@ -117,11 +117,18 @@ func (i commandItem) FilterValue() string { return i.name }
 // ---------------------------------------------------------------------------
 
 type promptState struct {
-	prompt   string
-	secret   bool
-	input    []rune
-	cursor   int
-	response chan tuievents.PromptResponse
+	prompt      string
+	secret      bool
+	input       []rune
+	cursor      int
+	choices     []promptChoice
+	choiceIndex int
+	response    chan tuievents.PromptResponse
+}
+
+type promptChoice struct {
+	label string
+	value string
 }
 
 type textSelectionPoint struct {
@@ -170,6 +177,7 @@ type Model struct {
 	hasCommittedLine   bool // true after at least one line has been committed
 	assistantBlock     *assistantBlockState
 	reasoningBlock     *assistantBlockState
+	lastFinalAnswer    string
 	diffBlocks         []diffBlockState
 
 	// Fullscreen viewport — replaces tea.Println scrollback.
@@ -582,6 +590,14 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 		}
 		line := m.streamLine[:idx]
 		m.streamLine = m.streamLine[idx+1:]
+		if strings.TrimSpace(line) != "" {
+			// Non-stream log lines (tool calls/results/system lines) delimit
+			// assistant streaming blocks. Without this, reasoning can keep
+			// accumulating across tool turns.
+			m.finalizeAssistantBlock()
+			m.finalizeReasoningBlock()
+			m.lastFinalAnswer = ""
+		}
 		m.commitLine(line)
 	}
 
@@ -639,6 +655,13 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 	} else {
 		activeBlock = &m.assistantBlock
 	}
+	if streamKind == "answer" && final && *activeBlock == nil {
+		normalized := strings.TrimSpace(text)
+		if normalized != "" && normalized == m.lastFinalAnswer {
+			// Drop duplicated terminal answer events.
+			return m, nil
+		}
+	}
 	if *activeBlock == nil {
 		if m.hasCommittedLine && m.lastCommittedStyle != blockStyle &&
 			!(m.lastCommittedStyle == tuikit.LineStyleAssistant && blockStyle == tuikit.LineStyleReasoning) &&
@@ -656,6 +679,12 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 		m.hasCommittedLine = true
 		m.lastCommittedStyle = blockStyle
 		m.lastCommittedRaw = blockMarker
+		if final {
+			*activeBlock = nil
+			if streamKind == "answer" {
+				m.lastFinalAnswer = strings.TrimSpace(text)
+			}
+		}
 		m.syncViewportContent()
 		return m, nil
 	}
@@ -666,6 +695,9 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 	block.end = block.start + len(lines)
 	if final {
 		*activeBlock = nil
+		if streamKind == "answer" {
+			m.lastFinalAnswer = strings.TrimSpace(block.raw)
+		}
 	}
 	m.lastCommittedStyle = blockStyle
 	m.lastCommittedRaw = blockMarker
@@ -833,6 +865,7 @@ func (m *Model) resetConversationView() {
 	m.hasCommittedLine = false
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
+	m.lastFinalAnswer = ""
 	m.clearSelection()
 	m.clearInputSelection()
 	m.userScrolledUp = false
@@ -1293,6 +1326,8 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 	m.historyLines = append(m.historyLines, colored)
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleUser
+	m.lastCommittedRaw = userLine
+	m.lastFinalAnswer = ""
 
 	// Push to history.
 	displayTrimmed := strings.TrimSpace(displayLine)
@@ -1969,6 +2004,18 @@ func (m *Model) renderPromptModal() string {
 		return ""
 	}
 	p := m.activePrompt
+	if len(p.choices) > 0 {
+		lines := []string{strings.TrimSpace(p.prompt)}
+		for i, choice := range p.choices {
+			if i == p.choiceIndex {
+				lines = append(lines, m.theme.PromptStyle().Render("▸ ")+m.theme.CommandActiveStyle().Render(choice.label))
+			} else {
+				lines = append(lines, "  "+m.theme.HelpHintTextStyle().Render(choice.label))
+			}
+		}
+		lines = append(lines, "", "↑/↓: choose · Enter: submit · Esc: cancel")
+		return m.theme.ModalStyle().Render(strings.Join(lines, "\n"))
+	}
 	value := string(p.input)
 	if p.secret {
 		value = strings.Repeat("*", len(p.input))
@@ -2956,11 +3003,7 @@ func (m *Model) enqueuePrompt(req tuievents.PromptRequestMsg) {
 		return
 	}
 	if m.activePrompt == nil {
-		m.activePrompt = &promptState{
-			prompt:   req.Prompt,
-			secret:   req.Secret,
-			response: req.Response,
-		}
+		m.activePrompt = newPromptState(req)
 		return
 	}
 	m.pendingPrompt = append(m.pendingPrompt, req)
@@ -2980,16 +3023,15 @@ func (m *Model) finishPrompt(line string, err error) {
 	}
 	next := m.pendingPrompt[0]
 	m.pendingPrompt = m.pendingPrompt[1:]
-	m.activePrompt = &promptState{
-		prompt:   next.Prompt,
-		secret:   next.Secret,
-		response: next.Response,
-	}
+	m.activePrompt = newPromptState(next)
 }
 
 func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 	if m.activePrompt == nil {
 		return nil
+	}
+	if len(m.activePrompt.choices) > 0 {
+		return m.handlePromptChoiceKey(msg)
 	}
 	switch msg.String() {
 	case "ctrl+c", "esc":
@@ -3045,6 +3087,74 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 			head = append(head, r)
 			m.activePrompt.input = append(head, m.activePrompt.input[m.activePrompt.cursor:]...)
 			m.activePrompt.cursor++
+		}
+	}
+	return nil
+}
+
+func newPromptState(req tuievents.PromptRequestMsg) *promptState {
+	state := &promptState{
+		prompt:   req.Prompt,
+		secret:   req.Secret,
+		response: req.Response,
+	}
+	if req.Secret {
+		return state
+	}
+	if choices, idx, ok := parsePromptChoices(req.Prompt); ok {
+		state.choices = choices
+		state.choiceIndex = idx
+	}
+	return state
+}
+
+func parsePromptChoices(prompt string) ([]promptChoice, int, bool) {
+	normalized := strings.ToLower(strings.Join(strings.Fields(prompt), " "))
+	if strings.Contains(normalized, "[y] allow") &&
+		strings.Contains(normalized, "[a] always") &&
+		strings.Contains(normalized, "[n] deny") {
+		return []promptChoice{
+			{label: "allow", value: "y"},
+			{label: "always", value: "a"},
+			{label: "deny", value: "n"},
+		}, 2, true
+	}
+	return nil, 0, false
+}
+
+func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
+	if m.activePrompt == nil || len(m.activePrompt.choices) == 0 {
+		return nil
+	}
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		m.finishPrompt("", errors.New(tuievents.PromptErrInterrupt))
+		return nil
+	case "ctrl+d":
+		m.finishPrompt("", errors.New(tuievents.PromptErrEOF))
+		return nil
+	case "up", "k", "shift+tab":
+		if m.activePrompt.choiceIndex > 0 {
+			m.activePrompt.choiceIndex--
+		}
+		return nil
+	case "down", "j", "tab":
+		if m.activePrompt.choiceIndex < len(m.activePrompt.choices)-1 {
+			m.activePrompt.choiceIndex++
+		}
+		return nil
+	case "enter":
+		choice := m.activePrompt.choices[m.activePrompt.choiceIndex]
+		m.finishPrompt(choice.value, nil)
+		return nil
+	}
+	if len(msg.Runes) > 0 {
+		key := strings.ToLower(strings.TrimSpace(string(msg.Runes)))
+		for _, choice := range m.activePrompt.choices {
+			if choice.value == key {
+				m.finishPrompt(choice.value, nil)
+				return nil
+			}
 		}
 	}
 	return nil

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -125,5 +126,44 @@ func TestEmitAssistantEventToTUI_HideReasoningWhenDisabled(t *testing.T) {
 	msg := sender.msgs[0].(tuievents.AssistantStreamMsg)
 	if msg.Kind != "answer" || msg.Text != "shown" || !msg.Final {
 		t.Fatalf("unexpected msg: %+v", msg)
+	}
+}
+
+func TestForwardEventToTUI_AssistantReasoningBeforeToolCall(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:     sender,
+		showReasoning: true,
+	}
+	ev := &session.Event{
+		Message: model.Message{
+			Role:      model.RoleAssistant,
+			Reasoning: "think first",
+			ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "LIST", Args: `{"path":"."}`},
+			},
+		},
+	}
+
+	handled := c.forwardEventToTUI(ev, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected event to be handled by TUI forwarder")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected reasoning then tool call messages, got %d", len(sender.msgs))
+	}
+	reasoningMsg, ok := sender.msgs[0].(tuievents.AssistantStreamMsg)
+	if !ok {
+		t.Fatalf("expected first message AssistantStreamMsg, got %T", sender.msgs[0])
+	}
+	if reasoningMsg.Kind != "reasoning" || reasoningMsg.Text != "think first" || !reasoningMsg.Final {
+		t.Fatalf("unexpected reasoning message: %+v", reasoningMsg)
+	}
+	callMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected second message LogChunkMsg, got %T", sender.msgs[1])
+	}
+	if !strings.Contains(callMsg.Chunk, "▸ LIST") {
+		t.Fatalf("expected tool call chunk, got %q", callMsg.Chunk)
 	}
 }

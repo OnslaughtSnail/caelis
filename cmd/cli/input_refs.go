@@ -183,7 +183,7 @@ func formatResolvedMentionPrompt(absPath string) string {
 	if cleaned == "" {
 		return ""
 	}
-	return "Please read file: " + cleaned
+	return "请阅读文件: " + cleaned
 }
 
 func (r *inputReferenceResolver) ResolveMention(query string) (string, bool, error) {

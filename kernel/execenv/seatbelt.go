@@ -122,9 +122,9 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 		return result, WrapCodedError(
 			ErrorCodeSandboxCommandTimeout,
 			waitErr,
-			"tool: seatbelt sandbox command timed out after %s; stderr=%s",
+			"tool: seatbelt sandbox command timed out after %s; %s",
 			label,
-			result.Stderr,
+			commandOutputSummary(result),
 		)
 	}
 	if errors.Is(waitErr, errIdleTimeout) {
@@ -134,12 +134,12 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 		}
 		return result, NewCodedError(
 			ErrorCodeSandboxIdleTimeout,
-			"tool: seatbelt sandbox command produced no output for %s and was terminated (likely interactive/long-running); stderr=%s",
+			"tool: seatbelt sandbox command produced no output for %s and was terminated (likely interactive/long-running; try larger idle_timeout_ms); %s",
 			label,
-			result.Stderr,
+			commandOutputSummary(result),
 		)
 	}
-	return result, fmt.Errorf("tool: seatbelt sandbox command failed: %w; stderr=%s", waitErr, result.Stderr)
+	return result, fmt.Errorf("tool: seatbelt sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
 }
 
 func buildSeatbeltProfile(policy SandboxPolicy, workDir string) string {
