@@ -42,14 +42,18 @@ func TestHandleStatus_UsesRunStateCompleted(t *testing.T) {
 		sandboxType: execRT.SandboxType(),
 		modelAlias:  "fake",
 		out:         &out,
+		ui:          newUI(&out, true, false),
 	}
 	_, err = handleStatus(console, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "run_state=completed phase=run") {
-		t.Fatalf("expected completed run_state line, got: %s", text)
+	if !strings.Contains(text, "run_state") || !strings.Contains(text, "completed") {
+		t.Fatalf("expected run_state completed, got: %s", text)
+	}
+	if !strings.Contains(text, "phase") || !strings.Contains(text, "run") {
+		t.Fatalf("expected phase run, got: %s", text)
 	}
 }
 
@@ -82,17 +86,18 @@ func TestHandleStatus_UsesRunStateWaitingApprovalWithCode(t *testing.T) {
 		sandboxType: execRT.SandboxType(),
 		modelAlias:  "fake",
 		out:         &out,
+		ui:          newUI(&out, true, false),
 	}
 	_, err = handleStatus(console, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "run_state=waiting_approval phase=run") {
-		t.Fatalf("expected waiting_approval run_state line, got: %s", text)
+	if !strings.Contains(text, "run_state") || !strings.Contains(text, "waiting_approval") {
+		t.Fatalf("expected run_state waiting_approval, got: %s", text)
 	}
-	if !strings.Contains(text, "run_state_error_code=ERR_APPROVAL_REQUIRED") {
-		t.Fatalf("expected run_state_error_code line, got: %s", text)
+	if !strings.Contains(text, "error_code") || !strings.Contains(text, "ERR_APPROVAL_REQUIRED") {
+		t.Fatalf("expected error_code ERR_APPROVAL_REQUIRED, got: %s", text)
 	}
 }
 
@@ -126,14 +131,15 @@ func TestHandleStatus_UsesRunStateNoneWhenMissing(t *testing.T) {
 		sandboxType: execRT.SandboxType(),
 		modelAlias:  "fake",
 		out:         &out,
+		ui:          newUI(&out, true, false),
 	}
 	_, err = handleStatus(console, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "run_state=none") {
-		t.Fatalf("expected run_state=none line, got: %s", text)
+	if !strings.Contains(text, "run_state") || !strings.Contains(text, "none") {
+		t.Fatalf("expected run_state none, got: %s", text)
 	}
 }
 

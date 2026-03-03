@@ -12,6 +12,11 @@ func newDeepSeek(cfg Config, token string) model.LLM {
 	return llm
 }
 
+// thinkingModeMinTokens is the minimum max_tokens value required for DeepSeek
+// thinking mode. The API defaults to 32K and allows up to 64K; sending a lower
+// limit truncates the reasoning chain.
+const thinkingModeMinTokens = 32768
+
 func applyThinkingReasoning(payload *openAICompatRequest, cfg model.ReasoningConfig) {
 	if payload == nil {
 		return
@@ -22,6 +27,12 @@ func applyThinkingReasoning(payload *openAICompatRequest, cfg model.ReasoningCon
 	state := "disabled"
 	if *cfg.Enabled {
 		state = "enabled"
+		// Thinking mode needs a larger token budget. If the current limit is
+		// absent or below the API's default (32K), bump it up so the reasoning
+		// chain is not prematurely truncated.
+		if payload.MaxTokens <= 0 || payload.MaxTokens < thinkingModeMinTokens {
+			payload.MaxTokens = thinkingModeMinTokens
+		}
 	}
 	payload.Thinking = &openAIThinking{Type: state}
 	payload.Reasoning = nil

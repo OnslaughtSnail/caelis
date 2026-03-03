@@ -15,17 +15,17 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/lspbroker"
+	"github.com/OnslaughtSnail/caelis/internal/cli/lspclient"
 	"github.com/OnslaughtSnail/caelis/kernel/execenv"
-	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
-	"github.com/OnslaughtSnail/caelis/kernel/lspclient"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 const (
-	ToolDiagnostics   = "LSP_DIAGNOSTICS"
-	ToolDefinition    = "LSP_DEFINITION"
-	ToolReferences    = "LSP_REFERENCES"
-	ToolRenamePreview = "LSP_RENAME_PREVIEW"
+	ToolDiagnostics = "LSP_DIAGNOSTICS"
+	ToolDefinition  = "LSP_DEFINITION"
+	ToolReferences  = "LSP_REFERENCES"
+	ToolSymbols     = "LSP_SYMBOLS"
 )
 
 type rpcClient interface {
@@ -33,6 +33,7 @@ type rpcClient interface {
 	Notify(context.Context, string, any) error
 	IsClosed() bool
 	Close() error
+	ServerCapabilities() map[string]any
 }
 
 type clientStarter func(context.Context, lspclient.Config) (rpcClient, error)
@@ -53,6 +54,8 @@ type managedClient struct {
 
 // Adapter exposes gopls-backed LSP tools.
 type Adapter struct {
+	language    string
+	languageID  string
 	command     string
 	args        []string
 	initTimeout time.Duration
@@ -67,6 +70,8 @@ type Config struct {
 	// Runtime is kept for backward compatibility and is not used by stdio LSP mode.
 	Runtime execenv.Runtime
 
+	Language    string
+	LanguageID  string
 	Command     string
 	Args        []string
 	InitTimeout time.Duration
@@ -74,12 +79,20 @@ type Config struct {
 
 func New(cfg Config) (*Adapter, error) {
 	_ = cfg.Runtime
+	language := strings.ToLower(strings.TrimSpace(cfg.Language))
+	if language == "" {
+		language = "go"
+	}
+	languageID := strings.TrimSpace(cfg.LanguageID)
+	if languageID == "" {
+		languageID = language
+	}
 	command := strings.TrimSpace(cfg.Command)
 	if command == "" {
 		command = "gopls"
 	}
 	args := append([]string(nil), cfg.Args...)
-	if len(args) == 0 {
+	if len(args) == 0 && (command == "gopls" || language == "go") {
 		args = []string{"serve"}
 	}
 	initTimeout := cfg.InitTimeout
@@ -87,6 +100,8 @@ func New(cfg Config) (*Adapter, error) {
 		initTimeout = 15 * time.Second
 	}
 	return &Adapter{
+		language:    language,
+		languageID:  languageID,
 		command:     command,
 		args:        args,
 		initTimeout: initTimeout,
@@ -98,7 +113,10 @@ func New(cfg Config) (*Adapter, error) {
 }
 
 func (a *Adapter) Language() string {
-	return "go"
+	if a == nil || strings.TrimSpace(a.language) == "" {
+		return "go"
+	}
+	return a.language
 }
 
 func (a *Adapter) BuildToolSet(ctx context.Context, req lspbroker.ActivateRequest) (*lspbroker.ToolSet, error) {
@@ -106,34 +124,453 @@ func (a *Adapter) BuildToolSet(ctx context.Context, req lspbroker.ActivateReques
 	if err != nil {
 		return nil, err
 	}
-	_ = ctx
 
 	diagnosticsTool, err := a.newDiagnosticsTool(workspace)
 	if err != nil {
 		return nil, err
 	}
-	definitionTool, err := a.newDefinitionTool(workspace)
-	if err != nil {
-		return nil, err
+
+	// Probe whether the language server supports workspace/symbol.
+	symbolsSupported := a.probeSymbolCapability(ctx, workspace)
+
+	tools := []tool.Tool{diagnosticsTool}
+
+	if symbolsSupported {
+		// Symbol-driven mode: DEFINITION and REFERENCES accept a symbol name.
+		symbolsTool, err := a.newSymbolsTool(workspace)
+		if err != nil {
+			return nil, err
+		}
+		definitionTool, err := a.newSymbolDefinitionTool(workspace)
+		if err != nil {
+			return nil, err
+		}
+		referencesTool, err := a.newSymbolReferencesTool(workspace)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, symbolsTool, definitionTool, referencesTool)
+	} else {
+		// Fallback: position-driven mode (original behavior, without RENAME_PREVIEW).
+		definitionTool, err := a.newDefinitionTool(workspace)
+		if err != nil {
+			return nil, err
+		}
+		referencesTool, err := a.newReferencesTool(workspace)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, definitionTool, referencesTool)
 	}
-	referencesTool, err := a.newReferencesTool(workspace)
-	if err != nil {
-		return nil, err
-	}
-	renamePreviewTool, err := a.newRenamePreviewTool(workspace)
-	if err != nil {
-		return nil, err
-	}
+
 	return &lspbroker.ToolSet{
-		ID:       "lsp:go",
-		Language: "go",
-		Tools: []tool.Tool{
-			diagnosticsTool,
-			definitionTool,
-			referencesTool,
-			renamePreviewTool,
-		},
+		ID:       "lsp:" + a.Language(),
+		Language: a.Language(),
+		Tools:    tools,
 	}, nil
+}
+
+// probeSymbolCapability checks if the language server supports workspace/symbol.
+func (a *Adapter) probeSymbolCapability(ctx context.Context, workspace string) bool {
+	mc, err := a.getClient(ctx, workspace, false)
+	if err != nil {
+		return false
+	}
+	caps := mc.client.ServerCapabilities()
+	if caps == nil {
+		return false
+	}
+	v, ok := caps["workspaceSymbolProvider"]
+	if !ok {
+		return false
+	}
+	switch val := v.(type) {
+	case bool:
+		return val
+	case map[string]any:
+		return true // non-nil object means supported
+	default:
+		return false
+	}
+}
+
+// symbolHit is an internal type for resolved symbol information.
+type symbolHit struct {
+	Name          string
+	Kind          string
+	Path          string
+	Line          int
+	Column        int
+	ContainerName string
+}
+
+// lspSymbolInformation represents one workspace/symbol result.
+type lspSymbolInformation struct {
+	Name          string      `json:"name"`
+	Kind          int         `json:"kind"`
+	Location      lspLocation `json:"location"`
+	ContainerName string      `json:"containerName"`
+}
+
+// resolveSymbol queries workspace/symbol and returns matched hits sorted by relevance.
+func (a *Adapter) resolveSymbol(ctx context.Context, workspace, query string) ([]symbolHit, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("tool: arg %q is required", "symbol")
+	}
+
+	var raw []lspSymbolInformation
+	err := withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+		rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		return mc.client.Call(rpcCtx, "workspace/symbol", map[string]any{
+			"query": query,
+		}, &raw)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tool: lsp workspace/symbol failed: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+
+	lineCache := map[string][]string{}
+	hits := make([]symbolHit, 0, len(raw))
+	for _, s := range raw {
+		path := uriToPath(s.Location.URI)
+		if path == "" {
+			continue
+		}
+		lines := readLinesCached(lineCache, path)
+		line, col := lspPositionToUser(lines, s.Location.Range.Start)
+		hits = append(hits, symbolHit{
+			Name:          s.Name,
+			Kind:          symbolKindToString(s.Kind),
+			Path:          path,
+			Line:          line,
+			Column:        col,
+			ContainerName: s.ContainerName,
+		})
+	}
+
+	// Sort: exact match > prefix match > contains match, then by path+line.
+	queryLower := strings.ToLower(query)
+	sort.SliceStable(hits, func(i, j int) bool {
+		si := matchScore(hits[i].Name, queryLower)
+		sj := matchScore(hits[j].Name, queryLower)
+		if si != sj {
+			return si > sj
+		}
+		if hits[i].Path != hits[j].Path {
+			return hits[i].Path < hits[j].Path
+		}
+		return hits[i].Line < hits[j].Line
+	})
+	return hits, nil
+}
+
+// matchScore returns 3 for exact match, 2 for prefix, 1 for contains, 0 for no match.
+func matchScore(name, queryLower string) int {
+	nameLower := strings.ToLower(name)
+	if nameLower == queryLower {
+		return 3
+	}
+	if strings.HasPrefix(nameLower, queryLower) {
+		return 2
+	}
+	if strings.Contains(nameLower, queryLower) {
+		return 1
+	}
+	return 0
+}
+
+// symbolKindToString converts LSP SymbolKind integer to human-readable string.
+func symbolKindToString(kind int) string {
+	switch kind {
+	case 1:
+		return "file"
+	case 2:
+		return "module"
+	case 3:
+		return "namespace"
+	case 4:
+		return "package"
+	case 5:
+		return "class"
+	case 6:
+		return "method"
+	case 7:
+		return "property"
+	case 8:
+		return "field"
+	case 9:
+		return "constructor"
+	case 10:
+		return "enum"
+	case 11:
+		return "interface"
+	case 12:
+		return "function"
+	case 13:
+		return "variable"
+	case 14:
+		return "constant"
+	case 15:
+		return "string"
+	case 16:
+		return "number"
+	case 17:
+		return "boolean"
+	case 18:
+		return "array"
+	case 19:
+		return "object"
+	case 20:
+		return "key"
+	case 21:
+		return "null"
+	case 22:
+		return "enum_member"
+	case 23:
+		return "struct"
+	case 24:
+		return "event"
+	case 25:
+		return "operator"
+	case 26:
+		return "type_parameter"
+	default:
+		return "unknown"
+	}
+}
+
+// ---------- LSP_SYMBOLS tool ----------
+
+func (a *Adapter) newSymbolsTool(workspace string) (tool.Tool, error) {
+	type args struct {
+		Query string `json:"query"`
+	}
+	type symbolItem struct {
+		Name          string `json:"name"`
+		Kind          string `json:"kind"`
+		Path          string `json:"path"`
+		Line          int    `json:"line"`
+		ContainerName string `json:"container_name,omitempty"`
+	}
+	type result struct {
+		Query   string       `json:"query"`
+		Symbols []symbolItem `json:"symbols"`
+	}
+	return tool.NewFunction[args, result](
+		ToolSymbols,
+		"Search for symbols (functions, types, variables) by name across the workspace. Returns matching symbol names, kinds, and locations. Use this to discover symbols before calling LSP_DEFINITION or LSP_REFERENCES.",
+		func(ctx context.Context, in args) (result, error) {
+			hits, err := a.resolveSymbol(ctx, workspace, in.Query)
+			if err != nil {
+				return result{Query: in.Query}, err
+			}
+			const maxResults = 30
+			symbols := make([]symbolItem, 0, len(hits))
+			for i, h := range hits {
+				if i >= maxResults {
+					break
+				}
+				symbols = append(symbols, symbolItem{
+					Name:          h.Name,
+					Kind:          h.Kind,
+					Path:          h.Path,
+					Line:          h.Line,
+					ContainerName: h.ContainerName,
+				})
+			}
+			return result{Query: in.Query, Symbols: symbols}, nil
+		},
+	)
+}
+
+// ---------- Symbol-driven LSP_DEFINITION ----------
+
+func (a *Adapter) newSymbolDefinitionTool(workspace string) (tool.Tool, error) {
+	type args struct {
+		Symbol string `json:"symbol"`
+	}
+	type location struct {
+		Path   string `json:"path"`
+		Line   int    `json:"line"`
+		Column int    `json:"column"`
+	}
+	type result struct {
+		Symbol    string     `json:"symbol"`
+		Ambiguous bool       `json:"ambiguous,omitempty"`
+		Note      string     `json:"note,omitempty"`
+		Error     string     `json:"error,omitempty"`
+		Hint      string     `json:"hint,omitempty"`
+		Locations []location `json:"locations"`
+	}
+	return tool.NewFunction[args, result](
+		ToolDefinition,
+		"Find where a symbol is defined. Provide the symbol name (function, type, variable, etc.). Returns the definition location(s). If the symbol is ambiguous (multiple matches), returns all candidates — call LSP_SYMBOLS first to disambiguate.",
+		func(ctx context.Context, in args) (result, error) {
+			hits, err := a.resolveSymbol(ctx, workspace, in.Symbol)
+			if err != nil {
+				return result{Symbol: in.Symbol}, err
+			}
+			if len(hits) == 0 {
+				return result{
+					Symbol: in.Symbol,
+					Error:  "symbol not found",
+					Hint:   "try SEARCH tool with the symbol name as query",
+				}, nil
+			}
+
+			// Limit candidates to avoid too many RPC calls.
+			candidates := hits
+			if len(candidates) > 5 {
+				candidates = candidates[:5]
+			}
+
+			ambiguous := len(hits) > 1
+			allLocations := make([]location, 0)
+			seen := map[string]bool{}
+
+			for _, hit := range candidates {
+				absPath, _, lines, syncErr := a.ensureDocumentSynced(ctx, workspace, hit.Path)
+				if syncErr != nil {
+					continue
+				}
+				pos, posErr := userPositionToLSP(lines, hit.Line, hit.Column)
+				if posErr != nil {
+					continue
+				}
+
+				var raw json.RawMessage
+				callErr := withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+					rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer cancel()
+					return mc.client.Call(rpcCtx, "textDocument/definition", map[string]any{
+						"textDocument": map[string]any{"uri": mustPathToURI(absPath)},
+						"position":     pos,
+					}, &raw)
+				})
+				if callErr != nil {
+					continue
+				}
+				locs, decErr := decodeLocations(raw)
+				if decErr != nil {
+					continue
+				}
+				resolved := convertLocations(locs)
+				for _, one := range resolved {
+					key := fmt.Sprintf("%s:%d:%d", one.Path, one.Line, one.Column)
+					if seen[key] {
+						continue
+					}
+					seen[key] = true
+					allLocations = append(allLocations, location{
+						Path:   one.Path,
+						Line:   one.Line,
+						Column: one.Column,
+					})
+				}
+			}
+
+			out := result{
+				Symbol:    in.Symbol,
+				Ambiguous: ambiguous,
+				Locations: allLocations,
+			}
+			if ambiguous {
+				out.Note = fmt.Sprintf("%d symbols matched '%s', results combined. Call LSP_SYMBOLS to see all candidates.", len(hits), in.Symbol)
+			}
+			if len(allLocations) == 0 {
+				out.Error = "no definitions found"
+				out.Hint = "try SEARCH tool with the symbol name as query"
+			}
+			return out, nil
+		},
+	)
+}
+
+// ---------- Symbol-driven LSP_REFERENCES ----------
+
+func (a *Adapter) newSymbolReferencesTool(workspace string) (tool.Tool, error) {
+	type args struct {
+		Symbol string `json:"symbol"`
+	}
+	type refLocation struct {
+		Path string `json:"path"`
+		Line int    `json:"line"`
+	}
+	type result struct {
+		Symbol     string        `json:"symbol"`
+		TotalCount int           `json:"total_count"`
+		Note       string        `json:"note,omitempty"`
+		Error      string        `json:"error,omitempty"`
+		Hint       string        `json:"hint,omitempty"`
+		References []refLocation `json:"references"`
+	}
+	return tool.NewFunction[args, result](
+		ToolReferences,
+		"Find all references (usages) of a symbol across the workspace. Returns file paths and line numbers where the symbol is used. If the symbol name is ambiguous, returns references for the best match and notes the ambiguity.",
+		func(ctx context.Context, in args) (result, error) {
+			hits, err := a.resolveSymbol(ctx, workspace, in.Symbol)
+			if err != nil {
+				return result{Symbol: in.Symbol}, err
+			}
+			if len(hits) == 0 {
+				return result{
+					Symbol: in.Symbol,
+					Error:  "symbol not found",
+					Hint:   "try SEARCH tool with the symbol name as query",
+				}, nil
+			}
+
+			// Use the best match (Top1).
+			best := hits[0]
+			absPath, _, lines, syncErr := a.ensureDocumentSynced(ctx, workspace, best.Path)
+			if syncErr != nil {
+				return result{Symbol: in.Symbol}, syncErr
+			}
+			pos, posErr := userPositionToLSP(lines, best.Line, best.Column)
+			if posErr != nil {
+				return result{Symbol: in.Symbol}, posErr
+			}
+
+			var raw []lspLocation
+			callErr := withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+				rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				defer cancel()
+				return mc.client.Call(rpcCtx, "textDocument/references", map[string]any{
+					"textDocument": map[string]any{"uri": mustPathToURI(absPath)},
+					"position":     pos,
+					"context":      map[string]any{"includeDeclaration": true},
+				}, &raw)
+			})
+			if callErr != nil {
+				return result{Symbol: in.Symbol}, fmt.Errorf("tool: lsp references failed: %w", callErr)
+			}
+
+			resolved := convertLocations(raw)
+			refs := make([]refLocation, 0, len(resolved))
+			for _, one := range resolved {
+				refs = append(refs, refLocation{
+					Path: one.Path,
+					Line: one.Line,
+				})
+			}
+
+			out := result{
+				Symbol:     in.Symbol,
+				TotalCount: len(refs),
+				References: refs,
+			}
+			if len(hits) > 1 {
+				out.Note = fmt.Sprintf("%d symbols matched '%s', showing references for %s at %s:%d. Call LSP_SYMBOLS to see all candidates.",
+					len(hits), in.Symbol, best.Name, best.Path, best.Line)
+			}
+			return out, nil
+		},
+	)
 }
 
 func (a *Adapter) newDiagnosticsTool(workspace string) (tool.Tool, error) {
@@ -155,7 +592,7 @@ func (a *Adapter) newDiagnosticsTool(workspace string) (tool.Tool, error) {
 		Path        string           `json:"path"`
 		Diagnostics []diagnosticItem `json:"diagnostics"`
 	}
-	return tool.NewFunction[args, result](ToolDiagnostics, "Get diagnostics for one Go source file.", func(ctx context.Context, in args) (result, error) {
+	return tool.NewFunction[args, result](ToolDiagnostics, "Get diagnostics for one source file.", func(ctx context.Context, in args) (result, error) {
 		absPath, _, _, err := a.ensureDocumentSynced(ctx, workspace, strings.TrimSpace(in.Path))
 		if err != nil {
 			return result{}, err
@@ -170,7 +607,7 @@ func (a *Adapter) newDiagnosticsTool(workspace string) (tool.Tool, error) {
 			}, &report)
 		})
 		if err != nil {
-			return result{}, fmt.Errorf("tool: gopls diagnostics failed: %w", err)
+			return result{}, fmt.Errorf("tool: lsp diagnostics failed: %w", err)
 		}
 
 		items := make([]diagnosticItem, 0, len(report.Items))
@@ -246,7 +683,7 @@ func (a *Adapter) newDefinitionTool(workspace string) (tool.Tool, error) {
 			}, &raw)
 		})
 		if err != nil {
-			return result{}, fmt.Errorf("tool: gopls definition failed: %w", err)
+			return result{}, fmt.Errorf("tool: lsp definition failed: %w", err)
 		}
 
 		locations, err := decodeLocations(raw)
@@ -310,7 +747,7 @@ func (a *Adapter) newReferencesTool(workspace string) (tool.Tool, error) {
 			}, &raw)
 		})
 		if err != nil {
-			return result{}, fmt.Errorf("tool: gopls references failed: %w", err)
+			return result{}, fmt.Errorf("tool: lsp references failed: %w", err)
 		}
 		resolved := convertLocations(raw)
 		out := result{Query: query, References: make([]location, 0, len(resolved))}
@@ -318,106 +755,6 @@ func (a *Adapter) newReferencesTool(workspace string) (tool.Tool, error) {
 			out.References = append(out.References, location(one))
 		}
 		return out, nil
-	})
-}
-
-func (a *Adapter) newRenamePreviewTool(workspace string) (tool.Tool, error) {
-	type args struct {
-		Path    string `json:"path"`
-		Line    int    `json:"line"`
-		Column  int    `json:"column"`
-		NewName string `json:"new_name"`
-	}
-	type editItem struct {
-		StartLine   int    `json:"start_line"`
-		StartColumn int    `json:"start_column"`
-		EndLine     int    `json:"end_line"`
-		EndColumn   int    `json:"end_column"`
-		NewText     string `json:"new_text"`
-	}
-	type fileChange struct {
-		Path      string     `json:"path"`
-		EditCount int        `json:"edit_count"`
-		Edits     []editItem `json:"edits"`
-	}
-	type result struct {
-		Query        string       `json:"query"`
-		NewName      string       `json:"new_name"`
-		ChangedFiles int          `json:"changed_files"`
-		TotalEdits   int          `json:"total_edits"`
-		Files        []fileChange `json:"files"`
-	}
-	return tool.NewFunction[args, result](ToolRenamePreview, "Preview rename edits by file position and new symbol name.", func(ctx context.Context, in args) (result, error) {
-		newName := strings.TrimSpace(in.NewName)
-		if newName == "" {
-			return result{}, fmt.Errorf("tool: arg %q is required", "new_name")
-		}
-		absPath, _, lines, err := a.ensureDocumentSynced(ctx, workspace, strings.TrimSpace(in.Path))
-		if err != nil {
-			return result{}, err
-		}
-		pos, err := userPositionToLSP(lines, in.Line, in.Column)
-		if err != nil {
-			return result{}, err
-		}
-		query := fmt.Sprintf("%s:%d:%d", absPath, in.Line, in.Column)
-
-		var wsEdit lspWorkspaceEdit
-		err = withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
-			rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			defer cancel()
-			var prepare any
-			if callErr := mc.client.Call(rpcCtx, "textDocument/prepareRename", map[string]any{
-				"textDocument": map[string]any{"uri": mustPathToURI(absPath)},
-				"position":     pos,
-			}, &prepare); callErr != nil {
-				return callErr
-			}
-			return mc.client.Call(rpcCtx, "textDocument/rename", map[string]any{
-				"textDocument": map[string]any{"uri": mustPathToURI(absPath)},
-				"position":     pos,
-				"newName":      newName,
-			}, &wsEdit)
-		})
-		if err != nil {
-			return result{}, fmt.Errorf("tool: gopls rename preview failed: %w", err)
-		}
-
-		changes := flattenWorkspaceEdit(wsEdit)
-		files := make([]fileChange, 0, len(changes))
-		lineCache := map[string][]string{}
-		totalEdits := 0
-		for path, edits := range changes {
-			lines := readLinesCached(lineCache, path)
-			fc := fileChange{
-				Path:      path,
-				EditCount: len(edits),
-				Edits:     make([]editItem, 0, len(edits)),
-			}
-			for _, one := range edits {
-				startLine, startCol := lspPositionToUser(lines, one.Range.Start)
-				endLine, endCol := lspPositionToUser(lines, one.Range.End)
-				fc.Edits = append(fc.Edits, editItem{
-					StartLine:   startLine,
-					StartColumn: startCol,
-					EndLine:     endLine,
-					EndColumn:   endCol,
-					NewText:     one.NewText,
-				})
-			}
-			totalEdits += len(edits)
-			files = append(files, fc)
-		}
-		sort.Slice(files, func(i, j int) bool {
-			return files[i].Path < files[j].Path
-		})
-		return result{
-			Query:        query,
-			NewName:      newName,
-			ChangedFiles: len(files),
-			TotalEdits:   totalEdits,
-			Files:        files,
-		}, nil
 	})
 }
 
@@ -445,7 +782,7 @@ func (a *Adapter) ensureDocumentSynced(ctx context.Context, workspace, path stri
 			if notifyErr := mc.client.Notify(rpcCtx, "textDocument/didOpen", map[string]any{
 				"textDocument": map[string]any{
 					"uri":        uri,
-					"languageId": "go",
+					"languageId": a.languageID,
 					"version":    1,
 					"text":       string(content),
 				},
@@ -506,7 +843,7 @@ func withManagedClient(a *Adapter, ctx context.Context, workspace string, fn fun
 
 func (a *Adapter) getClient(ctx context.Context, workspace string, forceRecreate bool) (*managedClient, error) {
 	if a == nil {
-		return nil, fmt.Errorf("tool: gopls adapter is nil")
+		return nil, fmt.Errorf("tool: lsp adapter is nil")
 	}
 	ws, err := normalizeWorkspace(workspace)
 	if err != nil {
@@ -534,7 +871,7 @@ func (a *Adapter) getClient(ctx context.Context, workspace string, forceRecreate
 		InitTimeout: a.initTimeout,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("tool: start gopls LSP client failed: %w", err)
+		return nil, fmt.Errorf("tool: start LSP client failed: %w", err)
 	}
 	managed := &managedClient{
 		workspace: ws,
@@ -737,25 +1074,6 @@ type lspDocumentDiagnosticReport struct {
 	Items []lspDiagnostic `json:"items"`
 }
 
-type lspTextEdit struct {
-	Range   lspRange `json:"range"`
-	NewText string   `json:"newText"`
-}
-
-type lspWorkspaceEdit struct {
-	Changes         map[string][]lspTextEdit    `json:"changes"`
-	DocumentChanges []lspTextDocumentEditHolder `json:"documentChanges"`
-}
-
-type lspTextDocumentEditHolder struct {
-	TextDocument *lspVersionedTextDocumentIdentifier `json:"textDocument,omitempty"`
-	Edits        []lspTextEdit                       `json:"edits,omitempty"`
-}
-
-type lspVersionedTextDocumentIdentifier struct {
-	URI string `json:"uri"`
-}
-
 type outputLocation struct {
 	Path      string
 	Line      int
@@ -831,27 +1149,5 @@ func convertLocations(items []lspLocation) []outputLocation {
 		}
 		return out[i].Column < out[j].Column
 	})
-	return out
-}
-
-func flattenWorkspaceEdit(edit lspWorkspaceEdit) map[string][]lspTextEdit {
-	out := map[string][]lspTextEdit{}
-	for uri, edits := range edit.Changes {
-		path := uriToPath(uri)
-		if path == "" {
-			continue
-		}
-		out[path] = append(out[path], edits...)
-	}
-	for _, dc := range edit.DocumentChanges {
-		if dc.TextDocument == nil || strings.TrimSpace(dc.TextDocument.URI) == "" {
-			continue
-		}
-		path := uriToPath(dc.TextDocument.URI)
-		if path == "" {
-			continue
-		}
-		out[path] = append(out[path], dc.Edits...)
-	}
 	return out
 }

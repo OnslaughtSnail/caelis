@@ -32,19 +32,20 @@ type compactInput struct {
 	Force               bool
 }
 
+type CompactionSummaryFormatter func(string) string
+
 // CompactionConfig configures runtime history compaction behavior.
 type CompactionConfig struct {
-	Enabled                    bool
 	WatermarkRatio             float64
 	MinWatermarkRatio          float64
 	MaxWatermarkRatio          float64
 	DefaultContextWindowTokens int
 	ReserveOutputTokens        int
 	SafetyMarginTokens         int
-	PreserveRecentTurns        int
 	SummaryChunkTokens         int
 	MaxModelSummaryRetries     int
 	Strategy                   CompactionStrategy
+	SummaryFormatter           CompactionSummaryFormatter
 }
 
 func normalizeCompactionConfig(cfg CompactionConfig) CompactionConfig {
@@ -68,17 +69,14 @@ func normalizeCompactionConfig(cfg CompactionConfig) CompactionConfig {
 	if cfg.SafetyMarginTokens <= 0 {
 		cfg.SafetyMarginTokens = 1024
 	}
-	if cfg.PreserveRecentTurns <= 0 {
-		cfg.PreserveRecentTurns = 2
-	}
 	if cfg.SummaryChunkTokens <= 0 {
 		cfg.SummaryChunkTokens = 6000
 	}
 	if cfg.MaxModelSummaryRetries <= 0 {
 		cfg.MaxModelSummaryRetries = 3
 	}
-	if !cfg.Enabled {
-		cfg.Enabled = true
+	if cfg.SummaryFormatter == nil {
+		cfg.SummaryFormatter = defaultCompactionSummaryFormatter
 	}
 	return cfg
 }
@@ -103,7 +101,7 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 		return nil, nil
 	}
 
-	toSummarize, tail := splitCompactionTarget(windowEvents, r.compaction.PreserveRecentTurns)
+	toSummarize, tail := splitCompactionTarget(windowEvents)
 	if len(toSummarize) == 0 {
 		return nil, nil
 	}
@@ -112,7 +110,8 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(summary) == "" {
+	compiledSummary := strings.TrimSpace(r.compaction.SummaryFormatter(summary))
+	if compiledSummary == "" {
 		return nil, nil
 	}
 
@@ -122,8 +121,8 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 		SessionID: in.Session.ID,
 		Time:      time.Now(),
 		Message: model.Message{
-			Role: model.RoleSystem,
-			Text: summary,
+			Role: model.RoleUser,
+			Text: compiledSummary,
 		},
 		Meta: map[string]any{
 			metaKind: metaKindCompaction,
@@ -195,47 +194,17 @@ func splitByTokenBudget(events []*session.Event, budget int) [][]*session.Event 
 	return chunks
 }
 
-func splitCompactionTarget(window []*session.Event, preserveRecentTurns int) ([]*session.Event, []*session.Event) {
+func splitCompactionTarget(window []*session.Event) ([]*session.Event, []*session.Event) {
 	if len(window) == 0 {
 		return nil, nil
 	}
-	userIndices := make([]int, 0, 16)
-	for i, ev := range window {
-		if ev != nil && ev.Message.Role == model.RoleUser {
-			userIndices = append(userIndices, i)
-		}
-	}
-	if len(userIndices) == 0 {
-		return window, nil
-	}
-	if preserveRecentTurns < 1 {
-		preserveRecentTurns = 1
-	}
-	if len(userIndices) <= preserveRecentTurns {
-		return nil, window
-	}
-	cutoff := userIndices[len(userIndices)-preserveRecentTurns]
-	if cutoff <= 0 || cutoff >= len(window) {
-		return nil, window
-	}
-	return window[:cutoff], window[cutoff:]
+	// Compact the entire current context window into one checkpoint event.
+	// This avoids mixing summary + preserved tail turns.
+	return window, nil
 }
 
 func contextWindowEvents(events []*session.Event) []*session.Event {
-	if len(events) == 0 {
-		return nil
-	}
-	lastCompaction := -1
-	for i := len(events) - 1; i >= 0; i-- {
-		if isCompactionEvent(events[i]) {
-			lastCompaction = i
-			break
-		}
-	}
-	if lastCompaction < 0 {
-		return events
-	}
-	return events[lastCompaction:]
+	return session.ContextWindowEvents(events)
 }
 
 func isCompactionEvent(ev *session.Event) bool {
@@ -252,22 +221,38 @@ func isCompactionEvent(ev *session.Event) bool {
 
 func heuristicFallbackSummary(events []*session.Event, inputBudget int) string {
 	if len(events) == 0 {
-		return "Fallback summary: no events available."
+		return "## Active Objective\n- unknown\n\n## Current Task State\n- unknown\n\n## Completed Tasks\n- none\n\n## Pending Next Tasks\n1. Continue from latest user request in context.\n\n## Constraints And Preferences\n- unknown\n\n## Open Issues And Risks\n- model compaction fallback used due degraded summarization\n\n## Critical References\n- none"
 	}
 	tail := events
 	if len(tail) > 24 {
 		tail = tail[len(tail)-24:]
 	}
 	var b strings.Builder
-	b.WriteString("Fallback summary (heuristic, model compaction degraded):\n")
+	b.WriteString("## Active Objective\n")
+	b.WriteString("- Derive from the latest user request in retained context.\n\n")
+	b.WriteString("## Current Task State\n")
+	b.WriteString("- heuristic fallback summary; verify details before editing.\n\n")
+	b.WriteString("## Completed Tasks\n")
 	for _, ev := range tail {
 		if ev == nil {
 			continue
 		}
-		fmt.Fprintf(&b, "- %s: %s\n", ev.Message.Role, clipText(eventToText(ev), 240))
+		fmt.Fprintf(&b, "- %s: %s\n", ev.Message.Role, clipText(eventToText(ev), 220))
 	}
-	fmt.Fprintf(&b, "Estimated context budget=%d tokens.\n", inputBudget)
+	b.WriteString("\n## Pending Next Tasks\n")
+	b.WriteString("1. Continue execution from the latest unresolved user request.\n")
+	b.WriteString("2. Re-read key files before major mutations when uncertainty exists.\n\n")
+	b.WriteString("## Constraints And Preferences\n")
+	b.WriteString("- unknown (heuristic fallback)\n\n")
+	b.WriteString("\n## Open Issues And Risks\n")
+	b.WriteString("- Model compaction degraded; details may be incomplete.\n\n")
+	b.WriteString("## Critical References\n")
+	fmt.Fprintf(&b, "- Estimated context budget: %d tokens.\n", inputBudget)
 	return strings.TrimSpace(b.String())
+}
+
+func defaultCompactionSummaryFormatter(summary string) string {
+	return strings.TrimSpace(summary)
 }
 
 func eventToText(ev *session.Event) string {

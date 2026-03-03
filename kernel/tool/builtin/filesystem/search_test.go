@@ -18,7 +18,10 @@ func TestSearchTool_ReportsTruncationAndFileStats(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewSearch()
+	tool, err := NewSearchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path":  tmpDir,
 		"query": "hello",
@@ -50,7 +53,10 @@ func TestSearchTool_ReturnsColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewSearch()
+	tool, err := NewSearchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path":           path,
 		"query":          "hello",

@@ -1,28 +1,14 @@
 package shell
 
 import (
-	"sync"
+	"fmt"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-)
-
-var (
-	defaultRuntimeOnce sync.Once
-	defaultRuntimeInst toolexec.Runtime
-	defaultRuntimeErr  error
 )
 
 func runtimeOrDefault(runtime toolexec.Runtime) (toolexec.Runtime, error) {
 	if runtime != nil {
 		return runtime, nil
 	}
-	defaultRuntimeOnce.Do(func() {
-		defaultRuntimeInst, defaultRuntimeErr = toolexec.New(toolexec.Config{
-			PermissionMode: toolexec.PermissionModeDefault,
-		})
-	})
-	if defaultRuntimeErr != nil {
-		return nil, defaultRuntimeErr
-	}
-	return defaultRuntimeInst, nil
+	return nil, fmt.Errorf("tool: runtime is required")
 }

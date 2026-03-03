@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"iter"
 
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
@@ -59,7 +60,7 @@ func main() {
 		}
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "call_1", Name: "echo", Args: map[string]any{"text": "hello from tool"}}}}}, nil
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "call_1", Name: "echo", Args: `{"text":"hello from tool"}`}}}}, nil
 		}
 		if last.Role == model.RoleTool && last.ToolResponse != nil {
 			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: fmt.Sprintf("tool result: %v", last.ToolResponse.Result)}}, nil
@@ -77,6 +78,15 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	execRuntime, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		_ = toolexec.Close(execRuntime)
+	}()
 
 	for ev, runErr := range rt.Run(context.Background(), runtime.RunRequest{
 		AppName:   "demo-app",
@@ -86,6 +96,7 @@ func main() {
 		Agent:     ag,
 		Model:     llm,
 		Tools:     []tool.Tool{echoTool},
+		CoreTools: tool.CoreToolsConfig{Runtime: execRuntime},
 	}) {
 		if runErr != nil {
 			panic(runErr)

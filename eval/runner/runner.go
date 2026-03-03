@@ -13,12 +13,14 @@ import (
 	"github.com/OnslaughtSnail/caelis/eval/cases"
 	evalproviders "github.com/OnslaughtSnail/caelis/eval/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 // Options controls eval runner behavior.
@@ -60,6 +62,9 @@ func Run(ctx context.Context, opts Options) (*Summary, error) {
 		suite = "light"
 	}
 	modelAliases := resolveModelAliases(opts)
+	if len(modelAliases) == 0 {
+		return nil, fmt.Errorf("eval: no runnable models configured; set model credentials via env vars or pass -model/-models")
+	}
 	streamModes := resolveStreamModes(opts.StreamModes)
 	thinkingModes := resolveThinkingModes(opts.ThinkingModes)
 
@@ -124,7 +129,6 @@ func runOne(ctx context.Context, c cases.Case, llm model.LLM, stream bool, reaso
 	ag, err := llmagent.New(llmagent.Config{
 		Name:         "eval-agent",
 		SystemPrompt: "You are a reliable evaluator assistant.",
-		MaxSteps:     8,
 		StreamModel:  stream,
 		Reasoning:    reasoning,
 	})
@@ -136,6 +140,15 @@ func runOne(ctx context.Context, c cases.Case, llm model.LLM, stream bool, reaso
 	if err != nil {
 		return 0, 0, err
 	}
+	execRuntime, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		_ = toolexec.Close(execRuntime)
+	}()
 	runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
@@ -147,6 +160,7 @@ func runOne(ctx context.Context, c cases.Case, llm model.LLM, stream bool, reaso
 		Agent:     ag,
 		Model:     llm,
 		Tools:     resolved.Tools,
+		CoreTools: tool.CoreToolsConfig{Runtime: execRuntime},
 		Policies:  resolved.Policies,
 	}) {
 		if err != nil {

@@ -10,7 +10,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolfs "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/filesystem"
-	toollsp "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/lsp"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
 	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 )
@@ -19,7 +18,6 @@ const (
 	ProviderLocalTools     = "local_tools"
 	ProviderWorkspaceTools = "workspace_tools"
 	ProviderShellTools     = "shell_tools"
-	ProviderLSPActivation  = "lsp_activation"
 	ProviderMCPTools       = "mcp_tools"
 	ProviderDefaultPolicy  = "default_allow"
 )
@@ -42,9 +40,6 @@ func RegisterAll(r *plugin.Registry, options RegisterOptions) error {
 		return err
 	}
 	if err := r.RegisterToolProvider(shellToolProvider{runtime: options.ExecutionRuntime}); err != nil {
-		return err
-	}
-	if err := r.RegisterToolProvider(lspActivationToolProvider{}); err != nil {
 		return err
 	}
 	if err := r.RegisterToolProvider(mcpToolProvider{manager: options.MCPToolManager}); err != nil {
@@ -180,31 +175,19 @@ func (p defaultPolicyProvider) Name() string {
 func (p defaultPolicyProvider) Policies(ctx context.Context) ([]policy.Hook, error) {
 	_ = ctx
 	hooks := []policy.Hook{
-		policy.DefaultAllow(),
+		policy.DefaultSecurityBaseline(),
 	}
 	if p.runtime != nil {
 		hooks = append(hooks, policy.RouteCommandExecution(policy.CommandExecutionConfig{
 			Runtime:  p.runtime,
 			ToolName: toolshell.BashToolName,
 		}))
+		hooks = append(hooks, policy.WorkspaceBoundary(policy.WorkspaceBoundaryConfig{
+			Runtime: p.runtime,
+		}))
 	}
 	hooks = append(hooks, policy.RequireReadBeforeWrite(policy.ReadBeforeWriteConfig{}))
 	return hooks, nil
-}
-
-type lspActivationToolProvider struct{}
-
-func (p lspActivationToolProvider) Name() string {
-	return ProviderLSPActivation
-}
-
-func (p lspActivationToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
-	_ = ctx
-	activateTool, err := toollsp.NewActivate()
-	if err != nil {
-		return nil, err
-	}
-	return []tool.Tool{activateTool}, nil
 }
 
 type mcpToolProvider struct {

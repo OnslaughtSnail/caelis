@@ -145,6 +145,17 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
+	// Destructive commands (rm, shred, dd with of=…) are routed to the sandbox
+	// but still require explicit user approval before execution.
+	if policyDecision.Effect == policy.DecisionEffectRequireApproval && decision.Route == toolexec.ExecutionRouteSandbox {
+		approvalReason := strings.TrimSpace(policyDecision.Reason)
+		if approvalReason == "" {
+			approvalReason = "command requires approval before execution"
+		}
+		if err := requestApproval(ctx, command, approvalReason); err != nil {
+			return nil, err
+		}
+	}
 	runner, needApproval, reason, err := t.resolveRunner(decision)
 	if err != nil {
 		return nil, err
@@ -178,12 +189,13 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		})
 	}
 	if err != nil {
-		return nil, fmt.Errorf("tool: BASH failed: %w", err)
+		return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
 	}
 	return map[string]any{
 		"stdout":    result.Stdout,
 		"stderr":    result.Stderr,
 		"exit_code": result.ExitCode,
+		"route":     string(decision.Route),
 	}, nil
 }
 

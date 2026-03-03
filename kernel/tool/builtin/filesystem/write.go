@@ -20,11 +20,6 @@ type WriteTool struct {
 	runtime toolexec.Runtime
 }
 
-func NewWrite() *WriteTool {
-	tool, _ := NewWriteWithRuntime(nil)
-	return tool
-}
-
 func NewWriteWithRuntime(runtime toolexec.Runtime) (*WriteTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(runtime)
 	if err != nil {

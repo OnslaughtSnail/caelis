@@ -10,6 +10,11 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
+const (
+	deepSeekAPIKeyEnv = "DEEPSEEK_API_KEY"
+	geminiAPIKeyEnv   = "GEMINI_API_KEY"
+)
+
 func NewByAlias(alias string) (model.LLM, error) {
 	factory, err := defaultFactory()
 	if err != nil {
@@ -27,65 +32,68 @@ func ListModels() []string {
 }
 
 func defaultFactory() (*modelproviders.Factory, error) {
-	deepseekToken := strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
-	geminiToken := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
-	if deepseekToken == "" {
-		return nil, fmt.Errorf("eval providers: DEEPSEEK_API_KEY is required")
-	}
-	if geminiToken == "" {
-		return nil, fmt.Errorf("eval providers: GEMINI_API_KEY is required")
-	}
-
 	factory := modelproviders.NewFactory()
-	configs := []modelproviders.Config{
-		{
-			Alias:               "deepseek-chat",
-			Provider:            "deepseek",
-			API:                 modelproviders.APIDeepSeek,
-			Model:               "deepseek-chat",
-			BaseURL:             "https://api.deepseek.com/v1",
-			ContextWindowTokens: 64000,
-			Auth: modelproviders.AuthConfig{
-				Type:  modelproviders.AuthAPIKey,
-				Token: deepseekToken,
+	configs := make([]modelproviders.Config, 0, 4)
+	deepseekToken := strings.TrimSpace(os.Getenv(deepSeekAPIKeyEnv))
+	if deepseekToken != "" {
+		configs = append(configs,
+			modelproviders.Config{
+				Alias:               "deepseek-chat",
+				Provider:            "deepseek",
+				API:                 modelproviders.APIDeepSeek,
+				Model:               "deepseek-chat",
+				BaseURL:             "https://api.deepseek.com/v1",
+				ContextWindowTokens: 64000,
+				Auth: modelproviders.AuthConfig{
+					Type:  modelproviders.AuthAPIKey,
+					Token: deepseekToken,
+				},
 			},
-		},
-		{
-			Alias:               "deepseek/deepseek-chat",
-			Provider:            "deepseek",
-			API:                 modelproviders.APIDeepSeek,
-			Model:               "deepseek-chat",
-			BaseURL:             "https://api.deepseek.com/v1",
-			ContextWindowTokens: 64000,
-			Auth: modelproviders.AuthConfig{
-				Type:  modelproviders.AuthAPIKey,
-				Token: deepseekToken,
+			modelproviders.Config{
+				Alias:               "deepseek/deepseek-chat",
+				Provider:            "deepseek",
+				API:                 modelproviders.APIDeepSeek,
+				Model:               "deepseek-chat",
+				BaseURL:             "https://api.deepseek.com/v1",
+				ContextWindowTokens: 64000,
+				Auth: modelproviders.AuthConfig{
+					Type:  modelproviders.AuthAPIKey,
+					Token: deepseekToken,
+				},
 			},
-		},
-		{
-			Alias:               "gemini-2.5-flash",
-			Provider:            "gemini",
-			API:                 modelproviders.APIGemini,
-			Model:               "gemini-2.5-flash",
-			BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
-			ContextWindowTokens: 128000,
-			Auth: modelproviders.AuthConfig{
-				Type:  modelproviders.AuthAPIKey,
-				Token: geminiToken,
+		)
+	}
+	geminiToken := strings.TrimSpace(os.Getenv(geminiAPIKeyEnv))
+	if geminiToken != "" {
+		configs = append(configs,
+			modelproviders.Config{
+				Alias:               "gemini-2.5-flash",
+				Provider:            "gemini",
+				API:                 modelproviders.APIGemini,
+				Model:               "gemini-2.5-flash",
+				BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
+				ContextWindowTokens: 128000,
+				Auth: modelproviders.AuthConfig{
+					Type:  modelproviders.AuthAPIKey,
+					Token: geminiToken,
+				},
 			},
-		},
-		{
-			Alias:               "gemini/gemini-2.5-flash",
-			Provider:            "gemini",
-			API:                 modelproviders.APIGemini,
-			Model:               "gemini-2.5-flash",
-			BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
-			ContextWindowTokens: 128000,
-			Auth: modelproviders.AuthConfig{
-				Type:  modelproviders.AuthAPIKey,
-				Token: geminiToken,
+			modelproviders.Config{
+				Alias:               "gemini/gemini-2.5-flash",
+				Provider:            "gemini",
+				API:                 modelproviders.APIGemini,
+				Model:               "gemini-2.5-flash",
+				BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
+				ContextWindowTokens: 128000,
+				Auth: modelproviders.AuthConfig{
+					Type:  modelproviders.AuthAPIKey,
+					Token: geminiToken,
+				},
 			},
-		},
+		)
+	}
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("eval providers: no model credentials configured; set %s and/or %s", deepSeekAPIKeyEnv, geminiAPIKeyEnv)
 	}
 	for _, cfg := range configs {
 		if err := factory.Register(cfg); err != nil {
@@ -115,7 +123,13 @@ func NormalizeModelAlias(alias string) string {
 }
 
 func DefaultModelAliases() []string {
-	values := []string{"deepseek-chat", "gemini-2.5-flash"}
+	values := make([]string, 0, 2)
+	if strings.TrimSpace(os.Getenv(deepSeekAPIKeyEnv)) != "" {
+		values = append(values, "deepseek-chat")
+	}
+	if strings.TrimSpace(os.Getenv(geminiAPIKeyEnv)) != "" {
+		values = append(values, "gemini-2.5-flash")
+	}
 	sort.Strings(values)
 	return values
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 func TestLifecycleFromEvent_Parses(t *testing.T) {
@@ -52,6 +53,7 @@ func TestRuntime_RunState_Completed(t *testing.T) {
 		Input:     "hello",
 		Agent:     fixedAgent{},
 		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
 	}) {
 		if runErr != nil {
 			t.Fatal(runErr)
@@ -88,6 +90,7 @@ func TestRuntime_RunState_WaitingApproval(t *testing.T) {
 		Input:     "hello",
 		Agent:     approvalRequiredAgent{},
 		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
 	}) {
 		if runErr != nil {
 			gotErr = runErr

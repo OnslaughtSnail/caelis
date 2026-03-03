@@ -16,7 +16,11 @@ import (
 
 type runRenderConfig struct {
 	ShowReasoning bool
+	Verbose       bool
 	Writer        io.Writer
+	UI            *ui
+	OnUsage       func(int) // called with prompt_tokens count after run completes
+	OnEvent       func(*session.Event) bool
 }
 
 func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, renderCfg runRenderConfig) error {
@@ -27,7 +31,9 @@ func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, r
 	}
 	render := &renderState{
 		showReasoning:    renderCfg.ShowReasoning,
+		verbose:          renderCfg.Verbose,
 		out:              out,
+		ui:               renderCfg.UI,
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
 	for ev, err := range rt.Run(invokeCtx, req) {
@@ -37,10 +43,26 @@ func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, r
 		if ev == nil {
 			continue
 		}
+		if ev.Meta != nil {
+			if raw, ok := ev.Meta["usage"]; ok {
+				if usageMap, ok := raw.(map[string]any); ok {
+					prompt := toInt(usageMap["prompt_tokens"])
+					if prompt > 0 {
+						render.lastPromptTokens = prompt
+					}
+				}
+			}
+		}
+		if renderCfg.OnEvent != nil && renderCfg.OnEvent(ev) {
+			continue
+		}
 		printEvent(ev, render)
 	}
 	if render.partialOpen {
 		fmt.Fprintln(render.out)
+	}
+	if renderCfg.OnUsage != nil && render.lastPromptTokens > 0 {
+		renderCfg.OnUsage(render.lastPromptTokens)
 	}
 	return nil
 }
@@ -50,9 +72,14 @@ type renderState struct {
 	partialChannel       string
 	seenAnswerPartial    bool
 	seenReasoningPartial bool
+	answerPartialBuffer  strings.Builder
 	showReasoning        bool
+	verbose              bool
+	replayUserMessages   bool
 	out                  io.Writer
+	ui                   *ui
 	pendingToolCalls     map[string]toolCallSnapshot
+	lastPromptTokens     int // most recent prompt token count from event metadata
 }
 
 type toolCallSnapshot struct {
@@ -62,6 +89,22 @@ type toolCallSnapshot struct {
 func printEvent(ev *session.Event, state *renderState) {
 	if ev == nil {
 		return
+	}
+	// Track usage metadata from events.
+	if state != nil && ev.Meta != nil {
+		if raw, ok := ev.Meta["usage"]; ok {
+			if usageMap, ok := raw.(map[string]any); ok {
+				prompt := toInt(usageMap["prompt_tokens"])
+				completion := toInt(usageMap["completion_tokens"])
+				total := toInt(usageMap["total_tokens"])
+				if total == 0 {
+					total = prompt + completion
+				}
+				if prompt > 0 {
+					state.lastPromptTokens = prompt
+				}
+			}
+		}
 	}
 	if state != nil && eventIsPartial(ev) {
 		channel := eventChannel(ev)
@@ -79,11 +122,26 @@ func printEvent(ev *session.Event, state *renderState) {
 			fmt.Fprintln(state.out)
 			state.partialOpen = false
 		}
+		if channel != "reasoning" {
+			// Buffer answer partial chunks and render the final full assistant
+			// message once, so Markdown structure doesn't break on chunk edges.
+			state.answerPartialBuffer.WriteString(chunk)
+			state.seenAnswerPartial = true
+			return
+		}
 		if !state.partialOpen {
 			if channel == "reasoning" {
-				fmt.Fprint(state.out, "~ ")
+				if state.ui != nil {
+					fmt.Fprint(state.out, state.ui.ReasoningPrefix())
+				} else {
+					fmt.Fprint(state.out, "│ ")
+				}
 			} else {
-				fmt.Fprint(state.out, "* ")
+				if state.ui != nil {
+					fmt.Fprint(state.out, state.ui.AssistantPrefix())
+				} else {
+					fmt.Fprint(state.out, "* ")
+				}
 			}
 		}
 		fmt.Fprint(state.out, chunk)
@@ -103,7 +161,78 @@ func printEvent(ev *session.Event, state *renderState) {
 
 	msg := ev.Message
 	if msg.Role == model.RoleUser {
+		if state != nil && state.replayUserMessages {
+			userText := strings.TrimSpace(msg.Text)
+			if userText == "" {
+				userText = userTextFromContentParts(msg.ContentParts)
+			}
+			if userText != "" {
+				fmt.Fprintf(state.out, "> %s\n", userText)
+			}
+		}
+		// Show image attachment indicators for user messages.
+		if msg.HasImages() {
+			for _, part := range msg.ContentParts {
+				if part.Type == model.ContentPartImage {
+					name := strings.TrimSpace(part.FileName)
+					if name == "" {
+						name = "image"
+					}
+					if state.ui != nil {
+						fmt.Fprintf(state.out, "%s[image: %s]\n", state.ui.SystemPrefix(), name)
+					} else {
+						fmt.Fprintf(state.out, "📎 [image: %s]\n", name)
+					}
+				}
+			}
+		}
 		return
+	}
+	if msg.Role == model.RoleAssistant {
+		if state != nil && state.showReasoning && msg.Reasoning != "" && !state.seenReasoningPartial {
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s\n", state.ui.ReasoningPrefix(), strings.TrimSpace(msg.Reasoning))
+			} else {
+				fmt.Fprintf(state.out, "│ %s\n", strings.TrimSpace(msg.Reasoning))
+			}
+		}
+		text := strings.TrimSpace(msg.Text)
+		if state != nil && state.seenAnswerPartial {
+			if text == "" {
+				text = strings.TrimSpace(state.answerPartialBuffer.String())
+			}
+		}
+		if text != "" {
+			formatted := renderAssistantMarkdown(text)
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s\n", state.ui.AssistantPrefix(), formatted)
+			} else {
+				fmt.Fprintf(state.out, "* %s\n", formatted)
+			}
+		}
+		if state != nil {
+			state.seenAnswerPartial = false
+			state.seenReasoningPartial = false
+			state.answerPartialBuffer.Reset()
+		}
+	}
+	if len(msg.ToolCalls) > 0 {
+		for i, call := range msg.ToolCalls {
+			parsedArgs := parseToolArgsForDisplay(call.Args)
+			if state != nil && call.ID != "" {
+				if state.pendingToolCalls == nil {
+					state.pendingToolCalls = map[string]toolCallSnapshot{}
+				}
+				state.pendingToolCalls[call.ID] = toolCallSnapshot{
+					Args: cloneAnyMap(parsedArgs),
+				}
+			}
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), call.Name, summarizeToolArgs(call.Name, parsedArgs))
+			} else {
+				fmt.Fprintf(state.out, "▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs))
+			}
+		}
 	}
 	if msg.ToolResponse != nil {
 		var callArgs map[string]any
@@ -113,45 +242,55 @@ func printEvent(ev *session.Event, state *renderState) {
 				delete(state.pendingToolCalls, msg.ToolResponse.ID)
 			}
 		}
-		fmt.Fprintf(state.out, "= %s %s\n", msg.ToolResponse.Name, summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
-		return
-	}
-	if len(msg.ToolCalls) > 0 {
-		for i, call := range msg.ToolCalls {
-			if state != nil && call.ID != "" {
-				if state.pendingToolCalls == nil {
-					state.pendingToolCalls = map[string]toolCallSnapshot{}
-				}
-				state.pendingToolCalls[call.ID] = toolCallSnapshot{
-					Args: cloneAnyMap(call.Args),
-				}
-			}
-			fmt.Fprintf(state.out, "#%d %s %s\n", i+1, call.Name, summarizeToolArgs(call.Name, call.Args))
+		// Suppress result line for read-only FS tools (the call line is sufficient).
+		if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
+			return
+		}
+		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		if strings.TrimSpace(summary) == "" {
+			return
+		}
+		if state.ui != nil {
+			fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolResultPrefix(), msg.ToolResponse.Name, summary)
+		} else {
+			fmt.Fprintf(state.out, "✓ %s %s\n", msg.ToolResponse.Name, summary)
 		}
 		return
 	}
-	if msg.Role == model.RoleAssistant && state != nil && state.showReasoning && msg.Reasoning != "" && !state.seenReasoningPartial {
-		fmt.Fprintf(state.out, "~ %s\n", strings.TrimSpace(msg.Reasoning))
+	if msg.Role == model.RoleAssistant {
+		return
 	}
-	if msg.Role == model.RoleAssistant && state != nil && state.seenAnswerPartial && msg.Text != "" {
-		// Streaming mode already printed partial answer chunks.
-	} else {
-		text := strings.TrimSpace(msg.Text)
-		if text != "" {
-			switch msg.Role {
-			case model.RoleAssistant:
-				fmt.Fprintf(state.out, "* %s\n", text)
-			case model.RoleSystem:
+	text := strings.TrimSpace(msg.Text)
+	if text != "" {
+		switch msg.Role {
+		case model.RoleSystem:
+			if state.ui != nil {
+				fmt.Fprintf(state.out, "%s%s\n", state.ui.SystemPrefix(), text)
+			} else {
 				fmt.Fprintf(state.out, "! %s\n", text)
-			default:
-				fmt.Fprintf(state.out, "- %s\n", text)
 			}
+		default:
+			fmt.Fprintf(state.out, "- %s\n", text)
 		}
 	}
-	if state != nil && msg.Role == model.RoleAssistant {
-		state.seenAnswerPartial = false
-		state.seenReasoningPartial = false
+}
+
+func userTextFromContentParts(parts []model.ContentPart) string {
+	if len(parts) == 0 {
+		return ""
 	}
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Type != model.ContentPartText {
+			continue
+		}
+		text := strings.TrimSpace(part.Text)
+		if text == "" {
+			continue
+		}
+		texts = append(texts, text)
+	}
+	return strings.TrimSpace(strings.Join(texts, "\n"))
 }
 
 func summarizeToolArgs(toolName string, args map[string]any) string {
@@ -167,21 +306,18 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "READ":
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
-			return fmt.Sprintf("{path=%s, offset=%s, limit=%s}", path, valueOrDash(args["offset"]), valueOrDash(args["limit"]))
+			return displayFileName(path)
 		}
 	case "PATCH":
 		path := strings.TrimSpace(asString(args["path"]))
-		oldValue := asString(args["old"])
-		newValue := asString(args["new"])
-		return fmt.Sprintf("{path=%s, lines -%d/+%d}", path, countLines(oldValue), countLines(newValue))
+		return displayFileName(path)
 	case "WRITE":
 		path := strings.TrimSpace(asString(args["path"]))
-		content := asString(args["content"])
-		return fmt.Sprintf("{path=%s, lines=%d}", path, countLines(content))
+		return displayFileName(path)
 	case "SEARCH":
 		path := strings.TrimSpace(asString(args["path"]))
 		query := strings.TrimSpace(asString(args["query"]))
-		return fmt.Sprintf("{path=%s, query=%s}", path, truncateInline(query, 60))
+		return fmt.Sprintf("%s {query=%s}", displayFileName(path), truncateInline(query, 60))
 	case "GLOB":
 		pattern := strings.TrimSpace(asString(args["pattern"]))
 		if pattern != "" {
@@ -190,16 +326,7 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "LIST", "STAT":
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
-			return fmt.Sprintf("{path=%s}", path)
-		}
-	case "LSP_ACTIVATE":
-		language := strings.TrimSpace(asString(args["language"]))
-		workspace := strings.TrimSpace(asString(args["workspace"]))
-		if workspace != "" {
-			return fmt.Sprintf("{language=%s, workspace=%s}", language, workspace)
-		}
-		if language != "" {
-			return fmt.Sprintf("{language=%s}", language)
+			return displayFileName(path)
 		}
 	}
 	keys := make([]string, 0, len(args))
@@ -215,6 +342,14 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
+func parseToolArgsForDisplay(raw string) map[string]any {
+	parsed, err := model.ParseToolCallArgs(raw)
+	if err != nil {
+		return map[string]any{}
+	}
+	return parsed
+}
+
 func summarizeToolResponse(toolName string, result map[string]any) string {
 	return summarizeToolResponseWithCall(toolName, result, nil)
 }
@@ -224,26 +359,33 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		return "{}"
 	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
-	case "READ":
-		path := strings.TrimSpace(asString(result["path"]))
-		start, _ := asInt(result["start_line"])
-		end, _ := asInt(result["end_line"])
-		nextOffset, _ := asInt(result["next_offset"])
-		hasMore := fmt.Sprint(result["has_more"]) == "true"
-		if path != "" {
-			display := displayFileName(path)
-			if start > 0 && end > 0 {
-				if hasMore {
-					return fmt.Sprintf("read %s lines %d-%d (truncated, next_offset=%d)", display, start, end, nextOffset)
-				}
-				return fmt.Sprintf("read %s lines %d-%d", display, start, end)
+	case "BASH":
+		exitCode, _ := asInt(result["exit_code"])
+		stdout := strings.TrimRight(asString(result["stdout"]), "\n")
+		stderr := strings.TrimRight(asString(result["stderr"]), "\n")
+		if exitCode != 0 {
+			output := strings.TrimSpace(stderr)
+			if output == "" {
+				output = strings.TrimSpace(stdout)
 			}
-			return fmt.Sprintf("read %s (empty)", display)
+			if output == "" {
+				return fmt.Sprintf("exit_code=%d", exitCode)
+			}
+			return fmt.Sprintf("exit_code=%d\n%s", exitCode, tailLines(output, 6))
 		}
+		output := strings.TrimSpace(stdout)
+		if output == "" {
+			if strings.TrimSpace(stderr) != "" {
+				return tailLines(strings.TrimSpace(stderr), 5)
+			}
+			return "exit_code=0"
+		}
+		return tailLines(output, 5)
+	case "READ":
+		// Suppressed in printEvent; return empty for read-only tools.
+		return ""
 	case "PATCH":
 		path := strings.TrimSpace(asString(result["path"]))
-		replaced, _ := asInt(result["replaced"])
-		oldCount, _ := asInt(result["old_count"])
 		created := fmt.Sprint(result["created"]) == "true"
 		preview := patchPreviewFromEvent(callArgs)
 		if strings.TrimSpace(preview) == "" {
@@ -253,12 +395,13 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		if strings.TrimSpace(hunk) != "" && strings.TrimSpace(preview) != "" {
 			preview = hunk + "\n" + preview
 		}
+		display := displayFileName(path)
 		if path != "" {
 			action := "edited"
 			if created {
 				action = "created"
 			}
-			summary := fmt.Sprintf("%s %s (replaced=%d/%d)", action, path, replaced, oldCount)
+			summary := fmt.Sprintf("%s %s", action, display)
 			if strings.TrimSpace(preview) == "" {
 				return summary
 			}
@@ -268,37 +411,31 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		path := strings.TrimSpace(asString(result["path"]))
 		created := fmt.Sprint(result["created"]) == "true"
 		lineCount, _ := asInt(result["line_count"])
+		display := displayFileName(path)
 		if path != "" {
 			if created {
-				return fmt.Sprintf("created %s (%d lines)", path, lineCount)
+				return fmt.Sprintf("created %s (%d lines)", display, lineCount)
 			}
-			return fmt.Sprintf("wrote %s (%d lines)", path, lineCount)
+			return fmt.Sprintf("wrote %s (%d lines)", display, lineCount)
 		}
 	case "SEARCH":
-		path := strings.TrimSpace(asString(result["path"]))
 		count, _ := asInt(result["count"])
 		fileCount, _ := asInt(result["file_count"])
 		truncated := fmt.Sprint(result["truncated"]) == "true"
 		if truncated {
-			return fmt.Sprintf("found %d matches in %d files under %s (truncated)", count, fileCount, path)
+			return fmt.Sprintf("found %d matches in %d files (truncated)", count, fileCount)
 		}
-		return fmt.Sprintf("found %d matches in %d files under %s", count, fileCount, path)
+		return fmt.Sprintf("found %d matches in %d files", count, fileCount)
 	case "GLOB":
-		pattern := strings.TrimSpace(asString(result["pattern"]))
 		count, _ := asInt(result["count"])
-		return fmt.Sprintf("matched %d paths for %s", count, pattern)
+		return fmt.Sprintf("matched %d paths", count)
 	case "LIST":
 		path := strings.TrimSpace(asString(result["path"]))
 		count, _ := asInt(result["count"])
-		return fmt.Sprintf("listed %d entries in %s", count, path)
+		return fmt.Sprintf("listed %d entries in %s", count, displayFileName(path))
 	case "STAT":
-		path := strings.TrimSpace(asString(result["path"]))
-		size, _ := asInt(result["size"])
-		isDir := fmt.Sprint(result["is_dir"]) == "true"
-		if isDir {
-			return fmt.Sprintf("directory %s", path)
-		}
-		return fmt.Sprintf("file %s (size=%d)", path, size)
+		// Suppressed in printEvent; return empty for read-only tools.
+		return ""
 	}
 	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
 		return truncateInline(value, 160)
@@ -315,7 +452,7 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 }
 
 const (
-	patchPreviewSideLines = 4
+	patchPreviewSideLines = 30
 	patchPreviewLineWidth = 120
 )
 
@@ -495,6 +632,41 @@ func displayFileName(path string) string {
 	return base
 }
 
+// isReadOnlyFSTool returns true for FS tools whose result line can be suppressed.
+func isReadOnlyFSTool(toolName string) bool {
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "READ", "STAT":
+		return true
+	default:
+		return false
+	}
+}
+
+// hasToolError returns true when a tool result contains an error field.
+func hasToolError(result map[string]any) bool {
+	return strings.TrimSpace(asString(result["error"])) != ""
+}
+
+// tailLines returns the last n non-empty lines of text.  When the total line
+// count exceeds n, a "…" prefix is prepended to indicate truncation.
+func tailLines(text string, n int) string {
+	if n <= 0 {
+		n = 5
+	}
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	// strip trailing blank lines
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	if len(lines) <= n {
+		return strings.Join(lines, "\n")
+	}
+	return "...\n" + strings.Join(lines[len(lines)-n:], "\n")
+}
+
 func indentMultiline(input, indent string) string {
 	if input == "" {
 		return ""
@@ -518,6 +690,15 @@ func eventIsPartial(ev *session.Event) bool {
 	return ok && flag
 }
 
+// isCompactionMeta returns true if the event is an internal compaction summary.
+func isCompactionMeta(ev *session.Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	kind, ok := ev.Meta["kind"].(string)
+	return ok && strings.TrimSpace(kind) == "compaction"
+}
+
 func eventChannel(ev *session.Event) string {
 	if ev == nil || ev.Meta == nil {
 		return "answer"
@@ -531,4 +712,59 @@ func eventChannel(ev *session.Event) string {
 		return "answer"
 	}
 	return channel
+}
+
+// extractLastUsage scans events in reverse to find the most recent usage
+// metadata and returns the prompt_tokens count (context window usage).
+func extractLastUsage(events []*session.Event) int {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev == nil || ev.Meta == nil {
+			continue
+		}
+		raw, ok := ev.Meta["usage"]
+		if !ok {
+			continue
+		}
+		usageMap, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		prompt := toInt(usageMap["prompt_tokens"])
+		if prompt > 0 {
+			return prompt
+		}
+	}
+	return 0
+}
+
+// formatTokenCount returns a human-readable token count string.
+// Examples: 500 → "500", 1234 → "1.2k", 21063 → "21.1k", 1234567 → "1.2m".
+func formatTokenCount(v int) string {
+	if v <= 0 {
+		return ""
+	}
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%.1fm", float64(v)/1_000_000)
+	case v >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(v)/1_000)
+	default:
+		return fmt.Sprintf("%d", v)
+	}
+}
+
+func toInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case float32:
+		return int(n)
+	default:
+		return 0
+	}
 }

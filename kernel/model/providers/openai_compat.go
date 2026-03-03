@@ -20,6 +20,8 @@ type openAICompatLLM struct {
 	baseURL             string
 	token               string
 	client              *http.Client
+	requestTimeout      time.Duration
+	maxOutputTok        int
 	contextWindowTokens int
 	options             openAICompatOptions
 }
@@ -46,7 +48,9 @@ func newOpenAICompat(cfg Config, token string) *openAICompatLLM {
 		provider:            cfg.Provider,
 		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
 		token:               token,
-		client:              &http.Client{Timeout: timeout},
+		client:              &http.Client{},
+		requestTimeout:      timeout,
+		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 		options:             defaultOpenAICompatOptions(),
 	}
@@ -67,10 +71,11 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			return
 		}
 		payload := openAICompatRequest{
-			Model:    l.name,
-			Messages: l.fromKernelMessages(req.Messages),
-			Tools:    fromKernelTools(req.Tools),
-			Stream:   req.Stream,
+			Model:     l.name,
+			Messages:  l.fromKernelMessages(req.Messages),
+			Tools:     fromKernelTools(req.Tools),
+			Stream:    req.Stream,
+			MaxTokens: l.maxOutputTok,
 		}
 		if l.options.ApplyReasoning != nil {
 			l.options.ApplyReasoning(&payload, req.Reasoning)
@@ -81,7 +86,16 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			return
 		}
 
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, l.baseURL+"/chat/completions", bytes.NewReader(raw))
+		runCtx := ctx
+		cancel := func() {}
+		// For streaming SSE, rely on caller context cancellation to avoid hard timeout
+		// cutting off long-running responses.
+		if !req.Stream && l.requestTimeout > 0 {
+			runCtx, cancel = context.WithTimeout(ctx, l.requestTimeout)
+		}
+		defer cancel()
+
+		httpReq, err := http.NewRequestWithContext(runCtx, http.MethodPost, l.baseURL+"/chat/completions", bytes.NewReader(raw))
 		if err != nil {
 			yield(nil, err)
 			return
@@ -229,6 +243,7 @@ type openAICompatRequest struct {
 	Messages        []openAICompatReqMsg `json:"messages"`
 	Tools           []openAICompatTool   `json:"tools,omitempty"`
 	Stream          bool                 `json:"stream"`
+	MaxTokens       int                  `json:"max_tokens,omitempty"`
 	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
 	Reasoning       *openAIReasoning     `json:"reasoning,omitempty"`
 	Thinking        *openAIThinking      `json:"thinking,omitempty"`
@@ -281,6 +296,16 @@ type openAICompatCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
+type openAIImageURL struct {
+	URL string `json:"url"`
+}
+
+type openAIContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+
 type openAICompatResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
@@ -328,16 +353,10 @@ func (a *openAIStreamAccumulator) message() (model.Message, error) {
 	sort.Ints(keys)
 	for _, idx := range keys {
 		tc := a.toolCalls[idx]
-		args := map[string]any{}
-		if strings.TrimSpace(tc.Function.Arguments) != "" {
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-				return model.Message{}, err
-			}
-		}
 		msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
 			ID:   tc.ID,
 			Name: tc.Function.Name,
-			Args: args,
+			Args: tc.Function.Arguments,
 		})
 	}
 	return msg, nil
@@ -345,7 +364,32 @@ func (a *openAIStreamAccumulator) message() (model.Message, error) {
 
 func (l *openAICompatLLM) fromKernelMessages(messages []model.Message) []openAICompatReqMsg {
 	out := make([]openAICompatReqMsg, 0, len(messages))
+	seenToolCalls := map[string]struct{}{}
 	for _, m := range messages {
+		// OpenAI-compatible APIs reject role=tool messages that do not carry
+		// a tool_call_id. Skip malformed history entries.
+		if m.Role == model.RoleTool && m.ToolResponse == nil {
+			continue
+		}
+		for _, call := range m.ToolCalls {
+			callID := strings.TrimSpace(call.ID)
+			if callID != "" {
+				seenToolCalls[callID] = struct{}{}
+			}
+		}
+		// OpenAI-compatible APIs require tool messages to carry a non-empty
+		// tool_call_id that references a preceding assistant tool call.
+		// Resume/legacy histories may contain incomplete tool responses; skip
+		// these invalid entries to avoid hard request failures.
+		if m.ToolResponse != nil {
+			respID := strings.TrimSpace(m.ToolResponse.ID)
+			if respID == "" {
+				continue
+			}
+			if _, ok := seenToolCalls[respID]; !ok {
+				continue
+			}
+		}
 		out = append(out, l.fromKernelMessage(m))
 	}
 	return out
@@ -378,13 +422,16 @@ func (l *openAICompatLLM) fromKernelMessage(m model.Message) openAICompatReqMsg 
 	if len(m.ToolCalls) > 0 {
 		calls := make([]openAICompatToolCall, 0, len(m.ToolCalls))
 		for _, c := range m.ToolCalls {
-			raw, _ := json.Marshal(c.Args)
+			raw := strings.TrimSpace(c.Args)
+			if raw == "" {
+				raw = "{}"
+			}
 			calls = append(calls, openAICompatToolCall{
 				ID:   c.ID,
 				Type: "function",
 				Function: openAICompatCallFunction{
 					Name:      c.Name,
-					Arguments: string(raw),
+					Arguments: raw,
 				},
 			})
 		}
@@ -397,6 +444,24 @@ func (l *openAICompatLLM) fromKernelMessage(m model.Message) openAICompatReqMsg 
 			Content:          content,
 			ReasoningContent: l.reasoningContentField(m.Reasoning, true),
 			ToolCalls:        calls,
+		}
+	}
+	if m.Role == model.RoleUser && len(m.ContentParts) > 0 {
+		parts := make([]openAIContentPart, 0, len(m.ContentParts))
+		for _, cp := range m.ContentParts {
+			switch cp.Type {
+			case model.ContentPartText:
+				parts = append(parts, openAIContentPart{Type: "text", Text: cp.Text})
+			case model.ContentPartImage:
+				parts = append(parts, openAIContentPart{
+					Type:     "image_url",
+					ImageURL: &openAIImageURL{URL: fmt.Sprintf("data:%s;base64,%s", cp.MimeType, cp.Data)},
+				})
+			}
+		}
+		return openAICompatReqMsg{
+			Role:    string(m.Role),
+			Content: parts,
 		}
 	}
 	return openAICompatReqMsg{
@@ -445,16 +510,10 @@ func toKernelMessage(m openAICompatMsg) (model.Message, error) {
 		return out, nil
 	}
 	for _, c := range m.ToolCalls {
-		args := map[string]any{}
-		if strings.TrimSpace(c.Function.Arguments) != "" {
-			if err := json.Unmarshal([]byte(c.Function.Arguments), &args); err != nil {
-				return model.Message{}, err
-			}
-		}
 		out.ToolCalls = append(out.ToolCalls, model.ToolCall{
 			ID:   c.ID,
 			Name: c.Function.Name,
-			Args: args,
+			Args: c.Function.Arguments,
 		})
 	}
 	return out, nil

@@ -19,6 +19,7 @@ type anthropicLLM struct {
 	baseURL             string
 	token               string
 	client              *http.Client
+	requestTimeout      time.Duration
 	maxOutputTok        int
 	contextWindowTokens int
 }
@@ -37,7 +38,8 @@ func newAnthropic(cfg Config, token string) model.LLM {
 		provider:            cfg.Provider,
 		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
 		token:               token,
-		client:              &http.Client{Timeout: timeout},
+		client:              &http.Client{},
+		requestTimeout:      timeout,
 		maxOutputTok:        maxTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 	}
@@ -81,7 +83,14 @@ func (l *anthropicLLM) Generate(ctx context.Context, req *model.Request) iter.Se
 			yield(nil, err)
 			return
 		}
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, l.baseURL+"/messages", bytes.NewReader(raw))
+		runCtx := ctx
+		cancel := func() {}
+		if l.requestTimeout > 0 {
+			runCtx, cancel = context.WithTimeout(ctx, l.requestTimeout)
+		}
+		defer cancel()
+
+		httpReq, err := http.NewRequestWithContext(runCtx, http.MethodPost, l.baseURL+"/messages", bytes.NewReader(raw))
 		if err != nil {
 			yield(nil, err)
 			return
@@ -118,7 +127,7 @@ func (l *anthropicLLM) Generate(ctx context.Context, req *model.Request) iter.Se
 				msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
 					ID:   part.ID,
 					Name: part.Name,
-					Args: part.Input,
+					Args: toolArgsRaw(part.Input),
 				})
 			}
 		}
@@ -157,14 +166,21 @@ type anthropicMessage struct {
 	Content []anthropicMsgPart `json:"content"`
 }
 
+type anthropicImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. "image/png"
+	Data      string `json:"data"`       // base64-encoded
+}
+
 type anthropicMsgPart struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Input     map[string]any `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
+	Type      string                `json:"type"`
+	Text      string                `json:"text,omitempty"`
+	ID        string                `json:"id,omitempty"`
+	Name      string                `json:"name,omitempty"`
+	Input     map[string]any        `json:"input,omitempty"`
+	ToolUseID string                `json:"tool_use_id,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	Source    *anthropicImageSource `json:"source,omitempty"`
 }
 
 type anthropicToolDecl struct {
@@ -211,12 +227,29 @@ func toAnthropicMessages(messages []model.Message) (string, []anthropicMessage) 
 				systemLines = append(systemLines, m.Text)
 			}
 		case model.RoleUser:
+			var parts []anthropicMsgPart
+			if len(m.ContentParts) > 0 {
+				for _, cp := range m.ContentParts {
+					switch cp.Type {
+					case model.ContentPartText:
+						parts = append(parts, anthropicMsgPart{Type: "text", Text: cp.Text})
+					case model.ContentPartImage:
+						parts = append(parts, anthropicMsgPart{
+							Type: "image",
+							Source: &anthropicImageSource{
+								Type:      "base64",
+								MediaType: cp.MimeType,
+								Data:      cp.Data,
+							},
+						})
+					}
+				}
+			} else {
+				parts = []anthropicMsgPart{{Type: "text", Text: m.Text}}
+			}
 			out = append(out, anthropicMessage{
-				Role: "user",
-				Content: []anthropicMsgPart{{
-					Type: "text",
-					Text: m.Text,
-				}},
+				Role:    "user",
+				Content: parts,
 			})
 		case model.RoleAssistant:
 			parts := make([]anthropicMsgPart, 0, len(m.ToolCalls)+1)
@@ -228,7 +261,7 @@ func toAnthropicMessages(messages []model.Message) (string, []anthropicMessage) 
 					Type:  "tool_use",
 					ID:    call.ID,
 					Name:  call.Name,
-					Input: call.Args,
+					Input: toolArgsMap(call.Args),
 				})
 			}
 			if len(parts) > 0 {

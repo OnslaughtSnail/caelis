@@ -15,8 +15,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
-	"github.com/OnslaughtSnail/caelis/kernel/lspadapter/gopls"
-	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
@@ -26,6 +24,8 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session/filestore"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
+
+	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 )
 
 var conversationSessionCounter atomic.Uint64
@@ -69,30 +69,30 @@ func runCLI(ctx context.Context, args []string) error {
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	var (
-		toolProviders    = fs.String("tool-providers", pluginbuiltin.ProviderLocalTools+","+pluginbuiltin.ProviderWorkspaceTools+","+pluginbuiltin.ProviderShellTools+","+pluginbuiltin.ProviderLSPActivation+","+pluginbuiltin.ProviderMCPTools, "Comma-separated tool providers")
+		toolProviders    = fs.String("tool-providers", pluginbuiltin.ProviderWorkspaceTools+","+pluginbuiltin.ProviderShellTools+","+providerLSPTools+","+pluginbuiltin.ProviderMCPTools, "Comma-separated tool providers")
 		policyProviders  = fs.String("policy-providers", pluginbuiltin.ProviderDefaultPolicy, "Comma-separated policy providers")
 		modelAlias       = fs.String("model", configStore.DefaultModel(), "Model alias")
+		uiMode           = fs.String("ui", string(uiModeAuto), "Interactive UI mode: auto|tui")
 		appName          = fs.String("app", initialAppName, "App name")
 		userID           = fs.String("user", "local-user", "User id")
 		sessionID        = fs.String("session", "default", "Session id")
+		prompt           = fs.String("p", "", "Single-shot prompt text (headless mode)")
 		input            = fs.String("input", "", "Input text")
+		outputFormat     = fs.String("format", string(headlessFormatText), "Output format for headless mode: text|json")
 		storeDir         = fs.String("store-dir", defaultStoreDir, "Local event store directory")
 		sessionIndexFile = fs.String("session-index", defaultSessionIndexPath, "Session index sqlite file path")
 		systemPrompt     = fs.String("system-prompt", "You are a helpful assistant.", "Base system prompt")
 		promptConfigDir  = fs.String("prompt-config-dir", "", "Prompt config directory (default ~/.{app}/prompts)")
-		credentialStore  = fs.String("credential-store", configStore.CredentialStoreMode(), "Credential store mode: auto|file|ephemeral")
 		skillsDirs       = fs.String("skills-dirs", "~/.agents/skills,.agents/skills", "Comma-separated skill directories")
-		streamModel      = fs.Bool("stream", configStore.StreamModel(), "Enable model streaming mode")
-		thinkingMode     = fs.String("thinking-mode", configStore.ThinkingMode(), "Thinking mode: auto|on|off")
-		thinkingBudget   = fs.Int("thinking-budget", configStore.ThinkingBudget(), "Thinking token budget when thinking-mode=on")
-		reasoningEffort  = fs.String("reasoning-effort", configStore.ReasoningEffort(), "Reasoning effort hint: low|medium|high")
 		compactWatermark = fs.Float64("compact-watermark", 0.7, "Auto compaction watermark ratio (0.5-0.9)")
 		contextWindow    = fs.Int("context-window", 0, "Model context window tokens override")
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
 		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default")
-		safeCommands     = fs.String("safe-commands", "", "Comma-separated safe base commands for sandbox execution")
 		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
+		modelCapsPath    = fs.String("model-capabilities", defaultModelCapsOverridePath(), "Model capabilities override JSON path (default ~/.agents/model_capabilities.json)")
 		showVersion      = fs.Bool("version", false, "Show version and exit")
+		verbose          = fs.Bool("verbose", false, "Enable verbose output with debug details")
+		noColor          = fs.Bool("no-color", false, "Disable colored output")
 	)
 	if err := rejectRemovedExecutionFlags(args); err != nil {
 		return err
@@ -104,16 +104,35 @@ func runCLI(ctx context.Context, args []string) error {
 		fmt.Println(version.String())
 		return nil
 	}
+	// Initialise the dynamic model capability catalog (remote fetch + local overrides)
+	// in background so interactive/headless startup is never blocked by network I/O.
+	go modelproviders.InitModelCatalog(context.Background(), nil, *modelCapsPath)
+
 	if len(fs.Args()) > 0 {
 		return fmt.Errorf("unknown arguments: %v", fs.Args())
+	}
+	stdinTTY := isTTY(os.Stdin)
+	stdoutTTY := isTTY(os.Stdout)
+	singleInput, singleShotMode, err := resolveSingleShotInput(*prompt, *input, os.Stdin, stdinTTY, stdoutTTY)
+	if err != nil {
+		return err
+	}
+	outFormat, err := parseHeadlessOutputFormat(*outputFormat)
+	if err != nil {
+		return err
+	}
+	resolvedUIMode := uiModeTUI
+	if !singleShotMode {
+		mode, err := resolveInteractiveUIMode(*uiMode, stdinTTY, stdoutTTY)
+		if err != nil {
+			return err
+		}
+		resolvedUIMode = mode
 	}
 	if !flagProvided(args, "session") {
 		*sessionID = nextConversationSessionID()
 	}
-	if err := configStore.SetCredentialStoreMode(*credentialStore); err != nil {
-		return err
-	}
-	credentials, err := loadOrInitCredentialStore(initialAppName, *credentialStore)
+	credentials, err := loadOrInitCredentialStore(initialAppName, credentialStoreModeAuto)
 	if err != nil {
 		return err
 	}
@@ -121,13 +140,8 @@ func runCLI(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := configStore.SetRuntimeSettings(runtimeSettings{
-		StreamModel:     *streamModel,
-		ThinkingMode:    *thinkingMode,
-		ThinkingBudget:  *thinkingBudget,
-		ReasoningEffort: *reasoningEffort,
-		ShowReasoning:   configStore.ShowReasoning(),
-		PermissionMode:  *permissionMode,
-		SandboxType:     *sandboxType,
+		PermissionMode: *permissionMode,
+		SandboxType:    *sandboxType,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: persist runtime settings failed: %v\n", err)
 	}
@@ -135,6 +149,14 @@ func runCLI(ctx context.Context, args []string) error {
 	workspace, err := resolveWorkspaceContext()
 	if err != nil {
 		return err
+	}
+	skillDirList := splitCSV(*skillsDirs)
+	inputRefs, inputRefWarnings, err := newInputReferenceResolver(workspace.CWD, skillDirList)
+	if err != nil {
+		return err
+	}
+	for _, warn := range inputRefWarnings {
+		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
 	}
 	historyPath, err := historyFilePath(initialAppName, workspace.Key)
 	if err != nil {
@@ -144,7 +166,6 @@ func runCLI(ctx context.Context, args []string) error {
 	execRuntime, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionMode(strings.TrimSpace(*permissionMode)),
 		SandboxType:    strings.TrimSpace(*sandboxType),
-		SafeCommands:   splitCSV(*safeCommands),
 	})
 	if err != nil {
 		return err
@@ -169,19 +190,14 @@ func runCLI(ctx context.Context, args []string) error {
 			}
 		}()
 	}
-	lspBroker := lspbroker.New()
-	goAdapter, err := gopls.New(gopls.Config{Runtime: execRuntime})
-	if err != nil {
-		return err
-	}
-	if err := lspBroker.RegisterAdapter(goAdapter); err != nil {
-		return err
-	}
 	pluginRegistry := plugin.NewRegistry()
 	if err := pluginbuiltin.RegisterAll(pluginRegistry, pluginbuiltin.RegisterOptions{
 		ExecutionRuntime: execRuntime,
 		MCPToolManager:   mcpManager,
 	}); err != nil {
+		return err
+	}
+	if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntime); err != nil {
 		return err
 	}
 
@@ -198,8 +214,6 @@ func runCLI(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "warn: close assembled providers failed: %v\n", closeErr)
 		}
 	}()
-	lspActivationTools := lspActivationToolNames(resolved.Tools)
-
 	factory := modelproviders.NewFactory()
 	for _, providerCfg := range configStore.ProviderConfigs() {
 		if registerErr := factory.Register(providerCfg); registerErr != nil {
@@ -213,6 +227,10 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 	if configStore != nil && alias != "" {
 		alias = configStore.ResolveModelAlias(alias)
+	}
+	modelRuntime := defaultModelRuntimeSettings()
+	if configStore != nil {
+		modelRuntime = configStore.ModelRuntimeSettings(alias)
 	}
 	var llm model.LLM
 	if alias != "" {
@@ -248,7 +266,6 @@ func runCLI(ctx context.Context, args []string) error {
 	rt, err := runtime.New(runtime.Config{
 		Store: store,
 		Compaction: runtime.CompactionConfig{
-			Enabled:        true,
 			WatermarkRatio: *compactWatermark,
 		},
 	})
@@ -256,12 +273,12 @@ func runCLI(ctx context.Context, args []string) error {
 		return err
 	}
 
-	if strings.TrimSpace(*input) != "" {
+	if singleShotMode {
 		if llm == nil {
 			return fmt.Errorf("no model configured, run /connect first or pass -model with a configured provider/model")
 		}
-		if strings.HasPrefix(strings.TrimSpace(*input), "/compact") {
-			note := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(*input), "/compact"))
+		if strings.HasPrefix(strings.TrimSpace(singleInput), "/compact") {
+			note := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(singleInput), "/compact"))
 			ev, compactErr := rt.Compact(ctx, runtime.CompactRequest{
 				AppName:             *appName,
 				UserID:              *userID,
@@ -284,36 +301,63 @@ func runCLI(ctx context.Context, args []string) error {
 			AppName:                *appName,
 			WorkspaceDir:           workspace.CWD,
 			PromptConfigDir:        *promptConfigDir,
-			EnableLSPRoutingPolicy: hasToolName(resolved.Tools, "LSP_ACTIVATE"),
+			EnableLSPRoutingPolicy: hasLSPTools(resolved.Tools),
 			BasePrompt:             *systemPrompt,
 			RuntimeHint:            buildRuntimePromptHint(execRuntime),
-			SkillDirs:              splitCSV(*skillsDirs),
-			StreamModel:            *streamModel,
-			ThinkingMode:           *thinkingMode,
-			ThinkingBudget:         *thinkingBudget,
-			ReasoningEffort:        *reasoningEffort,
+			SkillDirs:              skillDirList,
+			StreamModel:            false,
+			ThinkingMode:           modelRuntime.ThinkingMode,
+			ThinkingBudget:         modelRuntime.ThinkingBudget,
+			ReasoningEffort:        modelRuntime.ReasoningEffort,
+			ModelProvider:          resolveProviderName(factory, alias),
+			ModelName:              resolveModelName(factory, alias),
 		})
 		if err != nil {
 			return err
 		}
-		return runOnce(ctx, rt, runtime.RunRequest{
+		resolvedInput := singleInput
+		var contentParts []model.ContentPart
+		if inputRefs != nil {
+			result, rewriteErr := inputRefs.RewriteInput(singleInput)
+			if rewriteErr != nil {
+				fmt.Fprintf(os.Stderr, "warn: input reference resolution skipped: %v\n", rewriteErr)
+			} else {
+				resolvedInput = result.Text
+				for _, note := range result.Notes {
+					fmt.Fprintf(os.Stderr, "note: %s\n", note)
+				}
+				for _, relPath := range result.ResolvedPaths {
+					if !image.IsImagePath(relPath) {
+						continue
+					}
+					absPath := inputRefs.AbsPath(relPath)
+					part, loadErr := image.LoadAsContentPart(absPath)
+					if loadErr != nil {
+						fmt.Fprintf(os.Stderr, "warn: image load skipped: %s: %v\n", relPath, loadErr)
+						continue
+					}
+					contentParts = append(contentParts, part)
+					fmt.Fprintf(os.Stderr, "note: attached image: %s\n", relPath)
+				}
+			}
+		}
+		headlessResult, runErr := runHeadlessOnce(ctx, rt, runtime.RunRequest{
 			AppName:             *appName,
 			UserID:              *userID,
 			SessionID:           *sessionID,
-			Input:               *input,
+			Input:               resolvedInput,
+			ContentParts:        contentParts,
 			Agent:               ag,
 			Model:               llm,
 			Tools:               resolved.Tools,
 			CoreTools:           tool.CoreToolsConfig{Runtime: execRuntime},
 			Policies:            resolved.Policies,
-			LSPBroker:           lspBroker,
-			LSPActivationTools:  lspActivationTools,
-			AutoActivateLSP:     autoActivateLSPLanguages(workspace.CWD, resolved.Tools),
 			ContextWindowTokens: *contextWindow,
-		}, runRenderConfig{
-			ShowReasoning: configStore.ShowReasoning(),
-			Writer:        os.Stdout,
 		})
+		if runErr != nil {
+			return runErr
+		}
+		return writeHeadlessResult(os.Stdout, outFormat, headlessResult)
 	}
 
 	console := newCLIConsole(cliConsoleConfig{
@@ -327,8 +371,6 @@ func runCLI(ctx context.Context, args []string) error {
 		Resolved:               resolved,
 		ExecRuntime:            execRuntime,
 		SandboxType:            strings.TrimSpace(*sandboxType),
-		AutoActivateLSP:        autoActivateLSPLanguages(workspace.CWD, resolved.Tools),
-		LSPActivationTools:     lspActivationTools,
 		ModelAlias:             alias,
 		Model:                  llm,
 		ModelFactory:           factory,
@@ -337,16 +379,18 @@ func runCLI(ctx context.Context, args []string) error {
 		SessionIndex:           index,
 		SystemPrompt:           *systemPrompt,
 		PromptConfigDir:        *promptConfigDir,
-		EnableLSPRoutingPolicy: hasToolName(resolved.Tools, "LSP_ACTIVATE"),
-		SkillDirs:              splitCSV(*skillsDirs),
-		StreamModel:            *streamModel,
-		ThinkingMode:           *thinkingMode,
-		ThinkingBudget:         *thinkingBudget,
-		ReasoningEffort:        *reasoningEffort,
-		ShowReasoning:          configStore.ShowReasoning(),
+		EnableLSPRoutingPolicy: hasLSPTools(resolved.Tools),
+		SkillDirs:              skillDirList,
+		ThinkingMode:           modelRuntime.ThinkingMode,
+		ThinkingBudget:         modelRuntime.ThinkingBudget,
+		ReasoningEffort:        modelRuntime.ReasoningEffort,
+		InputRefs:              inputRefs,
+		TUIDiagnostics:         newTUIDiagnostics(),
 		HistoryFile:            historyPath,
-		LSPBroker:              lspBroker,
 		Version:                version.String(),
+		NoColor:                *noColor,
+		Verbose:                *verbose,
+		UIMode:                 string(resolvedUIMode),
 	})
 	return console.loop()
 }
@@ -363,6 +407,8 @@ type buildAgentInput struct {
 	ThinkingMode           string
 	ThinkingBudget         int
 	ReasoningEffort        string
+	ModelProvider          string
+	ModelName              string
 }
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
@@ -378,7 +424,7 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
 	}
 
-	reasoning, err := parseReasoning(in.ThinkingMode, in.ThinkingBudget, in.ReasoningEffort)
+	reasoning, err := parseReasoning(in.ThinkingMode, in.ThinkingBudget, in.ReasoningEffort, in.ModelProvider, in.ModelName)
 	if err != nil {
 		return nil, err
 	}
@@ -405,6 +451,28 @@ func splitCSV(input string) []string {
 	return out
 }
 
+func resolveProviderName(factory *modelproviders.Factory, alias string) string {
+	if factory == nil || alias == "" {
+		return ""
+	}
+	cfg, ok := factory.ConfigForAlias(alias)
+	if !ok {
+		return ""
+	}
+	return cfg.Provider
+}
+
+func resolveModelName(factory *modelproviders.Factory, alias string) string {
+	if factory == nil || alias == "" {
+		return ""
+	}
+	cfg, ok := factory.ConfigForAlias(alias)
+	if !ok {
+		return ""
+	}
+	return cfg.Model
+}
+
 func buildRuntimePromptHint(execRuntime toolexec.Runtime) string {
 	if execRuntime == nil {
 		return ""
@@ -419,9 +487,6 @@ func buildRuntimePromptHint(execRuntime toolexec.Runtime) string {
 	}
 	if policyHint := runtimePolicyHint(execRuntime.SandboxPolicy()); policyHint != "" {
 		lines = append(lines, "- "+policyHint)
-	}
-	if safeSummary := summarizeSafeCommands(execRuntime.SafeCommands(), 10); safeSummary != "-" {
-		lines = append(lines, "- safe_commands="+safeSummary)
 	}
 	switch execRuntime.PermissionMode() {
 	case toolexec.PermissionModeFullControl:
@@ -479,35 +544,6 @@ func csvOrDash(items []string) string {
 	return strings.Join(filtered, ",")
 }
 
-func summarizeSafeCommands(commands []string, limit int) string {
-	if len(commands) == 0 {
-		return "-"
-	}
-	if limit <= 0 {
-		limit = 1
-	}
-	normalized := make([]string, 0, len(commands))
-	seen := map[string]struct{}{}
-	for _, one := range commands {
-		trimmed := strings.TrimSpace(one)
-		if trimmed == "" {
-			continue
-		}
-		if _, ok := seen[trimmed]; ok {
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		normalized = append(normalized, trimmed)
-	}
-	if len(normalized) == 0 {
-		return "-"
-	}
-	if len(normalized) <= limit {
-		return strings.Join(normalized, ",")
-	}
-	return fmt.Sprintf("%s,+%d more", strings.Join(normalized[:limit], ","), len(normalized)-limit)
-}
-
 func nextConversationSessionID() string {
 	seq := conversationSessionCounter.Add(1)
 	return fmt.Sprintf("s-%d-%d", time.Now().UTC().UnixNano(), seq)
@@ -536,7 +572,7 @@ func rejectRemovedExecutionFlags(args []string) error {
 	removed := map[string]string{
 		"exec-mode":      "-permission-mode",
 		"bash-strategy":  "-permission-mode",
-		"bash-allowlist": "-safe-commands",
+		"bash-allowlist": "sandbox policy and host escalation approval flow",
 		"bash-deny-meta": "-permission-mode",
 	}
 	for _, arg := range args {
@@ -544,58 +580,37 @@ func rejectRemovedExecutionFlags(args []string) error {
 			short := "-" + flagName
 			long := "--" + flagName
 			if arg == short || arg == long || strings.HasPrefix(arg, short+"=") || strings.HasPrefix(arg, long+"=") {
-				return fmt.Errorf("flag %q 已移除，请使用 %s", flagName, replacement)
+				return fmt.Errorf("flag %q has been removed, use %s instead", flagName, replacement)
 			}
 		}
 	}
 	return nil
 }
 
-func autoActivateLSPLanguages(workspaceDir string, tools []tool.Tool) []string {
-	if !hasToolName(tools, "LSP_ACTIVATE") {
-		return nil
-	}
-	if strings.TrimSpace(workspaceDir) == "" {
-		return nil
-	}
-	goModPath := filepath.Join(workspaceDir, "go.mod")
-	if _, err := os.Stat(goModPath); err == nil {
-		return []string{"go"}
-	}
-	matches, err := filepath.Glob(filepath.Join(workspaceDir, "*.go"))
-	if err == nil && len(matches) > 0 {
-		return []string{"go"}
-	}
-	return nil
-}
-
-func lspActivationToolNames(tools []tool.Tool) []string {
-	if hasToolName(tools, "LSP_ACTIVATE") {
-		return []string{"LSP_ACTIVATE"}
-	}
-	return nil
-}
-
-func hasToolName(tools []tool.Tool, name string) bool {
-	target := strings.TrimSpace(name)
-	if target == "" {
-		return false
-	}
+func hasLSPTools(tools []tool.Tool) bool {
 	for _, one := range tools {
 		if one == nil {
 			continue
 		}
-		if one.Name() == target {
+		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(one.Name())), "LSP_") {
 			return true
 		}
 	}
 	return false
 }
 
-func parseReasoning(mode string, budget int, effort string) (model.ReasoningConfig, error) {
+func parseReasoning(mode string, budget int, effort string, provider string, modelName string) (model.ReasoningConfig, error) {
 	cfg := model.ReasoningConfig{Effort: strings.TrimSpace(effort)}
-	switch strings.ToLower(strings.TrimSpace(mode)) {
+	switch normalizeReasoningSelection(mode) {
 	case "", "auto":
+		// For "auto" mode, look up known capabilities to decide.
+		if modelSupportsReasoning(provider, modelName) {
+			enabled := true
+			cfg.Enabled = &enabled
+			if budget > 0 {
+				cfg.BudgetTokens = budget
+			}
+		}
 		return cfg, nil
 	case "on":
 		enabled := true
@@ -612,6 +627,13 @@ func parseReasoning(mode string, budget int, effort string) (model.ReasoningConf
 	default:
 		return model.ReasoningConfig{}, fmt.Errorf("invalid thinking-mode %q, expected auto|on|off", mode)
 	}
+}
+
+// defaultModelCapsOverridePath returns the default path for the user's local
+// model capability override file, following the same ~/.agents/ convention
+// as the MCP config file.
+func defaultModelCapsOverridePath() string {
+	return "~/.agents/model_capabilities.json"
 }
 
 func exitErr(err error) {

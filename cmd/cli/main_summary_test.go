@@ -9,22 +9,19 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
-func TestSummarizeToolResponse_ReadUsesFileNameAndRange(t *testing.T) {
+func TestSummarizeToolResponse_ReadReturnsEmpty(t *testing.T) {
 	got := summarizeToolResponse("READ", map[string]any{
 		"path":       "/tmp/work/project/main.go",
 		"start_line": 3,
 		"end_line":   12,
 		"has_more":   false,
 	})
-	if !strings.Contains(got, "read main.go lines 3-12") {
-		t.Fatalf("unexpected read summary: %q", got)
-	}
-	if strings.Contains(got, "/tmp/work/project") {
-		t.Fatalf("expected basename-only summary, got %q", got)
+	if got != "" {
+		t.Fatalf("expected empty read summary, got %q", got)
 	}
 }
 
-func TestSummarizeToolResponse_ReadTruncatedShowsNextOffset(t *testing.T) {
+func TestSummarizeToolResponse_ReadTruncatedReturnsEmpty(t *testing.T) {
 	got := summarizeToolResponse("READ", map[string]any{
 		"path":        "/tmp/a.txt",
 		"start_line":  1,
@@ -32,8 +29,8 @@ func TestSummarizeToolResponse_ReadTruncatedShowsNextOffset(t *testing.T) {
 		"has_more":    true,
 		"next_offset": 4096,
 	})
-	if !strings.Contains(got, "truncated") || !strings.Contains(got, "next_offset=4096") {
-		t.Fatalf("unexpected truncated read summary: %q", got)
+	if got != "" {
+		t.Fatalf("expected empty read summary, got %q", got)
 	}
 }
 
@@ -50,7 +47,7 @@ func TestSummarizeToolResponse_PatchIncludesMetadataPreview(t *testing.T) {
 			},
 		},
 	})
-	if !strings.Contains(got, "edited a.txt (replaced=1/1)") {
+	if !strings.Contains(got, "edited a.txt") {
 		t.Fatalf("unexpected patch summary header: %q", got)
 	}
 	if !strings.Contains(got, "\n  @@ -5,1 +5,1 @@\n  --- old\n  +++ new\n  -old\n  +new") {
@@ -81,7 +78,7 @@ func TestSummarizeToolResponse_PatchBuildsPreviewFromCallArgs(t *testing.T) {
 		"old":  "line1\nold",
 		"new":  "line1\nnew",
 	})
-	if !strings.Contains(got, "edited a.txt (replaced=1/1)") {
+	if !strings.Contains(got, "edited a.txt") {
 		t.Fatalf("unexpected patch summary header: %q", got)
 	}
 	if !strings.Contains(got, "\n  --- old\n  +++ new\n  -line1\n  -old\n  +line1\n  +new") {
@@ -102,11 +99,7 @@ func TestPrintEvent_PatchResponseUsesRecordedToolCallArgs(t *testing.T) {
 				{
 					ID:   "call_1",
 					Name: "PATCH",
-					Args: map[string]any{
-						"path": "a.txt",
-						"old":  "alpha",
-						"new":  "beta",
-					},
+					Args: `{"path":"a.txt","old":"alpha","new":"beta"}`,
 				},
 			},
 		},
@@ -127,7 +120,7 @@ func TestPrintEvent_PatchResponseUsesRecordedToolCallArgs(t *testing.T) {
 		},
 	}, state)
 	rendered := out.String()
-	if !strings.Contains(rendered, "edited a.txt (replaced=1/1)") {
+	if !strings.Contains(rendered, "edited a.txt") {
 		t.Fatalf("expected patch summary in rendered output, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "--- old") || !strings.Contains(rendered, "+beta") {

@@ -17,23 +17,6 @@ type ActivateRequest struct {
 	Workspace    string
 }
 
-// ActivateResult describes one activation result for current session.
-type ActivateResult struct {
-	Language       string
-	ToolsetID      string
-	Activated      bool
-	AddedTools     []string
-	ActiveToolsets []string
-}
-
-// ActivationController is implemented by runtime invocation context so
-// activation tools can mutate available toolsets in-session.
-type ActivationController interface {
-	ActivateLSP(context.Context, ActivateRequest) (ActivateResult, error)
-	ActivatedToolsets() []string
-	AvailableLSP() []string
-}
-
 // ToolSet is one dynamic tool bundle for one activated capability set.
 type ToolSet struct {
 	ID       string

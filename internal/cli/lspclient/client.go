@@ -58,6 +58,8 @@ type Client struct {
 
 	closed  chan struct{}
 	closeMu sync.Once
+
+	serverCaps map[string]any
 }
 
 type requestPacket struct {
@@ -144,11 +146,23 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 		_ = c.Close()
 		return nil, err
 	}
+	if caps, ok := initResp["capabilities"].(map[string]any); ok {
+		c.serverCaps = caps
+	}
 	if err := c.Notify(initCtx, "initialized", map[string]any{}); err != nil {
 		_ = c.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// ServerCapabilities returns the capabilities reported by the language server
+// during initialization. Returns nil if the server did not report capabilities.
+func (c *Client) ServerCapabilities() map[string]any {
+	if c == nil {
+		return nil
+	}
+	return c.serverCaps
 }
 
 func (c *Client) IsClosed() bool {

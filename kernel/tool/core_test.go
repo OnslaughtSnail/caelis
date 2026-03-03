@@ -3,6 +3,8 @@ package tool
 import (
 	"context"
 	"testing"
+
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
 func TestEnsureCoreTools_AddRead(t *testing.T) {
@@ -14,7 +16,16 @@ func TestEnsureCoreTools_AddRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools, err := EnsureCoreTools([]Tool{echoTool}, CoreToolsConfig{})
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = toolexec.Close(rt)
+	})
+	tools, err := EnsureCoreTools([]Tool{echoTool}, CoreToolsConfig{Runtime: rt})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,10 @@ func TestWriteTool_CreateFileWithoutReadEvidence(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "new.txt")
 
-	tool := NewWrite()
+	tool, err := NewWriteWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path":    path,
 		"content": "hello",
@@ -39,7 +42,10 @@ func TestWriteTool_OverwriteExistingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewWrite()
+	tool, err := NewWriteWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path":    path,
 		"content": "new",

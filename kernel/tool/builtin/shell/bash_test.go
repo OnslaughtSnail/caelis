@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,7 +93,7 @@ func TestBash_DefaultSafeCommandRunsInSandbox(t *testing.T) {
 	}
 }
 
-func TestBash_DefaultUnsafeCommandRequiresApprovalWhenNoApprover(t *testing.T) {
+func TestBash_DefaultUnsafeCommandRunsInSandboxWithoutApprovalWhenNoApprover(t *testing.T) {
 	host := &recordingRunner{}
 	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
 	rt, err := toolexec.New(toolexec.Config{
@@ -108,25 +109,24 @@ func TestBash_DefaultUnsafeCommandRequiresApprovalWhenNoApprover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = tool.Run(context.Background(), map[string]any{"command": "python3 app.py"})
-	if err == nil {
-		t.Fatal("expected approval required")
-	}
-	var approvalErr *toolexec.ApprovalRequiredError
-	if !errors.As(err, &approvalErr) {
-		t.Fatalf("expected approval-required error, got: %v", err)
+	out, err := tool.Run(context.Background(), map[string]any{"command": "python3 app.py"})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(host.calls) != 0 {
 		t.Fatalf("expected host runner not called, got %d", len(host.calls))
 	}
-	if len(sandbox.calls) != 0 {
-		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	if len(sandbox.calls) != 1 {
+		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
+	}
+	if out["stdout"] != "sandbox-ok" {
+		t.Fatalf("unexpected stdout: %v", out["stdout"])
 	}
 }
 
-func TestBash_DefaultUnsafeCommandWithApprovalRunsOnHost(t *testing.T) {
-	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-ok"}}
-	sandbox := &recordingRunner{}
+func TestBash_DefaultUnsafeCommandWithApprovalStillRunsInSandbox(t *testing.T) {
+	host := &recordingRunner{}
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		HostRunner:     host,
@@ -145,13 +145,13 @@ func TestBash_DefaultUnsafeCommandWithApprovalRunsOnHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(host.calls) != 1 {
-		t.Fatalf("expected host runner called once, got %d", len(host.calls))
+	if len(host.calls) != 0 {
+		t.Fatalf("expected host runner not called, got %d", len(host.calls))
 	}
-	if len(sandbox.calls) != 0 {
-		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	if len(sandbox.calls) != 1 {
+		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "host-ok" {
+	if out["stdout"] != "sandbox-ok" {
 		t.Fatalf("unexpected stdout: %v", out["stdout"])
 	}
 }
@@ -645,5 +645,35 @@ func TestBash_SandboxErrorNonMissingDoesNotEscalate(t *testing.T) {
 	}
 	if len(host.calls) != 0 {
 		t.Fatalf("expected host not called on non-missing sandbox error, got %d", len(host.calls))
+	}
+}
+
+func TestBash_ErrorIncludesRouteForDebug(t *testing.T) {
+	sandbox := &recordingRunner{
+		result: toolexec.CommandResult{
+			Stdout:   "node: cannot find module",
+			ExitCode: 1,
+		},
+		err: errors.New("sandbox command failed"),
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		HostRunner:     &recordingRunner{},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{"command": "node script.js"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "route=sandbox") {
+		t.Fatalf("expected route in error message, got: %v", err)
 	}
 }

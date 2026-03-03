@@ -29,9 +29,9 @@ type CompactionStrategy interface {
 }
 
 const (
-	defaultCompactionSystemPrompt = "You are a conversation compactor. Produce a concise structured summary covering goals, constraints, key facts, completed actions, pending tasks, and important artifacts."
-	defaultCompactionUserPrefix   = "Summarize the following conversation history. Preserve critical tool outcomes and unresolved issues. Return only the summary body:\n\n"
-	defaultCompactionMergePrefix  = "Merge the following chunk summaries into one coherent final summary:\n\n"
+	defaultCompactionSystemPrompt = "You are writing a CONTEXT CHECKPOINT for an autonomous coding agent that must continue work after history truncation. Do not write a project retrospective or final answer. Focus on what the next model turn must execute."
+	defaultCompactionUserPrefix   = "Create a continuation checkpoint from the transcript below.\n\nOutput requirements:\n- Use exactly these Markdown headings in this order:\n  1) ## Active Objective\n  2) ## Current Task State\n  3) ## Completed Tasks\n  4) ## Pending Next Tasks\n  5) ## Constraints And Preferences\n  6) ## Open Issues And Risks\n  7) ## Critical References\n- Keep items concrete and execution-oriented.\n- Preserve critical tool outcomes, errors, and unresolved user intent.\n- For Pending Next Tasks, provide an ordered checklist.\n- If something is unknown, explicitly write \"unknown\".\n- Return only checkpoint content, no preface.\n\nTranscript:\n\n"
+	defaultCompactionMergePrefix  = "Merge the following checkpoint chunks into one continuation checkpoint.\nKeep the same section headings and remove duplicates.\nReturn only the merged checkpoint body:\n\n"
 )
 
 // MapReduceCompactionStrategyConfig configures default map-reduce compaction.

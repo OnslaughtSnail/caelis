@@ -2,6 +2,7 @@ package llmagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -140,6 +141,14 @@ type echoResp struct {
 	Echo string `json:"echo"`
 }
 
+func jsonArgs(v map[string]any) string {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
+}
+
 func TestLLMAgent_ToolLoop(t *testing.T) {
 	echoTool, err := tool.NewFunction[echoArgs, echoResp]("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
 		_ = ctx
@@ -152,7 +161,7 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "c1", Name: "echo", Args: map[string]any{"text": "hello"}}}}}, nil
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "c1", Name: "echo", Args: jsonArgs(map[string]any{"text": "hello"})}}}}, nil
 		}
 		if last.Role == model.RoleTool {
 			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
@@ -215,7 +224,7 @@ func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "cap_tool",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		}
@@ -349,6 +358,521 @@ func TestLLMAgent_RetryExhaustedReturnsError(t *testing.T) {
 	t.Fatal("expected retry exhausted error")
 }
 
+func TestLLMAgent_InvalidRawToolArgsFailsRun(t *testing.T) {
+	// With an empty call ID, arg-parse errors cannot be fed back to the model
+	// and must cause a hard error.
+	toolCalled := false
+	echoTool := namedTool{
+		name: "echo",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			toolCalled = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "",
+					Name: "echo",
+					Args: `not valid json`,
+				}},
+			}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{echoTool},
+		toolMap: map[string]tool.Tool{"echo": echoTool},
+	}
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			if !strings.Contains(runErr.Error(), "invalid tool call") {
+				t.Fatalf("unexpected error: %v", runErr)
+			}
+			if toolCalled {
+				t.Fatal("expected tool not to execute when raw args are invalid")
+			}
+			return
+		}
+	}
+	t.Fatal("expected invalid raw args error")
+}
+
+func TestLLMAgent_InvalidArgsWithIDReturnedAsToolResponse(t *testing.T) {
+	// Even non-truncated invalid JSON (e.g. "not valid json") should be fed
+	// back to the model as a tool response when the call ID is present.
+	toolCalled := false
+	echoTool := namedTool{
+		name: "echo",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			toolCalled = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		last := req.Messages[len(req.Messages)-1]
+		switch last.Role {
+		case model.RoleUser:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "echo",
+					Args: `not valid json`,
+				}},
+			}}, nil
+		case model.RoleTool:
+			errText := fmt.Sprint(last.ToolResponse.Result["error"])
+			if !strings.Contains(errText, `invalid tool call "echo" arguments`) {
+				return nil, fmt.Errorf("unexpected error: %q", errText)
+			}
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "recovered"}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{echoTool},
+		toolMap: map[string]tool.Tool{"echo": echoTool},
+	}
+	events := make([]*session.Event, 0, 8)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatalf("expected no hard error, got %v", runErr)
+		}
+		events = append(events, ev)
+	}
+	if toolCalled {
+		t.Fatal("expected echo tool not to run when args are invalid")
+	}
+	foundRecovery := false
+	for _, ev := range events {
+		if ev != nil && strings.TrimSpace(ev.Message.Text) == "recovered" {
+			foundRecovery = true
+			break
+		}
+	}
+	if !foundRecovery {
+		t.Fatal("expected model to recover from invalid args error")
+	}
+}
+
+func TestLLMAgent_AnyToolTruncatedArgsReturnedAsToolResponse(t *testing.T) {
+	toolCalled := false
+	bashTool := namedTool{
+		name: "BASH",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			toolCalled = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		last := req.Messages[len(req.Messages)-1]
+		switch last.Role {
+		case model.RoleUser:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "BASH",
+					Args: `{"command":"echo hello`,
+				}},
+			}}, nil
+		case model.RoleTool:
+			if last.ToolResponse == nil {
+				return nil, fmt.Errorf("expected tool response from agent")
+			}
+			errText := fmt.Sprint(last.ToolResponse.Result["error"])
+			if !strings.Contains(errText, `invalid tool call "BASH" arguments`) {
+				return nil, fmt.Errorf("unexpected tool error text: %q", errText)
+			}
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "ok, retrying differently"}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{bashTool},
+		toolMap: map[string]tool.Tool{"BASH": bashTool},
+	}
+	events := make([]*session.Event, 0, 8)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatalf("expected no hard error, got %v", runErr)
+		}
+		events = append(events, ev)
+	}
+	if toolCalled {
+		t.Fatal("expected BASH tool not to run when args are truncated")
+	}
+	foundToolResult := false
+	for _, ev := range events {
+		if ev == nil || ev.Message.ToolResponse == nil {
+			continue
+		}
+		if ev.Message.ToolResponse.Name != "BASH" {
+			continue
+		}
+		errText := fmt.Sprint(ev.Message.ToolResponse.Result["error"])
+		if strings.Contains(errText, `invalid tool call "BASH" arguments`) {
+			foundToolResult = true
+			break
+		}
+	}
+	if !foundToolResult {
+		t.Fatalf("expected BASH parse error returned as tool response, events=%#v", events)
+	}
+}
+
+func TestLLMAgent_WriteTruncatedArgsReturnedAsToolResponse(t *testing.T) {
+	toolCalled := false
+	writeTool := namedTool{
+		name: "WRITE",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			toolCalled = true
+			return map[string]any{"ok": true}, nil
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		last := req.Messages[len(req.Messages)-1]
+		switch last.Role {
+		case model.RoleUser:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "WRITE",
+					Args: `{"path":"index.html","content":"<html>`,
+				}},
+			}}, nil
+		case model.RoleTool:
+			if last.ToolResponse == nil {
+				return nil, fmt.Errorf("expected tool response from agent")
+			}
+			errText := fmt.Sprint(last.ToolResponse.Result["error"])
+			if !strings.Contains(errText, `invalid tool call "WRITE" arguments`) {
+				return nil, fmt.Errorf("unexpected tool error text: %q", errText)
+			}
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "switching to chunked strategy"}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{writeTool},
+		toolMap: map[string]tool.Tool{"WRITE": writeTool},
+	}
+	events := make([]*session.Event, 0, 8)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatalf("expected no hard error, got %v", runErr)
+		}
+		events = append(events, ev)
+	}
+	if toolCalled {
+		t.Fatal("expected WRITE tool not to run when args are truncated")
+	}
+	foundToolResult := false
+	for _, ev := range events {
+		if ev == nil || ev.Message.ToolResponse == nil {
+			continue
+		}
+		if ev.Message.ToolResponse.Name != "WRITE" {
+			continue
+		}
+		errText := fmt.Sprint(ev.Message.ToolResponse.Result["error"])
+		if strings.Contains(errText, `invalid tool call "WRITE" arguments`) {
+			foundToolResult = true
+			break
+		}
+	}
+	if !foundToolResult {
+		t.Fatalf("expected WRITE parse error returned as tool response, events=%#v", events)
+	}
+}
+
+func TestLLMAgent_RawToolArgsCompatibilityParsing(t *testing.T) {
+	toolCalled := false
+	echoTool := namedTool{
+		name: "echo",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			toolCalled = true
+			if args["text"] != "hello" {
+				return nil, fmt.Errorf("unexpected parsed args: %#v", args)
+			}
+			return map[string]any{"echo": "hello"}, nil
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		if step == 1 {
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "echo",
+					Args: "```json\n{\"text\":\"hello\"}\n```",
+				}},
+			}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{echoTool},
+		toolMap: map[string]tool.Tool{"echo": echoTool},
+	}
+	var last *session.Event
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		last = ev
+	}
+	if !toolCalled {
+		t.Fatal("expected tool to be called")
+	}
+	if last == nil || strings.TrimSpace(last.Message.Text) != "done" {
+		t.Fatalf("unexpected final event: %#v", last)
+	}
+}
+
+func TestLLMAgent_DuplicateToolCallFailsWithoutToolResponse(t *testing.T) {
+	toolCalled := 0
+	echoTool := namedTool{
+		name: "echo",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			toolCalled++
+			return map[string]any{"echo": "hello"}, nil
+		},
+	}
+
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		switch last.Role {
+		case model.RoleUser:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "echo",
+					Args: jsonArgs(map[string]any{"text": "hello"}),
+				}},
+			}}, nil
+		case model.RoleTool:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "echo",
+					Args: jsonArgs(map[string]any{"text": "hello"}),
+				}},
+			}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{echoTool},
+		toolMap: map[string]tool.Tool{"echo": echoTool},
+	}
+
+	events := make([]*session.Event, 0, 8)
+	var gotErr error
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+		events = append(events, ev)
+	}
+	if gotErr == nil {
+		t.Fatal("expected duplicate tool call error")
+	}
+	if !strings.Contains(gotErr.Error(), "duplicate tool call detected") {
+		t.Fatalf("unexpected error: %v", gotErr)
+	}
+	if toolCalled != 2 {
+		t.Fatalf("expected tool to run twice before duplicate guard, got %d", toolCalled)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected assistant/tool events before failure")
+	}
+	last := events[len(events)-1]
+	if last.Message.Role != model.RoleTool {
+		t.Fatalf("expected last event to be tool response for duplicate, got %#v", last.Message)
+	}
+	if last.Message.ToolResponse == nil {
+		t.Fatal("expected tool response event on duplicate failure")
+	}
+	errStr, _ := last.Message.ToolResponse.Result["error"].(string)
+	if !strings.Contains(errStr, "duplicate") {
+		t.Fatalf("expected duplicate error in tool response result, got %q", errStr)
+	}
+}
+
+func TestLLMAgent_NonConsecutiveSameToolCallIsNotDuplicate(t *testing.T) {
+	// BASH→READ→BASH with same args should NOT trigger duplicate detection.
+	bashCalled := 0
+	readCalled := 0
+	bashTool := namedTool{
+		name: "BASH",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			bashCalled++
+			return map[string]any{"output": "ok"}, nil
+		},
+	}
+	readTool := namedTool{
+		name: "READ",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			readCalled++
+			return map[string]any{"content": "file"}, nil
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		switch step {
+		case 1: // initial: call BASH
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID: "c1", Name: "BASH",
+					Args: jsonArgs(map[string]any{"cmd": "ls"}),
+				}},
+			}}, nil
+		case 2: // after BASH result: call READ (different tool)
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID: "c2", Name: "READ",
+					Args: jsonArgs(map[string]any{"path": "/tmp/f"}),
+				}},
+			}}, nil
+		case 3: // after READ result: call BASH again with same args
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID: "c3", Name: "BASH",
+					Args: jsonArgs(map[string]any{"cmd": "ls"}),
+				}},
+			}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{bashTool, readTool},
+		toolMap: map[string]tool.Tool{"BASH": bashTool, "READ": readTool},
+	}
+
+	var gotErr error
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no error for non-consecutive same tool calls, got: %v", gotErr)
+	}
+	if bashCalled != 2 {
+		t.Fatalf("expected BASH to be called 2 times, got %d", bashCalled)
+	}
+	if readCalled != 1 {
+		t.Fatalf("expected READ to be called 1 time, got %d", readCalled)
+	}
+}
+
 func TestLLMAgent_PropagatesPolicyDecisionToToolContext(t *testing.T) {
 	toolCalled := false
 	hostRouteSeen := false
@@ -380,7 +904,7 @@ func TestLLMAgent_PropagatesPolicyDecisionToToolContext(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "check_ctx",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		}
@@ -437,7 +961,7 @@ func TestLLMAgent_DenyDecisionSkipsToolExecution(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "check_ctx",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		}
@@ -494,7 +1018,7 @@ func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "needs_approval",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		}
@@ -553,7 +1077,7 @@ func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "echo_big",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		}
@@ -693,7 +1217,7 @@ func TestLLMAgent_DoesNotSendUIOnlyToolFieldsToModel(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "preview_tool",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		case 2:
@@ -751,7 +1275,7 @@ func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "minimal_tool",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		default:
@@ -813,7 +1337,7 @@ func TestLLMAgent_AddsErrorCodeToToolResultMetadata(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "coded_tool",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		default:
@@ -875,7 +1399,7 @@ func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "plain_tool",
-					Args: map[string]any{},
+					Args: "{}",
 				}},
 			}}, nil
 		default:
@@ -920,7 +1444,7 @@ func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
 func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 	dynamicTool := namedTool{name: "LSP_DIAGNOSTICS"}
 	activationTool := namedTool{
-		name: "LSP_ACTIVATE",
+		name: "ENABLE_EXTRA_TOOLS",
 		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
 			inv, ok := ctx.(*testCtx)
 			if !ok {
@@ -941,8 +1465,8 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 				Role: model.RoleAssistant,
 				ToolCalls: []model.ToolCall{{
 					ID:   "activate_1",
-					Name: "LSP_ACTIVATE",
-					Args: map[string]any{"language": "go"},
+					Name: "ENABLE_EXTRA_TOOLS",
+					Args: jsonArgs(map[string]any{}),
 				}},
 			}}, nil
 		case 2:
@@ -987,7 +1511,7 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 	}
 }
 
-func TestLLMAgent_IgnoresMaxStepsLimit(t *testing.T) {
+func TestLLMAgent_CompletesMultiTurnToolLoop(t *testing.T) {
 	turn := 0
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		turn++
@@ -997,7 +1521,7 @@ func TestLLMAgent_IgnoresMaxStepsLimit(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "echo",
-					Args: map[string]any{"text": "loop"},
+					Args: jsonArgs(map[string]any{"text": "loop"}),
 				}},
 			}}, nil
 		}
@@ -1012,7 +1536,7 @@ func TestLLMAgent_IgnoresMaxStepsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ag, err := New(Config{Name: "test", MaxSteps: 1})
+	ag, err := New(Config{Name: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1036,7 +1560,7 @@ func TestLLMAgent_IgnoresMaxStepsLimit(t *testing.T) {
 	}
 }
 
-func TestLLMAgent_AllowUnlimitedStepsWithZero(t *testing.T) {
+func TestLLMAgent_AllowsUnlimitedToolLoopByDefault(t *testing.T) {
 	turn := 0
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		turn++
@@ -1046,7 +1570,7 @@ func TestLLMAgent_AllowUnlimitedStepsWithZero(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "echo",
-					Args: map[string]any{"text": "ok"},
+					Args: jsonArgs(map[string]any{"text": "ok"}),
 				}},
 			}}, nil
 		}
@@ -1059,7 +1583,7 @@ func TestLLMAgent_AllowUnlimitedStepsWithZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ag, err := New(Config{Name: "test", MaxSteps: 0})
+	ag, err := New(Config{Name: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,13 +1604,6 @@ func TestLLMAgent_AllowUnlimitedStepsWithZero(t *testing.T) {
 	}
 	if last == nil || last.Message.Text != "done" {
 		t.Fatalf("unexpected last event: %#v", last)
-	}
-}
-
-func TestLLMAgent_AllowsNegativeMaxSteps(t *testing.T) {
-	_, err := New(Config{Name: "test", MaxSteps: -1})
-	if err != nil {
-		t.Fatalf("expected negative max steps to be ignored, got %v", err)
 	}
 }
 
@@ -1104,7 +1621,7 @@ func TestLLMAgent_PersistsModelUsageMeta(t *testing.T) {
 			},
 		}, nil
 	})
-	ag, err := New(Config{Name: "test", MaxSteps: 1})
+	ag, err := New(Config{Name: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

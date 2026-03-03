@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
@@ -28,7 +29,7 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	if store.CredentialStoreMode() != credentialStoreModeAuto {
 		t.Fatalf("unexpected default credential store mode: %q", store.CredentialStoreMode())
 	}
-	if store.StreamModel() {
+	if !store.StreamModel() {
 		t.Fatalf("unexpected default stream mode: %v", store.StreamModel())
 	}
 	if store.ThinkingMode() != "auto" {
@@ -62,6 +63,9 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		Model:               "gpt-4o-mini",
 		BaseURL:             "https://api.openai.com/v1",
 		ContextWindowTokens: 128000,
+		ThinkingMode:        "on",
+		ThinkingBudget:      2048,
+		ReasoningEffort:     "high",
 		Auth: modelproviders.AuthConfig{
 			Type:  modelproviders.AuthAPIKey,
 			Token: "secret",
@@ -100,15 +104,20 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	if got := store2.ResolveModelAlias("OPENAI/GPT-4O-MINI"); got != "openai/gpt-4o-mini" {
 		t.Fatalf("unexpected resolved alias: %q", got)
 	}
+	settings := store2.ModelRuntimeSettings("openai/gpt-4o-mini")
+	if settings.ThinkingMode != "on" {
+		t.Fatalf("expected provider thinking mode on, got %q", settings.ThinkingMode)
+	}
+	if settings.ThinkingBudget != 2048 {
+		t.Fatalf("expected provider thinking budget 2048, got %d", settings.ThinkingBudget)
+	}
+	if settings.ReasoningEffort != "high" {
+		t.Fatalf("expected provider reasoning effort high, got %q", settings.ReasoningEffort)
+	}
 
 	if err := store2.SetRuntimeSettings(runtimeSettings{
-		StreamModel:     true,
-		ThinkingMode:    "on",
-		ThinkingBudget:  2048,
-		ReasoningEffort: "high",
-		ShowReasoning:   false,
-		PermissionMode:  "full_control",
-		SandboxType:     "docker",
+		PermissionMode: "full_control",
+		SandboxType:    "docker",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -116,23 +125,27 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !store3.StreamModel() {
-		t.Fatalf("expected stream mode persisted")
-	}
-	if store3.ThinkingMode() != "on" {
-		t.Fatalf("expected thinking mode on, got %q", store3.ThinkingMode())
-	}
-	if store3.ThinkingBudget() != 2048 {
-		t.Fatalf("expected thinking budget 2048, got %d", store3.ThinkingBudget())
-	}
-	if store3.ReasoningEffort() != "high" {
-		t.Fatalf("expected reasoning effort high, got %q", store3.ReasoningEffort())
-	}
-	if store3.ShowReasoning() {
-		t.Fatalf("expected show reasoning persisted false")
-	}
 	if store3.PermissionMode() != "full_control" {
 		t.Fatalf("expected permission mode full_control, got %q", store3.PermissionMode())
+	}
+	settings = store3.ModelRuntimeSettings("openai/gpt-4o-mini")
+	if settings.ThinkingMode != "on" || settings.ThinkingBudget != 2048 || settings.ReasoningEffort != "high" {
+		t.Fatalf("expected provider runtime settings persisted, got %#v", settings)
+	}
+	if err := store3.SetModelRuntimeSettings("openai/gpt-4o-mini", modelRuntimeSettings{
+		ThinkingMode:    "true",
+		ThinkingBudget:  2048,
+		ReasoningEffort: "very-high",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store4, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = store4.ModelRuntimeSettings("openai/gpt-4o-mini")
+	if settings.ThinkingMode != "on" || settings.ReasoningEffort != "very_high" {
+		t.Fatalf("expected normalized runtime settings, got %#v", settings)
 	}
 }
 
@@ -185,5 +198,165 @@ func TestSanitizeAppName(t *testing.T) {
 	}
 	if filepath.Base(filepath.Dir(idxPath)) != "sessions" {
 		t.Fatalf("unexpected session index dir: %q", filepath.Dir(idxPath))
+	}
+}
+
+func TestAppConfig_ResolvesEnvPlaceholderFromCwdDotEnv(t *testing.T) {
+	const tokenEnv = "CAELIS_TEST_TOKEN_FROM_CWD"
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("HOME", oldHome)
+	})
+
+	workspace := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	cfgPath, err := configPath("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+  "version": 1,
+  "default_model": "deepseek/deepseek-chat",
+  "providers": [
+    {
+      "alias": "deepseek/deepseek-chat",
+      "provider": "deepseek",
+      "api": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com/v1",
+      "auth": {"type": "api_key", "token": "${` + tokenEnv + `}"}
+    }
+  ]
+}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".env"), []byte(tokenEnv+"=from-cwd-env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := store.ProviderConfigs()
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider, got %d", len(providers))
+	}
+	if providers[0].Auth.Token != "from-cwd-env" {
+		t.Fatalf("expected resolved token from cwd .env, got %q", providers[0].Auth.Token)
+	}
+}
+
+func TestAppConfig_ResolvesEnvPlaceholderFromConfigRootDotEnv(t *testing.T) {
+	const tokenEnv = "CAELIS_TEST_TOKEN_FROM_CONFIG_ROOT"
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("HOME", oldHome)
+	})
+
+	cfgPath, err := configPath("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+  "version": 1,
+  "default_model": "deepseek/deepseek-chat",
+  "providers": [
+    {
+      "alias": "deepseek/deepseek-chat",
+      "provider": "deepseek",
+      "api": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com/v1",
+      "auth": {"type": "api_key", "token": "${` + tokenEnv + `}"}
+    }
+  ]
+}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(cfgPath), ".env"), []byte(tokenEnv+"=from-config-root-env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := store.ProviderConfigs()
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider, got %d", len(providers))
+	}
+	if providers[0].Auth.Token != "from-config-root-env" {
+		t.Fatalf("expected resolved token from config-root .env, got %q", providers[0].Auth.Token)
+	}
+}
+
+func TestAppConfig_FailsOnUnresolvedEnvPlaceholder(t *testing.T) {
+	const tokenEnv = "CAELIS_TEST_TOKEN_UNRESOLVED"
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("HOME", oldHome)
+	})
+
+	cfgPath, err := configPath("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+  "version": 1,
+  "providers": [
+    {
+      "alias": "deepseek/deepseek-chat",
+      "provider": "deepseek",
+      "api": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com/v1",
+      "auth": {"type": "api_key", "token": "${` + tokenEnv + `}"}
+    }
+  ]
+}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = loadOrInitAppConfig("demo-app")
+	if err == nil {
+		t.Fatal("expected unresolved placeholder error")
+	}
+	if !strings.Contains(err.Error(), "invalid config") || !strings.Contains(err.Error(), tokenEnv) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -17,11 +17,6 @@ type StatTool struct {
 	runtime toolexec.Runtime
 }
 
-func NewStat() *StatTool {
-	tool, _ := NewStatWithRuntime(nil)
-	return tool
-}
-
 func NewStatWithRuntime(runtime toolexec.Runtime) (*StatTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(runtime)
 	if err != nil {

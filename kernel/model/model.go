@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"iter"
+	"strings"
 )
 
 // Role identifies message author type.
@@ -26,7 +27,9 @@ type ToolDefinition struct {
 type ToolCall struct {
 	ID   string
 	Name string
-	Args map[string]any
+	// Args preserves provider-originated raw JSON argument text.
+	// It is parsed only at execution boundaries.
+	Args string
 	// ThoughtSignature carries provider-specific chain-of-thought signature
 	// required by some providers (for example Gemini) to validate tool loops.
 	ThoughtSignature string
@@ -39,13 +42,59 @@ type ToolResponse struct {
 	Result map[string]any
 }
 
+// ContentPartType identifies the kind of content in a ContentPart.
+type ContentPartType string
+
+const (
+	ContentPartText  ContentPartType = "text"
+	ContentPartImage ContentPartType = "image"
+)
+
+// ContentPart is one segment of a multimodal message.
+type ContentPart struct {
+	Type     ContentPartType
+	Text     string
+	MimeType string // e.g. "image/png"
+	Data     string // base64-encoded image data
+	FileName string // original filename for display
+}
+
 // Message is a single turn element in model context.
 type Message struct {
 	Role         Role
 	Text         string
+	ContentParts []ContentPart
 	Reasoning    string
 	ToolCalls    []ToolCall
 	ToolResponse *ToolResponse
+}
+
+// HasImages returns true if the message contains any image content parts.
+func (m Message) HasImages() bool {
+	for _, part := range m.ContentParts {
+		if part.Type == ContentPartImage {
+			return true
+		}
+	}
+	return false
+}
+
+// TextContent returns the text content from either ContentParts or the Text
+// field, providing backward-compatible text extraction.
+func (m Message) TextContent() string {
+	if len(m.ContentParts) == 0 {
+		return m.Text
+	}
+	var parts []string
+	for _, p := range m.ContentParts {
+		if p.Type == ContentPartText && strings.TrimSpace(p.Text) != "" {
+			parts = append(parts, p.Text)
+		}
+	}
+	if len(parts) == 0 {
+		return m.Text
+	}
+	return strings.Join(parts, "\n")
 }
 
 // ReasoningConfig controls provider reasoning/thinking behavior.
