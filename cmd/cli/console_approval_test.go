@@ -34,9 +34,9 @@ func (s *stubLineEditor) ReadSecret(prompt string) (string, error) {
 func (s *stubLineEditor) Output() io.Writer { return io.Discard }
 func (s *stubLineEditor) Close() error      { return nil }
 
-func TestTerminalApprover_DefaultWhitelistAllowsSafeCommands(t *testing.T) {
-	editor := &stubLineEditor{}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat", "head", "grep", "tail"})
+func TestTerminalApprover_RequiresExplicitApprovalByDefault(t *testing.T) {
+	editor := &stubLineEditor{lines: []string{"y"}}
+	approver := newTerminalApprover(editor, io.Discard, nil)
 
 	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{
 		ToolName: "BASH",
@@ -48,22 +48,22 @@ func TestTerminalApprover_DefaultWhitelistAllowsSafeCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !allowed {
-		t.Fatal("expected safe command pipeline to be auto-approved")
+		t.Fatal("expected explicit approval to allow command")
 	}
-	if editor.reads != 0 {
-		t.Fatalf("expected no prompt for safe command, got reads=%d", editor.reads)
+	if editor.reads != 1 {
+		t.Fatalf("expected one prompt for default approval, got reads=%d", editor.reads)
 	}
 }
 
-func TestTerminalApprover_DefaultWhitelistRejectsSingleAmpersandChain(t *testing.T) {
+func TestTerminalApprover_RejectsCommandWhenUserDenies(t *testing.T) {
 	editor := &stubLineEditor{lines: []string{"n"}}
-	approver := newTerminalApprover(editor, io.Discard, []string{"ls"})
+	approver := newTerminalApprover(editor, io.Discard, nil)
 
 	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{
 		Command: "ls & rm -rf /tmp/x",
 	})
 	if allowed {
-		t.Fatal("expected '&' chained command not to be auto-approved")
+		t.Fatal("expected denied command to return false")
 	}
 	if err == nil || !toolexec.IsApprovalAborted(err) {
 		t.Fatalf("expected approval aborted error, got %v", err)
@@ -73,25 +73,9 @@ func TestTerminalApprover_DefaultWhitelistRejectsSingleAmpersandChain(t *testing
 	}
 }
 
-func TestTerminalApprover_DefaultWhitelistAllowsGitStatus(t *testing.T) {
-	editor := &stubLineEditor{}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
-
-	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "git status --short"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !allowed {
-		t.Fatal("expected git status to be auto-approved")
-	}
-	if editor.reads != 0 {
-		t.Fatalf("expected no prompt for git status, got reads=%d", editor.reads)
-	}
-}
-
 func TestTerminalApprover_AlwaysAddsSessionWhitelist(t *testing.T) {
 	editor := &stubLineEditor{lines: []string{"a"}}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+	approver := newTerminalApprover(editor, io.Discard, nil)
 	req := toolexec.ApprovalRequest{Command: "go test ./..."}
 
 	allowed, err := approver.Approve(context.Background(), req)
@@ -119,7 +103,7 @@ func TestTerminalApprover_AlwaysAddsSessionWhitelist(t *testing.T) {
 
 func TestTerminalApprover_CancelReturnsApprovalAborted(t *testing.T) {
 	editor := &stubLineEditor{lines: []string{"n"}}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+	approver := newTerminalApprover(editor, io.Discard, nil)
 
 	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "go test ./..."})
 	if allowed {
@@ -140,18 +124,9 @@ func TestSessionApprovalKey_ComplexCommandUsesExactText(t *testing.T) {
 	}
 }
 
-func TestIsEnvAssignmentToken(t *testing.T) {
-	if !isEnvAssignmentToken("MODEL_NAME=deepseek") {
-		t.Fatal("expected env assignment token")
-	}
-	if isEnvAssignmentToken("1A=bad") {
-		t.Fatal("expected invalid assignment to be rejected")
-	}
-}
-
 func TestTerminalApprover_EOFIsCancel(t *testing.T) {
 	editor := &stubLineEditor{}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+	approver := newTerminalApprover(editor, io.Discard, nil)
 	_, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "go test ./..."})
 	if err == nil {
 		t.Fatal("expected cancel error")
@@ -163,7 +138,7 @@ func TestTerminalApprover_EOFIsCancel(t *testing.T) {
 
 func TestTerminalApprover_AuthorizeToolAlwaysCachesByToolName(t *testing.T) {
 	editor := &stubLineEditor{lines: []string{"a"}}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+	approver := newTerminalApprover(editor, io.Discard, nil)
 	req := kernelpolicy.ToolAuthorizationRequest{
 		ToolName: "WRITE",
 		Reason:   "filesystem mutation tool",
@@ -194,7 +169,7 @@ func TestTerminalApprover_AuthorizeToolAlwaysCachesByToolName(t *testing.T) {
 
 func TestTerminalApprover_AuthorizeToolCancelReturnsApprovalAborted(t *testing.T) {
 	editor := &stubLineEditor{lines: []string{"n"}}
-	approver := newTerminalApprover(editor, io.Discard, []string{"cat"})
+	approver := newTerminalApprover(editor, io.Discard, nil)
 
 	allowed, err := approver.AuthorizeTool(context.Background(), kernelpolicy.ToolAuthorizationRequest{
 		ToolName: "PATCH",

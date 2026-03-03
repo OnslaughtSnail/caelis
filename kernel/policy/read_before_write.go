@@ -49,14 +49,31 @@ func (h readBeforeWriteHook) BeforeTool(ctx context.Context, in ToolInput) (Tool
 	if !in.Capability.HasOperation(toolcap.OperationFileWrite) {
 		return in, nil
 	}
-	targetPath := pathArgFromToolCall(in.Call.Args)
+	args := resolveToolInputArgs(in)
+	targetPath := pathArgFromToolCall(args)
 	if targetPath == "" {
-		return in, fmt.Errorf("policy: write tool %q requires path arg", in.Call.Name)
+		in.Decision = Decision{
+			Effect: DecisionEffectDeny,
+			Reason: fmt.Sprintf("write tool %q requires path arg", in.Call.Name),
+		}
+		return in, nil
+	}
+	protectedTarget, statErr := requiresPriorRead(targetPath)
+	if statErr != nil {
+		// Let the tool itself surface filesystem errors instead of hard-stopping policy chain.
+		return in, nil
+	}
+	if !protectedTarget {
+		return in, nil
 	}
 	if hasReadEvidence(ctx, h.readToolName, targetPath) {
 		return in, nil
 	}
-	return in, fmt.Errorf("policy: write tool %q requires prior READ of %q", in.Call.Name, targetPath)
+	in.Decision = Decision{
+		Effect: DecisionEffectDeny,
+		Reason: fmt.Sprintf("write tool %q requires prior READ of %q", in.Call.Name, targetPath),
+	}
+	return in, nil
 }
 
 func (h readBeforeWriteHook) AfterTool(ctx context.Context, out ToolOutput) (ToolOutput, error) {
@@ -128,4 +145,18 @@ func normalizePathForComparison(path string) string {
 		}
 	}
 	return filepath.Clean(path)
+}
+
+func requiresPriorRead(targetPath string) (bool, error) {
+	info, err := os.Stat(targetPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() {
+		return false, nil
+	}
+	return info.Size() > 0, nil
 }

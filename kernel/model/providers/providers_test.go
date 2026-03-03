@@ -13,6 +13,14 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 )
 
+func jsonArgs(v map[string]any) string {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(raw)
+}
+
 func TestListModelsRequiresRegistration(t *testing.T) {
 	factory := NewFactory()
 	if got := factory.ListModels(); len(got) != 0 {
@@ -114,6 +122,233 @@ func TestOpenAICompatStream_PropagatesSSEErrorsWithoutTurnComplete(t *testing.T)
 	}
 }
 
+func TestOpenAICompatStream_DoesNotApplyRequestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(150 * time.Millisecond)
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	llm := newOpenAICompat(Config{
+		Provider: "openai-compatible",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  50 * time.Millisecond,
+	}, "token")
+
+	var (
+		gotErr    error
+		finalText string
+	)
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   true,
+	}) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		if resp != nil && resp.TurnComplete {
+			finalText = resp.Message.Text
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no stream error, got %v", gotErr)
+	}
+	if finalText != "hello world" {
+		t.Fatalf("unexpected final text %q", finalText)
+	}
+}
+
+func TestOpenAICompatRequest_IncludesMaxTokens(t *testing.T) {
+	var gotMax float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		got, _ := payload["max_tokens"].(float64)
+		gotMax = got
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer server.Close()
+
+	llm := newOpenAICompat(Config{
+		Provider:     "openai-compatible",
+		Model:        "test-model",
+		BaseURL:      server.URL,
+		Timeout:      2 * time.Second,
+		MaxOutputTok: 2048,
+	}, "token")
+
+	var gotErr error
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+	}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no generate error, got %v", gotErr)
+	}
+	if gotMax != 2048 {
+		t.Fatalf("expected max_tokens=2048, got %v", gotMax)
+	}
+}
+
+func TestOpenAICompatNonStream_AppliesRequestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer server.Close()
+
+	llm := newOpenAICompat(Config{
+		Provider: "openai-compatible",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  50 * time.Millisecond,
+	}, "token")
+
+	var gotErr error
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+	}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatalf("expected timeout error, got nil")
+	}
+	if !strings.Contains(strings.ToLower(gotErr.Error()), "context deadline exceeded") {
+		t.Fatalf("expected context deadline exceeded, got %v", gotErr)
+	}
+}
+
+func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/models/test-model:streamGenerateContent") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"hello\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(150 * time.Millisecond)
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":2,\"totalTokenCount\":3}}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider: "gemini",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  50 * time.Millisecond,
+	}, "token")
+
+	var (
+		gotErr    error
+		finalText string
+	)
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   true,
+	}) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		if resp != nil && resp.TurnComplete {
+			finalText = resp.Message.Text
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no stream error, got %v", gotErr)
+	}
+	if finalText != "hello!" {
+		t.Fatalf("unexpected final text %q", finalText)
+	}
+}
+
+func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
+	var gotMax float64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/models/test-model:generateContent") {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		if cfg, ok := payload["generationConfig"].(map[string]any); ok {
+			gotMax, _ = cfg["maxOutputTokens"].(float64)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`)
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider:     "gemini",
+		Model:        "test-model",
+		BaseURL:      server.URL,
+		Timeout:      2 * time.Second,
+		MaxOutputTok: 3072,
+	}, "token")
+
+	var gotErr error
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+	}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no generate error, got %v", gotErr)
+	}
+	if gotMax != 3072 {
+		t.Fatalf("expected generationConfig.maxOutputTokens=3072, got %v", gotMax)
+	}
+}
+
 func TestFromToOpenAIMessage(t *testing.T) {
 	llm := newOpenAICompat(Config{
 		Provider: "openai-compatible",
@@ -127,7 +362,7 @@ func TestFromToOpenAIMessage(t *testing.T) {
 		ToolCalls: []model.ToolCall{{
 			ID:   "c1",
 			Name: "echo",
-			Args: map[string]any{"text": "hello"},
+			Args: jsonArgs(map[string]any{"text": "hello"}),
 		}},
 	}
 	raw := llm.fromKernelMessage(in)
@@ -160,6 +395,31 @@ func TestFromToOpenAIMessage(t *testing.T) {
 	}
 }
 
+func TestToKernelMessage_OpenAICompatKeepsRawToolArgsOnDecodeFailure(t *testing.T) {
+	msg, err := toKernelMessage(openAICompatMsg{
+		Role: "assistant",
+		ToolCalls: []openAICompatToolCall{
+			{
+				ID:   "c1",
+				Type: "function",
+				Function: openAICompatCallFunction{
+					Name:      "WRITE",
+					Arguments: `{"path":`,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected no hard parse error, got %v", err)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	}
+	if got := strings.TrimSpace(msg.ToolCalls[0].Args); got == "" {
+		t.Fatalf("expected raw args kept, got %#v", msg.ToolCalls[0])
+	}
+}
+
 func TestDeepSeekThinkingPayload(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider: "deepseek",
@@ -175,7 +435,7 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 				ToolCalls: []model.ToolCall{{
 					ID:   "c1",
 					Name: "echo",
-					Args: map[string]any{"text": "hi"},
+					Args: jsonArgs(map[string]any{"text": "hi"}),
 				}},
 			},
 		},
@@ -197,6 +457,67 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 	}
 	if got := *payload.Messages[0].ReasoningContent; got != "" {
 		t.Fatalf("expected empty reasoning_content for tool-call loop, got %q", got)
+	}
+	// When thinking is enabled the payload MaxTokens must be at least 32K so
+	// the reasoning chain is not prematurely truncated.
+	if payload.MaxTokens < thinkingModeMinTokens {
+		t.Fatalf("expected MaxTokens >= %d when thinking enabled, got %d",
+			thinkingModeMinTokens, payload.MaxTokens)
+	}
+}
+
+func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
+	llm := newDeepSeek(Config{
+		Provider:     "deepseek",
+		Model:        "deepseek-chat",
+		BaseURL:      "https://api.deepseek.com/v1",
+		Timeout:      time.Second,
+		MaxOutputTok: 8192, // smaller than thinking min – must be bumped
+	}, "token").(*openAICompatLLM)
+	enabled := true
+	req := &model.Request{
+		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Reasoning: model.ReasoningConfig{Enabled: &enabled},
+	}
+	payload := openAICompatRequest{
+		Model:     "deepseek-chat",
+		Messages:  llm.fromKernelMessages(req.Messages),
+		MaxTokens: llm.maxOutputTok, // 8192 from config
+	}
+	llm.options.ApplyReasoning(&payload, req.Reasoning)
+	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
+		t.Fatalf("expected thinking enabled")
+	}
+	if payload.MaxTokens < thinkingModeMinTokens {
+		t.Fatalf("expected MaxTokens bumped to >= %d, got %d",
+			thinkingModeMinTokens, payload.MaxTokens)
+	}
+}
+
+func TestDeepSeekThinkingPayload_DisabledDoesNotBumpMaxTokens(t *testing.T) {
+	llm := newDeepSeek(Config{
+		Provider:     "deepseek",
+		Model:        "deepseek-chat",
+		BaseURL:      "https://api.deepseek.com/v1",
+		Timeout:      time.Second,
+		MaxOutputTok: 8192,
+	}, "token").(*openAICompatLLM)
+	disabled := false
+	req := &model.Request{
+		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Reasoning: model.ReasoningConfig{Enabled: &disabled},
+	}
+	payload := openAICompatRequest{
+		Model:     "deepseek-chat",
+		Messages:  llm.fromKernelMessages(req.Messages),
+		MaxTokens: llm.maxOutputTok, // 8192
+	}
+	llm.options.ApplyReasoning(&payload, req.Reasoning)
+	if payload.Thinking == nil || payload.Thinking.Type != "disabled" {
+		t.Fatalf("expected thinking disabled")
+	}
+	if payload.MaxTokens != 8192 {
+		t.Fatalf("MaxTokens should not be changed when thinking is disabled, got %d", payload.MaxTokens)
 	}
 }
 
@@ -223,6 +544,61 @@ func TestXiaomiProviderUsesThinkingPayload(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatMessageTransform_SkipsInvalidToolResponses(t *testing.T) {
+	llm := newOpenAICompat(Config{
+		Provider: "openai-compatible",
+		Model:    "test-model",
+		BaseURL:  "https://example.com/v1",
+		Timeout:  time.Second,
+	}, "token")
+	messages := llm.fromKernelMessages([]model.Message{
+		{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "call_1",
+				Name: "echo",
+				Args: jsonArgs(map[string]any{"text": "x"}),
+			}},
+		},
+		{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     "",
+				Name:   "echo",
+				Result: map[string]any{"echo": "missing-id"},
+			},
+		},
+		{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     "call_2",
+				Name:   "echo",
+				Result: map[string]any{"echo": "unmatched-id"},
+			},
+		},
+		{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     "call_1",
+				Name:   "echo",
+				Result: map[string]any{"echo": "ok"},
+			},
+		},
+		{
+			Role: model.RoleTool,
+		},
+	})
+	if len(messages) != 2 {
+		t.Fatalf("expected 2 transformed messages, got %d", len(messages))
+	}
+	if messages[1].Role != string(model.RoleTool) {
+		t.Fatalf("expected tool role at index 1, got %q", messages[1].Role)
+	}
+	if messages[1].ToolCallID != "call_1" {
+		t.Fatalf("expected tool_call_id=call_1, got %q", messages[1].ToolCallID)
+	}
+}
+
 func TestAnthropicMessageTransform(t *testing.T) {
 	system, msgs := toAnthropicMessages([]model.Message{
 		{Role: model.RoleSystem, Text: "sys"},
@@ -232,7 +608,7 @@ func TestAnthropicMessageTransform(t *testing.T) {
 			ToolCalls: []model.ToolCall{{
 				ID:   "call1",
 				Name: "echo",
-				Args: map[string]any{"text": "x"},
+				Args: jsonArgs(map[string]any{"text": "x"}),
 			}},
 		},
 	})
@@ -253,7 +629,7 @@ func TestGeminiMessageTransform(t *testing.T) {
 			ToolCalls: []model.ToolCall{{
 				ID:               "call1",
 				Name:             "echo",
-				Args:             map[string]any{"text": "x"},
+				Args:             jsonArgs(map[string]any{"text": "x"}),
 				ThoughtSignature: "sig-1",
 			}},
 		},
@@ -281,7 +657,7 @@ func TestGeminiMessageTransform_SkipsToolCallWithoutThoughtSignature(t *testing.
 			ToolCalls: []model.ToolCall{{
 				ID:   "call1",
 				Name: "BASH",
-				Args: map[string]any{"command": "ls"},
+				Args: jsonArgs(map[string]any{"command": "ls"}),
 			}},
 		},
 	})
@@ -373,12 +749,12 @@ func TestDedupToolCalls_MergesLateThoughtSignature(t *testing.T) {
 		{
 			ID:   "BASH",
 			Name: "BASH",
-			Args: map[string]any{"command": "ls"},
+			Args: jsonArgs(map[string]any{"command": "ls"}),
 		},
 		{
 			ID:               "BASH",
 			Name:             "BASH",
-			Args:             map[string]any{"command": "ls -la"},
+			Args:             jsonArgs(map[string]any{"command": "ls -la"}),
 			ThoughtSignature: "sig-late-1",
 		},
 	})
@@ -388,7 +764,7 @@ func TestDedupToolCalls_MergesLateThoughtSignature(t *testing.T) {
 	if calls[0].ThoughtSignature != "sig-late-1" {
 		t.Fatalf("expected merged thought signature, got %q", calls[0].ThoughtSignature)
 	}
-	if calls[0].Args["command"] != "ls -la" {
-		t.Fatalf("expected latest args merged, got %v", calls[0].Args["command"])
+	if strings.TrimSpace(calls[0].Args) != `{"command":"ls -la"}` {
+		t.Fatalf("expected latest args merged, got %v", calls[0].Args)
 	}
 }

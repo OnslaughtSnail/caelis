@@ -38,6 +38,7 @@ func (f *Factory) Register(cfg Config) error {
 		cfg.Auth.Type = AuthAPIKey
 	}
 	cfg.Alias = alias
+	ApplyModelCatalog(&cfg)
 	f.configs[alias] = cfg
 	return nil
 }
@@ -100,6 +101,17 @@ func (f *Factory) ListModels() []string {
 // ListModels returns aliases from a new empty factory.
 func ListModels() []string {
 	return NewFactory().ListModels()
+}
+
+// ConfigForAlias returns the registered Config for the given alias.
+// Returns zero Config and false if the alias is not registered.
+func (f *Factory) ConfigForAlias(alias string) (Config, bool) {
+	if f == nil {
+		return Config{}, false
+	}
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	cfg, ok := f.configs[alias]
+	return cfg, ok
 }
 
 func resolveToken(cfg AuthConfig) (string, error) {

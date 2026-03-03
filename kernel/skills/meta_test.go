@@ -51,11 +51,14 @@ func TestBuildMetaPrompt(t *testing.T) {
 	text := BuildMetaPrompt([]Meta{
 		{Name: "a", Description: "desc", Tags: []string{"x"}, Version: "v1", Path: "/tmp/a/SKILL.md"},
 	})
-	if !strings.Contains(text, "Skills Metadata") {
+	if !strings.Contains(text, "## Skills") {
 		t.Fatalf("missing header in prompt: %q", text)
 	}
-	if !strings.Contains(text, `name="a"`) {
+	if !strings.Contains(text, "- a: desc (file: /tmp/a/SKILL.md)") {
 		t.Fatalf("missing skill name: %q", text)
+	}
+	if !strings.Contains(text, "### How to use skills") {
+		t.Fatalf("missing usage rules section: %q", text)
 	}
 }
 

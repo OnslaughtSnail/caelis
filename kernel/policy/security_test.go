@@ -39,8 +39,15 @@ func TestSecurityBaseline_AllowsSafeReadOnlyTools(t *testing.T) {
 	}
 }
 
-func TestSecurityBaseline_RequiresAuthorizationWhenAuthorizerMissing(t *testing.T) {
+func TestSecurityBaseline_DefaultAllowsWriteTool(t *testing.T) {
 	hook := DefaultSecurityBaseline()
+	if _, err := hook.BeforeTool(context.Background(), ToolInput{Call: model.ToolCall{Name: "WRITE"}}); err != nil {
+		t.Fatalf("expected default WRITE allow, got %v", err)
+	}
+}
+
+func TestSecurityBaseline_RequiresAuthorizationWhenGuardedAndAuthorizerMissing(t *testing.T) {
+	hook := NewSecurityBaseline(SecurityBaselineConfig{GuardedTools: []string{"WRITE"}})
 	_, err := hook.BeforeTool(context.Background(), ToolInput{Call: model.ToolCall{Name: "WRITE"}})
 	if err == nil {
 		t.Fatal("expected approval required error")
@@ -52,7 +59,7 @@ func TestSecurityBaseline_RequiresAuthorizationWhenAuthorizerMissing(t *testing.
 }
 
 func TestSecurityBaseline_UsesToolAuthorizerForGuardedTools(t *testing.T) {
-	hook := DefaultSecurityBaseline()
+	hook := NewSecurityBaseline(SecurityBaselineConfig{GuardedTools: []string{"PATCH"}})
 	authorizer := &stubToolAuthorizer{allow: true}
 	ctx := WithToolAuthorizer(context.Background(), authorizer)
 	_, err := hook.BeforeTool(ctx, ToolInput{Call: model.ToolCall{Name: "PATCH"}})
@@ -67,7 +74,7 @@ func TestSecurityBaseline_UsesToolAuthorizerForGuardedTools(t *testing.T) {
 	}
 }
 
-func TestSecurityBaseline_MCPToolRequiresAuthorization(t *testing.T) {
+func TestSecurityBaseline_DefaultMCPToolRequiresAuthorization(t *testing.T) {
 	hook := DefaultSecurityBaseline()
 	authorizer := &stubToolAuthorizer{allow: true}
 	ctx := WithToolAuthorizer(context.Background(), authorizer)
@@ -76,7 +83,19 @@ func TestSecurityBaseline_MCPToolRequiresAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	if authorizer.calls != 1 {
-		t.Fatalf("expected one authorization call, got %d", authorizer.calls)
+		t.Fatalf("expected one authorization call by default, got %d", authorizer.calls)
+	}
+}
+
+func TestSecurityBaseline_UnknownToolRequiresAuthorization(t *testing.T) {
+	hook := DefaultSecurityBaseline()
+	_, err := hook.BeforeTool(context.Background(), ToolInput{Call: model.ToolCall{Name: "RISKY_CUSTOM_TOOL"}})
+	if err == nil {
+		t.Fatal("expected approval required error for unknown tool")
+	}
+	var target *toolexec.ApprovalRequiredError
+	if !errors.As(err, &target) {
+		t.Fatalf("expected ApprovalRequiredError, got %v", err)
 	}
 }
 

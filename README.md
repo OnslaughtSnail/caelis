@@ -19,7 +19,6 @@ It is designed to be extracted as a standalone repository.
 
 ## Quick Start
 ```bash
-cp .env.example .env
 make build
 make vet
 make test
@@ -28,7 +27,7 @@ make test
 Run CLI:
 ```bash
 go run ./cmd/cli \
-  -tool-providers local_tools,workspace_tools,shell_tools,lsp_activation,mcp_tools \
+  -tool-providers workspace_tools,shell_tools,lsp_tools,mcp_tools \
   -policy-providers default_allow \
   -model deepseek/deepseek-chat \
   -permission-mode default \
@@ -55,6 +54,11 @@ Launcher modes:
 - reserved placeholders: `go run ./cmd/cli api ...`, `go run ./cmd/cli web ...`
 
 Tool execution runtime flags:
+- `-ui`: interactive UI mode `auto|tui|line`
+  - default `auto`: use `tui` when stdin/stdout are TTY, otherwise fallback to `line`
+  - `tui`: force terminal UI mode (requires TTY)
+  - `line`: force line-editor mode
+  - TUI input shortcuts (MVP): `↑/↓` history, `←/→` cursor move, `Home/End`, `Ctrl+A/E` line start/end, `Ctrl+U/W` delete, `Ctrl+C` interrupt/quit
 - `-permission-mode`: `default|full_control`
   - `full_control`: run commands on host directly, no approval required
   - `default`: run commands in sandbox by default; escalated host command requires approval
@@ -65,12 +69,6 @@ Tool execution runtime flags:
   - built-in: `docker` (non-macOS default backend; requires local Docker daemon, image defaults to `alpine:3.20`, override via `CAELIS_SANDBOX_DOCKER_IMAGE`)
   - docker network defaults to `bridge`, override via `CAELIS_SANDBOX_DOCKER_NETWORK` (for stricter isolation use `none`)
   - sandbox does not fully mirror host toolchain; for language-specific workflows (go/node/python) use a richer image via `CAELIS_SANDBOX_DOCKER_IMAGE`
-- `-safe-commands`: override sandbox safe command set (comma-separated)
-  - default: `pwd,ls,find,cat,head,tail,wc,echo,grep,sed,awk,rg`
-  - in `default` mode, command routing uses unified strategy:
-    - base command in `safe-commands` and no shell meta characters -> sandbox execution (no approval)
-    - otherwise -> host execution with approval
-  - explicit `sandbox_permissions=require_escalated` always forces host approval path
 - `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
 - `-prompt-config-dir`: override prompt config directory; empty means `~/.{app}/prompts`
 - `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
@@ -83,7 +81,7 @@ Fallback behavior:
 - If a command is routed to sandbox but fails with "command not found" (`exit code 127`), BASH asks for approval and retries on host.
 
 Approval UX in interactive CLI:
-- Safe read-style commands are default-approved for host escalation in current session (`cat`, `head`, `grep`, and other `safe-commands`, plus `git status`).
+- Host escalation requires explicit approval by default.
 - Approval prompt options:
   - `y`: allow once
   - `a`: allow this exact command for current session (no more prompts for same command text)
@@ -101,7 +99,7 @@ System prompt pipeline order (high -> low):
 1. `~/.{app}/prompts/IDENTITY.md`
 2. `~/.{app}/prompts/AGENTS.md`
 3. `{workspace}/AGENTS.md` (optional)
-4. LSP routing policy (conditional, auto-enabled when `LSP_ACTIVATE` is available)
+4. LSP routing policy (conditional, auto-enabled when `LSP_*` tools are available)
 5. `~/.{app}/prompts/USER.md` + `-system-prompt` runtime override
 6. skills metadata section (auto-discovered)
 
@@ -149,9 +147,18 @@ Session behavior:
 
 CLI runtime preferences (`stream`, `thinking-mode`, `thinking-budget`, `reasoning-effort`, `reasoning display`, `permission-mode`, `sandbox-type`) are persisted in app config and reused on next start.
 
+Config env placeholder behavior:
+- Provider config (`~/.{app}/{app}_config.json`) supports `${ENV_NAME}` placeholders in string fields (for example `"token": "${DEEPSEEK_API_KEY}"`).
+- On startup, CLI optionally loads `.env` from:
+  - current working directory
+  - config file directory (`~/.{app}/`)
+- `.env` is optional; missing `.env` is allowed.
+- If config contains unresolved placeholders, startup fails with an explicit `invalid config` error and the unresolved env var name.
+
 LSP behavior:
-- `LSP_ACTIVATE` is still available.
-- For Go workspaces (`go.mod` exists or root has `*.go`), CLI auto-activates Go LSP tools at run start to reduce missed tool-loading.
+- LSP tools are injected by CLI plugin provider `lsp_tools` (no manual activation step).
+- CLI auto-detects workspace language and injects one language server toolset by default when a supported server exists locally.
+- Supported workspace language families: Go, Python, TypeScript, JavaScript, Rust, C/C++.
 
 Manual compaction command in interactive mode:
 ```text
@@ -162,6 +169,12 @@ Run lightweight eval:
 ```bash
 go run ./eval/cmd -suite light
 ```
+
+Eval model selection behavior:
+- Eval reads model credentials from environment (`DEEPSEEK_API_KEY`, `GEMINI_API_KEY`).
+- It runs only model aliases whose credentials are configured.
+- If no eval credentials are configured, eval exits with a clear error.
+- `eval/cmd` optionally loads nearest `.env` (for convenience only); `.env` is not required.
 
 Run real-model eval matrix (stream/non-stream + thinking/non-thinking):
 ```bash

@@ -5,30 +5,15 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-)
-
-var (
-	defaultRuntimeOnce sync.Once
-	defaultRuntimeInst toolexec.Runtime
-	defaultRuntimeErr  error
 )
 
 func runtimeOrDefault(runtime toolexec.Runtime) (toolexec.Runtime, error) {
 	if runtime != nil {
 		return runtime, nil
 	}
-	defaultRuntimeOnce.Do(func() {
-		defaultRuntimeInst, defaultRuntimeErr = toolexec.New(toolexec.Config{
-			PermissionMode: toolexec.PermissionModeFullControl,
-		})
-	})
-	if defaultRuntimeErr != nil {
-		return nil, defaultRuntimeErr
-	}
-	return defaultRuntimeInst, nil
+	return nil, fmt.Errorf("tool: runtime is required")
 }
 
 func normalizePathWithFS(fsys toolexec.FileSystem, path string) (string, error) {

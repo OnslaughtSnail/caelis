@@ -63,20 +63,17 @@ func NewSecurityBaseline(cfg SecurityBaselineConfig) Hook {
 
 	defaultAutoAllow := []string{
 		"READ", "LIST", "GLOB", "STAT", "SEARCH",
+		"WRITE", "PATCH",
 		"ECHO", "NOW",
 		"BASH", // BASH host escalation is gated by execution runtime approval flow.
 	}
-	defaultGuarded := []string{
-		"WRITE", "PATCH",
-	}
-
 	for _, one := range append(defaultAutoAllow, cfg.AutoAllowTools...) {
 		name := normalizeToolName(one)
 		if name != "" {
 			autoAllow[name] = struct{}{}
 		}
 	}
-	for _, one := range append(defaultGuarded, cfg.GuardedTools...) {
+	for _, one := range cfg.GuardedTools {
 		name := normalizeToolName(one)
 		if name != "" {
 			guarded[name] = struct{}{}
@@ -137,10 +134,12 @@ func (h securityBaselineHook) BeforeOutput(ctx context.Context, out Output) (Out
 }
 
 func (h securityBaselineHook) requiresToolAuthorization(toolName string) (bool, string) {
-	original := strings.TrimSpace(toolName)
-	name := normalizeToolName(original)
+	name := normalizeToolName(toolName)
 	if name == "" {
 		return false, ""
+	}
+	if _, ok := h.guarded[name]; ok {
+		return true, "tool requires explicit authorization"
 	}
 	if _, ok := h.autoAllow[name]; ok {
 		return false, ""
@@ -148,11 +147,8 @@ func (h securityBaselineHook) requiresToolAuthorization(toolName string) (bool, 
 	if strings.HasPrefix(name, "LSP_") {
 		return false, ""
 	}
-	if strings.HasPrefix(strings.ToLower(original), "mcp__") {
+	if strings.HasPrefix(name, "MCP__") {
 		return true, "external MCP tool"
-	}
-	if _, ok := h.guarded[name]; ok {
-		return true, "filesystem mutation tool"
 	}
 	return true, "unknown tool type"
 }

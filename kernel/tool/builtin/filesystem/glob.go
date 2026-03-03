@@ -19,11 +19,6 @@ type GlobTool struct {
 	runtime toolexec.Runtime
 }
 
-func NewGlob() *GlobTool {
-	tool, _ := NewGlobWithRuntime(nil)
-	return tool
-}
-
 func NewGlobWithRuntime(runtime toolexec.Runtime) (*GlobTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(runtime)
 	if err != nil {

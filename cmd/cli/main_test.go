@@ -45,7 +45,7 @@ func TestRejectRemovedExecutionFlags(t *testing.T) {
 	}{
 		{name: "exec-mode", args: []string{"-exec-mode", "sandbox"}, want: "-permission-mode"},
 		{name: "bash-strategy", args: []string{"--bash-strategy=strict"}, want: "-permission-mode"},
-		{name: "bash-allowlist", args: []string{"-bash-allowlist=ls,pwd"}, want: "-safe-commands"},
+		{name: "bash-allowlist", args: []string{"-bash-allowlist=ls,pwd"}, want: "host escalation approval flow"},
 		{name: "bash-deny-meta", args: []string{"--bash-deny-meta=false"}, want: "-permission-mode"},
 	}
 	for _, tc := range cases {
@@ -62,7 +62,7 @@ func TestRejectRemovedExecutionFlags(t *testing.T) {
 }
 
 func TestRejectRemovedExecutionFlags_AcceptsNewFlags(t *testing.T) {
-	err := rejectRemovedExecutionFlags([]string{"-permission-mode=default", "-safe-commands=ls,pwd"})
+	err := rejectRemovedExecutionFlags([]string{"-permission-mode=default", "-sandbox-type=docker"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +73,6 @@ func TestBuildRuntimePromptHint_IncludesPolicySummary(t *testing.T) {
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  noopCommandRunner{},
-		SafeCommands:   []string{"cat", "head", "grep"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,9 +83,6 @@ func TestBuildRuntimePromptHint_IncludesPolicySummary(t *testing.T) {
 	}
 	if !strings.Contains(hint, "commands run in sandbox by default") {
 		t.Fatalf("expected sandbox default rule, got %q", hint)
-	}
-	if !strings.Contains(hint, "safe_commands=cat,head,grep") {
-		t.Fatalf("expected safe command summary, got %q", hint)
 	}
 	if !strings.Contains(hint, "Approval UX: host escalation uses y/a/n") {
 		t.Fatalf("expected approval UX hint, got %q", hint)
@@ -122,13 +118,6 @@ func TestBuildRuntimePromptHint_DefaultFallbackIncludesReason(t *testing.T) {
 	}
 	if !strings.Contains(hint, "Fallback reason:") {
 		t.Fatalf("expected fallback reason, got %q", hint)
-	}
-}
-
-func TestSummarizeSafeCommands(t *testing.T) {
-	got := summarizeSafeCommands([]string{"cat", "head", "cat", "grep"}, 2)
-	if got != "cat,head,+1 more" {
-		t.Fatalf("unexpected summary: %q", got)
 	}
 }
 

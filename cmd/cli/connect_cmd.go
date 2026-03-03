@@ -16,6 +16,7 @@ type providerTemplate struct {
 	defaultBaseURL      string
 	defaultContextToken int
 	defaultMaxOutputTok int
+	commonModels        []string
 }
 
 var providerTemplates = []providerTemplate{
@@ -25,6 +26,7 @@ var providerTemplates = []providerTemplate{
 		provider:            "openai",
 		defaultBaseURL:      "https://api.openai.com/v1",
 		defaultContextToken: 128000,
+		commonModels:        []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"},
 	},
 	{
 		label:               "openai-compatible",
@@ -32,6 +34,7 @@ var providerTemplates = []providerTemplate{
 		provider:            "openai-compatible",
 		defaultBaseURL:      "https://api.openai.com/v1",
 		defaultContextToken: 128000,
+		commonModels:        []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"},
 	},
 	{
 		label:               "gemini",
@@ -39,6 +42,7 @@ var providerTemplates = []providerTemplate{
 		provider:            "gemini",
 		defaultBaseURL:      "https://generativelanguage.googleapis.com/v1beta",
 		defaultContextToken: 128000,
+		commonModels:        []string{"gemini-2.5-flash", "gemini-2.5-pro"},
 	},
 	{
 		label:               "anthropic",
@@ -47,6 +51,7 @@ var providerTemplates = []providerTemplate{
 		defaultBaseURL:      "https://api.anthropic.com/v1",
 		defaultContextToken: 200000,
 		defaultMaxOutputTok: 1024,
+		commonModels:        []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514"},
 	},
 	{
 		label:               "deepseek",
@@ -54,6 +59,7 @@ var providerTemplates = []providerTemplate{
 		provider:            "deepseek",
 		defaultBaseURL:      "https://api.deepseek.com/v1",
 		defaultContextToken: 64000,
+		commonModels:        []string{"deepseek-chat", "deepseek-reasoner"},
 	},
 	{
 		label:               "xiaomi",
@@ -61,41 +67,77 @@ var providerTemplates = []providerTemplate{
 		provider:            "xiaomi",
 		defaultBaseURL:      "https://api.xiaomimimo.com/v1",
 		defaultContextToken: 64000,
+		commonModels:        []string{"mimo-v2-flash", "mimo-v2-reasoner"},
 	},
 }
 
 func handleConnect(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 0 {
-		return false, fmt.Errorf("usage: /connect")
+	if len(args) > 5 {
+		return false, fmt.Errorf("usage: /connect [provider] [model] [base_url] [timeout_seconds] [api_key]")
 	}
 	if c.modelFactory == nil {
 		return false, fmt.Errorf("model factory is not configured")
 	}
-	fmt.Println("选择 provider 类型:")
-	for i, item := range providerTemplates {
-		fmt.Printf("  %d) %s\n", i+1, item.label)
+	quickMode := len(args) >= 1
+	tpl := providerTemplate{}
+	if len(args) >= 1 {
+		one, ok := findProviderTemplate(args[0])
+		if !ok {
+			return false, fmt.Errorf("unknown provider %q", strings.TrimSpace(args[0]))
+		}
+		tpl = one
+	} else {
+		c.ui.Section("Select provider type:")
+		for i, item := range providerTemplates {
+			c.ui.Numbered(i+1, item.label)
+		}
+		picked, err := promptIntInRange(c, "provider", 1, len(providerTemplates), 1)
+		if err != nil {
+			return false, err
+		}
+		tpl = providerTemplates[picked-1]
 	}
-	picked, err := promptIntInRange(c, "provider", 1, len(providerTemplates), 1)
-	if err != nil {
-		return false, err
-	}
-	tpl := providerTemplates[picked-1]
 
-	baseURL, err := c.promptText("base_url", tpl.defaultBaseURL, false)
-	if err != nil {
-		return false, err
+	baseURL := strings.TrimSpace(tpl.defaultBaseURL)
+	timeoutSeconds := 60
+	if len(args) >= 3 {
+		baseURL = strings.TrimSpace(args[2])
 	}
-	timeoutSeconds, err := promptInt(c, "timeout_seconds", 60)
-	if err != nil {
-		return false, err
+	if len(args) >= 4 {
+		parsedTimeout, parseErr := strconv.Atoi(strings.TrimSpace(args[3]))
+		if parseErr != nil {
+			return false, fmt.Errorf("invalid timeout_seconds %q", strings.TrimSpace(args[3]))
+		}
+		timeoutSeconds = parsedTimeout
+		if timeoutSeconds < 0 {
+			return false, fmt.Errorf("invalid timeout_seconds: must be >= 0")
+		}
+	}
+	var err error
+	if !quickMode {
+		baseURL, err = c.promptText("base_url", tpl.defaultBaseURL, false)
+		if err != nil {
+			return false, err
+		}
+		timeoutSeconds, err = promptInt(c, "timeout_seconds", 60)
+		if err != nil {
+			return false, err
+		}
+	} else {
+		c.ui.Note("using base_url=%s timeout_seconds=%d (quick mode)\n", baseURL, timeoutSeconds)
 	}
 
-	c.printf("auth: api_key\n")
-	token, err := c.promptText("api_key", "", true)
-	if err != nil {
-		return false, err
+	token := ""
+	if len(args) >= 5 {
+		token = strings.TrimSpace(args[4])
+	} else {
+		c.printf("auth: api_key\n")
+		input, err := c.promptText("api_key", "", true)
+		if err != nil {
+			return false, err
+		}
+		token = strings.TrimSpace(input)
 	}
-	token = strings.TrimSpace(token)
 	if token == "" {
 		return false, fmt.Errorf("api_key is required")
 	}
@@ -116,18 +158,39 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 		return false, fmt.Errorf("base_url is required")
 	}
 
-	models, discoverErr := modelproviders.DiscoverModels(c.baseCtx, baseCfg)
 	modelName := ""
-	contextWindow := tpl.defaultContextToken
-	maxOutput := tpl.defaultMaxOutputTok
-	if discoverErr != nil {
-		c.printf("warn: list_models failed: %v\n", discoverErr)
+	if len(args) >= 2 {
+		modelName = strings.TrimSpace(args[1])
+		if modelName == "" {
+			return false, fmt.Errorf("model is required")
+		}
+	}
+	models, discoverErr := modelproviders.DiscoverModels(c.baseCtx, baseCfg)
+	// Start at 0 so ApplyModelCatalog (called inside Register) can fill in the
+	// correct catalog values. DiscoverModels overrides only when the API
+	// explicitly returns a positive value.
+	contextWindow := 0
+	maxOutput := 0
+	if modelName != "" {
+		// Keep explicit model from command args.
+	} else if discoverErr != nil {
+		c.ui.Warn("list_models failed: %v\n", discoverErr)
 	} else if len(models) == 0 {
-		c.printf("warn: provider returned empty model list, fallback to manual input\n")
+		c.ui.Warn("provider returned empty model list, fallback to manual input\n")
+	} else if len(models) == 1 {
+		chosen := models[0]
+		modelName = strings.TrimSpace(chosen.Name)
+		c.ui.Note("auto-selected model: %s\n", describeRemoteModel(tpl.provider, chosen))
+		if chosen.ContextWindowTokens > 0 {
+			contextWindow = chosen.ContextWindowTokens
+		}
+		if chosen.MaxOutputTokens > 0 {
+			maxOutput = chosen.MaxOutputTokens
+		}
 	} else {
-		c.printf("可用模型:\n")
+		c.ui.Section("Available models:")
 		for i, item := range models {
-			c.printf("  %d) %s\n", i+1, describeRemoteModel(tpl.provider, item))
+			c.ui.Numbered(i+1, describeRemoteModel(tpl.provider, item))
 		}
 		index, pickErr := promptIntInRange(c, "model", 1, len(models), 1)
 		if pickErr != nil {
@@ -166,7 +229,19 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	cfg.Model = modelName
 	cfg.ContextWindowTokens = contextWindow
 	cfg.MaxOutputTok = maxOutput
+	cfg.ThinkingMode = defaultThinkingMode
+	cfg.ThinkingBudget = defaultThinkingBudget
+	cfg.ReasoningEffort = defaultReasoningEffort
+	if c.configStore != nil {
+		modelSettings := c.configStore.ModelRuntimeSettings(alias)
+		cfg.ThinkingMode = modelSettings.ThinkingMode
+		cfg.ThinkingBudget = modelSettings.ThinkingBudget
+		cfg.ReasoningEffort = modelSettings.ReasoningEffort
+	}
 	cfg.Auth.CredentialRef = credentialRef
+	// Enrich cfg with catalog values before capturing persistCfg so that the
+	// record written to disk already contains the fully-resolved token limits.
+	modelproviders.ApplyModelCatalog(&cfg)
 	persistCfg := cfg
 
 	if err := c.modelFactory.Register(cfg); err != nil {
@@ -182,7 +257,7 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 			return false, err
 		}
 		if err := c.configStore.SetDefaultModel(alias); err != nil {
-			fmt.Fprintf(c.out, "warn: update default model failed: %v\n", err)
+			c.ui.Warn("update default model failed: %v\n", err)
 		}
 	}
 	if c.credentialStore != nil && credentialRef != "" {
@@ -195,14 +270,41 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	}
 	c.modelAlias = alias
 	c.llm = llm
-	c.printf("connected: %s\n", alias)
+	c.applyModelRuntimeSettings(alias)
+	c.ui.Success("Connected: %s\n", alias)
 	if c.configStore != nil {
-		c.printf("note: api_key saved in provider config.\n")
+		c.ui.Note("api_key saved in provider config.\n")
 	}
 	if c.credentialStore != nil {
-		c.printf("note: api_key also saved locally with owner-only permissions.\n")
+		c.ui.Note("api_key also saved locally with owner-only permissions.\n")
 	}
 	return false, nil
+}
+
+func findProviderTemplate(input string) (providerTemplate, bool) {
+	target := strings.ToLower(strings.TrimSpace(input))
+	if target == "" {
+		return providerTemplate{}, false
+	}
+	for _, one := range providerTemplates {
+		if strings.EqualFold(strings.TrimSpace(one.label), target) {
+			return one, true
+		}
+	}
+	return providerTemplate{}, false
+}
+
+func commonModelsForProvider(provider string) []string {
+	target := strings.ToLower(strings.TrimSpace(provider))
+	if target == "" {
+		return nil
+	}
+	for _, one := range providerTemplates {
+		if strings.EqualFold(strings.TrimSpace(one.provider), target) || strings.EqualFold(strings.TrimSpace(one.label), target) {
+			return append([]string(nil), one.commonModels...)
+		}
+	}
+	return nil
 }
 
 func describeRemoteModel(provider string, item modelproviders.RemoteModel) string {
@@ -224,6 +326,9 @@ func describeRemoteModel(provider string, item modelproviders.RemoteModel) strin
 }
 
 func (c *cliConsole) promptText(name, defaultValue string, secret bool) (string, error) {
+	if c.prompter == nil {
+		return "", fmt.Errorf("interactive prompt is unavailable")
+	}
 	prompt := name
 	if strings.TrimSpace(defaultValue) != "" {
 		prompt += fmt.Sprintf(" [%s]", defaultValue)
@@ -234,9 +339,9 @@ func (c *cliConsole) promptText(name, defaultValue string, secret bool) (string,
 		err  error
 	)
 	if secret {
-		line, err = c.editor.ReadSecret(prompt)
+		line, err = c.prompter.ReadSecret(prompt)
 	} else {
-		line, err = c.editor.ReadLine(prompt)
+		line, err = c.prompter.ReadLine(prompt)
 	}
 	if err != nil {
 		return "", err

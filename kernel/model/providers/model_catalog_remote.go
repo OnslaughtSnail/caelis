@@ -1,0 +1,405 @@
+package providers
+
+// model_catalog_remote.go
+//
+// Dynamic model capability catalog:
+//   Priority (highest to lowest):
+//     1. Local override file  (~/.agents/model_capabilities.json, user-editable)
+//     2. Remote live data     (https://models.dev/api.json, fetched at startup)
+//     3. Embedded snapshot    (models_dev_snapshot.json, shipped in binary)
+//     4. Hard-coded catalog   (builtinCatalog in model_catalog.go, final fallback)
+//
+// Call InitModelCatalog once at program startup.  All subsequent
+// LookupModelCapabilities calls automatically use the loaded data.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	_ "embed"
+)
+
+//go:embed models_dev_snapshot.json
+var embeddedCatalogSnapshot []byte
+
+const (
+	// modelsDevURL is the public models.dev API endpoint.
+	modelsDevURL = "https://models.dev/api.json"
+
+	// catalogFetchTimeout is the HTTP timeout for the remote fetch.
+	catalogFetchTimeout = 5 * time.Second
+)
+
+// modelsDevURLOverride can be set in tests to redirect the HTTP fetch.
+// An empty string means the canonical modelsDevURL is used.
+var modelsDevURLOverride string
+
+// resolvedModelsDevURL returns the effective URL (override if set, else canonical).
+func resolvedModelsDevURL() string {
+	if modelsDevURLOverride != "" {
+		return modelsDevURLOverride
+	}
+	return modelsDevURL
+}
+
+// ---------------------------------------------------------------------------
+// Compact JSON format used by both the snapshot file and the local override
+// ---------------------------------------------------------------------------
+
+// capEntry is the per-model JSON record stored in the snapshot / override file.
+// Keys in the map are "provider:model_prefix" (lower-case, e.g. "openai:gpt-4o").
+type capEntry struct {
+	ContextWindow    int  `json:"context_window"`
+	MaxOutput        int  `json:"max_output"`
+	DefaultMaxOutput int  `json:"default_max_output,omitempty"` // 0 → heuristic applied later
+	ToolCalls        bool `json:"tool_calls"`
+	Reasoning        bool `json:"reasoning"`
+	Images           bool `json:"images"`
+	JSONOutput       bool `json:"json_output"`
+}
+
+// capSnapshot is the in-memory representation: map["provider:model"] → capEntry.
+type capSnapshot map[string]capEntry
+
+// ---------------------------------------------------------------------------
+// Package-level global state
+// ---------------------------------------------------------------------------
+
+var (
+	dynamicMu      sync.RWMutex
+	dynamicCatalog capSnapshot // loaded from models.dev or embedded snapshot
+	localOverrides capSnapshot // loaded from the user's override file
+)
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+// InitModelCatalog initialises the dynamic capability catalog.
+// It should be called once at program startup.
+//
+//   - client: an *http.Client to use for the remote fetch; nil uses http.DefaultClient.
+//   - overridePath: path to a JSON override file (e.g. ~/.agents/model_capabilities.json).
+//     Pass "" to skip loading local overrides.
+//
+// Errors during remote fetch or override loading are logged but never returned;
+// the catalog always falls back gracefully to the embedded snapshot.
+func InitModelCatalog(ctx context.Context, client *http.Client, overridePath string) {
+	if client == nil {
+		client = &http.Client{Timeout: catalogFetchTimeout}
+	} else {
+		// Ensure a timeout even if the caller's client has none.
+		if client.Timeout == 0 {
+			client = &http.Client{
+				Transport: client.Transport,
+				Timeout:   catalogFetchTimeout,
+			}
+		}
+	}
+
+	// 1. Try remote fetch.
+	remote, err := fetchModelsDev(ctx, client)
+	if err != nil || len(remote) == 0 {
+		if err != nil {
+			log.Printf("[model-catalog] remote fetch failed, using embedded snapshot: %v", err)
+		}
+		// 2. Fall back to embedded snapshot.
+		remote = parseSnapshotBytes(embeddedCatalogSnapshot)
+	}
+
+	dynamicMu.Lock()
+	dynamicCatalog = remote
+	dynamicMu.Unlock()
+
+	// 3. Load local overrides (non-fatal if the file is missing).
+	if overridePath != "" {
+		if ov, err := loadOverrideFile(overridePath); err == nil {
+			dynamicMu.Lock()
+			localOverrides = ov
+			dynamicMu.Unlock()
+		} else if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("[model-catalog] override file %q: %v", overridePath, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Internal lookup used by LookupModelCapabilities
+// ---------------------------------------------------------------------------
+
+// lookupDynamic searches the dynamic catalog (local overrides first, then
+// remote/snapshot) for the given provider+model pair.
+// Returns (caps, true) if found, otherwise (zero, false).
+func lookupDynamic(provider, modelName string) (ModelCapabilities, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if provider == "" || modelName == "" {
+		return ModelCapabilities{}, false
+	}
+
+	dynamicMu.RLock()
+	local := localOverrides
+	remote := dynamicCatalog
+	dynamicMu.RUnlock()
+
+	// Local overrides take priority.
+	if caps, ok := searchCapSnapshot(local, provider, modelName); ok {
+		return caps, true
+	}
+	// Then remote/snapshot.
+	if caps, ok := searchCapSnapshot(remote, provider, modelName); ok {
+		return caps, true
+	}
+	return ModelCapabilities{}, false
+}
+
+// searchCapSnapshot performs a longest-prefix match inside a capSnapshot.
+// Keys in the snapshot are "provider:model_prefix" (lower-case).
+func searchCapSnapshot(snap capSnapshot, provider, modelName string) (ModelCapabilities, bool) {
+	if len(snap) == 0 {
+		return ModelCapabilities{}, false
+	}
+	var bestKey string
+	bestLen := 0
+
+	for k := range snap {
+		kprov, kmodel, ok := splitCatalogKey(k)
+		if !ok {
+			continue
+		}
+		if !providerMatches(provider, kprov) {
+			continue
+		}
+		if modelName != kmodel && !strings.HasPrefix(modelName, kmodel) {
+			continue
+		}
+		if len(kmodel) > bestLen {
+			bestLen = len(kmodel)
+			bestKey = k
+		}
+	}
+	if bestKey == "" {
+		return ModelCapabilities{}, false
+	}
+	return entryToCaps(snap[bestKey]), true
+}
+
+// splitCatalogKey splits "provider:model" → ("provider", "model", true).
+func splitCatalogKey(key string) (provider, model string, ok bool) {
+	idx := strings.Index(key, ":")
+	if idx <= 0 || idx == len(key)-1 {
+		return "", "", false
+	}
+	return key[:idx], key[idx+1:], true
+}
+
+// providerMatches checks if a catalog key's provider matches the query.
+// The catalog may use alternate provider IDs (e.g. "google" for our "gemini").
+func providerMatches(queryProvider, keyProvider string) bool {
+	if queryProvider == keyProvider {
+		return true
+	}
+	// Handle models.dev → internal provider alias mappings.
+	if alias, ok := modelsDevProviderAlias[keyProvider]; ok && alias == queryProvider {
+		return true
+	}
+	// Substring fallback for hyphenated variants (e.g. "openai-compatible" contains "openai").
+	return strings.Contains(queryProvider, keyProvider)
+}
+
+// entryToCaps converts a capEntry to ModelCapabilities, applying a
+// DefaultMaxOutput heuristic when the override file omits that field.
+func entryToCaps(e capEntry) ModelCapabilities {
+	caps := ModelCapabilities{
+		ContextWindowTokens:    e.ContextWindow,
+		MaxOutputTokens:        e.MaxOutput,
+		DefaultMaxOutputTokens: e.DefaultMaxOutput,
+		SupportsToolCalls:      e.ToolCalls,
+		SupportsReasoning:      e.Reasoning,
+		SupportsImages:         e.Images,
+		SupportsJSONOutput:     e.JSONOutput,
+	}
+	if caps.DefaultMaxOutputTokens <= 0 {
+		caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.SupportsReasoning)
+	}
+	return caps
+}
+
+// defaultMaxOutputHeuristic applies a conservative default when
+// DefaultMaxOutputTokens is not explicitly specified in the source data.
+func defaultMaxOutputHeuristic(maxOut int, reasoning bool) int {
+	if maxOut <= 0 {
+		return 4096
+	}
+	if reasoning {
+		// Reasoning models often need more output headroom.
+		if maxOut >= 32768 {
+			return 32768
+		}
+		return maxOut
+	}
+	if maxOut <= 8192 {
+		return maxOut
+	}
+	return 8192
+}
+
+// ---------------------------------------------------------------------------
+// models.dev provider-ID → internal provider name mapping
+// ---------------------------------------------------------------------------
+
+// modelsDevProviderAlias maps models.dev provider IDs to our internal names
+// where they differ.
+var modelsDevProviderAlias = map[string]string{
+	"google": "gemini",
+}
+
+// ---------------------------------------------------------------------------
+// Remote fetch
+// ---------------------------------------------------------------------------
+
+// modelsDevProvider is one provider object from the models.dev API response.
+type modelsDevProvider struct {
+	ID     string                    `json:"id"`
+	Models map[string]modelsDevModel `json:"models"`
+}
+
+// modelsDevModel is one model record from the models.dev API response.
+type modelsDevModel struct {
+	ID               string              `json:"id"`
+	Reasoning        bool                `json:"reasoning"`
+	ToolCall         bool                `json:"tool_call"`
+	Attachment       bool                `json:"attachment"` // image input
+	StructuredOutput bool                `json:"structured_output"`
+	Limit            modelsDevModelLimit `json:"limit"`
+}
+
+// modelsDevModelLimit holds token limits from models.dev.
+type modelsDevModelLimit struct {
+	Context int `json:"context"`
+	Output  int `json:"output"`
+}
+
+// fetchModelsDev downloads and parses https://models.dev/api.json into our
+// internal capSnapshot format.
+func fetchModelsDev(ctx context.Context, client *http.Client) (capSnapshot, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, catalogFetchTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, resolvedModelsDevURL(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "caelis/model-catalog-updater")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Guard against accidentally huge responses.
+	const maxBytes = 32 * 1024 * 1024 // 32 MiB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, &httpStatusError{code: resp.StatusCode}
+	}
+
+	return parseModelsDevJSON(body)
+}
+
+type httpStatusError struct{ code int }
+
+func (e *httpStatusError) Error() string {
+	return "models.dev: HTTP " + http.StatusText(e.code)
+}
+
+// parseModelsDevJSON parses the models.dev API JSON into a capSnapshot.
+// The outer structure is map[providerID]modelsDevProvider.
+func parseModelsDevJSON(data []byte) (capSnapshot, error) {
+	var raw map[string]modelsDevProvider
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	snap := make(capSnapshot, len(raw)*8)
+	for providerID, prov := range raw {
+		if len(prov.Models) == 0 {
+			continue
+		}
+		// Map to our internal provider name.
+		internalProvider := providerID
+		if alias, ok := modelsDevProviderAlias[providerID]; ok {
+			internalProvider = alias
+		}
+
+		for modelID, m := range prov.Models {
+			if m.Limit.Context <= 0 && m.Limit.Output <= 0 {
+				continue // skip incomplete entries
+			}
+			key := internalProvider + ":" + strings.ToLower(modelID)
+			snap[key] = capEntry{
+				ContextWindow: m.Limit.Context,
+				MaxOutput:     m.Limit.Output,
+				// DefaultMaxOutput left 0; heuristic applied in entryToCaps.
+				ToolCalls:  m.ToolCall,
+				Reasoning:  m.Reasoning,
+				Images:     m.Attachment,
+				JSONOutput: m.StructuredOutput,
+			}
+		}
+	}
+	return snap, nil
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot / override file loading
+// ---------------------------------------------------------------------------
+
+// parseSnapshotBytes parses the embedded JSON snapshot into a capSnapshot.
+// Errors are swallowed (the embedded data is trusted).
+func parseSnapshotBytes(data []byte) capSnapshot {
+	// Strip "_comment" key before parsing as capEntry map.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	snap := make(capSnapshot, len(raw))
+	for k, v := range raw {
+		if k == "_comment" {
+			continue
+		}
+		var entry capEntry
+		if err := json.Unmarshal(v, &entry); err != nil {
+			continue
+		}
+		snap[strings.ToLower(k)] = entry
+	}
+	return snap
+}
+
+// loadOverrideFile reads and parses a local capability override file.
+// The file format is the same as models_dev_snapshot.json.
+func loadOverrideFile(path string) (capSnapshot, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	snap := parseSnapshotBytes(raw)
+	if snap == nil {
+		return nil, errors.New("model-catalog: failed to parse override file")
+	}
+	return snap, nil
+}

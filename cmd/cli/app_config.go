@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	stdruntime "runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/OnslaughtSnail/caelis/internal/envload"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -18,38 +20,33 @@ const (
 	configVersion    = 1
 	defaultModel     = ""
 	configFileSuffix = "_config.json"
-	defaultStream    = false
 
 	defaultThinkingMode    = "auto"
 	defaultThinkingBudget  = 1024
 	defaultReasoningEffort = ""
-	defaultShowReasoning   = true
 
 	defaultPermissionMode = "default"
 )
 
+var configEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
 type appConfig struct {
-	Version             int              `json:"version"`
-	DefaultModel        string           `json:"default_model"`
-	CredentialStoreMode string           `json:"credential_store_mode,omitempty"`
-	StreamModel         *bool            `json:"stream_model,omitempty"`
-	ThinkingMode        string           `json:"thinking_mode,omitempty"`
-	ThinkingBudget      *int             `json:"thinking_budget,omitempty"`
-	ReasoningEffort     string           `json:"reasoning_effort,omitempty"`
-	ShowReasoning       *bool            `json:"show_reasoning,omitempty"`
-	PermissionMode      string           `json:"permission_mode,omitempty"`
-	SandboxType         string           `json:"sandbox_type,omitempty"`
-	Providers           []providerRecord `json:"providers,omitempty"`
+	Version        int              `json:"version"`
+	DefaultModel   string           `json:"default_model"`
+	PermissionMode string           `json:"permission_mode,omitempty"`
+	SandboxType    string           `json:"sandbox_type,omitempty"`
+	Providers      []providerRecord `json:"providers,omitempty"`
 }
 
 type runtimeSettings struct {
-	StreamModel     bool
+	PermissionMode string
+	SandboxType    string
+}
+
+type modelRuntimeSettings struct {
 	ThinkingMode    string
 	ThinkingBudget  int
 	ReasoningEffort string
-	ShowReasoning   bool
-	PermissionMode  string
-	SandboxType     string
 }
 
 type providerRecord struct {
@@ -62,6 +59,9 @@ type providerRecord struct {
 	TimeoutSeconds      int               `json:"timeout_seconds,omitempty"`
 	MaxOutputTok        int               `json:"max_output_tokens,omitempty"`
 	ContextWindowTokens int               `json:"context_window_tokens,omitempty"`
+	ThinkingMode        string            `json:"thinking_mode,omitempty"`
+	ThinkingBudget      int               `json:"thinking_budget,omitempty"`
+	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
 	Auth                authRecord        `json:"auth"`
 }
 
@@ -84,6 +84,9 @@ func loadOrInitAppConfig(appName string) (*appConfigStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := loadConfigEnvFiles(path); err != nil {
+		return nil, err
+	}
 	store := &appConfigStore{
 		path: path,
 		data: defaultAppConfig(),
@@ -104,9 +107,142 @@ func loadOrInitAppConfig(appName string) (*appConfigStore, error) {
 	if err := json.Unmarshal(raw, &loaded); err != nil {
 		return nil, fmt.Errorf("cli config: parse %q: %w", path, err)
 	}
+	if err := resolveAppConfigEnvPlaceholders(&loaded, path); err != nil {
+		return nil, err
+	}
 	mergeAppConfigDefaults(&loaded)
 	store.data = loaded
 	return store, nil
+}
+
+func loadConfigEnvFiles(configFilePath string) ([]string, error) {
+	paths := make([]string, 0, 2)
+	if cwd, err := os.Getwd(); err == nil && strings.TrimSpace(cwd) != "" {
+		paths = append(paths, filepath.Join(cwd, ".env"))
+	}
+	configDir := strings.TrimSpace(filepath.Dir(configFilePath))
+	if configDir != "" {
+		paths = append(paths, filepath.Join(configDir, ".env"))
+	}
+	unique := dedupeStrings(paths)
+	loaded, err := envload.LoadFilesIfExists(unique)
+	if err != nil {
+		return nil, fmt.Errorf("cli config: load .env failed: %w", err)
+	}
+	return loaded, nil
+}
+
+func resolveAppConfigEnvPlaceholders(cfg *appConfig, configPath string) error {
+	if cfg == nil {
+		return nil
+	}
+	resolveField := func(fieldPath string, value *string) error {
+		if value == nil {
+			return nil
+		}
+		resolved, err := resolveConfigStringPlaceholders(*value)
+		if err != nil {
+			return fmt.Errorf("cli config: invalid config %q: %s: %w", configPath, fieldPath, err)
+		}
+		*value = resolved
+		return nil
+	}
+
+	if err := resolveField("default_model", &cfg.DefaultModel); err != nil {
+		return err
+	}
+	if err := resolveField("permission_mode", &cfg.PermissionMode); err != nil {
+		return err
+	}
+	if err := resolveField("sandbox_type", &cfg.SandboxType); err != nil {
+		return err
+	}
+
+	for i := range cfg.Providers {
+		rec := &cfg.Providers[i]
+		prefix := fmt.Sprintf("providers[%d]", i)
+
+		if err := resolveField(prefix+".alias", &rec.Alias); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".provider", &rec.Provider); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".api", &rec.API); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".model", &rec.Model); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".base_url", &rec.BaseURL); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".thinking_mode", &rec.ThinkingMode); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".reasoning_effort", &rec.ReasoningEffort); err != nil {
+			return err
+		}
+
+		if len(rec.Headers) > 0 {
+			keys := make([]string, 0, len(rec.Headers))
+			for key := range rec.Headers {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				value := rec.Headers[key]
+				if err := resolveField(prefix+".headers."+key, &value); err != nil {
+					return err
+				}
+				rec.Headers[key] = value
+			}
+		}
+
+		if err := resolveField(prefix+".auth.type", &rec.Auth.Type); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".auth.token_env", &rec.Auth.TokenEnv); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".auth.token", &rec.Auth.Token); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".auth.credential_ref", &rec.Auth.CredentialRef); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".auth.header_key", &rec.Auth.HeaderKey); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".auth.prefix", &rec.Auth.Prefix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveConfigStringPlaceholders(raw string) (string, error) {
+	matches := configEnvPlaceholderPattern.FindAllStringSubmatchIndex(raw, -1)
+	if len(matches) == 0 {
+		return raw, nil
+	}
+	var b strings.Builder
+	last := 0
+	for _, idx := range matches {
+		if len(idx) < 4 {
+			continue
+		}
+		b.WriteString(raw[last:idx[0]])
+		name := raw[idx[2]:idx[3]]
+		value, ok := os.LookupEnv(name)
+		if !ok || strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("unresolved env placeholder ${%s}", name)
+		}
+		b.WriteString(value)
+		last = idx[1]
+	}
+	b.WriteString(raw[last:])
+	return b.String(), nil
 }
 
 func (s *appConfigStore) DefaultModel() string {
@@ -118,49 +254,27 @@ func (s *appConfigStore) DefaultModel() string {
 }
 
 func (s *appConfigStore) CredentialStoreMode() string {
-	if s == nil {
-		return defaultCredentialStoreMode
-	}
-	return normalizeCredentialStoreMode(s.data.CredentialStoreMode)
+	return defaultCredentialStoreMode
 }
 
 func (s *appConfigStore) StreamModel() bool {
-	if s == nil || s.data.StreamModel == nil {
-		return defaultStream
-	}
-	return *s.data.StreamModel
+	return true
 }
 
 func (s *appConfigStore) ThinkingMode() string {
-	if s == nil {
-		return defaultThinkingMode
-	}
-	return normalizeThinkingMode(s.data.ThinkingMode)
+	return defaultThinkingMode
 }
 
 func (s *appConfigStore) ThinkingBudget() int {
-	if s == nil || s.data.ThinkingBudget == nil {
-		return defaultThinkingBudget
-	}
-	value := *s.data.ThinkingBudget
-	if value <= 0 {
-		return defaultThinkingBudget
-	}
-	return value
+	return defaultThinkingBudget
 }
 
 func (s *appConfigStore) ReasoningEffort() string {
-	if s == nil {
-		return defaultReasoningEffort
-	}
-	return normalizeReasoningEffort(s.data.ReasoningEffort)
+	return defaultReasoningEffort
 }
 
 func (s *appConfigStore) ShowReasoning() bool {
-	if s == nil || s.data.ShowReasoning == nil {
-		return defaultShowReasoning
-	}
-	return *s.data.ShowReasoning
+	return true
 }
 
 func (s *appConfigStore) PermissionMode() string {
@@ -196,6 +310,9 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 			Headers:             copyHeaders(rec.Headers),
 			ContextWindowTokens: rec.ContextWindowTokens,
 			MaxOutputTok:        rec.MaxOutputTok,
+			ThinkingMode:        normalizeThinkingMode(rec.ThinkingMode),
+			ThinkingBudget:      normalizeThinkingBudget(rec.ThinkingBudget),
+			ReasoningEffort:     normalizeReasoningEffort(rec.ReasoningEffort),
 			Auth: modelproviders.AuthConfig{
 				Type:          modelproviders.AuthType(strings.TrimSpace(rec.Auth.Type)),
 				TokenEnv:      "",
@@ -211,6 +328,37 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 		out = append(out, cfg)
 	}
 	return out
+}
+
+func defaultModelRuntimeSettings() modelRuntimeSettings {
+	return modelRuntimeSettings{
+		ThinkingMode:    defaultThinkingMode,
+		ThinkingBudget:  defaultThinkingBudget,
+		ReasoningEffort: defaultReasoningEffort,
+	}
+}
+
+func (s *appConfigStore) ModelRuntimeSettings(alias string) modelRuntimeSettings {
+	settings := defaultModelRuntimeSettings()
+	target := strings.ToLower(strings.TrimSpace(alias))
+	if target == "" || s == nil {
+		return settings
+	}
+	for _, rec := range s.data.Providers {
+		recAlias := strings.ToLower(strings.TrimSpace(rec.Alias))
+		if recAlias == "" {
+			continue
+		}
+		recRef := canonicalModelRef(rec.Provider, rec.Model)
+		if recAlias != target && recRef != target {
+			continue
+		}
+		settings.ThinkingMode = normalizeThinkingMode(rec.ThinkingMode)
+		settings.ThinkingBudget = normalizeThinkingBudget(rec.ThinkingBudget)
+		settings.ReasoningEffort = normalizeReasoningEffort(rec.ReasoningEffort)
+		return settings
+	}
+	return settings
 }
 
 func (s *appConfigStore) ConfiguredModelRefs() []string {
@@ -271,54 +419,19 @@ func (s *appConfigStore) SetDefaultModel(alias string) error {
 }
 
 func (s *appConfigStore) SetCredentialStoreMode(mode string) error {
-	if s == nil {
-		return nil
-	}
-	mode = normalizeCredentialStoreMode(mode)
-	if s.data.CredentialStoreMode == mode {
-		return nil
-	}
-	s.data.CredentialStoreMode = mode
-	return s.save()
+	_ = s
+	_ = mode
+	return nil
 }
 
 func (s *appConfigStore) SetRuntimeSettings(settings runtimeSettings) error {
 	if s == nil {
 		return nil
 	}
-	thinkingMode := normalizeThinkingMode(settings.ThinkingMode)
-	thinkingBudget := settings.ThinkingBudget
-	if thinkingBudget <= 0 {
-		thinkingBudget = defaultThinkingBudget
-	}
-	reasoningEffort := normalizeReasoningEffort(settings.ReasoningEffort)
 	permissionMode := normalizePermissionMode(settings.PermissionMode)
 	sandboxType := normalizeSandboxType(settings.SandboxType)
 
 	changed := false
-	if s.data.StreamModel == nil || *s.data.StreamModel != settings.StreamModel {
-		v := settings.StreamModel
-		s.data.StreamModel = &v
-		changed = true
-	}
-	if s.data.ThinkingMode != thinkingMode {
-		s.data.ThinkingMode = thinkingMode
-		changed = true
-	}
-	if s.data.ThinkingBudget == nil || *s.data.ThinkingBudget != thinkingBudget {
-		v := thinkingBudget
-		s.data.ThinkingBudget = &v
-		changed = true
-	}
-	if s.data.ReasoningEffort != reasoningEffort {
-		s.data.ReasoningEffort = reasoningEffort
-		changed = true
-	}
-	if s.data.ShowReasoning == nil || *s.data.ShowReasoning != settings.ShowReasoning {
-		v := settings.ShowReasoning
-		s.data.ShowReasoning = &v
-		changed = true
-	}
 	if s.data.PermissionMode != permissionMode {
 		s.data.PermissionMode = permissionMode
 		changed = true
@@ -350,6 +463,9 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		Headers:             copyHeaders(cfg.Headers),
 		ContextWindowTokens: cfg.ContextWindowTokens,
 		MaxOutputTok:        cfg.MaxOutputTok,
+		ThinkingMode:        normalizeThinkingMode(cfg.ThinkingMode),
+		ThinkingBudget:      normalizeThinkingBudget(cfg.ThinkingBudget),
+		ReasoningEffort:     normalizeReasoningEffort(cfg.ReasoningEffort),
 		Auth: authRecord{
 			Type:          string(cfg.Auth.Type),
 			TokenEnv:      "",
@@ -404,21 +520,12 @@ func (s *appConfigStore) save() error {
 }
 
 func defaultAppConfig() appConfig {
-	streamModel := defaultStream
-	thinkingBudget := defaultThinkingBudget
-	showReasoning := defaultShowReasoning
 	return appConfig{
-		Version:             configVersion,
-		DefaultModel:        defaultModel,
-		CredentialStoreMode: defaultCredentialStoreMode,
-		StreamModel:         &streamModel,
-		ThinkingMode:        defaultThinkingMode,
-		ThinkingBudget:      &thinkingBudget,
-		ReasoningEffort:     defaultReasoningEffort,
-		ShowReasoning:       &showReasoning,
-		PermissionMode:      defaultPermissionMode,
-		SandboxType:         platformDefaultSandboxType(),
-		Providers:           nil,
+		Version:        configVersion,
+		DefaultModel:   defaultModel,
+		PermissionMode: defaultPermissionMode,
+		SandboxType:    platformDefaultSandboxType(),
+		Providers:      nil,
 	}
 }
 
@@ -433,23 +540,13 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	if cfg.DefaultModel == "fake" {
 		cfg.DefaultModel = ""
 	}
-	cfg.CredentialStoreMode = normalizeCredentialStoreMode(cfg.CredentialStoreMode)
-	if cfg.StreamModel == nil {
-		v := defaultStream
-		cfg.StreamModel = &v
-	}
-	cfg.ThinkingMode = normalizeThinkingMode(cfg.ThinkingMode)
-	if cfg.ThinkingBudget == nil || *cfg.ThinkingBudget <= 0 {
-		v := defaultThinkingBudget
-		cfg.ThinkingBudget = &v
-	}
-	cfg.ReasoningEffort = normalizeReasoningEffort(cfg.ReasoningEffort)
-	if cfg.ShowReasoning == nil {
-		v := defaultShowReasoning
-		cfg.ShowReasoning = &v
-	}
 	cfg.PermissionMode = normalizePermissionMode(cfg.PermissionMode)
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
+	for i := range cfg.Providers {
+		cfg.Providers[i].ThinkingMode = normalizeThinkingMode(cfg.Providers[i].ThinkingMode)
+		cfg.Providers[i].ThinkingBudget = normalizeThinkingBudget(cfg.Providers[i].ThinkingBudget)
+		cfg.Providers[i].ReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].ReasoningEffort)
+	}
 }
 
 func normalizeThinkingMode(mode string) string {
@@ -461,6 +558,13 @@ func normalizeThinkingMode(mode string) string {
 	default:
 		return defaultThinkingMode
 	}
+}
+
+func normalizeThinkingBudget(budget int) int {
+	if budget <= 0 {
+		return defaultThinkingBudget
+	}
+	return budget
 }
 
 func normalizeReasoningEffort(effort string) string {
@@ -607,6 +711,26 @@ func copyHeaders(in map[string]string) map[string]string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, one := range values {
+		value := strings.TrimSpace(one)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
 	return out
 }

@@ -36,7 +36,8 @@ type Store interface {
 }
 
 // ContextWindowStore optionally provides a reduced event window optimized for
-// model context construction (typically latest compaction event and newer).
+// model context construction (typically latest compaction checkpoint and newer
+// events).
 type ContextWindowStore interface {
 	ListContextWindowEvents(context.Context, *Session) ([]*Event, error)
 }

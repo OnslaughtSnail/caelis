@@ -26,11 +26,6 @@ const (
 	patchPreviewLineWidth = 120
 )
 
-func NewPatch() *PatchTool {
-	tool, _ := NewPatchWithRuntime(nil)
-	return tool
-}
-
 func NewPatchWithRuntime(runtime toolexec.Runtime) (*PatchTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(runtime)
 	if err != nil {

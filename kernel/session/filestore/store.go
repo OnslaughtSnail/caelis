@@ -155,7 +155,7 @@ func (s *Store) ListContextWindowEvents(ctx context.Context, req *session.Sessio
 	}
 	defer f.Close()
 
-	out := []*session.Event{}
+	events := []*session.Event{}
 	dec := json.NewDecoder(f)
 	for {
 		ev := &session.Event{}
@@ -165,12 +165,9 @@ func (s *Store) ListContextWindowEvents(ctx context.Context, req *session.Sessio
 			}
 			return nil, fmt.Errorf("filestore: decode events: %w", err)
 		}
-		if isCompactionEvent(ev) {
-			out = out[:0]
-		}
-		out = append(out, ev)
+		events = append(events, ev)
 	}
-	return out, nil
+	return session.ContextWindowEvents(events), nil
 }
 
 func (s *Store) SnapshotState(ctx context.Context, req *session.Session) (map[string]any, error) {
@@ -235,12 +232,4 @@ func validateSessionPathComponent(name, value string) error {
 		return fmt.Errorf("filestore: invalid %s", name)
 	}
 	return nil
-}
-
-func isCompactionEvent(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, _ := ev.Meta["kind"].(string)
-	return kind == "compaction"
 }

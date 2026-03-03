@@ -36,9 +36,10 @@ You are a pragmatic software engineering agent focused on correctness, clarity, 
 Add your long-lived custom preferences here.
 `
 
-	defaultLSPRoutingPolicy = `When the task is symbol-level (definition/references/rename/diagnostics), call LSP_ACTIVATE first for the target language, then use LSP_* tools.
-Use SEARCH/GLOB for coarse file discovery only.
-Prefer LSP results over text matching when both are available.`
+	defaultLSPRoutingPolicy = `Use LSP_DEFINITION, LSP_REFERENCES to find definitions and usages by symbol name.
+Use LSP_SYMBOLS to discover symbol names when you don't know the exact name.
+Use SEARCH/GLOB for text-level pattern matching; use LSP tools for semantic symbol operations.
+If an LSP tool returns an error with a hint, follow the suggested fallback tool.`
 )
 
 func Defaults() DefaultTemplates {

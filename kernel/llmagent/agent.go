@@ -23,7 +23,6 @@ import (
 type Config struct {
 	Name              string
 	SystemPrompt      string
-	MaxSteps          int // Deprecated: kept for compatibility and ignored.
 	StreamModel       bool
 	Reasoning         model.ReasoningConfig
 	EmitPartialEvents bool
@@ -63,212 +62,355 @@ func (a *Agent) Name() string {
 	return a.cfg.Name
 }
 
+type agentRunState struct {
+	messages          []model.Message
+	hooks             []policy.Hook
+	lastCallSig       string
+	consecutiveDupCnt int
+}
+
 func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		if ctx == nil {
-			yield(nil, fmt.Errorf("llmagent: invocation context is nil"))
+		if err := validateInvocationContext(ctx); err != nil {
+			yield(nil, err)
 			return
 		}
-		if ctx.Model() == nil {
-			yield(nil, fmt.Errorf("llmagent: model is nil"))
-			return
+		state := agentRunState{
+			messages: toMessagesWithSanitizer(ctx.History(), a.cfg.SystemPrompt, a.toolResultSanitizer),
+			hooks:    ctx.Policies(),
 		}
-
-		messages := toMessagesWithSanitizer(ctx.History(), a.cfg.SystemPrompt, a.toolResultSanitizer)
-		hooks := ctx.Policies()
-		dupCount := map[string]int{}
-
 		for {
-			toolDecls := tool.Declarations(ctx.Tools())
-			in, err := policy.ApplyBeforeModel(ctx, hooks, policy.ModelInput{Messages: messages, Tools: toolDecls})
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			req := &model.Request{
-				Messages:  in.Messages,
-				Tools:     in.Tools,
-				Stream:    a.cfg.StreamModel,
-				Reasoning: a.cfg.Reasoning,
-			}
-			resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
-				if partial == nil || !a.cfg.EmitPartialEvents || !partial.Partial {
-					return nil
-				}
-				if strings.TrimSpace(partial.Message.Reasoning) != "" {
-					ev := &session.Event{
-						ID:   newEventID(),
-						Time: time.Now(),
-						Message: model.Message{
-							Role:      model.RoleAssistant,
-							Reasoning: partial.Message.Reasoning,
-						},
-						Meta: map[string]any{
-							"partial": true,
-							"channel": "reasoning",
-						},
-					}
-					if !yield(ev, nil) {
-						return errYieldStopped
-					}
-				}
-				if strings.TrimSpace(partial.Message.Text) != "" {
-					ev := &session.Event{
-						ID:      newEventID(),
-						Time:    time.Now(),
-						Message: model.Message{Role: model.RoleAssistant, Text: partial.Message.Text},
-						Meta: map[string]any{
-							"partial": true,
-							"channel": "answer",
-						},
-					}
-					if !yield(ev, nil) {
-						return errYieldStopped
-					}
-				}
-				return nil
-			})
-			if errors.Is(err, errYieldStopped) {
+			done, err := a.runOneTurn(ctx, &state, yield)
+			if errors.Is(err, errYieldStopped) || errors.Is(err, errStopAfterYieldedError) {
 				return
 			}
 			if err != nil {
 				yield(nil, err)
 				return
 			}
-			if resp == nil {
-				yield(nil, fmt.Errorf("llmagent: empty model response"))
+			if done {
 				return
-			}
-
-			out, err := policy.ApplyBeforeOutput(ctx, hooks, policy.Output{Message: resp.Message})
-			if err != nil {
-				yield(nil, err)
-				return
-			}
-			assistantMsg := out.Message
-			if assistantMsg.Role == "" {
-				assistantMsg.Role = model.RoleAssistant
-			}
-			assistantEvent := &session.Event{
-				ID:      newEventID(),
-				Time:    time.Now(),
-				Message: assistantMsg,
-				Meta:    responseMeta(resp),
-			}
-			if !yield(assistantEvent, nil) {
-				return
-			}
-
-			messages = append(messages, assistantMsg)
-			if len(assistantMsg.ToolCalls) == 0 {
-				return
-			}
-
-			for _, call := range assistantMsg.ToolCalls {
-				sig, sigErr := toolCallSignature(call)
-				if sigErr != nil {
-					yield(nil, sigErr)
-					return
-				}
-				dupCount[sig]++
-				if dupCount[sig] > 2 {
-					errMsg := "duplicate tool call detected"
-					toolMsg := model.Message{
-						Role: model.RoleTool,
-						ToolResponse: &model.ToolResponse{
-							ID:     call.ID,
-							Name:   call.Name,
-							Result: map[string]any{"error": errMsg},
-						},
-					}
-					ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
-					if !yield(ev, nil) {
-						return
-					}
-					messages = append(messages, toolMsg)
-					return
-				}
-
-				capability := toolcap.Capability{Risk: toolcap.RiskUnknown}
-				if toolForCap, exists := ctx.Tool(call.Name); exists {
-					capability = toolcap.Of(toolForCap)
-				}
-				beforeIn, err := policy.ApplyBeforeTool(ctx, hooks, policy.ToolInput{
-					Call:       call,
-					Capability: capability,
-				})
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				call = beforeIn.Call
-				decision := policy.NormalizeDecision(beforeIn.Decision)
-
-				execOut := policy.ToolOutput{
-					Call:       call,
-					Capability: beforeIn.Capability,
-					Decision:   decision,
-				}
-				t, ok := ctx.Tool(call.Name)
-				if !ok {
-					execOut.Err = fmt.Errorf("llmagent: unknown tool %q", call.Name)
-					execOut.Result = map[string]any{"error": execOut.Err.Error()}
-				} else if decision.Effect == policy.DecisionEffectDeny {
-					reason := strings.TrimSpace(decision.Reason)
-					if reason == "" {
-						reason = "tool denied by policy"
-					}
-					execOut.Err = fmt.Errorf("llmagent: tool %q denied by policy: %s", call.Name, reason)
-					execOut.Result = map[string]any{"error": execOut.Err.Error()}
-				} else {
-					execOut.Capability = toolcap.Of(t)
-					toolCtx := context.Context(ctx)
-					toolCtx = policy.WithToolDecision(toolCtx, decision)
-					result, runErr := t.Run(toolCtx, call.Args)
-					execOut.Err = runErr
-					if runErr != nil {
-						if toolexec.IsApprovalAborted(runErr) {
-							yield(nil, runErr)
-							return
-						}
-						execOut.Result = map[string]any{"error": runErr.Error()}
-					} else {
-						execOut.Result = result
-					}
-				}
-				if len(execOut.Capability.Operations) == 0 && execOut.Capability.Risk == "" {
-					execOut.Capability = beforeIn.Capability
-				}
-
-				afterOut, err := policy.ApplyAfterTool(ctx, hooks, execOut)
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
-				finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
-				finalResult = annotateToolResultMetadata(finalResult, afterOut.Err)
-				modelResult := a.toolResultSanitizer(finalResult)
-				toolMsg := model.Message{
-					Role:         model.RoleTool,
-					ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
-				}
-				ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
-				if !yield(ev, nil) {
-					return
-				}
-				messages = append(messages, model.Message{
-					Role: model.RoleTool,
-					ToolResponse: &model.ToolResponse{
-						ID:     afterOut.Call.ID,
-						Name:   afterOut.Call.Name,
-						Result: modelResult,
-					},
-				})
 			}
 		}
-
 	}
+}
+
+func validateInvocationContext(ctx agent.InvocationContext) error {
+	if ctx == nil {
+		return fmt.Errorf("llmagent: invocation context is nil")
+	}
+	if ctx.Model() == nil {
+		return fmt.Errorf("llmagent: model is nil")
+	}
+	return nil
+}
+
+func (a *Agent) runOneTurn(
+	ctx agent.InvocationContext,
+	state *agentRunState,
+	yield func(*session.Event, error) bool,
+) (bool, error) {
+	resp, err := a.generateTurnResponse(ctx, state, yield)
+	if err != nil {
+		return false, err
+	}
+	assistantMsg, err := a.emitAssistantTurn(ctx, state.hooks, resp, yield)
+	if err != nil {
+		return false, err
+	}
+	state.messages = append(state.messages, assistantMsg)
+	if len(assistantMsg.ToolCalls) == 0 {
+		return true, nil
+	}
+	if err := a.executeToolCalls(ctx, state, assistantMsg.ToolCalls, yield); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (a *Agent) generateTurnResponse(
+	ctx agent.InvocationContext,
+	state *agentRunState,
+	yield func(*session.Event, error) bool,
+) (*model.Response, error) {
+	toolDecls := tool.Declarations(ctx.Tools())
+	in, err := policy.ApplyBeforeModel(ctx, state.hooks, policy.ModelInput{
+		Messages: state.messages,
+		Tools:    toolDecls,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req := &model.Request{
+		Messages:  in.Messages,
+		Tools:     in.Tools,
+		Stream:    a.cfg.StreamModel,
+		Reasoning: a.cfg.Reasoning,
+	}
+	resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
+		return a.emitPartialResponse(partial, yield)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("llmagent: empty model response")
+	}
+	return resp, nil
+}
+
+func (a *Agent) emitPartialResponse(partial *model.Response, yield func(*session.Event, error) bool) error {
+	if partial == nil || !a.cfg.EmitPartialEvents || !partial.Partial {
+		return nil
+	}
+	if strings.TrimSpace(partial.Message.Reasoning) != "" {
+		ev := &session.Event{
+			ID:   newEventID(),
+			Time: time.Now(),
+			Message: model.Message{
+				Role:      model.RoleAssistant,
+				Reasoning: partial.Message.Reasoning,
+			},
+			Meta: map[string]any{
+				"partial": true,
+				"channel": "reasoning",
+			},
+		}
+		if !yield(ev, nil) {
+			return errYieldStopped
+		}
+	}
+	if strings.TrimSpace(partial.Message.Text) != "" {
+		ev := &session.Event{
+			ID:      newEventID(),
+			Time:    time.Now(),
+			Message: model.Message{Role: model.RoleAssistant, Text: partial.Message.Text},
+			Meta: map[string]any{
+				"partial": true,
+				"channel": "answer",
+			},
+		}
+		if !yield(ev, nil) {
+			return errYieldStopped
+		}
+	}
+	return nil
+}
+
+func (a *Agent) emitAssistantTurn(
+	ctx agent.InvocationContext,
+	hooks []policy.Hook,
+	resp *model.Response,
+	yield func(*session.Event, error) bool,
+) (model.Message, error) {
+	out, err := policy.ApplyBeforeOutput(ctx, hooks, policy.Output{Message: resp.Message})
+	if err != nil {
+		return model.Message{}, err
+	}
+	assistantMsg := out.Message
+	if assistantMsg.Role == "" {
+		assistantMsg.Role = model.RoleAssistant
+	}
+	assistantEvent := &session.Event{
+		ID:      newEventID(),
+		Time:    time.Now(),
+		Message: assistantMsg,
+		Meta:    responseMeta(resp),
+	}
+	if !yield(assistantEvent, nil) {
+		return model.Message{}, errYieldStopped
+	}
+	return assistantMsg, nil
+}
+
+func (a *Agent) executeToolCalls(
+	ctx agent.InvocationContext,
+	state *agentRunState,
+	toolCalls []model.ToolCall,
+	yield func(*session.Event, error) bool,
+) error {
+	for _, call := range toolCalls {
+		if err := a.executeToolCall(ctx, state, call, yield); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *Agent) executeToolCall(
+	ctx agent.InvocationContext,
+	state *agentRunState,
+	call model.ToolCall,
+	yield func(*session.Event, error) bool,
+) error {
+	args, argErr := resolveToolCallArgs(call)
+	if argErr != nil {
+		// All arg-parse errors are fed back to the model as tool responses
+		// so the model can self-correct, unless the call ID is empty (malformed)
+		// or we detect a duplicate loop.
+		if strings.TrimSpace(call.ID) == "" {
+			return fmt.Errorf("llmagent: invalid tool call %q arguments: %w", call.Name, argErr)
+		}
+		sig := toolArgParseErrorSignature(call)
+		if sig == state.lastCallSig {
+			state.consecutiveDupCnt++
+		} else {
+			state.lastCallSig = sig
+			state.consecutiveDupCnt = 1
+		}
+		if state.consecutiveDupCnt > 2 {
+			errMsg := fmt.Sprintf("duplicate tool call detected for %q", call.Name)
+			toolMsg := model.Message{
+				Role: model.RoleTool,
+				ToolResponse: &model.ToolResponse{
+					ID:     call.ID,
+					Name:   call.Name,
+					Result: map[string]any{"error": errMsg},
+				},
+			}
+			ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+			if !yield(ev, nil) {
+				return errYieldStopped
+			}
+			state.messages = append(state.messages, toolMsg)
+			return fmt.Errorf("llmagent: %s", errMsg)
+		}
+		result := toolArgParseErrorResult(call, argErr)
+		modelResult := a.toolResultSanitizer(cloneArgs(result))
+		toolMsg := model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     call.ID,
+				Name:   call.Name,
+				Result: result,
+			},
+		}
+		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+		if !yield(ev, nil) {
+			return errYieldStopped
+		}
+		state.messages = append(state.messages, model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     call.ID,
+				Name:   call.Name,
+				Result: modelResult,
+			},
+		})
+		return nil
+	}
+
+	sig, sigErr := toolCallSignature(call.Name, args)
+	if sigErr != nil {
+		return sigErr
+	}
+	if sig == state.lastCallSig {
+		state.consecutiveDupCnt++
+	} else {
+		state.lastCallSig = sig
+		state.consecutiveDupCnt = 1
+	}
+	if state.consecutiveDupCnt > 2 {
+		errMsg := fmt.Sprintf("duplicate tool call detected for %q", call.Name)
+		toolMsg := model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     call.ID,
+				Name:   call.Name,
+				Result: map[string]any{"error": errMsg},
+			},
+		}
+		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+		if !yield(ev, nil) {
+			return errYieldStopped
+		}
+		state.messages = append(state.messages, toolMsg)
+		return fmt.Errorf("llmagent: %s", errMsg)
+	}
+
+	capability := toolcap.Capability{Risk: toolcap.RiskUnknown}
+	if toolForCap, exists := ctx.Tool(call.Name); exists {
+		capability = toolcap.Of(toolForCap)
+	}
+	beforeIn, err := policy.ApplyBeforeTool(ctx, state.hooks, policy.ToolInput{
+		Call:       call,
+		Args:       cloneArgs(args),
+		Capability: capability,
+	})
+	if err != nil {
+		return err
+	}
+	call = beforeIn.Call
+	args = beforeIn.Args
+	if args == nil {
+		args = map[string]any{}
+	}
+	decision := policy.NormalizeDecision(beforeIn.Decision)
+
+	execOut := policy.ToolOutput{
+		Call:       call,
+		Args:       cloneArgs(args),
+		Capability: beforeIn.Capability,
+		Decision:   decision,
+	}
+	t, ok := ctx.Tool(call.Name)
+	if !ok {
+		execOut.Err = fmt.Errorf("llmagent: unknown tool %q", call.Name)
+		execOut.Result = map[string]any{"error": execOut.Err.Error()}
+	} else if decision.Effect == policy.DecisionEffectDeny {
+		reason := strings.TrimSpace(decision.Reason)
+		if reason == "" {
+			reason = "tool denied by policy"
+		}
+		execOut.Err = fmt.Errorf("llmagent: tool %q denied by policy: %s", call.Name, reason)
+		execOut.Result = map[string]any{"error": execOut.Err.Error()}
+	} else {
+		execOut.Capability = toolcap.Of(t)
+		toolCtx := context.Context(ctx)
+		toolCtx = policy.WithToolDecision(toolCtx, decision)
+		result, runErr := t.Run(toolCtx, args)
+		execOut.Err = runErr
+		if runErr != nil {
+			if toolexec.IsApprovalAborted(runErr) {
+				if !yield(nil, runErr) {
+					return errYieldStopped
+				}
+				return errStopAfterYieldedError
+			}
+			execOut.Result = map[string]any{"error": runErr.Error()}
+		} else {
+			execOut.Result = result
+		}
+	}
+	if len(execOut.Capability.Operations) == 0 && execOut.Capability.Risk == "" {
+		execOut.Capability = beforeIn.Capability
+	}
+
+	afterOut, err := policy.ApplyAfterTool(ctx, state.hooks, execOut)
+	if err != nil {
+		return err
+	}
+	truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
+	finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
+	finalResult = annotateToolResultMetadata(finalResult, afterOut.Err)
+	modelResult := a.toolResultSanitizer(finalResult)
+	toolMsg := model.Message{
+		Role:         model.RoleTool,
+		ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
+	}
+	ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+	if !yield(ev, nil) {
+		return errYieldStopped
+	}
+	state.messages = append(state.messages, model.Message{
+		Role: model.RoleTool,
+		ToolResponse: &model.ToolResponse{
+			ID:     afterOut.Call.ID,
+			Name:   afterOut.Call.Name,
+			Result: modelResult,
+		},
+	})
+	return nil
 }
 
 func toMessages(events []*session.Event, systemPrompt string) []model.Message {
@@ -374,7 +516,40 @@ func sanitizeToolResultValue(value any, sanitizer func(map[string]any) map[strin
 	}
 }
 
+func resolveToolCallArgs(call model.ToolCall) (map[string]any, error) {
+	raw := strings.TrimSpace(call.Args)
+	if raw == "" {
+		return map[string]any{}, nil
+	}
+	return model.ParseToolCallArgs(raw)
+}
+
+func toolArgParseErrorSignature(call model.ToolCall) string {
+	return "parse_error:" + strings.TrimSpace(call.Name) + ":" + strings.TrimSpace(call.Args)
+}
+
+func toolArgParseErrorResult(call model.ToolCall, err error) map[string]any {
+	return map[string]any{
+		"error":       fmt.Sprintf("invalid tool call %q arguments: %v", call.Name, err),
+		"error_type":  "invalid_tool_call_args",
+		"recoverable": true,
+		"hint":        fmt.Sprintf("tool call %q arguments appear truncated (incomplete JSON); try reducing the argument size or splitting into smaller operations", call.Name),
+	}
+}
+
+func cloneArgs(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	out := make(map[string]any, len(input))
+	for k, v := range input {
+		out[k] = v
+	}
+	return out
+}
+
 var errYieldStopped = errors.New("llmagent: downstream yield stopped")
+var errStopAfterYieldedError = errors.New("llmagent: stop after yielded error")
 
 var (
 	modelRequestMaxRetries = 5
@@ -463,13 +638,13 @@ func retryDelayForAttempt(retry int) time.Duration {
 	return delay
 }
 
-func toolCallSignature(call model.ToolCall) (string, error) {
-	norm := normalize(call.Args)
+func toolCallSignature(name string, args map[string]any) (string, error) {
+	norm := normalize(args)
 	raw, err := json.Marshal(norm)
 	if err != nil {
 		return "", err
 	}
-	return call.Name + ":" + string(raw), nil
+	return name + ":" + string(raw), nil
 }
 
 func normalize(input map[string]any) any {

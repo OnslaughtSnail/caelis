@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -59,8 +60,7 @@ func TestRuntime_Compact_UsesWindowEventsAndCustomStrategy(t *testing.T) {
 	rt, err := New(Config{
 		Store: store,
 		Compaction: CompactionConfig{
-			PreserveRecentTurns: 1,
-			Strategy:            strategy,
+			Strategy: strategy,
 		},
 	})
 	if err != nil {
@@ -79,8 +79,11 @@ func TestRuntime_Compact_UsesWindowEventsAndCustomStrategy(t *testing.T) {
 	if ev == nil {
 		t.Fatal("expected compaction event")
 	}
-	if ev.Message.Text != "custom summary" {
-		t.Fatalf("expected custom summary text, got %q", ev.Message.Text)
+	if ev.Message.Role != model.RoleUser {
+		t.Fatalf("expected compaction role=user, got %q", ev.Message.Role)
+	}
+	if !strings.Contains(ev.Message.Text, "custom summary") {
+		t.Fatalf("expected custom summary body in compaction text, got %q", ev.Message.Text)
 	}
 	if strategy.calls != 1 {
 		t.Fatalf("expected strategy called once, got %d", strategy.calls)
@@ -92,5 +95,55 @@ func TestRuntime_Compact_UsesWindowEventsAndCustomStrategy(t *testing.T) {
 		if one.ID == "old_user" || one.ID == "old_assistant" {
 			t.Fatalf("expected old pre-compaction events excluded, got %q in strategy input", one.ID)
 		}
+	}
+}
+
+func TestRuntime_Compact_UsesCustomSummaryFormatter(t *testing.T) {
+	store := inmemory.New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-compact-formatter"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	appendEvent := func(ev *session.Event) {
+		t.Helper()
+		if err := store.AppendEvent(context.Background(), sess, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendEvent(&session.Event{ID: "new_user_1", Message: model.Message{Role: model.RoleUser, Text: "new user 1"}})
+	appendEvent(&session.Event{ID: "new_assistant_1", Message: model.Message{Role: model.RoleAssistant, Text: "new assistant 1"}})
+
+	strategy := &captureCompactionStrategy{text: "custom summary"}
+	rt, err := New(Config{
+		Store: store,
+		Compaction: CompactionConfig{
+			Strategy: strategy,
+			SummaryFormatter: func(summary string) string {
+				summary = strings.TrimSpace(summary)
+				if summary == "" {
+					return ""
+				}
+				return "CHECKPOINT:\n\n" + summary
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ev, err := rt.Compact(context.Background(), CompactRequest{
+		AppName:   sess.AppName,
+		UserID:    sess.UserID,
+		SessionID: sess.ID,
+		Model:     newRuntimeTestLLM("fake"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev == nil {
+		t.Fatal("expected compaction event")
+	}
+	if !strings.HasPrefix(ev.Message.Text, "CHECKPOINT:\n\n") {
+		t.Fatalf("expected formatter prefix, got %q", ev.Message.Text)
 	}
 }

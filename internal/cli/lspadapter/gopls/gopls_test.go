@@ -40,31 +40,44 @@ func TestDecodeLocations(t *testing.T) {
 	}
 }
 
-func TestFlattenWorkspaceEdit(t *testing.T) {
-	edit := lspWorkspaceEdit{
-		Changes: map[string][]lspTextEdit{
-			"file:///tmp/a.go": {{
-				Range:   lspRange{Start: lspPosition{Line: 0, Character: 0}, End: lspPosition{Line: 0, Character: 1}},
-				NewText: "A",
-			}},
-		},
-		DocumentChanges: []lspTextDocumentEditHolder{{
-			TextDocument: &lspVersionedTextDocumentIdentifier{URI: "file:///tmp/b.go"},
-			Edits: []lspTextEdit{{
-				Range:   lspRange{Start: lspPosition{Line: 1, Character: 0}, End: lspPosition{Line: 1, Character: 1}},
-				NewText: "B",
-			}},
-		}},
+func TestMatchScore(t *testing.T) {
+	tests := []struct {
+		name       string
+		queryLower string
+		want       int
+	}{
+		{"HandleRequest", "handlerequest", 3}, // exact (case-insensitive)
+		{"HandleRequest", "handle", 2},        // prefix
+		{"MyHandleRequest", "handle", 1},      // contains
+		{"Foo", "handle", 0},                  // no match
 	}
-	out := flattenWorkspaceEdit(edit)
-	if len(out) != 2 {
-		t.Fatalf("expected 2 files, got %d", len(out))
+	for _, tt := range tests {
+		got := matchScore(tt.name, tt.queryLower)
+		if got != tt.want {
+			t.Errorf("matchScore(%q, %q) = %d, want %d", tt.name, tt.queryLower, got, tt.want)
+		}
 	}
-	if len(out[filepath.Clean("/tmp/a.go")]) != 1 {
-		t.Fatalf("expected one edit for /tmp/a.go")
+}
+
+func TestSymbolKindToString(t *testing.T) {
+	tests := []struct {
+		kind int
+		want string
+	}{
+		{6, "method"},
+		{12, "function"},
+		{5, "class"},
+		{23, "struct"},
+		{11, "interface"},
+		{13, "variable"},
+		{14, "constant"},
+		{99, "unknown"},
 	}
-	if len(out[filepath.Clean("/tmp/b.go")]) != 1 {
-		t.Fatalf("expected one edit for /tmp/b.go")
+	for _, tt := range tests {
+		got := symbolKindToString(tt.kind)
+		if got != tt.want {
+			t.Errorf("symbolKindToString(%d) = %q, want %q", tt.kind, got, tt.want)
+		}
 	}
 }
 

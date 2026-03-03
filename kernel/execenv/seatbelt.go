@@ -172,20 +172,21 @@ func seatbeltWritableRoots(policy SandboxPolicy, workDir string) []string {
 	for _, one := range policy.WritableRoots {
 		resolved := resolveSeatbeltPath(workDir, one)
 		if resolved != "" {
-			roots = append(roots, resolved)
+			roots = append(roots, seatbeltPathVariants(resolved)...)
 		}
 	}
 	tmp := strings.TrimSpace(os.TempDir())
 	if tmp != "" {
-		roots = append(roots, filepath.Clean(tmp))
+		roots = append(roots, seatbeltPathVariants(tmp)...)
 	}
+	// On macOS /tmp is a symlink to /private/tmp; os.TempDir() returns
+	// $TMPDIR (e.g. /var/folders/...) which does NOT cover /tmp.
+	roots = append(roots, seatbeltPathVariants("/tmp")...)
 	home, err := os.UserHomeDir()
 	if err == nil && strings.TrimSpace(home) != "" {
-		roots = append(roots,
-			filepath.Join(home, "Library", "Caches"),
-			filepath.Join(home, ".cache"),
-			filepath.Join(home, ".npm"),
-		)
+		roots = append(roots, seatbeltPathVariants(filepath.Join(home, "Library", "Caches"))...)
+		roots = append(roots, seatbeltPathVariants(filepath.Join(home, ".cache"))...)
+		roots = append(roots, seatbeltPathVariants(filepath.Join(home, ".npm"))...)
 	}
 	return normalizeStringList(roots)
 }
@@ -195,10 +196,22 @@ func seatbeltReadOnlySubpaths(policy SandboxPolicy, workDir string) []string {
 	for _, one := range policy.ReadOnlySubpaths {
 		resolved := resolveSeatbeltPath(workDir, one)
 		if resolved != "" {
-			values = append(values, resolved)
+			values = append(values, seatbeltPathVariants(resolved)...)
 		}
 	}
 	return normalizeStringList(values)
+}
+
+func seatbeltPathVariants(path string) []string {
+	cleaned := filepath.Clean(strings.TrimSpace(path))
+	if cleaned == "" || cleaned == "." {
+		return nil
+	}
+	variants := []string{cleaned}
+	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && strings.TrimSpace(resolved) != "" {
+		variants = append(variants, filepath.Clean(resolved))
+	}
+	return normalizeStringList(variants)
 }
 
 func resolveSeatbeltPath(baseDir, value string) string {

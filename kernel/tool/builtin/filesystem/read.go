@@ -42,11 +42,6 @@ type ReadTool struct {
 	runtime toolexec.Runtime
 }
 
-// NewRead creates the built-in READ tool.
-func NewRead(cfg ReadConfig) (*ReadTool, error) {
-	return NewReadWithRuntime(cfg, nil)
-}
-
 // NewReadWithRuntime creates READ tool with one execution runtime.
 func NewReadWithRuntime(cfg ReadConfig, runtime toolexec.Runtime) (*ReadTool, error) {
 	if cfg.DefaultLimit <= 0 || cfg.MaxLimit <= 0 || cfg.DefaultMaxTokens <= 0 || cfg.MaxTokens <= 0 {
@@ -228,14 +223,6 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		"truncated_reason":   truncatedReason,
 		"content":            content.String(),
 	}, nil
-}
-
-func normalizePath(path string) (string, error) {
-	runtime, err := runtimeOrDefault(nil)
-	if err != nil {
-		return "", err
-	}
-	return normalizePathWithFS(runtime.FileSystem(), path)
 }
 
 func estimateToken(text string) int {

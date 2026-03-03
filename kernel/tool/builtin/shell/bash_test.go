@@ -92,7 +92,7 @@ func TestBash_DefaultSafeCommandRunsInSandbox(t *testing.T) {
 	}
 }
 
-func TestBash_DefaultUnsafeCommandRequiresApprovalWhenNoApprover(t *testing.T) {
+func TestBash_DefaultUnsafeCommandRunsInSandboxWithoutApprovalWhenNoApprover(t *testing.T) {
 	host := &recordingRunner{}
 	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
 	rt, err := toolexec.New(toolexec.Config{
@@ -108,25 +108,24 @@ func TestBash_DefaultUnsafeCommandRequiresApprovalWhenNoApprover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = tool.Run(context.Background(), map[string]any{"command": "python3 app.py"})
-	if err == nil {
-		t.Fatal("expected approval required")
-	}
-	var approvalErr *toolexec.ApprovalRequiredError
-	if !errors.As(err, &approvalErr) {
-		t.Fatalf("expected approval-required error, got: %v", err)
+	out, err := tool.Run(context.Background(), map[string]any{"command": "python3 app.py"})
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(host.calls) != 0 {
 		t.Fatalf("expected host runner not called, got %d", len(host.calls))
 	}
-	if len(sandbox.calls) != 0 {
-		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	if len(sandbox.calls) != 1 {
+		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
+	}
+	if out["stdout"] != "sandbox-ok" {
+		t.Fatalf("unexpected stdout: %v", out["stdout"])
 	}
 }
 
-func TestBash_DefaultUnsafeCommandWithApprovalRunsOnHost(t *testing.T) {
-	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-ok"}}
-	sandbox := &recordingRunner{}
+func TestBash_DefaultUnsafeCommandWithApprovalStillRunsInSandbox(t *testing.T) {
+	host := &recordingRunner{}
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		HostRunner:     host,
@@ -145,13 +144,13 @@ func TestBash_DefaultUnsafeCommandWithApprovalRunsOnHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(host.calls) != 1 {
-		t.Fatalf("expected host runner called once, got %d", len(host.calls))
+	if len(host.calls) != 0 {
+		t.Fatalf("expected host runner not called, got %d", len(host.calls))
 	}
-	if len(sandbox.calls) != 0 {
-		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	if len(sandbox.calls) != 1 {
+		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "host-ok" {
+	if out["stdout"] != "sandbox-ok" {
 		t.Fatalf("unexpected stdout: %v", out["stdout"])
 	}
 }

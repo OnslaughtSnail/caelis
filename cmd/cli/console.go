@@ -8,20 +8,23 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	kernelpolicy "github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
+	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/skills"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
+
+	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 )
 
 type cliConsole struct {
@@ -37,9 +40,6 @@ type cliConsole struct {
 	resolved    *bootstrap.ResolvedSpec
 	execRuntime toolexec.Runtime
 	sandboxType string
-	autoLSP     []string
-	lspActivate []string
-	lspBroker   *lspbroker.Broker
 
 	modelAlias             string
 	llm                    model.LLM
@@ -57,9 +57,17 @@ type cliConsole struct {
 	reasoningEffort        string
 	showReasoning          bool
 	version                string
+	uiMode                 interactiveUIMode
+	noColor                bool
+	verbose                bool
+	inputRefs              *inputReferenceResolver
+	tuiDiag                *tuiDiagnostics
+	lastPromptTokens       int // cached prompt token count from resume or run
 
 	editor   lineEditor
+	prompter promptReader
 	out      io.Writer
+	ui       *ui
 	approver *terminalApprover
 	commands map[string]slashCommand
 
@@ -67,6 +75,13 @@ type cliConsole struct {
 	activeRunCancel context.CancelFunc
 	interruptMu     sync.Mutex
 	lastInterruptAt time.Time
+
+	imageCache          *image.Cache
+	pendingAttachments  []model.ContentPart
+	pendingAttachmentMu sync.Mutex
+	tuiSender           interface{ Send(msg any) } // set in TUI mode for hint updates
+	connectModelCacheMu sync.Mutex
+	connectModelCache   map[string]connectModelCacheEntry
 }
 
 const interruptExitWindow = 2 * time.Second
@@ -77,16 +92,24 @@ type slashCommand struct {
 	Handle      func(*cliConsole, []string) (bool, error)
 }
 
+type promptReader interface {
+	ReadLine(prompt string) (string, error)
+	ReadSecret(prompt string) (string, error)
+}
+
+type connectModelCacheEntry struct {
+	models    []string
+	expiresAt time.Time
+}
+
 func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
-	commands := []string{"help", "version", "exit", "new", "compact", "status", "permission", "sandbox", "sessions", "models", "model", "connect", "thinking", "effort", "stream", "reasoning", "tools"}
-	editor, _ := newLineEditor(lineEditorConfig{
-		HistoryFile: cfg.HistoryFile,
-		Commands:    commands,
-	})
-	var out io.Writer = os.Stdout
-	if editor != nil {
-		out = editor.Output()
+	mode := interactiveUIMode(strings.ToLower(strings.TrimSpace(cfg.UIMode)))
+	if mode == "" {
+		mode = uiModeTUI
 	}
+	var editor lineEditor
+	var out io.Writer = os.Stdout
+	baseUI := newUI(out, cfg.NoColor, cfg.Verbose)
 	console := &cliConsole{
 		baseCtx:                cfg.BaseContext,
 		rt:                     cfg.Runtime,
@@ -98,9 +121,6 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		resolved:               cfg.Resolved,
 		execRuntime:            cfg.ExecRuntime,
 		sandboxType:            strings.TrimSpace(cfg.SandboxType),
-		autoLSP:                append([]string(nil), cfg.AutoActivateLSP...),
-		lspActivate:            append([]string(nil), cfg.LSPActivationTools...),
-		lspBroker:              cfg.LSPBroker,
 		modelAlias:             cfg.ModelAlias,
 		llm:                    cfg.Model,
 		modelFactory:           cfg.ModelFactory,
@@ -111,48 +131,51 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		promptConfigDir:        cfg.PromptConfigDir,
 		enableLSPRoutingPolicy: cfg.EnableLSPRoutingPolicy,
 		skillDirs:              append([]string(nil), cfg.SkillDirs...),
-		streamModel:            cfg.StreamModel,
+		streamModel:            true,
 		thinkingMode:           cfg.ThinkingMode,
 		thinkingBudget:         cfg.ThinkingBudget,
 		reasoningEffort:        cfg.ReasoningEffort,
-		showReasoning:          cfg.ShowReasoning,
+		showReasoning:          true,
 		version:                strings.TrimSpace(cfg.Version),
+		uiMode:                 mode,
+		noColor:                cfg.NoColor,
+		verbose:                cfg.Verbose,
+		inputRefs:              cfg.InputRefs,
+		tuiDiag:                cfg.TUIDiagnostics,
+		imageCache:             image.NewCache(32),
+		connectModelCache:      map[string]connectModelCacheEntry{},
 		editor:                 editor,
+		prompter:               editor,
 		out:                    out,
+		ui:                     baseUI,
 	}
-	safeCommands := []string(nil)
-	if cfg.ExecRuntime != nil {
-		safeCommands = cfg.ExecRuntime.SafeCommands()
-	}
-	console.approver = newTerminalApprover(editor, out, safeCommands)
+	console.approver = newTerminalApprover(console.prompter, out, baseUI)
 	console.commands = map[string]slashCommand{
-		"help":    {Usage: "/help", Description: "显示命令帮助", Handle: handleHelp},
-		"version": {Usage: "/version", Description: "显示版本信息", Handle: handleVersion},
-		"exit":    {Usage: "/exit", Description: "退出 CLI", Handle: handleExit},
-		"new":     {Usage: "/new", Description: "开始新的对话会话", Handle: handleNew},
-		"compact": {Usage: "/compact [note]", Description: "手动触发一次上下文压缩", Handle: handleCompact},
-		"status":  {Usage: "/status", Description: "查看当前会话配置", Handle: handleStatus},
+		"help":    {Usage: "/help", Description: "Show available commands", Handle: handleHelp},
+		"version": {Usage: "/version", Description: "Show version", Handle: handleVersion},
+		"exit":    {Usage: "/exit", Description: "Exit the CLI", Handle: handleExit},
+		"quit":    {Usage: "/quit", Description: "Alias of /exit", Handle: handleExit},
+		"new":     {Usage: "/new", Description: "Start a new conversation session", Handle: handleNew},
+		"fork":    {Usage: "/fork", Description: "Fork current conversation into a new session", Handle: handleFork},
+		"compact": {Usage: "/compact [note]", Description: "Compact context history", Handle: handleCompact},
+		"status":  {Usage: "/status", Description: "Show current session status", Handle: handleStatus},
 		"permission": {
 			Usage:       "/permission [default|full_control]",
-			Description: "查看或切换权限模式",
+			Description: "View or switch permission mode",
 			Handle:      handlePermission,
 		},
 		"sandbox": {
 			Usage:       "/sandbox [<type>]",
-			Description: "查看或切换 sandbox 配置",
+			Description: "View or switch sandbox type",
 			Handle:      handleSandbox,
 		},
-		"models":   {Usage: "/models", Description: "列出可用模型别名", Handle: handleModels},
-		"model":    {Usage: "/model <alias>", Description: "切换当前模型", Handle: handleModel},
-		"connect":  {Usage: "/connect", Description: "交互式添加/更新模型 Provider", Handle: handleConnect},
-		"thinking": {Usage: "/thinking <auto|on|off> [budget]", Description: "切换思考模式与预算", Handle: handleThinking},
-		"effort":   {Usage: "/effort <low|medium|high|off>", Description: "设置 reasoning effort", Handle: handleEffort},
-		"stream":   {Usage: "/stream <on|off>", Description: "切换流式输出", Handle: handleStream},
-		"reasoning": {Usage: "/reasoning <on|off>", Description: "切换 reasoning 内容展示",
-			Handle: handleReasoning},
-		"tools":    {Usage: "/tools", Description: "查看当前工具列表", Handle: handleTools},
-		"sessions": {Usage: "/sessions [resume <session-id>]", Description: "列出并切换当前工作区会话", Handle: handleSessions},
+		"model":   {Usage: "/model <alias>", Description: "Switch active model", Handle: handleModel},
+		"connect": {Usage: "/connect [provider] [model] [base_url] [timeout_seconds]", Description: "Add or update a model provider", Handle: handleConnect},
+		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
+		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
+		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
 	}
+	console.applyModelRuntimeSettings(console.modelAlias)
 	return console
 }
 
@@ -167,9 +190,6 @@ type cliConsoleConfig struct {
 	Resolved               *bootstrap.ResolvedSpec
 	ExecRuntime            toolexec.Runtime
 	SandboxType            string
-	AutoActivateLSP        []string
-	LSPActivationTools     []string
-	LSPBroker              *lspbroker.Broker
 	ModelAlias             string
 	Model                  model.LLM
 	ModelFactory           *modelproviders.Factory
@@ -180,17 +200,34 @@ type cliConsoleConfig struct {
 	PromptConfigDir        string
 	EnableLSPRoutingPolicy bool
 	SkillDirs              []string
-	StreamModel            bool
 	ThinkingMode           string
 	ThinkingBudget         int
 	ReasoningEffort        string
-	ShowReasoning          bool
+	InputRefs              *inputReferenceResolver
+	TUIDiagnostics         *tuiDiagnostics
 	HistoryFile            string
 	Version                string
+	NoColor                bool
+	Verbose                bool
+	UIMode                 string
 }
 
 func (c *cliConsole) loop() error {
-	c.printf("Interactive mode. /help 查看命令。\n")
+	switch c.uiMode {
+	case uiModeTUI:
+		return c.loopTUITea()
+	default:
+		return fmt.Errorf("unsupported ui mode %q", c.uiMode)
+	}
+}
+
+func (c *cliConsole) loopLine() error {
+	if c.editor == nil {
+		return fmt.Errorf("line editor is not available")
+	}
+	for _, line := range c.startupLines() {
+		c.printf("%s\n", line)
+	}
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt)
 	exitCh := make(chan struct{}, 1)
@@ -237,7 +274,7 @@ func (c *cliConsole) loop() error {
 		if strings.HasPrefix(line, "/") {
 			exitNow, err := c.handleSlash(line)
 			if err != nil {
-				fmt.Fprintf(c.out, "error: %v\n", err)
+				c.ui.Error("%v\n", err)
 			}
 			if exitNow {
 				return nil
@@ -246,11 +283,24 @@ func (c *cliConsole) loop() error {
 		}
 		if err := c.runPrompt(line); err != nil {
 			if errors.Is(err, context.Canceled) {
-				c.printf("! execution interrupted\n")
+				c.ui.Warn("execution interrupted\n")
 				continue
 			}
-			fmt.Fprintf(c.out, "error: %v\n", err)
+			c.ui.Error("%v\n", err)
 		}
+	}
+}
+
+func (c *cliConsole) startupLines() []string {
+	versionText := strings.TrimSpace(c.version)
+	if versionText == "" {
+		versionText = "unknown"
+	}
+	return []string{
+		fmt.Sprintf("Caelis %s", versionText),
+		fmt.Sprintf("Workspace  %s", strings.TrimSpace(c.workspace.CWD)),
+		"Commands   /help  /resume  /new",
+		"Tip        Type your message and press Enter",
 	}
 }
 
@@ -287,6 +337,9 @@ func (c *cliConsole) handleSlash(line string) (bool, error) {
 	cmd := strings.ToLower(parts[0])
 	handler, ok := c.commands[cmd]
 	if !ok {
+		if suggestion := closestCommand(cmd, commandNames(c.commands)); suggestion != "" {
+			return false, fmt.Errorf("unknown command %q -- did you mean /%s?", cmd, suggestion)
+		}
 		return false, fmt.Errorf("unknown command %q, use /help", cmd)
 	}
 	return handler.Handle(c, parts[1:])
@@ -295,6 +348,43 @@ func (c *cliConsole) handleSlash(line string) (bool, error) {
 func (c *cliConsole) runPrompt(input string) error {
 	if c.llm == nil {
 		return fmt.Errorf("no model configured, use /connect to add provider and select model")
+	}
+	resolvedInput := input
+	var resolvedPaths []string
+	if c.inputRefs != nil {
+		result, err := c.inputRefs.RewriteInput(input)
+		if err != nil {
+			c.ui.Warn("input reference resolution skipped: %v\n", err)
+		} else {
+			resolvedInput = result.Text
+			resolvedPaths = result.ResolvedPaths
+			for _, note := range result.Notes {
+				c.ui.Note("%s\n", note)
+			}
+		}
+	}
+	// Load image content parts from resolved file references.
+	var contentParts []model.ContentPart
+	if c.inputRefs != nil && len(resolvedPaths) > 0 {
+		for _, relPath := range resolvedPaths {
+			if !image.IsImagePath(relPath) {
+				continue
+			}
+			absPath := c.inputRefs.AbsPath(relPath)
+			part, err := image.LoadAsContentPartCached(absPath, c.imageCache)
+			if err != nil {
+				c.ui.Warn("image load skipped: %s: %v\n", relPath, err)
+				continue
+			}
+			contentParts = append(contentParts, part)
+			c.ui.Note("attached image: %s\n", relPath)
+		}
+	}
+	// Consume any pending clipboard attachments.
+	pendingParts := c.consumePendingAttachments()
+	contentParts = append(contentParts, pendingParts...)
+	if c.tuiSender != nil && len(pendingParts) > 0 {
+		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 	}
 	ag, err := buildAgent(buildAgentInput{
 		AppName:                c.appName,
@@ -308,6 +398,8 @@ func (c *cliConsole) runPrompt(input string) error {
 		ThinkingMode:           c.thinkingMode,
 		ThinkingBudget:         c.thinkingBudget,
 		ReasoningEffort:        c.reasoningEffort,
+		ModelProvider:          resolveProviderName(c.modelFactory, c.modelAlias),
+		ModelName:              resolveModelName(c.modelFactory, c.modelAlias),
 	})
 	if err != nil {
 		return err
@@ -324,19 +416,49 @@ func (c *cliConsole) runPrompt(input string) error {
 		AppName:             c.appName,
 		UserID:              c.userID,
 		SessionID:           c.sessionID,
-		Input:               input,
+		Input:               resolvedInput,
+		ContentParts:        contentParts,
 		Agent:               ag,
 		Model:               c.llm,
 		Tools:               c.resolved.Tools,
 		CoreTools:           tool.CoreToolsConfig{Runtime: c.execRuntime},
 		Policies:            c.resolved.Policies,
-		LSPBroker:           c.lspBroker,
-		LSPActivationTools:  append([]string(nil), c.lspActivate...),
-		AutoActivateLSP:     append([]string(nil), c.autoLSP...),
 		ContextWindowTokens: c.contextWindow,
 	}, runRenderConfig{
 		ShowReasoning: c.showReasoning,
+		Verbose:       c.ui.verbose,
 		Writer:        c.out,
+		UI:            c.ui,
+		OnEvent: func(ev *session.Event) bool {
+			if c.tuiSender == nil || ev == nil {
+				return false
+			}
+			msg := ev.Message
+			if msg.Role != model.RoleAssistant {
+				return false
+			}
+			if eventIsPartial(ev) {
+				if eventChannel(ev) != "answer" || msg.Text == "" {
+					return false
+				}
+				c.tuiSender.Send(tuievents.AssistantStreamMsg{
+					Text:  msg.Text,
+					Final: false,
+				})
+				return true
+			}
+			if len(msg.ToolCalls) > 0 || strings.TrimSpace(msg.Text) == "" {
+				return false
+			}
+			c.tuiSender.Send(tuievents.AssistantStreamMsg{
+				Text:  msg.Text,
+				Final: true,
+			})
+			return true
+		},
+		OnUsage: func(pt int) {
+			c.lastPromptTokens = pt
+		},
 	})
 }
 
@@ -364,8 +486,12 @@ func (c *cliConsole) cancelActiveRun() bool {
 }
 
 func (c *cliConsole) usesReadlineEditor() bool {
-	_, ok := c.editor.(*readlineEditor)
-	return ok
+	switch c.editor.(type) {
+	case *readlineEditor, *linerEditor:
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *cliConsole) noteInterrupt() {
@@ -391,12 +517,17 @@ func (c *cliConsole) resetInterruptWindow() {
 
 func handleHelp(c *cliConsole, args []string) (bool, error) {
 	_ = args
-	c.printf("Available commands:\n")
-	order := []string{"help", "version", "status", "new", "permission", "sandbox", "sessions", "models", "model", "connect", "thinking", "effort", "stream", "reasoning", "tools", "compact", "exit"}
-	for _, name := range order {
-		cmd := c.commands[name]
-		c.printf("  %-24s %s\n", cmd.Usage, cmd.Description)
+	helpSection := func(title string, names []string) {
+		c.ui.Section(title)
+		for _, name := range names {
+			cmd := c.commands[name]
+			c.ui.Plain("  %-24s %s\n", cmd.Usage, cmd.Description)
+		}
 	}
+	helpSection("Session", []string{"new", "fork", "resume", "compact", "status"})
+	helpSection("Model", []string{"model", "connect"})
+	helpSection("Security", []string{"permission", "sandbox"})
+	helpSection("Other", []string{"tools", "skills", "help", "version", "exit", "quit"})
 	return false, nil
 }
 
@@ -420,13 +551,37 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 	if len(args) != 0 {
 		return false, fmt.Errorf("usage: /new")
 	}
-	previous := strings.TrimSpace(c.sessionID)
 	c.sessionID = nextConversationSessionID()
-	if previous == "" {
-		c.printf("new session started: %s\n", c.sessionID)
+	c.lastPromptTokens = 0
+	_ = c.clearPendingAttachments()
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.ClearHistoryMsg{})
+		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
+		modelText, contextText := c.readTUIStatus()
+		c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "started new session"})
 		return false, nil
 	}
-	c.printf("new session started: %s (from %s)\n", c.sessionID, previous)
+	c.printf("new session started: %s\n", c.sessionID)
+	return false, nil
+}
+
+func handleFork(c *cliConsole, args []string) (bool, error) {
+	if len(args) != 0 {
+		return false, fmt.Errorf("usage: /fork")
+	}
+	previous := strings.TrimSpace(c.sessionID)
+	if previous == "" {
+		return false, fmt.Errorf("cannot fork without an active session")
+	}
+	c.sessionID = nextConversationSessionID()
+	_ = c.clearPendingAttachments()
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "fork succeeded"})
+		return false, nil
+	}
+	c.printf("fork succeeded\n")
 	return false, nil
 }
 
@@ -476,23 +631,33 @@ func handleCompact(c *cliConsole, args []string) (bool, error) {
 
 func handleStatus(c *cliConsole, args []string) (bool, error) {
 	_ = args
-	c.printf("model=%s stream=%v thinking=%s budget=%d effort=%s reasoning_display=%v\n",
-		c.modelAlias, c.streamModel, c.thinkingMode, c.thinkingBudget, c.reasoningEffort, c.showReasoning)
-	c.printf("workspace=%s session=%s\n", c.workspace.CWD, c.sessionID)
+	c.ui.Section("Model")
+	c.ui.KeyValue("model", c.modelAlias)
+	c.ui.KeyValue("stream", fmt.Sprintf("%v", c.streamModel))
+	c.ui.KeyValue("thinking", fmt.Sprintf("%s (budget=%d)", c.thinkingMode, c.thinkingBudget))
+	c.ui.KeyValue("effort", c.reasoningEffort)
+	c.ui.KeyValue("reasoning", fmt.Sprintf("%v", c.showReasoning))
+
+	c.ui.Section("Session")
+	c.ui.KeyValue("workspace", c.workspace.CWD)
+	c.ui.KeyValue("session", c.sessionID)
+
+	c.ui.Section("Security")
 	mode := c.execRuntime.PermissionMode()
 	switch mode {
 	case toolexec.PermissionModeFullControl:
-		c.printf("permission_mode=%s route=host\n", mode)
+		c.ui.KeyValue("permission", fmt.Sprintf("%s  route=host", mode))
 	default:
 		if c.execRuntime.FallbackToHost() {
-			c.printf("permission_mode=%s sandbox_type=%s route=host (fallback: host+approval, reason=%s)\n",
-				mode, c.execRuntime.SandboxType(), c.execRuntime.FallbackReason())
+			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=host (fallback, reason=%s)",
+				mode, c.execRuntime.SandboxType(), c.execRuntime.FallbackReason()))
 		} else {
-			c.printf("permission_mode=%s sandbox_type=%s route=sandbox\n",
-				mode, c.execRuntime.SandboxType())
+			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=sandbox",
+				mode, c.execRuntime.SandboxType()))
 		}
 	}
-	c.printf("sandbox_policy=%s\n", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
+	c.ui.KeyValue("sandbox_policy", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
+
 	if c.rt != nil {
 		runState, err := c.rt.RunState(c.baseCtx, runtime.RunStateRequest{
 			AppName:   c.appName,
@@ -502,20 +667,22 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
+		c.ui.Section("Runtime")
 		if runState.HasLifecycle {
-			c.printf("run_state=%s phase=%s\n", runState.Status, stringOrDash(runState.Phase))
+			c.ui.KeyValue("run_state", fmt.Sprintf("%s  phase=%s", runState.Status, stringOrDash(runState.Phase)))
 			if strings.TrimSpace(runState.Error) != "" {
-				c.printf("run_state_error=%s\n", truncateInline(runState.Error, 160))
+				c.ui.KeyValue("error", truncateInline(runState.Error, 160))
 			}
 			if strings.TrimSpace(string(runState.ErrorCode)) != "" {
-				c.printf("run_state_error_code=%s\n", runState.ErrorCode)
+				c.ui.KeyValue("error_code", string(runState.ErrorCode))
 			}
 		} else {
-			c.printf("run_state=none\n")
+			c.ui.KeyValue("run_state", "none")
 		}
 	}
+
 	if c.llm == nil {
-		c.printf("context_usage=not available (no model configured)\n")
+		c.ui.KeyValue("context", "not available (no model configured)")
 		return false, nil
 	}
 	usage, err := c.rt.ContextUsage(c.baseCtx, runtime.UsageRequest{
@@ -528,7 +695,8 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	c.printf("context_usage=%s (input_budget=%d, events=%d)\n", formatUsage(usage), usage.InputBudget, usage.EventCount)
+	c.ui.Section("Context")
+	c.ui.KeyValue("usage", fmt.Sprintf("%s  input_budget=%d  events=%d", formatUsage(usage), usage.InputBudget, usage.EventCount))
 	return false, nil
 }
 
@@ -570,15 +738,10 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 	if sandboxType == "" {
 		return false, fmt.Errorf("sandbox type cannot be empty")
 	}
-	safeCommands := []string(nil)
-	if c.execRuntime != nil {
-		safeCommands = c.execRuntime.SafeCommands()
-	}
 	// Validate type by constructing a default-mode runtime.
 	if _, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    sandboxType,
-		SafeCommands:   safeCommands,
 	}); err != nil {
 		return false, err
 	}
@@ -601,35 +764,6 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 	return false, nil
 }
 
-func handleModels(c *cliConsole, args []string) (bool, error) {
-	_ = args
-	current := strings.ToLower(strings.TrimSpace(c.modelAlias))
-	refs := []string(nil)
-	if c.configStore != nil {
-		refs = c.configStore.ConfiguredModelRefs()
-	}
-	if len(refs) > 0 {
-		c.printf("models:\n")
-		for _, ref := range refs {
-			marker := " "
-			if ref == current {
-				marker = "*"
-			}
-			c.printf("  %s %s\n", marker, ref)
-		}
-		return false, nil
-	}
-	if c.modelFactory == nil {
-		return false, fmt.Errorf("no models configured, use /connect")
-	}
-	list := c.modelFactory.ListModels()
-	if len(list) == 0 {
-		return false, fmt.Errorf("no models configured, use /connect")
-	}
-	c.printf("models: %s\n", strings.Join(list, ", "))
-	return false, nil
-}
-
 func handleModel(c *cliConsole, args []string) (bool, error) {
 	if len(args) != 1 {
 		return false, fmt.Errorf("usage: /model <alias>")
@@ -647,6 +781,7 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 	}
 	c.modelAlias = strings.ToLower(alias)
 	c.llm = llm
+	c.applyModelRuntimeSettings(c.modelAlias)
 	if c.configStore != nil {
 		if err := c.configStore.SetDefaultModel(c.modelAlias); err != nil {
 			fmt.Fprintf(c.out, "warn: update default model failed: %v\n", err)
@@ -656,79 +791,39 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 	return false, nil
 }
 
-func handleThinking(c *cliConsole, args []string) (bool, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return false, fmt.Errorf("usage: /thinking <auto|on|off> [budget]")
+// resolveContextWindowForDisplay returns the context window token limit for the
+// current model. Uses the explicit CLI override first, then falls back to the
+// model capability catalog.
+func (c *cliConsole) resolveContextWindowForDisplay() int {
+	if c.contextWindow > 0 {
+		return c.contextWindow
 	}
-	mode := strings.ToLower(strings.TrimSpace(args[0]))
-	budget := c.thinkingBudget
-	if len(args) == 2 {
-		value, err := strconv.Atoi(args[1])
-		if err != nil || value < 0 {
-			return false, fmt.Errorf("invalid budget: %q", args[1])
-		}
-		budget = value
+	if c.modelFactory == nil {
+		return 0
 	}
-	if _, err := parseReasoning(mode, budget, c.reasoningEffort); err != nil {
-		return false, err
+	cfg, ok := c.modelFactory.ConfigForAlias(c.modelAlias)
+	if !ok {
+		return 0
 	}
-	c.thinkingMode = mode
-	c.thinkingBudget = budget
-	c.persistRuntimeSettings()
-	c.printf("thinking updated: mode=%s budget=%d\n", c.thinkingMode, c.thinkingBudget)
-	return false, nil
+	caps, found := modelproviders.LookupModelCapabilities(cfg.Provider, cfg.Model)
+	if found && caps.ContextWindowTokens > 0 {
+		return caps.ContextWindowTokens
+	}
+	return 0
 }
 
-func handleEffort(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /effort <low|medium|high|off>")
+func (c *cliConsole) applyModelRuntimeSettings(alias string) {
+	settings := modelRuntimeSettings{
+		ThinkingMode:    defaultThinkingMode,
+		ThinkingBudget:  defaultThinkingBudget,
+		ReasoningEffort: defaultReasoningEffort,
 	}
-	value := strings.ToLower(strings.TrimSpace(args[0]))
-	switch value {
-	case "off":
-		c.reasoningEffort = ""
-	case "low", "medium", "high":
-		c.reasoningEffort = value
-	default:
-		return false, fmt.Errorf("invalid effort %q", value)
+	if c.configStore != nil {
+		settings = c.configStore.ModelRuntimeSettings(alias)
 	}
-	c.persistRuntimeSettings()
-	c.printf("reasoning effort=%s\n", c.reasoningEffort)
-	return false, nil
-}
-
-func handleStream(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /stream <on|off>")
-	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "on":
-		c.streamModel = true
-	case "off":
-		c.streamModel = false
-	default:
-		return false, fmt.Errorf("usage: /stream <on|off>")
-	}
-	c.persistRuntimeSettings()
-	c.printf("stream=%v\n", c.streamModel)
-	return false, nil
-}
-
-func handleReasoning(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /reasoning <on|off>")
-	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "on":
-		c.showReasoning = true
-	case "off":
-		c.showReasoning = false
-	default:
-		return false, fmt.Errorf("usage: /reasoning <on|off>")
-	}
-	c.persistRuntimeSettings()
-	c.printf("reasoning display=%v\n", c.showReasoning)
-	return false, nil
+	c.thinkingMode = settings.ThinkingMode
+	c.thinkingBudget = settings.ThinkingBudget
+	c.reasoningEffort = settings.ReasoningEffort
 }
 
 func handleTools(c *cliConsole, args []string) (bool, error) {
@@ -747,19 +842,38 @@ func handleTools(c *cliConsole, args []string) (bool, error) {
 	return false, nil
 }
 
-func handleSessions(c *cliConsole, args []string) (bool, error) {
+func handleSkills(c *cliConsole, args []string) (bool, error) {
+	_ = args
+	discovered := skills.DiscoverMeta(c.skillDirs)
+	if len(discovered.Metas) == 0 {
+		c.printf("skills: (none discovered)\n")
+		for _, w := range discovered.Warnings {
+			c.ui.Warn("  %v\n", w)
+		}
+		return false, nil
+	}
+	c.printf("skills:\n")
+	for _, m := range discovered.Metas {
+		c.printf("  - %-20s %s\n", m.Name, m.Description)
+	}
+	if len(discovered.Warnings) > 0 {
+		for _, w := range discovered.Warnings {
+			c.ui.Warn("  %v\n", w)
+		}
+	}
+	return false, nil
+}
+
+func handleResume(c *cliConsole, args []string) (bool, error) {
 	if c.sessionIndex == nil {
 		return false, fmt.Errorf("session index is not available")
 	}
-	if len(args) == 0 {
-		return printWorkspaceSessions(c)
+	if len(args) > 1 {
+		return false, fmt.Errorf("usage: /resume [session-id]")
 	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "resume":
-		if len(args) != 2 {
-			return false, fmt.Errorf("usage: /sessions resume <session-id>")
-		}
-		target := strings.TrimSpace(args[1])
+	target := ""
+	if len(args) == 1 {
+		target = strings.TrimSpace(args[0])
 		if target == "" {
 			return false, fmt.Errorf("session-id is required")
 		}
@@ -770,63 +884,129 @@ func handleSessions(c *cliConsole, args []string) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("session %q not found in current workspace", target)
 		}
-		c.sessionID = target
-		c.printf("session resumed: %s\n", c.sessionID)
-		return false, nil
-	default:
-		return false, fmt.Errorf("usage: /sessions [resume <session-id>]")
+	} else {
+		rec, ok, err := c.sessionIndex.MostRecentWorkspaceSession(c.workspace.Key, c.sessionID)
+		if err != nil {
+			return false, err
+		}
+		if !ok || strings.TrimSpace(rec.SessionID) == "" {
+			return false, fmt.Errorf("no resumable session found in current workspace")
+		}
+		target = rec.SessionID
 	}
-}
-
-func printWorkspaceSessions(c *cliConsole) (bool, error) {
-	items, err := c.sessionIndex.ListWorkspaceSessions(c.workspace.Key, 50)
-	if err != nil {
+	c.sessionID = target
+	if err := c.renderResumedSessionEvents(); err != nil {
 		return false, err
-	}
-	c.printf("workspace: %s\n", c.workspace.CWD)
-	if len(items) == 0 {
-		c.printf("sessions: (empty)\n")
-		return false, nil
-	}
-	c.printf("sessions:\n")
-	now := time.Now()
-	for _, one := range items {
-		marker := " "
-		if one.SessionID == c.sessionID {
-			marker = "*"
-		}
-		last := "never"
-		if !one.LastEventAt.IsZero() {
-			last = one.LastEventAt.Format(time.RFC3339)
-		}
-		preview := strings.TrimSpace(one.LastUserMessage)
-		if preview != "" {
-			runes := []rune(preview)
-			if len(runes) > 48 {
-				preview = string(runes[:48]) + "..."
-			}
-		} else {
-			preview = "-"
-		}
-		age := "-"
-		if !one.LastEventAt.IsZero() {
-			age = now.Sub(one.LastEventAt).Round(time.Second).String()
-		}
-		c.printf(" %s %s  events=%d  last=%s (%s)  user=%s\n", marker, one.SessionID, one.EventCount, last, age, preview)
 	}
 	return false, nil
 }
 
-func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandboxType string) error {
-	safeCommands := []string(nil)
-	if c.execRuntime != nil {
-		safeCommands = c.execRuntime.SafeCommands()
+func (c *cliConsole) renderResumedSessionEvents() error {
+	if c == nil || c.rt == nil {
+		return nil
 	}
+	events, err := c.rt.SessionEvents(c.baseCtx, runtime.SessionEventsRequest{
+		AppName:          c.appName,
+		UserID:           c.userID,
+		SessionID:        c.sessionID,
+		Limit:            200,
+		IncludeLifecycle: false,
+	})
+	if err != nil {
+		return err
+	}
+	// Extract usage info from the most recent event with usage metadata.
+	c.lastPromptTokens = extractLastUsage(events)
+	if c.tuiSender == nil || len(events) == 0 {
+		return nil
+	}
+	// In TUI mode, replay directly through structured events so assistant
+	// Markdown is rendered by the same block renderer as live streaming,
+	// avoiding mixed prefix-coloring and formatting artifacts.
+	c.tuiSender.Send(tuievents.ClearHistoryMsg{})
+	modelText, contextText := c.readTUIStatus()
+	c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
+	pendingToolCalls := map[string]toolCallSnapshot{}
+	for _, ev := range events {
+		if ev == nil || eventIsPartial(ev) {
+			continue
+		}
+		msg := ev.Message
+		if msg.Role == model.RoleUser {
+			userText := strings.TrimSpace(msg.Text)
+			if userText == "" {
+				userText = userTextFromContentParts(msg.ContentParts)
+			}
+			if userText != "" {
+				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("> %s\n", userText)})
+			}
+			for _, part := range msg.ContentParts {
+				if part.Type != model.ContentPartImage {
+					continue
+				}
+				name := strings.TrimSpace(part.FileName)
+				if name == "" {
+					name = "image"
+				}
+				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("! [image: %s]\n", name)})
+			}
+			continue
+		}
+		if msg.ToolResponse != nil {
+			var callArgs map[string]any
+			if msg.ToolResponse.ID != "" {
+				if snapshot, ok := pendingToolCalls[msg.ToolResponse.ID]; ok {
+					callArgs = snapshot.Args
+					delete(pendingToolCalls, msg.ToolResponse.ID)
+				}
+			}
+			summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+			continue
+		}
+		if len(msg.ToolCalls) > 0 {
+			for _, call := range msg.ToolCalls {
+				parsedArgs := parseToolArgsForDisplay(call.Args)
+				if call.ID != "" {
+					pendingToolCalls[call.ID] = toolCallSnapshot{
+						Args: cloneAnyMap(parsedArgs),
+					}
+				}
+				c.tuiSender.Send(tuievents.LogChunkMsg{
+					Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
+				})
+			}
+			continue
+		}
+		if msg.Role == model.RoleAssistant && c.showReasoning && strings.TrimSpace(msg.Reasoning) != "" {
+			c.tuiSender.Send(tuievents.LogChunkMsg{
+				Chunk: fmt.Sprintf("~ %s\n", strings.TrimSpace(msg.Reasoning)),
+			})
+		}
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			continue
+		}
+		switch msg.Role {
+		case model.RoleAssistant:
+			c.tuiSender.Send(tuievents.AssistantStreamMsg{
+				Text:  text,
+				Final: true,
+			})
+		case model.RoleSystem:
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("! %s\n", text)})
+		default:
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("- %s\n", text)})
+		}
+	}
+	return nil
+}
+
+func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandboxType string) error {
 	prevRuntime := c.execRuntime
 	nextRuntime, err := toolexec.New(toolexec.Config{
 		PermissionMode: mode,
 		SandboxType:    sandboxType,
-		SafeCommands:   safeCommands,
 	})
 	if err != nil {
 		return err
@@ -853,13 +1033,8 @@ func (c *cliConsole) persistRuntimeSettings() {
 		return
 	}
 	if err := c.configStore.SetRuntimeSettings(runtimeSettings{
-		StreamModel:     c.streamModel,
-		ThinkingMode:    c.thinkingMode,
-		ThinkingBudget:  c.thinkingBudget,
-		ReasoningEffort: c.reasoningEffort,
-		ShowReasoning:   c.showReasoning,
-		PermissionMode:  string(c.execRuntime.PermissionMode()),
-		SandboxType:     c.sandboxType,
+		PermissionMode: string(c.execRuntime.PermissionMode()),
+		SandboxType:    c.sandboxType,
 	}); err != nil {
 		c.printf("warn: persist runtime settings failed: %v\n", err)
 	}
@@ -883,40 +1058,40 @@ func (c *cliConsole) refreshShellToolRuntime() error {
 }
 
 type terminalApprover struct {
-	editor         lineEditor
+	prompter       promptReader
 	out            io.Writer
+	ui             *ui
 	mu             sync.RWMutex
-	defaultAllowed map[string]struct{}
 	sessionAllowed map[string]struct{}
 	toolAllowed    map[string]struct{}
 }
 
-func newTerminalApprover(editor lineEditor, out io.Writer, safeCommands []string) *terminalApprover {
-	approver := &terminalApprover{
-		editor:         editor,
+func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalApprover {
+	return &terminalApprover{
+		prompter:       prompter,
 		out:            out,
-		defaultAllowed: map[string]struct{}{},
+		ui:             u,
 		sessionAllowed: map[string]struct{}{},
 		toolAllowed:    map[string]struct{}{},
 	}
-	for _, key := range defaultApprovalKeys(safeCommands) {
-		approver.defaultAllowed[key] = struct{}{}
-	}
-	return approver
 }
 
 func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalRequest) (bool, error) {
 	_ = ctx
-	if a.isAllowedByDefault(req.Command) || a.isAllowedInSession(req.Command) {
+	if a.isAllowedInSession(req.Command) {
 		return true, nil
 	}
-	fmt.Fprintf(a.out, "\n? 审批请求 %s (%s)\n", req.ToolName, req.Action)
-	fmt.Fprintf(a.out, "! %s\n", req.Reason)
-	fmt.Fprintf(a.out, "$ %s\n", req.Command)
-	if a.editor == nil {
+	if a.ui != nil {
+		a.ui.ApprovalHeader(req.ToolName, req.Action)
+		a.ui.ApprovalReason(req.Reason)
+		a.ui.ApprovalCommand(req.Command)
+	} else {
+		fmt.Fprintf(a.out, "\n? Approval: %s (%s)\n  %s\n  $ %s\n", req.ToolName, req.Action, req.Reason, req.Command)
+	}
+	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	line, err := a.editor.ReadLine("? allow [y]同意 / [a]本会话放行 / [N]取消: ")
+	line, err := a.prompter.ReadLine(approvalPrompt)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
@@ -936,7 +1111,11 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 			a.mu.Lock()
 			a.sessionAllowed[key] = struct{}{}
 			a.mu.Unlock()
-			fmt.Fprintf(a.out, "! 已加入当前会话白名单: %s\n", key)
+			if a.ui != nil {
+				a.ui.ApprovalSessionNote(key)
+			} else {
+				fmt.Fprintf(a.out, "  Added to session allowlist: %s\n", key)
+			}
 		}
 		return true, nil
 	case "n", "no", "", "c", "cancel":
@@ -956,14 +1135,21 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 		return true, nil
 	}
 
-	fmt.Fprintf(a.out, "\n? 工具授权请求 %s\n", toolKey)
-	if reason := strings.TrimSpace(req.Reason); reason != "" {
-		fmt.Fprintf(a.out, "! %s\n", reason)
+	if a.ui != nil {
+		a.ui.ToolAuthHeader(toolKey)
+		if reason := strings.TrimSpace(req.Reason); reason != "" {
+			a.ui.ApprovalReason(reason)
+		}
+	} else {
+		fmt.Fprintf(a.out, "\n? Authorize tool: %s\n", toolKey)
+		if reason := strings.TrimSpace(req.Reason); reason != "" {
+			fmt.Fprintf(a.out, "  %s\n", reason)
+		}
 	}
-	if a.editor == nil {
+	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	line, err := a.editor.ReadLine("? allow [y]同意 / [a]本会话放行该工具 / [N]取消: ")
+	line, err := a.prompter.ReadLine(toolAuthPrompt)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
@@ -978,35 +1164,17 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 		a.mu.Lock()
 		a.toolAllowed[toolKey] = struct{}{}
 		a.mu.Unlock()
-		fmt.Fprintf(a.out, "! 已加入当前会话工具白名单: %s\n", toolKey)
+		if a.ui != nil {
+			a.ui.ApprovalSessionNote(toolKey)
+		} else {
+			fmt.Fprintf(a.out, "  Added to session allowlist: %s\n", toolKey)
+		}
 		return true, nil
 	case "n", "no", "", "c", "cancel":
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 	default:
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 	}
-}
-
-func (a *terminalApprover) isAllowedByDefault(command string) bool {
-	segments := splitApprovalSegments(command)
-	if len(segments) == 0 {
-		return false
-	}
-	if strings.ContainsAny(command, "<>$`\\&") {
-		return false
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	for _, segment := range segments {
-		key := approvalSegmentKey(segment)
-		if key == "" {
-			return false
-		}
-		if _, ok := a.defaultAllowed[key]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func (a *terminalApprover) isAllowedInSession(command string) bool {
@@ -1027,20 +1195,6 @@ func (a *terminalApprover) isToolAllowedInSession(toolKey string) bool {
 	return ok
 }
 
-func defaultApprovalKeys(safeCommands []string) []string {
-	keys := make([]string, 0, len(safeCommands)+1)
-	for _, one := range safeCommands {
-		trimmed := strings.TrimSpace(one)
-		if trimmed == "" {
-			continue
-		}
-		keys = append(keys, filepath.Base(trimmed))
-	}
-	// git status is a low-risk read-only command and common in coding sessions.
-	keys = append(keys, "git status")
-	return dedupeStrings(keys)
-}
-
 func sessionApprovalKey(command string) string {
 	return strings.TrimSpace(command)
 }
@@ -1049,90 +1203,57 @@ func toolApprovalKey(toolName string) string {
 	return strings.ToUpper(strings.TrimSpace(toolName))
 }
 
-func splitApprovalSegments(command string) []string {
-	normalized := strings.TrimSpace(command)
-	if normalized == "" {
-		return nil
-	}
-	replacer := strings.NewReplacer("&&", ";", "||", ";", "|", ";")
-	normalized = replacer.Replace(normalized)
-	rawParts := strings.Split(normalized, ";")
-	out := make([]string, 0, len(rawParts))
-	for _, one := range rawParts {
-		part := strings.TrimSpace(one)
-		if part == "" {
-			continue
-		}
-		out = append(out, part)
-	}
-	return out
+func (c *cliConsole) addPendingAttachment(part model.ContentPart) {
+	c.pendingAttachmentMu.Lock()
+	defer c.pendingAttachmentMu.Unlock()
+	c.pendingAttachments = append(c.pendingAttachments, part)
 }
 
-func approvalSegmentKey(segment string) string {
-	fields := strings.Fields(strings.TrimSpace(segment))
-	if len(fields) == 0 {
-		return ""
-	}
-	idx := 0
-	for idx < len(fields) && isEnvAssignmentToken(fields[idx]) {
-		idx++
-	}
-	if idx >= len(fields) {
-		return ""
-	}
-	base := filepath.Base(fields[idx])
-	if base == "git" {
-		next := idx + 1
-		for next < len(fields) && strings.HasPrefix(fields[next], "-") {
-			next++
-		}
-		if next < len(fields) {
-			return "git " + strings.ToLower(strings.TrimSpace(fields[next]))
-		}
-	}
-	return base
+func (c *cliConsole) consumePendingAttachments() []model.ContentPart {
+	c.pendingAttachmentMu.Lock()
+	defer c.pendingAttachmentMu.Unlock()
+	parts := c.pendingAttachments
+	c.pendingAttachments = nil
+	return parts
 }
 
-func isEnvAssignmentToken(token string) bool {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return false
-	}
-	eq := strings.IndexByte(token, '=')
-	if eq <= 0 {
-		return false
-	}
-	name := token[:eq]
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' {
-			continue
-		}
-		if i > 0 && (r >= '0' && r <= '9') {
-			continue
-		}
-		return false
-	}
-	return true
+func (c *cliConsole) clearPendingAttachments() int {
+	c.pendingAttachmentMu.Lock()
+	defer c.pendingAttachmentMu.Unlock()
+	c.pendingAttachments = nil
+	return 0
 }
 
-func dedupeStrings(values []string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, len(values))
-	for _, one := range values {
-		trimmed := strings.TrimSpace(one)
-		if trimmed == "" {
-			continue
-		}
-		if _, ok := seen[trimmed]; ok {
-			continue
-		}
-		seen[trimmed] = struct{}{}
-		out = append(out, trimmed)
+// pasteClipboardImage extracts an image from the system clipboard, saves it to
+// a temp directory, and adds it as a pending attachment. Returns the current
+// pending attachment count, a legacy hint string (always empty), and any error.
+func (c *cliConsole) pasteClipboardImage() (int, string, error) {
+	raw, mime, err := image.ExtractClipboardImage()
+	if err != nil {
+		return 0, "", fmt.Errorf("clipboard: %w", err)
 	}
-	return out
+	if raw == nil {
+		return 0, "", nil // no image in clipboard
+	}
+	if len(raw) > image.MaxImageBytes {
+		return 0, "", fmt.Errorf("clipboard image too large: %d bytes (max %d)", len(raw), image.MaxImageBytes)
+	}
+	// Save to temp directory for inspection.
+	tmpDir := filepath.Join(os.TempDir(), "caelis-clipboard")
+	_ = os.MkdirAll(tmpDir, 0o755)
+	tmpName := fmt.Sprintf("clipboard-%d.png", time.Now().UnixNano())
+	tmpPath := filepath.Join(tmpDir, tmpName)
+	_ = os.WriteFile(tmpPath, raw, 0o644)
+
+	part, err := image.ContentPartFromBytes(raw, mime, tmpName, c.imageCache)
+	if err != nil {
+		return 0, "", fmt.Errorf("clipboard image: %w", err)
+	}
+	c.addPendingAttachment(part)
+	c.pendingAttachmentMu.Lock()
+	count := len(c.pendingAttachments)
+	c.pendingAttachmentMu.Unlock()
+	return count, "", nil
 }
 
 func (c *cliConsole) printf(format string, args ...any) {

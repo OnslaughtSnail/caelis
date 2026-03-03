@@ -30,7 +30,6 @@
 
 ## 当前仍需治理的边界问题
 
-- 运行时压缩策略仍包含固定中文摘要提示词，属于产品策略混入内核。
 - policy 仍以 hook error 短路为主，缺少统一决策对象（allow/deny/require_approval）。
 - `session.Store` 仅支持全量 `ListEvents`，缺少游标接口，导致内核可扩展性不足。
 

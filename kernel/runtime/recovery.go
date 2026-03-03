@@ -1,9 +1,8 @@
 package runtime
 
 import (
-	"encoding/json"
-	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -18,7 +17,7 @@ type pendingToolCall struct {
 	EventIndex int
 	ID         string
 	Name       string
-	Args       map[string]any
+	Args       string
 }
 
 func buildRecoveryEvents(events []*session.Event) []*session.Event {
@@ -46,7 +45,7 @@ func buildRecoveryEvents(events []*session.Event) []*session.Event {
 					EventIndex: idx,
 					ID:         call.ID,
 					Name:       call.Name,
-					Args:       cloneMap(call.Args),
+					Args:       strings.TrimSpace(call.Args),
 				}
 				order = append(order, call.ID)
 			}
@@ -97,31 +96,10 @@ func buildRecoveryEvents(events []*session.Event) []*session.Event {
 					"type":         "dangling_tool_call",
 					"tool_call_id": call.ID,
 					"tool_name":    call.Name,
-					"tool_args":    cloneMap(call.Args),
+					"tool_args":    call.Args,
 				},
 			},
 		})
-	}
-	return out
-}
-
-func cloneMap(input map[string]any) map[string]any {
-	if input == nil {
-		return nil
-	}
-	raw, err := json.Marshal(input)
-	if err != nil {
-		out := make(map[string]any, len(input))
-		for k, v := range input {
-			out[k] = v
-		}
-		return out
-	}
-	out := map[string]any{}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return map[string]any{
-			"raw": fmt.Sprintf("%v", input),
-		}
 	}
 	return out
 }

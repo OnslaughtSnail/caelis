@@ -23,11 +23,6 @@ type SearchTool struct {
 	runtime toolexec.Runtime
 }
 
-func NewSearch() *SearchTool {
-	tool, _ := NewSearchWithRuntime(nil)
-	return tool
-}
-
 func NewSearchWithRuntime(runtime toolexec.Runtime) (*SearchTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(runtime)
 	if err != nil {

@@ -246,16 +246,21 @@ func BuildMetaPrompt(metas []Meta) string {
 		return ""
 	}
 	var b bytes.Buffer
-	b.WriteString("Skills Metadata (auto-loaded, all active):\n")
+	b.WriteString("## Skills\n")
+	b.WriteString("Use skills as local playbooks from `SKILL.md`.\n")
+	b.WriteString("### Available skills\n")
 	for _, m := range metas {
-		line := fmt.Sprintf("- name=%q; description=%q; tags=%q; version=%q; path=%q\n",
-			m.Name,
-			m.Description,
-			strings.Join(m.Tags, ","),
-			m.Version,
-			m.Path,
-		)
+		line := fmt.Sprintf("- %s: %s (file: %s)\n", m.Name, m.Description, m.Path)
 		b.WriteString(line)
 	}
+	b.WriteString("### How to use skills\n")
+	b.WriteString(`- Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
+- Skill selection: Choose skills by task-semantic match to their descriptions, and combine skills only when each one is relevant to the current turn.
+- Workflow: Open SKILL.md first, then load only referenced files needed for the task. Resolve relative paths from the skill directory.
+- Progressive disclosure: Keep reads minimal; avoid broad scans or loading whole folders unless blocked.
+- scripts/ default path: Treat scripts as executable helpers. Prefer running them directly; read script source only when needed for debugging, parameter checks, or targeted edits.
+- Reuse first: Prefer existing assets/ and templates over recreating content.
+- Coordination: Use the minimal skill set and state which skill(s) you are using with a one-line reason.
+- Fallback: If a skill is missing/unreadable or unclear, state it briefly and continue with the best fallback.`)
 	return strings.TrimSpace(b.String())
 }

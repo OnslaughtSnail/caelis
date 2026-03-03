@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
-	"github.com/OnslaughtSnail/caelis/kernel/lspbroker"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -55,16 +54,34 @@ type RunRequest struct {
 	SessionID string
 	Input     string
 
+	// ContentParts carries multimodal content (e.g. images) alongside Input.
+	// When non-empty, the runtime builds a user message with these parts
+	// instead of using Input as plain text.
+	ContentParts []model.ContentPart
+
 	Agent                agent.Agent
 	Model                model.LLM
 	Tools                []tool.Tool
 	CoreTools            tool.CoreToolsConfig
 	Policies             []policy.Hook
-	LSPBroker            *lspbroker.Broker
-	LSPActivationTools   []string
-	AutoActivateLSP      []string
 	PersistPartialEvents bool
 	ContextWindowTokens  int
+}
+
+type runErrorEmitter func(error) bool
+type runEventYielder func(*session.Event, error) bool
+
+func validateRunRequest(req RunRequest) error {
+	if req.Agent == nil {
+		return fmt.Errorf("runtime: agent is nil")
+	}
+	if req.Model == nil {
+		return fmt.Errorf("runtime: model is nil")
+	}
+	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
+		return fmt.Errorf("runtime: app_name, user_id and session_id are required")
+	}
+	return nil
 }
 
 func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Event, error] {
@@ -72,16 +89,8 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		if req.Agent == nil {
-			yield(nil, fmt.Errorf("runtime: agent is nil"))
-			return
-		}
-		if req.Model == nil {
-			yield(nil, fmt.Errorf("runtime: model is nil"))
-			return
-		}
-		if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
-			yield(nil, fmt.Errorf("runtime: app_name, user_id and session_id are required"))
+		if err := validateRunRequest(req); err != nil {
+			yield(nil, err)
 			return
 		}
 		leaseKey := runLeaseKey(req.AppName, req.UserID, req.SessionID)
@@ -99,195 +108,223 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		if !r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusRunning, "run", nil, yield) {
 			return
 		}
-		emitRunError := func(err error) {
+		emitRunError := func(err error) bool {
 			if err == nil {
-				return
+				return true
 			}
 			status := lifecycleStatusForError(err)
 			if !r.appendAndYieldLifecycle(ctx, sess, status, "run", err, yield) {
-				return
+				return false
 			}
-			yield(nil, err)
+			return yield(nil, err)
 		}
 
-		existing, err := r.listContextWindowEvents(ctx, sess)
+		allEvents, ok := r.prepareRunContext(ctx, sess, req, emitRunError, yield)
+		if !ok {
+			return
+		}
+		inv, err := r.buildInvocationContext(ctx, sess, req, allEvents)
 		if err != nil {
-			emitRunError(err)
-			return
-		}
-		recoveryEvents := buildRecoveryEvents(existing)
-		for _, recoveryEvent := range recoveryEvents {
-			if recoveryEvent == nil {
-				continue
-			}
-			recoveryEvent.SessionID = sess.ID
-			if recoveryEvent.ID == "" {
-				recoveryEvent.ID = eventID()
-			}
-			if recoveryEvent.Time.IsZero() {
-				recoveryEvent.Time = time.Now()
-			}
-			if err := r.store.AppendEvent(ctx, sess, recoveryEvent); err != nil {
-				emitRunError(err)
+			if !emitRunError(err) {
 				return
 			}
-			if !yield(recoveryEvent, nil) {
-				return
-			}
-		}
-
-		userEvent := &session.Event{
-			ID:        eventID(),
-			SessionID: sess.ID,
-			Time:      time.Now(),
-			Message:   model.Message{Role: model.RoleUser, Text: req.Input},
-		}
-		if err := r.store.AppendEvent(ctx, sess, userEvent); err != nil {
-			emitRunError(err)
 			return
 		}
-		if !yield(userEvent, nil) {
+		if !r.runAgentExecution(ctx, sess, req, inv, emitRunError, yield) {
 			return
-		}
-
-		allEvents, err := r.listContextWindowEvents(ctx, sess)
-		if err != nil {
-			emitRunError(err)
-			return
-		}
-
-		compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
-			Session:             sess,
-			Model:               req.Model,
-			Events:              allEvents,
-			ContextWindowTokens: req.ContextWindowTokens,
-			Trigger:             triggerAuto,
-			Force:               false,
-		})
-		if compactErr != nil {
-			emitRunError(compactErr)
-			return
-		}
-		if compactionEvent != nil {
-			if !yield(compactionEvent, nil) {
-				return
-			}
-			allEvents, err = r.listContextWindowEvents(ctx, sess)
-			if err != nil {
-				emitRunError(err)
-				return
-			}
-		}
-
-		history := agentHistoryEvents(contextWindowEvents(allEvents))
-		allTools, err := tool.EnsureCoreTools(req.Tools, req.CoreTools)
-		if err != nil {
-			emitRunError(err)
-			return
-		}
-		toolMap, err := tool.BuildMap(allTools)
-		if err != nil {
-			emitRunError(err)
-			return
-		}
-		inv := &invocationContext{
-			Context:  ctx,
-			session:  sess,
-			history:  history,
-			model:    req.Model,
-			tools:    allTools,
-			toolMap:  toolMap,
-			policies: append([]policy.Hook(nil), req.Policies...),
-			lsp:      req.LSPBroker,
-			active:   map[string]struct{}{},
-		}
-		activateLanguages := mergeActivationLanguages(
-			restoreActivatedLSPFromEvents(allEvents, req.LSPActivationTools),
-			req.AutoActivateLSP,
-		)
-		for _, language := range activateLanguages {
-			_, activateErr := inv.ActivateLSP(ctx, lspbroker.ActivateRequest{Language: language})
-			if activateErr != nil {
-				emitRunError(activateErr)
-				return
-			}
-		}
-
-		for attempt := 0; attempt < 2; attempt++ {
-			retry := false
-			for ev, err := range req.Agent.Run(inv) {
-				if err != nil {
-					if attempt == 0 && isContextOverflowError(err) {
-						allEvents, listErr := r.listContextWindowEvents(ctx, sess)
-						if listErr != nil {
-							emitRunError(listErr)
-							return
-						}
-						compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
-							Session:             sess,
-							Model:               req.Model,
-							Events:              allEvents,
-							ContextWindowTokens: req.ContextWindowTokens,
-							Trigger:             triggerOverflowRecovery,
-							Force:               true,
-						})
-						if compactErr != nil {
-							emitRunError(compactErr)
-							return
-						}
-						if compactionEvent != nil {
-							if !yield(compactionEvent, nil) {
-								return
-							}
-						}
-						refreshed, refreshErr := r.listContextWindowEvents(ctx, sess)
-						if refreshErr != nil {
-							emitRunError(refreshErr)
-							return
-						}
-						inv.history = agentHistoryEvents(contextWindowEvents(refreshed))
-						retry = true
-						break
-					}
-					status := lifecycleStatusForError(err)
-					if !r.appendAndYieldLifecycle(ctx, sess, status, "run", err, yield) {
-						return
-					}
-					yield(nil, err)
-					return
-				}
-				if ev == nil {
-					continue
-				}
-				if ev.ID == "" {
-					ev.ID = eventID()
-				}
-				if ev.Time.IsZero() {
-					ev.Time = time.Now()
-				}
-				ev.SessionID = sess.ID
-				if shouldPersistEvent(ev, req.PersistPartialEvents) {
-					if err := r.store.AppendEvent(ctx, sess, ev); err != nil {
-						emitRunError(err)
-						return
-					}
-					cp := *ev
-					if !isLifecycleEvent(&cp) {
-						inv.history = append(inv.history, &cp)
-					}
-				}
-				if !yield(ev, nil) {
-					return
-				}
-			}
-			if !retry {
-				if !r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusCompleted, "run", nil, yield) {
-					return
-				}
-				return
-			}
 		}
 	}
+}
+
+func (r *Runtime) prepareRunContext(
+	ctx context.Context,
+	sess *session.Session,
+	req RunRequest,
+	emitRunError runErrorEmitter,
+	yield runEventYielder,
+) ([]*session.Event, bool) {
+	existing, err := r.listContextWindowEvents(ctx, sess)
+	if err != nil {
+		emitRunError(err)
+		return nil, false
+	}
+	recoveryEvents := buildRecoveryEvents(existing)
+	for _, recoveryEvent := range recoveryEvents {
+		if recoveryEvent == nil {
+			continue
+		}
+		recoveryEvent.SessionID = sess.ID
+		if recoveryEvent.ID == "" {
+			recoveryEvent.ID = eventID()
+		}
+		if recoveryEvent.Time.IsZero() {
+			recoveryEvent.Time = time.Now()
+		}
+		if err := r.store.AppendEvent(ctx, sess, recoveryEvent); err != nil {
+			emitRunError(err)
+			return nil, false
+		}
+		if !yield(recoveryEvent, nil) {
+			return nil, false
+		}
+	}
+	userMsg := model.Message{Role: model.RoleUser, Text: req.Input}
+	if len(req.ContentParts) > 0 {
+		parts := make([]model.ContentPart, 0, 1+len(req.ContentParts))
+		if strings.TrimSpace(req.Input) != "" {
+			parts = append(parts, model.ContentPart{
+				Type: model.ContentPartText,
+				Text: req.Input,
+			})
+		}
+		parts = append(parts, req.ContentParts...)
+		userMsg.ContentParts = parts
+	}
+	userEvent := &session.Event{
+		ID:        eventID(),
+		SessionID: sess.ID,
+		Time:      time.Now(),
+		Message:   userMsg,
+	}
+	if err := r.store.AppendEvent(ctx, sess, userEvent); err != nil {
+		emitRunError(err)
+		return nil, false
+	}
+	if !yield(userEvent, nil) {
+		return nil, false
+	}
+	allEvents, err := r.listContextWindowEvents(ctx, sess)
+	if err != nil {
+		emitRunError(err)
+		return nil, false
+	}
+	compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
+		Session:             sess,
+		Model:               req.Model,
+		Events:              allEvents,
+		ContextWindowTokens: req.ContextWindowTokens,
+		Trigger:             triggerAuto,
+		Force:               false,
+	})
+	if compactErr != nil {
+		emitRunError(compactErr)
+		return nil, false
+	}
+	if compactionEvent != nil {
+		if !yield(compactionEvent, nil) {
+			return nil, false
+		}
+		allEvents, err = r.listContextWindowEvents(ctx, sess)
+		if err != nil {
+			emitRunError(err)
+			return nil, false
+		}
+	}
+	return allEvents, true
+}
+
+func (r *Runtime) buildInvocationContext(
+	ctx context.Context,
+	sess *session.Session,
+	req RunRequest,
+	allEvents []*session.Event,
+) (*invocationContext, error) {
+	history := agentHistoryEvents(contextWindowEvents(allEvents))
+	allTools, err := tool.EnsureCoreTools(req.Tools, req.CoreTools)
+	if err != nil {
+		return nil, err
+	}
+	toolMap, err := tool.BuildMap(allTools)
+	if err != nil {
+		return nil, err
+	}
+	return &invocationContext{
+		Context:  ctx,
+		session:  sess,
+		history:  history,
+		model:    req.Model,
+		tools:    allTools,
+		toolMap:  toolMap,
+		policies: append([]policy.Hook(nil), req.Policies...),
+	}, nil
+}
+
+func (r *Runtime) runAgentExecution(
+	ctx context.Context,
+	sess *session.Session,
+	req RunRequest,
+	inv *invocationContext,
+	emitRunError runErrorEmitter,
+	yield runEventYielder,
+) bool {
+	for attempt := 0; attempt < 2; attempt++ {
+		retry := false
+		for ev, err := range req.Agent.Run(inv) {
+			if err != nil {
+				if attempt == 0 && isContextOverflowError(err) {
+					allEvents, listErr := r.listContextWindowEvents(ctx, sess)
+					if listErr != nil {
+						emitRunError(listErr)
+						return false
+					}
+					compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
+						Session:             sess,
+						Model:               req.Model,
+						Events:              allEvents,
+						ContextWindowTokens: req.ContextWindowTokens,
+						Trigger:             triggerOverflowRecovery,
+						Force:               true,
+					})
+					if compactErr != nil {
+						emitRunError(compactErr)
+						return false
+					}
+					if compactionEvent != nil {
+						if !yield(compactionEvent, nil) {
+							return false
+						}
+					}
+					refreshed, refreshErr := r.listContextWindowEvents(ctx, sess)
+					if refreshErr != nil {
+						emitRunError(refreshErr)
+						return false
+					}
+					inv.history = agentHistoryEvents(contextWindowEvents(refreshed))
+					retry = true
+					break
+				}
+				emitRunError(err)
+				return false
+			}
+			if ev == nil {
+				continue
+			}
+			if ev.ID == "" {
+				ev.ID = eventID()
+			}
+			if ev.Time.IsZero() {
+				ev.Time = time.Now()
+			}
+			ev.SessionID = sess.ID
+			if shouldPersistEvent(ev, req.PersistPartialEvents) {
+				if err := r.store.AppendEvent(ctx, sess, ev); err != nil {
+					emitRunError(err)
+					return false
+				}
+				cp := *ev
+				if !isLifecycleEvent(&cp) {
+					inv.history = append(inv.history, &cp)
+				}
+			}
+			if !yield(ev, nil) {
+				return false
+			}
+		}
+		if !retry {
+			return r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusCompleted, "run", nil, yield)
+		}
+	}
+	return true
 }
 
 func runLeaseKey(appName, userID, sessionID string) string {
@@ -382,73 +419,6 @@ func shouldPersistEvent(ev *session.Event, persistPartial bool) bool {
 
 func eventID() string {
 	return fmt.Sprintf("ev_%d", time.Now().UnixNano())
-}
-
-func restoreActivatedLSPFromEvents(events []*session.Event, activationToolNames []string) []string {
-	if len(events) == 0 {
-		return nil
-	}
-	names := activationToolNameSet(activationToolNames)
-	if len(names) == 0 {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 2)
-	for _, ev := range events {
-		if ev == nil || ev.Message.ToolResponse == nil {
-			continue
-		}
-		resp := ev.Message.ToolResponse
-		name := strings.ToLower(strings.TrimSpace(resp.Name))
-		if _, ok := names[name]; !ok {
-			continue
-		}
-		if resp.Result == nil {
-			continue
-		}
-		language, _ := resp.Result["language"].(string)
-		language = strings.ToLower(strings.TrimSpace(language))
-		if language == "" {
-			continue
-		}
-		if _, exists := seen[language]; exists {
-			continue
-		}
-		seen[language] = struct{}{}
-		out = append(out, language)
-	}
-	return out
-}
-
-func activationToolNameSet(names []string) map[string]struct{} {
-	set := map[string]struct{}{}
-	for _, one := range names {
-		name := strings.ToLower(strings.TrimSpace(one))
-		if name == "" {
-			continue
-		}
-		set[name] = struct{}{}
-	}
-	return set
-}
-
-func mergeActivationLanguages(groups ...[]string) []string {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 4)
-	for _, group := range groups {
-		for _, one := range group {
-			language := strings.ToLower(strings.TrimSpace(one))
-			if language == "" {
-				continue
-			}
-			if _, exists := seen[language]; exists {
-				continue
-			}
-			seen[language] = struct{}{}
-			out = append(out, language)
-		}
-	}
-	return out
 }
 
 func (r *Runtime) appendAndYieldLifecycle(

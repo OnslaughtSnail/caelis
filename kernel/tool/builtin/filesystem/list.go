@@ -20,11 +20,6 @@ type ListTool struct {
 	runtime toolexec.Runtime
 }
 
-func NewList() *ListTool {
-	tool, _ := NewListWithRuntime(nil)
-	return tool
-}
-
 func NewListWithRuntime(runtime toolexec.Runtime) (*ListTool, error) {
 	resolvedRuntime, err := runtimeOrDefault(runtime)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/session"
 	_ "modernc.org/sqlite"
 )
 
@@ -92,7 +93,7 @@ ON CONFLICT(workspace_key, session_id) DO UPDATE SET
 	return err
 }
 
-func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, sessionID string, ev model.Message, at time.Time) error {
+func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, sessionID string, ev *session.Event, at time.Time) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -103,8 +104,8 @@ func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, s
 		at = time.Now()
 	}
 	lastUser := ""
-	if ev.Role == model.RoleUser {
-		lastUser = strings.TrimSpace(ev.Text)
+	if ev != nil && ev.Message.Role == model.RoleUser && !isCompactionEventForIndex(ev) {
+		lastUser = strings.TrimSpace(ev.Message.Text)
 	}
 	ts := at.UnixMilli()
 	s.mu.Lock()
@@ -125,7 +126,19 @@ WHERE workspace_key = ? AND session_id = ?`
 	return err
 }
 
+func isCompactionEventForIndex(ev *session.Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	kind, _ := ev.Meta["kind"].(string)
+	return strings.TrimSpace(kind) == "compaction"
+}
+
 func (s *sessionIndex) ListWorkspaceSessions(workspaceKey string, limit int) ([]sessionIndexRecord, error) {
+	return s.ListWorkspaceSessionsPage(workspaceKey, 1, limit)
+}
+
+func (s *sessionIndex) ListWorkspaceSessionsPage(workspaceKey string, page int, pageSize int) ([]sessionIndexRecord, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
@@ -133,21 +146,25 @@ func (s *sessionIndex) ListWorkspaceSessions(workspaceKey string, limit int) ([]
 	if workspaceKey == "" {
 		return nil, fmt.Errorf("session index: workspace_key is required")
 	}
-	if limit <= 0 {
-		limit = 50
+	if page < 1 {
+		page = 1
 	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
 	const q = `
-SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
-FROM session_index
-WHERE workspace_key = ?
-ORDER BY last_event_at DESC, created_at DESC
-LIMIT ?`
-	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, limit)
+	SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
+	FROM session_index
+	WHERE workspace_key = ?
+	ORDER BY last_event_at DESC, created_at DESC
+	LIMIT ? OFFSET ?`
+	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, pageSize, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]sessionIndexRecord, 0, limit)
+	out := make([]sessionIndexRecord, 0, pageSize)
 	for rows.Next() {
 		var rec sessionIndexRecord
 		var createdAt, lastEventAt int64
@@ -159,6 +176,52 @@ LIMIT ?`
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+func (s *sessionIndex) CountWorkspaceSessions(workspaceKey string) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	if workspaceKey == "" {
+		return 0, fmt.Errorf("session index: workspace_key is required")
+	}
+	const q = `SELECT COUNT(*) FROM session_index WHERE workspace_key = ?`
+	var count int
+	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *sessionIndex) MostRecentWorkspaceSession(workspaceKey string, excludeSessionID string) (sessionIndexRecord, bool, error) {
+	if s == nil || s.db == nil {
+		return sessionIndexRecord{}, false, nil
+	}
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	if workspaceKey == "" {
+		return sessionIndexRecord{}, false, fmt.Errorf("session index: workspace_key is required")
+	}
+	excludeSessionID = strings.TrimSpace(excludeSessionID)
+	const q = `
+	SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
+	FROM session_index
+	WHERE workspace_key = ? AND (? = '' OR session_id <> ?)
+	ORDER BY last_event_at DESC, created_at DESC
+	LIMIT 1`
+	var rec sessionIndexRecord
+	var createdAt, lastEventAt int64
+	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey, excludeSessionID, excludeSessionID).Scan(
+		&rec.SessionID, &rec.AppName, &rec.UserID, &rec.WorkspaceCWD, &createdAt, &lastEventAt, &rec.EventCount, &rec.LastUserMessage,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return sessionIndexRecord{}, false, nil
+		}
+		return sessionIndexRecord{}, false, err
+	}
+	rec.CreatedAt = time.UnixMilli(createdAt)
+	rec.LastEventAt = time.UnixMilli(lastEventAt)
+	return rec, true, nil
 }
 
 func (s *sessionIndex) HasWorkspaceSession(workspaceKey, sessionID string) (bool, error) {

@@ -19,7 +19,7 @@ func TestBuildRecoveryEvents_GeneratesToolInterrupt(t *testing.T) {
 					{
 						ID:   "call_1",
 						Name: "READ",
-						Args: map[string]any{"path": "/tmp/a.txt"},
+						Args: `{"path":"/tmp/a.txt"}`,
 					},
 				},
 			},
@@ -53,7 +53,7 @@ func TestBuildRecoveryEvents_SkipsClosedToolCalls(t *testing.T) {
 					{
 						ID:   "call_1",
 						Name: "READ",
-						Args: map[string]any{"path": "/tmp/a.txt"},
+						Args: `{"path":"/tmp/a.txt"}`,
 					},
 				},
 			},
@@ -91,7 +91,7 @@ func TestBuildRecoveryEvents_UsesLastCompactionWindow(t *testing.T) {
 					{
 						ID:   "call_old",
 						Name: "READ",
-						Args: map[string]any{"path": "/tmp/old.txt"},
+						Args: `{"path":"/tmp/old.txt"}`,
 					},
 				},
 			},

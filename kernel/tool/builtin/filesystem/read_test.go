@@ -16,7 +16,7 @@ func TestReadTool_OffsetAndLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	readTool, err := NewRead(DefaultReadConfig())
+	readTool, err := NewReadWithRuntime(DefaultReadConfig(), newTestRuntime(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,12 +44,12 @@ func TestReadTool_TokenLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	readTool, err := NewRead(ReadConfig{
+	readTool, err := NewReadWithRuntime(ReadConfig{
 		DefaultLimit:     10,
 		MaxLimit:         10,
 		DefaultMaxTokens: 10,
 		MaxTokens:        10,
-	})
+	}, newTestRuntime(t))
 	if err != nil {
 		t.Fatal(err)
 	}

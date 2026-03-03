@@ -109,7 +109,7 @@ func TestNew_DefaultRoutesSafeCommandToSandbox(t *testing.T) {
 	}
 }
 
-func TestNew_DefaultUnsafeCommandRoutesToHostWithEscalation(t *testing.T) {
+func TestNew_DefaultUnsafeCommandRoutesToSandbox(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
 		SandboxType:    platformDefaultSandboxType(),
@@ -119,18 +119,15 @@ func TestNew_DefaultUnsafeCommandRoutesToHostWithEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision := rt.DecideRoute("python3 app.py", SandboxPermissionAuto)
-	if decision.Route != ExecutionRouteHost {
-		t.Fatalf("expected host route, got %q", decision.Route)
+	if decision.Route != ExecutionRouteSandbox {
+		t.Fatalf("expected sandbox route, got %q", decision.Route)
 	}
-	if decision.Escalation == nil {
-		t.Fatal("expected escalation reason for unsafe command")
-	}
-	if !strings.Contains(decision.Escalation.Message, "outside safe command set") {
-		t.Fatalf("expected safe-set escalation reason, got %+v", decision.Escalation)
+	if decision.Escalation != nil {
+		t.Fatalf("expected no escalation in sandbox path, got %+v", decision.Escalation)
 	}
 }
 
-func TestNew_DefaultMetaCharactersRequireHostEscalation(t *testing.T) {
+func TestNew_DefaultMetaCharactersRouteToSandbox(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
 		SandboxType:    platformDefaultSandboxType(),
@@ -140,14 +137,11 @@ func TestNew_DefaultMetaCharactersRequireHostEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision := rt.DecideRoute("ls | head -1", SandboxPermissionAuto)
-	if decision.Route != ExecutionRouteHost {
-		t.Fatalf("expected host route, got %q", decision.Route)
+	if decision.Route != ExecutionRouteSandbox {
+		t.Fatalf("expected sandbox route, got %q", decision.Route)
 	}
-	if decision.Escalation == nil {
-		t.Fatal("expected escalation reason")
-	}
-	if !strings.Contains(decision.Escalation.Message, "shell meta characters detected") {
-		t.Fatalf("expected meta-char escalation reason, got %+v", decision.Escalation)
+	if decision.Escalation != nil {
+		t.Fatalf("expected no escalation in sandbox path, got %+v", decision.Escalation)
 	}
 }
 

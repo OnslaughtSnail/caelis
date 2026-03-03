@@ -34,3 +34,31 @@ func TestDescribeRemoteModelWithoutMetadata(t *testing.T) {
 		t.Fatalf("did not expect metadata suffix when fields are empty, got %q", got)
 	}
 }
+
+func TestCommonModelsForProvider(t *testing.T) {
+	got := commonModelsForProvider("deepseek")
+	if len(got) == 0 {
+		t.Fatal("expected common models for deepseek")
+	}
+	found := false
+	for _, one := range got {
+		if one == "deepseek-chat" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected deepseek-chat in common models: %v", got)
+	}
+}
+
+func TestHandleConnectRejectsInvalidTimeoutArg(t *testing.T) {
+	c := &cliConsole{modelFactory: modelproviders.NewFactory()}
+	_, err := handleConnect(c, []string{"openai", "gpt-4o", "https://api.openai.com/v1", "abc"})
+	if err == nil {
+		t.Fatal("expected invalid timeout error")
+	}
+	if !strings.Contains(err.Error(), "invalid timeout_seconds") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

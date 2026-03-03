@@ -16,15 +16,27 @@ func TestListModelsContainsDefaultAliases(t *testing.T) {
 	assertContains(t, models, "gemini-2.5-flash")
 }
 
-func TestDefaultFactoryRequiresTokens(t *testing.T) {
+func TestDefaultFactoryRequiresAtLeastOneToken(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "")
 	t.Setenv("GEMINI_API_KEY", "")
 	_, err := defaultFactory()
 	if err == nil {
 		t.Fatal("expected missing token error")
 	}
-	if !strings.Contains(err.Error(), "DEEPSEEK_API_KEY is required") {
+	if !strings.Contains(err.Error(), "no model credentials configured") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDefaultFactory_RegistersOnlyConfiguredModels(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-token")
+	t.Setenv("GEMINI_API_KEY", "")
+	models := ListModels()
+	assertContains(t, models, "deepseek-chat")
+	for _, one := range models {
+		if strings.HasPrefix(one, "gemini") {
+			t.Fatalf("did not expect gemini aliases when GEMINI_API_KEY is empty, got %v", models)
+		}
 	}
 }
 

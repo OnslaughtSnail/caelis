@@ -40,7 +40,7 @@ func (s *indexedSessionStore) AppendEvent(ctx context.Context, req *session.Sess
 		return err
 	}
 	if req != nil && ev != nil {
-		_ = s.index.TouchEvent(s.workspace, req.AppName, req.UserID, req.ID, ev.Message, ev.Time)
+		_ = s.index.TouchEvent(s.workspace, req.AppName, req.UserID, req.ID, ev, ev.Time)
 	}
 	return nil
 }

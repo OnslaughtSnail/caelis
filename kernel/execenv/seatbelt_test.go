@@ -3,7 +3,9 @@ package execenv
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -190,4 +192,37 @@ func TestBuildSeatbeltProfileIncludesSystemRules(t *testing.T) {
 	if !strings.Contains(profile, "(allow process*)") {
 		t.Fatalf("expected process allow, got %q", profile)
 	}
+}
+
+func TestSeatbeltPathVariantsIncludesSymlinkResolvedPath(t *testing.T) {
+	target := t.TempDir()
+	base := t.TempDir()
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	variants := seatbeltPathVariants(link)
+	if len(variants) == 0 {
+		t.Fatal("expected non-empty path variants")
+	}
+	if !containsString(variants, filepath.Clean(link)) {
+		t.Fatalf("expected original path in variants: %v", variants)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve target failed: %v", err)
+	}
+	if !containsString(variants, filepath.Clean(resolvedTarget)) {
+		t.Fatalf("expected resolved path in variants: %v", variants)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, one := range values {
+		if one == want {
+			return true
+		}
+	}
+	return false
 }

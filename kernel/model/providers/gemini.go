@@ -20,6 +20,8 @@ type geminiLLM struct {
 	baseURL             string
 	token               string
 	client              *http.Client
+	requestTimeout      time.Duration
+	maxOutputTok        int
 	contextWindowTokens int
 }
 
@@ -33,7 +35,9 @@ func newGemini(cfg Config, token string) model.LLM {
 		provider:            cfg.Provider,
 		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
 		token:               token,
-		client:              &http.Client{Timeout: timeout},
+		client:              &http.Client{},
+		requestTimeout:      timeout,
+		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 	}
 }
@@ -63,6 +67,7 @@ func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 				Parts: []geminiPart{{Text: system}},
 			}
 		}
+		generationConfig := &geminiGenerationConfig{}
 		if req.Reasoning.Enabled != nil || req.Reasoning.BudgetTokens > 0 {
 			thinking := geminiThinkingConfig{}
 			if req.Reasoning.BudgetTokens > 0 {
@@ -70,9 +75,13 @@ func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 			} else if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
 				thinking.ThinkingBudget = 0
 			}
-			payload.GenerationConfig = &geminiGenerationConfig{
-				ThinkingConfig: &thinking,
-			}
+			generationConfig.ThinkingConfig = &thinking
+		}
+		if l.maxOutputTok > 0 {
+			generationConfig.MaxOutputTokens = l.maxOutputTok
+		}
+		if generationConfig.ThinkingConfig != nil || generationConfig.MaxOutputTokens > 0 {
+			payload.GenerationConfig = generationConfig
 		}
 
 		raw, err := json.Marshal(payload)
@@ -89,7 +98,16 @@ func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 		if req.Stream {
 			endpoint += "&alt=sse"
 		}
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+		runCtx := ctx
+		cancel := func() {}
+		// Keep stream requests bounded by caller context only; avoid http.Client timeout
+		// terminating long-running SSE responses.
+		if !req.Stream && l.requestTimeout > 0 {
+			runCtx, cancel = context.WithTimeout(ctx, l.requestTimeout)
+		}
+		defer cancel()
+
+		httpReq, err := http.NewRequestWithContext(runCtx, http.MethodPost, endpoint, bytes.NewReader(raw))
 		if err != nil {
 			yield(nil, err)
 			return
@@ -199,7 +217,8 @@ type geminiRequest struct {
 }
 
 type geminiGenerationConfig struct {
-	ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+	ThinkingConfig  *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+	MaxOutputTokens int                   `json:"maxOutputTokens,omitempty"`
 }
 
 type geminiThinkingConfig struct {
@@ -211,8 +230,14 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
 type geminiPart struct {
 	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
 	ThoughtSignature string                  `json:"thoughtSignature,omitempty"`
@@ -288,7 +313,7 @@ func geminiResponseToMessage(out geminiResponse) (model.Message, model.Usage, er
 			msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
 				ID:               part.FunctionCall.Name,
 				Name:             part.FunctionCall.Name,
-				Args:             part.FunctionCall.Args,
+				Args:             toolArgsRaw(part.FunctionCall.Args),
 				ThoughtSignature: thoughtSig,
 			})
 		}
@@ -313,11 +338,28 @@ func toGeminiContents(messages []model.Message) (string, []geminiContent) {
 				systemLines = append(systemLines, m.Text)
 			}
 		case model.RoleUser:
+			var parts []geminiPart
+			if len(m.ContentParts) > 0 {
+				parts = make([]geminiPart, 0, len(m.ContentParts))
+				for _, cp := range m.ContentParts {
+					switch cp.Type {
+					case model.ContentPartText:
+						parts = append(parts, geminiPart{Text: cp.Text})
+					case model.ContentPartImage:
+						parts = append(parts, geminiPart{
+							InlineData: &geminiInlineData{
+								MimeType: cp.MimeType,
+								Data:     cp.Data,
+							},
+						})
+					}
+				}
+			} else {
+				parts = []geminiPart{{Text: m.Text}}
+			}
 			out = append(out, geminiContent{
-				Role: "user",
-				Parts: []geminiPart{{
-					Text: m.Text,
-				}},
+				Role:  "user",
+				Parts: parts,
 			})
 		case model.RoleAssistant:
 			parts := make([]geminiPart, 0, len(m.ToolCalls)+1)
@@ -333,7 +375,7 @@ func toGeminiContents(messages []model.Message) (string, []geminiContent) {
 				parts = append(parts, geminiPart{
 					FunctionCall: &geminiFunctionCall{
 						Name: call.Name,
-						Args: call.Args,
+						Args: toolArgsMap(call.Args),
 					},
 					ThoughtSignature: call.ThoughtSignature,
 				})
@@ -397,14 +439,10 @@ func callKey(call model.ToolCall) string {
 	if callID != "" {
 		return callID + "|" + call.Name
 	}
-	if len(call.Args) == 0 {
+	if strings.TrimSpace(call.Args) == "" {
 		return call.Name
 	}
-	raw, err := json.Marshal(call.Args)
-	if err != nil {
-		return call.Name
-	}
-	return call.Name + "|" + string(raw)
+	return call.Name + "|" + strings.TrimSpace(call.Args)
 }
 
 func mergeToolCall(oldCall model.ToolCall, newCall model.ToolCall) model.ToolCall {
@@ -418,13 +456,8 @@ func mergeToolCall(oldCall model.ToolCall, newCall model.ToolCall) model.ToolCal
 	if strings.TrimSpace(merged.ThoughtSignature) == "" && strings.TrimSpace(newCall.ThoughtSignature) != "" {
 		merged.ThoughtSignature = newCall.ThoughtSignature
 	}
-	if len(newCall.Args) > 0 {
-		if merged.Args == nil {
-			merged.Args = map[string]any{}
-		}
-		for k, v := range newCall.Args {
-			merged.Args[k] = v
-		}
+	if strings.TrimSpace(newCall.Args) != "" {
+		merged.Args = newCall.Args
 	}
 	return merged
 }

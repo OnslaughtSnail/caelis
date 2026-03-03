@@ -16,6 +16,7 @@ type ModelInput struct {
 // ToolInput is the mutable request envelope for BeforeTool hooks.
 type ToolInput struct {
 	Call       model.ToolCall
+	Args       map[string]any
 	Capability toolcap.Capability
 	Decision   Decision
 }
@@ -23,6 +24,7 @@ type ToolInput struct {
 // ToolOutput is the mutable response envelope for AfterTool hooks.
 type ToolOutput struct {
 	Call       model.ToolCall
+	Args       map[string]any
 	Capability toolcap.Capability
 	Decision   Decision
 	Result     map[string]any

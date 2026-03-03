@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	stdruntime "runtime"
 	"strings"
 	"sync"
@@ -69,7 +68,6 @@ type CommandDecision struct {
 type Config struct {
 	PermissionMode PermissionMode
 	SandboxType    string
-	SafeCommands   []string
 	SandboxPolicy  SandboxPolicy
 
 	FileSystem    FileSystem
@@ -121,8 +119,6 @@ type Runtime interface {
 	FileSystem() FileSystem
 	HostRunner() CommandRunner
 	SandboxRunner() CommandRunner
-	SafeCommands() []string
-	DenyMetaChars() bool
 	DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision
 }
 
@@ -149,8 +145,6 @@ type runtimeImpl struct {
 	fs             FileSystem
 	hostRunner     CommandRunner
 	sandboxRunner  CommandRunner
-	safeCommands   []string
-	denyMetaChars  bool
 	closers        []runtimeCloser
 	closeOnce      sync.Once
 	closeErr       error
@@ -191,14 +185,6 @@ func (r *runtimeImpl) SandboxRunner() CommandRunner {
 	return r.sandboxRunner
 }
 
-func (r *runtimeImpl) SafeCommands() []string {
-	return append([]string(nil), r.safeCommands...)
-}
-
-func (r *runtimeImpl) DenyMetaChars() bool {
-	return r.denyMetaChars
-}
-
 func (r *runtimeImpl) DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision {
 	if r.permissionMode == PermissionModeFullControl {
 		return CommandDecision{Route: ExecutionRouteHost}
@@ -223,34 +209,7 @@ func (r *runtimeImpl) DecideRoute(command string, sandboxPermission SandboxPermi
 			Escalation: &EscalationReason{Message: "sandbox_permissions=require_escalated requested"},
 		}
 	}
-	if reason, unsafe := r.sandboxSafetyReason(command); unsafe {
-		return CommandDecision{
-			Route: ExecutionRouteHost,
-			Escalation: &EscalationReason{
-				Message: reason,
-			},
-		}
-	}
 	return CommandDecision{Route: ExecutionRouteSandbox}
-}
-
-func (r *runtimeImpl) sandboxSafetyReason(command string) (string, bool) {
-	reasons := make([]string, 0, 2)
-	if r.denyMetaChars && hasShellMeta(command) {
-		reasons = append(reasons, "shell meta characters detected")
-	}
-	base := baseCommand(command)
-	if !isAllowedCommand(base, r.safeCommands) {
-		if base == "" {
-			reasons = append(reasons, "empty command")
-		} else {
-			reasons = append(reasons, fmt.Sprintf("command %q is outside safe command set", base))
-		}
-	}
-	if len(reasons) == 0 {
-		return "", false
-	}
-	return strings.Join(reasons, "; "), true
 }
 
 func (r *runtimeImpl) Close() error {
@@ -333,11 +292,6 @@ func New(cfg Config) (Runtime, error) {
 		hostRunner = newHostRunner()
 	}
 
-	safeCommands := append([]string(nil), cfg.SafeCommands...)
-	if len(safeCommands) == 0 {
-		safeCommands = defaultSafeCommands()
-	}
-	denyMetaChars := true
 	resolvedPolicy := deriveSandboxPolicy(mode, cfg.SandboxPolicy)
 
 	runtime := &runtimeImpl{
@@ -345,8 +299,6 @@ func New(cfg Config) (Runtime, error) {
 		sandboxPolicy:  resolvedPolicy,
 		fs:             filesystem,
 		hostRunner:     hostRunner,
-		safeCommands:   safeCommands,
-		denyMetaChars:  denyMetaChars,
 	}
 
 	if mode == PermissionModeFullControl {
@@ -447,39 +399,6 @@ func sandboxTypeCandidatesForPlatform(requested string, goos string) []string {
 		return []string{dockerSandboxType}
 	}
 	return []string{value}
-}
-
-func hasShellMeta(command string) bool {
-	return strings.ContainsAny(command, "|;&><`$\\")
-}
-
-func baseCommand(command string) string {
-	fields := strings.Fields(strings.TrimSpace(command))
-	if len(fields) == 0 {
-		return ""
-	}
-	return filepath.Base(fields[0])
-}
-
-func isAllowedCommand(base string, allowlist []string) bool {
-	if base == "" {
-		return false
-	}
-	if len(allowlist) == 0 {
-		return false
-	}
-	for _, one := range allowlist {
-		if strings.TrimSpace(one) == base {
-			return true
-		}
-	}
-	return false
-}
-
-func defaultSafeCommands() []string {
-	return []string{
-		"pwd", "ls", "find", "cat", "head", "tail", "wc", "echo", "grep", "sed", "awk", "rg",
-	}
 }
 
 func deriveSandboxPolicy(mode PermissionMode, policy SandboxPolicy) SandboxPolicy {

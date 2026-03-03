@@ -15,7 +15,10 @@ func TestPatchTool_AppliesWithoutPriorRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewPatch()
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path": path,
 		"old":  "hello",
@@ -36,7 +39,10 @@ func TestPatchTool_AppliesSingleReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewPatch()
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path": path,
 		"old":  "hello",
@@ -76,7 +82,10 @@ func TestPatchTool_AllowsEmptyOldForEmptyFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tool := NewPatch()
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path": path,
 		"old":  "",
@@ -101,7 +110,10 @@ func TestPatchTool_CreateMissingFileWithEmptyOld(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "new.txt")
 
-	tool := NewPatch()
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"path": path,
 		"old":  "",
@@ -144,8 +156,11 @@ func patchHunkFromResult(result map[string]any) string {
 func TestPatchTool_MissingFileRequiresEmptyOld(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "missing.txt")
-	tool := NewPatch()
-	_, err := tool.Run(context.Background(), map[string]any{
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{
 		"path": path,
 		"old":  "x",
 		"new":  "y",

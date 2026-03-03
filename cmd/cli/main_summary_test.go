@@ -102,11 +102,7 @@ func TestPrintEvent_PatchResponseUsesRecordedToolCallArgs(t *testing.T) {
 				{
 					ID:   "call_1",
 					Name: "PATCH",
-					Args: map[string]any{
-						"path": "a.txt",
-						"old":  "alpha",
-						"new":  "beta",
-					},
+					Args: `{"path":"a.txt","old":"alpha","new":"beta"}`,
 				},
 			},
 		},

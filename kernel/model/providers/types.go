@@ -43,5 +43,8 @@ type Config struct {
 	Timeout             time.Duration
 	MaxOutputTok        int
 	ContextWindowTokens int
+	ThinkingMode        string
+	ThinkingBudget      int
+	ReasoningEffort     string
 	Auth                AuthConfig
 }
