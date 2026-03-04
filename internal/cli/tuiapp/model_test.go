@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -78,28 +79,28 @@ func TestSlashCommandQueryAtCursor(t *testing.T) {
 }
 
 func TestConnectWizardQueryAtCursor(t *testing.T) {
-	query, ok := connectWizardQueryAtCursor([]rune("/connect openai"), len([]rune("/connect openai")))
+	query, ok := wizardQueryAtCursor("connect", []rune("/connect openai"), len([]rune("/connect openai")))
 	if !ok {
 		t.Fatal("expected connect wizard query")
 	}
 	if query != "openai" {
 		t.Fatalf("unexpected query %q", query)
 	}
-	_, ok = connectWizardQueryAtCursor([]rune("/model x"), len([]rune("/model x")))
+	_, ok = wizardQueryAtCursor("connect", []rune("/model x"), len([]rune("/model x")))
 	if ok {
 		t.Fatal("did not expect connect wizard query for non-connect input")
 	}
 }
 
 func TestModelWizardQueryAtCursor(t *testing.T) {
-	query, ok := modelWizardQueryAtCursor([]rune("/model high"), len([]rune("/model high")))
+	query, ok := wizardQueryAtCursor("model", []rune("/model high"), len([]rune("/model high")))
 	if !ok {
 		t.Fatal("expected model wizard query")
 	}
 	if query != "high" {
 		t.Fatalf("unexpected query %q", query)
 	}
-	_, ok = modelWizardQueryAtCursor([]rune("/connect x"), len([]rune("/connect x")))
+	_, ok = wizardQueryAtCursor("model", []rune("/connect x"), len([]rune("/connect x")))
 	if ok {
 		t.Fatal("did not expect model wizard query for non-model input")
 	}
@@ -297,6 +298,7 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 			called = line
 			return tuievents.TaskResultMsg{}
 		},
+		Wizards: testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			switch {
 			case command == "model":
@@ -376,6 +378,7 @@ func TestSlashArgOverlayTabFillsSelectedValue(t *testing.T) {
 func TestSlashArgOverlayEscClearsSlashCommand(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
+		Wizards:     testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			if command != "connect" {
 				return nil, nil
@@ -406,6 +409,7 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 			called = line
 			return tuievents.TaskResultMsg{}
 		},
+		Wizards: testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "connect":
@@ -497,6 +501,7 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 			called = line
 			return tuievents.TaskResultMsg{}
 		},
+		Wizards: testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "connect":
@@ -819,6 +824,7 @@ func TestSlashCommandEnterOpensModelPicker(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"model", "status"},
 		ExecuteLine: noopExecute,
+		Wizards:     testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			if command != "model" {
 				return nil, nil
@@ -1826,4 +1832,108 @@ func TestHelpHintsNoCopyMode(t *testing.T) {
 	if strings.Contains(hints, "copy mode") {
 		t.Fatalf("did not expect copy mode hints, got %q", hints)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Test wizard definitions (match production definitions in console_tui_tea.go)
+// ---------------------------------------------------------------------------
+
+func testConnectWizard() WizardDef {
+	return WizardDef{
+		Command:     "connect",
+		DisplayLine: "/connect",
+		Steps: []WizardStepDef{
+			{
+				Key:       "provider",
+				HintLabel: "/connect provider",
+				CompletionCommand: func(_ map[string]string) string {
+					return "connect"
+				},
+			},
+			{
+				Key:       "baseurl",
+				HintLabel: "/connect base_url",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-baseurl:" + s["provider"]
+				},
+			},
+			{
+				Key:       "timeout",
+				HintLabel: "/connect timeout",
+				Validate:  ValidateInt,
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-timeout:" + s["provider"]
+				},
+			},
+			{
+				Key:          "apikey",
+				HintLabel:    "/connect api_key",
+				HideInput:    true,
+				FreeformHint: "/connect api_key: type and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-apikey:" + s["provider"]
+				},
+				ShouldSkip: func(s map[string]string) bool {
+					return s["_noauth"] == "true"
+				},
+			},
+			{
+				Key:          "model",
+				HintLabel:    "/connect model",
+				FreeformHint: "/connect model: type model name and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-model:" + s["provider"] +
+						"|" + url.QueryEscape(s["baseurl"]) +
+						"|" + s["timeout"] +
+						"|" + url.QueryEscape(s["apikey"])
+				},
+			},
+		},
+		OnStepConfirm: func(stepKey, value string, candidate *SlashArgCandidate, state map[string]string) {
+			if stepKey == "provider" {
+				state["provider"] = strings.ToLower(strings.TrimSpace(value))
+			}
+			if stepKey == "provider" && candidate != nil && candidate.NoAuth {
+				state["_noauth"] = "true"
+			}
+		},
+		BuildExecLine: func(s map[string]string) string {
+			line := "/connect " + s["provider"] + " " + s["model"] +
+				" " + s["baseurl"] + " " + s["timeout"]
+			if apiKey := strings.TrimSpace(s["apikey"]); apiKey != "" {
+				line += " " + apiKey
+			}
+			return line
+		},
+	}
+}
+
+func testModelWizard() WizardDef {
+	return WizardDef{
+		Command: "model",
+		Steps: []WizardStepDef{
+			{
+				Key:       "alias",
+				HintLabel: "/model",
+				CompletionCommand: func(_ map[string]string) string {
+					return "model"
+				},
+			},
+			{
+				Key:          "reasoning",
+				HintLabel:    "/model reasoning",
+				FreeformHint: "/model reasoning: type option and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "model-reasoning:" + url.QueryEscape(strings.ToLower(strings.TrimSpace(s["alias"])))
+				},
+			},
+		},
+		BuildExecLine: func(s map[string]string) string {
+			return "/model " + s["alias"] + " " + s["reasoning"]
+		},
+	}
+}
+
+func testWizards() []WizardDef {
+	return []WizardDef{testConnectWizard(), testModelWizard()}
 }

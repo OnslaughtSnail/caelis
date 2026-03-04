@@ -42,6 +42,8 @@ func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 		return discoverGeminiModels(ctx, client, cfg, token)
 	case APIAnthropic:
 		return discoverAnthropicModels(ctx, client, cfg, token)
+	case APIOllama:
+		return discoverOllamaModels(ctx, client, cfg)
 	default:
 		return nil, fmt.Errorf("providers: unsupported api type %q for list_models", cfg.API)
 	}
@@ -212,6 +214,65 @@ func discoverAnthropicModels(ctx context.Context, client *http.Client, cfg Confi
 			ContextWindowTokens: firstPositiveInt(toInt(item.ContextWindow), toInt(item.InputTokenLimit)),
 			MaxOutputTokens:     firstPositiveInt(toInt(item.MaxOutputTokens), toInt(item.OutputTokenLimit)),
 			Capabilities:        toStringSlice(item.Capabilities),
+		})
+	}
+	return normalizeRemoteModels(models), nil
+}
+
+// discoverOllamaModels queries the Ollama /api/tags endpoint to list locally
+// available models. Ollama runs locally and typically requires no authentication.
+func discoverOllamaModels(ctx context.Context, client *http.Client, cfg Config) ([]RemoteModel, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	if strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
+		baseURL = baseURL[:len(baseURL)-len("/v1")]
+	}
+	endpoint := baseURL + "/api/tags"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, statusError(resp)
+	}
+	var payload struct {
+		Models []struct {
+			Name    string `json:"name"`
+			Model   string `json:"model"`
+			Details struct {
+				Family          string   `json:"family"`
+				Families        []string `json:"families"`
+				ParameterSize   string   `json:"parameter_size"`
+				QuantizationLvl string   `json:"quantization_level"`
+			} `json:"details"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	models := make([]RemoteModel, 0, len(payload.Models))
+	for _, item := range payload.Models {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			name = strings.TrimSpace(item.Model)
+		}
+		if name == "" {
+			continue
+		}
+		caps := make([]string, 0, 2)
+		if item.Details.Family != "" {
+			caps = append(caps, item.Details.Family)
+		}
+		if item.Details.ParameterSize != "" {
+			caps = append(caps, item.Details.ParameterSize)
+		}
+		models = append(models, RemoteModel{
+			Name:         name,
+			Capabilities: caps,
 		})
 	}
 	return normalizeRemoteModels(models), nil

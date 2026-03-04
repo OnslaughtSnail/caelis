@@ -184,6 +184,7 @@ func (c *cliConsole) loopTUITea() error {
 		Workspace:       c.workspace.CWD,
 		ShowWelcomeCard: true,
 		Commands:        commandNames(c.commands),
+		Wizards:         buildWizardDefs(),
 		ExecuteLine: func(line string) tuievents.TaskResultMsg {
 			if strings.HasPrefix(strings.TrimSpace(line), "/") {
 				exitNow, err := c.handleSlash(strings.TrimSpace(line))
@@ -451,7 +452,7 @@ func parseConnectModelPayload(payload string) (provider, baseURL string, timeout
 	}
 	decodedBaseURL = strings.TrimSpace(decodedBaseURL)
 	decodedAPIKey = strings.TrimSpace(decodedAPIKey)
-	if decodedBaseURL == "" || decodedAPIKey == "" {
+	if decodedBaseURL == "" {
 		return provider, "", 0, "", false
 	}
 	return provider, decodedBaseURL, timeout, decodedAPIKey, true
@@ -665,7 +666,7 @@ func (c *cliConsole) completeConnectCandidates(query string, limit int) []tuiapp
 		if q != "" && !strings.Contains(strings.ToLower(label), q) {
 			continue
 		}
-		out = append(out, tuiapp.SlashArgCandidate{Value: label, Display: label})
+		out = append(out, tuiapp.SlashArgCandidate{Value: label, Display: label, NoAuth: tpl.noAuthRequired})
 		if len(out) >= limit {
 			break
 		}
@@ -747,26 +748,37 @@ func (c *cliConsole) completeConnectModelCandidatesRemote(provider, baseURL stri
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	baseURL = strings.TrimSpace(baseURL)
 	apiKey = strings.TrimSpace(apiKey)
-	if provider == "" || baseURL == "" || apiKey == "" || timeoutSeconds <= 0 {
+	if provider == "" || baseURL == "" || timeoutSeconds <= 0 {
+		return nil
+	}
+	tpl, ok := findProviderTemplate(provider)
+	if !ok {
+		return nil
+	}
+	// No-auth providers (e.g. Ollama) can discover without an API key.
+	if apiKey == "" && !tpl.noAuthRequired {
 		return nil
 	}
 	cacheKey := buildConnectModelCacheKey(provider, baseURL, timeoutSeconds, apiKey)
 	if cached, ok := c.getConnectModelCache(cacheKey); ok {
 		return filterConnectModelCandidates(cached, query, limit)
 	}
-	tpl, ok := findProviderTemplate(provider)
-	if !ok {
-		return nil
+	authCfg := modelproviders.AuthConfig{
+		Type:  modelproviders.AuthAPIKey,
+		Token: apiKey,
+	}
+	if tpl.noAuthRequired {
+		authCfg = modelproviders.AuthConfig{
+			Type:  modelproviders.AuthNone,
+			Token: apiKey,
+		}
 	}
 	cfg := modelproviders.Config{
 		Provider: strings.TrimSpace(tpl.provider),
 		API:      tpl.api,
 		BaseURL:  baseURL,
 		Timeout:  time.Duration(timeoutSeconds) * time.Second,
-		Auth: modelproviders.AuthConfig{
-			Type:  modelproviders.AuthAPIKey,
-			Token: apiKey,
-		},
+		Auth:     authCfg,
 	}
 	ctx := c.baseCtx
 	if ctx == nil {
@@ -933,4 +945,111 @@ func (c *cliConsole) completeConnectTimeoutCandidates(query string, limit int) [
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Wizard definitions — declarative multi-step slash command flows
+// ---------------------------------------------------------------------------
+
+func buildWizardDefs() []tuiapp.WizardDef {
+	return []tuiapp.WizardDef{
+		buildConnectWizard(),
+		buildModelWizard(),
+	}
+}
+
+func buildConnectWizard() tuiapp.WizardDef {
+	return tuiapp.WizardDef{
+		Command:     "connect",
+		DisplayLine: "/connect",
+		Steps: []tuiapp.WizardStepDef{
+			{
+				Key:       "provider",
+				HintLabel: "/connect provider",
+				CompletionCommand: func(_ map[string]string) string {
+					return "connect"
+				},
+			},
+			{
+				Key:       "baseurl",
+				HintLabel: "/connect base_url",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-baseurl:" + s["provider"]
+				},
+			},
+			{
+				Key:       "timeout",
+				HintLabel: "/connect timeout",
+				Validate:  tuiapp.ValidateInt,
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-timeout:" + s["provider"]
+				},
+			},
+			{
+				Key:          "apikey",
+				HintLabel:    "/connect api_key",
+				HideInput:    true,
+				FreeformHint: "/connect api_key: type and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-apikey:" + s["provider"]
+				},
+				ShouldSkip: func(s map[string]string) bool {
+					return s["_noauth"] == "true"
+				},
+			},
+			{
+				Key:          "model",
+				HintLabel:    "/connect model",
+				FreeformHint: "/connect model: type model name and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-model:" + s["provider"] +
+						"|" + url.QueryEscape(s["baseurl"]) +
+						"|" + s["timeout"] +
+						"|" + url.QueryEscape(s["apikey"])
+				},
+			},
+		},
+		OnStepConfirm: func(stepKey, value string, candidate *tuiapp.SlashArgCandidate, state map[string]string) {
+			if stepKey == "provider" {
+				state["provider"] = strings.ToLower(strings.TrimSpace(value))
+			}
+			if stepKey == "provider" && candidate != nil && candidate.NoAuth {
+				state["_noauth"] = "true"
+			}
+		},
+		BuildExecLine: func(s map[string]string) string {
+			line := "/connect " + s["provider"] + " " + s["model"] +
+				" " + s["baseurl"] + " " + s["timeout"]
+			if apiKey := strings.TrimSpace(s["apikey"]); apiKey != "" {
+				line += " " + apiKey
+			}
+			return line
+		},
+	}
+}
+
+func buildModelWizard() tuiapp.WizardDef {
+	return tuiapp.WizardDef{
+		Command: "model",
+		Steps: []tuiapp.WizardStepDef{
+			{
+				Key:       "alias",
+				HintLabel: "/model",
+				CompletionCommand: func(_ map[string]string) string {
+					return "model"
+				},
+			},
+			{
+				Key:          "reasoning",
+				HintLabel:    "/model reasoning",
+				FreeformHint: "/model reasoning: type option and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "model-reasoning:" + url.QueryEscape(strings.ToLower(strings.TrimSpace(s["alias"])))
+				},
+			},
+		},
+		BuildExecLine: func(s map[string]string) string {
+			return "/model " + s["alias"] + " " + s["reasoning"]
+		},
+	}
 }

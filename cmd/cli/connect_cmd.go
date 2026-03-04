@@ -16,6 +16,7 @@ type providerTemplate struct {
 	defaultBaseURL      string
 	defaultContextToken int
 	defaultMaxOutputTok int
+	noAuthRequired      bool
 	commonModels        []string
 }
 
@@ -68,6 +69,15 @@ var providerTemplates = []providerTemplate{
 		defaultBaseURL:      "https://api.xiaomimimo.com/v1",
 		defaultContextToken: 64000,
 		commonModels:        []string{"mimo-v2-flash", "mimo-v2-reasoner"},
+	},
+	{
+		label:               "ollama",
+		api:                 modelproviders.APIOllama,
+		provider:            "ollama",
+		defaultBaseURL:      "http://localhost:11434",
+		defaultContextToken: 32000,
+		noAuthRequired:      true,
+		commonModels:        []string{"qwen2.5:7b", "llama3.1:8b", "deepseek-r1:7b", "gemma3:4b"},
 	},
 }
 
@@ -128,7 +138,13 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	}
 
 	token := ""
-	if len(args) >= 5 {
+	authType := modelproviders.AuthAPIKey
+	if tpl.noAuthRequired {
+		authType = modelproviders.AuthNone
+		if len(args) >= 5 {
+			token = strings.TrimSpace(args[4])
+		}
+	} else if len(args) >= 5 {
 		token = strings.TrimSpace(args[4])
 	} else {
 		c.printf("auth: api_key\n")
@@ -138,7 +154,7 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 		}
 		token = strings.TrimSpace(input)
 	}
-	if token == "" {
+	if !tpl.noAuthRequired && token == "" {
 		return false, fmt.Errorf("api_key is required")
 	}
 	credentialRef := defaultCredentialRef(tpl.provider, baseURL)
@@ -149,7 +165,7 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 		BaseURL:  strings.TrimSpace(baseURL),
 		Timeout:  time.Duration(timeoutSeconds) * time.Second,
 		Auth: modelproviders.AuthConfig{
-			Type:          modelproviders.AuthAPIKey,
+			Type:          authType,
 			Token:         token,
 			CredentialRef: credentialRef,
 		},

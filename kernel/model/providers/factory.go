@@ -27,15 +27,19 @@ func (f *Factory) Register(cfg Config) error {
 	if alias == "" {
 		return fmt.Errorf("providers: alias is required")
 	}
-	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIDeepSeek {
+	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIDeepSeek && cfg.API != APIOllama {
 		return fmt.Errorf("providers: unsupported api type %q", cfg.API)
 	}
 	authType := strings.TrimSpace(string(cfg.Auth.Type))
-	if authType != "" && cfg.Auth.Type != AuthAPIKey {
-		return fmt.Errorf("providers: unsupported auth type %q (only api_key is supported now)", cfg.Auth.Type)
+	if authType != "" && cfg.Auth.Type != AuthAPIKey && cfg.Auth.Type != AuthNone {
+		return fmt.Errorf("providers: unsupported auth type %q (only api_key and none are supported now)", cfg.Auth.Type)
 	}
 	if cfg.Auth.Type == "" {
-		cfg.Auth.Type = AuthAPIKey
+		if cfg.API == APIOllama {
+			cfg.Auth.Type = AuthNone
+		} else {
+			cfg.Auth.Type = AuthAPIKey
+		}
 	}
 	cfg.Alias = alias
 	ApplyModelCatalog(&cfg)
@@ -75,6 +79,8 @@ func (f *Factory) NewByAlias(alias string) (model.LLM, error) {
 		return newAnthropic(cfg, token), nil
 	case APIGemini:
 		return newGemini(cfg, token), nil
+	case APIOllama:
+		return newOllama(cfg, token), nil
 	default:
 		return nil, fmt.Errorf("providers: unsupported api type %q", cfg.API)
 	}
@@ -115,6 +121,9 @@ func (f *Factory) ConfigForAlias(alias string) (Config, bool) {
 }
 
 func resolveToken(cfg AuthConfig) (string, error) {
+	if cfg.Type == AuthNone {
+		return strings.TrimSpace(cfg.Token), nil
+	}
 	token := strings.TrimSpace(cfg.Token)
 	if token == "" {
 		return "", fmt.Errorf("providers: auth token is empty")
