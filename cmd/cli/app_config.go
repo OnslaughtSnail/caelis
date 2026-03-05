@@ -667,10 +667,9 @@ func normalizeProviderAuthRecord(provider string, baseURL string, auth *authReco
 	auth.HeaderKey = strings.TrimSpace(auth.HeaderKey)
 	auth.Prefix = strings.TrimSpace(auth.Prefix)
 
-	// Strategy: prefer credential_ref (credential store) and keep plaintext
-	// token as compatibility fallback only when credential_ref is absent.
+	// Strategy: prefer credential_ref (credential store). Keep plaintext token
+	// for backward compatibility fallback when credential store is missing.
 	if auth.CredentialRef != "" {
-		auth.Token = ""
 		return
 	}
 	if auth.Token != "" {

@@ -149,7 +149,7 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	}
 }
 
-func TestNormalizeProviderAuthRecord_PrefersCredentialRef(t *testing.T) {
+func TestNormalizeProviderAuthRecord_PrefersCredentialRefAndKeepsLegacyTokenFallback(t *testing.T) {
 	auth := authRecord{
 		Type:          string(modelproviders.AuthAPIKey),
 		Token:         "plaintext-token",
@@ -159,8 +159,8 @@ func TestNormalizeProviderAuthRecord_PrefersCredentialRef(t *testing.T) {
 	if auth.CredentialRef != "openai_api_openai_com" {
 		t.Fatalf("expected credential_ref kept, got %q", auth.CredentialRef)
 	}
-	if auth.Token != "" {
-		t.Fatalf("expected plaintext token cleared when credential_ref exists, got %q", auth.Token)
+	if auth.Token != "plaintext-token" {
+		t.Fatalf("expected plaintext token kept as fallback when credential_ref exists, got %q", auth.Token)
 	}
 }
 
