@@ -78,7 +78,7 @@ func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 		if l.maxOutputTok > 0 {
 			cfg.MaxOutputTokens = int32(l.maxOutputTok)
 		}
-		if thinkingCfg := toGeminiThinkingConfig(req.Reasoning); thinkingCfg != nil {
+		if thinkingCfg := toGeminiThinkingConfig(l.name, req.Reasoning); thinkingCfg != nil {
 			cfg.ThinkingConfig = thinkingCfg
 		}
 
@@ -294,18 +294,87 @@ func looksLikeAPIVersion(v string) bool {
 	return false
 }
 
-func toGeminiThinkingConfig(reasoning model.ReasoningConfig) *genai.ThinkingConfig {
+func toGeminiThinkingConfig(modelName string, reasoning model.ReasoningConfig) *genai.ThinkingConfig {
+	effort := normalizeGeminiReasoningLevel(reasoning.Effort)
+	disabled := reasoning.Enabled != nil && !*reasoning.Enabled
+	if effort == "none" {
+		disabled = true
+	}
+	explicit := reasoning.Enabled != nil || effort != ""
+	if !explicit {
+		return nil
+	}
+
+	// Gemini 2.x and earlier use token budget; Gemini 3+ uses thinking level.
+	if geminiUsesThinkingBudget(modelName) {
+		budget := geminiThinkingBudgetForReasoning(effort, reasoning.BudgetTokens)
+		if disabled {
+			budget = 0
+		}
+		value := int32(budget)
+		return &genai.ThinkingConfig{
+			IncludeThoughts: !disabled,
+			ThinkingBudget:  &value,
+		}
+	}
+
 	level := resolveGeminiThinkingLevel(reasoning)
 	if level == genai.ThinkingLevelUnspecified {
 		return nil
 	}
-	cfg := &genai.ThinkingConfig{ThinkingLevel: level}
-	disabled := reasoning.Enabled != nil && !*reasoning.Enabled
-	if normalizeGeminiReasoningLevel(reasoning.Effort) == "none" {
-		disabled = true
+	return &genai.ThinkingConfig{
+		IncludeThoughts: !disabled,
+		ThinkingLevel:   level,
 	}
-	cfg.IncludeThoughts = !disabled
-	return cfg
+}
+
+func geminiUsesThinkingBudget(modelName string) bool {
+	major, ok := geminiMajorVersion(modelName)
+	return ok && major < 3
+}
+
+func geminiMajorVersion(modelName string) (int, bool) {
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	if name == "" {
+		return 0, false
+	}
+	if slash := strings.LastIndex(name, "/"); slash >= 0 {
+		name = name[slash+1:]
+	}
+	pos := strings.Index(name, "gemini-")
+	if pos < 0 {
+		return 0, false
+	}
+	tail := name[pos+len("gemini-"):]
+	end := 0
+	for end < len(tail) && tail[end] >= '0' && tail[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(tail[:end])
+	if err != nil {
+		return 0, false
+	}
+	return major, true
+}
+
+func geminiThinkingBudgetForReasoning(level string, explicitBudget int) int {
+	switch level {
+	case "minimal":
+		return 512
+	case "low":
+		return 1024
+	case "medium":
+		return 4096
+	case "high", "xhigh":
+		return 8192
+	}
+	if explicitBudget > 0 {
+		return explicitBudget
+	}
+	return 4096
 }
 
 func resolveGeminiThinkingLevel(reasoning model.ReasoningConfig) genai.ThinkingLevel {

@@ -13,6 +13,7 @@ import (
 const (
 	deepSeekAPIKeyEnv = "DEEPSEEK_API_KEY"
 	geminiAPIKeyEnv   = "GEMINI_API_KEY"
+	gemminAPIKeyEnv   = "GEMMIN_API_KEY" // legacy typo compatibility
 	geminiEvalModel   = "gemini-3.1-flash-lite-preview"
 )
 
@@ -64,7 +65,7 @@ func defaultFactory() (*modelproviders.Factory, error) {
 			},
 		)
 	}
-	geminiToken := strings.TrimSpace(os.Getenv(geminiAPIKeyEnv))
+	geminiToken := geminiTokenFromEnv()
 	if geminiToken != "" {
 		configs = append(configs,
 			modelproviders.Config{
@@ -94,7 +95,7 @@ func defaultFactory() (*modelproviders.Factory, error) {
 		)
 	}
 	if len(configs) == 0 {
-		return nil, fmt.Errorf("eval providers: no model credentials configured; set %s and/or %s", deepSeekAPIKeyEnv, geminiAPIKeyEnv)
+		return nil, fmt.Errorf("eval providers: no model credentials configured; set %s and/or %s (legacy %s is also accepted)", deepSeekAPIKeyEnv, geminiAPIKeyEnv, gemminAPIKeyEnv)
 	}
 	for _, cfg := range configs {
 		if err := factory.Register(cfg); err != nil {
@@ -128,9 +129,16 @@ func DefaultModelAliases() []string {
 	if strings.TrimSpace(os.Getenv(deepSeekAPIKeyEnv)) != "" {
 		values = append(values, "deepseek-chat")
 	}
-	if strings.TrimSpace(os.Getenv(geminiAPIKeyEnv)) != "" {
+	if geminiTokenFromEnv() != "" {
 		values = append(values, geminiEvalModel)
 	}
 	sort.Strings(values)
 	return values
+}
+
+func geminiTokenFromEnv() string {
+	if token := strings.TrimSpace(os.Getenv(geminiAPIKeyEnv)); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv(gemminAPIKeyEnv))
 }

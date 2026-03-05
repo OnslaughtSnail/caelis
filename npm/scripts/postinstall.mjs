@@ -95,11 +95,19 @@ async function download(url, toFile, redirects = 0) {
 
 async function extractArchive(archivePath, tempDir, target) {
 	if (target.archiveExt === 'zip') {
-		const extract = (await import('extract-zip')).default;
+		const extractMod = await import('extract-zip');
+		const extract = extractMod.default || extractMod;
+		if (typeof extract !== 'function') {
+			throw new Error('extract-zip module does not export a callable extractor');
+		}
 		await extract(archivePath, { dir: tempDir });
 		return;
 	}
-	const tar = (await import('tar')).default;
+	const tarMod = await import('tar');
+	const tar = tarMod.default || tarMod;
+	if (!tar || typeof tar.x !== 'function') {
+		throw new Error('tar module does not export x() extractor');
+	}
 	await tar.x({
 		file: archivePath,
 		cwd: tempDir,

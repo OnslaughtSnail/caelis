@@ -434,6 +434,107 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 	}
 }
 
+func TestGeminiRequest_Pre3UsesThinkingBudget(t *testing.T) {
+	var gotThinkingLevel string
+	var gotThinkingBudget float64
+	var gotIncludeThoughts bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/gemini-2.5-flash:generateContent") {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		if cfg, ok := payload["generationConfig"].(map[string]any); ok {
+			if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
+				gotThinkingLevel, _ = thinking["thinkingLevel"].(string)
+				gotThinkingBudget, _ = thinking["thinkingBudget"].(float64)
+				gotIncludeThoughts, _ = thinking["includeThoughts"].(bool)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider: "gemini",
+		Model:    "gemini-2.5-flash",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:    false,
+		Reasoning: model.ReasoningConfig{Effort: "high"},
+	}) {
+		if err != nil {
+			t.Fatalf("expected no generate error, got %v", err)
+		}
+	}
+
+	if gotThinkingLevel != "" {
+		t.Fatalf("expected thinkingLevel omitted for pre-3 model, got %q", gotThinkingLevel)
+	}
+	if gotThinkingBudget != 8192 {
+		t.Fatalf("expected thinkingBudget=8192 for high effort, got %v", gotThinkingBudget)
+	}
+	if !gotIncludeThoughts {
+		t.Fatalf("expected includeThoughts=true for enabled reasoning")
+	}
+}
+
+func TestGeminiRequest_Pre3DisableReasoningUsesZeroBudget(t *testing.T) {
+	var gotThinkingBudget float64
+	var gotIncludeThoughts bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		if cfg, ok := payload["generationConfig"].(map[string]any); ok {
+			if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
+				gotThinkingBudget, _ = thinking["thinkingBudget"].(float64)
+				gotIncludeThoughts, _ = thinking["includeThoughts"].(bool)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider: "gemini",
+		Model:    "gemini-2.5-pro",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	disabled := false
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+		Reasoning: model.ReasoningConfig{
+			Enabled: &disabled,
+			Effort:  "none",
+		},
+	}) {
+		if err != nil {
+			t.Fatalf("expected no generate error, got %v", err)
+		}
+	}
+
+	if gotThinkingBudget != 0 {
+		t.Fatalf("expected thinkingBudget=0 when reasoning disabled, got %v", gotThinkingBudget)
+	}
+	if gotIncludeThoughts {
+		t.Fatalf("expected includeThoughts=false when reasoning disabled")
+	}
+}
+
 func TestGeminiRequest_BaseURLWithVersionPath(t *testing.T) {
 	var gotPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

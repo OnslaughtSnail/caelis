@@ -182,6 +182,7 @@ func (c *cliConsole) loopTUITea() error {
 	model := tuiapp.NewModel(tuiapp.Config{
 		Version:         strings.TrimSpace(c.version),
 		Workspace:       c.workspace.CWD,
+		ModelAlias:      c.modelAlias,
 		ShowWelcomeCard: true,
 		Commands:        commandNames(c.commands),
 		Wizards:         buildWizardDefs(),

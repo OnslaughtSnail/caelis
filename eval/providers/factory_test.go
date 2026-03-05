@@ -8,6 +8,7 @@ import (
 func TestListModelsContainsDefaultAliases(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-token")
 	t.Setenv("GEMINI_API_KEY", "test-gemini-token")
+	t.Setenv("GEMMIN_API_KEY", "")
 	models := ListModels()
 	if len(models) == 0 {
 		t.Fatalf("expected non-empty model aliases")
@@ -19,6 +20,7 @@ func TestListModelsContainsDefaultAliases(t *testing.T) {
 func TestDefaultFactoryRequiresAtLeastOneToken(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "")
 	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GEMMIN_API_KEY", "")
 	_, err := defaultFactory()
 	if err == nil {
 		t.Fatal("expected missing token error")
@@ -31,11 +33,25 @@ func TestDefaultFactoryRequiresAtLeastOneToken(t *testing.T) {
 func TestDefaultFactory_RegistersOnlyConfiguredModels(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-deepseek-token")
 	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GEMMIN_API_KEY", "")
 	models := ListModels()
 	assertContains(t, models, "deepseek-chat")
 	for _, one := range models {
 		if strings.HasPrefix(one, "gemini") {
 			t.Fatalf("did not expect gemini aliases when GEMINI_API_KEY is empty, got %v", models)
+		}
+	}
+}
+
+func TestDefaultFactory_UsesLegacyGemminEnv(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GEMMIN_API_KEY", "test-gemini-token")
+	models := ListModels()
+	assertContains(t, models, "gemini-3.1-flash-lite-preview")
+	for _, one := range models {
+		if strings.HasPrefix(one, "deepseek") {
+			t.Fatalf("did not expect deepseek aliases when DEEPSEEK_API_KEY is empty, got %v", models)
 		}
 	}
 }

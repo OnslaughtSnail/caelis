@@ -1,6 +1,7 @@
 package tuiapp
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -76,6 +77,7 @@ type Diagnostics struct {
 type Config struct {
 	Version             string
 	Workspace           string
+	ModelAlias          string
 	ShowWelcomeCard     bool
 	InitialLogs         []string
 	Commands            []string
@@ -410,13 +412,58 @@ func (m *Model) appendWelcomeCard() {
 	if workspace == "" {
 		workspace = "."
 	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		workspace = strings.Replace(workspace, home, "~", 1)
+	}
+	modelAlias := strings.TrimSpace(m.cfg.ModelAlias)
+	if modelAlias == "" {
+		modelAlias = "loading"
+	}
+
+	// Title: >_ CAELIS (v0.0.8)
+	prefix := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(m.theme.Accent).
+		Render(">_")
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(m.theme.PanelTitle).
+		Render("CAELIS")
+	version := lipgloss.NewStyle().
+		Foreground(m.theme.TextSecondary).
+		Render("(" + versionLabel + ")")
+
+	// Aligned key-value rows
+	labelStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(m.theme.Info).
+		Width(10)
+	valueStyle := lipgloss.NewStyle().
+		Foreground(m.theme.TextPrimary)
+	tipValueStyle := lipgloss.NewStyle().
+		Foreground(m.theme.TextSecondary)
+
+	titleLine := prefix + " " + title + " " + version
+	modelLine := labelStyle.Render("model:") + " " + valueStyle.Render(modelAlias)
+	workspaceLine := labelStyle.Render("workspace:") + " " + valueStyle.Render(workspace)
+	tipLine := labelStyle.Render("tip:") + " " + tipValueStyle.Render("type / for command list")
+
 	body := strings.Join([]string{
-		lipgloss.NewStyle().Bold(true).Foreground(m.theme.PanelTitle).Render("CAELIS " + versionLabel),
-		"workspace: " + lipgloss.NewStyle().Bold(true).Foreground(m.theme.TextPrimary).Render(workspace),
-		"tip: type / for command list",
+		titleLine,
+		"",
+		modelLine,
+		workspaceLine,
+		tipLine,
 	}, "\n")
-	card := lipgloss.NewStyle().MarginBottom(1).Render(body)
-	lines := strings.Split(card, "\n")
+
+	frame := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.PanelBorder).
+		Foreground(m.theme.TextPrimary).
+		Padding(0, 2).
+		Margin(1, 0, 1, 1).
+		Render(body)
+	lines := strings.Split(frame, "\n")
 	m.historyLines = append(m.historyLines, lines...)
 	if len(lines) > 0 {
 		m.hasCommittedLine = true
