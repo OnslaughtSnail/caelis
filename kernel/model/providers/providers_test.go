@@ -889,7 +889,7 @@ func TestGeminiResponseToMessage_ExtractsReasoningText(t *testing.T) {
 	}
 }
 
-func TestGeminiResponseToMessage_ExtractsReasoningTextFromThoughtSignature(t *testing.T) {
+func TestGeminiResponseToMessage_DoesNotClassifyAnswerTextAsReasoningByThoughtSignature(t *testing.T) {
 	msg, _, err := geminiResponseToMessage(&genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{
 			{
@@ -905,10 +905,10 @@ func TestGeminiResponseToMessage_ExtractsReasoningTextFromThoughtSignature(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Text != "answer" {
+	if msg.Text != "thought-signature\nanswer" {
 		t.Fatalf("unexpected answer text %q", msg.Text)
 	}
-	if msg.Reasoning != "thought-signature" {
+	if msg.Reasoning != "" {
 		t.Fatalf("unexpected reasoning text %q", msg.Reasoning)
 	}
 }

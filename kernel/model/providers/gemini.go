@@ -377,11 +377,7 @@ func geminiResponseToMessage(out *genai.GenerateContentResponse) (model.Message,
 			continue
 		}
 		if strings.TrimSpace(part.Text) != "" {
-			isThought := part.Thought
-			if !isThought && len(part.ThoughtSignature) > 0 && part.FunctionCall == nil && part.FunctionResponse == nil {
-				isThought = true
-			}
-			if isThought {
+			if part.Thought {
 				reasoningParts = append(reasoningParts, part.Text)
 			} else {
 				textParts = append(textParts, part.Text)
