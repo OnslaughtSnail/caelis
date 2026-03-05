@@ -1,4 +1,5 @@
-VERSION ?= $(shell cat VERSION 2>/dev/null || echo dev)
+GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null || true)
+VERSION ?= $(if $(strip $(GIT_TAG)),$(strip $(GIT_TAG)),$(shell cat VERSION 2>/dev/null || echo dev))
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w \
@@ -31,7 +32,7 @@ eval-nightly:
 	go run ./eval/cmd -suite nightly
 
 eval-real-matrix:
-	go run ./eval/cmd -suite light -models "deepseek-chat,gemini-2.5-flash" -stream-modes both -thinking-modes both -thinking-budget 1024
+	go run ./eval/cmd -suite light -models "deepseek-chat,gemini-3.1-flash-lite-preview" -stream-modes both -thinking-modes both -thinking-budget 1024
 
 release-dry-run:
 	goreleaser release --clean --snapshot
