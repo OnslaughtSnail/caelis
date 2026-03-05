@@ -184,6 +184,7 @@ func (c *cliConsole) loopTUITea() error {
 		Workspace:       c.workspace.CWD,
 		ShowWelcomeCard: true,
 		Commands:        commandNames(c.commands),
+		Wizards:         buildWizardDefs(),
 		ExecuteLine: func(line string) tuievents.TaskResultMsg {
 			if strings.HasPrefix(strings.TrimSpace(line), "/") {
 				exitNow, err := c.handleSlash(strings.TrimSpace(line))
@@ -299,6 +300,9 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 	if modelLabel == "" {
 		modelLabel = "no model"
 	}
+	if level := c.statusReasoningLevelLabel(); level != "" {
+		modelLabel = modelLabel + " [" + level + "]"
+	}
 	pt := c.lastPromptTokens
 	if pt < 0 {
 		pt = 0
@@ -322,6 +326,20 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 		contextStr = "0"
 	}
 	return modelLabel, contextStr
+}
+
+func (c *cliConsole) statusReasoningLevelLabel() string {
+	if c == nil {
+		return ""
+	}
+	if normalizeReasoningSelection(c.thinkingMode) == "off" {
+		return ""
+	}
+	level := normalizeReasoningLevel(c.reasoningEffort)
+	if level == "" || level == "none" {
+		return ""
+	}
+	return level
 }
 
 func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp.ResumeCandidate, error) {
@@ -390,6 +408,15 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 			return c.completeConnectModelCandidatesRemote(provider, baseURL, timeoutSeconds, apiKey, query, limit), nil
 		}
 		return c.completeConnectModelCandidates(provider, query, limit), nil
+	case strings.HasPrefix(cmd, "connect-context:"):
+		payload := strings.TrimPrefix(rawCmd, "connect-context:")
+		return c.completeConnectContextCandidates(payload, query, limit), nil
+	case strings.HasPrefix(cmd, "connect-maxout:"):
+		payload := strings.TrimPrefix(rawCmd, "connect-maxout:")
+		return c.completeConnectMaxOutputCandidates(payload, query, limit), nil
+	case strings.HasPrefix(cmd, "connect-reasoning-levels:"):
+		payload := strings.TrimPrefix(rawCmd, "connect-reasoning-levels:")
+		return c.completeConnectReasoningLevelsCandidates(payload, query, limit), nil
 	case strings.HasPrefix(cmd, "connect-baseurl:"):
 		provider := strings.TrimPrefix(strings.ToLower(rawCmd), "connect-baseurl:")
 		return c.completeConnectBaseURLCandidates(provider, query, limit), nil
@@ -451,10 +478,44 @@ func parseConnectModelPayload(payload string) (provider, baseURL string, timeout
 	}
 	decodedBaseURL = strings.TrimSpace(decodedBaseURL)
 	decodedAPIKey = strings.TrimSpace(decodedAPIKey)
-	if decodedBaseURL == "" || decodedAPIKey == "" {
+	if decodedBaseURL == "" {
 		return provider, "", 0, "", false
 	}
 	return provider, decodedBaseURL, timeout, decodedAPIKey, true
+}
+
+func parseConnectSettingsPayload(payload string) (provider, baseURL string, timeoutSeconds int, apiKey, model string, ok bool) {
+	parts := strings.Split(payload, "|")
+	provider = strings.ToLower(strings.TrimSpace(parts[0]))
+	if provider == "" {
+		return "", "", 0, "", "", false
+	}
+	if len(parts) < 5 {
+		return provider, "", 0, "", "", false
+	}
+	decodedBaseURL, err := url.QueryUnescape(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return provider, "", 0, "", "", false
+	}
+	decodedAPIKey, err := url.QueryUnescape(strings.TrimSpace(parts[3]))
+	if err != nil {
+		return provider, "", 0, "", "", false
+	}
+	decodedModel, err := url.QueryUnescape(strings.TrimSpace(parts[4]))
+	if err != nil {
+		return provider, "", 0, "", "", false
+	}
+	timeout, err := strconv.Atoi(strings.TrimSpace(parts[2]))
+	if err != nil || timeout < 0 {
+		return provider, "", 0, "", "", false
+	}
+	decodedBaseURL = strings.TrimSpace(decodedBaseURL)
+	decodedAPIKey = strings.TrimSpace(decodedAPIKey)
+	decodedModel = strings.TrimSpace(decodedModel)
+	if decodedBaseURL == "" || decodedModel == "" {
+		return provider, "", 0, "", "", false
+	}
+	return provider, decodedBaseURL, timeout, decodedAPIKey, decodedModel, true
 }
 
 func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
@@ -665,7 +726,7 @@ func (c *cliConsole) completeConnectCandidates(query string, limit int) []tuiapp
 		if q != "" && !strings.Contains(strings.ToLower(label), q) {
 			continue
 		}
-		out = append(out, tuiapp.SlashArgCandidate{Value: label, Display: label})
+		out = append(out, tuiapp.SlashArgCandidate{Value: label, Display: label, NoAuth: tpl.noAuthRequired})
 		if len(out) >= limit {
 			break
 		}
@@ -747,26 +808,37 @@ func (c *cliConsole) completeConnectModelCandidatesRemote(provider, baseURL stri
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	baseURL = strings.TrimSpace(baseURL)
 	apiKey = strings.TrimSpace(apiKey)
-	if provider == "" || baseURL == "" || apiKey == "" || timeoutSeconds <= 0 {
+	if provider == "" || baseURL == "" || timeoutSeconds <= 0 {
+		return nil
+	}
+	tpl, ok := findProviderTemplate(provider)
+	if !ok {
+		return nil
+	}
+	// No-auth providers (e.g. Ollama) can discover without an API key.
+	if apiKey == "" && !tpl.noAuthRequired {
 		return nil
 	}
 	cacheKey := buildConnectModelCacheKey(provider, baseURL, timeoutSeconds, apiKey)
 	if cached, ok := c.getConnectModelCache(cacheKey); ok {
 		return filterConnectModelCandidates(cached, query, limit)
 	}
-	tpl, ok := findProviderTemplate(provider)
-	if !ok {
-		return nil
+	authCfg := modelproviders.AuthConfig{
+		Type:  modelproviders.AuthAPIKey,
+		Token: apiKey,
+	}
+	if tpl.noAuthRequired {
+		authCfg = modelproviders.AuthConfig{
+			Type:  modelproviders.AuthNone,
+			Token: apiKey,
+		}
 	}
 	cfg := modelproviders.Config{
 		Provider: strings.TrimSpace(tpl.provider),
 		API:      tpl.api,
 		BaseURL:  baseURL,
 		Timeout:  time.Duration(timeoutSeconds) * time.Second,
-		Auth: modelproviders.AuthConfig{
-			Type:  modelproviders.AuthAPIKey,
-			Token: apiKey,
-		},
+		Auth:     authCfg,
 	}
 	ctx := c.baseCtx
 	if ctx == nil {
@@ -793,6 +865,107 @@ func (c *cliConsole) completeConnectModelCandidatesRemote(provider, baseURL stri
 	}
 	c.setConnectModelCache(cacheKey, names)
 	return filterConnectModelCandidates(names, query, limit)
+}
+
+func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens int, maxOutputTokens int, reasoningLevels []string) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.TrimSpace(model)
+
+	contextWindowTokens = 32000
+	maxOutputTokens = 4096
+	if tpl, ok := findProviderTemplate(provider); ok {
+		if tpl.defaultContextToken > 0 {
+			contextWindowTokens = tpl.defaultContextToken
+		}
+		maxOutputTokens = defaultMaxOutputForTemplate(tpl)
+	}
+
+	if caps, ok := modelproviders.LookupDynamicModelCapabilities(provider, model); ok {
+		if caps.ContextWindowTokens > 0 {
+			contextWindowTokens = caps.ContextWindowTokens
+		}
+		if caps.DefaultMaxOutputTokens > 0 {
+			maxOutputTokens = caps.DefaultMaxOutputTokens
+		} else if caps.MaxOutputTokens > 0 {
+			maxOutputTokens = caps.MaxOutputTokens
+		}
+		reasoningLevels = normalizeReasoningLevels(caps.ReasoningEfforts)
+		if len(reasoningLevels) == 0 && !caps.SupportsReasoning {
+			reasoningLevels = []string{"none"}
+		}
+	}
+	return contextWindowTokens, maxOutputTokens, reasoningLevels
+}
+
+func (c *cliConsole) completeConnectContextCandidates(payload string, query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	provider, _, _, _, model, ok := parseConnectSettingsPayload(payload)
+	if !ok {
+		return nil
+	}
+	ctxTokens, _, _ := connectWizardSuggestedSettings(provider, model)
+	value := strconv.Itoa(ctxTokens)
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q != "" && !strings.Contains(strings.ToLower(value), q) {
+		return nil
+	}
+	return []tuiapp.SlashArgCandidate{{Value: value, Display: value}}
+}
+
+func (c *cliConsole) completeConnectMaxOutputCandidates(payload string, query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	provider, _, _, _, model, ok := parseConnectSettingsPayload(payload)
+	if !ok {
+		return nil
+	}
+	_, maxTokens, _ := connectWizardSuggestedSettings(provider, model)
+	value := strconv.Itoa(maxTokens)
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q != "" && !strings.Contains(strings.ToLower(value), q) {
+		return nil
+	}
+	return []tuiapp.SlashArgCandidate{{Value: value, Display: value}}
+}
+
+func (c *cliConsole) completeConnectReasoningLevelsCandidates(payload string, query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	provider, _, _, _, model, ok := parseConnectSettingsPayload(payload)
+	if !ok {
+		return nil
+	}
+	_, _, levels := connectWizardSuggestedSettings(provider, model)
+	candidates := make([]tuiapp.SlashArgCandidate, 0, 2)
+	if len(levels) == 0 {
+		candidates = append(candidates, tuiapp.SlashArgCandidate{
+			Value:   "-",
+			Display: "(empty, unknown support)",
+		})
+	} else {
+		csv := strings.Join(levels, ",")
+		candidates = append(candidates, tuiapp.SlashArgCandidate{
+			Value:   csv,
+			Display: csv,
+		})
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]tuiapp.SlashArgCandidate, 0, minInt(limit, len(candidates)))
+	for _, one := range candidates {
+		text := strings.ToLower(strings.TrimSpace(one.Display + " " + one.Value))
+		if q != "" && !strings.Contains(text, q) {
+			continue
+		}
+		out = append(out, one)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func buildConnectModelCacheKey(provider, baseURL string, timeoutSeconds int, apiKey string) string {
@@ -933,4 +1106,151 @@ func (c *cliConsole) completeConnectTimeoutCandidates(query string, limit int) [
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Wizard definitions — declarative multi-step slash command flows
+// ---------------------------------------------------------------------------
+
+func buildWizardDefs() []tuiapp.WizardDef {
+	return []tuiapp.WizardDef{
+		buildConnectWizard(),
+		buildModelWizard(),
+	}
+}
+
+func buildConnectWizard() tuiapp.WizardDef {
+	return tuiapp.WizardDef{
+		Command:     "connect",
+		DisplayLine: "/connect",
+		Steps: []tuiapp.WizardStepDef{
+			{
+				Key:       "provider",
+				HintLabel: "/connect provider",
+				CompletionCommand: func(_ map[string]string) string {
+					return "connect"
+				},
+			},
+			{
+				Key:       "baseurl",
+				HintLabel: "/connect base_url",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-baseurl:" + s["provider"]
+				},
+			},
+			{
+				Key:       "timeout",
+				HintLabel: "/connect timeout",
+				Validate:  tuiapp.ValidateInt,
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-timeout:" + s["provider"]
+				},
+			},
+			{
+				Key:          "apikey",
+				HintLabel:    "/connect api_key",
+				HideInput:    true,
+				FreeformHint: "/connect api_key: type and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-apikey:" + s["provider"]
+				},
+				ShouldSkip: func(s map[string]string) bool {
+					return s["_noauth"] == "true"
+				},
+			},
+			{
+				Key:          "model",
+				HintLabel:    "/connect model",
+				FreeformHint: "/connect model: type model name and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-model:" + buildConnectWizardPayload(s)
+				},
+			},
+			{
+				Key:          "context_window_tokens",
+				HintLabel:    "/connect context_window_tokens",
+				Validate:     tuiapp.ValidateInt,
+				FreeformHint: "/connect context_window_tokens: type integer and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-context:" + buildConnectWizardPayload(s)
+				},
+			},
+			{
+				Key:          "max_output_tokens",
+				HintLabel:    "/connect max_output_tokens",
+				Validate:     tuiapp.ValidateInt,
+				FreeformHint: "/connect max_output_tokens: type integer and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-maxout:" + buildConnectWizardPayload(s)
+				},
+			},
+			{
+				Key:          "reasoning_levels",
+				HintLabel:    "/connect reasoning_levels(csv)",
+				FreeformHint: "/connect reasoning_levels(csv): e.g. minimal,low (use - for empty)",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-reasoning-levels:" + buildConnectWizardPayload(s)
+				},
+			},
+		},
+		OnStepConfirm: func(stepKey, value string, candidate *tuiapp.SlashArgCandidate, state map[string]string) {
+			if stepKey == "provider" {
+				state["provider"] = strings.ToLower(strings.TrimSpace(value))
+			}
+			if stepKey == "provider" && candidate != nil && candidate.NoAuth {
+				state["_noauth"] = "true"
+			}
+		},
+		BuildExecLine: func(s map[string]string) string {
+			apiKey := strings.TrimSpace(s["apikey"])
+			if apiKey == "" {
+				apiKey = "-"
+			}
+			reasoningLevels := strings.TrimSpace(s["reasoning_levels"])
+			if reasoningLevels == "" {
+				reasoningLevels = "-"
+			}
+			return "/connect " + s["provider"] + " " + s["model"] +
+				" " + s["baseurl"] + " " + s["timeout"] +
+				" " + apiKey +
+				" " + s["context_window_tokens"] +
+				" " + s["max_output_tokens"] +
+				" " + reasoningLevels
+		},
+	}
+}
+
+func buildConnectWizardPayload(state map[string]string) string {
+	apiKey := strings.TrimSpace(state["apikey"])
+	return strings.TrimSpace(state["provider"]) +
+		"|" + url.QueryEscape(state["baseurl"]) +
+		"|" + strings.TrimSpace(state["timeout"]) +
+		"|" + url.QueryEscape(apiKey) +
+		"|" + url.QueryEscape(state["model"])
+}
+
+func buildModelWizard() tuiapp.WizardDef {
+	return tuiapp.WizardDef{
+		Command: "model",
+		Steps: []tuiapp.WizardStepDef{
+			{
+				Key:       "alias",
+				HintLabel: "/model",
+				CompletionCommand: func(_ map[string]string) string {
+					return "model"
+				},
+			},
+			{
+				Key:          "reasoning",
+				HintLabel:    "/model reasoning",
+				FreeformHint: "/model reasoning: type option and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "model-reasoning:" + url.QueryEscape(strings.ToLower(strings.TrimSpace(s["alias"])))
+				},
+			},
+		},
+		BuildExecLine: func(s map[string]string) string {
+			return "/model " + s["alias"] + " " + s["reasoning"]
+		},
+	}
 }

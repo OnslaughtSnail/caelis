@@ -1,0 +1,44 @@
+{
+  "name": "@onslaughtsnail/caelis",
+  "version": "0.0.0",
+  "description": "caelis CLI distributed via npm",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OnslaughtSnail/caelis.git"
+  },
+  "homepage": "https://github.com/OnslaughtSnail/caelis",
+  "bugs": {
+    "url": "https://github.com/OnslaughtSnail/caelis/issues"
+  },
+  "bin": {
+    "caelis": "bin/caelis.js"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "runtime",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "scripts": {
+    "postinstall": "node ./scripts/postinstall.mjs",
+    "prepare": "node ./scripts/prepare.mjs"
+  },
+  "dependencies": {
+    "extract-zip": "^2.0.1",
+    "tar": "^7.4.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

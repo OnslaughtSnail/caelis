@@ -11,6 +11,7 @@ const (
 	APIGemini           APIType = "gemini"
 	APIAnthropic        APIType = "anthropic"
 	APIDeepSeek         APIType = "deepseek"
+	APIOllama           APIType = "ollama"
 )
 
 // AuthType defines model provider authentication strategy.
@@ -20,6 +21,7 @@ const (
 	AuthAPIKey      AuthType = "api_key"
 	AuthBearerToken AuthType = "bearer_token"
 	AuthOAuthToken  AuthType = "oauth_token"
+	AuthNone        AuthType = "none"
 )
 
 // AuthConfig is provider-agnostic auth configuration.
@@ -43,6 +45,7 @@ type Config struct {
 	Timeout             time.Duration
 	MaxOutputTok        int
 	ContextWindowTokens int
+	ReasoningLevels     []string
 	ThinkingMode        string
 	ThinkingBudget      int
 	ReasoningEffort     string

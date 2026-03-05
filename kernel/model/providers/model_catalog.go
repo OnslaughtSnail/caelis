@@ -19,6 +19,10 @@ type ModelCapabilities struct {
 	SupportsToolCalls bool
 	// SupportsReasoning indicates whether the model supports thinking/reasoning mode.
 	SupportsReasoning bool
+	// ReasoningEfforts lists supported reasoning effort levels (for example:
+	// low|medium|high|xhigh). Empty means the model uses toggle/budget-only
+	// reasoning or the effort set is unknown.
+	ReasoningEfforts []string
 	// SupportsJSONOutput indicates whether the model supports structured JSON output.
 	SupportsJSONOutput bool
 }
@@ -112,6 +116,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 32768,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -125,6 +130,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 16384,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         false,
 		},
@@ -138,6 +144,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 32768,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high", "xhigh"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -151,6 +158,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 16384,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high", "xhigh"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         false,
 		},
@@ -164,6 +172,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 16384,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high", "xhigh"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -217,6 +226,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 16384,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -230,6 +240,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 16384,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -269,6 +280,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 16384,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -283,6 +295,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 8192,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -296,6 +309,7 @@ var builtinCatalog = []catalogEntry{
 			DefaultMaxOutputTokens: 8192,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningEfforts:       []string{"low", "medium", "high"},
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
 		},
@@ -392,7 +406,9 @@ func lookupBuiltin(provider, modelName string) (ModelCapabilities, bool) {
 	if best == nil {
 		return DefaultModelCapabilities(), false
 	}
-	return best.caps, true
+	out := best.caps
+	out.ReasoningEfforts = normalizeReasoningEffortList(out.ReasoningEfforts)
+	return out, true
 }
 
 // ApplyModelCatalog enriches the given Config with capabilities from the
@@ -421,4 +437,107 @@ func ApplyModelCatalog(cfg *Config) {
 	if cfg.MaxOutputTok <= 0 {
 		cfg.MaxOutputTok = caps.DefaultMaxOutputTokens
 	}
+}
+
+// NormalizeReasoningEffort canonicalizes one reasoning effort value.
+// Known aliases:
+//
+//	very_high, very-high, veryhigh -> xhigh
+func NormalizeReasoningEffort(input string) string {
+	value := strings.ToLower(strings.TrimSpace(input))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	switch value {
+	case "":
+		return ""
+	case "very_high", "veryhigh":
+		return "xhigh"
+	default:
+		return value
+	}
+}
+
+// SupportedReasoningEfforts returns supported effort levels for the model.
+// Empty means no effort levels are supported (toggle/budget-only) or unknown.
+func SupportedReasoningEfforts(provider, modelName string) []string {
+	caps, found := LookupModelCapabilities(provider, modelName)
+	if found {
+		if !caps.SupportsReasoning {
+			return nil
+		}
+		if normalized := normalizeReasoningEffortList(caps.ReasoningEfforts); len(normalized) > 0 {
+			return normalized
+		}
+	}
+	return inferReasoningEfforts(provider, modelName)
+}
+
+// SupportsReasoningEffort reports whether one model supports a specific effort.
+func SupportsReasoningEffort(provider, modelName, effort string) bool {
+	normalized := NormalizeReasoningEffort(effort)
+	if normalized == "" {
+		return false
+	}
+	levels := SupportedReasoningEfforts(provider, modelName)
+	if len(levels) == 0 {
+		return false
+	}
+	for _, one := range levels {
+		if one == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeReasoningEffortList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, one := range in {
+		normalized := NormalizeReasoningEffort(one)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
+}
+
+func inferReasoningEfforts(provider, modelName string) []string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if provider == "" && modelName == "" {
+		return nil
+	}
+
+	// DeepSeek/Xiaomi reasoning is modeled as thinking on/off toggles.
+	if strings.Contains(provider, "deepseek") || strings.HasPrefix(modelName, "deepseek-") {
+		return nil
+	}
+	if provider == "xiaomi" || provider == "mimo" || strings.Contains(modelName, "mimo") {
+		return nil
+	}
+
+	if provider == "gemini" || strings.HasPrefix(modelName, "gemini-") {
+		return []string{"low", "medium", "high"}
+	}
+
+	if strings.Contains(provider, "openai") || strings.HasPrefix(modelName, "o") || strings.HasPrefix(modelName, "gpt-") {
+		switch {
+		case strings.HasPrefix(modelName, "o3"),
+			strings.HasPrefix(modelName, "o4"):
+			return []string{"low", "medium", "high", "xhigh"}
+		default:
+			return []string{"low", "medium", "high"}
+		}
+	}
+
+	return []string{"low", "medium", "high"}
 }

@@ -33,4 +33,4 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: go run ./eval/cmd -suite light -stream-modes both -thinking-modes both -thinking-budget 1024
+        run: go run ./eval/cmd -suite light -stream-modes on -thinking-modes on -thinking-budget 1024

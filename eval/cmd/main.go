@@ -59,9 +59,26 @@ func main() {
 	})
 	if summary != nil {
 		fmt.Printf("suite=%s passed=%d failed=%d\n", summary.Suite, summary.Passed, summary.Failed)
+		if summary.Failed > 0 {
+			printFailedCases(summary)
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func printFailedCases(summary *runner.Summary) {
+	if summary == nil || len(summary.Results) == 0 {
+		return
+	}
+	fmt.Println("failed cases:")
+	for _, r := range summary.Results {
+		if r.Passed {
+			continue
+		}
+		errText := strings.ReplaceAll(strings.TrimSpace(r.Error), "\n", " | ")
+		fmt.Printf("- model=%s case=%s stream=%t thinking=%s error=%s\n", r.Model, r.CaseName, r.Stream, r.Thinking, errText)
 	}
 }

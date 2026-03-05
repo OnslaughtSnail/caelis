@@ -13,7 +13,7 @@ func TestListModelsContainsDefaultAliases(t *testing.T) {
 		t.Fatalf("expected non-empty model aliases")
 	}
 	assertContains(t, models, "deepseek-chat")
-	assertContains(t, models, "gemini-2.5-flash")
+	assertContains(t, models, "gemini-3.1-flash-lite-preview")
 }
 
 func TestDefaultFactoryRequiresAtLeastOneToken(t *testing.T) {

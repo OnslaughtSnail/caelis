@@ -95,10 +95,11 @@ func TestHandleModel_InvalidReasoningDoesNotSwitchModel(t *testing.T) {
 		},
 	}
 	deepseekCfg := modelproviders.Config{
-		Alias:    "deepseek/deepseek-chat",
-		Provider: "deepseek",
-		API:      modelproviders.APIDeepSeek,
-		Model:    "deepseek-chat",
+		Alias:           "deepseek/deepseek-chat",
+		Provider:        "deepseek",
+		API:             modelproviders.APIDeepSeek,
+		Model:           "deepseek-chat",
+		ReasoningLevels: []string{"none", "low"},
 		Auth: modelproviders.AuthConfig{
 			Type:  modelproviders.AuthAPIKey,
 			Token: "test-token",

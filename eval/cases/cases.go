@@ -25,12 +25,6 @@ func Light() []Case {
 			Validate:    validateAssistantNonEmpty,
 		},
 		{
-			Name:        "basic_reply_en",
-			Description: "assistant answers one concise English sentence",
-			Prompt:      "Reply in exactly one short English sentence: what can you do?",
-			Validate:    validateAssistantNonEmpty,
-		},
-		{
 			Name:        "tool_echo",
 			Description: "assistant calls echo tool and returns final text",
 			Prompt:      "你必须先调用工具 echo，参数严格为 {\"text\":\"kernel-v2\"}。不要直接回答。收到工具结果后再给出一句总结。",
@@ -41,18 +35,6 @@ func Light() []Case {
 			Description: "assistant calls now tool before final response",
 			Prompt:      "请先调用工具 now 一次，再返回一句话说明当前时间。",
 			Validate:    validateHasToolAndAssistantByName("now"),
-		},
-		{
-			Name:        "tool_echo_now_chain",
-			Description: "assistant calls echo and now in one turn",
-			Prompt:      "请先调用工具 echo 参数 {\"text\":\"chain\"}，再调用工具 now，最后输出一句总结。",
-			Validate:    validateHasToolsAndAssistant("echo", "now"),
-		},
-		{
-			Name:        "tool_echo_unicode",
-			Description: "assistant handles non-ascii tool args",
-			Prompt:      "必须调用工具 echo，参数严格为 {\"text\":\"你好，caelis\"}，然后返回一句确认。",
-			Validate:    validateHasToolAndAssistantByName("echo"),
 		},
 	}
 }

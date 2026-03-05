@@ -19,12 +19,14 @@ import (
 func resetDynamicCatalog(t *testing.T) {
 	t.Helper()
 	dynamicMu.Lock()
-	dynamicCatalog = nil
+	remoteCatalog = nil
+	embeddedCatalog = nil
 	localOverrides = nil
 	dynamicMu.Unlock()
 	t.Cleanup(func() {
 		dynamicMu.Lock()
-		dynamicCatalog = nil
+		remoteCatalog = nil
+		embeddedCatalog = nil
 		localOverrides = nil
 		dynamicMu.Unlock()
 	})
@@ -316,9 +318,12 @@ func TestInitModelCatalog_LoadsRemoteCatalog(t *testing.T) {
 	InitModelCatalog(context.Background(), srv.Client(), "")
 
 	dynamicMu.RLock()
-	snap := dynamicCatalog
+	snap := remoteCatalog
 	dynamicMu.RUnlock()
 
+	if len(snap) == 0 {
+		t.Fatal("expected remote catalog to be loaded")
+	}
 	if _, ok := snap["openai:gpt-4o"]; !ok {
 		t.Error("expected openai:gpt-4o after remote fetch")
 	}
@@ -340,10 +345,14 @@ func TestInitModelCatalog_FallsBackToEmbeddedSnapshot(t *testing.T) {
 	InitModelCatalog(context.Background(), srv.Client(), "")
 
 	dynamicMu.RLock()
-	snap := dynamicCatalog
+	remote := remoteCatalog
+	embedded := embeddedCatalog
 	dynamicMu.RUnlock()
 
-	if len(snap) == 0 {
+	if len(remote) != 0 {
+		t.Error("expected remote catalog empty after remote failure")
+	}
+	if len(embedded) == 0 {
 		t.Error("expected embedded snapshot to be loaded after remote failure")
 	}
 }
@@ -402,7 +411,7 @@ func TestLookupModelCapabilities_LocalOverrideTakesPriority(t *testing.T) {
 	resetDynamicCatalog(t)
 
 	dynamicMu.Lock()
-	dynamicCatalog = capSnapshot{
+	remoteCatalog = capSnapshot{
 		"openai:gpt-4o": {ContextWindow: 111, MaxOutput: 111, ToolCalls: true, DefaultMaxOutput: 111},
 	}
 	localOverrides = capSnapshot{
@@ -424,7 +433,7 @@ func TestLookupModelCapabilities_DynamicOverridesBuiltin(t *testing.T) {
 
 	// Put a different value for deepseek-chat in the dynamic catalog.
 	dynamicMu.Lock()
-	dynamicCatalog = capSnapshot{
+	remoteCatalog = capSnapshot{
 		"deepseek:deepseek-chat": {
 			ContextWindow: 200000, MaxOutput: 65536, DefaultMaxOutput: 8192,
 			ToolCalls: true, Reasoning: true, JSONOutput: true,
@@ -438,6 +447,30 @@ func TestLookupModelCapabilities_DynamicOverridesBuiltin(t *testing.T) {
 	}
 	if caps.ContextWindowTokens != 200000 {
 		t.Errorf("dynamic catalog should override builtin: want 200000, got %d", caps.ContextWindowTokens)
+	}
+}
+
+func TestLookupModelCapabilities_RemoteMissFallsBackToEmbedded(t *testing.T) {
+	resetDynamicCatalog(t)
+
+	dynamicMu.Lock()
+	remoteCatalog = capSnapshot{
+		"openai:gpt-4o": {ContextWindow: 128000, MaxOutput: 16384, ToolCalls: true},
+	}
+	embeddedCatalog = capSnapshot{
+		"deepseek:deepseek-chat": {
+			ContextWindow: 128000, MaxOutput: 65536, DefaultMaxOutput: 8192,
+			ToolCalls: true, Reasoning: true, JSONOutput: true,
+		},
+	}
+	dynamicMu.Unlock()
+
+	caps, ok := LookupModelCapabilities("deepseek", "deepseek-chat")
+	if !ok {
+		t.Fatal("expected embedded fallback when remote catalog misses model")
+	}
+	if caps.ContextWindowTokens != 128000 {
+		t.Fatalf("expected embedded context 128000, got %d", caps.ContextWindowTokens)
 	}
 }
 
@@ -458,7 +491,7 @@ func TestLookupModelCapabilities_DefaultMaxFilledFromBuiltin(t *testing.T) {
 
 	// Dynamic entry omits DefaultMaxOutput (0) → should be backfilled from builtin.
 	dynamicMu.Lock()
-	dynamicCatalog = capSnapshot{
+	remoteCatalog = capSnapshot{
 		"deepseek:deepseek-chat": {
 			ContextWindow: 128000, MaxOutput: 65536, // DefaultMaxOutput intentionally 0
 			ToolCalls: true, Reasoning: true,
@@ -482,7 +515,8 @@ func TestLookupModelCapabilities_DefaultMaxFilledFromBuiltin(t *testing.T) {
 func TestInitModelCatalog_ConcurrentCallsSafe(t *testing.T) {
 	defer func() {
 		dynamicMu.Lock()
-		dynamicCatalog = nil
+		remoteCatalog = nil
+		embeddedCatalog = nil
 		localOverrides = nil
 		dynamicMu.Unlock()
 	}()

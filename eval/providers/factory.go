@@ -13,6 +13,7 @@ import (
 const (
 	deepSeekAPIKeyEnv = "DEEPSEEK_API_KEY"
 	geminiAPIKeyEnv   = "GEMINI_API_KEY"
+	geminiEvalModel   = "gemini-3.1-flash-lite-preview"
 )
 
 func NewByAlias(alias string) (model.LLM, error) {
@@ -67,10 +68,10 @@ func defaultFactory() (*modelproviders.Factory, error) {
 	if geminiToken != "" {
 		configs = append(configs,
 			modelproviders.Config{
-				Alias:               "gemini-2.5-flash",
+				Alias:               geminiEvalModel,
 				Provider:            "gemini",
 				API:                 modelproviders.APIGemini,
-				Model:               "gemini-2.5-flash",
+				Model:               geminiEvalModel,
 				BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
 				ContextWindowTokens: 128000,
 				Auth: modelproviders.AuthConfig{
@@ -79,10 +80,10 @@ func defaultFactory() (*modelproviders.Factory, error) {
 				},
 			},
 			modelproviders.Config{
-				Alias:               "gemini/gemini-2.5-flash",
+				Alias:               "gemini/" + geminiEvalModel,
 				Provider:            "gemini",
 				API:                 modelproviders.APIGemini,
-				Model:               "gemini-2.5-flash",
+				Model:               geminiEvalModel,
 				BaseURL:             "https://generativelanguage.googleapis.com/v1beta",
 				ContextWindowTokens: 128000,
 				Auth: modelproviders.AuthConfig{
@@ -113,10 +114,10 @@ func NormalizeModelAlias(alias string) string {
 		return "deepseek-chat"
 	case "deepseek/deepseek-chat":
 		return "deepseek/deepseek-chat"
-	case "gemini-2.5-flash":
-		return "gemini-2.5-flash"
-	case "gemini/gemini-2.5-flash":
-		return "gemini/gemini-2.5-flash"
+	case geminiEvalModel:
+		return geminiEvalModel
+	case "gemini/" + geminiEvalModel:
+		return "gemini/" + geminiEvalModel
 	default:
 		return value
 	}
@@ -128,7 +129,7 @@ func DefaultModelAliases() []string {
 		values = append(values, "deepseek-chat")
 	}
 	if strings.TrimSpace(os.Getenv(geminiAPIKeyEnv)) != "" {
-		values = append(values, "gemini-2.5-flash")
+		values = append(values, geminiEvalModel)
 	}
 	sort.Strings(values)
 	return values
