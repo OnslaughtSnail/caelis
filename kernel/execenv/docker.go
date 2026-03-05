@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -295,7 +294,7 @@ func (d *dockerRunner) containerName() string {
 
 func (d *dockerRunner) runSandboxCommand(runCtx context.Context, req CommandRequest, args []string, mode string) (CommandResult, error) {
 	cmd := d.execCommand(runCtx, "docker", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	lastOutput := atomic.Int64{}

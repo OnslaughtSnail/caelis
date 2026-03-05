@@ -71,7 +71,7 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "bash", "-lc", req.Command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
 	}

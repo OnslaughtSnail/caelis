@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os/exec"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -78,7 +77,7 @@ func killProcess(cmd *exec.Cmd) error {
 	}
 	// Kill the whole process group so child processes (for example spawned by
 	// "go run" / shells) do not keep stdout/stderr pipes open.
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+	if err := killProcessGroup(cmd.Process.Pid); err == nil {
 		return nil
 	}
 	return cmd.Process.Kill()

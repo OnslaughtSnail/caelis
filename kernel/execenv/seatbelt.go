@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -82,7 +81,7 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 
 	args := []string{"-p", profile, "bash", "-lc", req.Command}
 	cmd := s.execCommand(runCtx, "sandbox-exec", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	if strings.TrimSpace(req.Dir) != "" {
 		cmd.Dir = req.Dir
 	}
