@@ -206,3 +206,22 @@ go run ./eval/cmd \
 make release-dry-run
 ```
 - CI release is triggered by git tag push like `v0.0.1`.
+
+### npm Distribution
+- npm package source lives in `npm/` and publishes package `@onslaughtsnail/caelis`.
+- End users install with:
+```bash
+npm i -g @onslaughtsnail/caelis
+```
+- npm publish runs in `.github/workflows/release.yml` after GoReleaser uploads release assets.
+- npm package downloads platform binary from GitHub Releases during `postinstall`.
+
+#### One-time GitHub/npm setup
+1. Login to npm and ensure package name `@onslaughtsnail/caelis` is available (or change name in `npm/package.json`).
+2. In npm package settings, configure **Trusted Publisher**:
+   - Provider: GitHub Actions
+   - Repository: `OnslaughtSnail/caelis`
+   - Workflow file: `release.yml`
+3. In GitHub repo settings, ensure Actions are allowed and workflow permissions are not blocking OIDC.
+4. Push a tag like `v0.0.3` to trigger release + npm publish.
+5. Detailed checklist: `docs/npm-release.md`.

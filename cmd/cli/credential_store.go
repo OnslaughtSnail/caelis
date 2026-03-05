@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
 const (
@@ -255,6 +257,29 @@ func normalizeCredentialRef(input string) string {
 	return strings.Trim(b.String(), "_")
 }
 
+func hydrateProviderAuthToken(cfg modelproviders.Config, credentials *credentialStore) modelproviders.Config {
+	if credentials == nil {
+		return cfg
+	}
+	ref := normalizeCredentialRef(cfg.Auth.CredentialRef)
+	if ref != "" {
+		stored, ok := credentials.Get(ref)
+		if ok {
+			token := strings.TrimSpace(stored.Token)
+			if token != "" {
+				cfg.Auth.Token = token
+				if cfg.Auth.Type == "" && strings.TrimSpace(stored.Type) != "" {
+					cfg.Auth.Type = modelproviders.AuthType(strings.TrimSpace(stored.Type))
+				}
+				return cfg
+			}
+		}
+	}
+	// Legacy fallback: keep plaintext token from config when credential_ref is
+	// absent or missing in credential store.
+	return cfg
+}
+
 func mergeCredentialStoreProviderTokens(configStore *appConfigStore, credentials *credentialStore) error {
 	if configStore == nil || credentials == nil {
 		return nil
@@ -273,29 +298,24 @@ func mergeCredentialStoreProviderTokens(configStore *appConfigStore, credentials
 			rec.Auth.TokenEnv = ""
 			changed = true
 		}
-		if strings.TrimSpace(rec.Auth.Token) != "" {
-			if ref != "" && rec.Auth.CredentialRef != ref {
-				rec.Auth.CredentialRef = ref
-				changed = true
-			}
-			continue
-		}
 		if ref == "" {
 			continue
 		}
-		stored, ok := credentials.Get(ref)
-		if !ok {
-			continue
+		if strings.TrimSpace(rec.Auth.CredentialRef) != ref {
+			rec.Auth.CredentialRef = ref
+			changed = true
 		}
-		token := strings.TrimSpace(stored.Token)
+		token := strings.TrimSpace(rec.Auth.Token)
 		if token == "" {
 			continue
 		}
-		rec.Auth.Token = token
-		rec.Auth.CredentialRef = ref
-		if rec.Auth.Type == "" && strings.TrimSpace(stored.Type) != "" {
-			rec.Auth.Type = strings.TrimSpace(stored.Type)
+		if err := credentials.Upsert(ref, credentialRecord{
+			Type:  strings.TrimSpace(rec.Auth.Type),
+			Token: token,
+		}); err != nil {
+			return err
 		}
+		rec.Auth.Token = ""
 		changed = true
 	}
 	if !changed {

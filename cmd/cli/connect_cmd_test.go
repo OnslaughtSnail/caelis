@@ -62,3 +62,87 @@ func TestHandleConnectRejectsInvalidTimeoutArg(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestParseConnectCLIArgs_WithAllFields(t *testing.T) {
+	got, err := parseConnectCLIArgs([]string{
+		"openai", "gpt-4o", "https://api.openai.com/v1", "60", "sk-test", "200000", "8192", "minimal,high",
+	})
+	if err != nil {
+		t.Fatalf("parseConnectCLIArgs failed: %v", err)
+	}
+	if !got.quickMode || got.provider != "openai" || got.model != "gpt-4o" || got.baseURL != "https://api.openai.com/v1" {
+		t.Fatalf("unexpected parsed args: %+v", got)
+	}
+	if !got.hasTimeout || got.timeoutSeconds != 60 {
+		t.Fatalf("unexpected timeout parse: %+v", got)
+	}
+	if got.apiKey != "sk-test" {
+		t.Fatalf("unexpected api key parse: %+v", got)
+	}
+	if !got.hasContextWindow || got.contextWindowTokens != 200000 {
+		t.Fatalf("unexpected context parse: %+v", got)
+	}
+	if !got.hasMaxOutput || got.maxOutputTokens != 8192 {
+		t.Fatalf("unexpected max_output parse: %+v", got)
+	}
+	if !got.hasReasoningLevels || got.reasoningLevelsRaw != "minimal,high" {
+		t.Fatalf("unexpected reasoning parse: %+v", got)
+	}
+}
+
+func TestParseConnectCLIArgs_NoAuthPlaceholder(t *testing.T) {
+	got, err := parseConnectCLIArgs([]string{
+		"ollama", "qwen2.5:7b", "http://localhost:11434", "30", "-", "32768", "4096", "-",
+	})
+	if err != nil {
+		t.Fatalf("parseConnectCLIArgs failed: %v", err)
+	}
+	if got.apiKey != "" {
+		t.Fatalf("expected empty api key for '-' placeholder, got %+v", got)
+	}
+	if !got.hasContextWindow || got.contextWindowTokens != 32768 || !got.hasMaxOutput || got.maxOutputTokens != 4096 {
+		t.Fatalf("unexpected token limits: %+v", got)
+	}
+	if !got.hasReasoningLevels || got.reasoningLevelsRaw != "-" {
+		t.Fatalf("unexpected reasoning parse: %+v", got)
+	}
+}
+
+func TestParseReasoningLevelsInput_CommaSpaceTab(t *testing.T) {
+	got, err := parseReasoningLevelsInput("minimal,low\tmedium high")
+	if err != nil {
+		t.Fatalf("parseReasoningLevelsInput failed: %v", err)
+	}
+	want := []string{"minimal", "low", "medium", "high"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected levels: %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected levels: %v", got)
+		}
+	}
+}
+
+func TestParseReasoningLevelsInput_NormalizeAndDedup(t *testing.T) {
+	got, err := parseReasoningLevelsInput("mimimal minimal very-high x-high")
+	if err != nil {
+		t.Fatalf("parseReasoningLevelsInput failed: %v", err)
+	}
+	want := []string{"minimal", "xhigh"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected levels: %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected levels: %v", got)
+		}
+	}
+}
+
+func TestParseReasoningLevelsInput_Invalid(t *testing.T) {
+	_, err := parseReasoningLevelsInput("minimal,unknown")
+	if err == nil {
+		t.Fatal("expected invalid reasoning level error")
+	}
+}

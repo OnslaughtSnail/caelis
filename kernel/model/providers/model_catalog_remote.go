@@ -9,8 +9,9 @@ package providers
 //     3. Embedded snapshot    (models_dev_snapshot.json, shipped in binary)
 //     4. Hard-coded catalog   (builtinCatalog in model_catalog.go, final fallback)
 //
-// Call InitModelCatalog once at program startup.  All subsequent
-// LookupModelCapabilities calls automatically use the loaded data.
+// Call InitModelCatalog when you need to refresh dynamic catalog data
+// (for example from /connect). All subsequent LookupModelCapabilities
+// calls automatically use the loaded data.
 
 import (
 	"context"
@@ -57,13 +58,14 @@ func resolvedModelsDevURL() string {
 // capEntry is the per-model JSON record stored in the snapshot / override file.
 // Keys in the map are "provider:model_prefix" (lower-case, e.g. "openai:gpt-4o").
 type capEntry struct {
-	ContextWindow    int  `json:"context_window"`
-	MaxOutput        int  `json:"max_output"`
-	DefaultMaxOutput int  `json:"default_max_output,omitempty"` // 0 → heuristic applied later
-	ToolCalls        bool `json:"tool_calls"`
-	Reasoning        bool `json:"reasoning"`
-	Images           bool `json:"images"`
-	JSONOutput       bool `json:"json_output"`
+	ContextWindow    int      `json:"context_window"`
+	MaxOutput        int      `json:"max_output"`
+	DefaultMaxOutput int      `json:"default_max_output,omitempty"` // 0 → heuristic applied later
+	ToolCalls        bool     `json:"tool_calls"`
+	Reasoning        bool     `json:"reasoning"`
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+	Images           bool     `json:"images"`
+	JSONOutput       bool     `json:"json_output"`
 }
 
 // capSnapshot is the in-memory representation: map["provider:model"] → capEntry.
@@ -74,17 +76,23 @@ type capSnapshot map[string]capEntry
 // ---------------------------------------------------------------------------
 
 var (
-	dynamicMu      sync.RWMutex
-	dynamicCatalog capSnapshot // loaded from models.dev or embedded snapshot
-	localOverrides capSnapshot // loaded from the user's override file
+	dynamicMu       sync.RWMutex
+	remoteCatalog   capSnapshot // loaded from models.dev
+	embeddedCatalog capSnapshot // loaded from embedded snapshot
+	localOverrides  capSnapshot // loaded from the user's override file
 )
+
+// CatalogInitStatus describes the result of one dynamic catalog refresh.
+type CatalogInitStatus struct {
+	RemoteFetched bool
+	RemoteError   error
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
-// InitModelCatalog initialises the dynamic capability catalog.
-// It should be called once at program startup.
+// InitModelCatalog initialises or refreshes the dynamic capability catalog.
 //
 //   - client: an *http.Client to use for the remote fetch; nil uses http.DefaultClient.
 //   - overridePath: path to a JSON override file (e.g. ~/.agents/model_capabilities.json).
@@ -93,6 +101,12 @@ var (
 // Errors during remote fetch or override loading are logged but never returned;
 // the catalog always falls back gracefully to the embedded snapshot.
 func InitModelCatalog(ctx context.Context, client *http.Client, overridePath string) {
+	_ = InitModelCatalogWithStatus(ctx, client, overridePath)
+}
+
+// InitModelCatalogWithStatus initialises dynamic catalog data and returns
+// whether the remote fetch succeeded.
+func InitModelCatalogWithStatus(ctx context.Context, client *http.Client, overridePath string) CatalogInitStatus {
 	if client == nil {
 		client = &http.Client{Timeout: catalogFetchTimeout}
 	} else {
@@ -105,18 +119,19 @@ func InitModelCatalog(ctx context.Context, client *http.Client, overridePath str
 		}
 	}
 
+	embedded := parseSnapshotBytes(embeddedCatalogSnapshot)
+
 	// 1. Try remote fetch.
 	remote, err := fetchModelsDev(ctx, client)
-	if err != nil || len(remote) == 0 {
-		if err != nil {
-			log.Printf("[model-catalog] remote fetch failed, using embedded snapshot: %v", err)
-		}
-		// 2. Fall back to embedded snapshot.
-		remote = parseSnapshotBytes(embeddedCatalogSnapshot)
+	remoteFetched := err == nil && len(remote) > 0
+	if err != nil {
+		log.Printf("[model-catalog] remote fetch failed, using embedded snapshot only: %v", err)
+		remote = nil
 	}
 
 	dynamicMu.Lock()
-	dynamicCatalog = remote
+	remoteCatalog = remote
+	embeddedCatalog = embedded
 	dynamicMu.Unlock()
 
 	// 3. Load local overrides (non-fatal if the file is missing).
@@ -129,14 +144,18 @@ func InitModelCatalog(ctx context.Context, client *http.Client, overridePath str
 			log.Printf("[model-catalog] override file %q: %v", overridePath, err)
 		}
 	}
+	return CatalogInitStatus{
+		RemoteFetched: remoteFetched,
+		RemoteError:   err,
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Internal lookup used by LookupModelCapabilities
 // ---------------------------------------------------------------------------
 
-// lookupDynamic searches the dynamic catalog (local overrides first, then
-// remote/snapshot) for the given provider+model pair.
+// lookupDynamic searches local/remote/embedded catalogs in priority order:
+// local overrides -> remote models.dev -> embedded snapshot.
 // Returns (caps, true) if found, otherwise (zero, false).
 func lookupDynamic(provider, modelName string) (ModelCapabilities, bool) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -147,7 +166,8 @@ func lookupDynamic(provider, modelName string) (ModelCapabilities, bool) {
 
 	dynamicMu.RLock()
 	local := localOverrides
-	remote := dynamicCatalog
+	remote := remoteCatalog
+	embedded := embeddedCatalog
 	dynamicMu.RUnlock()
 
 	// Local overrides take priority.
@@ -158,7 +178,17 @@ func lookupDynamic(provider, modelName string) (ModelCapabilities, bool) {
 	if caps, ok := searchCapSnapshot(remote, provider, modelName); ok {
 		return caps, true
 	}
+	// Then embedded snapshot.
+	if caps, ok := searchCapSnapshot(embedded, provider, modelName); ok {
+		return caps, true
+	}
 	return ModelCapabilities{}, false
+}
+
+// LookupDynamicModelCapabilities searches only local/remote/embedded catalogs.
+// It does not fall back to builtin hard-coded catalog.
+func LookupDynamicModelCapabilities(provider, modelName string) (ModelCapabilities, bool) {
+	return lookupDynamic(provider, modelName)
 }
 
 // searchCapSnapshot performs a longest-prefix match inside a capSnapshot.
@@ -224,6 +254,7 @@ func entryToCaps(e capEntry) ModelCapabilities {
 		DefaultMaxOutputTokens: e.DefaultMaxOutput,
 		SupportsToolCalls:      e.ToolCalls,
 		SupportsReasoning:      e.Reasoning,
+		ReasoningEfforts:       normalizeReasoningEffortList(e.ReasoningEfforts),
 		SupportsImages:         e.Images,
 		SupportsJSONOutput:     e.JSONOutput,
 	}

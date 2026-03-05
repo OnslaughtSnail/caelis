@@ -426,11 +426,17 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 					{Value: "30", Display: "30s"},
 					{Value: "60", Display: "60s"},
 				}, nil
-			case "connect-model:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test":
+			case "connect-model:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|":
 				return []SlashArgCandidate{
 					{Value: "gpt-4o", Display: "gpt-4o"},
 					{Value: "gpt-4o-mini", Display: "gpt-4o-mini"},
 				}, nil
+			case "connect-context:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-4o-mini":
+				return []SlashArgCandidate{{Value: "128000", Display: "128000"}}, nil
+			case "connect-maxout:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-4o-mini":
+				return []SlashArgCandidate{{Value: "4096", Display: "4096"}}, nil
+			case "connect-reasoning-levels:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-4o-mini":
+				return []SlashArgCandidate{{Value: "none,minimal,low,medium,high,xhigh", Display: "none,minimal,low,medium,high,xhigh"}}, nil
 			default:
 				return nil, nil
 			}
@@ -473,10 +479,22 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected model candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // pick gpt-4o-mini
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})  // pick gpt-4o-mini
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open context_window_tokens picker
+	if !strings.HasPrefix(m.slashArgCommand, "connect-context:openai|") {
+		t.Fatalf("expected connect-context step, got %q", m.slashArgCommand)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick context_window_tokens
+	if !strings.HasPrefix(m.slashArgCommand, "connect-maxout:openai|") {
+		t.Fatalf("expected connect-maxout step, got %q", m.slashArgCommand)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick max_output_tokens
+	if !strings.HasPrefix(m.slashArgCommand, "connect-reasoning-levels:openai|") {
+		t.Fatalf("expected connect-reasoning-levels step, got %q", m.slashArgCommand)
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick reasoning levels and submit
 	if cmd == nil {
-		t.Fatal("expected command on model confirm")
+		t.Fatal("expected command on connect submit")
 	}
 	batchMsg := cmd()
 	if batchMsg == nil {
@@ -486,7 +504,7 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 	if !found {
 		t.Fatal("expected TaskResultMsg in batch")
 	}
-	if called != "/connect openai gpt-4o-mini https://api.openai.com/v1 60 sk-test" {
+	if called != "/connect openai gpt-4o-mini https://api.openai.com/v1 60 sk-test 128000 4096 none,minimal,low,medium,high,xhigh" {
 		t.Fatalf("unexpected connect command %q", called)
 	}
 	if len(m.history) != 0 {
@@ -510,6 +528,12 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 				return []SlashArgCandidate{{Value: "https://api.openai.com/v1", Display: "https://api.openai.com/v1"}}, nil
 			case "connect-timeout:openai":
 				return []SlashArgCandidate{{Value: "60", Display: "60s"}}, nil
+			case "connect-context:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-custom":
+				return []SlashArgCandidate{{Value: "128000", Display: "128000"}}, nil
+			case "connect-maxout:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-custom":
+				return []SlashArgCandidate{{Value: "4096", Display: "4096"}}, nil
+			case "connect-reasoning-levels:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-custom":
+				return []SlashArgCandidate{{Value: "-", Display: "(empty, unknown support)"}}, nil
 			default:
 				return nil, nil // model step intentionally returns empty
 			}
@@ -531,7 +555,19 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 		t.Fatalf("expected no model candidates for manual fallback, got %d", len(m.slashArgCandidates))
 	}
 	typeRunes(m, "gpt-custom")
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // model -> context step
+	if !strings.HasPrefix(m.slashArgCommand, "connect-context:openai|") {
+		t.Fatalf("expected connect-context step, got %q", m.slashArgCommand)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // context
+	if !strings.HasPrefix(m.slashArgCommand, "connect-maxout:openai|") {
+		t.Fatalf("expected connect-maxout step, got %q", m.slashArgCommand)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // max output
+	if !strings.HasPrefix(m.slashArgCommand, "connect-reasoning-levels:openai|") {
+		t.Fatalf("expected connect-reasoning-levels step, got %q", m.slashArgCommand)
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // reasoning -> submit
 	if cmd == nil {
 		t.Fatal("expected command on manual model enter")
 	}
@@ -542,7 +578,7 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 	if !findAndRunTaskResult(batchMsg, m) {
 		t.Fatal("expected TaskResultMsg in batch")
 	}
-	if called != "/connect openai gpt-custom https://api.openai.com/v1 60 sk-test" {
+	if called != "/connect openai gpt-custom https://api.openai.com/v1 60 sk-test 128000 4096 -" {
 		t.Fatalf("unexpected connect command %q", called)
 	}
 }
@@ -879,6 +915,34 @@ func TestInputMouseDragCopiesSelection(t *testing.T) {
 	start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines()))
 	if !ok || (start.line == end.line && start.col == end.col) {
 		t.Fatal("expected input selection to remain after mouse release")
+	}
+}
+
+func TestCopyHintClearsOnTimerMessage(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+	typeRunes(m, "hello world")
+	startY, _, ok := m.inputAreaBounds()
+	if !ok {
+		t.Fatal("expected input area bounds")
+	}
+	_, _ = m.Update(tea.MouseMsg{X: 2, Y: startY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	_, _ = m.Update(tea.MouseMsg{X: 7, Y: startY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	if !strings.Contains(m.hint, "copied") {
+		t.Fatalf("expected copy hint, got %q", m.hint)
+	}
+	_, _ = m.Update(clearHintMsg{expected: "selected text copied to clipboard"})
+	if strings.TrimSpace(m.hint) != "" {
+		t.Fatalf("expected copy hint cleared, got %q", m.hint)
+	}
+}
+
+func TestCopyHintTimerDoesNotOverrideNewHint(t *testing.T) {
+	m := newTestModel()
+	m.hint = "interrupt requested"
+	_, _ = m.Update(clearHintMsg{expected: "selected text copied to clipboard"})
+	if m.hint != "interrupt requested" {
+		t.Fatalf("expected newer hint preserved, got %q", m.hint)
 	}
 }
 
@@ -1279,19 +1343,23 @@ func TestClearHistoryResetsDiffBlocks(t *testing.T) {
 	}
 }
 
-func TestViewShowsThinkingHintWhenRunning(t *testing.T) {
+func TestViewShowsBreathingHintWhenRunning(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
 	m.running = true
 	m.startRunningAnimation()
+	m.runningTip = 0
 	m.syncViewportContent()
 	view := m.View()
 
-	if !strings.Contains(view, "thinking") {
-		t.Fatalf("expected running hint text in view when running, got:\n%s", view)
+	if !strings.Contains(view, "Queue your next prompt now; it will run after this one.") {
+		t.Fatalf("expected running carousel text in view when running, got:\n%s", view)
 	}
-	if strings.Contains(strings.Join(m.viewportPlainLines, "\n"), "thinking") {
+	if strings.Contains(view, "thinking") || strings.Contains(view, "Tip:") {
+		t.Fatalf("did not expect thinking/tip prefix in running hint, got:\n%s", view)
+	}
+	if strings.Contains(strings.Join(m.viewportPlainLines, "\n"), "Queue your next prompt now; it will run after this one.") {
 		t.Fatalf("did not expect running hint to be rendered inside viewport history, got: %q", strings.Join(m.viewportPlainLines, "\n"))
 	}
 }
@@ -1882,10 +1950,33 @@ func testConnectWizard() WizardDef {
 				HintLabel:    "/connect model",
 				FreeformHint: "/connect model: type model name and press enter",
 				CompletionCommand: func(s map[string]string) string {
-					return "connect-model:" + s["provider"] +
-						"|" + url.QueryEscape(s["baseurl"]) +
-						"|" + s["timeout"] +
-						"|" + url.QueryEscape(s["apikey"])
+					return "connect-model:" + buildConnectWizardPayloadForTest(s)
+				},
+			},
+			{
+				Key:          "context_window_tokens",
+				HintLabel:    "/connect context_window_tokens",
+				Validate:     ValidateInt,
+				FreeformHint: "/connect context_window_tokens: type integer and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-context:" + buildConnectWizardPayloadForTest(s)
+				},
+			},
+			{
+				Key:          "max_output_tokens",
+				HintLabel:    "/connect max_output_tokens",
+				Validate:     ValidateInt,
+				FreeformHint: "/connect max_output_tokens: type integer and press enter",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-maxout:" + buildConnectWizardPayloadForTest(s)
+				},
+			},
+			{
+				Key:          "reasoning_levels",
+				HintLabel:    "/connect reasoning_levels(csv)",
+				FreeformHint: "/connect reasoning_levels(csv): e.g. minimal,low (use - for empty)",
+				CompletionCommand: func(s map[string]string) string {
+					return "connect-reasoning-levels:" + buildConnectWizardPayloadForTest(s)
 				},
 			},
 		},
@@ -1898,14 +1989,30 @@ func testConnectWizard() WizardDef {
 			}
 		},
 		BuildExecLine: func(s map[string]string) string {
-			line := "/connect " + s["provider"] + " " + s["model"] +
-				" " + s["baseurl"] + " " + s["timeout"]
-			if apiKey := strings.TrimSpace(s["apikey"]); apiKey != "" {
-				line += " " + apiKey
+			apiKey := strings.TrimSpace(s["apikey"])
+			if apiKey == "" {
+				apiKey = "-"
 			}
-			return line
+			reasoningLevels := strings.TrimSpace(s["reasoning_levels"])
+			if reasoningLevels == "" {
+				reasoningLevels = "-"
+			}
+			return "/connect " + s["provider"] + " " + s["model"] +
+				" " + s["baseurl"] + " " + s["timeout"] +
+				" " + apiKey +
+				" " + s["context_window_tokens"] +
+				" " + s["max_output_tokens"] +
+				" " + reasoningLevels
 		},
 	}
+}
+
+func buildConnectWizardPayloadForTest(state map[string]string) string {
+	return strings.TrimSpace(state["provider"]) +
+		"|" + url.QueryEscape(state["baseurl"]) +
+		"|" + strings.TrimSpace(state["timeout"]) +
+		"|" + url.QueryEscape(strings.TrimSpace(state["apikey"])) +
+		"|" + url.QueryEscape(state["model"])
 }
 
 func testModelWizard() WizardDef {

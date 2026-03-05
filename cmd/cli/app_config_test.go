@@ -95,8 +95,8 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	if providers[0].Auth.Token != "secret" {
 		t.Fatalf("unexpected provider token")
 	}
-	if providers[0].Auth.CredentialRef == "" {
-		t.Fatalf("expected credential ref")
+	if providers[0].Auth.CredentialRef != "" {
+		t.Fatalf("expected credential_ref empty when token is configured, got %q", providers[0].Auth.CredentialRef)
 	}
 	if got := store2.ConfiguredModelRefs(); len(got) != 1 || got[0] != "openai/gpt-4o-mini" {
 		t.Fatalf("unexpected configured model refs: %v", got)
@@ -144,8 +144,23 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings = store4.ModelRuntimeSettings("openai/gpt-4o-mini")
-	if settings.ThinkingMode != "on" || settings.ReasoningEffort != "very_high" {
+	if settings.ThinkingMode != "on" || settings.ReasoningEffort != "xhigh" {
 		t.Fatalf("expected normalized runtime settings, got %#v", settings)
+	}
+}
+
+func TestNormalizeProviderAuthRecord_PrefersCredentialRef(t *testing.T) {
+	auth := authRecord{
+		Type:          string(modelproviders.AuthAPIKey),
+		Token:         "plaintext-token",
+		CredentialRef: "openai_api_openai_com",
+	}
+	normalizeProviderAuthRecord("openai", "https://api.openai.com/v1", &auth)
+	if auth.CredentialRef != "openai_api_openai_com" {
+		t.Fatalf("expected credential_ref kept, got %q", auth.CredentialRef)
+	}
+	if auth.Token != "" {
+		t.Fatalf("expected plaintext token cleared when credential_ref exists, got %q", auth.Token)
 	}
 }
 

@@ -171,7 +171,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Handle:      handleSandbox,
 		},
 		"model":   {Usage: "/model <alias> [reasoning]", Description: "Switch active model and reasoning level", Handle: handleModel},
-		"connect": {Usage: "/connect [provider] [model] [base_url] [timeout_seconds]", Description: "Add or update a model provider", Handle: handleConnect},
+		"connect": {Usage: "/connect [provider] [model] [base_url] [timeout_seconds] [api_key] [context_window_tokens] [max_output_tokens] [reasoning_levels]", Description: "Add or update a model provider", Handle: handleConnect},
 		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
 		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
@@ -921,8 +921,8 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 }
 
 // resolveContextWindowForDisplay returns the context window token limit for the
-// current model. Uses the explicit CLI override first, then falls back to the
-// model capability catalog.
+// current model. Uses the explicit CLI override first, then the connected model
+// config value, then falls back to the model capability catalog.
 func (c *cliConsole) resolveContextWindowForDisplay() int {
 	if c.contextWindow > 0 {
 		return c.contextWindow
@@ -933,6 +933,9 @@ func (c *cliConsole) resolveContextWindowForDisplay() int {
 	cfg, ok := c.modelFactory.ConfigForAlias(c.modelAlias)
 	if !ok {
 		return 0
+	}
+	if cfg.ContextWindowTokens > 0 {
+		return cfg.ContextWindowTokens
 	}
 	caps, found := modelproviders.LookupModelCapabilities(cfg.Provider, cfg.Model)
 	if found && caps.ContextWindowTokens > 0 {

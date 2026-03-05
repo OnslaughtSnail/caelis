@@ -424,18 +424,10 @@ func (m *Model) buildRunningHintText() string {
 	if len(runningBreathFrames) > 0 {
 		frame = runningBreathFrames[m.runningBeat%len(runningBreathFrames)]
 	}
-	status := "thinking..."
-	if h := strings.TrimSpace(m.runningHint); h != "" {
-		status = "running: " + h
-	}
-	parts := []string{frame + " " + status}
-	if len(m.pendingQueue) > 0 {
-		parts = append(parts, fmt.Sprintf("queued: %d", len(m.pendingQueue)))
-	}
 	if len(runningCarouselLines) > 0 {
-		parts = append(parts, runningCarouselLines[m.runningTip%len(runningCarouselLines)])
+		return frame + " " + runningCarouselLines[m.runningTip%len(runningCarouselLines)]
 	}
-	return strings.Join(parts, "  |  ")
+	return frame
 }
 
 func (m *Model) renderHintArea() string {
@@ -575,15 +567,13 @@ func (m *Model) renderPromptModal() string {
 			}
 		}
 		lines = append(lines, "", "↑/↓: choose · Enter: submit · Esc: cancel")
-		return m.theme.ModalStyle().Render(strings.Join(lines, "\n"))
+		return strings.Join(lines, "\n")
 	}
 	value := string(p.input)
 	if p.secret {
 		value = strings.Repeat("*", len(p.input))
 	}
-	return m.theme.ModalStyle().Render(
-		fmt.Sprintf("%s%s\n\nEnter: submit · Esc: cancel", p.prompt, value),
-	)
+	return fmt.Sprintf("%s%s\n\nEnter: submit · Esc: cancel", p.prompt, value)
 }
 
 func (m *Model) adjustTextareaHeight() {

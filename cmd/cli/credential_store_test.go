@@ -106,13 +106,42 @@ func TestMergeCredentialStoreProviderTokens(t *testing.T) {
 	if len(providers) != 1 {
 		t.Fatalf("expected 1 provider, got %d", len(providers))
 	}
-	if providers[0].Auth.Token != "stored-token" {
-		t.Fatalf("expected token merged into config, got %q", providers[0].Auth.Token)
+	if providers[0].Auth.Token != "" {
+		t.Fatalf("expected plaintext token removed from config, got %q", providers[0].Auth.Token)
 	}
 	if providers[0].Auth.TokenEnv != "" {
 		t.Fatalf("expected token_env cleared, got %q", providers[0].Auth.TokenEnv)
 	}
 	if providers[0].Auth.CredentialRef != "openai_api_openai_com" {
-		t.Fatalf("unexpected credential_ref: %q", providers[0].Auth.CredentialRef)
+		t.Fatalf("expected credential_ref preserved, got %q", providers[0].Auth.CredentialRef)
+	}
+	stored, ok := credStore.Get("openai_api_openai_com")
+	if !ok || stored.Token != "stored-token" {
+		t.Fatalf("expected token persisted in credential store, got %+v (exists=%v)", stored, ok)
+	}
+}
+
+func TestHydrateProviderAuthToken_PrefersCredentialRef(t *testing.T) {
+	store := &credentialStore{
+		data: credentialFile{
+			Version: 1,
+			Credentials: map[string]credentialRecord{
+				"openai_api_openai_com": {
+					Type:  string(modelproviders.AuthAPIKey),
+					Token: "token-from-store",
+				},
+			},
+		},
+	}
+	cfg := modelproviders.Config{
+		Auth: modelproviders.AuthConfig{
+			Type:          modelproviders.AuthAPIKey,
+			Token:         "token-from-config",
+			CredentialRef: "openai_api_openai_com",
+		},
+	}
+	hydrated := hydrateProviderAuthToken(cfg, store)
+	if hydrated.Auth.Token != "token-from-store" {
+		t.Fatalf("expected credential_ref token to win, got %q", hydrated.Auth.Token)
 	}
 }

@@ -19,17 +19,31 @@ import (
 const maxInputBarRows = 6
 const ctrlCExitWindow = 2 * time.Second
 const reservedHintRows = 1
-const runningHintRotateEveryTicks = 20
+const runningHintRotateEveryTicks = 40
+const copyHintDuration = 1600 * time.Millisecond
 
 var runningBreathFrames = []string{"·", "•", "●", "•"}
 
 var runningCarouselLines = []string{
-	"Tip: queue your next prompt now; it will run after this one.",
-	"Tip: use @path to anchor the model on exact files.",
-	"Joke: There are 10 types of people; binary readers and others.",
-	"Tip: /model can switch both model and reasoning level.",
-	"Joke: I would tell you a UDP joke, but you might not get it.",
-	"Tip: press Esc to interrupt, Enter to queue your next message.",
+	"Queue your next prompt now; it will run after this one.",
+	"Use @path to anchor the model on exact files.",
+	"/model can switch both model and reasoning level.",
+	"Press Esc to interrupt, Enter to queue your next message.",
+	"A maiden is praying...",
+}
+
+type clearHintMsg struct {
+	expected string
+}
+
+func clearHintLaterCmd(expected string, after time.Duration) tea.Cmd {
+	expected = strings.TrimSpace(expected)
+	if expected == "" || after <= 0 {
+		return nil
+	}
+	return tea.Tick(after, func(time.Time) tea.Msg {
+		return clearHintMsg{expected: expected}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +472,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuievents.SetHintMsg:
 		m.hint = strings.TrimSpace(typed.Hint)
+		return m, nil
+
+	case clearHintMsg:
+		if strings.TrimSpace(m.hint) == strings.TrimSpace(typed.expected) {
+			m.hint = ""
+		}
 		return m, nil
 
 	case tuievents.SetRunningMsg:

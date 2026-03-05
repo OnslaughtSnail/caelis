@@ -188,3 +188,20 @@ func TestApplyModelCatalog_DeepSeekReasoner(t *testing.T) {
 		t.Fatalf("expected default max output 32768, got %d", cfg.MaxOutputTok)
 	}
 }
+
+func TestSupportedReasoningEfforts_Gemini(t *testing.T) {
+	got := SupportedReasoningEfforts("gemini", "gemini-2.5-pro")
+	if len(got) != 3 || got[0] != "low" || got[1] != "medium" || got[2] != "high" {
+		t.Fatalf("unexpected gemini efforts: %v", got)
+	}
+}
+
+func TestSupportedReasoningEfforts_OpenAIO3IncludesXHigh(t *testing.T) {
+	got := SupportedReasoningEfforts("openai", "o3")
+	if len(got) < 4 || got[3] != "xhigh" {
+		t.Fatalf("expected xhigh for o3, got %v", got)
+	}
+	if !SupportsReasoningEffort("openai", "o3", "very-high") {
+		t.Fatalf("expected very-high alias to map to xhigh")
+	}
+}

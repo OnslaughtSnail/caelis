@@ -89,7 +89,6 @@ func runCLI(ctx context.Context, args []string) error {
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
 		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default")
 		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
-		modelCapsPath    = fs.String("model-capabilities", defaultModelCapsOverridePath(), "Model capabilities override JSON path (default ~/.agents/model_capabilities.json)")
 		showVersion      = fs.Bool("version", false, "Show version and exit")
 		verbose          = fs.Bool("verbose", false, "Enable verbose output with debug details")
 		noColor          = fs.Bool("no-color", false, "Disable colored output")
@@ -104,9 +103,6 @@ func runCLI(ctx context.Context, args []string) error {
 		fmt.Println(version.String())
 		return nil
 	}
-	// Initialise the dynamic model capability catalog (remote fetch + local overrides)
-	// in background so interactive/headless startup is never blocked by network I/O.
-	go modelproviders.InitModelCatalog(context.Background(), nil, *modelCapsPath)
 
 	if len(fs.Args()) > 0 {
 		return fmt.Errorf("unknown arguments: %v", fs.Args())
@@ -134,9 +130,6 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 	credentials, err := loadOrInitCredentialStore(initialAppName, credentialStoreModeAuto)
 	if err != nil {
-		return err
-	}
-	if err := mergeCredentialStoreProviderTokens(configStore, credentials); err != nil {
 		return err
 	}
 	if err := configStore.SetRuntimeSettings(runtimeSettings{
@@ -216,6 +209,7 @@ func runCLI(ctx context.Context, args []string) error {
 	}()
 	factory := modelproviders.NewFactory()
 	for _, providerCfg := range configStore.ProviderConfigs() {
+		providerCfg = hydrateProviderAuthToken(providerCfg, credentials)
 		if registerErr := factory.Register(providerCfg); registerErr != nil {
 			fmt.Fprintf(os.Stderr, "warn: skip provider %q: %v\n", providerCfg.Alias, registerErr)
 		}
@@ -600,40 +594,38 @@ func hasLSPTools(tools []tool.Tool) bool {
 }
 
 func parseReasoning(mode string, budget int, effort string, provider string, modelName string) (model.ReasoningConfig, error) {
-	cfg := model.ReasoningConfig{Effort: strings.TrimSpace(effort)}
+	cfg := model.ReasoningConfig{Effort: normalizeReasoningLevel(effort)}
 	switch normalizeReasoningSelection(mode) {
 	case "", "auto":
-		// For "auto" mode, look up known capabilities to decide.
-		if modelSupportsReasoning(provider, modelName) {
+		if cfg.Effort != "" && cfg.Effort != "none" {
 			enabled := true
 			cfg.Enabled = &enabled
-			if budget > 0 {
-				cfg.BudgetTokens = budget
-			}
 		}
-		return cfg, nil
 	case "on":
 		enabled := true
 		cfg.Enabled = &enabled
-		if budget > 0 {
-			cfg.BudgetTokens = budget
-		}
-		return cfg, nil
 	case "off":
 		enabled := false
 		cfg.Enabled = &enabled
-		cfg.BudgetTokens = 0
-		return cfg, nil
 	default:
 		return model.ReasoningConfig{}, fmt.Errorf("invalid thinking-mode %q, expected auto|on|off", mode)
 	}
-}
-
-// defaultModelCapsOverridePath returns the default path for the user's local
-// model capability override file, following the same ~/.agents/ convention
-// as the MCP config file.
-func defaultModelCapsOverridePath() string {
-	return "~/.agents/model_capabilities.json"
+	if budget > 0 {
+		cfg.BudgetTokens = budget
+	}
+	if cfg.Effort == "none" {
+		disabled := false
+		cfg.Enabled = &disabled
+		cfg.Effort = ""
+		cfg.BudgetTokens = 0
+	}
+	if cfg.Enabled != nil && !*cfg.Enabled {
+		cfg.Effort = ""
+		cfg.BudgetTokens = 0
+	}
+	_ = provider
+	_ = modelName
+	return cfg, nil
 }
 
 func exitErr(err error) {

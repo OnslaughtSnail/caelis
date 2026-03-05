@@ -66,11 +66,12 @@ func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{
-		Alias:    "deepseek/deepseek-chat",
-		Provider: "deepseek",
-		API:      modelproviders.APIDeepSeek,
-		Model:    "deepseek-chat",
-		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+		Alias:           "deepseek/deepseek-chat",
+		Provider:        "deepseek",
+		API:             modelproviders.APIDeepSeek,
+		Model:           "deepseek-chat",
+		ReasoningLevels: []string{"none", "high"},
+		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
 	}
 	if err := factory.Register(cfg); err != nil {
 		t.Fatalf("register config: %v", err)
@@ -80,7 +81,7 @@ func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 reasoning candidates, got %d", len(got))
 	}
-	if got[0].Value != "off" || got[1].Value != "on" {
+	if got[0].Value != "none" || got[1].Value != "high" {
 		t.Fatalf("unexpected reasoning candidates: %+v", got)
 	}
 }
@@ -88,21 +89,22 @@ func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
 func TestCompleteModelReasoningCandidates_EffortModel(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{
-		Alias:    "openai/o3",
-		Provider: "openai",
-		API:      modelproviders.APIOpenAI,
-		Model:    "o3",
-		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+		Alias:           "openai/o3",
+		Provider:        "openai",
+		API:             modelproviders.APIOpenAI,
+		Model:           "o3",
+		ReasoningLevels: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
+		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
 	}
 	if err := factory.Register(cfg); err != nil {
 		t.Fatalf("register config: %v", err)
 	}
 	c := &cliConsole{modelFactory: factory}
 	got := c.completeModelReasoningCandidates("openai/o3", "", 10)
-	if len(got) < 5 {
+	if len(got) != 6 {
 		t.Fatalf("expected effort reasoning candidates, got %d", len(got))
 	}
-	if got[0].Value != "off" || got[4].Value != "very_high" {
+	if got[0].Value != "none" || got[5].Value != "xhigh" {
 		t.Fatalf("unexpected reasoning candidates: %+v", got)
 	}
 }
@@ -208,6 +210,27 @@ func TestParseConnectModelPayload(t *testing.T) {
 	}
 }
 
+func TestParseConnectSettingsPayload(t *testing.T) {
+	provider, baseURL, timeout, apiKey, model, ok := parseConnectSettingsPayload("openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-4o-mini")
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if provider != "openai" || baseURL != "https://api.openai.com/v1" || timeout != 60 || apiKey != "sk-test" || model != "gpt-4o-mini" {
+		t.Fatalf("unexpected payload parse result: provider=%q base_url=%q timeout=%d api_key=%q model=%q", provider, baseURL, timeout, apiKey, model)
+	}
+}
+
+func TestCompleteConnectReasoningLevelsCandidates_UnknownModel(t *testing.T) {
+	c := &cliConsole{}
+	got := c.completeConnectReasoningLevelsCandidates("openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|unknown-model", "", 10)
+	if len(got) == 0 {
+		t.Fatal("expected fallback reasoning-level candidate")
+	}
+	if got[0].Value != "-" {
+		t.Fatalf("expected '-' fallback candidate, got %+v", got[0])
+	}
+}
+
 func TestFindProviderTemplate(t *testing.T) {
 	tpl, ok := findProviderTemplate(" OpenAI-Compatible ")
 	if !ok {
@@ -263,5 +286,34 @@ func TestReadTUIStatus_ZeroUsageStillShowsContextWindow(t *testing.T) {
 	}
 	if contextText != "0/128.0k(0%)" {
 		t.Fatalf("expected zero context usage display, got %q", contextText)
+	}
+}
+
+func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	if err := factory.Register(modelproviders.Config{
+		Alias:               "gemini/gemini-3.1-flash-lite-preview",
+		Provider:            "gemini",
+		API:                 modelproviders.APIGemini,
+		Model:               "gemini-3.1-flash-lite-preview",
+		ContextWindowTokens: 1_000_000,
+		Auth:                modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "token"},
+	}); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+
+	c := &cliConsole{
+		modelAlias:       "gemini/gemini-3.1-flash-lite-preview",
+		modelFactory:     factory,
+		lastPromptTokens: 5200,
+		thinkingMode:     "on",
+		reasoningEffort:  "high",
+	}
+	modelText, contextText := c.readTUIStatus()
+	if modelText != "gemini/gemini-3.1-flash-lite-preview [high]" {
+		t.Fatalf("unexpected model text %q", modelText)
+	}
+	if contextText != "5.2k/1.0m(0%)" {
+		t.Fatalf("expected context ratio display for gemini, got %q", contextText)
 	}
 }

@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"google.golang.org/genai"
 )
 
 func jsonArgs(v map[string]any) string {
@@ -255,7 +257,7 @@ func TestOpenAICompatNonStream_AppliesRequestTimeout(t *testing.T) {
 
 func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/models/test-model:streamGenerateContent") {
+		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/test-model:streamGenerateContent") {
 			http.NotFound(w, r)
 			return
 		}
@@ -267,7 +269,6 @@ func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
 		}
 		time.Sleep(150 * time.Millisecond)
 		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"!\"}]}}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":2,\"totalTokenCount\":3}}\n\n")
-		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -305,10 +306,77 @@ func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestGeminiStream_EmitsReasoningChunks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/test-model:streamGenerateContent") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"think-1\",\"thought\":true},{\"text\":\"hello\"}]}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		_, _ = fmt.Fprint(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"think-2\",\"thought\":true},{\"text\":\"!\"}]}}]}\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider: "gemini",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	var (
+		reasoningChunks []string
+		finalReasoning  string
+		finalText       string
+	)
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   true,
+		Reasoning: model.ReasoningConfig{
+			Enabled: func() *bool { v := true; return &v }(),
+			Effort:  "high",
+		},
+	}) {
+		if err != nil {
+			t.Fatalf("expected no stream error, got %v", err)
+		}
+		if resp == nil {
+			continue
+		}
+		if resp.Partial && strings.TrimSpace(resp.Message.Reasoning) != "" {
+			reasoningChunks = append(reasoningChunks, strings.TrimSpace(resp.Message.Reasoning))
+		}
+		if resp.TurnComplete {
+			finalReasoning = strings.TrimSpace(resp.Message.Reasoning)
+			finalText = strings.TrimSpace(resp.Message.Text)
+		}
+	}
+	if strings.Join(reasoningChunks, "|") != "think-1|think-2" {
+		t.Fatalf("unexpected reasoning chunks: %v", reasoningChunks)
+	}
+	if finalReasoning != "think-1think-2" {
+		t.Fatalf("unexpected final reasoning %q", finalReasoning)
+	}
+	if finalText != "hello!" {
+		t.Fatalf("unexpected final text %q", finalText)
+	}
+}
+
 func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 	var gotMax float64
+	var gotThinkingLevel string
+	var gotIncludeThoughts bool
+	var gotThinkingBudget any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/models/test-model:generateContent") {
+		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/test-model:generateContent") {
 			http.NotFound(w, r)
 			return
 		}
@@ -318,6 +386,11 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 		}
 		if cfg, ok := payload["generationConfig"].(map[string]any); ok {
 			gotMax, _ = cfg["maxOutputTokens"].(float64)
+			if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
+				gotThinkingLevel, _ = thinking["thinkingLevel"].(string)
+				gotIncludeThoughts, _ = thinking["includeThoughts"].(bool)
+				gotThinkingBudget = thinking["thinkingBudget"]
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`)
@@ -336,6 +409,9 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 	for _, err := range llm.Generate(context.Background(), &model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
 		Stream:   false,
+		Reasoning: model.ReasoningConfig{
+			Effort: "high",
+		},
 	}) {
 		if err != nil {
 			gotErr = err
@@ -346,6 +422,84 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 	}
 	if gotMax != 3072 {
 		t.Fatalf("expected generationConfig.maxOutputTokens=3072, got %v", gotMax)
+	}
+	if gotThinkingLevel != "HIGH" {
+		t.Fatalf("expected generationConfig.thinkingConfig.thinkingLevel=HIGH, got %q", gotThinkingLevel)
+	}
+	if !gotIncludeThoughts {
+		t.Fatalf("expected generationConfig.thinkingConfig.includeThoughts=true")
+	}
+	if gotThinkingBudget != nil {
+		t.Fatalf("expected thinkingBudget omitted, got %v", gotThinkingBudget)
+	}
+}
+
+func TestGeminiRequest_BaseURLWithVersionPath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider: "gemini",
+		Model:    "test-model",
+		BaseURL:  server.URL + "/v1beta",
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+	}) {
+		if err != nil {
+			t.Fatalf("expected no generate error, got %v", err)
+		}
+	}
+
+	if gotPath != "/v1beta/models/test-model:generateContent" {
+		t.Fatalf("unexpected request path %q", gotPath)
+	}
+}
+
+func TestGeminiRequest_XHighEffortFallsBackToHighLevel(t *testing.T) {
+	var gotThinkingLevel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		if cfg, ok := payload["generationConfig"].(map[string]any); ok {
+			if thinking, ok := cfg["thinkingConfig"].(map[string]any); ok {
+				gotThinkingLevel, _ = thinking["thinkingLevel"].(string)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
+	}))
+	defer server.Close()
+
+	llm := newGemini(Config{
+		Provider: "gemini",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	for _, err := range llm.Generate(context.Background(), &model.Request{
+		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:    false,
+		Reasoning: model.ReasoningConfig{Effort: "xhigh"},
+	}) {
+		if err != nil {
+			t.Fatalf("expected no generate error, got %v", err)
+		}
+	}
+
+	if gotThinkingLevel != "HIGH" {
+		t.Fatalf("expected xhigh fallback to HIGH, got %q", gotThinkingLevel)
 	}
 }
 
@@ -621,7 +775,7 @@ func TestAnthropicMessageTransform(t *testing.T) {
 }
 
 func TestGeminiMessageTransform(t *testing.T) {
-	system, msgs := toGeminiContents([]model.Message{
+	system, msgs, err := toGeminiContents([]model.Message{
 		{Role: model.RoleSystem, Text: "sys"},
 		{Role: model.RoleUser, Text: "u"},
 		{
@@ -634,6 +788,9 @@ func TestGeminiMessageTransform(t *testing.T) {
 			}},
 		},
 	})
+	if err != nil {
+		t.Fatalf("toGeminiContents: %v", err)
+	}
 	if system != "sys" {
 		t.Fatalf("unexpected system text: %q", system)
 	}
@@ -644,13 +801,13 @@ func TestGeminiMessageTransform(t *testing.T) {
 	if len(parts) == 0 || parts[0].FunctionCall == nil {
 		t.Fatalf("expected function call part in last gemini message")
 	}
-	if parts[0].ThoughtSignature != "sig-1" {
-		t.Fatalf("expected thought signature propagated, got %q", parts[0].ThoughtSignature)
+	if string(parts[0].ThoughtSignature) != "sig-1" {
+		t.Fatalf("expected thought signature propagated, got %q", string(parts[0].ThoughtSignature))
 	}
 }
 
 func TestGeminiMessageTransform_SkipsToolCallWithoutThoughtSignature(t *testing.T) {
-	_, msgs := toGeminiContents([]model.Message{
+	_, msgs, err := toGeminiContents([]model.Message{
 		{
 			Role: model.RoleAssistant,
 			Text: "tool planned",
@@ -661,6 +818,9 @@ func TestGeminiMessageTransform_SkipsToolCallWithoutThoughtSignature(t *testing.
 			}},
 		},
 	})
+	if err != nil {
+		t.Fatalf("toGeminiContents: %v", err)
+	}
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
@@ -673,16 +833,14 @@ func TestGeminiMessageTransform_SkipsToolCallWithoutThoughtSignature(t *testing.
 }
 
 func TestGeminiResponseToMessage_PreservesThoughtSignature(t *testing.T) {
-	msg, _, err := geminiResponseToMessage(geminiResponse{
-		Candidates: []struct {
-			Content geminiContent `json:"content"`
-		}{
+	msg, _, err := geminiResponseToMessage(&genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
 			{
-				Content: geminiContent{
-					Parts: []geminiPart{
+				Content: &genai.Content{
+					Parts: []*genai.Part{
 						{
-							ThoughtSignature: "sig-call-1",
-							FunctionCall: &geminiFunctionCall{
+							ThoughtSignature: []byte("sig-call-1"),
+							FunctionCall: &genai.FunctionCall{
 								Name: "BASH",
 								Args: map[string]any{"command": "ls"},
 							},
@@ -698,18 +856,60 @@ func TestGeminiResponseToMessage_PreservesThoughtSignature(t *testing.T) {
 	if len(msg.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
 	}
-	if msg.ToolCalls[0].ThoughtSignature != "sig-call-1" {
-		t.Fatalf("expected thought signature kept, got %q", msg.ToolCalls[0].ThoughtSignature)
+	if msg.ToolCalls[0].ThoughtSignature == "sig-call-1" {
+		t.Fatalf("expected thought signature to be encoded for lossless persistence, got raw %q", msg.ToolCalls[0].ThoughtSignature)
+	}
+	if got := decodeGeminiThoughtSignature(msg.ToolCalls[0].ThoughtSignature); string(got) != "sig-call-1" {
+		t.Fatalf("expected decoded thought signature kept, got %q", string(got))
 	}
 }
 
-func TestGeminiFunctionCallUnmarshal_SupportsSnakeCaseThoughtSignature(t *testing.T) {
-	var call geminiFunctionCall
-	if err := json.Unmarshal([]byte(`{"name":"BASH","args":{"command":"ls"},"thought_signature":"sig-snake-1"}`), &call); err != nil {
+func TestGeminiResponseToMessage_ExtractsReasoningText(t *testing.T) {
+	msg, _, err := geminiResponseToMessage(&genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Parts: []*genai.Part{
+						{Text: "thought-1", Thought: true},
+						{Text: "answer"},
+						{Text: "thought-2", Thought: true},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if call.ThoughtSignature != "sig-snake-1" {
-		t.Fatalf("expected snake thought signature, got %q", call.ThoughtSignature)
+	if msg.Text != "answer" {
+		t.Fatalf("unexpected answer text %q", msg.Text)
+	}
+	if msg.Reasoning != "thought-1\nthought-2" {
+		t.Fatalf("unexpected reasoning text %q", msg.Reasoning)
+	}
+}
+
+func TestGeminiResponseToMessage_ExtractsReasoningTextFromThoughtSignature(t *testing.T) {
+	msg, _, err := geminiResponseToMessage(&genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Parts: []*genai.Part{
+						{Text: "thought-signature", ThoughtSignature: []byte("sig-thought")},
+						{Text: "answer"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Text != "answer" {
+		t.Fatalf("unexpected answer text %q", msg.Text)
+	}
+	if msg.Reasoning != "thought-signature" {
+		t.Fatalf("unexpected reasoning text %q", msg.Reasoning)
 	}
 }
 
@@ -721,26 +921,26 @@ func TestGeminiResponseDecode_PartLevelThoughtSignature(t *testing.T) {
 					"parts":[
 						{
 							"functionCall":{"name":"BASH","args":{"command":"ls"}},
-							"thoughtSignature":"sig-part-1"
+							"thoughtSignature":"c2lnLXBhcnQtMQ=="
 						}
 					]
 				}
 			}
 		]
 	}`)
-	var out geminiResponse
+	var out genai.GenerateContentResponse
 	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatal(err)
 	}
-	msg, _, err := geminiResponseToMessage(out)
+	msg, _, err := geminiResponseToMessage(&out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(msg.ToolCalls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
 	}
-	if msg.ToolCalls[0].ThoughtSignature != "sig-part-1" {
-		t.Fatalf("expected part-level thought signature, got %q", msg.ToolCalls[0].ThoughtSignature)
+	if got := decodeGeminiThoughtSignature(msg.ToolCalls[0].ThoughtSignature); string(got) != "sig-part-1" {
+		t.Fatalf("expected part-level thought signature, got %q", string(got))
 	}
 }
 
@@ -766,5 +966,21 @@ func TestDedupToolCalls_MergesLateThoughtSignature(t *testing.T) {
 	}
 	if strings.TrimSpace(calls[0].Args) != `{"command":"ls -la"}` {
 		t.Fatalf("expected latest args merged, got %v", calls[0].Args)
+	}
+}
+
+func TestGeminiThoughtSignature_BinaryRoundTrip(t *testing.T) {
+	raw := []byte{0x00, 0x01, 0x02, 0xff, 0x20, 0x09}
+	encoded := encodeGeminiThoughtSignature(raw)
+	if encoded == "" || encoded == string(raw) {
+		t.Fatalf("expected non-empty encoded signature, got %q", encoded)
+	}
+	decoded := decodeGeminiThoughtSignature(encoded)
+	if !bytes.Equal(decoded, raw) {
+		t.Fatalf("expected decoded signature to match raw bytes")
+	}
+	legacy := decodeGeminiThoughtSignature("sig-legacy-1")
+	if string(legacy) != "sig-legacy-1" {
+		t.Fatalf("expected legacy signature compatibility, got %q", string(legacy))
 	}
 }

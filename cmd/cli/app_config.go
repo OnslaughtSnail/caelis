@@ -59,6 +59,7 @@ type providerRecord struct {
 	TimeoutSeconds      int               `json:"timeout_seconds,omitempty"`
 	MaxOutputTok        int               `json:"max_output_tokens,omitempty"`
 	ContextWindowTokens int               `json:"context_window_tokens,omitempty"`
+	ReasoningLevels     []string          `json:"reasoning_levels,omitempty"`
 	ThinkingMode        string            `json:"thinking_mode,omitempty"`
 	ThinkingBudget      int               `json:"thinking_budget,omitempty"`
 	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
@@ -301,6 +302,8 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 		if alias == "" {
 			continue
 		}
+		auth := rec.Auth
+		normalizeProviderAuthRecord(rec.Provider, rec.BaseURL, &auth)
 		cfg := modelproviders.Config{
 			Alias:               alias,
 			Provider:            strings.TrimSpace(rec.Provider),
@@ -310,16 +313,17 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 			Headers:             copyHeaders(rec.Headers),
 			ContextWindowTokens: rec.ContextWindowTokens,
 			MaxOutputTok:        rec.MaxOutputTok,
+			ReasoningLevels:     normalizeReasoningLevels(rec.ReasoningLevels),
 			ThinkingMode:        normalizeThinkingMode(rec.ThinkingMode),
 			ThinkingBudget:      normalizeThinkingBudget(rec.ThinkingBudget),
 			ReasoningEffort:     normalizeReasoningEffort(rec.ReasoningEffort),
 			Auth: modelproviders.AuthConfig{
-				Type:          modelproviders.AuthType(strings.TrimSpace(rec.Auth.Type)),
+				Type:          modelproviders.AuthType(strings.TrimSpace(auth.Type)),
 				TokenEnv:      "",
-				Token:         strings.TrimSpace(rec.Auth.Token),
-				CredentialRef: strings.TrimSpace(rec.Auth.CredentialRef),
-				HeaderKey:     strings.TrimSpace(rec.Auth.HeaderKey),
-				Prefix:        strings.TrimSpace(rec.Auth.Prefix),
+				Token:         strings.TrimSpace(auth.Token),
+				CredentialRef: normalizeCredentialRef(auth.CredentialRef),
+				HeaderKey:     strings.TrimSpace(auth.HeaderKey),
+				Prefix:        strings.TrimSpace(auth.Prefix),
 			},
 		}
 		if rec.TimeoutSeconds > 0 {
@@ -504,6 +508,7 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		Headers:             copyHeaders(cfg.Headers),
 		ContextWindowTokens: cfg.ContextWindowTokens,
 		MaxOutputTok:        cfg.MaxOutputTok,
+		ReasoningLevels:     normalizeReasoningLevels(cfg.ReasoningLevels),
 		ThinkingMode:        normalizeThinkingMode(cfg.ThinkingMode),
 		ThinkingBudget:      normalizeThinkingBudget(cfg.ThinkingBudget),
 		ReasoningEffort:     normalizeReasoningEffort(cfg.ReasoningEffort),
@@ -511,14 +516,12 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 			Type:          string(cfg.Auth.Type),
 			TokenEnv:      "",
 			Token:         strings.TrimSpace(cfg.Auth.Token),
-			CredentialRef: strings.TrimSpace(cfg.Auth.CredentialRef),
+			CredentialRef: normalizeCredentialRef(cfg.Auth.CredentialRef),
 			HeaderKey:     strings.TrimSpace(cfg.Auth.HeaderKey),
 			Prefix:        strings.TrimSpace(cfg.Auth.Prefix),
 		},
 	}
-	if record.Auth.CredentialRef == "" {
-		record.Auth.CredentialRef = normalizeCredentialRef(defaultCredentialRef(record.Provider, record.BaseURL))
-	}
+	normalizeProviderAuthRecord(record.Provider, record.BaseURL, &record.Auth)
 	if cfg.Timeout > 0 {
 		record.TimeoutSeconds = int(cfg.Timeout.Seconds())
 	}
@@ -584,9 +587,11 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	cfg.PermissionMode = normalizePermissionMode(cfg.PermissionMode)
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
 	for i := range cfg.Providers {
+		cfg.Providers[i].ReasoningLevels = normalizeReasoningLevels(cfg.Providers[i].ReasoningLevels)
 		cfg.Providers[i].ThinkingMode = normalizeThinkingMode(cfg.Providers[i].ThinkingMode)
 		cfg.Providers[i].ThinkingBudget = normalizeThinkingBudget(cfg.Providers[i].ThinkingBudget)
 		cfg.Providers[i].ReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].ReasoningEffort)
+		normalizeProviderAuthRecord(cfg.Providers[i].Provider, cfg.Providers[i].BaseURL, &cfg.Providers[i].Auth)
 	}
 }
 
@@ -609,18 +614,69 @@ func normalizeThinkingBudget(budget int) int {
 }
 
 func normalizeReasoningEffort(effort string) string {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "low":
-		return "low"
-	case "medium":
-		return "medium"
-	case "high":
-		return "high"
-	case "very_high", "very-high", "veryhigh":
-		return "very_high"
+	return modelproviders.NormalizeReasoningEffort(effort)
+}
+
+func normalizeReasoningLevel(level string) string {
+	value := strings.ToLower(strings.TrimSpace(level))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	switch value {
+	case "mimimal":
+		return "minimal"
+	case "very_high", "veryhigh", "x_high":
+		return "xhigh"
+	case "none", "minimal", "low", "medium", "high", "xhigh":
+		return value
 	default:
-		return defaultReasoningEffort
+		return ""
 	}
+}
+
+func normalizeReasoningLevels(levels []string) []string {
+	if len(levels) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(levels))
+	for _, one := range levels {
+		normalized := normalizeReasoningLevel(one)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeProviderAuthRecord(provider string, baseURL string, auth *authRecord) {
+	if auth == nil {
+		return
+	}
+	auth.Type = strings.TrimSpace(auth.Type)
+	auth.TokenEnv = ""
+	auth.Token = strings.TrimSpace(auth.Token)
+	auth.CredentialRef = normalizeCredentialRef(auth.CredentialRef)
+	auth.HeaderKey = strings.TrimSpace(auth.HeaderKey)
+	auth.Prefix = strings.TrimSpace(auth.Prefix)
+
+	// Strategy: prefer credential_ref (credential store) and keep plaintext
+	// token as compatibility fallback only when credential_ref is absent.
+	if auth.CredentialRef != "" {
+		auth.Token = ""
+		return
+	}
+	if auth.Token != "" {
+		return
+	}
+	auth.CredentialRef = normalizeCredentialRef(defaultCredentialRef(provider, baseURL))
 }
 
 func normalizePermissionMode(mode string) string {

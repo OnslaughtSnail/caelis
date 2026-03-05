@@ -68,11 +68,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.renderViewportContent()
-		m.hint = "selected text copied to clipboard"
-		return m, func() tea.Msg {
+		const copyHint = "selected text copied to clipboard"
+		m.hint = copyHint
+		clipCmd := func() tea.Msg {
 			_ = clipboard.WriteAll(text)
 			return nil
 		}
+		return m, tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
 	}
 	return m, nil
 }
@@ -125,11 +127,13 @@ func (m *Model) handleInputAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 			m.clearInputSelection()
 			return true, nil
 		}
-		m.hint = "selected text copied to clipboard"
-		return true, func() tea.Msg {
+		const copyHint = "selected text copied to clipboard"
+		m.hint = copyHint
+		clipCmd := func() tea.Msg {
 			_ = clipboard.WriteAll(text)
 			return nil
 		}
+		return true, tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
 	}
 	return false, nil
 }
