@@ -49,7 +49,7 @@ Workflow: `.github/workflows/release.yml`
 - `postinstall` download error for users:
   - Confirm GitHub release has expected asset names:
     - `caelis_<version>_<os>_<arch>.tar.gz`
-    - windows: `.zip`
+  - Supported OS for npm binary install: `darwin`, `linux` (x64/arm64)
 - Need to skip download during local debugging:
   ```bash
   CAELIS_NPM_SKIP_DOWNLOAD=1 npm i

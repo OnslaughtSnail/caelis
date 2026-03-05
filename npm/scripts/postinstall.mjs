@@ -24,7 +24,6 @@ function resolveTarget() {
   const osMap = {
     darwin: 'darwin',
     linux: 'linux',
-    win32: 'windows',
   };
   const archMap = {
     x64: 'amd64',
@@ -34,7 +33,7 @@ function resolveTarget() {
   const goos = osMap[platform];
   const goarch = archMap[arch];
   if (!goos || !goarch) {
-    throw new Error(`unsupported platform/arch: ${platform}/${arch}`);
+    throw new Error(`unsupported platform/arch: ${platform}/${arch}; supported: darwin|linux with x64|arm64`);
   }
 
   return {
