@@ -21,7 +21,7 @@ func testSandboxTypeForPolicy() string {
 	if runtime.GOOS == "darwin" {
 		return "seatbelt"
 	}
-	return "bwrap"
+	return "landlock"
 }
 
 func TestRouteCommandExecution_SafeCommandSandboxAllow(t *testing.T) {
@@ -136,8 +136,8 @@ func TestRouteCommandExecution_RequireEscalatedBoolAccepted(t *testing.T) {
 			Args: `{"command":"python3 app.py","require_escalated":true}`,
 		},
 		Args: map[string]any{
-			"command":            "python3 app.py",
-			"require_escalated":  true,
+			"command":           "python3 app.py",
+			"require_escalated": true,
 		},
 	})
 	if err != nil {

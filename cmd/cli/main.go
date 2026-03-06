@@ -26,11 +26,15 @@ import (
 	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
+	"github.com/OnslaughtSnail/caelis/internal/sandboxhelper"
 )
 
 var conversationSessionCounter atomic.Uint64
 
 func main() {
+	if sandboxhelper.MaybeRun(os.Args[1:]) {
+		return
+	}
 	launcher := launcherfull.NewLauncher(
 		runCLI,
 		notImplementedLauncher("api"),
@@ -132,13 +136,6 @@ func runCLI(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := configStore.SetRuntimeSettings(runtimeSettings{
-		PermissionMode: *permissionMode,
-		SandboxType:    *sandboxType,
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: persist runtime settings failed: %v\n", err)
-	}
-
 	workspace, err := resolveWorkspaceContext()
 	if err != nil {
 		return err
@@ -156,18 +153,35 @@ func runCLI(ctx context.Context, args []string) error {
 		return err
 	}
 
-	execRuntime, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionMode(strings.TrimSpace(*permissionMode)),
-		SandboxType:    strings.TrimSpace(*sandboxType),
-	})
+	sandboxHelperPath, err := resolveSandboxHelperPath()
 	if err != nil {
 		return err
+	}
+	execRuntime, err := newExecutionRuntime(
+		toolexec.PermissionMode(strings.TrimSpace(*permissionMode)),
+		strings.TrimSpace(*sandboxType),
+		sandboxHelperPath,
+	)
+	if err != nil {
+		return err
+	}
+	if flagProvided(args, "sandbox-type") &&
+		execRuntime.PermissionMode() == toolexec.PermissionModeDefault &&
+		execRuntime.FallbackToHost() {
+		_ = toolexec.Close(execRuntime)
+		return fmt.Errorf("sandbox type %q is unavailable: %s", strings.TrimSpace(*sandboxType), execRuntime.FallbackReason())
 	}
 	defer func() {
 		if closeErr := toolexec.Close(execRuntime); closeErr != nil {
 			fmt.Fprintf(os.Stderr, "warn: close execution runtime failed: %v\n", closeErr)
 		}
 	}()
+	if err := configStore.SetRuntimeSettings(runtimeSettings{
+		PermissionMode: *permissionMode,
+		SandboxType:    *sandboxType,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: persist runtime settings failed: %v\n", err)
+	}
 	if execRuntime.FallbackToHost() {
 		fmt.Fprintf(os.Stderr, "warn: sandbox unavailable, fallback to host+approval: %s\n", execRuntime.FallbackReason())
 	}
@@ -366,6 +380,7 @@ func runCLI(ctx context.Context, args []string) error {
 		Resolved:               resolved,
 		ExecRuntime:            execRuntime,
 		SandboxType:            strings.TrimSpace(*sandboxType),
+		SandboxHelperPath:      sandboxHelperPath,
 		ModelAlias:             alias,
 		Model:                  llm,
 		ModelFactory:           factory,

@@ -713,6 +713,7 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 	}
 	appendType(c.sandboxType)
 	appendType(platformDefaultSandboxType())
+	appendType("landlock")
 	appendType("bwrap")
 	appendType("seatbelt")
 

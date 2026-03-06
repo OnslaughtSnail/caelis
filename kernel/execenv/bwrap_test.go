@@ -47,12 +47,39 @@ func TestBwrapRunner_ProbeMissingBinary(t *testing.T) {
 	}
 }
 
+func TestBwrapRunner_ProbeMissingBash(t *testing.T) {
+	r := &bwrapRunner{
+		goos: "linux",
+		lookPath: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			return "", errors.New("not found")
+		},
+	}
+	err := r.Probe(context.Background())
+	if err == nil {
+		t.Fatal("expected missing-bash error")
+	}
+	if !strings.Contains(err.Error(), "bash not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestBwrapRunner_ProbeRunsBwrap(t *testing.T) {
 	var call string
 	r := &bwrapRunner{
-		goos:     "linux",
-		lookPath: func(string) (string, error) { return "/usr/bin/bwrap", nil },
-		policy:   SandboxPolicy{NetworkAccess: false},
+		goos: "linux",
+		lookPath: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			if name == "bash" {
+				return "/usr/bin/bash", nil
+			}
+			return "", errors.New("unexpected lookup")
+		},
+		policy: SandboxPolicy{NetworkAccess: false},
 		execCommand: func(_ context.Context, name string, args ...string) *exec.Cmd {
 			call = name + " " + strings.Join(args, " ")
 			if name != "bwrap" {
@@ -72,14 +99,25 @@ func TestBwrapRunner_ProbeRunsBwrap(t *testing.T) {
 			t.Fatalf("expected %s in probe command: %s", flag, call)
 		}
 	}
+	if !strings.Contains(call, "-- bash -lc echo bwrap-probe") {
+		t.Fatalf("expected bash probe command, got %s", call)
+	}
 }
 
 func TestBwrapRunner_ProbeSkipsUnshareNetWhenNetworkEnabled(t *testing.T) {
 	var call string
 	r := &bwrapRunner{
-		goos:     "linux",
-		lookPath: func(string) (string, error) { return "/usr/bin/bwrap", nil },
-		policy:   SandboxPolicy{NetworkAccess: true},
+		goos: "linux",
+		lookPath: func(name string) (string, error) {
+			if name == "bwrap" {
+				return "/usr/bin/bwrap", nil
+			}
+			if name == "bash" {
+				return "/usr/bin/bash", nil
+			}
+			return "", errors.New("unexpected lookup")
+		},
+		policy: SandboxPolicy{NetworkAccess: true},
 		execCommand: func(_ context.Context, name string, args ...string) *exec.Cmd {
 			call = name + " " + strings.Join(args, " ")
 			return exec.Command("bash", "-lc", "echo ok")
@@ -95,6 +133,39 @@ func TestBwrapRunner_ProbeSkipsUnshareNetWhenNetworkEnabled(t *testing.T) {
 	for _, flag := range []string{"--unshare-user", "--unshare-pid"} {
 		if !strings.Contains(call, flag) {
 			t.Fatalf("expected %s in probe command: %s", flag, call)
+		}
+	}
+}
+
+func TestBwrapProbeFailureDetail_UserNamespaceBlocked(t *testing.T) {
+	statFn := func(string) (os.FileInfo, error) {
+		return os.Stat("/bin/sh")
+	}
+	readFileFn := func(path string) ([]byte, error) {
+		switch path {
+		case "/proc/sys/kernel/unprivileged_userns_clone":
+			return []byte("0\n"), nil
+		case "/proc/sys/user/max_user_namespaces":
+			return []byte("0\n"), nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+
+	got := bwrapProbeFailureDetail(
+		"/usr/bin/bwrap",
+		"bwrap: setting up uid map: Permission denied",
+		statFn,
+		readFileFn,
+	)
+	for _, want := range []string{
+		"working unprivileged user-namespace setup",
+		"/usr/bin/bwrap is not setuid",
+		"kernel.unprivileged_userns_clone=0",
+		"user.max_user_namespaces=0",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in detail %q", want, got)
 		}
 	}
 }
@@ -449,10 +520,10 @@ func TestBwrapReadOnlySubpathsResolved(t *testing.T) {
 
 func TestResolveBwrapPath(t *testing.T) {
 	cases := []struct {
-		name    string
-		base    string
-		value   string
-		want    string
+		name  string
+		base  string
+		value string
+		want  string
 	}{
 		{"absolute", "/tmp", "/usr/bin", "/usr/bin"},
 		{"relative", "/home/user", "project", "/home/user/project"},

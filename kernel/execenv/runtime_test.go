@@ -3,6 +3,7 @@ package execenv
 import (
 	"context"
 	"errors"
+	"reflect"
 	stdruntime "runtime"
 	"strings"
 	"testing"
@@ -55,6 +56,9 @@ type staticFactory struct {
 func platformDefaultSandboxType() string {
 	if strings.EqualFold(runtimeGOOS, "darwin") {
 		return seatbeltSandboxType
+	}
+	if strings.EqualFold(runtimeGOOS, "linux") {
+		return landlockSandboxType
 	}
 	return bwrapSandboxType
 }
@@ -223,6 +227,22 @@ func TestNew_DefaultDerivesWorkspaceWritePolicy(t *testing.T) {
 	}
 }
 
+func TestSandboxTypeCandidatesForPlatform_LinuxDefaultUsesLandlockOnly(t *testing.T) {
+	got := sandboxTypeCandidatesForPlatform("", "linux")
+	want := []string{landlockSandboxType}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected linux default candidates: got=%v want=%v", got, want)
+	}
+}
+
+func TestSandboxTypeCandidatesForPlatform_LinuxExplicitBwrap(t *testing.T) {
+	got := sandboxTypeCandidatesForPlatform(bwrapSandboxType, "linux")
+	want := []string{bwrapSandboxType}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected linux bwrap candidates: got=%v want=%v", got, want)
+	}
+}
+
 func TestNew_FullControlDerivesDangerFullPolicy(t *testing.T) {
 	rt, err := New(Config{PermissionMode: PermissionModeFullControl})
 	if err != nil {
@@ -274,6 +294,8 @@ func TestNew_DefaultSandboxTypeFollowsPlatform(t *testing.T) {
 	want := bwrapSandboxType
 	if stdruntime.GOOS == "darwin" {
 		want = seatbeltSandboxType
+	} else if stdruntime.GOOS == "linux" {
+		want = landlockSandboxType
 	}
 	if rt.SandboxType() != want {
 		t.Fatalf("expected default sandbox type %q, got %q", want, rt.SandboxType())
@@ -289,6 +311,10 @@ func TestNew_DarwinSeatbeltUnavailableFallsBackToHost(t *testing.T) {
 		seatbeltSandboxType: staticFactory{
 			typ:    seatbeltSandboxType,
 			runner: probeRunner{probeErr: errors.New("seatbelt unavailable")},
+		},
+		landlockSandboxType: staticFactory{
+			typ:    landlockSandboxType,
+			runner: noopRunner{},
 		},
 		bwrapSandboxType: staticFactory{
 			typ:    bwrapSandboxType,
@@ -324,9 +350,10 @@ func TestSandboxTypeCandidatesForPlatform(t *testing.T) {
 		expected []string
 	}{
 		{name: "darwin default", request: "", goos: "darwin", expected: []string{"seatbelt"}},
-		{name: "linux default", request: "", goos: "linux", expected: []string{"bwrap"}},
+		{name: "linux default", request: "", goos: "linux", expected: []string{"landlock"}},
 		{name: "darwin explicit seatbelt", request: "seatbelt", goos: "darwin", expected: []string{"seatbelt"}},
 		{name: "darwin explicit bwrap", request: "bwrap", goos: "darwin", expected: nil},
+		{name: "linux explicit landlock", request: "landlock", goos: "linux", expected: []string{"landlock"}},
 		{name: "linux explicit bwrap", request: "bwrap", goos: "linux", expected: []string{"bwrap"}},
 		{name: "linux explicit seatbelt", request: "seatbelt", goos: "linux", expected: nil},
 	}

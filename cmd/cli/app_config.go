@@ -717,6 +717,9 @@ func platformDefaultSandboxType() string {
 	if stdruntime.GOOS == "darwin" {
 		return "seatbelt"
 	}
+	if stdruntime.GOOS == "linux" {
+		return "landlock"
+	}
 	return "bwrap"
 }
 

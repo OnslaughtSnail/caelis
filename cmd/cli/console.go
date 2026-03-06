@@ -37,9 +37,10 @@ type cliConsole struct {
 	contextWindow int
 	workspace     workspaceContext
 
-	resolved    *bootstrap.ResolvedSpec
-	execRuntime toolexec.Runtime
-	sandboxType string
+	resolved          *bootstrap.ResolvedSpec
+	execRuntime       toolexec.Runtime
+	sandboxType       string
+	sandboxHelperPath string
 
 	modelAlias             string
 	llm                    model.LLM
@@ -127,6 +128,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		resolved:               cfg.Resolved,
 		execRuntime:            cfg.ExecRuntime,
 		sandboxType:            strings.TrimSpace(cfg.SandboxType),
+		sandboxHelperPath:      strings.TrimSpace(cfg.SandboxHelperPath),
 		modelAlias:             cfg.ModelAlias,
 		llm:                    cfg.Model,
 		modelFactory:           cfg.ModelFactory,
@@ -196,6 +198,7 @@ type cliConsoleConfig struct {
 	Resolved               *bootstrap.ResolvedSpec
 	ExecRuntime            toolexec.Runtime
 	SandboxType            string
+	SandboxHelperPath      string
 	ModelAlias             string
 	Model                  model.LLM
 	ModelFactory           *modelproviders.Factory
@@ -882,10 +885,7 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 		return false, fmt.Errorf("sandbox type cannot be empty")
 	}
 	// Validate type by constructing a default-mode runtime.
-	if _, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		SandboxType:    sandboxType,
-	}); err != nil {
+	if err := validateExplicitSandboxType(sandboxType, c.sandboxHelperPath); err != nil {
 		return false, err
 	}
 	c.sandboxType = sandboxType
@@ -1154,10 +1154,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 
 func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandboxType string) error {
 	prevRuntime := c.execRuntime
-	nextRuntime, err := toolexec.New(toolexec.Config{
-		PermissionMode: mode,
-		SandboxType:    sandboxType,
-	})
+	nextRuntime, err := newExecutionRuntime(mode, sandboxType, c.sandboxHelperPath)
 	if err != nil {
 		return err
 	}

@@ -61,16 +61,17 @@ type EscalationReason struct {
 
 // CommandDecision is runtime routing result for one command request.
 type CommandDecision struct {
-	Route      ExecutionRoute
-	Escalation *EscalationReason
+	Route        ExecutionRoute
+	Escalation   *EscalationReason
 	NeedApproval bool
 }
 
 // Config builds an execution runtime.
 type Config struct {
-	PermissionMode PermissionMode
-	SandboxType    string
-	SandboxPolicy  SandboxPolicy
+	PermissionMode    PermissionMode
+	SandboxType       string
+	SandboxPolicy     SandboxPolicy
+	SandboxHelperPath string
 
 	FileSystem    FileSystem
 	HostRunner    CommandRunner
@@ -487,8 +488,17 @@ func New(cfg Config) (Runtime, error) {
 	if strings.EqualFold(runtimeGOOS, "darwin") && requestedSandboxType != "" && requestedSandboxType != seatbeltSandboxType {
 		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on darwin, expected %q", requestedSandboxType, seatbeltSandboxType)
 	}
-	if strings.EqualFold(runtimeGOOS, "linux") && requestedSandboxType != "" && requestedSandboxType != bwrapSandboxType {
-		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on linux, expected %q", requestedSandboxType, bwrapSandboxType)
+	if strings.EqualFold(runtimeGOOS, "linux") &&
+		requestedSandboxType != "" &&
+		requestedSandboxType != landlockSandboxType &&
+		requestedSandboxType != bwrapSandboxType {
+		return nil, NewCodedError(
+			ErrorCodeSandboxUnsupported,
+			"execenv: sandbox type %q is unsupported on linux, expected %q or %q",
+			requestedSandboxType,
+			landlockSandboxType,
+			bwrapSandboxType,
+		)
 	}
 	candidates := sandboxTypeCandidates(requestedSandboxType)
 	if len(candidates) == 0 {
@@ -561,6 +571,9 @@ func defaultSandboxTypeForPlatform() string {
 	if runtimeGOOS == "darwin" {
 		return seatbeltSandboxType
 	}
+	if runtimeGOOS == "linux" {
+		return landlockSandboxType
+	}
 	return bwrapSandboxType
 }
 
@@ -578,7 +591,10 @@ func sandboxTypeCandidatesForPlatform(requested string, goos string) []string {
 		return nil
 	}
 	if normalizedGoos == "linux" {
-		if value == "" || value == bwrapSandboxType {
+		if value == "" || value == landlockSandboxType {
+			return []string{landlockSandboxType}
+		}
+		if value == bwrapSandboxType {
 			return []string{bwrapSandboxType}
 		}
 		return nil

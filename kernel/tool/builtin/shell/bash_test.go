@@ -23,7 +23,7 @@ func testSandboxType() string {
 	if runtime.GOOS == "darwin" {
 		return "seatbelt"
 	}
-	return "bwrap"
+	return "landlock"
 }
 
 func (r *recordingRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
@@ -281,8 +281,8 @@ func TestBash_RequireEscalatedBoolForcesHostApproval(t *testing.T) {
 	}
 	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: true})
 	out, err := tool.Run(ctx, map[string]any{
-		"command":            "python3 app.py",
-		"require_escalated":  true,
+		"command":           "python3 app.py",
+		"require_escalated": true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,8 +315,8 @@ func TestBash_RequireEscalatedWhitelistedCommandSkipsApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, err := tool.Run(context.Background(), map[string]any{
-		"command":            "cd /tmp && ls -la *.png",
-		"require_escalated":  true,
+		"command":           "cd /tmp && ls -la *.png",
+		"require_escalated": true,
 	})
 	if err != nil {
 		t.Fatal(err)

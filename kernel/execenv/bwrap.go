@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	stdruntime "runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -31,6 +32,8 @@ func (f bwrapSandboxFactory) Build(cfg Config) (CommandRunner, error) {
 type bwrapRunner struct {
 	execCommand func(context.Context, string, ...string) *exec.Cmd
 	lookPath    func(string) (string, error)
+	readFile    func(string) ([]byte, error)
+	stat        func(string) (os.FileInfo, error)
 	goos        string
 	policy      SandboxPolicy
 }
@@ -39,6 +42,8 @@ func newBwrapRunner(policy SandboxPolicy) CommandRunner {
 	return &bwrapRunner{
 		execCommand: exec.CommandContext,
 		lookPath:    exec.LookPath,
+		readFile:    os.ReadFile,
+		stat:        os.Stat,
 		goos:        stdruntime.GOOS,
 		policy:      policy,
 	}
@@ -48,8 +53,12 @@ func (b *bwrapRunner) Probe(ctx context.Context) error {
 	if b.goos != "linux" {
 		return fmt.Errorf("bwrap sandbox is only supported on linux (current=%s)", b.goos)
 	}
-	if _, err := b.lookPath("bwrap"); err != nil {
+	bwrapPath, err := b.lookPath("bwrap")
+	if err != nil {
 		return fmt.Errorf("bwrap sandbox unavailable: bwrap not found: %w", err)
+	}
+	if _, err := b.lookPath("bash"); err != nil {
+		return fmt.Errorf("bwrap sandbox unavailable: bash not found: %w", err)
 	}
 	// Exercise the same namespace flags the runtime will actually use for
 	// this policy so we don't reject machines that can run the default path.
@@ -65,7 +74,7 @@ func (b *bwrapRunner) Probe(ctx context.Context) error {
 	if !b.policy.NetworkAccess {
 		probeArgs = append(probeArgs, "--unshare-net")
 	}
-	probeArgs = append(probeArgs, "--", "/bin/sh", "-c", "echo bwrap-probe")
+	probeArgs = append(probeArgs, "--", "bash", "-lc", "echo bwrap-probe")
 	cmd := b.execCommand(ctx, "bwrap", probeArgs...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -74,9 +83,68 @@ func (b *bwrapRunner) Probe(ctx context.Context) error {
 		if msg == "" {
 			return fmt.Errorf("bwrap sandbox probe failed: %w", err)
 		}
+		if detail := bwrapProbeFailureDetail(bwrapPath, msg, b.stat, b.readFile); detail != "" {
+			return fmt.Errorf("bwrap sandbox probe failed: %w; stderr=%s; %s", err, msg, detail)
+		}
 		return fmt.Errorf("bwrap sandbox probe failed: %w; stderr=%s", err, msg)
 	}
 	return nil
+}
+
+func bwrapProbeFailureDetail(
+	bwrapPath string,
+	stderr string,
+	statFn func(string) (os.FileInfo, error),
+	readFileFn func(string) ([]byte, error),
+) string {
+	lower := strings.ToLower(strings.TrimSpace(stderr))
+	if lower == "" {
+		return ""
+	}
+	if !strings.Contains(lower, "uid map") &&
+		!strings.Contains(lower, "new namespace") &&
+		!strings.Contains(lower, "namespace failed") &&
+		!strings.Contains(lower, "operation not permitted") &&
+		!strings.Contains(lower, "permission denied") {
+		return ""
+	}
+
+	parts := []string{
+		"bubblewrap needs a working unprivileged user-namespace setup or a setuid-root bwrap binary on linux",
+	}
+	if statFn != nil && strings.TrimSpace(bwrapPath) != "" {
+		if info, err := statFn(bwrapPath); err == nil && info.Mode()&os.ModeSetuid == 0 {
+			parts = append(parts, fmt.Sprintf("%s is not setuid", bwrapPath))
+		}
+	}
+	if readFileFn != nil {
+		if value, ok := readFirstLineInt(readFileFn, "/proc/sys/kernel/unprivileged_userns_clone"); ok && value == 0 {
+			parts = append(parts, "kernel.unprivileged_userns_clone=0")
+		}
+		if value, ok := readFirstLineInt(readFileFn, "/proc/sys/user/max_user_namespaces"); ok && value == 0 {
+			parts = append(parts, "user.max_user_namespaces=0")
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func readFirstLineInt(readFileFn func(string) ([]byte, error), path string) (int, bool) {
+	if readFileFn == nil {
+		return 0, false
+	}
+	data, err := readFileFn(path)
+	if err != nil {
+		return 0, false
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return 0, false
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
 }
 
 func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResult, error) {
