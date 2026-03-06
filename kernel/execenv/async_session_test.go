@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+func waitForCondition(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if check() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !check() {
+		t.Fatalf("condition not satisfied within %s", timeout)
+	}
+}
+
 func TestAsyncSession_BasicExecution(t *testing.T) {
 	session := NewAsyncSession(AsyncSessionConfig{
 		Command: "echo hello",
@@ -48,8 +62,10 @@ func TestAsyncSession_WriteInput(t *testing.T) {
 		t.Fatalf("WriteInput failed: %v", err)
 	}
 
-	// Give it time to process
-	time.Sleep(100 * time.Millisecond)
+	waitForCondition(t, time.Second, func() bool {
+		stdout, _ := session.ReadAllOutput()
+		return strings.Contains(stdout, "test input")
+	})
 
 	// Terminate
 	session.Terminate()
@@ -218,17 +234,15 @@ func TestHostRunner_AsyncWriteRead(t *testing.T) {
 		t.Fatalf("WriteInput failed: %v", err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
-
-	// Read output
-	stdout, _, _, _, err := runner.ReadOutput(sessionID, 0, 0)
-	if err != nil {
-		t.Fatalf("ReadOutput failed: %v", err)
-	}
-
-	if !strings.Contains(string(stdout), "hello from test") {
-		t.Fatalf("Expected 'hello from test' in output, got %q", string(stdout))
-	}
+	var stdout []byte
+	waitForCondition(t, time.Second, func() bool {
+		var err error
+		stdout, _, _, _, err = runner.ReadOutput(sessionID, 0, 0)
+		if err != nil {
+			t.Fatalf("ReadOutput failed: %v", err)
+		}
+		return strings.Contains(string(stdout), "hello from test")
+	})
 
 	// Terminate
 	runner.TerminateSession(sessionID)

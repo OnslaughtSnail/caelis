@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.11 - 2026-03-06
+
+### Release Follow-up
+- Stabilized async execution tests in `kernel/execenv` by replacing fixed sleeps with bounded polling, avoiding empty-output flakes on slower CI runners.
+- Reissued the release after the `v0.0.10` GitHub workflow failed during `go test ./...` in GoReleaser.
+
 ## v0.0.10 - 2026-03-06
 
 ### Shell & Execution Runtime
