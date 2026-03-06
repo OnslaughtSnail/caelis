@@ -43,12 +43,12 @@ func TestIsOllamaProvider(t *testing.T) {
 
 func TestOllamaRegisterAndCreate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/api/chat" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"model":"qwen2.5:7b","choices":[{"message":{"role":"assistant","content":"hello from ollama"}}],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}}`)
+		_, _ = fmt.Fprint(w, `{"model":"qwen2.5:7b","message":{"role":"assistant","content":"hello from ollama"},"done":true,"prompt_eval_count":5,"eval_count":4}`)
 	}))
 	defer server.Close()
 
@@ -76,6 +76,7 @@ func TestOllamaRegisterAndCreate(t *testing.T) {
 
 	// Verify the model can generate a response.
 	var gotText string
+	var gotUsage model.Usage
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
 		Stream:   false,
@@ -85,10 +86,14 @@ func TestOllamaRegisterAndCreate(t *testing.T) {
 		}
 		if resp != nil && resp.TurnComplete {
 			gotText = resp.Message.Text
+			gotUsage = resp.Usage
 		}
 	}
 	if gotText != "hello from ollama" {
 		t.Fatalf("unexpected response text: %q", gotText)
+	}
+	if gotUsage.PromptTokens != 5 || gotUsage.CompletionTokens != 4 || gotUsage.TotalTokens != 9 {
+		t.Fatalf("unexpected usage: %+v", gotUsage)
 	}
 }
 
@@ -122,7 +127,7 @@ func TestOllamaBaseURLGetsV1Suffix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"model":"test","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+		_, _ = fmt.Fprint(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true}`)
 	}))
 	defer server.Close()
 
@@ -140,8 +145,8 @@ func TestOllamaBaseURLGetsV1Suffix(t *testing.T) {
 		}
 		_ = resp
 	}
-	if gotPath != "/v1/chat/completions" {
-		t.Fatalf("expected /v1/chat/completions, got %q", gotPath)
+	if gotPath != "/api/chat" {
+		t.Fatalf("expected /api/chat, got %q", gotPath)
 	}
 }
 
@@ -150,7 +155,7 @@ func TestOllamaBaseURLDoesNotDoubleV1(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"model":"test","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+		_, _ = fmt.Fprint(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true}`)
 	}))
 	defer server.Close()
 
@@ -168,8 +173,8 @@ func TestOllamaBaseURLDoesNotDoubleV1(t *testing.T) {
 		}
 		_ = resp
 	}
-	if gotPath != "/v1/chat/completions" {
-		t.Fatalf("expected /v1/chat/completions, got %q", gotPath)
+	if gotPath != "/api/chat" {
+		t.Fatalf("expected /api/chat, got %q", gotPath)
 	}
 }
 
@@ -284,18 +289,18 @@ func TestDiscoverOllamaModelsWithV1BaseURL(t *testing.T) {
 
 func TestOllamaStream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
+		if r.URL.Path != "/api/chat" {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", "application/x-ndjson")
 		flusher, _ := w.(http.Flusher)
-		_, _ = fmt.Fprint(w, "data: {\"model\":\"qwen2.5:7b\",\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "{\"model\":\"qwen2.5:7b\",\"message\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"done\":false}\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
-		_, _ = fmt.Fprint(w, "data: {\"model\":\"qwen2.5:7b\",\"choices\":[{\"delta\":{\"content\":\" World\"}}]}\n\n")
-		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(w, "{\"model\":\"qwen2.5:7b\",\"message\":{\"role\":\"assistant\",\"content\":\" World\"},\"done\":false}\n")
+		_, _ = fmt.Fprint(w, "{\"model\":\"qwen2.5:7b\",\"message\":{\"role\":\"assistant\"},\"done\":true,\"prompt_eval_count\":7,\"eval_count\":5}\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -310,6 +315,7 @@ func TestOllamaStream(t *testing.T) {
 	}, "")
 
 	var parts []string
+	var finalUsage model.Usage
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
 		Stream:   true,
@@ -320,10 +326,73 @@ func TestOllamaStream(t *testing.T) {
 		if resp != nil && resp.Partial {
 			parts = append(parts, resp.Message.Text)
 		}
+		if resp != nil && resp.TurnComplete {
+			finalUsage = resp.Usage
+		}
 	}
 	got := strings.Join(parts, "")
 	if got != "Hello World" {
 		t.Fatalf("unexpected streamed text: %q", got)
+	}
+	if finalUsage.PromptTokens != 7 || finalUsage.CompletionTokens != 5 || finalUsage.TotalTokens != 12 {
+		t.Fatalf("unexpected stream usage: %+v", finalUsage)
+	}
+}
+
+func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
+	var gotThink *bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload struct {
+			Think *bool `json:"think"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		gotThink = payload.Think
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"model":"qwen3.5:4b","message":{"role":"assistant","thinking":"step by step","content":"done"},"done":true,"prompt_eval_count":11,"eval_count":6}`)
+	}))
+	defer server.Close()
+
+	llm := newOllama(Config{
+		Provider: "ollama",
+		Model:    "qwen3.5:4b",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "")
+	enabled := true
+
+	var gotResp *model.Response
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+		Reasoning: model.ReasoningConfig{
+			Enabled: &enabled,
+		},
+	}) {
+		if err != nil {
+			t.Fatalf("generate error: %v", err)
+		}
+		if resp != nil && resp.TurnComplete {
+			gotResp = resp
+		}
+	}
+
+	if gotThink == nil || !*gotThink {
+		t.Fatalf("expected think=true in ollama request, got %#v", gotThink)
+	}
+	if gotResp == nil {
+		t.Fatal("expected final response")
+	}
+	if gotResp.Message.Reasoning != "step by step" {
+		t.Fatalf("unexpected reasoning: %q", gotResp.Message.Reasoning)
+	}
+	if gotResp.Usage.PromptTokens != 11 || gotResp.Usage.CompletionTokens != 6 || gotResp.Usage.TotalTokens != 17 {
+		t.Fatalf("unexpected usage: %+v", gotResp.Usage)
 	}
 }
 

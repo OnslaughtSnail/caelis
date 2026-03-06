@@ -161,6 +161,21 @@ func TestWelcomeCardRendersWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestWelcomeCardShowsConnectHintWhenModelMissing(t *testing.T) {
+	m := NewModel(Config{
+		Version:         "0.0.1",
+		Workspace:       "/tmp/work",
+		ShowWelcomeCard: true,
+		ExecuteLine:     noopExecute,
+	})
+	_ = m.Init()
+	resizeModel(m)
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "not configured (/connect)") {
+		t.Fatalf("expected explicit empty model state, got %q", view)
+	}
+}
+
 func TestResumeOverlayEnterExecutesSelectedSession(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
@@ -1257,6 +1272,122 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	}
 }
 
+func TestPromptChoiceRequestUsesExplicitChoicesAndFilter(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Select model",
+		Choices: []tuievents.PromptChoice{
+			{Label: "openai/gpt-4o", Value: "gpt-4o", Detail: "catalog"},
+			{Label: "openai/o3", Value: "o3", Detail: "reasoning"},
+		},
+		DefaultChoice: "gpt-4o",
+		Filterable:    true,
+		Response:      respCh,
+	})
+	if m.activePrompt == nil {
+		t.Fatal("expected active prompt")
+	}
+	if len(m.activePrompt.choices) != 2 {
+		t.Fatalf("expected explicit prompt choices, got %d", len(m.activePrompt.choices))
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Runes: []rune("o3")})
+	if string(m.activePrompt.filter) != "o3" {
+		t.Fatalf("expected prompt filter to update, got %q", string(m.activePrompt.filter))
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "openai/o3") {
+		t.Fatalf("expected filtered choice in modal, got %q", view)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case resp := <-respCh:
+		if resp.Err != nil {
+			t.Fatalf("expected successful prompt response, got err=%v", resp.Err)
+		}
+		if resp.Line != "o3" {
+			t.Fatalf("expected selected value 'o3', got %q", resp.Line)
+		}
+	default:
+		t.Fatal("expected prompt response after enter")
+	}
+}
+
+func TestPromptChoiceRequestSupportsMultiSelect(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Select models",
+		Choices: []tuievents.PromptChoice{
+			{Label: "openai/gpt-4o", Value: "gpt-4o"},
+			{Label: "openai/o3", Value: "o3"},
+		},
+		MultiSelect: true,
+		Response:    respCh,
+	})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "[x] openai/gpt-4o") || !strings.Contains(view, "[x] openai/o3") {
+		t.Fatalf("expected checked markers in view, got %q", view)
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case resp := <-respCh:
+		if resp.Line != "gpt-4o,o3" {
+			t.Fatalf("unexpected multi-select response %q", resp.Line)
+		}
+	default:
+		t.Fatal("expected prompt response after enter")
+	}
+}
+
+func TestPromptChoiceScrollKeepsSelectionVisible(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	choices := make([]tuievents.PromptChoice, 0, 12)
+	for i := 1; i <= 12; i++ {
+		label := fmt.Sprintf("model-%02d", i)
+		choices = append(choices, tuievents.PromptChoice{Label: label, Value: label})
+	}
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt:   "Select model",
+		Choices:  choices,
+		Response: respCh,
+	})
+
+	for i := 0; i < 9; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+
+	if m.activePrompt == nil {
+		t.Fatal("expected active prompt")
+	}
+	if m.activePrompt.choiceIndex != 9 {
+		t.Fatalf("expected choice index 9, got %d", m.activePrompt.choiceIndex)
+	}
+	if m.activePrompt.scrollOffset == 0 {
+		t.Fatal("expected prompt list to scroll once selection moved past visible window")
+	}
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "model-10") {
+		t.Fatalf("expected selected item to remain visible in view, got %q", view)
+	}
+	if strings.Contains(view, "model-01") {
+		t.Fatalf("expected window to scroll past early items, got %q", view)
+	}
+}
+
 func TestClearHistoryMsgResetsViewportContent(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine:     noopExecute,
@@ -1388,6 +1519,23 @@ func TestViewShowsInputWhenRunningForQueueing(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, ">") {
 		t.Fatalf("expected input prompt while running for queueing, got:\n%s", view)
+	}
+}
+
+func TestViewShowsPendingQueueWhileRunning(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	m.running = true
+	m.startRunningAnimation()
+	m.runningTip = 0
+	m.pendingQueue = []pendingPrompt{
+		{execLine: "first", displayLine: "first"},
+		{execLine: "second", displayLine: "second"},
+	}
+	view := m.View()
+	if !strings.Contains(view, "2 pending messages") {
+		t.Fatalf("expected pending queue hint in running view, got:\n%s", view)
 	}
 }
 

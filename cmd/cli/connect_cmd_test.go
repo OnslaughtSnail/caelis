@@ -1,11 +1,86 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
+
+type stubChoicePrompter struct {
+	choices []string
+	lines   []string
+	choiceI int
+	lineI   int
+}
+
+func (s *stubChoicePrompter) ReadLine(prompt string) (string, error) {
+	_ = prompt
+	if s.lineI >= len(s.lines) {
+		return "", errInputEOF
+	}
+	line := s.lines[s.lineI]
+	s.lineI++
+	return line, nil
+}
+
+func (s *stubChoicePrompter) ReadSecret(prompt string) (string, error) {
+	return s.ReadLine(prompt)
+}
+
+func (s *stubChoicePrompter) RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error) {
+	_ = prompt
+	_ = defaultChoice
+	_ = filterable
+	if s.choiceI >= len(s.choices) {
+		return "", errInputEOF
+	}
+	value := s.choices[s.choiceI]
+	s.choiceI++
+	for _, choice := range choices {
+		if choice.Value == value {
+			return value, nil
+		}
+	}
+	return "", io.EOF
+}
+
+func (s *stubChoicePrompter) RequestMultiChoicePrompt(prompt string, choices []tuievents.PromptChoice, selectedChoices []string, filterable bool) (string, error) {
+	_ = prompt
+	_ = selectedChoices
+	_ = filterable
+	if s.choiceI >= len(s.choices) {
+		return "", errInputEOF
+	}
+	raw := s.choices[s.choiceI]
+	s.choiceI++
+	parts := splitArrayInput(raw)
+	if len(parts) == 0 {
+		return "", io.EOF
+	}
+	allowed := map[string]struct{}{}
+	for _, choice := range choices {
+		allowed[choice.Value] = struct{}{}
+	}
+	for _, part := range parts {
+		if _, ok := allowed[part]; !ok {
+			return "", io.EOF
+		}
+	}
+	return raw, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestDescribeRemoteModel(t *testing.T) {
 	got := describeRemoteModel("deepseek", modelproviders.RemoteModel{
@@ -52,59 +127,154 @@ func TestCommonModelsForProvider(t *testing.T) {
 	}
 }
 
-func TestHandleConnectRejectsInvalidTimeoutArg(t *testing.T) {
+func TestHandleConnectRejectsPositionalArgs(t *testing.T) {
 	c := &cliConsole{modelFactory: modelproviders.NewFactory()}
-	_, err := handleConnect(c, []string{"openai", "gpt-4o", "https://api.openai.com/v1", "abc"})
+	_, err := handleConnect(c, []string{"openai"})
 	if err == nil {
-		t.Fatal("expected invalid timeout error")
+		t.Fatal("expected usage error")
 	}
-	if !strings.Contains(err.Error(), "invalid timeout_seconds") {
+	if !strings.Contains(err.Error(), "usage: /connect") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestParseConnectCLIArgs_WithAllFields(t *testing.T) {
-	got, err := parseConnectCLIArgs([]string{
-		"openai", "gpt-4o", "https://api.openai.com/v1", "60", "sk-test", "200000", "8192", "minimal,high",
+func TestBuildConnectModelChoicesIncludesCatalogAndCustom(t *testing.T) {
+	got := buildConnectModelChoices("deepseek", []modelproviders.RemoteModel{
+		{Name: "deepseek-chat"},
 	})
-	if err != nil {
-		t.Fatalf("parseConnectCLIArgs failed: %v", err)
+	foundChat := false
+	foundReasoner := false
+	foundCustom := false
+	for _, item := range got {
+		switch item.Name {
+		case "deepseek-chat":
+			foundChat = true
+		case "deepseek-reasoner":
+			foundReasoner = true
+		case connectCustomModelValue:
+			foundCustom = true
+		}
 	}
-	if !got.quickMode || got.provider != "openai" || got.model != "gpt-4o" || got.baseURL != "https://api.openai.com/v1" {
-		t.Fatalf("unexpected parsed args: %+v", got)
-	}
-	if !got.hasTimeout || got.timeoutSeconds != 60 {
-		t.Fatalf("unexpected timeout parse: %+v", got)
-	}
-	if got.apiKey != "sk-test" {
-		t.Fatalf("unexpected api key parse: %+v", got)
-	}
-	if !got.hasContextWindow || got.contextWindowTokens != 200000 {
-		t.Fatalf("unexpected context parse: %+v", got)
-	}
-	if !got.hasMaxOutput || got.maxOutputTokens != 8192 {
-		t.Fatalf("unexpected max_output parse: %+v", got)
-	}
-	if !got.hasReasoningLevels || got.reasoningLevelsRaw != "minimal,high" {
-		t.Fatalf("unexpected reasoning parse: %+v", got)
+	if !foundChat || !foundReasoner || !foundCustom {
+		t.Fatalf("unexpected model choices: %+v", got)
 	}
 }
 
-func TestParseConnectCLIArgs_NoAuthPlaceholder(t *testing.T) {
-	got, err := parseConnectCLIArgs([]string{
-		"ollama", "qwen2.5:7b", "http://localhost:11434", "30", "-", "32768", "4096", "-",
+func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return []modelproviders.RemoteModel{
+			{Name: "deepseek-chat"},
+			{Name: "deepseek-reasoner"},
+		}, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelproviders.CatalogInitStatus {
+		return modelproviders.InitModelCatalogWithStatus(context.Background(), &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, io.EOF
+			}),
+		}, "")
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
 	})
+
+	store := &appConfigStore{path: filepath.Join(t.TempDir(), "config.json"), data: defaultAppConfig()}
+	prompter := &stubChoicePrompter{
+		choices: []string{"deepseek", "deepseek-chat,deepseek-reasoner"},
+		lines:   []string{"sk-test"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		configStore:  store,
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+	_, err := handleConnect(c, nil)
 	if err != nil {
-		t.Fatalf("parseConnectCLIArgs failed: %v", err)
+		t.Fatalf("handleConnect failed: %v", err)
 	}
-	if got.apiKey != "" {
-		t.Fatalf("expected empty api key for '-' placeholder, got %+v", got)
+	if c.modelAlias != "deepseek/deepseek-chat" {
+		t.Fatalf("unexpected current model %q", c.modelAlias)
 	}
-	if !got.hasContextWindow || got.contextWindowTokens != 32768 || !got.hasMaxOutput || got.maxOutputTokens != 4096 {
-		t.Fatalf("unexpected token limits: %+v", got)
+	gotModels := c.modelFactory.ListModels()
+	if len(gotModels) != 2 {
+		t.Fatalf("expected 2 registered models, got %v", gotModels)
 	}
-	if !got.hasReasoningLevels || got.reasoningLevelsRaw != "-" {
-		t.Fatalf("unexpected reasoning parse: %+v", got)
+	if store.DefaultModel() != "deepseek/deepseek-chat" {
+		t.Fatalf("unexpected default model %q", store.DefaultModel())
+	}
+}
+
+func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return nil, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelproviders.CatalogInitStatus {
+		return modelproviders.InitModelCatalogWithStatus(context.Background(), &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, io.EOF
+			}),
+		}, "")
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"openai", connectCustomModelValue, modelproviders.ReasoningModeEffort, "low,high"},
+		lines:   []string{"sk-test", "gpt-custom", "", "", "minimal,xhigh"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("openai/gpt-custom")
+	if !ok {
+		t.Fatal("expected unknown model to be registered")
+	}
+	if cfg.ContextWindowTokens != 128000 || cfg.MaxOutputTok != 4096 {
+		t.Fatalf("unexpected advanced defaults %+v", cfg)
+	}
+	if cfg.ReasoningMode != modelproviders.ReasoningModeEffort {
+		t.Fatalf("expected reasoning mode effort, got %q", cfg.ReasoningMode)
+	}
+	wantEfforts := []string{"low", "high", "minimal", "xhigh"}
+	if len(cfg.SupportedReasoningEfforts) != len(wantEfforts) {
+		t.Fatalf("unexpected supported efforts %+v", cfg.SupportedReasoningEfforts)
+	}
+	for i := range wantEfforts {
+		if cfg.SupportedReasoningEfforts[i] != wantEfforts[i] {
+			t.Fatalf("unexpected supported efforts %+v", cfg.SupportedReasoningEfforts)
+		}
+	}
+	if cfg.DefaultReasoningEffort != "low" {
+		t.Fatalf("expected default reasoning effort low, got %q", cfg.DefaultReasoningEffort)
+	}
+	wantLevels := []string{"none", "low", "high", "minimal", "xhigh"}
+	if len(cfg.ReasoningLevels) != len(wantLevels) {
+		t.Fatalf("unexpected reasoning levels %+v", cfg.ReasoningLevels)
+	}
+	for i := range wantLevels {
+		if cfg.ReasoningLevels[i] != wantLevels[i] {
+			t.Fatalf("unexpected reasoning levels %+v", cfg.ReasoningLevels)
+		}
 	}
 }
 

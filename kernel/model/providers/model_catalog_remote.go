@@ -58,14 +58,16 @@ func resolvedModelsDevURL() string {
 // capEntry is the per-model JSON record stored in the snapshot / override file.
 // Keys in the map are "provider:model_prefix" (lower-case, e.g. "openai:gpt-4o").
 type capEntry struct {
-	ContextWindow    int      `json:"context_window"`
-	MaxOutput        int      `json:"max_output"`
-	DefaultMaxOutput int      `json:"default_max_output,omitempty"` // 0 → heuristic applied later
-	ToolCalls        bool     `json:"tool_calls"`
-	Reasoning        bool     `json:"reasoning"`
-	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
-	Images           bool     `json:"images"`
-	JSONOutput       bool     `json:"json_output"`
+	ContextWindow          int      `json:"context_window"`
+	MaxOutput              int      `json:"max_output"`
+	DefaultMaxOutput       int      `json:"default_max_output,omitempty"` // 0 → heuristic applied later
+	ToolCalls              bool     `json:"tool_calls"`
+	Reasoning              bool     `json:"reasoning"`
+	ReasoningMode          string   `json:"reasoning_mode,omitempty"`
+	ReasoningEfforts       []string `json:"reasoning_efforts,omitempty"`
+	DefaultReasoningEffort string   `json:"default_reasoning_effort,omitempty"`
+	Images                 bool     `json:"images"`
+	JSONOutput             bool     `json:"json_output"`
 }
 
 // capSnapshot is the in-memory representation: map["provider:model"] → capEntry.
@@ -254,10 +256,13 @@ func entryToCaps(e capEntry) ModelCapabilities {
 		DefaultMaxOutputTokens: e.DefaultMaxOutput,
 		SupportsToolCalls:      e.ToolCalls,
 		SupportsReasoning:      e.Reasoning,
+		ReasoningMode:          e.ReasoningMode,
 		ReasoningEfforts:       normalizeReasoningEffortList(e.ReasoningEfforts),
+		DefaultReasoningEffort: NormalizeReasoningEffort(e.DefaultReasoningEffort),
 		SupportsImages:         e.Images,
 		SupportsJSONOutput:     e.JSONOutput,
 	}
+	normalizeModelCapabilitiesReasoning(&caps)
 	if caps.DefaultMaxOutputTokens <= 0 {
 		caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.SupportsReasoning)
 	}

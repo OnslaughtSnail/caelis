@@ -201,13 +201,18 @@ func (r *Runtime) prepareRunContext(
 		emitRunError(err)
 		return nil, false
 	}
-	compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
+	compactionEvent, compactErr := r.compactIfNeededWithNotify(ctx, compactInput{
 		Session:             sess,
 		Model:               req.Model,
 		Events:              allEvents,
 		ContextWindowTokens: req.ContextWindowTokens,
 		Trigger:             triggerAuto,
 		Force:               false,
+	}, func(ev *session.Event) bool {
+		if ev == nil {
+			return true
+		}
+		return yield(ev, nil)
 	})
 	if compactErr != nil {
 		emitRunError(compactErr)
@@ -270,13 +275,18 @@ func (r *Runtime) runAgentExecution(
 						emitRunError(listErr)
 						return false
 					}
-					compactionEvent, compactErr := r.compactIfNeeded(ctx, compactInput{
+					compactionEvent, compactErr := r.compactIfNeededWithNotify(ctx, compactInput{
 						Session:             sess,
 						Model:               req.Model,
 						Events:              allEvents,
 						ContextWindowTokens: req.ContextWindowTokens,
 						Trigger:             triggerOverflowRecovery,
 						Force:               true,
+					}, func(ev *session.Event) bool {
+						if ev == nil {
+							return true
+						}
+						return yield(ev, nil)
 					})
 					if compactErr != nil {
 						emitRunError(compactErr)

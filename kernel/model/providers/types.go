@@ -36,18 +36,21 @@ type AuthConfig struct {
 
 // Config is a provider-agnostic model alias definition.
 type Config struct {
-	Alias               string
-	Provider            string
-	API                 APIType
-	Model               string
-	BaseURL             string
-	Headers             map[string]string
-	Timeout             time.Duration
-	MaxOutputTok        int
-	ContextWindowTokens int
-	ReasoningLevels     []string
-	ThinkingMode        string
-	ThinkingBudget      int
-	ReasoningEffort     string
-	Auth                AuthConfig
+	Alias                     string
+	Provider                  string
+	API                       APIType
+	Model                     string
+	BaseURL                   string
+	Headers                   map[string]string
+	Timeout                   time.Duration
+	MaxOutputTok              int
+	ContextWindowTokens       int
+	ReasoningLevels           []string
+	ReasoningMode             string
+	SupportedReasoningEfforts []string
+	DefaultReasoningEffort    string
+	ThinkingMode              string
+	ThinkingBudget            int
+	ReasoningEffort           string
+	Auth                      AuthConfig
 }

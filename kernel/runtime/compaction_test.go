@@ -75,6 +75,8 @@ func TestRuntimeRun_AutoCompaction(t *testing.T) {
 
 	llm := newRuntimeTestLLM("fake")
 	foundAutoCompaction := false
+	foundStartNotice := false
+	foundDoneNotice := false
 	for ev, runErr := range rt.Run(context.Background(), RunRequest{
 		AppName:             sess.AppName,
 		UserID:              sess.UserID,
@@ -91,9 +93,20 @@ func TestRuntimeRun_AutoCompaction(t *testing.T) {
 		if compactionTrigger(ev) == triggerAuto {
 			foundAutoCompaction = true
 		}
+		if ev != nil && ev.Message.Role == model.RoleSystem {
+			if strings.Contains(ev.Message.Text, "正在自动压缩") {
+				foundStartNotice = true
+			}
+			if strings.Contains(ev.Message.Text, "自动上下文压缩完成") {
+				foundDoneNotice = true
+			}
+		}
 	}
 	if !foundAutoCompaction {
 		t.Fatalf("expected auto compaction event in runtime run")
+	}
+	if !foundStartNotice || !foundDoneNotice {
+		t.Fatalf("expected visible auto compaction notices, start=%v done=%v", foundStartNotice, foundDoneNotice)
 	}
 }
 
@@ -121,6 +134,7 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 
 	foundOverflowCompaction := false
 	foundFinalAssistant := false
+	foundOverflowNotice := false
 	for ev, runErr := range rt.Run(context.Background(), RunRequest{
 		AppName:             sess.AppName,
 		UserID:              sess.UserID,
@@ -140,6 +154,9 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 		if ev != nil && ev.Message.Role == model.RoleAssistant && ev.Message.Text == "final" {
 			foundFinalAssistant = true
 		}
+		if ev != nil && ev.Message.Role == model.RoleSystem && strings.Contains(ev.Message.Text, "压缩后重试") {
+			foundOverflowNotice = true
+		}
 	}
 
 	if !foundOverflowCompaction {
@@ -147,6 +164,9 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 	}
 	if !foundFinalAssistant {
 		t.Fatalf("expected assistant event after retry")
+	}
+	if !foundOverflowNotice {
+		t.Fatalf("expected visible overflow compaction notice")
 	}
 	if agentImpl.calls != 2 {
 		t.Fatalf("expected agent to run twice, got %d", agentImpl.calls)

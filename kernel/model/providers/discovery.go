@@ -118,9 +118,7 @@ func discoverGeminiModels(ctx context.Context, client *http.Client, cfg Config, 
 		if pageToken != "" {
 			query.Set("pageToken", pageToken)
 		}
-		if cfg.Auth.Type == AuthAPIKey || cfg.Auth.Type == "" {
-			query.Set("key", token)
-		}
+		query.Set("pageSize", "1000")
 		endpoint := base
 		if encoded := query.Encode(); encoded != "" {
 			endpoint += "?" + encoded
@@ -129,7 +127,9 @@ func discoverGeminiModels(ctx context.Context, client *http.Client, cfg Config, 
 		if err != nil {
 			return nil, err
 		}
-		if cfg.Auth.Type != AuthAPIKey && cfg.Auth.Type != "" {
+		if cfg.Auth.Type == AuthAPIKey || cfg.Auth.Type == "" {
+			req.Header.Set("x-goog-api-key", token)
+		} else if cfg.Auth.Type != "" {
 			applyDefaultAuthHeader(req, cfg, token, true)
 		}
 		resp, err := client.Do(req)

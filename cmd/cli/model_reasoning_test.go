@@ -20,21 +20,22 @@ func TestNormalizeReasoningSelection(t *testing.T) {
 
 func TestModelReasoningOptionsForConfig(t *testing.T) {
 	toggle := modelproviders.Config{
-		Provider:        "deepseek",
-		Model:           "deepseek-chat",
-		API:             modelproviders.APIDeepSeek,
-		ReasoningLevels: []string{"none", "high"},
+		Provider:      "deepseek",
+		Model:         "deepseek-chat",
+		API:           modelproviders.APIDeepSeek,
+		ReasoningMode: modelproviders.ReasoningModeToggle,
 	}
 	toggleOptions := modelReasoningOptionsForConfig(toggle)
-	if len(toggleOptions) != 2 || toggleOptions[0].Value != "none" || toggleOptions[1].Value != "high" {
+	if len(toggleOptions) != 2 || toggleOptions[0].Value != "off" || toggleOptions[1].Value != "on" {
 		t.Fatalf("unexpected toggle options: %+v", toggleOptions)
 	}
 
 	effort := modelproviders.Config{
-		Provider:        "openai",
-		Model:           "o3",
-		API:             modelproviders.APIOpenAI,
-		ReasoningLevels: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
+		Provider:                  "openai",
+		Model:                     "o3",
+		API:                       modelproviders.APIOpenAI,
+		ReasoningMode:             modelproviders.ReasoningModeEffort,
+		SupportedReasoningEfforts: []string{"minimal", "low", "medium", "high", "xhigh"},
 	}
 	effortOptions := modelReasoningOptionsForConfig(effort)
 	if len(effortOptions) != 6 {
@@ -47,19 +48,37 @@ func TestModelReasoningOptionsForConfig(t *testing.T) {
 
 func TestResolveModelReasoningOption_ToggleRejectsEffort(t *testing.T) {
 	cfg := modelproviders.Config{
-		Provider:        "deepseek",
-		Model:           "deepseek-chat",
-		API:             modelproviders.APIDeepSeek,
-		ReasoningLevels: []string{"none"},
+		Provider:      "deepseek",
+		Model:         "deepseek-chat",
+		API:           modelproviders.APIDeepSeek,
+		ReasoningMode: modelproviders.ReasoningModeToggle,
 	}
 	if _, err := resolveModelReasoningOption(cfg, "high"); err == nil {
 		t.Fatal("expected error for high on toggle model")
 	}
-	opt, err := resolveModelReasoningOption(cfg, "none")
+	opt, err := resolveModelReasoningOption(cfg, "off")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if opt.ThinkingMode != "off" || opt.ReasoningEffort != "" {
+		t.Fatalf("unexpected option: %+v", opt)
+	}
+}
+
+func TestResolveModelReasoningOption_EffortUsesDefaultForOn(t *testing.T) {
+	cfg := modelproviders.Config{
+		Provider:                  "openai",
+		Model:                     "o3",
+		API:                       modelproviders.APIOpenAI,
+		ReasoningMode:             modelproviders.ReasoningModeEffort,
+		SupportedReasoningEfforts: []string{"low", "medium", "high"},
+		DefaultReasoningEffort:    "medium",
+	}
+	opt, err := resolveModelReasoningOption(cfg, "on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.ThinkingMode != "on" || opt.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected option: %+v", opt)
 	}
 }
@@ -102,7 +121,7 @@ func TestParseReasoning_GeminiHighDoesNotForceBudget(t *testing.T) {
 }
 
 func TestParseReasoning_AcceptsXHighAsUserInput(t *testing.T) {
-	cfg, err := parseReasoning("on", 1024, "xhigh", "gemini", "gemini-3.1-flash-lite-preview")
+	cfg, err := parseReasoning("on", 1024, "xhigh", "openai", "o3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,5 +140,25 @@ func TestParseReasoning_NoneDisablesReasoning(t *testing.T) {
 	}
 	if cfg.Effort != "" || cfg.BudgetTokens != 0 {
 		t.Fatalf("expected none to clear effort/budget, got %+v", cfg)
+	}
+}
+
+func TestParseReasoning_ToggleModelClearsEffort(t *testing.T) {
+	cfg, err := parseReasoning("on", 1024, "low", "deepseek", "deepseek-chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Effort != "" {
+		t.Fatalf("expected toggle model to clear effort, got %+v", cfg)
+	}
+}
+
+func TestParseReasoning_EffortModelUsesDefaultWhenMissing(t *testing.T) {
+	cfg, err := parseReasoning("on", 1024, "", "gemini", "gemini-2.5-pro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Effort != "medium" {
+		t.Fatalf("expected default effort medium, got %+v", cfg)
 	}
 }

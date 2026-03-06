@@ -82,6 +82,10 @@ func normalizeCompactionConfig(cfg CompactionConfig) CompactionConfig {
 }
 
 func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*session.Event, error) {
+	return r.compactIfNeededWithNotify(ctx, in, nil)
+}
+
+func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput, notify func(*session.Event) bool) (*session.Event, error) {
 	windowEvents := agentHistoryEvents(contextWindowEvents(in.Events))
 	if len(windowEvents) == 0 {
 		return nil, nil
@@ -104,6 +108,11 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 	toSummarize, tail := splitCompactionTarget(windowEvents)
 	if len(toSummarize) == 0 {
 		return nil, nil
+	}
+	if notify != nil {
+		if !notify(compactionNoticeEvent(in.Trigger, currentTokens, windowTokens, "start")) {
+			return nil, nil
+		}
 	}
 
 	summary, summarizedEvents, err := r.summarizeForCompaction(ctx, in.Model, toSummarize, inputBudget)
@@ -145,7 +154,53 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 	if err := r.store.AppendEvent(ctx, in.Session, compactionEvent); err != nil {
 		return nil, err
 	}
+	if notify != nil {
+		if !notify(compactionNoticeEvent(in.Trigger, currentTokens, postTokens, "done")) {
+			return nil, nil
+		}
+	}
 	return compactionEvent, nil
+}
+
+func compactionNoticeEvent(trigger string, beforeTokens int, afterTokens int, phase string) *session.Event {
+	text := ""
+	switch strings.TrimSpace(phase) {
+	case "start":
+		switch strings.TrimSpace(trigger) {
+		case triggerManual:
+			text = fmt.Sprintf("note: 正在压缩上下文，当前约 %d tokens。", beforeTokens)
+		case triggerOverflowRecovery:
+			text = fmt.Sprintf("note: 上下文超限，正在压缩后重试，当前约 %d tokens。", beforeTokens)
+		default:
+			text = fmt.Sprintf("note: 上下文接近上限，正在自动压缩，当前约 %d tokens。", beforeTokens)
+		}
+	case "done":
+		switch strings.TrimSpace(trigger) {
+		case triggerManual:
+			text = fmt.Sprintf("note: 上下文压缩完成，约 %d -> %d tokens。", beforeTokens, afterTokens)
+		case triggerOverflowRecovery:
+			text = fmt.Sprintf("note: 上下文压缩完成，约 %d -> %d tokens，继续重试。", beforeTokens, afterTokens)
+		default:
+			text = fmt.Sprintf("note: 自动上下文压缩完成，约 %d -> %d tokens。", beforeTokens, afterTokens)
+		}
+	default:
+		return nil
+	}
+	return &session.Event{
+		ID:   eventID(),
+		Time: time.Now(),
+		Message: model.Message{
+			Role: model.RoleSystem,
+			Text: text,
+		},
+		Meta: map[string]any{
+			"kind":               "compaction_notice",
+			"compaction_phase":   phase,
+			"compaction_trigger": trigger,
+			"pre_tokens":         beforeTokens,
+			"post_tokens":        afterTokens,
+		},
+	}
 }
 
 func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, events []*session.Event, inputBudget int) (string, int, error) {

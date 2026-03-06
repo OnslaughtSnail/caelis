@@ -160,6 +160,32 @@ func printEvent(ev *session.Event, state *renderState) {
 	}
 
 	msg := ev.Message
+	if msg.Role == model.RoleSystem {
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			return
+		}
+		out := io.Writer(nil)
+		if state != nil {
+			out = state.out
+		}
+		if out == nil {
+			out = os.Stdout
+		}
+		if state != nil && state.ui != nil {
+			switch {
+			case strings.HasPrefix(text, "warn:"):
+				state.ui.Warn("%s\n", strings.TrimSpace(strings.TrimPrefix(text, "warn:")))
+			case strings.HasPrefix(text, "note:"):
+				state.ui.Note("%s\n", strings.TrimSpace(strings.TrimPrefix(text, "note:")))
+			default:
+				fmt.Fprintf(out, "%s%s\n", state.ui.SystemPrefix(), text)
+			}
+		} else {
+			fmt.Fprintln(out, text)
+		}
+		return
+	}
 	if msg.Role == model.RoleUser {
 		if state != nil && state.replayUserMessages {
 			userText := strings.TrimSpace(msg.Text)

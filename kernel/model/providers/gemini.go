@@ -295,7 +295,7 @@ func looksLikeAPIVersion(v string) bool {
 }
 
 func toGeminiThinkingConfig(modelName string, reasoning model.ReasoningConfig) *genai.ThinkingConfig {
-	effort := normalizeGeminiReasoningLevel(reasoning.Effort)
+	effort := strings.ToLower(strings.TrimSpace(reasoning.Effort))
 	disabled := reasoning.Enabled != nil && !*reasoning.Enabled
 	if effort == "none" {
 		disabled = true
@@ -381,7 +381,7 @@ func resolveGeminiThinkingLevel(reasoning model.ReasoningConfig) genai.ThinkingL
 	if reasoning.Enabled != nil && !*reasoning.Enabled {
 		return genai.ThinkingLevelMinimal
 	}
-	switch normalizeGeminiReasoningLevel(reasoning.Effort) {
+	switch strings.ToLower(strings.TrimSpace(reasoning.Effort)) {
 	case "none", "minimal":
 		return genai.ThinkingLevelMinimal
 	case "low":
@@ -395,17 +395,6 @@ func resolveGeminiThinkingLevel(reasoning model.ReasoningConfig) genai.ThinkingL
 		return genai.ThinkingLevelMedium
 	}
 	return genai.ThinkingLevelUnspecified
-}
-
-func normalizeGeminiReasoningLevel(level string) string {
-	norm := strings.ToLower(strings.TrimSpace(level))
-	switch norm {
-	case "mimimal":
-		return "minimal"
-	case "very-high", "very_high", "x-high", "x_high":
-		return "xhigh"
-	}
-	return norm
 }
 
 func geminiUsageFromResponse(out *genai.GenerateContentResponse) model.Usage {

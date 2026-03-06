@@ -140,3 +140,22 @@ func TestPrintEvent_AssistantReasoningRendersBeforeToolCall(t *testing.T) {
 		t.Fatalf("expected reasoning to render before tool call, got %q", got)
 	}
 }
+
+func TestPrintEvent_SystemWarningRenders(t *testing.T) {
+	var out bytes.Buffer
+	state := &renderState{
+		out:              &out,
+		pendingToolCalls: map[string]toolCallSnapshot{},
+	}
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role: model.RoleSystem,
+			Text: "warn: llm request failed, retrying in 2s (1/5)",
+		},
+	}, state)
+
+	got := ansi.Strip(out.String())
+	if !strings.Contains(got, "warn: llm request failed, retrying in 2s (1/5)") {
+		t.Fatalf("expected warning output, got %q", got)
+	}
+}

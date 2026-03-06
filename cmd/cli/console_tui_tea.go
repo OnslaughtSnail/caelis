@@ -93,6 +93,18 @@ func (b *teaPromptBroker) ReadSecret(prompt string) (string, error) {
 }
 
 func (b *teaPromptBroker) requestPrompt(prompt string, secret bool) (string, error) {
+	return b.requestPromptWithOptions(prompt, secret, nil, "", nil, false, false)
+}
+
+func (b *teaPromptBroker) RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error) {
+	return b.requestPromptWithOptions(prompt, false, choices, defaultChoice, nil, filterable, false)
+}
+
+func (b *teaPromptBroker) RequestMultiChoicePrompt(prompt string, choices []tuievents.PromptChoice, selectedChoices []string, filterable bool) (string, error) {
+	return b.requestPromptWithOptions(prompt, false, choices, "", selectedChoices, filterable, true)
+}
+
+func (b *teaPromptBroker) requestPromptWithOptions(prompt string, secret bool, choices []tuievents.PromptChoice, defaultChoice string, selectedChoices []string, filterable bool, multiSelect bool) (string, error) {
 	response := make(chan tuievents.PromptResponse, 1)
 
 	b.mu.Lock()
@@ -104,9 +116,14 @@ func (b *teaPromptBroker) requestPrompt(prompt string, secret bool) (string, err
 	b.mu.Unlock()
 
 	b.sender.Send(tuievents.PromptRequestMsg{
-		Prompt:   prompt,
-		Secret:   secret,
-		Response: response,
+		Prompt:          prompt,
+		Secret:          secret,
+		Choices:         append([]tuievents.PromptChoice(nil), choices...),
+		DefaultChoice:   defaultChoice,
+		SelectedChoices: append([]string(nil), selectedChoices...),
+		Filterable:      filterable,
+		MultiSelect:     multiSelect,
+		Response:        response,
 	})
 
 	result, ok := <-response
@@ -872,7 +889,7 @@ func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	model = strings.TrimSpace(model)
 
-	contextWindowTokens = 32000
+	contextWindowTokens = modelproviders.DefaultModelCapabilities().ContextWindowTokens
 	maxOutputTokens = 4096
 	if tpl, ok := findProviderTemplate(provider); ok {
 		if tpl.defaultContextToken > 0 {
@@ -1115,119 +1132,8 @@ func (c *cliConsole) completeConnectTimeoutCandidates(query string, limit int) [
 
 func buildWizardDefs() []tuiapp.WizardDef {
 	return []tuiapp.WizardDef{
-		buildConnectWizard(),
 		buildModelWizard(),
 	}
-}
-
-func buildConnectWizard() tuiapp.WizardDef {
-	return tuiapp.WizardDef{
-		Command:     "connect",
-		DisplayLine: "/connect",
-		Steps: []tuiapp.WizardStepDef{
-			{
-				Key:       "provider",
-				HintLabel: "/connect provider",
-				CompletionCommand: func(_ map[string]string) string {
-					return "connect"
-				},
-			},
-			{
-				Key:       "baseurl",
-				HintLabel: "/connect base_url",
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-baseurl:" + s["provider"]
-				},
-			},
-			{
-				Key:       "timeout",
-				HintLabel: "/connect timeout",
-				Validate:  tuiapp.ValidateInt,
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-timeout:" + s["provider"]
-				},
-			},
-			{
-				Key:          "apikey",
-				HintLabel:    "/connect api_key",
-				HideInput:    true,
-				FreeformHint: "/connect api_key: type and press enter",
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-apikey:" + s["provider"]
-				},
-				ShouldSkip: func(s map[string]string) bool {
-					return s["_noauth"] == "true"
-				},
-			},
-			{
-				Key:          "model",
-				HintLabel:    "/connect model",
-				FreeformHint: "/connect model: type model name and press enter",
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-model:" + buildConnectWizardPayload(s)
-				},
-			},
-			{
-				Key:          "context_window_tokens",
-				HintLabel:    "/connect context_window_tokens",
-				Validate:     tuiapp.ValidateInt,
-				FreeformHint: "/connect context_window_tokens: type integer and press enter",
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-context:" + buildConnectWizardPayload(s)
-				},
-			},
-			{
-				Key:          "max_output_tokens",
-				HintLabel:    "/connect max_output_tokens",
-				Validate:     tuiapp.ValidateInt,
-				FreeformHint: "/connect max_output_tokens: type integer and press enter",
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-maxout:" + buildConnectWizardPayload(s)
-				},
-			},
-			{
-				Key:          "reasoning_levels",
-				HintLabel:    "/connect reasoning_levels(csv)",
-				FreeformHint: "/connect reasoning_levels(csv): e.g. minimal,low (use - for empty)",
-				CompletionCommand: func(s map[string]string) string {
-					return "connect-reasoning-levels:" + buildConnectWizardPayload(s)
-				},
-			},
-		},
-		OnStepConfirm: func(stepKey, value string, candidate *tuiapp.SlashArgCandidate, state map[string]string) {
-			if stepKey == "provider" {
-				state["provider"] = strings.ToLower(strings.TrimSpace(value))
-			}
-			if stepKey == "provider" && candidate != nil && candidate.NoAuth {
-				state["_noauth"] = "true"
-			}
-		},
-		BuildExecLine: func(s map[string]string) string {
-			apiKey := strings.TrimSpace(s["apikey"])
-			if apiKey == "" {
-				apiKey = "-"
-			}
-			reasoningLevels := strings.TrimSpace(s["reasoning_levels"])
-			if reasoningLevels == "" {
-				reasoningLevels = "-"
-			}
-			return "/connect " + s["provider"] + " " + s["model"] +
-				" " + s["baseurl"] + " " + s["timeout"] +
-				" " + apiKey +
-				" " + s["context_window_tokens"] +
-				" " + s["max_output_tokens"] +
-				" " + reasoningLevels
-		},
-	}
-}
-
-func buildConnectWizardPayload(state map[string]string) string {
-	apiKey := strings.TrimSpace(state["apikey"])
-	return strings.TrimSpace(state["provider"]) +
-		"|" + url.QueryEscape(state["baseurl"]) +
-		"|" + strings.TrimSpace(state["timeout"]) +
-		"|" + url.QueryEscape(apiKey) +
-		"|" + url.QueryEscape(state["model"])
 }
 
 func buildModelWizard() tuiapp.WizardDef {

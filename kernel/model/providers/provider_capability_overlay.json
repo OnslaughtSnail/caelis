@@ -1,0 +1,122 @@
+{
+  "_comment": "Provider-specific overlay for reasoning efforts and fallback defaults.",
+  "openai:*": {
+    "context_window": 128000,
+    "default_max_output": 4096,
+    "tool_calls": true,
+    "json_output": true
+  },
+  "openai:o1": {
+    "context_window": 200000,
+    "max_output": 100000,
+    "default_max_output": 32768,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high"],
+    "default_reasoning_effort": "medium",
+    "images": true,
+    "json_output": true
+  },
+  "openai:o1-mini": {
+    "context_window": 128000,
+    "max_output": 65536,
+    "default_max_output": 16384,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high"],
+    "default_reasoning_effort": "medium",
+    "json_output": true
+  },
+  "openai:o3": {
+    "context_window": 200000,
+    "max_output": 100000,
+    "default_max_output": 32768,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+    "default_reasoning_effort": "medium",
+    "images": true,
+    "json_output": true
+  },
+  "openai:o3-mini": {
+    "context_window": 200000,
+    "max_output": 100000,
+    "default_max_output": 16384,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+    "default_reasoning_effort": "medium",
+    "json_output": true
+  },
+  "openai:o4-mini": {
+    "context_window": 200000,
+    "max_output": 100000,
+    "default_max_output": 16384,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+    "default_reasoning_effort": "medium",
+    "images": true,
+    "json_output": true
+  },
+  "openai-compatible:*": {
+    "context_window": 128000,
+    "default_max_output": 4096,
+    "tool_calls": true,
+    "json_output": true
+  },
+  "gemini:*": {
+    "context_window": 1048576,
+    "max_output": 65536,
+    "default_max_output": 8192,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high"],
+    "default_reasoning_effort": "medium",
+    "images": true,
+    "json_output": true
+  },
+  "anthropic:*": {
+    "context_window": 200000,
+    "max_output": 64000,
+    "default_max_output": 16384,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "effort",
+    "reasoning_efforts": ["low", "medium", "high"],
+    "default_reasoning_effort": "medium",
+    "images": true,
+    "json_output": true
+  },
+  "deepseek:*": {
+    "context_window": 128000,
+    "max_output": 65536,
+    "default_max_output": 8192,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "toggle",
+    "json_output": true
+  },
+  "xiaomi:*": {
+    "context_window": 64000,
+    "max_output": 16384,
+    "default_max_output": 4096,
+    "tool_calls": true,
+    "reasoning": true,
+    "reasoning_mode": "toggle",
+    "images": true,
+    "json_output": true
+  },
+  "ollama:*": {
+    "context_window": 128000,
+    "default_max_output": 4096,
+    "tool_calls": true,
+    "json_output": true
+  }
+}

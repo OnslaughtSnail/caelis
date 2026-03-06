@@ -133,12 +133,18 @@ type promptState struct {
 	cursor      int
 	choices     []promptChoice
 	choiceIndex int
+	scrollOffset int
+	filter      []rune
+	filterable  bool
+	multiSelect bool
+	selected    map[string]struct{}
 	response    chan tuievents.PromptResponse
 }
 
 type promptChoice struct {
-	label string
-	value string
+	label  string
+	value  string
+	detail string
 }
 
 type textSelectionPoint struct {
@@ -417,7 +423,7 @@ func (m *Model) appendWelcomeCard() {
 	}
 	modelAlias := strings.TrimSpace(m.cfg.ModelAlias)
 	if modelAlias == "" {
-		modelAlias = "loading"
+		modelAlias = "not configured (/connect)"
 	}
 
 	// Title: >_ CAELIS (v0.0.8)

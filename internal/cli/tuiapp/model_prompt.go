@@ -108,18 +108,66 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 
 func newPromptState(req tuievents.PromptRequestMsg) *promptState {
 	state := &promptState{
-		prompt:   req.Prompt,
-		secret:   req.Secret,
-		response: req.Response,
+		prompt:     req.Prompt,
+		secret:     req.Secret,
+		response:   req.Response,
+		filterable: req.Filterable,
+		multiSelect: req.MultiSelect,
+		selected:   map[string]struct{}{},
 	}
 	if req.Secret {
+		return state
+	}
+	if len(req.Choices) > 0 {
+		state.choices = make([]promptChoice, 0, len(req.Choices))
+		for _, choice := range req.Choices {
+			label := strings.TrimSpace(choice.Label)
+			value := strings.TrimSpace(choice.Value)
+			if label == "" {
+				label = value
+			}
+			if value == "" {
+				value = label
+			}
+			if value == "" {
+				continue
+			}
+			state.choices = append(state.choices, promptChoice{
+				label:  label,
+				value:  value,
+				detail: strings.TrimSpace(choice.Detail),
+			})
+		}
+		for _, selected := range req.SelectedChoices {
+			selected = strings.TrimSpace(selected)
+			if selected == "" {
+				continue
+			}
+			state.selected[selected] = struct{}{}
+		}
+		state.choiceIndex = promptChoiceIndexByValue(state.choices, req.DefaultChoice)
+		clampPromptChoiceWindow(state, len(state.choices))
 		return state
 	}
 	if choices, idx, ok := parsePromptChoices(req.Prompt); ok {
 		state.choices = choices
 		state.choiceIndex = idx
+		clampPromptChoiceWindow(state, len(state.choices))
 	}
 	return state
+}
+
+func promptChoiceIndexByValue(choices []promptChoice, value string) int {
+	target := strings.TrimSpace(value)
+	if target == "" {
+		return 0
+	}
+	for i, choice := range choices {
+		if choice.value == target {
+			return i
+		}
+	}
+	return 0
 }
 
 func parsePromptChoices(prompt string) ([]promptChoice, int, bool) {
@@ -140,6 +188,10 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 	if m.activePrompt == nil || len(m.activePrompt.choices) == 0 {
 		return nil
 	}
+	visible := m.visiblePromptChoices()
+	if len(visible) == 0 {
+		m.activePrompt.choiceIndex = 0
+	}
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.finishPrompt("", errors.New(tuievents.PromptErrInterrupt))
@@ -147,24 +199,102 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 	case "ctrl+d":
 		m.finishPrompt("", errors.New(tuievents.PromptErrEOF))
 		return nil
+	case "left":
+		if m.activePrompt.filterable && m.activePrompt.cursor > 0 {
+			m.activePrompt.cursor--
+		}
+		return nil
+	case "right":
+		if m.activePrompt.filterable && m.activePrompt.cursor < len(m.activePrompt.filter) {
+			m.activePrompt.cursor++
+		}
+		return nil
+	case "home", "ctrl+a":
+		if m.activePrompt.filterable {
+			m.activePrompt.cursor = 0
+		}
+		return nil
+	case "end", "ctrl+e":
+		if m.activePrompt.filterable {
+			m.activePrompt.cursor = len(m.activePrompt.filter)
+		}
+		return nil
+	case "backspace":
+		if m.activePrompt.filterable && m.activePrompt.cursor > 0 {
+			m.activePrompt.filter = append(m.activePrompt.filter[:m.activePrompt.cursor-1], m.activePrompt.filter[m.activePrompt.cursor:]...)
+			m.activePrompt.cursor--
+			m.clampPromptChoiceIndex()
+		}
+		return nil
+	case "delete":
+		if m.activePrompt.filterable && m.activePrompt.cursor >= 0 && m.activePrompt.cursor < len(m.activePrompt.filter) {
+			m.activePrompt.filter = append(m.activePrompt.filter[:m.activePrompt.cursor], m.activePrompt.filter[m.activePrompt.cursor+1:]...)
+			m.clampPromptChoiceIndex()
+		}
+		return nil
+	case "ctrl+u":
+		if m.activePrompt.filterable {
+			m.activePrompt.filter = m.activePrompt.filter[:0]
+			m.activePrompt.cursor = 0
+			m.clampPromptChoiceIndex()
+		}
+		return nil
 	case "up", "k", "shift+tab":
 		if m.activePrompt.choiceIndex > 0 {
 			m.activePrompt.choiceIndex--
+			m.syncPromptChoiceWindow()
 		}
 		return nil
 	case "down", "j", "tab":
-		if m.activePrompt.choiceIndex < len(m.activePrompt.choices)-1 {
+		if m.activePrompt.choiceIndex < len(visible)-1 {
 			m.activePrompt.choiceIndex++
+			m.syncPromptChoiceWindow()
+		}
+		return nil
+	case " ":
+		if !m.activePrompt.multiSelect {
+			return nil
+		}
+		visible = m.visiblePromptChoices()
+		if len(visible) == 0 {
+			return nil
+		}
+		choice := visible[m.activePrompt.choiceIndex]
+		if _, ok := m.activePrompt.selected[choice.value]; ok {
+			delete(m.activePrompt.selected, choice.value)
+		} else {
+			m.activePrompt.selected[choice.value] = struct{}{}
 		}
 		return nil
 	case "enter":
-		choice := m.activePrompt.choices[m.activePrompt.choiceIndex]
+		visible = m.visiblePromptChoices()
+		if len(visible) == 0 {
+			return nil
+		}
+		if m.activePrompt.multiSelect {
+			if len(m.activePrompt.selected) == 0 {
+				m.activePrompt.selected[visible[m.activePrompt.choiceIndex].value] = struct{}{}
+			}
+			m.finishPrompt(strings.Join(m.selectedPromptChoices(), ","), nil)
+			return nil
+		}
+		choice := visible[m.activePrompt.choiceIndex]
 		m.finishPrompt(choice.value, nil)
 		return nil
 	}
 	if len(msg.Runes) > 0 {
+		if m.activePrompt.filterable {
+			for _, r := range msg.Runes {
+				head := append([]rune(nil), m.activePrompt.filter[:m.activePrompt.cursor]...)
+				head = append(head, r)
+				m.activePrompt.filter = append(head, m.activePrompt.filter[m.activePrompt.cursor:]...)
+			m.activePrompt.cursor++
+		}
+		m.clampPromptChoiceIndex()
+		return nil
+		}
 		key := strings.ToLower(strings.TrimSpace(string(msg.Runes)))
-		for _, choice := range m.activePrompt.choices {
+		for _, choice := range visible {
 			if choice.value == key {
 				m.finishPrompt(choice.value, nil)
 				return nil
@@ -172,4 +302,98 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *Model) visiblePromptChoices() []promptChoice {
+	if m.activePrompt == nil || len(m.activePrompt.choices) == 0 {
+		return nil
+	}
+	if !m.activePrompt.filterable {
+		return m.activePrompt.choices
+	}
+	query := strings.ToLower(strings.TrimSpace(string(m.activePrompt.filter)))
+	if query == "" {
+		return m.activePrompt.choices
+	}
+	out := make([]promptChoice, 0, len(m.activePrompt.choices))
+	for _, choice := range m.activePrompt.choices {
+		text := strings.ToLower(strings.TrimSpace(choice.label + " " + choice.value + " " + choice.detail))
+		if strings.Contains(text, query) {
+			out = append(out, choice)
+		}
+	}
+	return out
+}
+
+func (m *Model) clampPromptChoiceIndex() {
+	if m.activePrompt == nil {
+		return
+	}
+	visible := m.visiblePromptChoices()
+	if len(visible) == 0 {
+		m.activePrompt.choiceIndex = 0
+		m.activePrompt.scrollOffset = 0
+		return
+	}
+	if m.activePrompt.choiceIndex >= len(visible) {
+		m.activePrompt.choiceIndex = len(visible) - 1
+	}
+	if m.activePrompt.choiceIndex < 0 {
+		m.activePrompt.choiceIndex = 0
+	}
+	m.syncPromptChoiceWindow()
+}
+
+func (m *Model) selectedPromptChoices() []string {
+	if m.activePrompt == nil || len(m.activePrompt.selected) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m.activePrompt.selected))
+	for _, choice := range m.activePrompt.choices {
+		if _, ok := m.activePrompt.selected[choice.value]; ok {
+			out = append(out, choice.value)
+		}
+	}
+	return out
+}
+
+func (m *Model) syncPromptChoiceWindow() {
+	if m.activePrompt == nil {
+		return
+	}
+	clampPromptChoiceWindow(m.activePrompt, len(m.visiblePromptChoices()))
+}
+
+func clampPromptChoiceWindow(state *promptState, visibleCount int) {
+	if state == nil {
+		return
+	}
+	const maxVisiblePromptChoices = 8
+	if visibleCount <= 0 {
+		state.choiceIndex = 0
+		state.scrollOffset = 0
+		return
+	}
+	if state.choiceIndex < 0 {
+		state.choiceIndex = 0
+	}
+	if state.choiceIndex >= visibleCount {
+		state.choiceIndex = visibleCount - 1
+	}
+	maxOffset := visibleCount - maxVisiblePromptChoices
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if state.scrollOffset > maxOffset {
+		state.scrollOffset = maxOffset
+	}
+	if state.scrollOffset < 0 {
+		state.scrollOffset = 0
+	}
+	if state.choiceIndex < state.scrollOffset {
+		state.scrollOffset = state.choiceIndex
+	}
+	if state.choiceIndex >= state.scrollOffset+maxVisiblePromptChoices {
+		state.scrollOffset = state.choiceIndex - maxVisiblePromptChoices + 1
+	}
 }

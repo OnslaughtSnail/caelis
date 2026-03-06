@@ -193,6 +193,7 @@ func runCLI(ctx context.Context, args []string) error {
 	if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntime); err != nil {
 		return err
 	}
+	_ = initModelCatalogForCLI(ctx)
 
 	resolved, err := bootstrap.Assemble(ctx, bootstrap.AssembleSpec{
 		Registry:        pluginRegistry,
@@ -273,6 +274,7 @@ func runCLI(ctx context.Context, args []string) error {
 		}
 		if strings.HasPrefix(strings.TrimSpace(singleInput), "/compact") {
 			note := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(singleInput), "/compact"))
+			fmt.Println("note: 正在压缩上下文...")
 			ev, compactErr := rt.Compact(ctx, runtime.CompactRequest{
 				AppName:             *appName,
 				UserID:              *userID,
@@ -623,8 +625,22 @@ func parseReasoning(mode string, budget int, effort string, provider string, mod
 		cfg.Effort = ""
 		cfg.BudgetTokens = 0
 	}
-	_ = provider
-	_ = modelName
+	profile := reasoningProfileForModel(provider, modelName)
+	switch profile.Mode {
+	case modelproviders.ReasoningModeNone:
+		cfg.Enabled = nil
+		cfg.Effort = ""
+		cfg.BudgetTokens = 0
+	case modelproviders.ReasoningModeToggle:
+		cfg.Effort = ""
+	case modelproviders.ReasoningModeEffort:
+		if cfg.Effort != "" && !modelproviders.SupportsReasoningEffortList(profile.SupportedEfforts, cfg.Effort) {
+			cfg.Effort = profile.DefaultEffort
+		}
+		if cfg.Enabled != nil && *cfg.Enabled && cfg.Effort == "" {
+			cfg.Effort = profile.DefaultEffort
+		}
+	}
 	return cfg, nil
 }
 

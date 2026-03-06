@@ -171,7 +171,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Handle:      handleSandbox,
 		},
 		"model":   {Usage: "/model <alias> [reasoning]", Description: "Switch active model and reasoning level", Handle: handleModel},
-		"connect": {Usage: "/connect [provider] [model] [base_url] [timeout_seconds] [api_key] [context_window_tokens] [max_output_tokens] [reasoning_levels]", Description: "Add or update a model provider", Handle: handleConnect},
+		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
 		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
@@ -499,6 +499,13 @@ func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[s
 	}
 	msg := ev.Message
 	handled := false
+	if msg.Role == model.RoleSystem {
+		text := strings.TrimSpace(msg.Text)
+		if text != "" {
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: text + "\n"})
+			return true
+		}
+	}
 	if msg.Role == model.RoleAssistant {
 		// Keep assistant rendering deterministic, even for mixed assistant+toolcall events.
 		c.emitAssistantEventToTUI(ev)
@@ -689,6 +696,11 @@ func handleCompact(c *cliConsole, args []string) (bool, error) {
 		Model:               c.llm,
 		ContextWindowTokens: c.contextWindow,
 	})
+	if c.ui != nil {
+		c.ui.Note("正在压缩上下文...\n")
+	} else {
+		c.printf("note: 正在压缩上下文...\n")
+	}
 	ev, err := c.rt.Compact(c.baseCtx, runtime.CompactRequest{
 		AppName:             c.appName,
 		UserID:              c.userID,

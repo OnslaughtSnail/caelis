@@ -25,14 +25,25 @@ type TaskResultMsg struct {
 }
 
 type PromptRequestMsg struct {
-	Prompt   string
-	Secret   bool
-	Response chan PromptResponse
+	Prompt        string
+	Secret        bool
+	Choices       []PromptChoice
+	DefaultChoice string
+	SelectedChoices []string
+	Filterable    bool
+	MultiSelect   bool
+	Response      chan PromptResponse
 }
 
 type PromptResponse struct {
 	Line string
 	Err  error
+}
+
+type PromptChoice struct {
+	Label  string
+	Value  string
+	Detail string
 }
 
 const (

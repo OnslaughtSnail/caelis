@@ -39,15 +39,15 @@ func (m *Model) View() string {
 		sections = append(sections, sep)
 	}
 
-	// 4. External prompt (modal-style).
+	// 4. Prompt choices (if any).
 	if m.activePrompt != nil {
-		sections = append(sections, m.renderPromptModal())
+		if promptView := m.renderPromptModal(); promptView != "" {
+			sections = append(sections, promptView)
+		}
 	}
 
 	// 5. Input bar.
-	if m.activePrompt == nil {
-		sections = append(sections, m.renderInputBar())
-	}
+	sections = append(sections, m.renderInputBar())
 
 	// 5b. @mention candidates inline list (below input, above status).
 	if len(m.mentionCandidates) > 0 {
@@ -114,11 +114,16 @@ func (m *Model) bottomSectionHeight() int {
 	// Separator.
 	lines++
 
-	// Prompt modal (3 lines) or input bar (>=1).
-	if m.activePrompt != nil {
-		lines += 3
-	} else {
-		lines += maxInt(1, m.textarea.Height())
+	// Input bar is always shown.
+	lines += maxInt(1, m.textarea.Height())
+
+	// Prompt choices, when present, render above the input bar.
+	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
+		n := len(m.visiblePromptChoices())
+		lines += minInt(8, n)
+		if n > 8 {
+			lines++
+		}
 	}
 
 	// Mention candidates.
@@ -280,12 +285,16 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 }
 
 func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
-	if m.activePrompt != nil {
-		return 0, 0, false
-	}
 	y := m.viewport.Height
 	y += reservedHintRows
 	y++ // separator
+	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
+		n := len(m.visiblePromptChoices())
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
 	h := maxInt(1, m.textarea.Height())
 	return y, h, true
 }
@@ -353,15 +362,14 @@ func (m *Model) buildHintText() string {
 	if h := strings.TrimSpace(m.hint); h != "" {
 		return h
 	}
+	if m.activePrompt != nil {
+		return m.promptHintText()
+	}
 	if m.running && m.activePrompt == nil {
 		return m.buildRunningHintText()
 	}
-	if len(m.pendingQueue) > 0 {
-		n := len(m.pendingQueue)
-		if n == 1 {
-			return "1 message queued; it will send after current run"
-		}
-		return fmt.Sprintf("%d messages queued; they will send in order after current run", n)
+	if text := m.pendingQueueHintText(); text != "" {
+		return text
 	}
 	// Show /resume guidance.
 	if len(m.resumeCandidates) > 0 {
@@ -424,10 +432,29 @@ func (m *Model) buildRunningHintText() string {
 	if len(runningBreathFrames) > 0 {
 		frame = runningBreathFrames[m.runningBeat%len(runningBreathFrames)]
 	}
+	queueText := m.pendingQueueHintText()
 	if len(runningCarouselLines) > 0 {
-		return frame + " " + runningCarouselLines[m.runningTip%len(runningCarouselLines)]
+		text := frame + " " + runningCarouselLines[m.runningTip%len(runningCarouselLines)]
+		if queueText != "" {
+			return text + " │ " + queueText
+		}
+		return text
+	}
+	if queueText != "" {
+		return frame + " " + queueText
 	}
 	return frame
+}
+
+func (m *Model) pendingQueueHintText() string {
+	n := len(m.pendingQueue)
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return "1 pending message; it will send after current run"
+	}
+	return fmt.Sprintf("%d pending messages; they will send in order after current run", n)
 }
 
 func (m *Model) renderHintArea() string {
@@ -450,6 +477,9 @@ func (m *Model) renderHintArea() string {
 }
 
 func (m *Model) renderInputBar() string {
+	if m.activePrompt != nil {
+		return m.renderPromptInputBar()
+	}
 	if start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines())); ok &&
 		(start.line != end.line || start.col != end.col) {
 		lines := m.inputPlainLines()
@@ -557,23 +587,115 @@ func (m *Model) renderPromptModal() string {
 		return ""
 	}
 	p := m.activePrompt
-	if len(p.choices) > 0 {
-		lines := []string{strings.TrimSpace(p.prompt)}
-		for i, choice := range p.choices {
-			if i == p.choiceIndex {
-				lines = append(lines, m.theme.PromptStyle().Render("▸ ")+m.theme.CommandActiveStyle().Render(choice.label))
+	if len(p.choices) == 0 {
+		return ""
+	}
+	visible := m.visiblePromptChoices()
+	if len(visible) == 0 {
+		return m.theme.HelpHintTextStyle().Render("  no matching choices")
+	}
+	const maxVisiblePromptChoices = 8
+	m.syncPromptChoiceWindow()
+	start := m.activePrompt.scrollOffset
+	if start < 0 {
+		start = 0
+	}
+	if start > len(visible) {
+		start = len(visible)
+	}
+	end := minInt(len(visible), start+maxVisiblePromptChoices)
+	window := visible[start:end]
+	maxItems := len(window)
+	lines := make([]string, 0, maxItems+1)
+	for i := 0; i < maxItems; i++ {
+		choice := window[i]
+		actualIndex := start + i
+		marker := ""
+		if p.multiSelect {
+			if _, ok := p.selected[choice.value]; ok {
+				marker = "[x] "
 			} else {
-				lines = append(lines, "  "+m.theme.HelpHintTextStyle().Render(choice.label))
+				marker = "[ ] "
 			}
 		}
-		lines = append(lines, "", "↑/↓: choose · Enter: submit · Esc: cancel")
-		return strings.Join(lines, "\n")
+		if actualIndex == p.choiceIndex {
+			line := m.theme.PromptStyle().Render("▸ ") + m.theme.CommandActiveStyle().Render(marker+choice.label)
+			if choice.detail != "" {
+				line += " " + m.theme.HelpHintTextStyle().Render(choice.detail)
+			}
+			lines = append(lines, line)
+			continue
+		}
+		line := "  " + m.theme.HelpHintTextStyle().Render(marker+choice.label)
+		if choice.detail != "" {
+			line += " " + m.theme.HelpHintTextStyle().Render(choice.detail)
+		}
+		lines = append(lines, line)
 	}
-	value := string(p.input)
-	if p.secret {
-		value = strings.Repeat("*", len(p.input))
+	if len(visible) > end {
+		lines = append(lines, m.theme.HelpHintTextStyle().Render(
+			fmt.Sprintf("  … and %d more", len(visible)-end),
+		))
 	}
-	return fmt.Sprintf("%s%s\n\nEnter: submit · Esc: cancel", p.prompt, value)
+	return strings.Join(lines, "\n")
+}
+
+func (m *Model) renderPromptInputBar() string {
+	prompt := m.theme.PromptStyle().Render("> ")
+	value, cursor := m.promptInputValue()
+	return renderMultilineInput(prompt, insertPromptCursor(value, cursor, m.theme.PromptStyle().Render("█")))
+}
+
+func (m *Model) promptInputValue() (string, int) {
+	if m.activePrompt == nil {
+		return "", 0
+	}
+	if m.activePrompt.filterable {
+		return string(m.activePrompt.filter), m.activePrompt.cursor
+	}
+	value := string(m.activePrompt.input)
+	if m.activePrompt.secret {
+		value = strings.Repeat("*", len(m.activePrompt.input))
+	}
+	return value, m.activePrompt.cursor
+}
+
+func insertPromptCursor(value string, cursor int, cursorGlyph string) string {
+	runes := []rune(value)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	head := string(runes[:cursor])
+	tail := string(runes[cursor:])
+	return head + cursorGlyph + tail
+}
+
+func (m *Model) promptHintText() string {
+	if m.activePrompt == nil {
+		return ""
+	}
+	text := strings.TrimSpace(m.activePrompt.prompt)
+	text = strings.TrimSuffix(text, ":")
+	text = strings.TrimSpace(text)
+	if len(m.activePrompt.choices) > 0 {
+		if m.activePrompt.filterable {
+			if m.activePrompt.multiSelect {
+				return text + "，输入关键字过滤，空格勾选"
+			}
+			return text + "，输入关键字过滤"
+		}
+		if m.activePrompt.multiSelect {
+			return text + "，空格勾选"
+		}
+		return text
+	}
+	if text == "" {
+		return "输入内容"
+	}
+	return "输入 " + text
 }
 
 func (m *Model) adjustTextareaHeight() {

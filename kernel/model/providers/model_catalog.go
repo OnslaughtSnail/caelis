@@ -19,21 +19,33 @@ type ModelCapabilities struct {
 	SupportsToolCalls bool
 	// SupportsReasoning indicates whether the model supports thinking/reasoning mode.
 	SupportsReasoning bool
+	// ReasoningMode describes how reasoning is controlled: none|toggle|effort.
+	ReasoningMode string
 	// ReasoningEfforts lists supported reasoning effort levels (for example:
 	// low|medium|high|xhigh). Empty means the model uses toggle/budget-only
 	// reasoning or the effort set is unknown.
 	ReasoningEfforts []string
+	// DefaultReasoningEffort is the recommended default effort when the model
+	// uses effort-based reasoning.
+	DefaultReasoningEffort string
 	// SupportsJSONOutput indicates whether the model supports structured JSON output.
 	SupportsJSONOutput bool
 }
 
+const (
+	ReasoningModeNone   = "none"
+	ReasoningModeToggle = "toggle"
+	ReasoningModeEffort = "effort"
+)
+
 // DefaultModelCapabilities returns conservative defaults for unknown models.
 func DefaultModelCapabilities() ModelCapabilities {
 	return ModelCapabilities{
-		ContextWindowTokens:    32000,
+		ContextWindowTokens:    128000,
 		MaxOutputTokens:        4096,
 		DefaultMaxOutputTokens: 4096,
 		SupportsToolCalls:      true,
+		ReasoningMode:          ReasoningModeNone,
 		SupportsJSONOutput:     true,
 	}
 }
@@ -355,7 +367,7 @@ var builtinCatalog = []catalogEntry{
 //
 // Returns the matched capabilities and true, or DefaultModelCapabilities()
 // and false if no match is found.
-func LookupModelCapabilities(provider, modelName string) (ModelCapabilities, bool) {
+func LookupBaseCatalogCapabilities(provider, modelName string) (ModelCapabilities, bool) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	modelName = strings.ToLower(strings.TrimSpace(modelName))
 	if provider == "" || modelName == "" {
@@ -373,9 +385,40 @@ func LookupModelCapabilities(provider, modelName string) (ModelCapabilities, boo
 		}
 		return caps, true
 	}
+	return ModelCapabilities{}, false
+}
 
-	// 3 – static builtin catalog fallback.
-	return lookupBuiltin(provider, modelName)
+// LookupModelCapabilities resolves model capabilities from the layered catalog:
+// local override -> remote -> embedded -> provider overlay -> builtin.
+func LookupModelCapabilities(provider, modelName string) (ModelCapabilities, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if provider == "" || modelName == "" {
+		return DefaultModelCapabilities(), false
+	}
+	if caps, ok := LookupBaseCatalogCapabilities(provider, modelName); ok {
+		if overlay, overlayOK := searchOverlay(provider, modelName); overlayOK {
+			caps = mergeCapabilities(caps, overlay)
+		}
+		return caps, true
+	}
+	if caps, ok := lookupBuiltin(provider, modelName); ok {
+		if overlay, overlayOK := searchOverlay(provider, modelName); overlayOK {
+			caps = mergeCapabilities(caps, overlay)
+		}
+		return caps, true
+	}
+	return DefaultModelCapabilities(), false
+}
+
+// LookupSuggestedModelCapabilities returns the best-effort suggested defaults
+// for one provider/model pair, including provider overlay fallbacks for models
+// that are not present in the base catalog.
+func LookupSuggestedModelCapabilities(provider, modelName string) (ModelCapabilities, bool) {
+	if caps, ok := LookupModelCapabilities(provider, modelName); ok {
+		return caps, true
+	}
+	return lookupOverlayModelCapabilities(provider, modelName)
 }
 
 // lookupBuiltin searches only the hard-coded builtinCatalog.
@@ -407,7 +450,7 @@ func lookupBuiltin(provider, modelName string) (ModelCapabilities, bool) {
 		return DefaultModelCapabilities(), false
 	}
 	out := best.caps
-	out.ReasoningEfforts = normalizeReasoningEffortList(out.ReasoningEfforts)
+	normalizeModelCapabilitiesReasoning(&out)
 	return out, true
 }
 
@@ -421,21 +464,38 @@ func ApplyModelCatalog(cfg *Config) {
 	}
 	caps, found := LookupModelCapabilities(cfg.Provider, cfg.Model)
 	if !found {
-		// Apply conservative defaults for completely unknown models.
-		defaults := DefaultModelCapabilities()
-		if cfg.ContextWindowTokens <= 0 {
-			cfg.ContextWindowTokens = defaults.ContextWindowTokens
+		if suggested, ok := LookupSuggestedModelCapabilities(cfg.Provider, cfg.Model); ok {
+			caps = suggested
+			found = true
+		} else {
+			// Apply conservative defaults for completely unknown models.
+			defaults := DefaultModelCapabilities()
+			if cfg.ContextWindowTokens <= 0 {
+				cfg.ContextWindowTokens = defaults.ContextWindowTokens
+			}
+			if cfg.MaxOutputTok <= 0 {
+				cfg.MaxOutputTok = defaults.DefaultMaxOutputTokens
+			}
+			return
 		}
-		if cfg.MaxOutputTok <= 0 {
-			cfg.MaxOutputTok = defaults.DefaultMaxOutputTokens
-		}
-		return
 	}
 	if cfg.ContextWindowTokens <= 0 {
 		cfg.ContextWindowTokens = caps.ContextWindowTokens
 	}
 	if cfg.MaxOutputTok <= 0 {
 		cfg.MaxOutputTok = caps.DefaultMaxOutputTokens
+	}
+	if strings.TrimSpace(cfg.ReasoningMode) == "" {
+		cfg.ReasoningMode = caps.ReasoningMode
+	}
+	if len(cfg.SupportedReasoningEfforts) == 0 {
+		cfg.SupportedReasoningEfforts = append([]string(nil), caps.ReasoningEfforts...)
+	}
+	if strings.TrimSpace(cfg.DefaultReasoningEffort) == "" {
+		cfg.DefaultReasoningEffort = caps.DefaultReasoningEffort
+	}
+	if len(cfg.ReasoningLevels) == 0 {
+		cfg.ReasoningLevels = reasoningLevelsFromCapabilities(caps)
 	}
 }
 
@@ -462,7 +522,7 @@ func NormalizeReasoningEffort(input string) string {
 func SupportedReasoningEfforts(provider, modelName string) []string {
 	caps, found := LookupModelCapabilities(provider, modelName)
 	if found {
-		if !caps.SupportsReasoning {
+		if !caps.SupportsReasoning || NormalizeReasoningMode(caps.ReasoningMode) != ReasoningModeEffort {
 			return nil
 		}
 		if normalized := normalizeReasoningEffortList(caps.ReasoningEfforts); len(normalized) > 0 {
@@ -488,6 +548,62 @@ func SupportsReasoningEffort(provider, modelName, effort string) bool {
 		}
 	}
 	return false
+}
+
+func ReasoningModeForModel(provider, modelName string) string {
+	caps, found := LookupModelCapabilities(provider, modelName)
+	if !found {
+		caps, found = LookupSuggestedModelCapabilities(provider, modelName)
+	}
+	if found {
+		normalizeModelCapabilitiesReasoning(&caps)
+		if mode := NormalizeReasoningMode(caps.ReasoningMode); mode != "" && (mode != ReasoningModeNone || caps.SupportsReasoning) {
+			return mode
+		}
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if strings.Contains(provider, "deepseek") || strings.HasPrefix(modelName, "deepseek-") {
+		return ReasoningModeToggle
+	}
+	if provider == "xiaomi" || provider == "mimo" || strings.Contains(modelName, "mimo") {
+		return ReasoningModeToggle
+	}
+	if len(inferReasoningEfforts(provider, modelName)) > 0 {
+		return ReasoningModeEffort
+	}
+	return ReasoningModeNone
+}
+
+func DefaultReasoningEffortForModel(provider, modelName string) string {
+	caps, found := LookupModelCapabilities(provider, modelName)
+	if !found {
+		caps, found = LookupSuggestedModelCapabilities(provider, modelName)
+	}
+	if !found {
+		return defaultReasoningEffortFromList(inferReasoningEfforts(provider, modelName))
+	}
+	normalizeModelCapabilitiesReasoning(&caps)
+	if NormalizeReasoningMode(caps.ReasoningMode) != ReasoningModeEffort {
+		return defaultReasoningEffortFromList(inferReasoningEfforts(provider, modelName))
+	}
+	if normalized := NormalizeReasoningEffort(caps.DefaultReasoningEffort); normalized != "" {
+		return normalized
+	}
+	return defaultReasoningEffortFromList(caps.ReasoningEfforts)
+}
+
+func NormalizeReasoningMode(input string) string {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case ReasoningModeNone:
+		return ReasoningModeNone
+	case ReasoningModeToggle, "boolean", "onoff":
+		return ReasoningModeToggle
+	case ReasoningModeEffort, "levels":
+		return ReasoningModeEffort
+	default:
+		return ""
+	}
 }
 
 func normalizeReasoningEffortList(in []string) []string {
@@ -529,15 +645,91 @@ func inferReasoningEfforts(provider, modelName string) []string {
 		return []string{"low", "medium", "high"}
 	}
 
-	if strings.Contains(provider, "openai") || strings.HasPrefix(modelName, "o") || strings.HasPrefix(modelName, "gpt-") {
+	if strings.Contains(provider, "openai") || strings.HasPrefix(modelName, "o") {
 		switch {
-		case strings.HasPrefix(modelName, "o3"),
+		case strings.HasPrefix(modelName, "o1"),
+			strings.HasPrefix(modelName, "o3"),
 			strings.HasPrefix(modelName, "o4"):
 			return []string{"low", "medium", "high", "xhigh"}
-		default:
+		case strings.HasPrefix(modelName, "o"):
 			return []string{"low", "medium", "high"}
 		}
 	}
 
-	return []string{"low", "medium", "high"}
+	if provider == "anthropic" || strings.HasPrefix(modelName, "claude-") {
+		return []string{"low", "medium", "high"}
+	}
+
+	return nil
+}
+
+func normalizeModelCapabilitiesReasoning(caps *ModelCapabilities) {
+	if caps == nil {
+		return
+	}
+	caps.ReasoningEfforts = normalizeReasoningEffortList(caps.ReasoningEfforts)
+	caps.DefaultReasoningEffort = NormalizeReasoningEffort(caps.DefaultReasoningEffort)
+	mode := NormalizeReasoningMode(caps.ReasoningMode)
+	switch {
+	case !caps.SupportsReasoning:
+		caps.ReasoningMode = ReasoningModeNone
+		caps.ReasoningEfforts = nil
+		caps.DefaultReasoningEffort = ""
+		return
+	case mode != "":
+		caps.ReasoningMode = mode
+	case len(caps.ReasoningEfforts) > 0:
+		caps.ReasoningMode = ReasoningModeEffort
+	default:
+		caps.ReasoningMode = ReasoningModeToggle
+	}
+	if caps.ReasoningMode != ReasoningModeEffort {
+		caps.ReasoningEfforts = nil
+		caps.DefaultReasoningEffort = ""
+		return
+	}
+	if caps.DefaultReasoningEffort == "" || !SupportsReasoningEffortList(caps.ReasoningEfforts, caps.DefaultReasoningEffort) {
+		caps.DefaultReasoningEffort = defaultReasoningEffortFromList(caps.ReasoningEfforts)
+	}
+}
+
+func defaultReasoningEffortFromList(levels []string) string {
+	levels = normalizeReasoningEffortList(levels)
+	for _, preferred := range []string{"medium", "low", "minimal", "high", "xhigh"} {
+		if SupportsReasoningEffortList(levels, preferred) {
+			return preferred
+		}
+	}
+	if len(levels) > 0 {
+		return levels[0]
+	}
+	return ""
+}
+
+func SupportsReasoningEffortList(levels []string, effort string) bool {
+	normalized := NormalizeReasoningEffort(effort)
+	if normalized == "" {
+		return false
+	}
+	for _, one := range normalizeReasoningEffortList(levels) {
+		if one == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+func reasoningLevelsFromCapabilities(caps ModelCapabilities) []string {
+	normalizeModelCapabilitiesReasoning(&caps)
+	switch caps.ReasoningMode {
+	case ReasoningModeEffort:
+		out := make([]string, 0, len(caps.ReasoningEfforts)+1)
+		out = append(out, "none")
+		out = append(out, caps.ReasoningEfforts...)
+		return out
+	case ReasoningModeToggle:
+		return []string{"none"}
+	default:
+		return nil
+	}
 }

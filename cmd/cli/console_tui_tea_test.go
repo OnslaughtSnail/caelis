@@ -81,7 +81,7 @@ func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("expected 2 reasoning candidates, got %d", len(got))
 	}
-	if got[0].Value != "none" || got[1].Value != "high" {
+	if got[0].Value != "off" || got[1].Value != "on" {
 		t.Fatalf("unexpected reasoning candidates: %+v", got)
 	}
 }
@@ -101,10 +101,10 @@ func TestCompleteModelReasoningCandidates_EffortModel(t *testing.T) {
 	}
 	c := &cliConsole{modelFactory: factory}
 	got := c.completeModelReasoningCandidates("openai/o3", "", 10)
-	if len(got) != 6 {
+	if len(got) != 5 {
 		t.Fatalf("expected effort reasoning candidates, got %d", len(got))
 	}
-	if got[0].Value != "none" || got[5].Value != "xhigh" {
+	if got[0].Value != "none" || got[4].Value != "xhigh" {
 		t.Fatalf("unexpected reasoning candidates: %+v", got)
 	}
 }

@@ -50,20 +50,23 @@ type modelRuntimeSettings struct {
 }
 
 type providerRecord struct {
-	Alias               string            `json:"alias"`
-	Provider            string            `json:"provider"`
-	API                 string            `json:"api"`
-	Model               string            `json:"model"`
-	BaseURL             string            `json:"base_url"`
-	Headers             map[string]string `json:"headers,omitempty"`
-	TimeoutSeconds      int               `json:"timeout_seconds,omitempty"`
-	MaxOutputTok        int               `json:"max_output_tokens,omitempty"`
-	ContextWindowTokens int               `json:"context_window_tokens,omitempty"`
-	ReasoningLevels     []string          `json:"reasoning_levels,omitempty"`
-	ThinkingMode        string            `json:"thinking_mode,omitempty"`
-	ThinkingBudget      int               `json:"thinking_budget,omitempty"`
-	ReasoningEffort     string            `json:"reasoning_effort,omitempty"`
-	Auth                authRecord        `json:"auth"`
+	Alias                     string            `json:"alias"`
+	Provider                  string            `json:"provider"`
+	API                       string            `json:"api"`
+	Model                     string            `json:"model"`
+	BaseURL                   string            `json:"base_url"`
+	Headers                   map[string]string `json:"headers,omitempty"`
+	TimeoutSeconds            int               `json:"timeout_seconds,omitempty"`
+	MaxOutputTok              int               `json:"max_output_tokens,omitempty"`
+	ContextWindowTokens       int               `json:"context_window_tokens,omitempty"`
+	ReasoningLevels           []string          `json:"reasoning_levels,omitempty"`
+	ReasoningMode             string            `json:"reasoning_mode,omitempty"`
+	SupportedReasoningEfforts []string          `json:"supported_reasoning_efforts,omitempty"`
+	DefaultReasoningEffort    string            `json:"default_reasoning_effort,omitempty"`
+	ThinkingMode              string            `json:"thinking_mode,omitempty"`
+	ThinkingBudget            int               `json:"thinking_budget,omitempty"`
+	ReasoningEffort           string            `json:"reasoning_effort,omitempty"`
+	Auth                      authRecord        `json:"auth"`
 }
 
 type authRecord struct {
@@ -179,6 +182,12 @@ func resolveAppConfigEnvPlaceholders(cfg *appConfig, configPath string) error {
 			return err
 		}
 		if err := resolveField(prefix+".thinking_mode", &rec.ThinkingMode); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".reasoning_mode", &rec.ReasoningMode); err != nil {
+			return err
+		}
+		if err := resolveField(prefix+".default_reasoning_effort", &rec.DefaultReasoningEffort); err != nil {
 			return err
 		}
 		if err := resolveField(prefix+".reasoning_effort", &rec.ReasoningEffort); err != nil {
@@ -305,18 +314,21 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 		auth := rec.Auth
 		normalizeProviderAuthRecord(rec.Provider, rec.BaseURL, &auth)
 		cfg := modelproviders.Config{
-			Alias:               alias,
-			Provider:            strings.TrimSpace(rec.Provider),
-			API:                 modelproviders.APIType(strings.TrimSpace(rec.API)),
-			Model:               strings.TrimSpace(rec.Model),
-			BaseURL:             strings.TrimSpace(rec.BaseURL),
-			Headers:             copyHeaders(rec.Headers),
-			ContextWindowTokens: rec.ContextWindowTokens,
-			MaxOutputTok:        rec.MaxOutputTok,
-			ReasoningLevels:     normalizeReasoningLevels(rec.ReasoningLevels),
-			ThinkingMode:        normalizeThinkingMode(rec.ThinkingMode),
-			ThinkingBudget:      normalizeThinkingBudget(rec.ThinkingBudget),
-			ReasoningEffort:     normalizeReasoningEffort(rec.ReasoningEffort),
+			Alias:                     alias,
+			Provider:                  strings.TrimSpace(rec.Provider),
+			API:                       modelproviders.APIType(strings.TrimSpace(rec.API)),
+			Model:                     strings.TrimSpace(rec.Model),
+			BaseURL:                   strings.TrimSpace(rec.BaseURL),
+			Headers:                   copyHeaders(rec.Headers),
+			ContextWindowTokens:       rec.ContextWindowTokens,
+			MaxOutputTok:              rec.MaxOutputTok,
+			ReasoningLevels:           normalizeReasoningLevels(rec.ReasoningLevels),
+			ReasoningMode:             modelproviders.NormalizeReasoningMode(rec.ReasoningMode),
+			SupportedReasoningEfforts: normalizeReasoningLevels(rec.SupportedReasoningEfforts),
+			DefaultReasoningEffort:    normalizeReasoningEffort(rec.DefaultReasoningEffort),
+			ThinkingMode:              normalizeThinkingMode(rec.ThinkingMode),
+			ThinkingBudget:            normalizeThinkingBudget(rec.ThinkingBudget),
+			ReasoningEffort:           normalizeReasoningEffort(rec.ReasoningEffort),
 			Auth: modelproviders.AuthConfig{
 				Type:          modelproviders.AuthType(strings.TrimSpace(auth.Type)),
 				TokenEnv:      "",
@@ -500,18 +512,21 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		return fmt.Errorf("cli config: provider alias is required")
 	}
 	record := providerRecord{
-		Alias:               alias,
-		Provider:            strings.TrimSpace(cfg.Provider),
-		API:                 string(cfg.API),
-		Model:               strings.TrimSpace(cfg.Model),
-		BaseURL:             strings.TrimSpace(cfg.BaseURL),
-		Headers:             copyHeaders(cfg.Headers),
-		ContextWindowTokens: cfg.ContextWindowTokens,
-		MaxOutputTok:        cfg.MaxOutputTok,
-		ReasoningLevels:     normalizeReasoningLevels(cfg.ReasoningLevels),
-		ThinkingMode:        normalizeThinkingMode(cfg.ThinkingMode),
-		ThinkingBudget:      normalizeThinkingBudget(cfg.ThinkingBudget),
-		ReasoningEffort:     normalizeReasoningEffort(cfg.ReasoningEffort),
+		Alias:                     alias,
+		Provider:                  strings.TrimSpace(cfg.Provider),
+		API:                       string(cfg.API),
+		Model:                     strings.TrimSpace(cfg.Model),
+		BaseURL:                   strings.TrimSpace(cfg.BaseURL),
+		Headers:                   copyHeaders(cfg.Headers),
+		ContextWindowTokens:       cfg.ContextWindowTokens,
+		MaxOutputTok:              cfg.MaxOutputTok,
+		ReasoningLevels:           normalizeReasoningLevels(cfg.ReasoningLevels),
+		ReasoningMode:             modelproviders.NormalizeReasoningMode(cfg.ReasoningMode),
+		SupportedReasoningEfforts: normalizeReasoningLevels(cfg.SupportedReasoningEfforts),
+		DefaultReasoningEffort:    normalizeReasoningEffort(cfg.DefaultReasoningEffort),
+		ThinkingMode:              normalizeThinkingMode(cfg.ThinkingMode),
+		ThinkingBudget:            normalizeThinkingBudget(cfg.ThinkingBudget),
+		ReasoningEffort:           normalizeReasoningEffort(cfg.ReasoningEffort),
 		Auth: authRecord{
 			Type:          string(cfg.Auth.Type),
 			TokenEnv:      "",
@@ -588,6 +603,9 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
 	for i := range cfg.Providers {
 		cfg.Providers[i].ReasoningLevels = normalizeReasoningLevels(cfg.Providers[i].ReasoningLevels)
+		cfg.Providers[i].ReasoningMode = modelproviders.NormalizeReasoningMode(cfg.Providers[i].ReasoningMode)
+		cfg.Providers[i].SupportedReasoningEfforts = normalizeReasoningLevels(cfg.Providers[i].SupportedReasoningEfforts)
+		cfg.Providers[i].DefaultReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].DefaultReasoningEffort)
 		cfg.Providers[i].ThinkingMode = normalizeThinkingMode(cfg.Providers[i].ThinkingMode)
 		cfg.Providers[i].ThinkingBudget = normalizeThinkingBudget(cfg.Providers[i].ThinkingBudget)
 		cfg.Providers[i].ReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].ReasoningEffort)

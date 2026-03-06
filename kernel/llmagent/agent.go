@@ -149,6 +149,19 @@ func (a *Agent) generateTurnResponse(
 	}
 	resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
 		return a.emitPartialResponse(partial, yield)
+	}, func(attempt int, delay time.Duration, cause error) error {
+		ev := &session.Event{
+			ID:   newEventID(),
+			Time: time.Now(),
+			Message: model.Message{
+				Role: model.RoleSystem,
+				Text: fmt.Sprintf("warn: llm request failed, retrying in %s (%d/%d): %v", formatRetryDelay(delay), attempt, modelRequestMaxRetries, cause),
+			},
+		}
+		if !yield(ev, nil) {
+			return errYieldStopped
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -584,6 +597,7 @@ func (a *Agent) generateWithRetry(
 	ctx agent.InvocationContext,
 	req *model.Request,
 	onPartial func(*model.Response) error,
+	onRetry func(attempt int, delay time.Duration, cause error) error,
 ) (*model.Response, error) {
 	retries := 0
 	for {
@@ -610,6 +624,11 @@ func (a *Agent) generateWithRetry(
 			return nil, fmt.Errorf("llmagent: model request failed after %d retries: %w", modelRequestMaxRetries, err)
 		}
 		delay := retryDelayForAttempt(retries)
+		if onRetry != nil {
+			if retryErr := onRetry(retries+1, delay, err); retryErr != nil {
+				return nil, retryErr
+			}
+		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -619,6 +638,16 @@ func (a *Agent) generateWithRetry(
 		}
 		retries++
 	}
+}
+
+func formatRetryDelay(delay time.Duration) string {
+	if delay <= 0 {
+		return "0s"
+	}
+	if delay < time.Second {
+		return delay.Round(100 * time.Millisecond).String()
+	}
+	return delay.Round(time.Second).String()
 }
 
 func retryDelayForAttempt(retry int) time.Duration {

@@ -299,14 +299,24 @@ func TestLLMAgent_RetriesModelRequestAndSucceeds(t *testing.T) {
 		toolMap: map[string]tool.Tool{},
 	}
 	var last *session.Event
+	var retryWarnings []string
 	for ev, runErr := range ag.Run(ctx) {
 		if runErr != nil {
 			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.Role == model.RoleSystem {
+			retryWarnings = append(retryWarnings, ev.Message.Text)
 		}
 		last = ev
 	}
 	if attempts != 3 {
 		t.Fatalf("expected 3 attempts (2 retries), got %d", attempts)
+	}
+	if len(retryWarnings) != 2 {
+		t.Fatalf("expected 2 retry warnings, got %v", retryWarnings)
+	}
+	if !strings.Contains(retryWarnings[0], "retrying in") {
+		t.Fatalf("expected retry warning text, got %v", retryWarnings)
 	}
 	if last == nil || strings.TrimSpace(last.Message.Text) != "done" {
 		t.Fatalf("unexpected final message: %#v", last)

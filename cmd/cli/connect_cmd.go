@@ -1,15 +1,18 @@
 package main
 
 import (
-	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
+
+const connectCustomModelValue = "__custom_model__"
 
 type providerTemplate struct {
 	label               string
@@ -20,6 +23,24 @@ type providerTemplate struct {
 	defaultMaxOutputTok int
 	noAuthRequired      bool
 	commonModels        []string
+}
+
+type promptChoiceRequester interface {
+	RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error)
+	RequestMultiChoicePrompt(prompt string, choices []tuievents.PromptChoice, selectedChoices []string, filterable bool) (string, error)
+}
+
+type connectModelChoice struct {
+	Name    string
+	Display string
+	Detail  string
+}
+
+type connectModelSelection struct {
+	cfg             modelproviders.Config
+	persistCfg      modelproviders.Config
+	knownModel      bool
+	requiresAdvance bool
 }
 
 var providerTemplates = []providerTemplate{
@@ -77,7 +98,7 @@ var providerTemplates = []providerTemplate{
 		api:                 modelproviders.APIOllama,
 		provider:            "ollama",
 		defaultBaseURL:      "http://localhost:11434",
-		defaultContextToken: 32000,
+		defaultContextToken: 128000,
 		noAuthRequired:      true,
 		commonModels:        []string{"qwen2.5:7b", "llama3.1:8b", "deepseek-r1:7b", "gemma3:4b"},
 	},
@@ -87,73 +108,51 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	if c.modelFactory == nil {
 		return false, fmt.Errorf("model factory is not configured")
 	}
-	connectArgs, err := parseConnectCLIArgs(args)
+	if len(args) != 0 {
+		return false, fmt.Errorf("usage: /connect")
+	}
+
+	tpl, err := promptProviderTemplate(c)
 	if err != nil {
 		return false, err
 	}
-	quickMode := connectArgs.quickMode
-	tpl := providerTemplate{}
-	if quickMode {
-		one, ok := findProviderTemplate(connectArgs.provider)
-		if !ok {
-			return false, fmt.Errorf("unknown provider %q", strings.TrimSpace(connectArgs.provider))
-		}
-		tpl = one
-	} else {
-		c.ui.Section("Select provider type:")
-		for i, item := range providerTemplates {
-			c.ui.Numbered(i+1, item.label)
-		}
-		picked, err := promptIntInRange(c, "provider", 1, len(providerTemplates), 1)
-		if err != nil {
-			return false, err
-		}
-		tpl = providerTemplates[picked-1]
-	}
 
 	baseURL := strings.TrimSpace(tpl.defaultBaseURL)
-	timeoutSeconds := 60
-	if connectArgs.baseURL != "" {
-		baseURL = connectArgs.baseURL
-	}
-	if connectArgs.hasTimeout {
-		timeoutSeconds = connectArgs.timeoutSeconds
-	}
-	if !quickMode {
-		var err error
+	if tpl.provider == "openai-compatible" {
 		baseURL, err = c.promptText("base_url", tpl.defaultBaseURL, false)
 		if err != nil {
 			return false, err
 		}
-		timeoutSeconds, err = promptInt(c, "timeout_seconds", 60)
-		if err != nil {
-			return false, err
+		baseURL = strings.TrimSpace(baseURL)
+		if baseURL == "" {
+			return false, fmt.Errorf("base_url is required")
 		}
-	} else {
-		c.ui.Note("using base_url=%s timeout_seconds=%d (quick mode)\n", baseURL, timeoutSeconds)
 	}
 
-	token := strings.TrimSpace(connectArgs.apiKey)
+	timeoutSeconds := 60
+	token := ""
 	authType := modelproviders.AuthAPIKey
 	if tpl.noAuthRequired {
 		authType = modelproviders.AuthNone
-	} else if !quickMode && token == "" {
-		c.printf("auth: api_key\n")
-		input, err := c.promptText("api_key", "", true)
+	} else {
+		token, err = c.promptText("api_key", "", true)
 		if err != nil {
 			return false, err
 		}
-		token = strings.TrimSpace(input)
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return false, fmt.Errorf("api_key is required")
+		}
 	}
-	if !tpl.noAuthRequired && token == "" {
-		return false, fmt.Errorf("api_key is required")
+	credentialRef := normalizeCredentialRef(defaultCredentialRef(tpl.provider, baseURL))
+	if credentialRef == "" {
+		credentialRef = normalizeCredentialRef(tpl.provider)
 	}
-	credentialRef := defaultCredentialRef(tpl.provider, baseURL)
 
 	baseCfg := modelproviders.Config{
 		Provider: strings.TrimSpace(tpl.provider),
 		API:      tpl.api,
-		BaseURL:  strings.TrimSpace(baseURL),
+		BaseURL:  baseURL,
 		Timeout:  time.Duration(timeoutSeconds) * time.Second,
 		Auth: modelproviders.AuthConfig{
 			Type:          authType,
@@ -161,215 +160,323 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 			CredentialRef: credentialRef,
 		},
 	}
-	if baseCfg.BaseURL == "" {
-		return false, fmt.Errorf("base_url is required")
-	}
-	c.ui.Note("正在从 models.dev 拉取最新模型配置...\n")
-	catalogStatus := refreshModelCatalogForConnect(c.baseCtx)
-	if catalogStatus.RemoteFetched {
-		c.ui.Note("models.dev 模型配置拉取完成。\n")
-	} else {
-		c.ui.Warn("models.dev 拉取失败或超时，已回退到内置模型配置。\n")
-	}
 
-	modelName := strings.TrimSpace(connectArgs.model)
-	models, discoverErr := modelproviders.DiscoverModels(c.baseCtx, baseCfg)
-	// Start at 0 so ApplyModelCatalog (called inside Register) can fill in the
-	// correct catalog values. DiscoverModels overrides only when the API
-	// explicitly returns a positive value.
-	contextWindow := 0
-	maxOutput := 0
-	if modelName != "" {
-		// Keep explicit model from command args.
-	} else if discoverErr != nil {
+	if c.tuiSender != nil && modelCatalogRefreshDue() {
+		c.setPromptLoading(true)
+		defer c.setPromptLoading(false)
+	}
+	_, _ = connectModelCatalogRefreshFn(c.baseCtx)
+
+	remoteModels, discoverErr := discoverModelsFn(c.baseCtx, baseCfg)
+	if discoverErr != nil && !shouldSuppressDiscoverModelsError(baseCfg, discoverErr) {
 		c.ui.Warn("list_models failed: %v\n", discoverErr)
-	} else if len(models) == 0 {
-		c.ui.Warn("provider returned empty model list, fallback to manual input\n")
-	} else if len(models) == 1 {
-		chosen := models[0]
-		modelName = strings.TrimSpace(chosen.Name)
-		c.ui.Note("auto-selected model: %s\n", describeRemoteModel(tpl.provider, chosen))
-		if chosen.ContextWindowTokens > 0 {
-			contextWindow = chosen.ContextWindowTokens
-		}
-		if chosen.MaxOutputTokens > 0 {
-			maxOutput = chosen.MaxOutputTokens
-		}
-	} else {
-		var chosen modelproviders.RemoteModel
-		if quickMode {
-			chosen = models[0]
-			c.ui.Note("auto-selected model (quick mode): %s\n", describeRemoteModel(tpl.provider, chosen))
-		} else {
-			c.ui.Section("Available models:")
-			for i, item := range models {
-				c.ui.Numbered(i+1, describeRemoteModel(tpl.provider, item))
-			}
-			index, pickErr := promptIntInRange(c, "model", 1, len(models), 1)
-			if pickErr != nil {
-				return false, pickErr
-			}
-			chosen = models[index-1]
-		}
-		modelName = strings.TrimSpace(chosen.Name)
-		if chosen.ContextWindowTokens > 0 {
-			contextWindow = chosen.ContextWindowTokens
-		}
-		if chosen.MaxOutputTokens > 0 {
-			maxOutput = chosen.MaxOutputTokens
-		}
 	}
-	if modelName == "" {
-		if quickMode {
-			return false, fmt.Errorf("model is required in quick mode")
-		}
-		modelName, err = c.promptText("model", "", false)
-		if err != nil {
-			return false, err
-		}
-		modelName = strings.TrimSpace(modelName)
-		if modelName == "" {
-			return false, fmt.Errorf("model is required")
-		}
-	}
-	alias := canonicalModelRef(baseCfg.Provider, modelName)
-	if alias == "" {
-		return false, fmt.Errorf("invalid provider/model")
-	}
-	if cfgRef := normalizeCredentialRef(credentialRef); cfgRef != "" {
-		credentialRef = cfgRef
-	} else {
-		credentialRef = normalizeCredentialRef(alias)
-	}
-	catalogCaps, hasDynamicCaps := modelproviders.LookupDynamicModelCapabilities(baseCfg.Provider, modelName)
-	defaultCtx := tpl.defaultContextToken
-	if defaultCtx <= 0 {
-		defaultCtx = 32000
-	}
-	defaultOut := defaultMaxOutputForTemplate(tpl)
-	defaultReasoningLevels := []string(nil)
-	if hasDynamicCaps {
-		if catalogCaps.ContextWindowTokens > 0 {
-			defaultCtx = catalogCaps.ContextWindowTokens
-		}
-		if catalogCaps.DefaultMaxOutputTokens > 0 {
-			defaultOut = catalogCaps.DefaultMaxOutputTokens
-		} else if catalogCaps.MaxOutputTokens > 0 {
-			defaultOut = catalogCaps.MaxOutputTokens
-		}
-		defaultReasoningLevels = normalizeReasoningLevels(catalogCaps.ReasoningEfforts)
-		if len(defaultReasoningLevels) == 0 && !catalogCaps.SupportsReasoning {
-			defaultReasoningLevels = []string{"none"}
-		}
-	}
-	if contextWindow <= 0 {
-		contextWindow = defaultCtx
-	}
-	if maxOutput <= 0 {
-		maxOutput = defaultOut
-	}
-	reasoningLevels := append([]string(nil), defaultReasoningLevels...)
-	if connectArgs.hasContextWindow {
-		contextWindow = connectArgs.contextWindowTokens
-	}
-	if connectArgs.hasMaxOutput {
-		maxOutput = connectArgs.maxOutputTokens
-	}
-	if connectArgs.hasReasoningLevels {
-		reasoningLevels, err = parseReasoningLevelsInput(connectArgs.reasoningLevelsRaw)
-		if err != nil {
-			return false, err
-		}
-	}
-	if !hasDynamicCaps {
-		c.ui.Note("该模型缺少在线/内置能力定义，进入手动配置模式。\n")
-		if !quickMode && !connectArgs.hasContextWindow {
-			contextWindow, err = promptInt(c, "context_window_tokens", contextWindow)
-			if err != nil {
-				return false, err
-			}
-		}
-		if !quickMode && !connectArgs.hasMaxOutput {
-			maxOutput, err = promptInt(c, "max_output_tokens", maxOutput)
-			if err != nil {
-				return false, err
-			}
-		}
-		if !quickMode && !connectArgs.hasReasoningLevels {
-			reasoningLevels, err = promptReasoningLevels(c, reasoningLevels)
-			if err != nil {
-				return false, err
-			}
-		}
-	} else if catalogCaps.SupportsReasoning && len(reasoningLevels) == 0 && !quickMode && !connectArgs.hasReasoningLevels {
-		// Dynamic catalog marks reasoning support but does not provide explicit levels.
-		// Ask user to configure levels explicitly to avoid hidden inference.
-		reasoningLevels, err = promptReasoningLevels(c, reasoningLevels)
-		if err != nil {
-			return false, err
-		}
-	}
-	cfg := baseCfg
-	cfg.Alias = alias
-	cfg.Model = modelName
-	cfg.ContextWindowTokens = contextWindow
-	cfg.MaxOutputTok = maxOutput
-	cfg.ReasoningLevels = normalizeReasoningLevels(reasoningLevels)
-	cfg.ThinkingMode = defaultThinkingMode
-	cfg.ThinkingBudget = defaultThinkingBudget
-	cfg.ReasoningEffort = defaultReasoningEffort
-	if c.configStore != nil {
-		modelSettings := c.configStore.ModelRuntimeSettings(alias)
-		cfg.ThinkingMode = modelSettings.ThinkingMode
-		cfg.ThinkingBudget = modelSettings.ThinkingBudget
-		cfg.ReasoningEffort = modelSettings.ReasoningEffort
-	}
-	if len(cfg.ReasoningLevels) > 0 && cfg.ThinkingMode == defaultThinkingMode && cfg.ReasoningEffort == defaultReasoningEffort {
-		defaultLevel := cfg.ReasoningLevels[0]
-		if defaultLevel == "none" {
-			cfg.ThinkingMode = "off"
-			cfg.ReasoningEffort = ""
-		} else {
-			cfg.ThinkingMode = "on"
-			cfg.ReasoningEffort = defaultLevel
-		}
-	}
-	cfg.Auth.CredentialRef = credentialRef
-	persistCfg := cfg
-	persistCfg.Auth.Token = ""
 
-	if err := c.modelFactory.Register(cfg); err != nil {
-		return false, err
+	choices := buildConnectModelChoices(tpl.provider, remoteModels)
+	if len(choices) == 0 {
+		choices = append(choices, connectModelChoice{
+			Name:    connectCustomModelValue,
+			Display: "输入自定义模型名",
+			Detail:  "provider 未返回模型目录，手动输入",
+		})
 	}
-	llm, err := c.modelFactory.NewByAlias(alias)
+
+	modelNames, err := promptConnectModelChoices(c, tpl.provider, choices)
 	if err != nil {
 		return false, err
 	}
-
-	if c.configStore != nil {
-		if err := c.configStore.UpsertProvider(persistCfg); err != nil {
+	selected := make([]connectModelSelection, 0, len(modelNames))
+	for _, modelName := range modelNames {
+		meta, _ := findRemoteModelByName(remoteModels, modelName)
+		selection, err := buildConnectModelSelection(c, tpl, baseCfg, credentialRef, modelName, meta)
+		if err != nil {
 			return false, err
 		}
-		if err := c.configStore.SetDefaultModel(alias); err != nil {
-			c.ui.Warn("update default model failed: %v\n", err)
-		}
+		selected = append(selected, selection)
 	}
+
+	if len(selected) == 0 {
+		return false, fmt.Errorf("no model selected")
+	}
+
 	if c.credentialStore != nil && credentialRef != "" {
 		if err := c.credentialStore.Upsert(credentialRef, credentialRecord{
-			Type:  string(cfg.Auth.Type),
+			Type:  string(authType),
 			Token: token,
 		}); err != nil {
 			return false, err
 		}
 	}
-	c.modelAlias = alias
+
+	for _, selection := range selected {
+		if err := c.modelFactory.Register(selection.cfg); err != nil {
+			return false, err
+		}
+		if c.configStore != nil {
+			if err := c.configStore.UpsertProvider(selection.persistCfg); err != nil {
+				return false, err
+			}
+		}
+	}
+
+	firstAlias := selected[0].cfg.Alias
+	llm, err := c.modelFactory.NewByAlias(firstAlias)
+	if err != nil {
+		return false, err
+	}
+	if c.configStore != nil {
+		if err := c.configStore.SetDefaultModel(firstAlias); err != nil {
+			c.ui.Warn("update default model failed: %v\n", err)
+		}
+	}
+	c.modelAlias = firstAlias
 	c.llm = llm
-	c.applyModelRuntimeSettings(alias)
-	c.ui.Success("Connected: %s\n", alias)
+	c.applyModelRuntimeSettings(firstAlias)
+	for _, selection := range selected {
+		c.ui.Success("Connected: %s\n", selection.cfg.Alias)
+	}
 	if c.credentialStore != nil {
 		c.ui.Note("api_key 已保存到本地凭据库，config 仅保存 credential_ref。\n")
 	}
 	return false, nil
+}
+
+func promptProviderTemplate(c *cliConsole) (providerTemplate, error) {
+	choices := make([]promptChoiceItem, 0, len(providerTemplates))
+	for _, tpl := range providerTemplates {
+		detail := tpl.defaultBaseURL
+		if tpl.noAuthRequired {
+			detail += " · no auth"
+		}
+		choices = append(choices, promptChoiceItem{
+			Label:  tpl.label,
+			Value:  tpl.label,
+			Detail: detail,
+		})
+	}
+	value, err := c.promptChoice("选择 provider", choices, providerTemplates[0].label, false)
+	if err != nil {
+		return providerTemplate{}, err
+	}
+	tpl, ok := findProviderTemplate(value)
+	if !ok {
+		return providerTemplate{}, fmt.Errorf("unknown provider %q", value)
+	}
+	return tpl, nil
+}
+
+func buildConnectModelChoices(provider string, remoteModels []modelproviders.RemoteModel) []connectModelChoice {
+	seen := map[string]struct{}{}
+	out := make([]connectModelChoice, 0, len(remoteModels)+16)
+	add := func(name string, detail string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, connectModelChoice{
+			Name:    name,
+			Display: canonicalModelRef(provider, name),
+			Detail:  strings.TrimSpace(detail),
+		})
+	}
+	for _, item := range remoteModels {
+		add(item.Name, describeRemoteModelDetail(item))
+	}
+	for _, name := range modelproviders.ListCatalogModels(provider) {
+		add(name, "")
+	}
+	for _, name := range commonModelsForProvider(provider) {
+		add(name, "")
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Display) < strings.ToLower(out[j].Display)
+	})
+	out = append(out, connectModelChoice{
+		Name:    connectCustomModelValue,
+		Display: "输入自定义模型名",
+		Detail:  "手动输入 provider/model",
+	})
+	return out
+}
+
+func promptConnectModelChoices(c *cliConsole, provider string, choices []connectModelChoice) ([]string, error) {
+	promptChoices := make([]promptChoiceItem, 0, len(choices))
+	for _, choice := range choices {
+		promptChoices = append(promptChoices, promptChoiceItem{
+			Label:  choice.Display,
+			Value:  choice.Name,
+			Detail: choice.Detail,
+		})
+	}
+	values, err := c.promptMultiChoice("选择模型", promptChoices, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == connectCustomModelValue {
+			customValue, err := c.promptText("model", "", false)
+			if err != nil {
+				return nil, err
+			}
+			customValue = strings.TrimSpace(customValue)
+			if customValue == "" {
+				return nil, fmt.Errorf("model is required")
+			}
+			out = append(out, customValue)
+			continue
+		}
+		out = append(out, strings.TrimSpace(value))
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no model selected")
+	}
+	return out, nil
+}
+
+func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg modelproviders.Config, credentialRef string, modelName string, remote *modelproviders.RemoteModel) (connectModelSelection, error) {
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return connectModelSelection{}, fmt.Errorf("model is required")
+	}
+	alias := canonicalModelRef(baseCfg.Provider, modelName)
+	if alias == "" {
+		return connectModelSelection{}, fmt.Errorf("invalid provider/model")
+	}
+
+	_, baseKnown := modelproviders.LookupBaseCatalogCapabilities(baseCfg.Provider, modelName)
+	caps, mergedKnown := modelproviders.LookupSuggestedModelCapabilities(baseCfg.Provider, modelName)
+	if !mergedKnown {
+		caps = modelproviders.DefaultModelCapabilities()
+	}
+	if caps.ContextWindowTokens <= 0 {
+		caps.ContextWindowTokens = defaultContextWindowForTemplate(tpl)
+	}
+	if caps.DefaultMaxOutputTokens <= 0 {
+		caps.DefaultMaxOutputTokens = defaultMaxOutputForTemplate(tpl)
+	}
+	if caps.MaxOutputTokens <= 0 {
+		caps.MaxOutputTokens = caps.DefaultMaxOutputTokens
+	}
+	requiresAdvanced := !baseKnown || !reasoningDefinitionKnown(baseCfg.Provider, caps)
+	if remote != nil {
+		if remote.ContextWindowTokens > 0 {
+			caps.ContextWindowTokens = remote.ContextWindowTokens
+		}
+		if remote.MaxOutputTokens > 0 {
+			caps.MaxOutputTokens = remote.MaxOutputTokens
+			if caps.DefaultMaxOutputTokens <= 0 {
+				caps.DefaultMaxOutputTokens = remote.MaxOutputTokens
+			}
+		}
+	}
+
+	reasoningMode := modelproviders.NormalizeReasoningMode(caps.ReasoningMode)
+	reasoningEfforts := normalizeReasoningLevels(caps.ReasoningEfforts)
+	defaultReasoningEffort := normalizeReasoningEffort(caps.DefaultReasoningEffort)
+	contextWindow := caps.ContextWindowTokens
+	maxOutput := caps.DefaultMaxOutputTokens
+	if maxOutput <= 0 {
+		maxOutput = caps.MaxOutputTokens
+	}
+	if maxOutput <= 0 {
+		maxOutput = defaultMaxOutputForTemplate(tpl)
+	}
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindowForTemplate(tpl)
+	}
+
+	if requiresAdvanced {
+		c.ui.Note("模型 %s 缺少完整能力定义，进入补充配置。\n", alias)
+		var err error
+		contextWindow, err = promptInt(c, "context_window_tokens", contextWindow)
+		if err != nil {
+			return connectModelSelection{}, err
+		}
+		maxOutput, err = promptInt(c, "max_output_tokens", maxOutput)
+		if err != nil {
+			return connectModelSelection{}, err
+		}
+		reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptReasoningDefinition(c, reasoningMode, reasoningEfforts, defaultReasoningEffort)
+		if err != nil {
+			return connectModelSelection{}, err
+		}
+	}
+
+	cfg := baseCfg
+	cfg.Alias = alias
+	cfg.Model = modelName
+	cfg.ContextWindowTokens = contextWindow
+	cfg.MaxOutputTok = maxOutput
+	cfg.ReasoningMode = reasoningMode
+	cfg.SupportedReasoningEfforts = reasoningEfforts
+	cfg.DefaultReasoningEffort = defaultReasoningEffort
+	cfg.ReasoningLevels = reasoningLevelsForMode(reasoningMode, reasoningEfforts)
+	cfg.Auth.CredentialRef = credentialRef
+	applyConnectRuntimeDefaults(c, &cfg)
+	persistCfg := cfg
+	persistCfg.Auth.Token = ""
+	return connectModelSelection{
+		cfg:             cfg,
+		persistCfg:      persistCfg,
+		knownModel:      baseKnown,
+		requiresAdvance: requiresAdvanced,
+	}, nil
+}
+
+func applyConnectRuntimeDefaults(c *cliConsole, cfg *modelproviders.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.ThinkingMode = defaultThinkingMode
+	cfg.ThinkingBudget = defaultThinkingBudget
+	cfg.ReasoningEffort = defaultReasoningEffort
+	if c != nil && c.configStore != nil {
+		settings := c.configStore.ModelRuntimeSettings(cfg.Alias)
+		cfg.ThinkingMode = settings.ThinkingMode
+		cfg.ThinkingBudget = settings.ThinkingBudget
+		cfg.ReasoningEffort = settings.ReasoningEffort
+	}
+	if len(cfg.ReasoningLevels) > 0 && cfg.ThinkingMode == defaultThinkingMode && cfg.ReasoningEffort == defaultReasoningEffort {
+		profile := reasoningProfileForConfig(*cfg)
+		switch profile.Mode {
+		case modelproviders.ReasoningModeEffort:
+			cfg.ThinkingMode = "on"
+			cfg.ReasoningEffort = profile.DefaultEffort
+		case modelproviders.ReasoningModeToggle:
+			cfg.ThinkingMode = defaultThinkingMode
+			cfg.ReasoningEffort = defaultReasoningEffort
+		}
+	}
+}
+
+func reasoningDefinitionKnown(provider string, caps modelproviders.ModelCapabilities) bool {
+	switch caps.ReasoningMode {
+	case modelproviders.ReasoningModeNone:
+		return true
+	case modelproviders.ReasoningModeToggle:
+		return true
+	case modelproviders.ReasoningModeEffort:
+		return len(caps.ReasoningEfforts) > 0
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "deepseek", "xiaomi", "mimo":
+		return true
+	default:
+		return false
+	}
+}
+
+func defaultContextWindowForTemplate(tpl providerTemplate) int {
+	if tpl.defaultContextToken > 0 {
+		return tpl.defaultContextToken
+	}
+	return 128000
 }
 
 func findProviderTemplate(input string) (providerTemplate, bool) {
@@ -405,25 +512,6 @@ func defaultMaxOutputForTemplate(tpl providerTemplate) int {
 	return 4096
 }
 
-func refreshModelCatalogForConnect(baseCtx context.Context) modelproviders.CatalogInitStatus {
-	ctx := baseCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	return modelproviders.InitModelCatalogWithStatus(timeoutCtx, nil, "")
-}
-
-func promptReasoningLevels(c *cliConsole, defaults []string) ([]string, error) {
-	defaultText := strings.Join(defaults, ",")
-	text, err := c.promptText("reasoning_levels(comma/space/tab)", defaultText, false)
-	if err != nil {
-		return nil, err
-	}
-	return parseReasoningLevelsInput(text)
-}
-
 func parseReasoningLevelsInput(raw string) ([]string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" || value == "-" {
@@ -449,98 +537,231 @@ func parseReasoningLevelsInput(raw string) ([]string, error) {
 	return out, nil
 }
 
-type connectCLIArgs struct {
-	quickMode           bool
-	provider            string
-	model               string
-	baseURL             string
-	timeoutSeconds      int
-	hasTimeout          bool
-	apiKey              string
-	contextWindowTokens int
-	hasContextWindow    bool
-	maxOutputTokens     int
-	hasMaxOutput        bool
-	reasoningLevelsRaw  string
-	hasReasoningLevels  bool
-}
-
-func parseConnectCLIArgs(args []string) (connectCLIArgs, error) {
-	parsed := connectCLIArgs{
-		quickMode: len(args) > 0,
+func promptReasoningDefinition(c *cliConsole, defaultMode string, defaultEfforts []string, defaultEffort string) (string, []string, string, error) {
+	defaultMode = modelproviders.NormalizeReasoningMode(defaultMode)
+	if defaultMode == "" {
+		defaultMode = modelproviders.ReasoningModeNone
 	}
-	if len(args) == 0 {
-		return parsed, nil
-	}
-	parsed.provider = strings.TrimSpace(args[0])
-	if parsed.provider == "" {
-		return connectCLIArgs{}, fmt.Errorf("usage: /connect [provider] [model] [base_url] [timeout_seconds] [api_key] [context_window_tokens] [max_output_tokens] [reasoning_levels]")
-	}
-	if len(args) >= 2 {
-		parsed.model = strings.TrimSpace(args[1])
-	}
-	if len(args) >= 3 {
-		parsed.baseURL = strings.TrimSpace(args[2])
-	}
-	if len(args) >= 4 {
-		timeout, err := parseConnectIntArg("timeout_seconds", args[3])
-		if err != nil {
-			return connectCLIArgs{}, err
-		}
-		parsed.timeoutSeconds = timeout
-		parsed.hasTimeout = true
-	}
-
-	tail := make([]string, 0, len(args))
-	if len(args) > 4 {
-		tail = append(tail, args[4:]...)
-	}
-	if len(tail) == 0 {
-		return parsed, nil
-	}
-
-	first := strings.TrimSpace(tail[0])
-	if first == "-" {
-		tail = tail[1:]
-	} else if _, err := strconv.Atoi(first); err != nil {
-		parsed.apiKey = first
-		tail = tail[1:]
-	}
-
-	if len(tail) > 0 {
-		contextTokens, err := parseConnectIntArg("context_window_tokens", tail[0])
-		if err != nil {
-			return connectCLIArgs{}, err
-		}
-		parsed.contextWindowTokens = contextTokens
-		parsed.hasContextWindow = true
-		tail = tail[1:]
-	}
-	if len(tail) > 0 {
-		maxTokens, err := parseConnectIntArg("max_output_tokens", tail[0])
-		if err != nil {
-			return connectCLIArgs{}, err
-		}
-		parsed.maxOutputTokens = maxTokens
-		parsed.hasMaxOutput = true
-		tail = tail[1:]
-	}
-	if len(tail) > 0 {
-		parsed.reasoningLevelsRaw = strings.TrimSpace(strings.Join(tail, " "))
-		parsed.hasReasoningLevels = true
-	}
-	return parsed, nil
-}
-
-func parseConnectIntArg(name string, raw string) (int, error) {
-	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	mode, err := c.promptChoice("选择 reasoning 模式", []promptChoiceItem{
+		{Label: "none", Value: modelproviders.ReasoningModeNone},
+		{Label: "toggle", Value: modelproviders.ReasoningModeToggle},
+		{Label: "effort", Value: modelproviders.ReasoningModeEffort},
+	}, defaultMode, false)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s %q", name, strings.TrimSpace(raw))
+		return "", nil, "", err
 	}
-	if value < 0 {
-		return 0, fmt.Errorf("invalid %s: must be >= 0", name)
+	mode = modelproviders.NormalizeReasoningMode(mode)
+	switch mode {
+	case modelproviders.ReasoningModeNone:
+		return mode, nil, "", nil
+	case modelproviders.ReasoningModeToggle:
+		return mode, nil, "", nil
+	case modelproviders.ReasoningModeEffort:
+		selectedDefaults := normalizeReasoningLevels(defaultEfforts)
+		if len(selectedDefaults) == 0 {
+			selectedDefaults = []string{"low", "medium", "high"}
+		}
+		selected, selErr := c.promptMultiChoiceWithDefaults("选择 reasoning efforts", []promptChoiceItem{
+			{Label: "low", Value: "low"},
+			{Label: "medium", Value: "medium"},
+			{Label: "high", Value: "high"},
+		}, selectedDefaults, false)
+		if selErr != nil {
+			return "", nil, "", selErr
+		}
+		extraDefault := reasoningExtrasDefault(selectedDefaults)
+		extraRaw, extraErr := c.promptText("额外 reasoning efforts(optional, comma/space/tab)", extraDefault, false)
+		if extraErr != nil {
+			return "", nil, "", extraErr
+		}
+		extra, extraParseErr := parseReasoningLevelsInput(extraRaw)
+		if extraParseErr != nil {
+			return "", nil, "", extraParseErr
+		}
+		combined := mergeReasoningEffortLists(selected, extra)
+		if len(combined) == 0 {
+			combined = []string{"low", "medium", "high"}
+		}
+		resolvedDefault := normalizeReasoningEffort(defaultEffort)
+		if !containsString(combined, resolvedDefault) {
+			if containsString(combined, "medium") {
+				resolvedDefault = "medium"
+			} else {
+				resolvedDefault = combined[0]
+			}
+		}
+		return mode, combined, resolvedDefault, nil
+	default:
+		return modelproviders.ReasoningModeNone, nil, "", nil
 	}
-	return value, nil
+}
+
+func reasoningLevelsForMode(mode string, efforts []string) []string {
+	mode = modelproviders.NormalizeReasoningMode(mode)
+	switch mode {
+	case modelproviders.ReasoningModeToggle:
+		return []string{"none"}
+	case modelproviders.ReasoningModeEffort:
+		out := []string{"none"}
+		return append(out, normalizeReasoningLevels(efforts)...)
+	default:
+		return nil
+	}
+}
+
+func reasoningExtrasDefault(levels []string) string {
+	levels = normalizeReasoningLevels(levels)
+	extras := make([]string, 0, len(levels))
+	for _, level := range levels {
+		if level == "low" || level == "medium" || level == "high" {
+			continue
+		}
+		extras = append(extras, level)
+	}
+	return strings.Join(extras, ",")
+}
+
+func mergeReasoningEffortLists(parts ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 8)
+	for _, list := range parts {
+		for _, one := range normalizeReasoningLevels(list) {
+			if one == "none" {
+				continue
+			}
+			if _, ok := seen[one]; ok {
+				continue
+			}
+			seen[one] = struct{}{}
+			out = append(out, one)
+		}
+	}
+	return out
+}
+
+func containsString(items []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, one := range items {
+		if one == target {
+			return true
+		}
+	}
+	return false
+}
+
+type promptChoiceItem struct {
+	Label  string
+	Value  string
+	Detail string
+}
+
+func (c *cliConsole) promptChoice(prompt string, choices []promptChoiceItem, defaultValue string, filterable bool) (string, error) {
+	if c.prompter == nil {
+		return "", fmt.Errorf("interactive prompt is unavailable")
+	}
+	if len(choices) == 0 {
+		return "", fmt.Errorf("no choices available")
+	}
+	if requester, ok := c.prompter.(promptChoiceRequester); ok {
+		promptChoices := make([]tuievents.PromptChoice, 0, len(choices))
+		for _, choice := range choices {
+			promptChoices = append(promptChoices, tuievents.PromptChoice{
+				Label:  choice.Label,
+				Value:  choice.Value,
+				Detail: choice.Detail,
+			})
+		}
+		return requester.RequestChoicePrompt(prompt, promptChoices, defaultValue, filterable)
+	}
+	c.ui.Section(prompt)
+	defaultIndex := 0
+	for i, choice := range choices {
+		text := choice.Label
+		if choice.Detail != "" {
+			text += " (" + choice.Detail + ")"
+		}
+		if strings.TrimSpace(defaultValue) != "" && choice.Value == defaultValue {
+			defaultIndex = i
+		}
+		c.ui.Numbered(i+1, text)
+	}
+	index, err := promptIntInRange(c, "choice", 1, len(choices), defaultIndex+1)
+	if err != nil {
+		return "", err
+	}
+	return choices[index-1].Value, nil
+}
+
+func (c *cliConsole) promptMultiChoice(prompt string, choices []promptChoiceItem, filterable bool) ([]string, error) {
+	return c.promptMultiChoiceWithDefaults(prompt, choices, nil, filterable)
+}
+
+func (c *cliConsole) promptMultiChoiceWithDefaults(prompt string, choices []promptChoiceItem, selectedChoices []string, filterable bool) ([]string, error) {
+	if c.prompter == nil {
+		return nil, fmt.Errorf("interactive prompt is unavailable")
+	}
+	if len(choices) == 0 {
+		return nil, fmt.Errorf("no choices available")
+	}
+	if requester, ok := c.prompter.(promptChoiceRequester); ok {
+		promptChoices := make([]tuievents.PromptChoice, 0, len(choices))
+		for _, choice := range choices {
+			promptChoices = append(promptChoices, tuievents.PromptChoice{
+				Label:  choice.Label,
+				Value:  choice.Value,
+				Detail: choice.Detail,
+			})
+		}
+		raw, err := requester.RequestMultiChoicePrompt(prompt, promptChoices, selectedChoices, filterable)
+		if err != nil {
+			return nil, err
+		}
+		return dedupeOrderedStrings(splitArrayInput(raw)), nil
+	}
+	c.ui.Section(prompt)
+	for i, choice := range choices {
+		text := choice.Label
+		if choice.Detail != "" {
+			text += " (" + choice.Detail + ")"
+		}
+		c.ui.Numbered(i+1, text)
+	}
+	raw, err := c.promptText("choices(space separated)", "", false)
+	if err != nil {
+		return nil, err
+	}
+	parts := splitArrayInput(raw)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("no model selected")
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		index, convErr := strconv.Atoi(strings.TrimSpace(part))
+		if convErr != nil || index < 1 || index > len(choices) {
+			return nil, fmt.Errorf("invalid choice %q", part)
+		}
+		value := choices[index-1].Value
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out, nil
+}
+
+func findRemoteModelByName(models []modelproviders.RemoteModel, name string) (*modelproviders.RemoteModel, bool) {
+	target := strings.ToLower(strings.TrimSpace(name))
+	for i := range models {
+		if strings.ToLower(strings.TrimSpace(models[i].Name)) == target {
+			return &models[i], true
+		}
+	}
+	return nil, false
 }
 
 func splitArrayInput(raw string) []string {
@@ -549,8 +770,35 @@ func splitArrayInput(raw string) []string {
 	})
 }
 
+func dedupeOrderedStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
 func describeRemoteModel(provider string, item modelproviders.RemoteModel) string {
 	ref := canonicalModelRef(provider, item.Name)
+	if detail := describeRemoteModelDetail(item); detail != "" {
+		return fmt.Sprintf("%s (%s)", ref, detail)
+	}
+	return ref
+}
+
+func describeRemoteModelDetail(item modelproviders.RemoteModel) string {
 	parts := make([]string, 0, 3)
 	if item.ContextWindowTokens > 0 {
 		parts = append(parts, fmt.Sprintf("ctx=%d", item.ContextWindowTokens))
@@ -561,10 +809,24 @@ func describeRemoteModel(provider string, item modelproviders.RemoteModel) strin
 	if len(item.Capabilities) > 0 {
 		parts = append(parts, "cap="+strings.Join(item.Capabilities, "|"))
 	}
-	if len(parts) == 0 {
-		return ref
+	return strings.Join(parts, ", ")
+}
+
+func shouldSuppressDiscoverModelsError(cfg modelproviders.Config, err error) bool {
+	if err == nil {
+		return false
 	}
-	return fmt.Sprintf("%s (%s)", ref, strings.Join(parts, ", "))
+	if cfg.API == modelproviders.APIGemini && strings.Contains(err.Error(), "http status 400") {
+		return true
+	}
+	return false
+}
+
+func (c *cliConsole) setPromptLoading(running bool) {
+	if c == nil || c.tuiSender == nil {
+		return
+	}
+	c.tuiSender.Send(tuievents.SetRunningMsg{Running: running})
 }
 
 func (c *cliConsole) promptText(name, defaultValue string, secret bool) (string, error) {
@@ -591,7 +853,7 @@ func (c *cliConsole) promptText(name, defaultValue string, secret bool) (string,
 	if line == "" {
 		return defaultValue, nil
 	}
-	return line, nil
+	return strings.TrimSpace(line), nil
 }
 
 func promptInt(c *cliConsole, name string, defaultValue int) (int, error) {

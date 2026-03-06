@@ -194,6 +194,12 @@ func TestSupportedReasoningEfforts_Gemini(t *testing.T) {
 	if len(got) != 3 || got[0] != "low" || got[1] != "medium" || got[2] != "high" {
 		t.Fatalf("unexpected gemini efforts: %v", got)
 	}
+	if mode := ReasoningModeForModel("gemini", "gemini-2.5-pro"); mode != ReasoningModeEffort {
+		t.Fatalf("expected gemini reasoning mode effort, got %q", mode)
+	}
+	if def := DefaultReasoningEffortForModel("gemini", "gemini-2.5-pro"); def != "medium" {
+		t.Fatalf("expected gemini default effort medium, got %q", def)
+	}
 }
 
 func TestSupportedReasoningEfforts_OpenAIO3IncludesXHigh(t *testing.T) {
@@ -203,5 +209,41 @@ func TestSupportedReasoningEfforts_OpenAIO3IncludesXHigh(t *testing.T) {
 	}
 	if !SupportsReasoningEffort("openai", "o3", "very-high") {
 		t.Fatalf("expected very-high alias to map to xhigh")
+	}
+}
+
+func TestLookupSuggestedModelCapabilities_UsesOverlayForUnknownProviderModel(t *testing.T) {
+	got, ok := LookupSuggestedModelCapabilities("openai", "gpt-custom")
+	if !ok {
+		t.Fatal("expected provider overlay fallback")
+	}
+	if got.ContextWindowTokens != 128000 {
+		t.Fatalf("expected overlay context window, got %d", got.ContextWindowTokens)
+	}
+}
+
+func TestListCatalogModels_IncludesDynamicAndBuiltin(t *testing.T) {
+	got := ListCatalogModels("deepseek")
+	if len(got) == 0 {
+		t.Fatal("expected catalog models for deepseek")
+	}
+	foundBuiltin := false
+	for _, one := range got {
+		if one == "deepseek-chat" {
+			foundBuiltin = true
+			break
+		}
+	}
+	if !foundBuiltin {
+		t.Fatalf("expected deepseek-chat in catalog models: %v", got)
+	}
+}
+
+func TestReasoningModeForToggleModel(t *testing.T) {
+	if mode := ReasoningModeForModel("deepseek", "deepseek-chat"); mode != ReasoningModeToggle {
+		t.Fatalf("expected deepseek-chat toggle reasoning mode, got %q", mode)
+	}
+	if efforts := SupportedReasoningEfforts("deepseek", "deepseek-chat"); len(efforts) != 0 {
+		t.Fatalf("expected no effort list for toggle model, got %v", efforts)
 	}
 }
