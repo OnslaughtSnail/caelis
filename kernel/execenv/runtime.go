@@ -487,6 +487,9 @@ func New(cfg Config) (Runtime, error) {
 	if strings.EqualFold(runtimeGOOS, "darwin") && requestedSandboxType != "" && requestedSandboxType != seatbeltSandboxType {
 		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on darwin, expected %q", requestedSandboxType, seatbeltSandboxType)
 	}
+	if strings.EqualFold(runtimeGOOS, "linux") && requestedSandboxType != "" && requestedSandboxType != bwrapSandboxType {
+		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on linux, expected %q", requestedSandboxType, bwrapSandboxType)
+	}
 	candidates := sandboxTypeCandidates(requestedSandboxType)
 	if len(candidates) == 0 {
 		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: no sandbox backend candidates")
@@ -558,7 +561,7 @@ func defaultSandboxTypeForPlatform() string {
 	if runtimeGOOS == "darwin" {
 		return seatbeltSandboxType
 	}
-	return dockerSandboxType
+	return bwrapSandboxType
 }
 
 func sandboxTypeCandidates(requested string) []string {
@@ -567,14 +570,21 @@ func sandboxTypeCandidates(requested string) []string {
 
 func sandboxTypeCandidatesForPlatform(requested string, goos string) []string {
 	value := strings.TrimSpace(strings.ToLower(requested))
-	if strings.TrimSpace(strings.ToLower(goos)) == "darwin" {
+	normalizedGoos := strings.TrimSpace(strings.ToLower(goos))
+	if normalizedGoos == "darwin" {
 		if value == "" || value == seatbeltSandboxType {
 			return []string{seatbeltSandboxType}
 		}
 		return nil
 	}
+	if normalizedGoos == "linux" {
+		if value == "" || value == bwrapSandboxType {
+			return []string{bwrapSandboxType}
+		}
+		return nil
+	}
 	if value == "" {
-		return []string{dockerSandboxType}
+		return []string{bwrapSandboxType}
 	}
 	return []string{value}
 }

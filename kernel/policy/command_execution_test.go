@@ -21,7 +21,7 @@ func testSandboxTypeForPolicy() string {
 	if runtime.GOOS == "darwin" {
 		return "seatbelt"
 	}
-	return "docker"
+	return "bwrap"
 }
 
 func TestRouteCommandExecution_SafeCommandSandboxAllow(t *testing.T) {

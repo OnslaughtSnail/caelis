@@ -69,20 +69,19 @@ Tool execution runtime flags:
   - `full_control`: run commands on host directly, no approval required
   - `default`: run commands in sandbox by default; escalated host command requires approval
 - `-sandbox-type`: sandbox backend type (when `-permission-mode=default`, pluggable by runtime registry)
-  - default: macOS uses `seatbelt`; other platforms use `docker`
+  - default: macOS uses `seatbelt`; Linux uses `bwrap`
   - on macOS, only `seatbelt` is supported in `default` mode
+  - on Linux, only `bwrap` is supported in `default` mode
   - built-in: `seatbelt` (macOS `sandbox-exec`)
-  - built-in: `docker` (non-macOS default backend; requires local Docker daemon, image defaults to `alpine:3.20`, override via `CAELIS_SANDBOX_DOCKER_IMAGE`)
-  - docker network defaults to `bridge`, override via `CAELIS_SANDBOX_DOCKER_NETWORK` (for stricter isolation use `none`)
-  - sandbox does not fully mirror host toolchain; for language-specific workflows (go/node/python) use a richer image via `CAELIS_SANDBOX_DOCKER_IMAGE`
+  - built-in: `bwrap` (Linux default backend; uses bubblewrap for namespace-based filesystem and network isolation; requires `bwrap` binary, install via `apt install bubblewrap` or equivalent)
 - `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
 - `-prompt-config-dir`: override prompt config directory; empty means `~/.{app}/prompts`
 - `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
 
 Fallback behavior:
 - In `default` mode on macOS, runtime only supports `seatbelt`; when unavailable it falls back to `host+approval`.
-- In `default` mode on other platforms, runtime tries: `docker -> host+approval`.
-- If sandbox backend is unavailable at startup (for example `sandbox-exec` missing on macOS or Docker daemon unavailable on Linux), CLI falls back to `host+approval` and prints a warning.
+- In `default` mode on Linux, runtime only supports `bwrap`; when unavailable it falls back to `host+approval`.
+- If sandbox backend is unavailable at startup (for example `sandbox-exec` missing on macOS or `bwrap` missing on Linux), CLI falls back to `host+approval` and prints a warning.
 - In non-interactive runs without approver context, escalated commands return `ApprovalRequiredError` with a hint to use interactive approval or `-permission-mode full_control`.
 - If a command is routed to sandbox but fails with "command not found" (`exit code 127`), BASH asks for approval and retries on host.
 

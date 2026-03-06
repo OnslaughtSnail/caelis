@@ -371,7 +371,7 @@ func TestSlashArgOverlayTabFillsSelectedValue(t *testing.T) {
 				return nil, nil
 			}
 			return []SlashArgCandidate{
-				{Value: "docker", Display: "docker"},
+				{Value: "bwrap", Display: "bwrap"},
 				{Value: "seatbelt", Display: "seatbelt"},
 			}, nil
 		},

@@ -23,7 +23,7 @@ func testSandboxType() string {
 	if runtime.GOOS == "darwin" {
 		return "seatbelt"
 	}
-	return "docker"
+	return "bwrap"
 }
 
 func (r *recordingRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
@@ -435,7 +435,7 @@ func TestBash_ConsumesPolicyDecisionDeny(t *testing.T) {
 
 func TestBash_DefaultFallbackAllCommandsNeedApproval(t *testing.T) {
 	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-fallback"}}
-	fallbackSandbox := &failingProbeRunner{probeErr: errors.New("docker unavailable")}
+	fallbackSandbox := &failingProbeRunner{probeErr: errors.New("bwrap unavailable")}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		HostRunner:     host,

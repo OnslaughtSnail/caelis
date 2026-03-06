@@ -9,7 +9,7 @@ import (
 
 func newTestRuntime(t *testing.T) toolexec.Runtime {
 	t.Helper()
-	sandboxType := "docker"
+	sandboxType := "bwrap"
 	if runtime.GOOS == "darwin" {
 		sandboxType = "seatbelt"
 	}

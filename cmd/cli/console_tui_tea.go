@@ -713,7 +713,7 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 	}
 	appendType(c.sandboxType)
 	appendType(platformDefaultSandboxType())
-	appendType("docker")
+	appendType("bwrap")
 	appendType("seatbelt")
 
 	q := strings.ToLower(strings.TrimSpace(query))

@@ -2,7 +2,10 @@ package execenv
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 var defaultCommandEnvVars = []string{
@@ -25,10 +28,16 @@ func applyNonInteractiveCommandDefaults(cmd *exec.Cmd) {
 	cmd.Stdin = bytes.NewReader(nil)
 }
 
-func defaultDockerEnvArgs() []string {
-	args := make([]string, 0, len(defaultCommandEnvVars)*2)
-	for _, kv := range defaultCommandEnvVars {
-		args = append(args, "-e", kv)
+func resolveHostWorkDir(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return os.Getwd()
 	}
-	return args
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir), nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }

@@ -717,7 +717,7 @@ func platformDefaultSandboxType() string {
 	if stdruntime.GOOS == "darwin" {
 		return "seatbelt"
 	}
-	return "docker"
+	return "bwrap"
 }
 
 func configPath(appName string) (string, error) {
