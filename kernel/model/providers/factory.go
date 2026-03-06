@@ -42,7 +42,6 @@ func (f *Factory) Register(cfg Config) error {
 		}
 	}
 	cfg.Alias = alias
-	ApplyModelCatalog(&cfg)
 	f.configs[alias] = cfg
 	return nil
 }

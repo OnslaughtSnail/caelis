@@ -81,24 +81,18 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 
 	args := []string{"-p", profile, "bash", "-lc", req.Command}
 	cmd := s.execCommand(runCtx, "sandbox-exec", args...)
-	setProcessGroup(cmd)
+	applyNonInteractiveCommandDefaults(cmd)
 	if strings.TrimSpace(req.Dir) != "" {
 		cmd.Dir = req.Dir
 	}
-	cmd.Env = append(os.Environ(),
-		"CI=1",
-		"TERM=dumb",
-		"GIT_TERMINAL_PROMPT=0",
-		"PAGER=cat",
-		"NO_COLOR=1",
-	)
+	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	lastOutput := atomic.Int64{}
 	lastOutput.Store(time.Now().UnixNano())
-	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput}
-	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput}
+	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput, stream: "stdout", onOutput: req.OnOutput}
+	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput, stream: "stderr", onOutput: req.OnOutput}
 
 	if err := cmd.Start(); err != nil {
 		return CommandResult{}, fmt.Errorf("tool: seatbelt sandbox command start failed: %w", err)
@@ -142,38 +136,61 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 }
 
 func buildSeatbeltProfile(policy SandboxPolicy, workDir string) string {
-	lines := []string{
-		"(version 1)",
-		"(deny default)",
-		"(import \"system.sb\")",
-		"(allow process*)",
-		"(allow signal (target self))",
-		"(allow sysctl-read)",
-		"(allow file-read*)",
-	}
+	var b strings.Builder
+
+	// Base rules — start with deny-all, import system baseline, then add
+	// broad process/file-read/sysctl permissions.
+	b.WriteString("(version 1)\n")
+	b.WriteString("(deny default)\n")
+	b.WriteString("(import \"system.sb\")\n")
+	b.WriteString("(allow process*)\n")
+	b.WriteString("(allow signal (target same-sandbox))\n")
+	b.WriteString("(allow sysctl-read)\n")
+	b.WriteString("(allow file-read*)\n")
+
+	// Core extensions: PTY, IPC, IOKit, system calls.
+	b.WriteString(seatbeltCoreExtensions)
+
+	// Mach services for system libraries, logging, crash reporting, etc.
+	b.WriteString(seatbeltMachServices)
+
+	// Device files and framework mapping.
+	b.WriteString(seatbeltDeviceAndFramework)
+
+	// Network
 	if policy.NetworkAccess {
-		lines = append(lines, "(allow network*)")
+		b.WriteString("(allow network*)\n")
+		b.WriteString(seatbeltNetworkExtensions)
 	}
+
+	// Writable roots
 	for _, root := range seatbeltWritableRoots(policy, workDir) {
-		lines = append(lines, fmt.Sprintf("(allow file-write* (subpath %s))", sbplString(root)))
+		fmt.Fprintf(&b, "(allow file-write* (subpath %s))\n", sbplString(root))
 	}
+
+	// Read-only subpaths (deny after allow so they take precedence)
 	for _, sub := range seatbeltReadOnlySubpaths(policy, workDir) {
-		lines = append(lines, fmt.Sprintf("(deny file-write* (subpath %s))", sbplString(sub)))
+		fmt.Fprintf(&b, "(deny file-write* (subpath %s))\n", sbplString(sub))
 	}
-	return strings.Join(lines, "\n")
+
+	return b.String()
 }
 
 func seatbeltWritableRoots(policy SandboxPolicy, workDir string) []string {
 	if policy.Type == SandboxPolicyReadOnly {
 		return nil
 	}
-	roots := make([]string, 0, len(policy.WritableRoots)+5)
+	roots := make([]string, 0, len(policy.WritableRoots)+8)
+
+	// User-declared writable roots.
 	for _, one := range policy.WritableRoots {
 		resolved := resolveSeatbeltPath(workDir, one)
 		if resolved != "" {
 			roots = append(roots, seatbeltPathVariants(resolved)...)
 		}
 	}
+
+	// Temp directories — always writable.
 	tmp := strings.TrimSpace(os.TempDir())
 	if tmp != "" {
 		roots = append(roots, seatbeltPathVariants(tmp)...)
@@ -181,13 +198,46 @@ func seatbeltWritableRoots(policy SandboxPolicy, workDir string) []string {
 	// On macOS /tmp is a symlink to /private/tmp; os.TempDir() returns
 	// $TMPDIR (e.g. /var/folders/...) which does NOT cover /tmp.
 	roots = append(roots, seatbeltPathVariants("/tmp")...)
+	// /var/tmp is another common temp location used by system tools.
+	roots = append(roots, seatbeltPathVariants("/var/tmp")...)
+
+	// Cache directories — low-risk, regenerable data that many dev tools
+	// (pip, npm, go build, homebrew, playwright) require for normal
+	// operation.  We intentionally do NOT open ~/Library/Application Support
+	// or ~/.local because those contain persistent app state.
 	home, err := os.UserHomeDir()
 	if err == nil && strings.TrimSpace(home) != "" {
 		roots = append(roots, seatbeltPathVariants(filepath.Join(home, "Library", "Caches"))...)
 		roots = append(roots, seatbeltPathVariants(filepath.Join(home, ".cache"))...)
-		roots = append(roots, seatbeltPathVariants(filepath.Join(home, ".npm"))...)
 	}
+
+	// macOS per-user cache dir (/var/folders/xx/xxx/C/) — needed for TLS
+	// certificate caching when network is enabled.  Matches codex's
+	// DARWIN_USER_CACHE_DIR behaviour.
+	if policy.NetworkAccess {
+		if cacheDir := darwinUserCacheDir(); cacheDir != "" {
+			roots = append(roots, seatbeltPathVariants(cacheDir)...)
+		}
+	}
+
 	return normalizeStringList(roots)
+}
+
+// darwinUserCacheDir returns the macOS per-user cache directory
+// (/var/folders/xx/xxx/C/), derived from $TMPDIR.  On macOS $TMPDIR
+// is always /var/folders/XX/XXXXXXXXX/T/ and the cache dir is the
+// sibling /var/folders/XX/XXXXXXXXX/C/.
+func darwinUserCacheDir() string {
+	tmpDir := strings.TrimRight(os.TempDir(), string(filepath.Separator))
+	parent := filepath.Dir(tmpDir)
+	if parent == "" || !strings.Contains(parent, string(filepath.Separator)+"var"+string(filepath.Separator)+"folders") {
+		return ""
+	}
+	cacheDir := filepath.Join(parent, "C")
+	if info, err := os.Stat(cacheDir); err == nil && info.IsDir() {
+		return cacheDir
+	}
+	return ""
 }
 
 func seatbeltReadOnlySubpaths(policy SandboxPolicy, workDir string) []string {

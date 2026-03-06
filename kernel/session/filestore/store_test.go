@@ -127,6 +127,38 @@ func TestStore_SessionOnlyLayout(t *testing.T) {
 	}
 }
 
+func TestStore_ReplaceState_RoundTrip(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{AppName: "app", UserID: "u", ID: "s-state"}
+	if _, err := store.GetOrCreate(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"runtime.lifecycle": map[string]any{
+			"status": "completed",
+			"phase":  "run",
+		},
+	}
+	if err := store.ReplaceState(context.Background(), s, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.SnapshotState(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, ok := got["runtime.lifecycle"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected lifecycle map, got %+v", got)
+	}
+	if lifecycle["status"] != "completed" {
+		t.Fatalf("unexpected lifecycle status %+v", lifecycle)
+	}
+}
+
 func TestStore_RejectsPathTraversalInSessionKeys(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	store, err := New(root)

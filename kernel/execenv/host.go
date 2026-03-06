@@ -14,6 +14,32 @@ import (
 	"time"
 )
 
+// AsyncCommandRunner extends CommandRunner with async execution support.
+type AsyncCommandRunner interface {
+	CommandRunner
+
+	// StartAsync starts a command asynchronously and returns a session ID.
+	StartAsync(ctx context.Context, req CommandRequest) (sessionID string, err error)
+
+	// WriteInput sends input to an async session's stdin.
+	WriteInput(sessionID string, input []byte) error
+
+	// ReadOutput reads new output from an async session.
+	ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error)
+
+	// GetSessionStatus returns the status of an async session.
+	GetSessionStatus(sessionID string) (SessionStatus, error)
+
+	// WaitSession waits for an async session to complete with optional timeout.
+	WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error)
+
+	// TerminateSession forcefully terminates an async session.
+	TerminateSession(sessionID string) error
+
+	// ListSessions returns information about all active sessions.
+	ListSessions() []SessionInfo
+}
+
 type hostFileSystem struct{}
 
 func newHostFileSystem() FileSystem {
@@ -56,10 +82,34 @@ func (h *hostFileSystem) WalkDir(root string, fn fs.WalkDirFunc) error {
 	return filepath.WalkDir(root, fn)
 }
 
-type hostRunner struct{}
+type hostRunner struct {
+	sessionManager  *SessionManager
+	smartIdleConfig SmartIdleConfig
+}
+
+// HostRunnerConfig configures the host runner.
+type HostRunnerConfig struct {
+	SessionManagerConfig SessionManagerConfig
+	SmartIdleConfig      SmartIdleConfig
+}
+
+// DefaultHostRunnerConfig returns a default host runner configuration.
+func DefaultHostRunnerConfig() HostRunnerConfig {
+	return HostRunnerConfig{
+		SessionManagerConfig: DefaultSessionManagerConfig(),
+		SmartIdleConfig:      DefaultSmartIdleConfig(),
+	}
+}
 
 func newHostRunner() CommandRunner {
-	return &hostRunner{}
+	return newHostRunnerWithConfig(DefaultHostRunnerConfig())
+}
+
+func newHostRunnerWithConfig(cfg HostRunnerConfig) *hostRunner {
+	return &hostRunner{
+		sessionManager:  NewSessionManager(cfg.SessionManagerConfig),
+		smartIdleConfig: cfg.SmartIdleConfig,
+	}
 }
 
 func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult, error) {
@@ -71,27 +121,28 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "bash", "-lc", req.Command)
-	setProcessGroup(cmd)
+	applyNonInteractiveCommandDefaults(cmd)
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
 	}
-	cmd.Env = append(os.Environ(),
-		"CI=1",
-		"TERM=dumb",
-		"GIT_TERMINAL_PROMPT=0",
-		"PAGER=cat",
-		"NO_COLOR=1",
-	)
+	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	lastOutput := atomic.Int64{}
 	lastOutput.Store(time.Now().UnixNano())
-	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput}
-	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput}
+	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput, stream: "stdout", onOutput: req.OnOutput}
+	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput, stream: "stderr", onOutput: req.OnOutput}
 	if err := cmd.Start(); err != nil {
 		return CommandResult{}, fmt.Errorf("tool: command start failed: %w", err)
 	}
-	err := waitWithIdleTimeout(runCtx, cmd, req.IdleTimeout, &lastOutput)
+
+	// Use smart idle detection if enabled and idle timeout is long enough
+	var err error
+	if h.smartIdleConfig.Enabled && req.IdleTimeout > 0 && req.IdleTimeout >= h.smartIdleConfig.MinIdleDuration {
+		err = h.waitWithSmartIdleDetection(runCtx, cmd, req.IdleTimeout, &lastOutput, &stdout, &stderr)
+	} else {
+		err = waitWithIdleTimeout(runCtx, cmd, req.IdleTimeout, &lastOutput)
+	}
 
 	result := CommandResult{
 		Stdout: stdout.String(),
@@ -126,7 +177,168 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 			commandOutputSummary(result),
 		)
 	}
+	if errors.Is(err, errInteractivePrompt) {
+		return result, NewCodedError(
+			ErrorCodeHostIdleTimeout,
+			"tool: command appears to be waiting for interactive input and was terminated; %s",
+			commandOutputSummary(result),
+		)
+	}
 	return result, fmt.Errorf("tool: command failed: %w; %s", err, commandOutputSummary(result))
+}
+
+var errInteractivePrompt = errors.New("interactive prompt detected")
+
+// waitWithSmartIdleDetection waits for command completion with intelligent idle detection.
+func (h *hostRunner) waitWithSmartIdleDetection(
+	ctx context.Context,
+	cmd *exec.Cmd,
+	idleTimeout time.Duration,
+	lastOutput *atomic.Int64,
+	stdout, stderr *bytes.Buffer,
+) error {
+	if cmd == nil {
+		return errors.New("nil command")
+	}
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	detector := NewSmartIdleDetector()
+	ticker := time.NewTicker(h.smartIdleConfig.CheckInterval)
+	defer ticker.Stop()
+
+	startTime := time.Now()
+
+	for {
+		select {
+		case err := <-waitCh:
+			return err
+		case <-ctx.Done():
+			_ = killProcess(cmd)
+			<-waitCh
+			return ctx.Err()
+		case <-ticker.C:
+			if lastOutput == nil {
+				continue
+			}
+
+			last := time.Unix(0, lastOutput.Load())
+			idleDuration := time.Since(last)
+
+			// Only check after minimum idle duration
+			if idleDuration < h.smartIdleConfig.MinIdleDuration {
+				continue
+			}
+
+			// Get current output for analysis
+			output := append(stdout.Bytes(), stderr.Bytes()...)
+			pid := 0
+			if cmd.Process != nil {
+				pid = cmd.Process.Pid
+			}
+
+			result := detector.Analyze(output, pid, idleDuration)
+
+			// If high confidence that it's waiting for input, terminate
+			if result.IsLikelyWaitingForInput && result.Confidence >= 0.7 {
+				_ = killProcess(cmd)
+				<-waitCh
+				return errInteractivePrompt
+			}
+
+			// Check standard idle timeout for non-interactive processes
+			if idleDuration > idleTimeout && !result.IsLikelyWaitingForInput {
+				_ = killProcess(cmd)
+				<-waitCh
+				return errIdleTimeout
+			}
+
+			// Fallback timeout (absolute maximum) — only applied when the
+			// caller did not set an explicit timeout (the context deadline
+			// already handles that case).  Without this guard the
+			// FallbackTimeout could kill active commands whose caller
+			// timeout is longer than FallbackTimeout.
+			if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+				if time.Since(startTime) > h.smartIdleConfig.FallbackTimeout {
+					_ = killProcess(cmd)
+					<-waitCh
+					return errIdleTimeout
+				}
+			}
+		}
+	}
+}
+
+// StartAsync starts a command asynchronously and returns a session ID.
+func (h *hostRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+	session, err := h.sessionManager.StartSession(AsyncSessionConfig{
+		Command:         req.Command,
+		Dir:             req.Dir,
+		OutputBufferCap: 256 * 1024, // 256KB for async sessions
+		Timeout:         req.Timeout,
+		IdleTimeout:     req.IdleTimeout,
+	})
+	if err != nil {
+		return "", err
+	}
+	return session.ID, nil
+}
+
+// WriteInput sends input to an async session's stdin.
+func (h *hostRunner) WriteInput(sessionID string, input []byte) error {
+	return h.sessionManager.WriteInput(sessionID, input)
+}
+
+// ReadOutput reads new output from an async session.
+func (h *hostRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	return h.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+}
+
+// GetSessionStatus returns the status of an async session.
+func (h *hostRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
+	return h.sessionManager.GetSessionStatus(sessionID)
+}
+
+// WaitSession waits for an async session to complete with optional timeout.
+func (h *hostRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	exitCode, err := h.sessionManager.WaitSession(waitCtx, sessionID)
+	if err != nil {
+		return CommandResult{}, err
+	}
+
+	result, err := h.sessionManager.GetResult(sessionID)
+	if err != nil {
+		return CommandResult{ExitCode: exitCode}, nil
+	}
+	return result, nil
+}
+
+// TerminateSession forcefully terminates an async session.
+func (h *hostRunner) TerminateSession(sessionID string) error {
+	return h.sessionManager.TerminateSession(sessionID)
+}
+
+// ListSessions returns information about all active sessions.
+func (h *hostRunner) ListSessions() []SessionInfo {
+	return h.sessionManager.ListSessions()
+}
+
+// Close closes the host runner and all its sessions.
+func (h *hostRunner) Close() error {
+	if h.sessionManager != nil {
+		return h.sessionManager.Close()
+	}
+	return nil
 }
 
 func resolveExitCode(err error) int {

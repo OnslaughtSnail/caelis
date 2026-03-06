@@ -20,7 +20,8 @@ type Agent interface {
 type ReadonlyContext interface {
 	context.Context
 	Session() *session.Session
-	History() []*session.Event
+	Events() session.Events
+	ReadonlyState() session.ReadonlyState
 }
 
 // ModelContext exposes model planning capabilities.

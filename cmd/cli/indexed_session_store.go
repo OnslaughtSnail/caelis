@@ -53,6 +53,10 @@ func (s *indexedSessionStore) SnapshotState(ctx context.Context, req *session.Se
 	return s.inner.SnapshotState(ctx, req)
 }
 
+func (s *indexedSessionStore) ReplaceState(ctx context.Context, req *session.Session, values map[string]any) error {
+	return s.inner.ReplaceState(ctx, req, values)
+}
+
 func (s *indexedSessionStore) ListContextWindowEvents(ctx context.Context, req *session.Session) ([]*session.Event, error) {
 	if withWindow, ok := s.inner.(session.ContextWindowStore); ok {
 		return withWindow.ListContextWindowEvents(ctx, req)

@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.0.10 - 2026-03-06
+
+### Shell & Execution Runtime
+- Added async `BASH` sessions with session IDs, incremental output reads, input writes, status checks, termination, and session listing.
+- Added streamed shell output plumbing so live `BASH` output can be rendered directly in the TUI.
+- Improved host execution with smarter idle detection, process defaults, session management, ring buffers, and seatbelt profile support.
+
+### Runtime & Session State
+- Added `eventview` projections and readonly session views for model/runtime consumption.
+- Moved run lifecycle state to persisted session snapshots and improved recovery/rebuild behavior for pending tool calls.
+- Added readonly session state access in invocation context and aligned runtime/session stores with snapshot APIs.
+
+### CLI & TUI
+- Added inline shell output panels in the Bubble Tea UI with adaptive width, capped preview height, and improved approval prompts.
+- Moved model catalog implementation to `internal/cli/modelcatalog` and added a CLI facade for catalog lookups.
+- Refined status, connect, model reasoning, and console runtime wiring with broader test coverage.
+
 ## v0.0.2 - 2026-03-03
 
 ### TUI Interface
@@ -10,7 +27,7 @@
 - Headless execution mode (`headless.go`) for non-interactive single-shot runs.
 
 ### Model & Reasoning
-- Model catalog: static capabilities snapshot + on-demand remote refresh (`model_catalog.go`, `model_catalog_remote.go`).
+- Model catalog: static capabilities snapshot + on-demand remote refresh (`internal/cli/modelcatalog`).
 - Model reasoning display mode: per-model reasoning option set (`model_reasoning.go`) supporting `off/on/low/medium/high/very_high`.
 - `normalizeReasoningSelection` helper for cleaner reasoning flag parsing.
 - `/reasoning <on|off>` slash command for toggling reasoning content rendering.

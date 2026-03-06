@@ -11,6 +11,8 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
+const runtimeLifecycleStateKey = "runtime.lifecycle"
+
 // RunStateRequest defines one run-state query.
 type RunStateRequest struct {
 	AppName   string
@@ -29,8 +31,8 @@ type RunState struct {
 	UpdatedAt    time.Time
 }
 
-// RunState returns latest lifecycle state from in-memory runtime cache,
-// then falls back to persisted session events.
+// RunState returns the latest lifecycle state from store-backed session state,
+// then falls back to persisted lifecycle events for older sessions.
 func (r *Runtime) RunState(ctx context.Context, req RunStateRequest) (RunState, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -38,13 +40,18 @@ func (r *Runtime) RunState(ctx context.Context, req RunStateRequest) (RunState, 
 	if strings.TrimSpace(req.AppName) == "" || strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return RunState{}, fmt.Errorf("runtime: app_name, user_id and session_id are required")
 	}
-	if state, ok := r.cachedRunState(req); ok {
-		return state, nil
-	}
 	sess := &session.Session{
 		AppName: req.AppName,
 		UserID:  req.UserID,
 		ID:      req.SessionID,
+	}
+	snapshot, err := r.store.SnapshotState(ctx, sess)
+	if err != nil {
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			return RunState{}, err
+		}
+	} else if state, ok := runStateFromSnapshot(snapshot); ok {
+		return state, nil
 	}
 	events, err := r.listContextWindowEvents(ctx, sess)
 	if err != nil {
@@ -53,49 +60,27 @@ func (r *Runtime) RunState(ctx context.Context, req RunStateRequest) (RunState, 
 		}
 		return RunState{}, err
 	}
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := events[i]
-		info, ok := LifecycleFromEvent(ev)
-		if !ok {
-			continue
-		}
-		return RunState{
-			HasLifecycle: true,
-			Status:       info.Status,
-			Phase:        info.Phase,
-			Error:        info.Error,
-			ErrorCode:    info.ErrorCode,
-			EventID:      ev.ID,
-			UpdatedAt:    ev.Time,
-		}, nil
+	if state, ok := latestRunStateFromEvents(events); ok {
+		return state, nil
 	}
 	return RunState{}, nil
 }
 
-func (r *Runtime) cachedRunState(req RunStateRequest) (RunState, bool) {
-	if r == nil {
-		return RunState{}, false
+func latestRunStateFromEvents(events []*session.Event) (RunState, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if state, ok := runStateFromLifecycleEvent(events[i]); ok {
+			return state, true
+		}
 	}
-	key := runLeaseKey(req.AppName, req.UserID, req.SessionID)
-	r.runStateMu.RLock()
-	state, ok := r.runStates[key]
-	r.runStateMu.RUnlock()
-	if !ok || !state.HasLifecycle {
-		return RunState{}, false
-	}
-	return state, true
+	return RunState{}, false
 }
 
-func (r *Runtime) updateCachedRunState(sess *session.Session, ev *session.Event) {
-	if r == nil || sess == nil || ev == nil {
-		return
-	}
+func runStateFromLifecycleEvent(ev *session.Event) (RunState, bool) {
 	info, ok := LifecycleFromEvent(ev)
 	if !ok {
-		return
+		return RunState{}, false
 	}
-	key := runLeaseKey(sess.AppName, sess.UserID, sess.ID)
-	state := RunState{
+	return RunState{
 		HasLifecycle: true,
 		Status:       info.Status,
 		Phase:        info.Phase,
@@ -103,11 +88,71 @@ func (r *Runtime) updateCachedRunState(sess *session.Session, ev *session.Event)
 		ErrorCode:    info.ErrorCode,
 		EventID:      ev.ID,
 		UpdatedAt:    ev.Time,
+	}, true
+}
+
+func runStateFromSnapshot(snapshot map[string]any) (RunState, bool) {
+	if len(snapshot) == 0 {
+		return RunState{}, false
 	}
-	r.runStateMu.Lock()
-	if r.runStates == nil {
-		r.runStates = map[string]RunState{}
+	raw, ok := snapshot[runtimeLifecycleStateKey]
+	if !ok {
+		return RunState{}, false
 	}
-	r.runStates[key] = state
-	r.runStateMu.Unlock()
+	payload, ok := raw.(map[string]any)
+	if !ok {
+		return RunState{}, false
+	}
+	status := RunLifecycleStatus(sprintOrEmpty(payload["status"]))
+	if status == "" {
+		return RunState{}, false
+	}
+	state := RunState{
+		HasLifecycle: true,
+		Status:       status,
+		Phase:        sprintOrEmpty(payload["phase"]),
+		Error:        sprintOrEmpty(payload["error"]),
+		ErrorCode:    toolexec.ErrorCode(sprintOrEmpty(payload["error_code"])),
+		EventID:      sprintOrEmpty(payload["event_id"]),
+	}
+	if rawUpdatedAt := sprintOrEmpty(payload["updated_at"]); rawUpdatedAt != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, rawUpdatedAt); err == nil {
+			state.UpdatedAt = parsed
+		}
+	}
+	return state, true
+}
+
+func runStateSnapshot(state RunState) map[string]any {
+	if !state.HasLifecycle {
+		return map[string]any{}
+	}
+	payload := map[string]any{
+		"status": string(state.Status),
+		"phase":  state.Phase,
+	}
+	if strings.TrimSpace(state.Error) != "" {
+		payload["error"] = state.Error
+	}
+	if strings.TrimSpace(string(state.ErrorCode)) != "" {
+		payload["error_code"] = string(state.ErrorCode)
+	}
+	if strings.TrimSpace(state.EventID) != "" {
+		payload["event_id"] = state.EventID
+	}
+	if !state.UpdatedAt.IsZero() {
+		payload["updated_at"] = state.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	return map[string]any{
+		runtimeLifecycleStateKey: payload,
+	}
+}
+
+// sprintOrEmpty converts a value to string, returning "" for nil values
+// instead of the literal "<nil>" that fmt.Sprint produces.
+func sprintOrEmpty(v any) string {
+	if v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
 }

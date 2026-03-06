@@ -191,6 +191,24 @@ func (s *Store) SnapshotState(ctx context.Context, req *session.Session) (map[st
 	return out, nil
 }
 
+func (s *Store) ReplaceState(ctx context.Context, req *session.Session, values map[string]any) error {
+	_ = ctx
+	dir, err := s.sessionDir(req)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(values, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o644)
+}
+
 func (s *Store) sessionDir(req *session.Session) (string, error) {
 	if err := validateSession(req); err != nil {
 		return "", err

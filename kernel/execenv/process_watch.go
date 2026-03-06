@@ -14,11 +14,19 @@ var errIdleTimeout = errors.New("process idle timeout exceeded")
 type activityWriter struct {
 	buffer     *bytes.Buffer
 	lastOutput *atomic.Int64
+	stream     string
+	onOutput   func(CommandOutputChunk)
 }
 
 func (w *activityWriter) Write(p []byte) (int, error) {
 	if w.lastOutput != nil {
 		w.lastOutput.Store(time.Now().UnixNano())
+	}
+	if w.onOutput != nil && len(p) > 0 {
+		w.onOutput(CommandOutputChunk{
+			Stream: w.stream,
+			Text:   string(p),
+		})
 	}
 	if w.buffer == nil {
 		return len(p), nil

@@ -33,6 +33,7 @@ type Store interface {
 	AppendEvent(context.Context, *Session, *Event) error
 	ListEvents(context.Context, *Session) ([]*Event, error)
 	SnapshotState(context.Context, *Session) (map[string]any, error)
+	ReplaceState(context.Context, *Session, map[string]any) error
 }
 
 // ContextWindowStore optionally provides a reduced event window optimized for

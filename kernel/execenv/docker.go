@@ -106,6 +106,7 @@ func (d *dockerRunner) Probe(ctx context.Context) error {
 
 func (d *dockerRunner) runCommand(ctx context.Context, name string, args ...string) error {
 	cmd := d.execCommand(ctx, name, args...)
+	applyNonInteractiveCommandDefaults(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -145,30 +146,26 @@ func (d *dockerRunner) Run(ctx context.Context, req CommandRequest) (CommandResu
 		args := []string{
 			"exec",
 			"-w", containerDir,
-			"-e", "CI=1",
-			"-e", "TERM=dumb",
-			"-e", "GIT_TERMINAL_PROMPT=0",
-			"-e", "PAGER=cat",
-			"-e", "NO_COLOR=1",
+		}
+		args = append(args, defaultDockerEnvArgs()...)
+		args = append(args,
 			d.containerName(),
 			"sh", "-lc", req.Command,
-		}
+		)
 		return d.runSandboxCommand(runCtx, req, args, "exec")
 	}
 
 	// Commands outside mounted workspace fallback to one-shot run with per-command mount.
 	args := []string{
 		"run", "--rm", "--network", d.network,
-		"-e", "CI=1",
-		"-e", "TERM=dumb",
-		"-e", "GIT_TERMINAL_PROMPT=0",
-		"-e", "PAGER=cat",
-		"-e", "NO_COLOR=1",
+	}
+	args = append(args, defaultDockerEnvArgs()...)
+	args = append(args,
 		"-v", d.workspaceMountArg(hostWorkDir),
 		"-w", dockerWorkspaceDir,
 		d.image,
 		"sh", "-lc", req.Command,
-	}
+	)
 	return d.runSandboxCommand(runCtx, req, args, "run")
 }
 
@@ -219,16 +216,14 @@ func (d *dockerRunner) ensureSession(ctx context.Context, workDir string) error 
 		"run", "-d", "--rm",
 		"--name", container,
 		"--network", d.network,
-		"-e", "CI=1",
-		"-e", "TERM=dumb",
-		"-e", "GIT_TERMINAL_PROMPT=0",
-		"-e", "PAGER=cat",
-		"-e", "NO_COLOR=1",
+	}
+	args = append(args, defaultDockerEnvArgs()...)
+	args = append(args,
 		"-v", d.workspaceMountArg(rootDir),
 		"-w", dockerWorkspaceDir,
 		d.image,
 		"sh", "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600; done",
-	}
+	)
 	if err := d.runCommand(ctx, "docker", args...); err != nil {
 		return err
 	}
@@ -294,13 +289,13 @@ func (d *dockerRunner) containerName() string {
 
 func (d *dockerRunner) runSandboxCommand(runCtx context.Context, req CommandRequest, args []string, mode string) (CommandResult, error) {
 	cmd := d.execCommand(runCtx, "docker", args...)
-	setProcessGroup(cmd)
+	applyNonInteractiveCommandDefaults(cmd)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	lastOutput := atomic.Int64{}
 	lastOutput.Store(time.Now().UnixNano())
-	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput}
-	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput}
+	cmd.Stdout = &activityWriter{buffer: &stdout, lastOutput: &lastOutput, stream: "stdout", onOutput: req.OnOutput}
+	cmd.Stderr = &activityWriter{buffer: &stderr, lastOutput: &lastOutput, stream: "stderr", onOutput: req.OnOutput}
 	if err := cmd.Start(); err != nil {
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
 			label := "context deadline"

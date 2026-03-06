@@ -135,7 +135,7 @@ func TestSeatbeltRunner_RunReadOnlyDisablesNetwork(t *testing.T) {
 	if strings.Contains(profile, "(allow network*)") {
 		t.Fatalf("did not expect network allow in readonly profile: %q", profile)
 	}
-	if strings.Contains(profile, "(allow file-write*") {
+	if strings.Contains(profile, "(allow file-write* (subpath") {
 		t.Fatalf("did not expect writable roots in readonly profile: %q", profile)
 	}
 }
@@ -191,6 +191,92 @@ func TestBuildSeatbeltProfileIncludesSystemRules(t *testing.T) {
 	}
 	if !strings.Contains(profile, "(allow process*)") {
 		t.Fatalf("expected process allow, got %q", profile)
+	}
+}
+
+func TestBuildSeatbeltProfileIncludesExtendedPermissions(t *testing.T) {
+	profile := buildSeatbeltProfile(SandboxPolicy{
+		Type:          SandboxPolicyWorkspaceWrite,
+		NetworkAccess: true,
+		WritableRoots: []string{"."},
+	}, "/tmp/work")
+
+	checks := []struct {
+		needle string
+		desc   string
+	}{
+		{"(allow pseudo-tty)", "PTY support"},
+		{"(allow ipc-posix-sem)", "IPC semaphores"},
+		{"(allow iokit-open", "IOKit access"},
+		{"com.apple.trustd", "trustd mach service"},
+		{"com.apple.cfprefsd.agent", "cfprefsd mach service"},
+		{"com.apple.logd", "logging mach service"},
+		{"apple.shm.notification_center", "notification shared memory"},
+		{"file-map-executable", "framework mapping"},
+		{"com.apple.SecurityServer", "network TLS mach service"},
+		{"com.apple.SystemConfiguration.configd", "network config mach service"},
+		{"/dev/ptmx", "PTY device access"},
+		{"/var/tmp", "var/tmp writable"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(profile, c.needle) {
+			t.Errorf("expected %s (%s) in profile", c.needle, c.desc)
+		}
+	}
+}
+
+func TestBuildSeatbeltProfileNoNetworkOmitsNetworkServices(t *testing.T) {
+	profile := buildSeatbeltProfile(SandboxPolicy{
+		Type:          SandboxPolicyWorkspaceWrite,
+		NetworkAccess: false,
+		WritableRoots: []string{"."},
+	}, "/tmp/work")
+
+	if strings.Contains(profile, "com.apple.SecurityServer") {
+		t.Error("network mach service should not be present when network is disabled")
+	}
+	if strings.Contains(profile, "com.apple.SystemConfiguration.configd") {
+		t.Error("network config service should not be present when network is disabled")
+	}
+	// Core mach services should still be present
+	if !strings.Contains(profile, "com.apple.trustd") {
+		t.Error("expected core mach service com.apple.trustd even without network")
+	}
+}
+
+func TestSeatbeltWritableRootsExcludesBroadHomePaths(t *testing.T) {
+	policy := SandboxPolicy{
+		Type:          SandboxPolicyWorkspaceWrite,
+		NetworkAccess: false,
+		WritableRoots: []string{"."},
+	}
+	profile := buildSeatbeltProfile(policy, "/tmp/work")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+	// These directories should NOT be writable — they contain persistent app
+	// state unrelated to the workspace.
+	forbidden := []string{
+		filepath.Join(home, "Library", "Application Support"),
+		filepath.Join(home, ".local"),
+		filepath.Join(home, ".npm"),
+	}
+	for _, dir := range forbidden {
+		if strings.Contains(profile, dir) {
+			t.Errorf("profile should not include broad writable root %s", dir)
+		}
+	}
+	// Cache directories ARE allowed (low-risk, regenerable).
+	allowed := []string{
+		filepath.Join(home, "Library", "Caches"),
+		filepath.Join(home, ".cache"),
+	}
+	for _, dir := range allowed {
+		if !strings.Contains(profile, dir) {
+			t.Errorf("expected cache directory %s in writable roots", dir)
+		}
 	}
 }
 

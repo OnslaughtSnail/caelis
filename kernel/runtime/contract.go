@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -79,25 +80,7 @@ func lifecycleEvent(sess *session.Session, status RunLifecycleStatus, phase stri
 }
 
 func isLifecycleEvent(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, _ := ev.Meta[metaKind].(string)
-	return kind == metaKindLifecycle
-}
-
-func agentHistoryEvents(events []*session.Event) []*session.Event {
-	if len(events) == 0 {
-		return nil
-	}
-	out := make([]*session.Event, 0, len(events))
-	for _, ev := range events {
-		if ev == nil || isLifecycleEvent(ev) {
-			continue
-		}
-		out = append(out, ev)
-	}
-	return out
+	return eventview.IsLifecycle(ev)
 }
 
 // LifecycleInfo is parsed lifecycle state from one lifecycle event.

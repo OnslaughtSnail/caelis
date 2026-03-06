@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	stdruntime "runtime"
 	"strings"
 	"sync"
@@ -62,6 +63,7 @@ type EscalationReason struct {
 type CommandDecision struct {
 	Route      ExecutionRoute
 	Escalation *EscalationReason
+	NeedApproval bool
 }
 
 // Config builds an execution runtime.
@@ -95,6 +97,12 @@ type CommandRequest struct {
 	Dir         string
 	Timeout     time.Duration
 	IdleTimeout time.Duration
+	OnOutput    func(CommandOutputChunk)
+}
+
+type CommandOutputChunk struct {
+	Stream string
+	Text   string
 }
 
 // CommandResult is one command execution result.
@@ -200,16 +208,180 @@ func (r *runtimeImpl) DecideRoute(command string, sandboxPermission SandboxPermi
 			Escalation: &EscalationReason{
 				Message: message,
 			},
+			NeedApproval: true,
 		}
 	}
 
 	if sandboxPermission == SandboxPermissionRequireEscalated {
+		if commandIsApprovalWhitelisted(command) {
+			return CommandDecision{Route: ExecutionRouteHost}
+		}
 		return CommandDecision{
-			Route:      ExecutionRouteHost,
-			Escalation: &EscalationReason{Message: "sandbox_permissions=require_escalated requested"},
+			Route:        ExecutionRouteHost,
+			Escalation:   &EscalationReason{Message: "require_escalated requested"},
+			NeedApproval: true,
 		}
 	}
 	return CommandDecision{Route: ExecutionRouteSandbox}
+}
+
+func commandIsApprovalWhitelisted(command string) bool {
+	segments := shellCommandSegments(command)
+	if len(segments) == 0 {
+		return false
+	}
+	sawCommand := false
+	for _, segment := range segments {
+		tokens := shellSegmentTokens(segment)
+		if len(tokens) == 0 {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(tokens[0]))
+		if base == "" {
+			continue
+		}
+		sawCommand = true
+		if !isApprovalWhitelistedBase(base) {
+			return false
+		}
+	}
+	return sawCommand
+}
+
+func isApprovalWhitelistedBase(base string) bool {
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "cd", "pwd", "ls", "stat", "file", "head", "tail", "cat", "grep", "egrep", "fgrep", "find", "which", "whereis", "env", "printenv", "uname", "id", "whoami":
+		return true
+	default:
+		return false
+	}
+}
+
+func shellCommandSegments(command string) []string {
+	var (
+		segments []string
+		buf      strings.Builder
+		squote   bool
+		dquote   bool
+		escape   bool
+	)
+	flush := func() {
+		part := strings.TrimSpace(buf.String())
+		if part != "" {
+			segments = append(segments, part)
+		}
+		buf.Reset()
+	}
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if escape {
+			buf.WriteRune(r)
+			escape = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escape = true
+			buf.WriteRune(r)
+		case '\'':
+			if !dquote {
+				squote = !squote
+			}
+			buf.WriteRune(r)
+		case '"':
+			if !squote {
+				dquote = !dquote
+			}
+			buf.WriteRune(r)
+		case ';':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			flush()
+		case '&':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			if i+1 < len(runes) && runes[i+1] == '&' {
+				flush()
+				i++
+				continue
+			}
+			buf.WriteRune(r)
+		case '|':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			flush()
+			if i+1 < len(runes) && runes[i+1] == '|' {
+				i++
+			}
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	flush()
+	return segments
+}
+
+func shellSegmentTokens(segment string) []string {
+	var (
+		tokens []string
+		buf    strings.Builder
+		squote bool
+		dquote bool
+		escape bool
+	)
+	flush := func() {
+		token := strings.TrimSpace(buf.String())
+		if token == "" {
+			buf.Reset()
+			return
+		}
+		if strings.Contains(token, "=") && !strings.HasPrefix(token, "=") && len(tokens) == 0 {
+			buf.Reset()
+			return
+		}
+		tokens = append(tokens, token)
+		buf.Reset()
+	}
+	for _, r := range segment {
+		if escape {
+			buf.WriteRune(r)
+			escape = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escape = true
+		case '\'':
+			if !dquote {
+				squote = !squote
+				continue
+			}
+			buf.WriteRune(r)
+		case '"':
+			if !squote {
+				dquote = !dquote
+				continue
+			}
+			buf.WriteRune(r)
+		case ' ', '\t', '\n':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			flush()
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	flush()
+	return tokens
 }
 
 func (r *runtimeImpl) Close() error {
@@ -299,6 +471,12 @@ func New(cfg Config) (Runtime, error) {
 		sandboxPolicy:  resolvedPolicy,
 		fs:             filesystem,
 		hostRunner:     hostRunner,
+	}
+
+	// Register host runner for cleanup if it implements runtimeCloser
+	// (e.g. to terminate async sessions on shutdown).
+	if closer, ok := hostRunner.(runtimeCloser); ok {
+		runtime.closers = append(runtime.closers, closer)
 	}
 
 	if mode == PermissionModeFullControl {

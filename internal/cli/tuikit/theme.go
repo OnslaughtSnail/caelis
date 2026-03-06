@@ -57,6 +57,7 @@ type Theme struct {
 	// Inline layout
 	InputBarBg   lipgloss.Color
 	InputBarFg   lipgloss.Color
+	ToolOutputBg lipgloss.Color
 	HelpHintFg   lipgloss.Color
 	SpinnerFg    lipgloss.Color
 	SeparatorFg  lipgloss.Color
@@ -112,6 +113,7 @@ func DefaultTheme() Theme {
 
 		InputBarBg:   lipgloss.Color("#151b26"),
 		InputBarFg:   lipgloss.Color("#d9dce3"),
+		ToolOutputBg: lipgloss.Color("#101216"),
 		HelpHintFg:   lipgloss.Color("#5e6a7e"),
 		SpinnerFg:    lipgloss.Color("#4da3ff"),
 		SeparatorFg:  lipgloss.Color("#2f3f5f"),

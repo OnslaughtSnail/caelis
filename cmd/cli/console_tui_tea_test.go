@@ -17,6 +17,7 @@ func TestCompleteModelCandidates_GroupsByProvider(t *testing.T) {
 		{Alias: "beta", Provider: "xiaomi", API: modelproviders.APIOpenAICompatible, Model: "mimo-v2-reasoner", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
 	}
 	for _, cfg := range configs {
+		modelcatalogApplyConfigDefaults(&cfg)
 		if err := factory.Register(cfg); err != nil {
 			t.Fatalf("register config: %v", err)
 		}
@@ -48,6 +49,7 @@ func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 		{Alias: "xiaomi/mimo-v2-flash", Provider: "xiaomi", API: modelproviders.APIOpenAICompatible, Model: "mimo-v2-flash", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
 	}
 	for _, cfg := range configs {
+		modelcatalogApplyConfigDefaults(&cfg)
 		if err := factory.Register(cfg); err != nil {
 			t.Fatalf("register config: %v", err)
 		}
@@ -73,6 +75,7 @@ func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
 		ReasoningLevels: []string{"none", "high"},
 		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
 	}
+	modelcatalogApplyConfigDefaults(&cfg)
 	if err := factory.Register(cfg); err != nil {
 		t.Fatalf("register config: %v", err)
 	}
@@ -96,6 +99,7 @@ func TestCompleteModelReasoningCandidates_EffortModel(t *testing.T) {
 		ReasoningLevels: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
 		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
 	}
+	modelcatalogApplyConfigDefaults(&cfg)
 	if err := factory.Register(cfg); err != nil {
 		t.Fatalf("register config: %v", err)
 	}
@@ -291,14 +295,16 @@ func TestReadTUIStatus_ZeroUsageStillShowsContextWindow(t *testing.T) {
 
 func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) {
 	factory := modelproviders.NewFactory()
-	if err := factory.Register(modelproviders.Config{
+	cfg := modelproviders.Config{
 		Alias:               "gemini/gemini-3.1-flash-lite-preview",
 		Provider:            "gemini",
 		API:                 modelproviders.APIGemini,
 		Model:               "gemini-3.1-flash-lite-preview",
 		ContextWindowTokens: 1_000_000,
 		Auth:                modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "token"},
-	}); err != nil {
+	}
+	modelcatalogApplyConfigDefaults(&cfg)
+	if err := factory.Register(cfg); err != nil {
 		t.Fatalf("register config: %v", err)
 	}
 

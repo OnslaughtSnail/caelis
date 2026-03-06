@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/modelcatalog"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
@@ -287,7 +288,7 @@ func buildConnectModelChoices(provider string, remoteModels []modelproviders.Rem
 	for _, item := range remoteModels {
 		add(item.Name, describeRemoteModelDetail(item))
 	}
-	for _, name := range modelproviders.ListCatalogModels(provider) {
+	for _, name := range listProviderCatalogModels(provider) {
 		add(name, "")
 	}
 	for _, name := range commonModelsForProvider(provider) {
@@ -349,10 +350,10 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 		return connectModelSelection{}, fmt.Errorf("invalid provider/model")
 	}
 
-	_, baseKnown := modelproviders.LookupBaseCatalogCapabilities(baseCfg.Provider, modelName)
-	caps, mergedKnown := modelproviders.LookupSuggestedModelCapabilities(baseCfg.Provider, modelName)
+	_, baseKnown := lookupBaseCatalogModelCapabilities(baseCfg.Provider, modelName)
+	caps, mergedKnown := lookupSuggestedCatalogModelCapabilities(baseCfg.Provider, modelName)
 	if !mergedKnown {
-		caps = modelproviders.DefaultModelCapabilities()
+		caps = defaultCatalogModelCapabilities()
 	}
 	if caps.ContextWindowTokens <= 0 {
 		caps.ContextWindowTokens = defaultContextWindowForTemplate(tpl)
@@ -376,7 +377,7 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 		}
 	}
 
-	reasoningMode := modelproviders.NormalizeReasoningMode(caps.ReasoningMode)
+	reasoningMode := normalizeCatalogReasoningMode(caps.ReasoningMode)
 	reasoningEfforts := normalizeReasoningLevels(caps.ReasoningEfforts)
 	defaultReasoningEffort := normalizeReasoningEffort(caps.DefaultReasoningEffort)
 	contextWindow := caps.ContextWindowTokens
@@ -445,23 +446,23 @@ func applyConnectRuntimeDefaults(c *cliConsole, cfg *modelproviders.Config) {
 	if len(cfg.ReasoningLevels) > 0 && cfg.ThinkingMode == defaultThinkingMode && cfg.ReasoningEffort == defaultReasoningEffort {
 		profile := reasoningProfileForConfig(*cfg)
 		switch profile.Mode {
-		case modelproviders.ReasoningModeEffort:
+		case reasoningModeEffort:
 			cfg.ThinkingMode = "on"
 			cfg.ReasoningEffort = profile.DefaultEffort
-		case modelproviders.ReasoningModeToggle:
+		case reasoningModeToggle:
 			cfg.ThinkingMode = defaultThinkingMode
 			cfg.ReasoningEffort = defaultReasoningEffort
 		}
 	}
 }
 
-func reasoningDefinitionKnown(provider string, caps modelproviders.ModelCapabilities) bool {
+func reasoningDefinitionKnown(provider string, caps modelcatalog.ModelCapabilities) bool {
 	switch caps.ReasoningMode {
-	case modelproviders.ReasoningModeNone:
+	case reasoningModeNone:
 		return true
-	case modelproviders.ReasoningModeToggle:
+	case reasoningModeToggle:
 		return true
-	case modelproviders.ReasoningModeEffort:
+	case reasoningModeEffort:
 		return len(caps.ReasoningEfforts) > 0
 	}
 	switch strings.ToLower(strings.TrimSpace(provider)) {
@@ -538,25 +539,25 @@ func parseReasoningLevelsInput(raw string) ([]string, error) {
 }
 
 func promptReasoningDefinition(c *cliConsole, defaultMode string, defaultEfforts []string, defaultEffort string) (string, []string, string, error) {
-	defaultMode = modelproviders.NormalizeReasoningMode(defaultMode)
+	defaultMode = normalizeCatalogReasoningMode(defaultMode)
 	if defaultMode == "" {
-		defaultMode = modelproviders.ReasoningModeNone
+		defaultMode = reasoningModeNone
 	}
 	mode, err := c.promptChoice("选择 reasoning 模式", []promptChoiceItem{
-		{Label: "none", Value: modelproviders.ReasoningModeNone},
-		{Label: "toggle", Value: modelproviders.ReasoningModeToggle},
-		{Label: "effort", Value: modelproviders.ReasoningModeEffort},
+		{Label: "none", Value: reasoningModeNone},
+		{Label: "toggle", Value: reasoningModeToggle},
+		{Label: "effort", Value: reasoningModeEffort},
 	}, defaultMode, false)
 	if err != nil {
 		return "", nil, "", err
 	}
-	mode = modelproviders.NormalizeReasoningMode(mode)
+	mode = normalizeCatalogReasoningMode(mode)
 	switch mode {
-	case modelproviders.ReasoningModeNone:
+	case reasoningModeNone:
 		return mode, nil, "", nil
-	case modelproviders.ReasoningModeToggle:
+	case reasoningModeToggle:
 		return mode, nil, "", nil
-	case modelproviders.ReasoningModeEffort:
+	case reasoningModeEffort:
 		selectedDefaults := normalizeReasoningLevels(defaultEfforts)
 		if len(selectedDefaults) == 0 {
 			selectedDefaults = []string{"low", "medium", "high"}
@@ -592,16 +593,16 @@ func promptReasoningDefinition(c *cliConsole, defaultMode string, defaultEfforts
 		}
 		return mode, combined, resolvedDefault, nil
 	default:
-		return modelproviders.ReasoningModeNone, nil, "", nil
+		return reasoningModeNone, nil, "", nil
 	}
 }
 
 func reasoningLevelsForMode(mode string, efforts []string) []string {
-	mode = modelproviders.NormalizeReasoningMode(mode)
+	mode = normalizeCatalogReasoningMode(mode)
 	switch mode {
-	case modelproviders.ReasoningModeToggle:
+	case reasoningModeToggle:
 		return []string{"none"}
-	case modelproviders.ReasoningModeEffort:
+	case reasoningModeEffort:
 		out := []string{"none"}
 		return append(out, normalizeReasoningLevels(efforts)...)
 	default:

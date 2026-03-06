@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	"github.com/OnslaughtSnail/caelis/internal/cli/modelcatalog"
 )
 
 const modelCatalogBootstrapTimeout = 5 * time.Second
@@ -30,14 +30,14 @@ func defaultModelCatalogOverridePath() string {
 	return filepath.Join(home, ".agents", "model_capabilities.json")
 }
 
-func initModelCatalogForCLI(baseCtx context.Context) modelproviders.CatalogInitStatus {
+func initModelCatalogForCLI(baseCtx context.Context) modelcatalog.CatalogInitStatus {
 	ctx := baseCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, modelCatalogBootstrapTimeout)
 	defer cancel()
-	status := modelproviders.InitModelCatalogWithStatus(timeoutCtx, nil, defaultModelCatalogOverridePath())
+	status := modelcatalog.InitModelCatalogWithStatus(timeoutCtx, nil, defaultModelCatalogOverridePath())
 	if status.RemoteFetched {
 		modelCatalogRefreshMu.Lock()
 		lastModelCatalogRefresh = time.Now()
@@ -46,9 +46,9 @@ func initModelCatalogForCLI(baseCtx context.Context) modelproviders.CatalogInitS
 	return status
 }
 
-func refreshModelCatalogForConnect(baseCtx context.Context) (modelproviders.CatalogInitStatus, bool) {
+func refreshModelCatalogForConnect(baseCtx context.Context) (modelcatalog.CatalogInitStatus, bool) {
 	if !modelCatalogRefreshDue() {
-		return modelproviders.CatalogInitStatus{}, false
+		return modelcatalog.CatalogInitStatus{}, false
 	}
 	return initModelCatalogFn(baseCtx), true
 }

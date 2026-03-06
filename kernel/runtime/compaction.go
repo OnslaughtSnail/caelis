@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -86,7 +87,7 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 }
 
 func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput, notify func(*session.Event) bool) (*session.Event, error) {
-	windowEvents := agentHistoryEvents(contextWindowEvents(in.Events))
+	windowEvents := eventview.AgentVisible(in.Events)
 	if len(windowEvents) == 0 {
 		return nil, nil
 	}
@@ -256,10 +257,6 @@ func splitCompactionTarget(window []*session.Event) ([]*session.Event, []*sessio
 	// Compact the entire current context window into one checkpoint event.
 	// This avoids mixing summary + preserved tail turns.
 	return window, nil
-}
-
-func contextWindowEvents(events []*session.Event) []*session.Event {
-	return session.ContextWindowEvents(events)
 }
 
 func isCompactionEvent(ev *session.Event) bool {

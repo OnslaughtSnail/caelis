@@ -323,7 +323,7 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 			ContextWindowTokens:       rec.ContextWindowTokens,
 			MaxOutputTok:              rec.MaxOutputTok,
 			ReasoningLevels:           normalizeReasoningLevels(rec.ReasoningLevels),
-			ReasoningMode:             modelproviders.NormalizeReasoningMode(rec.ReasoningMode),
+			ReasoningMode:             normalizeCatalogReasoningMode(rec.ReasoningMode),
 			SupportedReasoningEfforts: normalizeReasoningLevels(rec.SupportedReasoningEfforts),
 			DefaultReasoningEffort:    normalizeReasoningEffort(rec.DefaultReasoningEffort),
 			ThinkingMode:              normalizeThinkingMode(rec.ThinkingMode),
@@ -521,7 +521,7 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		ContextWindowTokens:       cfg.ContextWindowTokens,
 		MaxOutputTok:              cfg.MaxOutputTok,
 		ReasoningLevels:           normalizeReasoningLevels(cfg.ReasoningLevels),
-		ReasoningMode:             modelproviders.NormalizeReasoningMode(cfg.ReasoningMode),
+		ReasoningMode:             normalizeCatalogReasoningMode(cfg.ReasoningMode),
 		SupportedReasoningEfforts: normalizeReasoningLevels(cfg.SupportedReasoningEfforts),
 		DefaultReasoningEffort:    normalizeReasoningEffort(cfg.DefaultReasoningEffort),
 		ThinkingMode:              normalizeThinkingMode(cfg.ThinkingMode),
@@ -603,7 +603,7 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
 	for i := range cfg.Providers {
 		cfg.Providers[i].ReasoningLevels = normalizeReasoningLevels(cfg.Providers[i].ReasoningLevels)
-		cfg.Providers[i].ReasoningMode = modelproviders.NormalizeReasoningMode(cfg.Providers[i].ReasoningMode)
+		cfg.Providers[i].ReasoningMode = normalizeCatalogReasoningMode(cfg.Providers[i].ReasoningMode)
 		cfg.Providers[i].SupportedReasoningEfforts = normalizeReasoningLevels(cfg.Providers[i].SupportedReasoningEfforts)
 		cfg.Providers[i].DefaultReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].DefaultReasoningEffort)
 		cfg.Providers[i].ThinkingMode = normalizeThinkingMode(cfg.Providers[i].ThinkingMode)
@@ -632,7 +632,7 @@ func normalizeThinkingBudget(budget int) int {
 }
 
 func normalizeReasoningEffort(effort string) string {
-	return modelproviders.NormalizeReasoningEffort(effort)
+	return normalizeCatalogReasoningEffort(effort)
 }
 
 func normalizeReasoningLevel(level string) string {

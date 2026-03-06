@@ -961,6 +961,29 @@ func TestCopyHintTimerDoesNotOverrideNewHint(t *testing.T) {
 	}
 }
 
+func TestSetHintMsgSchedulesAutoClear(t *testing.T) {
+	m := newTestModel()
+	_, cmd := m.Update(tuievents.SetHintMsg{Hint: "started new session", ClearAfter: time.Millisecond})
+	if m.hint != "started new session" {
+		t.Fatalf("expected hint set, got %q", m.hint)
+	}
+	if cmd == nil {
+		t.Fatal("expected auto-clear command")
+	}
+	msg := cmd()
+	clearMsg, ok := msg.(clearHintMsg)
+	if !ok {
+		t.Fatalf("expected clearHintMsg, got %T", msg)
+	}
+	if clearMsg.expected != "started new session" {
+		t.Fatalf("unexpected clear expected %q", clearMsg.expected)
+	}
+	_, _ = m.Update(clearMsg)
+	if strings.TrimSpace(m.hint) != "" {
+		t.Fatalf("expected hint cleared, got %q", m.hint)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Inline architecture: streaming + commit tests
 // ---------------------------------------------------------------------------
@@ -1240,7 +1263,13 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 
 	respCh := make(chan tuievents.PromptResponse, 1)
 	_, _ = m.Update(tuievents.PromptRequestMsg{
-		Prompt:   "  [y] allow  [a] always  [N] deny: ",
+		Prompt:        "Approve command?",
+		DefaultChoice: "y",
+		Choices: []tuievents.PromptChoice{
+			{Label: "allow", Value: "y", Detail: "Run once"},
+			{Label: "always", Value: "a", Detail: "Allow in this session: go test"},
+			{Label: "deny", Value: "n", Detail: "Cancel (Esc)"},
+		},
 		Response: respCh,
 	})
 	if m.activePrompt == nil {
@@ -1249,15 +1278,15 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if len(m.activePrompt.choices) != 3 {
 		t.Fatalf("expected 3 approval choices, got %d", len(m.activePrompt.choices))
 	}
-	if m.activePrompt.choiceIndex != 2 {
-		t.Fatalf("expected default selection at deny, got %d", m.activePrompt.choiceIndex)
+	if m.activePrompt.choiceIndex != 0 {
+		t.Fatalf("expected default selection at allow, got %d", m.activePrompt.choiceIndex)
 	}
 	view := ansi.Strip(m.View())
 	if !strings.Contains(view, "allow") || !strings.Contains(view, "always") || !strings.Contains(view, "deny") {
 		t.Fatalf("expected approval list options in modal, got %q", view)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	select {
 	case resp := <-respCh:
@@ -1539,6 +1568,75 @@ func TestViewShowsPendingQueueWhileRunning(t *testing.T) {
 	}
 }
 
+func TestViewShowsToolOutputPanelWithLatestFourLines(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	for i := 1; i <= 6; i++ {
+		_, _ = m.Update(tuievents.ToolStreamMsg{
+			Tool:   "BASH",
+			CallID: "call-1",
+			Stream: "stdout",
+			Chunk:  fmt.Sprintf("line-%d\n", i),
+		})
+	}
+
+	view := m.View()
+	if strings.Contains(view, "terminal output") || strings.Contains(view, "BASH") {
+		t.Fatalf("expected boxed tool output without extra header text, got:\n%s", view)
+	}
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected bordered tool output box, got:\n%s", view)
+	}
+	if strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
+		t.Fatalf("expected old tool output lines to scroll out, got:\n%s", view)
+	}
+	for _, want := range []string{"line-3", "line-4", "line-5", "line-6"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in tool output panel, got:\n%s", want, view)
+		}
+	}
+}
+
+func TestViewShowsCompactToolOutputPanelForShortOutput(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "short\n",
+	})
+
+	view := ansi.Strip(m.View())
+	lines := strings.Split(view, "\n")
+	var topBorder string
+	var contentLine string
+	for _, line := range lines {
+		if strings.Contains(line, "╭") && strings.Contains(line, "╮") {
+			topBorder = line
+		}
+		if strings.Contains(line, "short") {
+			contentLine = line
+			break
+		}
+	}
+	if topBorder == "" || contentLine == "" {
+		t.Fatalf("expected tool output box, got:\n%s", view)
+	}
+	topBorder = strings.TrimRight(topBorder, " ")
+	contentLine = strings.TrimRight(contentLine, " ")
+	if len(topBorder) < 70 {
+		t.Fatalf("expected tool output box to fill viewport width, got top border %q", topBorder)
+	}
+	if len(contentLine) < 70 {
+		t.Fatalf("expected tool output content line to fill viewport width, got %q", contentLine)
+	}
+}
+
 func TestViewShowsInputWhenNotRunning(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -1608,11 +1706,22 @@ func TestHintAreaReservedHeightWithoutHintJitter(t *testing.T) {
 	if withoutHint != withHint {
 		t.Fatalf("expected stable bottom height with/without hint, got %d vs %d", withoutHint, withHint)
 	}
-	if strings.Count(withoutHintLine, "\n") != 0 {
-		t.Fatalf("expected reserved hint area to stay single-line when empty, got %q", withoutHintLine)
+	if strings.Count(withoutHintLine, "\n") != reservedHintRows-1 {
+		t.Fatalf("expected reserved hint area to keep %d rows when empty, got %q", reservedHintRows, withoutHintLine)
 	}
-	if strings.Count(withHintLine, "\n") != 0 {
-		t.Fatalf("expected reserved hint area to stay single-line when populated, got %q", withHintLine)
+	if strings.Count(withHintLine, "\n") != reservedHintRows-1 {
+		t.Fatalf("expected reserved hint area to keep %d rows when populated, got %q", reservedHintRows, withHintLine)
+	}
+	withoutHintLines := strings.Split(withoutHintLine, "\n")
+	withHintLines := strings.Split(withHintLine, "\n")
+	if len(withoutHintLines) != reservedHintRows || len(withHintLines) != reservedHintRows {
+		t.Fatalf("expected %d hint rows, got empty=%d populated=%d", reservedHintRows, len(withoutHintLines), len(withHintLines))
+	}
+	if strings.TrimSpace(withoutHintLines[0]) != "" || strings.TrimSpace(withHintLines[0]) != "" {
+		t.Fatalf("expected top hint row reserved as spacing, got empty=%q populated=%q", withoutHintLines[0], withHintLines[0])
+	}
+	if strings.TrimSpace(withHintLines[1]) == "" {
+		t.Fatalf("expected populated hint text on second row, got %q", withHintLine)
 	}
 }
 

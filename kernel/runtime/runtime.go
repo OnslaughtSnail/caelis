@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -28,8 +30,6 @@ type Runtime struct {
 	compactionStrategy CompactionStrategy
 	runMu              sync.Mutex
 	activeRuns         map[string]struct{}
-	runStateMu         sync.RWMutex
-	runStates          map[string]RunState
 }
 
 func New(cfg Config) (*Runtime, error) {
@@ -46,7 +46,6 @@ func New(cfg Config) (*Runtime, error) {
 		compaction:         compactionCfg,
 		compactionStrategy: strategy,
 		activeRuns:         map[string]struct{}{},
-		runStates:          map[string]RunState{},
 	}, nil
 }
 
@@ -237,7 +236,6 @@ func (r *Runtime) buildInvocationContext(
 	req RunRequest,
 	allEvents []*session.Event,
 ) (*invocationContext, error) {
-	history := agentHistoryEvents(contextWindowEvents(allEvents))
 	allTools, err := tool.EnsureCoreTools(req.Tools, req.CoreTools)
 	if err != nil {
 		return nil, err
@@ -246,15 +244,35 @@ func (r *Runtime) buildInvocationContext(
 	if err != nil {
 		return nil, err
 	}
+	state, err := r.snapshotReadonlyState(ctx, sess)
+	if err != nil {
+		return nil, err
+	}
 	return &invocationContext{
 		Context:  ctx,
 		session:  sess,
-		history:  history,
+		events:   r.projectInvocationEvents(allEvents),
+		state:    state,
 		model:    req.Model,
 		tools:    allTools,
 		toolMap:  toolMap,
 		policies: append([]policy.Hook(nil), req.Policies...),
 	}, nil
+}
+
+func (r *Runtime) projectInvocationEvents(allEvents []*session.Event) session.Events {
+	return eventview.AgentVisibleView(allEvents)
+}
+
+func (r *Runtime) snapshotReadonlyState(ctx context.Context, sess *session.Session) (session.ReadonlyState, error) {
+	values, err := r.store.SnapshotState(ctx, sess)
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			return session.NewReadonlyState(nil), nil
+		}
+		return nil, err
+	}
+	return session.NewReadonlyState(values), nil
 }
 
 func (r *Runtime) runAgentExecution(
@@ -302,7 +320,13 @@ func (r *Runtime) runAgentExecution(
 						emitRunError(refreshErr)
 						return false
 					}
-					inv.history = agentHistoryEvents(contextWindowEvents(refreshed))
+					inv.events = r.projectInvocationEvents(refreshed)
+					state, stateErr := r.snapshotReadonlyState(ctx, sess)
+					if stateErr != nil {
+						emitRunError(stateErr)
+						return false
+					}
+					inv.state = state
 					retry = true
 					break
 				}
@@ -324,9 +348,13 @@ func (r *Runtime) runAgentExecution(
 					emitRunError(err)
 					return false
 				}
-				cp := *ev
-				if !isLifecycleEvent(&cp) {
-					inv.history = append(inv.history, &cp)
+				if !isLifecycleEvent(ev) {
+					persisted, listErr := r.listContextWindowEvents(ctx, sess)
+					if listErr != nil {
+						emitRunError(listErr)
+						return false
+					}
+					inv.events = r.projectInvocationEvents(persisted)
 				}
 			}
 			if !yield(ev, nil) {
@@ -445,12 +473,29 @@ func (r *Runtime) appendAndYieldLifecycle(
 	cause error,
 	yield func(*session.Event, error) bool,
 ) bool {
-	_ = ctx
 	if r == nil || sess == nil {
 		return true
 	}
 	ev := lifecycleEvent(sess, status, phase, cause)
-	r.updateCachedRunState(sess, ev)
+	state, ok := runStateFromLifecycleEvent(ev)
+	if ok {
+		snapshot := runStateSnapshot(state)
+		// Merge lifecycle data into existing state instead of replacing
+		// the entire map, so that unrelated state keys are preserved.
+		existing, snapErr := r.store.SnapshotState(ctx, sess)
+		if snapErr != nil {
+			return yield(nil, fmt.Errorf("lifecycle state merge: failed to read existing state: %w", snapErr))
+		}
+		if existing == nil {
+			existing = map[string]any{}
+		}
+		for k, v := range snapshot {
+			existing[k] = v
+		}
+		if err := r.store.ReplaceState(ctx, sess, existing); err != nil {
+			return yield(nil, err)
+		}
+	}
 	if !yield(ev, nil) {
 		return false
 	}

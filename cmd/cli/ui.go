@@ -91,8 +91,9 @@ func (u *ui) Separator() {
 // Category 3: Approval Prompts
 // ---------------------------------------------------------------------------
 
-const approvalPrompt = "  [y] allow  [a] always  [N] deny: "
-const toolAuthPrompt = "  [y] allow  [a] always  [N] deny: "
+const approvalPromptAllowDeny = "  allow / deny (Esc cancels): "
+const approvalPromptAllowAlwaysDeny = "  allow / always / deny (Esc cancels): "
+const toolAuthPrompt = "  allow / always / deny (Esc cancels): "
 
 // ApprovalHeader prints the approval request header.
 func (u *ui) ApprovalHeader(toolName, action string) {
@@ -121,7 +122,7 @@ func (u *ui) ApprovalCommand(command string) {
 
 // ApprovalSessionNote prints the session-allow confirmation.
 func (u *ui) ApprovalSessionNote(key string) {
-	fmt.Fprintf(u.out, "  Added to session allowlist: %s\n", key)
+	fmt.Fprintf(u.out, "  Allowed for the rest of this session: %s\n", key)
 }
 
 // ---------------------------------------------------------------------------

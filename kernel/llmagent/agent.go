@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -63,10 +64,13 @@ func (a *Agent) Name() string {
 }
 
 type agentRunState struct {
-	messages          []model.Message
 	hooks             []policy.Hook
 	lastCallSig       string
 	consecutiveDupCnt int
+}
+
+type eventRecorder interface {
+	recordVisibleEvent(*session.Event)
 }
 
 func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -76,8 +80,7 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 			return
 		}
 		state := agentRunState{
-			messages: toMessagesWithSanitizer(ctx.History(), a.cfg.SystemPrompt, a.toolResultSanitizer),
-			hooks:    ctx.Policies(),
+			hooks: ctx.Policies(),
 		}
 		for {
 			done, err := a.runOneTurn(ctx, &state, yield)
@@ -118,7 +121,6 @@ func (a *Agent) runOneTurn(
 	if err != nil {
 		return false, err
 	}
-	state.messages = append(state.messages, assistantMsg)
 	if len(assistantMsg.ToolCalls) == 0 {
 		return true, nil
 	}
@@ -135,7 +137,7 @@ func (a *Agent) generateTurnResponse(
 ) (*model.Response, error) {
 	toolDecls := tool.Declarations(ctx.Tools())
 	in, err := policy.ApplyBeforeModel(ctx, state.hooks, policy.ModelInput{
-		Messages: state.messages,
+		Messages: eventview.Messages(ctx.Events(), a.cfg.SystemPrompt, a.toolResultSanitizer),
 		Tools:    toolDecls,
 	})
 	if err != nil {
@@ -233,6 +235,7 @@ func (a *Agent) emitAssistantTurn(
 	if !yield(assistantEvent, nil) {
 		return model.Message{}, errYieldStopped
 	}
+	recordVisibleEvent(ctx, assistantEvent)
 	return assistantMsg, nil
 }
 
@@ -285,11 +288,10 @@ func (a *Agent) executeToolCall(
 			if !yield(ev, nil) {
 				return errYieldStopped
 			}
-			state.messages = append(state.messages, toolMsg)
+			recordVisibleEvent(ctx, ev)
 			return fmt.Errorf("llmagent: %s", errMsg)
 		}
 		result := toolArgParseErrorResult(call, argErr)
-		modelResult := a.toolResultSanitizer(cloneArgs(result))
 		toolMsg := model.Message{
 			Role: model.RoleTool,
 			ToolResponse: &model.ToolResponse{
@@ -302,14 +304,7 @@ func (a *Agent) executeToolCall(
 		if !yield(ev, nil) {
 			return errYieldStopped
 		}
-		state.messages = append(state.messages, model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     call.ID,
-				Name:   call.Name,
-				Result: modelResult,
-			},
-		})
+		recordVisibleEvent(ctx, ev)
 		return nil
 	}
 
@@ -337,7 +332,7 @@ func (a *Agent) executeToolCall(
 		if !yield(ev, nil) {
 			return errYieldStopped
 		}
-		state.messages = append(state.messages, toolMsg)
+		recordVisibleEvent(ctx, ev)
 		return fmt.Errorf("llmagent: %s", errMsg)
 	}
 
@@ -381,6 +376,7 @@ func (a *Agent) executeToolCall(
 		execOut.Capability = toolcap.Of(t)
 		toolCtx := context.Context(ctx)
 		toolCtx = policy.WithToolDecision(toolCtx, decision)
+		toolCtx = toolexec.WithToolCallInfo(toolCtx, call.Name, call.ID)
 		result, runErr := t.Run(toolCtx, args)
 		execOut.Err = runErr
 		if runErr != nil {
@@ -406,7 +402,6 @@ func (a *Agent) executeToolCall(
 	truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
 	finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
 	finalResult = annotateToolResultMetadata(finalResult, afterOut.Err)
-	modelResult := a.toolResultSanitizer(finalResult)
 	toolMsg := model.Message{
 		Role:         model.RoleTool,
 		ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
@@ -415,15 +410,20 @@ func (a *Agent) executeToolCall(
 	if !yield(ev, nil) {
 		return errYieldStopped
 	}
-	state.messages = append(state.messages, model.Message{
-		Role: model.RoleTool,
-		ToolResponse: &model.ToolResponse{
-			ID:     afterOut.Call.ID,
-			Name:   afterOut.Call.Name,
-			Result: modelResult,
-		},
-	})
+	recordVisibleEvent(ctx, ev)
 	return nil
+}
+
+func recordVisibleEvent(ctx agent.InvocationContext, ev *session.Event) {
+	if ev == nil {
+		return
+	}
+	recorder, ok := any(ctx).(eventRecorder)
+	if !ok {
+		return
+	}
+	cp := *ev
+	recorder.recordVisibleEvent(&cp)
 }
 
 func toMessages(events []*session.Event, systemPrompt string) []model.Message {
@@ -438,23 +438,7 @@ func toMessagesWithSanitizer(
 	if sanitizer == nil {
 		sanitizer = defaultSanitizeToolResultForModel
 	}
-	out := make([]model.Message, 0, len(events)+1)
-	if systemPrompt != "" {
-		out = append(out, model.Message{Role: model.RoleSystem, Text: systemPrompt})
-	}
-	for _, ev := range events {
-		if ev == nil {
-			continue
-		}
-		msg := ev.Message
-		if msg.ToolResponse != nil {
-			resp := *msg.ToolResponse
-			resp.Result = sanitizer(resp.Result)
-			msg.ToolResponse = &resp
-		}
-		out = append(out, msg)
-	}
-	return out
+	return eventview.Messages(session.NewEvents(events), systemPrompt, sanitizer)
 }
 
 func defaultSanitizeToolResultForModel(result map[string]any) map[string]any {

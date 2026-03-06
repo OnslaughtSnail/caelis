@@ -86,6 +86,7 @@ type cliConsole struct {
 }
 
 const interruptExitWindow = 2 * time.Second
+const transientHintDuration = 1600 * time.Millisecond
 
 type slashCommand struct {
 	Usage       string
@@ -96,6 +97,10 @@ type slashCommand struct {
 type promptReader interface {
 	ReadLine(prompt string) (string, error)
 	ReadSecret(prompt string) (string, error)
+}
+
+type choicePromptReader interface {
+	RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error)
 }
 
 type connectModelCacheEntry struct {
@@ -407,6 +412,22 @@ func (c *cliConsole) runPrompt(input string) error {
 	}
 	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
+	if c.tuiSender != nil {
+		ctx = toolexec.WithOutputStreamer(ctx, toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
+			if c.tuiSender == nil || !strings.EqualFold(strings.TrimSpace(chunk.ToolName), toolshell.BashToolName) {
+				return
+			}
+			if strings.TrimSpace(chunk.Text) == "" {
+				return
+			}
+			c.tuiSender.Send(tuievents.ToolStreamMsg{
+				Tool:   chunk.ToolName,
+				CallID: chunk.ToolCallID,
+				Stream: chunk.Stream,
+				Chunk:  chunk.Text,
+			})
+		}))
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c.setActiveRunCancel(cancel)
 	defer func() {
@@ -519,6 +540,13 @@ func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[s
 					Args: cloneAnyMap(parsedArgs),
 				}
 			}
+			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) {
+				c.tuiSender.Send(tuievents.ToolStreamMsg{
+					Tool:   call.Name,
+					CallID: call.ID,
+					Reset:  true,
+				})
+			}
 			c.tuiSender.Send(tuievents.LogChunkMsg{
 				Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
 			})
@@ -526,6 +554,17 @@ func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[s
 		handled = true
 	}
 	if msg.ToolResponse != nil {
+		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), toolshell.BashToolName) {
+			c.tuiSender.Send(tuievents.ToolStreamMsg{
+				Tool:   msg.ToolResponse.Name,
+				CallID: msg.ToolResponse.ID,
+				Final:  true,
+			})
+			if strings.TrimSpace(asString(msg.ToolResponse.Result["stdout"])) != "" ||
+				strings.TrimSpace(asString(msg.ToolResponse.Result["stderr"])) != "" {
+				return true
+			}
+		}
 		var callArgs map[string]any
 		if pendingToolCalls != nil && msg.ToolResponse.ID != "" {
 			if snapshot, ok := pendingToolCalls[msg.ToolResponse.ID]; ok {
@@ -658,7 +697,7 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 		modelText, contextText := c.readTUIStatus()
 		c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
-		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "started new session"})
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "started new session", ClearAfter: transientHintDuration})
 		return false, nil
 	}
 	c.printf("new session started: %s\n", c.sessionID)
@@ -677,7 +716,7 @@ func handleFork(c *cliConsole, args []string) (bool, error) {
 	_ = c.clearPendingAttachments()
 	if c.tuiSender != nil {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
-		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "fork succeeded"})
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "fork succeeded", ClearAfter: transientHintDuration})
 		return false, nil
 	}
 	c.printf("fork succeeded\n")
@@ -949,7 +988,7 @@ func (c *cliConsole) resolveContextWindowForDisplay() int {
 	if cfg.ContextWindowTokens > 0 {
 		return cfg.ContextWindowTokens
 	}
-	caps, found := modelproviders.LookupModelCapabilities(cfg.Provider, cfg.Model)
+	caps, found := lookupCatalogModelCapabilities(cfg.Provider, cfg.Model)
 	if found && caps.ContextWindowTokens > 0 {
 		return caps.ContextWindowTokens
 	}
@@ -1192,17 +1231,11 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 	if a.isAllowedInSession(req.Command) {
 		return true, nil
 	}
-	if a.ui != nil {
-		a.ui.ApprovalHeader(req.ToolName, req.Action)
-		a.ui.ApprovalReason(req.Reason)
-		a.ui.ApprovalCommand(req.Command)
-	} else {
-		fmt.Fprintf(a.out, "\n? Approval: %s (%s)\n  %s\n  $ %s\n", req.ToolName, req.Action, req.Reason, req.Command)
-	}
+	key := sessionApprovalKey(req.Command)
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	line, err := a.prompter.ReadLine(approvalPrompt)
+	line, err := a.readApprovalChoice(key)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
@@ -1214,19 +1247,10 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 	case "y", "yes":
 		return true, nil
 	case "a", "always":
-		key := sessionApprovalKey(req.Command)
-		if key == "" {
-			key = strings.TrimSpace(req.Command)
-		}
 		if key != "" {
 			a.mu.Lock()
 			a.sessionAllowed[key] = struct{}{}
 			a.mu.Unlock()
-			if a.ui != nil {
-				a.ui.ApprovalSessionNote(key)
-			} else {
-				fmt.Fprintf(a.out, "  Added to session allowlist: %s\n", key)
-			}
 		}
 		return true, nil
 	case "n", "no", "", "c", "cancel":
@@ -1246,21 +1270,10 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 		return true, nil
 	}
 
-	if a.ui != nil {
-		a.ui.ToolAuthHeader(toolKey)
-		if reason := strings.TrimSpace(req.Reason); reason != "" {
-			a.ui.ApprovalReason(reason)
-		}
-	} else {
-		fmt.Fprintf(a.out, "\n? Authorize tool: %s\n", toolKey)
-		if reason := strings.TrimSpace(req.Reason); reason != "" {
-			fmt.Fprintf(a.out, "  %s\n", reason)
-		}
-	}
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	line, err := a.prompter.ReadLine(toolAuthPrompt)
+	line, err := a.readToolAuthorizationChoice(toolKey)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
@@ -1275,11 +1288,6 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 		a.mu.Lock()
 		a.toolAllowed[toolKey] = struct{}{}
 		a.mu.Unlock()
-		if a.ui != nil {
-			a.ui.ApprovalSessionNote(toolKey)
-		} else {
-			fmt.Fprintf(a.out, "  Added to session allowlist: %s\n", toolKey)
-		}
 		return true, nil
 	case "n", "no", "", "c", "cancel":
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
@@ -1307,11 +1315,221 @@ func (a *terminalApprover) isToolAllowedInSession(toolKey string) bool {
 }
 
 func sessionApprovalKey(command string) string {
-	return strings.TrimSpace(command)
+	segments := shellCommandSegments(command)
+	for _, segment := range segments {
+		tokens := shellSegmentTokens(segment)
+		if len(tokens) == 0 {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(tokens[0]))
+		if isApprovalWrapperCommand(base) {
+			continue
+		}
+		switch base {
+		case "go", "git", "npm", "pnpm", "yarn", "cargo", "make":
+			if len(tokens) > 1 && !strings.HasPrefix(tokens[1], "-") {
+				return strings.TrimSpace(base + " " + strings.ToLower(tokens[1]))
+			}
+			return strings.TrimSpace(base)
+		default:
+			return ""
+		}
+	}
+	return ""
 }
 
 func toolApprovalKey(toolName string) string {
 	return strings.ToUpper(strings.TrimSpace(toolName))
+}
+
+func (a *terminalApprover) readApprovalChoice(sessionKey string) (string, error) {
+	if chooser, ok := a.prompter.(choicePromptReader); ok {
+		return chooser.RequestChoicePrompt(
+			"Approve command?",
+			approvalChoicesForSessionKey(sessionKey),
+			"y",
+			false,
+		)
+	}
+	if sessionKey != "" {
+		return a.prompter.ReadLine(approvalPromptAllowAlwaysDeny)
+	}
+	return a.prompter.ReadLine(approvalPromptAllowDeny)
+}
+
+func (a *terminalApprover) readToolAuthorizationChoice(toolKey string) (string, error) {
+	if chooser, ok := a.prompter.(choicePromptReader); ok {
+		return chooser.RequestChoicePrompt(
+			"Authorize tool?",
+			toolAuthorizationChoices(toolKey),
+			"y",
+			false,
+		)
+	}
+	return a.prompter.ReadLine(toolAuthPrompt)
+}
+
+func approvalChoicesForSessionKey(sessionKey string) []tuievents.PromptChoice {
+	choices := []tuievents.PromptChoice{
+		{Label: "allow", Value: "y", Detail: "Run once"},
+	}
+	if sessionKey != "" {
+		choices = append(choices, tuievents.PromptChoice{
+			Label:  "always",
+			Value:  "a",
+			Detail: "Allow in this session: " + sessionKey,
+		})
+	}
+	choices = append(choices, tuievents.PromptChoice{
+		Label:  "deny",
+		Value:  "n",
+		Detail: "Cancel (Esc)",
+	})
+	return choices
+}
+
+func toolAuthorizationChoices(toolKey string) []tuievents.PromptChoice {
+	return []tuievents.PromptChoice{
+		{Label: "allow", Value: "y", Detail: "Run once"},
+		{Label: "always", Value: "a", Detail: "Allow in this session: " + toolKey},
+		{Label: "deny", Value: "n", Detail: "Cancel (Esc)"},
+	}
+}
+
+func isApprovalWrapperCommand(base string) bool {
+	switch strings.ToLower(strings.TrimSpace(base)) {
+	case "", "cd", "pwd", "export", "unset", "alias", "source", ".", "grep", "egrep", "fgrep", "head", "tail":
+		return true
+	default:
+		return false
+	}
+}
+
+func shellCommandSegments(command string) []string {
+	var (
+		segments []string
+		buf      strings.Builder
+		squote   bool
+		dquote   bool
+		escape   bool
+	)
+	flush := func() {
+		part := strings.TrimSpace(buf.String())
+		if part != "" {
+			segments = append(segments, part)
+		}
+		buf.Reset()
+	}
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if escape {
+			buf.WriteRune(r)
+			escape = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escape = true
+			buf.WriteRune(r)
+		case '\'':
+			if !dquote {
+				squote = !squote
+			}
+			buf.WriteRune(r)
+		case '"':
+			if !squote {
+				dquote = !dquote
+			}
+			buf.WriteRune(r)
+		case ';':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			flush()
+		case '&':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			if i+1 < len(runes) && runes[i+1] == '&' {
+				flush()
+				i++
+				continue
+			}
+			buf.WriteRune(r)
+		case '|':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			flush()
+			if i+1 < len(runes) && runes[i+1] == '|' {
+				i++
+			}
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	flush()
+	return segments
+}
+
+func shellSegmentTokens(segment string) []string {
+	var (
+		tokens []string
+		buf    strings.Builder
+		squote bool
+		dquote bool
+		escape bool
+	)
+	flush := func() {
+		token := strings.TrimSpace(buf.String())
+		if token == "" {
+			buf.Reset()
+			return
+		}
+		if strings.Contains(token, "=") && !strings.HasPrefix(token, "=") && len(tokens) == 0 {
+			buf.Reset()
+			return
+		}
+		tokens = append(tokens, token)
+		buf.Reset()
+	}
+	for _, r := range segment {
+		if escape {
+			buf.WriteRune(r)
+			escape = false
+			continue
+		}
+		switch r {
+		case '\\':
+			escape = true
+		case '\'':
+			if !dquote {
+				squote = !squote
+				continue
+			}
+			buf.WriteRune(r)
+		case '"':
+			if !squote {
+				dquote = !dquote
+				continue
+			}
+			buf.WriteRune(r)
+		case ' ', '\t', '\n':
+			if squote || dquote {
+				buf.WriteRune(r)
+				continue
+			}
+			flush()
+		default:
+			buf.WriteRune(r)
+		}
+	}
+	flush()
+	return tokens
 }
 
 func (c *cliConsole) addPendingAttachment(part model.ContentPart) {

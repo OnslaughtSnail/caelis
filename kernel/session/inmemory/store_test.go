@@ -85,3 +85,26 @@ func TestStore_ListContextWindowEvents_UsesLatestCompactionWindow(t *testing.T) 
 		t.Fatalf("unexpected window ids: %s, %s", window[0].ID, window[1].ID)
 	}
 }
+
+func TestStore_ReplaceState_RoundTrip(t *testing.T) {
+	store := New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-state"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"runtime.lifecycle": map[string]any{
+			"status": "completed",
+		},
+	}
+	if err := store.ReplaceState(context.Background(), sess, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.SnapshotState(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["runtime.lifecycle"] == nil {
+		t.Fatalf("expected lifecycle state, got %+v", got)
+	}
+}

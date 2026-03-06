@@ -28,14 +28,24 @@ type testCtx struct {
 }
 
 func (c *testCtx) Session() *session.Session { return c.session }
-func (c *testCtx) History() []*session.Event { return c.history }
-func (c *testCtx) Model() model.LLM          { return c.llm }
-func (c *testCtx) Tools() []tool.Tool        { return c.tools }
+func (c *testCtx) Events() session.Events    { return session.NewEvents(c.history) }
+func (c *testCtx) ReadonlyState() session.ReadonlyState {
+	return session.NewReadonlyState(nil)
+}
+func (c *testCtx) Model() model.LLM   { return c.llm }
+func (c *testCtx) Tools() []tool.Tool { return c.tools }
 func (c *testCtx) Tool(name string) (tool.Tool, bool) {
 	t, ok := c.toolMap[name]
 	return t, ok
 }
 func (c *testCtx) Policies() []policy.Hook { return c.policies }
+func (c *testCtx) recordVisibleEvent(ev *session.Event) {
+	if ev == nil {
+		return
+	}
+	cp := *ev
+	c.history = append(c.history, &cp)
+}
 
 type namedTool struct {
 	name string

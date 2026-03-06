@@ -12,7 +12,8 @@ import (
 type invocationContext struct {
 	context.Context
 	session  *session.Session
-	history  []*session.Event
+	events   session.Events
+	state    session.ReadonlyState
 	model    model.LLM
 	tools    []tool.Tool
 	toolMap  map[string]tool.Tool
@@ -23,16 +24,12 @@ func (c *invocationContext) Session() *session.Session {
 	return c.session
 }
 
-func (c *invocationContext) History() []*session.Event {
-	out := make([]*session.Event, 0, len(c.history))
-	for _, ev := range c.history {
-		if ev == nil {
-			continue
-		}
-		cp := *ev
-		out = append(out, &cp)
-	}
-	return out
+func (c *invocationContext) Events() session.Events {
+	return c.events
+}
+
+func (c *invocationContext) ReadonlyState() session.ReadonlyState {
+	return c.state
 }
 
 func (c *invocationContext) Model() model.LLM {

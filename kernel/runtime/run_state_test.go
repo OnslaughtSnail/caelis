@@ -152,3 +152,48 @@ func TestRuntime_RunState_NoLifecycle(t *testing.T) {
 		t.Fatalf("expected no lifecycle state, got %+v", state)
 	}
 }
+
+func TestRuntime_RunState_FromSnapshot(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-run-state-snapshot"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Round(0)
+	if err := store.ReplaceState(context.Background(), sess, map[string]any{
+		runtimeLifecycleStateKey: map[string]any{
+			"status":     string(RunLifecycleStatusCompleted),
+			"phase":      "run",
+			"error":      "",
+			"error_code": "",
+			"event_id":   "ev_done",
+			"updated_at": now.Format(time.RFC3339Nano),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := rt.RunState(context.Background(), RunStateRequest{
+		AppName:   sess.AppName,
+		UserID:    sess.UserID,
+		SessionID: sess.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.HasLifecycle {
+		t.Fatal("expected lifecycle state from snapshot")
+	}
+	if state.Status != RunLifecycleStatusCompleted {
+		t.Fatalf("unexpected status %q", state.Status)
+	}
+	if state.EventID != "ev_done" {
+		t.Fatalf("unexpected event id %q", state.EventID)
+	}
+	if !state.UpdatedAt.Equal(now) {
+		t.Fatalf("unexpected updated_at %s", state.UpdatedAt)
+	}
+}

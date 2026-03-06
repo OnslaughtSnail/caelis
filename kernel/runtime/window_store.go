@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
@@ -17,5 +18,5 @@ func (r *Runtime) listContextWindowEvents(ctx context.Context, sess *session.Ses
 	if err != nil {
 		return nil, err
 	}
-	return contextWindowEvents(events), nil
+	return eventview.ContextWindow(events), nil
 }

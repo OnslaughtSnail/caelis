@@ -19,9 +19,10 @@ import (
 
 const maxInputBarRows = 6
 const ctrlCExitWindow = 2 * time.Second
-const reservedHintRows = 1
+const reservedHintRows = 2
 const runningHintRotateEveryTicks = 40
 const copyHintDuration = 1600 * time.Millisecond
+const toolOutputPreviewLines = 4
 
 var runningBreathFrames = []string{"·", "•", "●", "•"}
 
@@ -30,7 +31,7 @@ var runningCarouselLines = []string{
 	"Use @path to anchor the model on exact files.",
 	"/model can switch both model and reasoning level.",
 	"Press Esc to interrupt, Enter to queue your next message.",
-	"A maiden is praying...",
+	"Review the latest tool output before sending follow-up guidance.",
 }
 
 type clearHintMsg struct {
@@ -127,18 +128,18 @@ func (i commandItem) FilterValue() string { return i.name }
 // ---------------------------------------------------------------------------
 
 type promptState struct {
-	prompt      string
-	secret      bool
-	input       []rune
-	cursor      int
-	choices     []promptChoice
-	choiceIndex int
+	prompt       string
+	secret       bool
+	input        []rune
+	cursor       int
+	choices      []promptChoice
+	choiceIndex  int
 	scrollOffset int
-	filter      []rune
-	filterable  bool
-	multiSelect bool
-	selected    map[string]struct{}
-	response    chan tuievents.PromptResponse
+	filter       []rune
+	filterable   bool
+	multiSelect  bool
+	selected     map[string]struct{}
+	response     chan tuievents.PromptResponse
 }
 
 type promptChoice struct {
@@ -169,6 +170,26 @@ type diffBlockState struct {
 	msg   tuievents.DiffBlockMsg
 }
 
+type toolOutputLine struct {
+	text   string
+	stream string
+}
+
+type toolOutputBlockState struct {
+	start int
+	end   int
+}
+
+type toolOutputState struct {
+	tool          string
+	callID        string
+	lines         []toolOutputLine
+	stdoutPartial string
+	stderrPartial string
+	active        bool
+	block         *toolOutputBlockState
+}
+
 // ---------------------------------------------------------------------------
 // Model — inline (non-fullscreen) Bubble Tea model
 //
@@ -195,6 +216,7 @@ type Model struct {
 	reasoningBlock     *assistantBlockState
 	lastFinalAnswer    string
 	diffBlocks         []diffBlockState
+	toolOutput         toolOutputState
 
 	// Fullscreen viewport — replaces tea.Println scrollback.
 	historyLines        []string // committed lines (pre-colorized)
@@ -523,9 +545,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuievents.DiffBlockMsg:
 		return m.handleDiffBlock(typed)
 
+	case tuievents.ToolStreamMsg:
+		return m.handleToolStreamMsg(typed)
+
 	case tuievents.SetHintMsg:
 		m.hint = strings.TrimSpace(typed.Hint)
-		return m, nil
+		return m, clearHintLaterCmd(m.hint, typed.ClearAfter)
 
 	case clearHintMsg:
 		if strings.TrimSpace(m.hint) == strings.TrimSpace(typed.expected) {

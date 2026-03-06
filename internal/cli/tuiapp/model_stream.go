@@ -7,6 +7,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,145 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
+func (m *Model) handleToolStreamMsg(msg tuievents.ToolStreamMsg) (tea.Model, tea.Cmd) {
+	toolName := strings.TrimSpace(msg.Tool)
+	callID := strings.TrimSpace(msg.CallID)
+	if msg.Reset || (callID != "" && strings.TrimSpace(m.toolOutput.callID) != "" && callID != strings.TrimSpace(m.toolOutput.callID)) {
+		m.resetToolOutput(toolName, callID)
+		m.syncToolOutputBlock()
+	}
+	if toolName != "" && strings.TrimSpace(m.toolOutput.tool) == "" {
+		m.toolOutput.tool = toolName
+	}
+	if callID != "" && strings.TrimSpace(m.toolOutput.callID) == "" {
+		m.toolOutput.callID = callID
+	}
+	if msg.Final {
+		m.toolOutput.active = false
+		m.syncToolOutputBlock()
+		return m, nil
+	}
+	if strings.TrimSpace(msg.Chunk) == "" {
+		return m, nil
+	}
+	m.toolOutput.active = true
+	m.appendToolOutputChunk(strings.TrimSpace(msg.Stream), msg.Chunk)
+	m.syncToolOutputBlock()
+	return m, nil
+}
+
+func (m *Model) resetToolOutput(toolName, callID string) {
+	m.toolOutput = toolOutputState{
+		tool:   strings.TrimSpace(toolName),
+		callID: strings.TrimSpace(callID),
+	}
+}
+
+func (m *Model) appendToolOutputChunk(stream, chunk string) {
+	normalized := tuikit.SanitizeLogText(chunk)
+	normalized = strings.ReplaceAll(strings.ReplaceAll(normalized, "\r\n", "\n"), "\r", "\n")
+	switch strings.ToLower(strings.TrimSpace(stream)) {
+	case "stderr":
+		m.toolOutput.stderrPartial = m.consumeToolOutputChunk(m.toolOutput.stderrPartial, normalized, "stderr")
+	default:
+		m.toolOutput.stdoutPartial = m.consumeToolOutputChunk(m.toolOutput.stdoutPartial, normalized, "stdout")
+	}
+}
+
+func (m *Model) consumeToolOutputChunk(partial, chunk, stream string) string {
+	if chunk == "" {
+		return partial
+	}
+	buf := partial + chunk
+	for {
+		idx := strings.IndexByte(buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := strings.TrimRight(buf[:idx], "\r")
+		buf = buf[idx+1:]
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		m.toolOutput.lines = append(m.toolOutput.lines, toolOutputLine{text: line, stream: stream})
+	}
+	if len(m.toolOutput.lines) > toolOutputPreviewLines {
+		m.toolOutput.lines = append([]toolOutputLine(nil), m.toolOutput.lines[len(m.toolOutput.lines)-toolOutputPreviewLines:]...)
+	}
+	return buf
+}
+
+func (m *Model) syncToolOutputBlock() {
+	content := m.currentToolOutputLines()
+	if len(content) == 0 {
+		return
+	}
+	rendered := m.renderToolOutputBlockLines(content)
+	if m.toolOutput.block == nil {
+		start := len(m.historyLines)
+		m.historyLines = append(m.historyLines, rendered...)
+		m.toolOutput.block = &toolOutputBlockState{
+			start: start,
+			end:   start + len(rendered),
+		}
+		m.syncViewportContent()
+		return
+	}
+	block := m.toolOutput.block
+	m.replaceHistoryRange(block.start, block.end, rendered)
+	block.end = block.start + len(rendered)
+	m.syncViewportContent()
+}
+
+func (m *Model) currentToolOutputLines() []toolOutputLine {
+	content := append([]toolOutputLine(nil), m.toolOutput.lines...)
+	if partial := strings.TrimSpace(m.toolOutput.stdoutPartial); partial != "" {
+		content = append(content, toolOutputLine{text: partial, stream: "stdout"})
+	}
+	if partial := strings.TrimSpace(m.toolOutput.stderrPartial); partial != "" {
+		content = append(content, toolOutputLine{text: partial, stream: "stderr"})
+	}
+	if len(content) > toolOutputPreviewLines {
+		content = content[len(content)-toolOutputPreviewLines:]
+	}
+	return content
+}
+
+func (m *Model) renderToolOutputBlockLines(content []toolOutputLine) []string {
+	if len(content) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(content))
+	panelInnerWidth := maxInt(1, m.viewport.Width-4)
+	for _, line := range content {
+		text := line.text
+		prefix := "  "
+		style := lipgloss.NewStyle().
+			Foreground(m.theme.TextPrimary).
+			Background(m.theme.ToolOutputBg)
+		if strings.EqualFold(strings.TrimSpace(line.stream), "stderr") {
+			prefix = "! "
+			style = m.theme.ErrorStyle().Background(m.theme.ToolOutputBg)
+		}
+		availableTextWidth := maxInt(1, panelInnerWidth-displayColumns(prefix))
+		if displayColumns(text) > availableTextWidth {
+			if availableTextWidth == 1 {
+				text = "…"
+			} else {
+				text = sliceByDisplayColumns(text, 0, availableTextWidth-1) + "…"
+			}
+		}
+		lines = append(lines, style.Width(panelInnerWidth).Render(prefix+text))
+	}
+	panel := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.PanelBorder).
+		Background(m.theme.ToolOutputBg).
+		Padding(0, 1).
+		Width(panelInnerWidth)
+	return strings.Split(panel.Render(strings.Join(lines, "\n")), "\n")
+}
+
 func (m *Model) replaceHistoryRange(start int, end int, replacement []string) {
 	if start < 0 {
 		start = 0
@@ -300,6 +440,7 @@ func (m *Model) resetConversationView() {
 	m.flushStream()
 	m.assistantBlock = nil
 	m.reasoningBlock = nil
+	m.toolOutput = toolOutputState{}
 	m.diffBlocks = m.diffBlocks[:0]
 	m.historyLines = m.historyLines[:0]
 	m.viewportStyledLines = m.viewportStyledLines[:0]

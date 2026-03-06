@@ -12,7 +12,8 @@ type SetStatusMsg struct {
 }
 
 type SetHintMsg struct {
-	Hint string
+	Hint       string
+	ClearAfter time.Duration
 }
 
 type SetRunningMsg struct {
@@ -25,14 +26,14 @@ type TaskResultMsg struct {
 }
 
 type PromptRequestMsg struct {
-	Prompt        string
-	Secret        bool
-	Choices       []PromptChoice
-	DefaultChoice string
+	Prompt          string
+	Secret          bool
+	Choices         []PromptChoice
+	DefaultChoice   string
 	SelectedChoices []string
-	Filterable    bool
-	MultiSelect   bool
-	Response      chan PromptResponse
+	Filterable      bool
+	MultiSelect     bool
+	Response        chan PromptResponse
 }
 
 type PromptResponse struct {
@@ -91,4 +92,13 @@ type DiffBlockMsg struct {
 	New       string
 	Preview   string
 	Truncated bool
+}
+
+type ToolStreamMsg struct {
+	Tool   string
+	CallID string
+	Stream string
+	Chunk  string
+	Reset  bool
+	Final  bool
 }

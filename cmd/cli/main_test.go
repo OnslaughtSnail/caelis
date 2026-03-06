@@ -84,8 +84,11 @@ func TestBuildRuntimePromptHint_IncludesPolicySummary(t *testing.T) {
 	if !strings.Contains(hint, "commands run in sandbox by default") {
 		t.Fatalf("expected sandbox default rule, got %q", hint)
 	}
-	if !strings.Contains(hint, "Approval UX: host escalation uses y/a/n") {
-		t.Fatalf("expected approval UX hint, got %q", hint)
+	if !strings.Contains(hint, "use require_escalated=true only when sandbox limits are blocking a necessary next step") {
+		t.Fatalf("expected escalation guidance, got %q", hint)
+	}
+	if !strings.Contains(hint, "Safe inspection commands may auto-pass host escalation without user approval") {
+		t.Fatalf("expected safe-command escalation hint, got %q", hint)
 	}
 }
 

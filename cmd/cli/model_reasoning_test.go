@@ -23,7 +23,7 @@ func TestModelReasoningOptionsForConfig(t *testing.T) {
 		Provider:      "deepseek",
 		Model:         "deepseek-chat",
 		API:           modelproviders.APIDeepSeek,
-		ReasoningMode: modelproviders.ReasoningModeToggle,
+		ReasoningMode: reasoningModeToggle,
 	}
 	toggleOptions := modelReasoningOptionsForConfig(toggle)
 	if len(toggleOptions) != 2 || toggleOptions[0].Value != "off" || toggleOptions[1].Value != "on" {
@@ -34,7 +34,7 @@ func TestModelReasoningOptionsForConfig(t *testing.T) {
 		Provider:                  "openai",
 		Model:                     "o3",
 		API:                       modelproviders.APIOpenAI,
-		ReasoningMode:             modelproviders.ReasoningModeEffort,
+		ReasoningMode:             reasoningModeEffort,
 		SupportedReasoningEfforts: []string{"minimal", "low", "medium", "high", "xhigh"},
 	}
 	effortOptions := modelReasoningOptionsForConfig(effort)
@@ -51,7 +51,7 @@ func TestResolveModelReasoningOption_ToggleRejectsEffort(t *testing.T) {
 		Provider:      "deepseek",
 		Model:         "deepseek-chat",
 		API:           modelproviders.APIDeepSeek,
-		ReasoningMode: modelproviders.ReasoningModeToggle,
+		ReasoningMode: reasoningModeToggle,
 	}
 	if _, err := resolveModelReasoningOption(cfg, "high"); err == nil {
 		t.Fatal("expected error for high on toggle model")
@@ -70,7 +70,7 @@ func TestResolveModelReasoningOption_EffortUsesDefaultForOn(t *testing.T) {
 		Provider:                  "openai",
 		Model:                     "o3",
 		API:                       modelproviders.APIOpenAI,
-		ReasoningMode:             modelproviders.ReasoningModeEffort,
+		ReasoningMode:             reasoningModeEffort,
 		SupportedReasoningEfforts: []string{"low", "medium", "high"},
 		DefaultReasoningEffort:    "medium",
 	}

@@ -17,12 +17,12 @@ type modelReasoningOption struct {
 func modelReasoningOptionsForConfig(cfg modelproviders.Config) []modelReasoningOption {
 	profile := reasoningProfileForConfig(cfg)
 	switch profile.Mode {
-	case modelproviders.ReasoningModeToggle:
+	case reasoningModeToggle:
 		return []modelReasoningOption{
 			{Value: "off", Display: "off", ThinkingMode: "off"},
 			{Value: "on", Display: "on", ThinkingMode: "on"},
 		}
-	case modelproviders.ReasoningModeEffort:
+	case reasoningModeEffort:
 		if len(profile.SupportedEfforts) == 0 {
 			return nil
 		}
@@ -56,7 +56,7 @@ func resolveModelReasoningOption(cfg modelproviders.Config, raw string) (modelRe
 	}
 	profile := reasoningProfileForConfig(cfg)
 	switch profile.Mode {
-	case modelproviders.ReasoningModeToggle:
+	case reasoningModeToggle:
 		if normalized == "off" {
 			return modelReasoningOption{Value: "off", Display: "off", ThinkingMode: "off"}, nil
 		}
@@ -67,7 +67,7 @@ func resolveModelReasoningOption(cfg modelproviders.Config, raw string) (modelRe
 			return modelReasoningOption{Value: "on", Display: "on", ThinkingMode: "on"}, nil
 		}
 		return modelReasoningOption{}, fmt.Errorf("reasoning option %q is not supported for this model, expected one of auto|on|off", raw)
-	case modelproviders.ReasoningModeEffort:
+	case reasoningModeEffort:
 		if normalized == "off" {
 			return modelReasoningOption{Value: "off", Display: "off", ThinkingMode: "off"}, nil
 		}
@@ -145,21 +145,21 @@ type reasoningProfile struct {
 
 func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 	profile := reasoningProfile{
-		Mode:             modelproviders.NormalizeReasoningMode(cfg.ReasoningMode),
+		Mode:             normalizeCatalogReasoningMode(cfg.ReasoningMode),
 		SupportedEfforts: normalizeReasoningLevels(cfg.SupportedReasoningEfforts),
 		DefaultEffort:    normalizeReasoningEffort(cfg.DefaultReasoningEffort),
 	}
 	fallback := inferredReasoningProfile(cfg.Provider, cfg.Model)
-	if profile.Mode == modelproviders.ReasoningModeNone && fallback.Mode != modelproviders.ReasoningModeNone {
+	if profile.Mode == reasoningModeNone && fallback.Mode != reasoningModeNone {
 		profile = fallback
 	}
-	if profile.Mode == modelproviders.ReasoningModeToggle && fallback.Mode == modelproviders.ReasoningModeEffort {
+	if profile.Mode == reasoningModeToggle && fallback.Mode == reasoningModeEffort {
 		profile = fallback
 	}
-	if profile.Mode == modelproviders.ReasoningModeEffort && len(profile.SupportedEfforts) == 0 && len(fallback.SupportedEfforts) > 0 {
+	if profile.Mode == reasoningModeEffort && len(profile.SupportedEfforts) == 0 && len(fallback.SupportedEfforts) > 0 {
 		profile.SupportedEfforts = append([]string(nil), fallback.SupportedEfforts...)
 	}
-	if profile.Mode == modelproviders.ReasoningModeEffort && profile.DefaultEffort == "" && fallback.DefaultEffort != "" {
+	if profile.Mode == reasoningModeEffort && profile.DefaultEffort == "" && fallback.DefaultEffort != "" {
 		profile.DefaultEffort = fallback.DefaultEffort
 	}
 	if profile.Mode == "" {
@@ -172,27 +172,27 @@ func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 		}
 		switch {
 		case len(efforts) > 0:
-			profile.Mode = modelproviders.ReasoningModeEffort
+			profile.Mode = reasoningModeEffort
 			if len(profile.SupportedEfforts) == 0 {
 				profile.SupportedEfforts = efforts
 			}
 		case len(levels) > 0:
-			profile.Mode = modelproviders.ReasoningModeToggle
+			profile.Mode = reasoningModeToggle
 		}
 	}
 	if profile.Mode == "" {
 		profile = reasoningProfileForModel(cfg.Provider, cfg.Model)
 	}
 	if profile.Mode == "" {
-		profile.Mode = modelproviders.ReasoningModeNone
+		profile.Mode = reasoningModeNone
 	}
-	if profile.Mode == modelproviders.ReasoningModeEffort && profile.DefaultEffort == "" {
-		profile.DefaultEffort = modelproviders.DefaultReasoningEffortForModel(cfg.Provider, cfg.Model)
+	if profile.Mode == reasoningModeEffort && profile.DefaultEffort == "" {
+		profile.DefaultEffort = defaultCatalogReasoningEffort(cfg.Provider, cfg.Model)
 		if profile.DefaultEffort == "" && len(profile.SupportedEfforts) > 0 {
 			profile.DefaultEffort = profile.SupportedEfforts[0]
 		}
 	}
-	if profile.Mode != modelproviders.ReasoningModeEffort {
+	if profile.Mode != reasoningModeEffort {
 		profile.SupportedEfforts = nil
 		profile.DefaultEffort = ""
 	}
@@ -201,30 +201,30 @@ func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 
 func reasoningProfileForModel(provider string, model string) reasoningProfile {
 	fallback := inferredReasoningProfile(provider, model)
-	if caps, found := modelproviders.LookupSuggestedModelCapabilities(provider, model); found {
+	if caps, found := lookupSuggestedCatalogModelCapabilities(provider, model); found {
 		profile := reasoningProfile{
-			Mode:             modelproviders.NormalizeReasoningMode(caps.ReasoningMode),
+			Mode:             normalizeCatalogReasoningMode(caps.ReasoningMode),
 			SupportedEfforts: normalizeReasoningLevels(caps.ReasoningEfforts),
 			DefaultEffort:    normalizeReasoningEffort(caps.DefaultReasoningEffort),
 		}
 		if profile.Mode != "" {
-			if profile.Mode == modelproviders.ReasoningModeNone && fallback.Mode != modelproviders.ReasoningModeNone {
+			if profile.Mode == reasoningModeNone && fallback.Mode != reasoningModeNone {
 				return fallback
 			}
-			if profile.Mode == modelproviders.ReasoningModeToggle && fallback.Mode == modelproviders.ReasoningModeEffort {
+			if profile.Mode == reasoningModeToggle && fallback.Mode == reasoningModeEffort {
 				return fallback
 			}
-			if profile.Mode == modelproviders.ReasoningModeEffort && len(profile.SupportedEfforts) == 0 && len(fallback.SupportedEfforts) > 0 {
+			if profile.Mode == reasoningModeEffort && len(profile.SupportedEfforts) == 0 && len(fallback.SupportedEfforts) > 0 {
 				profile.SupportedEfforts = append([]string(nil), fallback.SupportedEfforts...)
 			}
-			if profile.Mode == modelproviders.ReasoningModeEffort && profile.DefaultEffort == "" {
+			if profile.Mode == reasoningModeEffort && profile.DefaultEffort == "" {
 				if fallback.DefaultEffort != "" {
 					profile.DefaultEffort = fallback.DefaultEffort
 				} else if len(profile.SupportedEfforts) > 0 {
 					profile.DefaultEffort = profile.SupportedEfforts[0]
 				}
 			}
-			if profile.Mode != modelproviders.ReasoningModeEffort {
+			if profile.Mode != reasoningModeEffort {
 				profile.SupportedEfforts = nil
 				profile.DefaultEffort = ""
 			}
@@ -239,20 +239,20 @@ func inferredReasoningProfile(provider string, model string) reasoningProfile {
 	model = strings.ToLower(strings.TrimSpace(model))
 	switch {
 	case strings.Contains(provider, "deepseek") || strings.HasPrefix(model, "deepseek-"):
-		return reasoningProfile{Mode: modelproviders.ReasoningModeToggle}
+		return reasoningProfile{Mode: reasoningModeToggle}
 	case provider == "xiaomi" || provider == "mimo" || strings.Contains(model, "mimo"):
-		return reasoningProfile{Mode: modelproviders.ReasoningModeToggle}
+		return reasoningProfile{Mode: reasoningModeToggle}
 	case provider == "gemini" || strings.HasPrefix(model, "gemini-"):
-		return reasoningProfile{Mode: modelproviders.ReasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
+		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
 	case provider == "anthropic" || strings.HasPrefix(model, "claude-"):
-		return reasoningProfile{Mode: modelproviders.ReasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
+		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
 	case strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"):
 		efforts := []string{"low", "medium", "high"}
 		if strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
 			efforts = append(efforts, "xhigh")
 		}
-		return reasoningProfile{Mode: modelproviders.ReasoningModeEffort, SupportedEfforts: efforts, DefaultEffort: "medium"}
+		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: efforts, DefaultEffort: "medium"}
 	default:
-		return reasoningProfile{Mode: modelproviders.ReasoningModeNone}
+		return reasoningProfile{Mode: reasoningModeNone}
 	}
 }

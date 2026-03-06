@@ -889,7 +889,7 @@ func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	model = strings.TrimSpace(model)
 
-	contextWindowTokens = modelproviders.DefaultModelCapabilities().ContextWindowTokens
+	contextWindowTokens = defaultCatalogModelCapabilities().ContextWindowTokens
 	maxOutputTokens = 4096
 	if tpl, ok := findProviderTemplate(provider); ok {
 		if tpl.defaultContextToken > 0 {
@@ -898,7 +898,7 @@ func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens
 		maxOutputTokens = defaultMaxOutputForTemplate(tpl)
 	}
 
-	if caps, ok := modelproviders.LookupDynamicModelCapabilities(provider, model); ok {
+	if caps, ok := lookupDynamicCatalogCapabilities(provider, model); ok {
 		if caps.ContextWindowTokens > 0 {
 			contextWindowTokens = caps.ContextWindowTokens
 		}

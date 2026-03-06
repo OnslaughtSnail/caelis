@@ -17,16 +17,12 @@ type policyHistoryCtx struct {
 	events []*session.Event
 }
 
-func (c policyHistoryCtx) History() []*session.Event {
-	out := make([]*session.Event, 0, len(c.events))
-	for _, ev := range c.events {
-		if ev == nil {
-			continue
-		}
-		cp := *ev
-		out = append(out, &cp)
-	}
-	return out
+func (c policyHistoryCtx) Events() session.Events {
+	return session.NewEvents(c.events)
+}
+
+func (c policyHistoryCtx) ReadonlyState() session.ReadonlyState {
+	return session.NewReadonlyState(nil)
 }
 
 func TestRequireReadBeforeWrite_DeniesWithoutReadEvidence(t *testing.T) {

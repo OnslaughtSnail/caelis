@@ -119,6 +119,40 @@ func TestRouteCommandExecution_InvalidSandboxPermissionDenied(t *testing.T) {
 	}
 }
 
+func TestRouteCommandExecution_RequireEscalatedBoolAccepted(t *testing.T) {
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    testSandboxTypeForPolicy(),
+		SandboxRunner:  noopCommandRunner{},
+		HostRunner:     noopCommandRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := RouteCommandExecution(CommandExecutionConfig{Runtime: rt})
+	in, err := hook.BeforeTool(context.Background(), ToolInput{
+		Call: model.ToolCall{
+			Name: "BASH",
+			Args: `{"command":"python3 app.py","require_escalated":true}`,
+		},
+		Args: map[string]any{
+			"command":            "python3 app.py",
+			"require_escalated":  true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Decision = NormalizeDecision(in.Decision)
+	if in.Decision.Effect != DecisionEffectRequireApproval {
+		t.Fatalf("expected require_approval decision, got %q", in.Decision.Effect)
+	}
+	route, ok := DecisionRouteFromMetadata(in.Decision)
+	if !ok || route != DecisionRouteHost {
+		t.Fatalf("expected host route metadata, got route=%q ok=%v", route, ok)
+	}
+}
+
 func TestDetectDestructiveCommand(t *testing.T) {
 	cases := []struct {
 		cmd             string

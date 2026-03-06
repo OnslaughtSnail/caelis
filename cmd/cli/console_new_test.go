@@ -60,6 +60,25 @@ func TestHandleNew_ClearsTUIHistoryInsteadOfPrintingBranchMessage(t *testing.T) 
 	if _, ok := sender.msgs[0].(tuievents.ClearHistoryMsg); !ok {
 		t.Fatalf("expected first TUI message ClearHistoryMsg, got %T", sender.msgs[0])
 	}
+	var hint tuievents.SetHintMsg
+	var foundHint bool
+	for _, raw := range sender.msgs {
+		msg, ok := raw.(tuievents.SetHintMsg)
+		if !ok {
+			continue
+		}
+		hint = msg
+		foundHint = true
+	}
+	if !foundHint {
+		t.Fatal("expected transient new-session hint")
+	}
+	if hint.Hint != "started new session" {
+		t.Fatalf("unexpected hint text %q", hint.Hint)
+	}
+	if hint.ClearAfter <= 0 {
+		t.Fatalf("expected new-session hint to auto-clear, got %s", hint.ClearAfter)
+	}
 }
 
 func TestHandleFork_StartsNewSessionFromCurrent(t *testing.T) {
@@ -92,6 +111,9 @@ func TestHandleFork_KeepTokenUsageAndNoSessionIDInHint(t *testing.T) {
 		switch msg := raw.(type) {
 		case tuievents.SetHintMsg:
 			hint = msg.Hint
+			if msg.ClearAfter <= 0 {
+				t.Fatalf("expected fork hint to auto-clear, got %s", msg.ClearAfter)
+			}
 		case tuievents.ClearHistoryMsg:
 			t.Fatal("did not expect /fork to clear history")
 		}

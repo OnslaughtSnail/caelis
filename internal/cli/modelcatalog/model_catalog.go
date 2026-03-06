@@ -1,7 +1,9 @@
-package providers
+package modelcatalog
 
 import (
 	"strings"
+
+	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
 // ModelCapabilities describes known capabilities and limits for a specific model.
@@ -454,11 +456,11 @@ func lookupBuiltin(provider, modelName string) (ModelCapabilities, bool) {
 	return out, true
 }
 
-// ApplyModelCatalog enriches the given Config with capabilities from the
+// ApplyConfigDefaults enriches the given provider config with capabilities from the
 // built-in catalog when the config does not already have explicit values.
 // This is called when registering a provider config so that runtime parameters
 // are automatically filled in for known models.
-func ApplyModelCatalog(cfg *Config) {
+func ApplyConfigDefaults(cfg *modelproviders.Config) {
 	if cfg == nil {
 		return
 	}

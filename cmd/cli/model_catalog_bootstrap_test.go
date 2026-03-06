@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	"github.com/OnslaughtSnail/caelis/internal/cli/modelcatalog"
 )
 
 func TestRefreshModelCatalogForConnect_UsesTTL(t *testing.T) {
@@ -14,10 +14,10 @@ func TestRefreshModelCatalogForConnect_UsesTTL(t *testing.T) {
 	prevLast := lastModelCatalogRefresh
 	lastModelCatalogRefresh = time.Time{}
 	calls := 0
-	initModelCatalogFn = func(baseCtx context.Context) modelproviders.CatalogInitStatus {
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
 		calls++
 		lastModelCatalogRefresh = time.Now()
-		return modelproviders.CatalogInitStatus{RemoteFetched: true}
+		return modelcatalog.CatalogInitStatus{RemoteFetched: true}
 	}
 	connectModelCatalogRefreshFn = refreshModelCatalogForConnect
 	t.Cleanup(func() {

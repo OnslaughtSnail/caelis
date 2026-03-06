@@ -154,12 +154,30 @@ func TestNew_DefaultRequireEscalatedForcesHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decision := rt.DecideRoute("ls -la", SandboxPermissionRequireEscalated)
+	decision := rt.DecideRoute("python3 app.py", SandboxPermissionRequireEscalated)
 	if decision.Route != ExecutionRouteHost {
 		t.Fatalf("expected host route, got %q", decision.Route)
 	}
 	if decision.Escalation == nil {
 		t.Fatal("expected escalation reason")
+	}
+}
+
+func TestNew_DefaultRequireEscalatedWhitelistedCommandSkipsApproval(t *testing.T) {
+	rt, err := New(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    platformDefaultSandboxType(),
+		SandboxRunner:  noopRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := rt.DecideRoute("cd /tmp && ls -la *.png", SandboxPermissionRequireEscalated)
+	if decision.Route != ExecutionRouteHost {
+		t.Fatalf("expected host route, got %q", decision.Route)
+	}
+	if decision.Escalation != nil {
+		t.Fatalf("expected no escalation for whitelisted command, got %+v", decision.Escalation)
 	}
 }
 

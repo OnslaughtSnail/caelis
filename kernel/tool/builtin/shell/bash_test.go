@@ -16,6 +16,7 @@ type recordingRunner struct {
 	result toolexec.CommandResult
 	err    error
 	calls  []toolexec.CommandRequest
+	onRun  func(toolexec.CommandRequest)
 }
 
 func testSandboxType() string {
@@ -28,6 +29,9 @@ func testSandboxType() string {
 func (r *recordingRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
 	_ = ctx
 	r.calls = append(r.calls, req)
+	if r.onRun != nil {
+		r.onRun(req)
+	}
 	return r.result, r.err
 }
 
@@ -90,6 +94,49 @@ func TestBash_DefaultSafeCommandRunsInSandbox(t *testing.T) {
 	}
 	if out["stdout"] != "sandbox-ok" {
 		t.Fatalf("unexpected stdout: %v", out["stdout"])
+	}
+}
+
+func TestBash_StreamsCommandOutputThroughContext(t *testing.T) {
+	var got []toolexec.OutputChunk
+	sandbox := &recordingRunner{
+		result: toolexec.CommandResult{Stdout: "done"},
+		onRun: func(req toolexec.CommandRequest) {
+			if req.OnOutput == nil {
+				t.Fatal("expected output callback on command request")
+			}
+			req.OnOutput(toolexec.CommandOutputChunk{Stream: "stdout", Text: "line-1\n"})
+			req.OnOutput(toolexec.CommandOutputChunk{Stream: "stderr", Text: "warn-1\n"})
+		},
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		HostRunner:     &recordingRunner{},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := toolexec.WithToolCallInfo(context.Background(), BashToolName, "call-1")
+	ctx = toolexec.WithOutputStreamer(ctx, toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
+		got = append(got, chunk)
+	}))
+	if _, err := tool.Run(ctx, map[string]any{"command": "echo hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 streamed output chunks, got %d", len(got))
+	}
+	if got[0].ToolName != BashToolName || got[0].ToolCallID != "call-1" || got[0].Stream != "stdout" {
+		t.Fatalf("unexpected first output chunk: %+v", got[0])
+	}
+	if got[1].Stream != "stderr" || strings.TrimSpace(got[1].Text) != "warn-1" {
+		t.Fatalf("unexpected second output chunk: %+v", got[1])
 	}
 }
 
@@ -199,7 +246,7 @@ func TestBash_DefaultRequireEscalatedForcesHostApproval(t *testing.T) {
 	}
 	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: true})
 	out, err := tool.Run(ctx, map[string]any{
-		"command":             "ls",
+		"command":             "python3 app.py",
 		"sandbox_permissions": "require_escalated",
 	})
 	if err != nil {
@@ -212,6 +259,75 @@ func TestBash_DefaultRequireEscalatedForcesHostApproval(t *testing.T) {
 		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
 	}
 	if out["stdout"] != "host-approved" {
+		t.Fatalf("unexpected stdout: %v", out["stdout"])
+	}
+}
+
+func TestBash_RequireEscalatedBoolForcesHostApproval(t *testing.T) {
+	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-approved"}}
+	sandbox := &recordingRunner{}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		HostRunner:     host,
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: true})
+	out, err := tool.Run(ctx, map[string]any{
+		"command":            "python3 app.py",
+		"require_escalated":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(host.calls) != 1 {
+		t.Fatalf("expected host runner called once, got %d", len(host.calls))
+	}
+	if len(sandbox.calls) != 0 {
+		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	}
+	if out["stdout"] != "host-approved" {
+		t.Fatalf("unexpected stdout: %v", out["stdout"])
+	}
+}
+
+func TestBash_RequireEscalatedWhitelistedCommandSkipsApproval(t *testing.T) {
+	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-whitelisted"}}
+	sandbox := &recordingRunner{}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		HostRunner:     host,
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), map[string]any{
+		"command":            "cd /tmp && ls -la *.png",
+		"require_escalated":  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(host.calls) != 1 {
+		t.Fatalf("expected host runner called once, got %d", len(host.calls))
+	}
+	if len(sandbox.calls) != 0 {
+		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	}
+	if out["stdout"] != "host-whitelisted" {
 		t.Fatalf("unexpected stdout: %v", out["stdout"])
 	}
 }
@@ -234,7 +350,7 @@ func TestBash_DefaultRequireEscalatedDeniedStopsExecution(t *testing.T) {
 	}
 	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: false})
 	_, err = tool.Run(ctx, map[string]any{
-		"command":             "ls",
+		"command":             "python3 app.py",
 		"sandbox_permissions": "require_escalated",
 	})
 	if err == nil {

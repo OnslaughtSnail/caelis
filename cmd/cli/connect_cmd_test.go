@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/modelcatalog"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
@@ -169,8 +170,8 @@ func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 			{Name: "deepseek-reasoner"},
 		}, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelproviders.CatalogInitStatus {
-		return modelproviders.InitModelCatalogWithStatus(context.Background(), &http.Client{
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				return nil, io.EOF
 			}),
@@ -217,8 +218,8 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return nil, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelproviders.CatalogInitStatus {
-		return modelproviders.InitModelCatalogWithStatus(context.Background(), &http.Client{
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				return nil, io.EOF
 			}),
@@ -230,7 +231,7 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	})
 
 	prompter := &stubChoicePrompter{
-		choices: []string{"openai", connectCustomModelValue, modelproviders.ReasoningModeEffort, "low,high"},
+		choices: []string{"openai", connectCustomModelValue, reasoningModeEffort, "low,high"},
 		lines:   []string{"sk-test", "gpt-custom", "", "", "minimal,xhigh"},
 	}
 	var out bytes.Buffer
@@ -252,7 +253,7 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	if cfg.ContextWindowTokens != 128000 || cfg.MaxOutputTok != 4096 {
 		t.Fatalf("unexpected advanced defaults %+v", cfg)
 	}
-	if cfg.ReasoningMode != modelproviders.ReasoningModeEffort {
+	if cfg.ReasoningMode != reasoningModeEffort {
 		t.Fatalf("expected reasoning mode effort, got %q", cfg.ReasoningMode)
 	}
 	wantEfforts := []string{"low", "high", "minimal", "xhigh"}

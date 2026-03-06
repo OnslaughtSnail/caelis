@@ -1,11 +1,11 @@
-package providers
+package modelcatalog
 
 // model_catalog_remote.go
 //
 // Dynamic model capability catalog:
 //   Priority (highest to lowest):
 //     1. Local override file  (~/.agents/model_capabilities.json, user-editable)
-//     2. Remote live data     (https://models.dev/api.json, fetched at startup)
+//     2. Remote live data     (https://models.dev/api.json, fetched on demand by the app layer)
 //     3. Embedded snapshot    (models_dev_snapshot.json, shipped in binary)
 //     4. Hard-coded catalog   (builtinCatalog in model_catalog.go, final fallback)
 //

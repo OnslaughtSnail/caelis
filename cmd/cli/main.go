@@ -193,8 +193,6 @@ func runCLI(ctx context.Context, args []string) error {
 	if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntime); err != nil {
 		return err
 	}
-	_ = initModelCatalogForCLI(ctx)
-
 	resolved, err := bootstrap.Assemble(ctx, bootstrap.AssembleSpec{
 		Registry:        pluginRegistry,
 		ToolProviders:   splitCSV(*toolProviders),
@@ -211,6 +209,7 @@ func runCLI(ctx context.Context, args []string) error {
 	factory := modelproviders.NewFactory()
 	for _, providerCfg := range configStore.ProviderConfigs() {
 		providerCfg = hydrateProviderAuthToken(providerCfg, credentials)
+		modelcatalogApplyConfigDefaults(&providerCfg)
 		if registerErr := factory.Register(providerCfg); registerErr != nil {
 			fmt.Fprintf(os.Stderr, "warn: skip provider %q: %v\n", providerCfg.Alias, registerErr)
 		}
@@ -495,10 +494,11 @@ func buildRuntimePromptHint(execRuntime toolexec.Runtime) string {
 			if reason := strings.TrimSpace(execRuntime.FallbackReason()); reason != "" {
 				lines = append(lines, fmt.Sprintf("- Fallback reason: %s", truncateInline(reason, 160)))
 			}
-			lines = append(lines, "- Approval UX: y=allow once, a=allow this command for current session, n=cancel current run.")
+			lines = append(lines, "- Escalation: use require_escalated=true only when sandbox limits are blocking a necessary next step.")
 		} else {
-			lines = append(lines, "- Rule: commands run in sandbox by default; only require_escalated requests need host approval.")
-			lines = append(lines, "- Approval UX: host escalation uses y/a/n; denied approval stops current run and returns control to user.")
+			lines = append(lines, "- Rule: commands run in sandbox by default; use require_escalated=true only when sandbox limits are blocking a necessary next step.")
+			lines = append(lines, "- Escalate for cases like browser/GUI launch, downloads that sandbox blocks, or writes/access outside sandbox; do not escalate preemptively.")
+			lines = append(lines, "- Safe inspection commands may auto-pass host escalation without user approval.")
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -627,14 +627,14 @@ func parseReasoning(mode string, budget int, effort string, provider string, mod
 	}
 	profile := reasoningProfileForModel(provider, modelName)
 	switch profile.Mode {
-	case modelproviders.ReasoningModeNone:
+	case reasoningModeNone:
 		cfg.Enabled = nil
 		cfg.Effort = ""
 		cfg.BudgetTokens = 0
-	case modelproviders.ReasoningModeToggle:
+	case reasoningModeToggle:
 		cfg.Effort = ""
-	case modelproviders.ReasoningModeEffort:
-		if cfg.Effort != "" && !modelproviders.SupportsReasoningEffortList(profile.SupportedEfforts, cfg.Effort) {
+	case reasoningModeEffort:
+		if cfg.Effort != "" && !catalogSupportsReasoningEffortList(profile.SupportedEfforts, cfg.Effort) {
 			cfg.Effort = profile.DefaultEffort
 		}
 		if cfg.Enabled != nil && *cfg.Enabled && cfg.Effort == "" {

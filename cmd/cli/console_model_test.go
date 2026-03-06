@@ -37,6 +37,7 @@ func TestHandleModel_UpdatesReasoningAndPersists(t *testing.T) {
 	}
 
 	factory := modelproviders.NewFactory()
+	modelcatalogApplyConfigDefaults(&cfg)
 	if err := factory.Register(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -113,9 +114,11 @@ func TestHandleModel_InvalidReasoningDoesNotSwitchModel(t *testing.T) {
 	}
 
 	factory := modelproviders.NewFactory()
+	modelcatalogApplyConfigDefaults(&openaiCfg)
 	if err := factory.Register(openaiCfg); err != nil {
 		t.Fatal(err)
 	}
+	modelcatalogApplyConfigDefaults(&deepseekCfg)
 	if err := factory.Register(deepseekCfg); err != nil {
 		t.Fatal(err)
 	}

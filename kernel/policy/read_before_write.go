@@ -98,14 +98,14 @@ func pathArgFromToolCall(args map[string]any) string {
 }
 
 func hasReadEvidence(ctx context.Context, readToolName string, targetPath string) bool {
-	type historyReader interface {
-		History() []*session.Event
+	type eventReader interface {
+		Events() session.Events
 	}
-	h, ok := ctx.(historyReader)
+	h, ok := ctx.(eventReader)
 	if !ok {
 		return false
 	}
-	for _, ev := range h.History() {
+	for ev := range h.Events().All() {
 		if ev == nil || ev.Message.ToolResponse == nil {
 			continue
 		}

@@ -1,4 +1,4 @@
-package providers
+package modelcatalog
 
 import (
 	"encoding/json"

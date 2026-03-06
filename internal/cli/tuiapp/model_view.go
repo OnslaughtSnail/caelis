@@ -459,21 +459,22 @@ func (m *Model) pendingQueueHintText() string {
 
 func (m *Model) renderHintArea() string {
 	w := maxInt(1, m.width)
+	blank := m.theme.HintStyle().Width(w).Render("")
 	text := strings.TrimSpace(m.buildHintText())
 	if text == "" {
-		return m.theme.HintStyle().Render(" ")
+		return blank + "\n" + blank
 	}
 	if w <= 2 {
 		if displayColumns(text) > w {
 			text = sliceByDisplayColumns(text, 0, w)
 		}
-		return m.theme.HintStyle().Render(text)
+		return blank + "\n" + m.theme.HintStyle().Width(w).Render(text)
 	}
 	maxTextWidth := w - 2
 	if displayColumns(text) > maxTextWidth {
 		text = sliceByDisplayColumns(text, 0, maxTextWidth)
 	}
-	return m.theme.HintStyle().Render("  " + text)
+	return blank + "\n" + m.theme.HintStyle().Width(w).Render("  "+text)
 }
 
 func (m *Model) renderInputBar() string {
@@ -683,19 +684,19 @@ func (m *Model) promptHintText() string {
 	if len(m.activePrompt.choices) > 0 {
 		if m.activePrompt.filterable {
 			if m.activePrompt.multiSelect {
-				return text + "，输入关键字过滤，空格勾选"
+				return text + "; type to filter, Space to toggle"
 			}
-			return text + "，输入关键字过滤"
+			return text + "; type to filter"
 		}
 		if m.activePrompt.multiSelect {
-			return text + "，空格勾选"
+			return text + "; Space to toggle"
 		}
 		return text
 	}
 	if text == "" {
-		return "输入内容"
+		return "Enter a value"
 	}
-	return "输入 " + text
+	return "Enter " + text
 }
 
 func (m *Model) adjustTextareaHeight() {

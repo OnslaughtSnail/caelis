@@ -148,7 +148,7 @@ func TestUI_ApprovalSessionNote(t *testing.T) {
 	u := testUI(&buf)
 	u.ApprovalSessionNote("go test")
 	got := buf.String()
-	if !strings.Contains(got, "Added to session allowlist: go test") {
+	if !strings.Contains(got, "Allowed for the rest of this session: go test") {
 		t.Fatalf("unexpected ApprovalSessionNote output: %q", got)
 	}
 }

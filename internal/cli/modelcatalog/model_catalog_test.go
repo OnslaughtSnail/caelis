@@ -1,7 +1,9 @@
-package providers
+package modelcatalog
 
 import (
 	"testing"
+
+	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
 func TestLookupModelCapabilities_ExactMatch(t *testing.T) {
@@ -129,12 +131,12 @@ func TestLookupModelCapabilities_Gemini(t *testing.T) {
 	}
 }
 
-func TestApplyModelCatalog_FillsDefaults(t *testing.T) {
-	cfg := &Config{
+func TestApplyConfigDefaults_FillsDefaults(t *testing.T) {
+	cfg := &modelproviders.Config{
 		Provider: "deepseek",
 		Model:    "deepseek-chat",
 	}
-	ApplyModelCatalog(cfg)
+	ApplyConfigDefaults(cfg)
 	if cfg.ContextWindowTokens != 128000 {
 		t.Fatalf("expected context 128000, got %d", cfg.ContextWindowTokens)
 	}
@@ -144,14 +146,14 @@ func TestApplyModelCatalog_FillsDefaults(t *testing.T) {
 	}
 }
 
-func TestApplyModelCatalog_DoesNotOverrideExplicit(t *testing.T) {
-	cfg := &Config{
+func TestApplyConfigDefaults_DoesNotOverrideExplicit(t *testing.T) {
+	cfg := &modelproviders.Config{
 		Provider:            "deepseek",
 		Model:               "deepseek-chat",
 		ContextWindowTokens: 64000,
 		MaxOutputTok:        8192,
 	}
-	ApplyModelCatalog(cfg)
+	ApplyConfigDefaults(cfg)
 	if cfg.ContextWindowTokens != 64000 {
 		t.Fatalf("should not override explicit context, got %d", cfg.ContextWindowTokens)
 	}
@@ -160,12 +162,12 @@ func TestApplyModelCatalog_DoesNotOverrideExplicit(t *testing.T) {
 	}
 }
 
-func TestApplyModelCatalog_UnknownModelGetsDefaults(t *testing.T) {
-	cfg := &Config{
+func TestApplyConfigDefaults_UnknownModelGetsDefaults(t *testing.T) {
+	cfg := &modelproviders.Config{
 		Provider: "some-provider",
 		Model:    "unknown-model",
 	}
-	ApplyModelCatalog(cfg)
+	ApplyConfigDefaults(cfg)
 	defaults := DefaultModelCapabilities()
 	if cfg.ContextWindowTokens != defaults.ContextWindowTokens {
 		t.Fatalf("expected default context %d, got %d", defaults.ContextWindowTokens, cfg.ContextWindowTokens)
@@ -175,12 +177,12 @@ func TestApplyModelCatalog_UnknownModelGetsDefaults(t *testing.T) {
 	}
 }
 
-func TestApplyModelCatalog_DeepSeekReasoner(t *testing.T) {
-	cfg := &Config{
+func TestApplyConfigDefaults_DeepSeekReasoner(t *testing.T) {
+	cfg := &modelproviders.Config{
 		Provider: "deepseek",
 		Model:    "deepseek-reasoner",
 	}
-	ApplyModelCatalog(cfg)
+	ApplyConfigDefaults(cfg)
 	if cfg.ContextWindowTokens != 128000 {
 		t.Fatalf("expected context 128000, got %d", cfg.ContextWindowTokens)
 	}

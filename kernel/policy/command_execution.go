@@ -62,7 +62,7 @@ func (h commandExecutionHook) BeforeTool(ctx context.Context, in ToolInput) (Too
 		}
 		return in, nil
 	}
-	permission, err := parseSandboxPermissionArg(args["sandbox_permissions"])
+	permission, err := parseSandboxPermissionArgs(args)
 	if err != nil {
 		in.Decision = Decision{
 			Effect: DecisionEffectDeny,
@@ -122,8 +122,18 @@ func (h commandExecutionHook) BeforeOutput(ctx context.Context, out Output) (Out
 	return out, nil
 }
 
-func parseSandboxPermissionArg(raw any) (toolexec.SandboxPermission, error) {
-	value, _ := raw.(string)
+func parseSandboxPermissionArgs(args map[string]any) (toolexec.SandboxPermission, error) {
+	if raw, ok := args["require_escalated"]; ok && raw != nil {
+		value, ok := raw.(bool)
+		if !ok {
+			return "", fmt.Errorf("invalid require_escalated %v", raw)
+		}
+		if value {
+			return toolexec.SandboxPermissionRequireEscalated, nil
+		}
+		return toolexec.SandboxPermissionAuto, nil
+	}
+	value, _ := args["sandbox_permissions"].(string)
 	switch toolexec.SandboxPermission(strings.TrimSpace(strings.ToLower(value))) {
 	case "", toolexec.SandboxPermissionAuto:
 		return toolexec.SandboxPermissionAuto, nil

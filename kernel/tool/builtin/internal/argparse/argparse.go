@@ -6,6 +6,19 @@ import (
 	"strings"
 )
 
+// Bool reads boolean arg by key.
+func Bool(args map[string]any, key string, defaultValue bool) (bool, error) {
+	raw, ok := args[key]
+	if !ok || raw == nil {
+		return defaultValue, nil
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return false, fmt.Errorf("tool: arg %q must be boolean", key)
+	}
+	return value, nil
+}
+
 // String reads string arg by key.
 func String(args map[string]any, key string, required bool) (string, error) {
 	raw, ok := args[key]
