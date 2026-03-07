@@ -16,7 +16,10 @@ func cliTestSandboxType() string {
 	if runtime.GOOS == "darwin" {
 		return "seatbelt"
 	}
-	return "docker"
+	if runtime.GOOS == "linux" {
+		return "landlock"
+	}
+	return "bwrap"
 }
 
 func (noopCommandRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
@@ -34,7 +37,7 @@ func (failingProbeRunner) Run(ctx context.Context, req toolexec.CommandRequest) 
 }
 
 func (failingProbeRunner) Probe(context.Context) error {
-	return errors.New("docker is unavailable")
+	return errors.New("sandbox is unavailable")
 }
 
 func TestRejectRemovedExecutionFlags(t *testing.T) {
@@ -62,7 +65,7 @@ func TestRejectRemovedExecutionFlags(t *testing.T) {
 }
 
 func TestRejectRemovedExecutionFlags_AcceptsNewFlags(t *testing.T) {
-	err := rejectRemovedExecutionFlags([]string{"-permission-mode=default", "-sandbox-type=docker"})
+	err := rejectRemovedExecutionFlags([]string{"-permission-mode=default", "-sandbox-type=landlock"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -3,6 +3,7 @@ package execenv
 import (
 	"context"
 	"errors"
+	"reflect"
 	stdruntime "runtime"
 	"strings"
 	"testing"
@@ -56,7 +57,10 @@ func platformDefaultSandboxType() string {
 	if strings.EqualFold(runtimeGOOS, "darwin") {
 		return seatbeltSandboxType
 	}
-	return dockerSandboxType
+	if strings.EqualFold(runtimeGOOS, "linux") {
+		return landlockSandboxType
+	}
+	return bwrapSandboxType
 }
 
 func (f staticFactory) Type() string {
@@ -223,6 +227,22 @@ func TestNew_DefaultDerivesWorkspaceWritePolicy(t *testing.T) {
 	}
 }
 
+func TestSandboxTypeCandidatesForPlatform_LinuxDefaultUsesLandlockOnly(t *testing.T) {
+	got := sandboxTypeCandidatesForPlatform("", "linux")
+	want := []string{landlockSandboxType}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected linux default candidates: got=%v want=%v", got, want)
+	}
+}
+
+func TestSandboxTypeCandidatesForPlatform_LinuxExplicitBwrap(t *testing.T) {
+	got := sandboxTypeCandidatesForPlatform(bwrapSandboxType, "linux")
+	want := []string{bwrapSandboxType}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected linux bwrap candidates: got=%v want=%v", got, want)
+	}
+}
+
 func TestNew_FullControlDerivesDangerFullPolicy(t *testing.T) {
 	rt, err := New(Config{PermissionMode: PermissionModeFullControl})
 	if err != nil {
@@ -271,9 +291,11 @@ func TestNew_DefaultSandboxTypeFollowsPlatform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := dockerSandboxType
+	want := bwrapSandboxType
 	if stdruntime.GOOS == "darwin" {
 		want = seatbeltSandboxType
+	} else if stdruntime.GOOS == "linux" {
+		want = landlockSandboxType
 	}
 	if rt.SandboxType() != want {
 		t.Fatalf("expected default sandbox type %q, got %q", want, rt.SandboxType())
@@ -290,50 +312,13 @@ func TestNew_DarwinSeatbeltUnavailableFallsBackToHost(t *testing.T) {
 			typ:    seatbeltSandboxType,
 			runner: probeRunner{probeErr: errors.New("seatbelt unavailable")},
 		},
-		dockerSandboxType: staticFactory{
-			typ:    dockerSandboxType,
+		landlockSandboxType: staticFactory{
+			typ:    landlockSandboxType,
 			runner: noopRunner{},
 		},
-	}
-	sandboxFactoriesMu.Unlock()
-	defer func() {
-		runtimeGOOS = oldGoos
-		sandboxFactoriesMu.Lock()
-		sandboxFactories = oldFactories
-		sandboxFactoriesMu.Unlock()
-	}()
-
-	rt, err := New(Config{
-		PermissionMode: PermissionModeDefault,
-		SandboxType:    seatbeltSandboxType,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !rt.FallbackToHost() {
-		t.Fatalf("expected host fallback when seatbelt is unavailable, got sandbox=%s", rt.SandboxType())
-	}
-	if rt.SandboxType() != seatbeltSandboxType {
-		t.Fatalf("expected sandbox type %q, got %q", seatbeltSandboxType, rt.SandboxType())
-	}
-	if !strings.Contains(rt.FallbackReason(), "seatbelt") {
-		t.Fatalf("expected seatbelt reason in fallback, got %q", rt.FallbackReason())
-	}
-}
-
-func TestNew_DarwinDefaultSeatbeltUnavailableFallbackToHost(t *testing.T) {
-	oldGoos := runtimeGOOS
-	oldFactories := sandboxFactories
-	runtimeGOOS = "darwin"
-	sandboxFactoriesMu.Lock()
-	sandboxFactories = map[string]SandboxFactory{
-		seatbeltSandboxType: staticFactory{
-			typ:    seatbeltSandboxType,
-			runner: probeRunner{probeErr: errors.New("seatbelt unavailable")},
-		},
-		dockerSandboxType: staticFactory{
-			typ:    dockerSandboxType,
-			runner: probeRunner{probeErr: errors.New("docker unavailable")},
+		bwrapSandboxType: staticFactory{
+			typ:    bwrapSandboxType,
+			runner: noopRunner{},
 		},
 	}
 	sandboxFactoriesMu.Unlock()
@@ -365,10 +350,12 @@ func TestSandboxTypeCandidatesForPlatform(t *testing.T) {
 		expected []string
 	}{
 		{name: "darwin default", request: "", goos: "darwin", expected: []string{"seatbelt"}},
-		{name: "linux default", request: "", goos: "linux", expected: []string{"docker"}},
+		{name: "linux default", request: "", goos: "linux", expected: []string{"landlock"}},
 		{name: "darwin explicit seatbelt", request: "seatbelt", goos: "darwin", expected: []string{"seatbelt"}},
-		{name: "darwin explicit docker", request: "docker", goos: "darwin", expected: nil},
-		{name: "linux explicit seatbelt", request: "seatbelt", goos: "linux", expected: []string{"seatbelt"}},
+		{name: "darwin explicit bwrap", request: "bwrap", goos: "darwin", expected: nil},
+		{name: "linux explicit landlock", request: "landlock", goos: "linux", expected: []string{"landlock"}},
+		{name: "linux explicit bwrap", request: "bwrap", goos: "linux", expected: []string{"bwrap"}},
+		{name: "linux explicit seatbelt", request: "seatbelt", goos: "linux", expected: nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,7 +372,7 @@ func TestSandboxTypeCandidatesForPlatform(t *testing.T) {
 	}
 }
 
-func TestNew_DarwinExplicitDockerUnsupported(t *testing.T) {
+func TestNew_DarwinExplicitBwrapUnsupported(t *testing.T) {
 	oldGoos := runtimeGOOS
 	runtimeGOOS = "darwin"
 	defer func() {
@@ -393,16 +380,38 @@ func TestNew_DarwinExplicitDockerUnsupported(t *testing.T) {
 	}()
 	_, err := New(Config{
 		PermissionMode: PermissionModeDefault,
-		SandboxType:    dockerSandboxType,
+		SandboxType:    bwrapSandboxType,
 		SandboxRunner:  noopRunner{},
 	})
 	if err == nil {
-		t.Fatal("expected explicit docker to be unsupported on darwin")
+		t.Fatal("expected explicit bwrap to be unsupported on darwin")
 	}
 	if !IsErrorCode(err, ErrorCodeSandboxUnsupported) {
 		t.Fatalf("expected error code %q, got %q", ErrorCodeSandboxUnsupported, ErrorCodeOf(err))
 	}
 	if !strings.Contains(err.Error(), "unsupported on darwin") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNew_LinuxExplicitSeatbeltUnsupported(t *testing.T) {
+	oldGoos := runtimeGOOS
+	runtimeGOOS = "linux"
+	defer func() {
+		runtimeGOOS = oldGoos
+	}()
+	_, err := New(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    seatbeltSandboxType,
+		SandboxRunner:  noopRunner{},
+	})
+	if err == nil {
+		t.Fatal("expected explicit seatbelt to be unsupported on linux")
+	}
+	if !IsErrorCode(err, ErrorCodeSandboxUnsupported) {
+		t.Fatalf("expected error code %q, got %q", ErrorCodeSandboxUnsupported, ErrorCodeOf(err))
+	}
+	if !strings.Contains(err.Error(), "unsupported on linux") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

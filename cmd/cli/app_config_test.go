@@ -117,7 +117,7 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 
 	if err := store2.SetRuntimeSettings(runtimeSettings{
 		PermissionMode: "full_control",
-		SandboxType:    "docker",
+		SandboxType:    "bwrap",
 	}); err != nil {
 		t.Fatal(err)
 	}

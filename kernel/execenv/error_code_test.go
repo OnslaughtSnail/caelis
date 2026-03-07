@@ -22,7 +22,7 @@ func TestErrorCode_RuntimeUnsupportedSandboxType(t *testing.T) {
 	defer func() {
 		runtimeGOOS = oldGoos
 	}()
-	_, err := New(Config{PermissionMode: PermissionModeDefault, SandboxType: "docker"})
+	_, err := New(Config{PermissionMode: PermissionModeDefault, SandboxType: "bwrap"})
 	if err == nil {
 		t.Fatal("expected unsupported sandbox error")
 	}

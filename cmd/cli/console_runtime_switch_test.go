@@ -15,6 +15,25 @@ type closeableSwitchRunner struct {
 	closed int
 }
 
+type fakeRuntime struct {
+	permissionMode toolexec.PermissionMode
+	sandboxType    string
+	fallbackToHost bool
+	fallbackReason string
+}
+
+func (r fakeRuntime) PermissionMode() toolexec.PermissionMode { return r.permissionMode }
+func (r fakeRuntime) SandboxType() string                     { return r.sandboxType }
+func (r fakeRuntime) SandboxPolicy() toolexec.SandboxPolicy   { return toolexec.SandboxPolicy{} }
+func (r fakeRuntime) FallbackToHost() bool                    { return r.fallbackToHost }
+func (r fakeRuntime) FallbackReason() string                  { return r.fallbackReason }
+func (r fakeRuntime) FileSystem() toolexec.FileSystem         { return nil }
+func (r fakeRuntime) HostRunner() toolexec.CommandRunner      { return nil }
+func (r fakeRuntime) SandboxRunner() toolexec.CommandRunner   { return nil }
+func (r fakeRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
+	return toolexec.CommandDecision{}
+}
+
 func (r *closeableSwitchRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
 	_ = ctx
 	_ = req
@@ -27,6 +46,17 @@ func (r *closeableSwitchRunner) Close() error {
 }
 
 func TestHandlePermission_SwitchMode(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		return fakeRuntime{
+			permissionMode: cfg.PermissionMode,
+			sandboxType:    cfg.SandboxType,
+		}, nil
+	}
+
 	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
 	if err != nil {
 		t.Fatal(err)
@@ -76,12 +106,25 @@ func TestHandleSandbox_UnknownType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "unknown sandbox type") && !strings.Contains(err.Error(), "unsupported on darwin") {
+	if !strings.Contains(err.Error(), "unknown sandbox type") &&
+		!strings.Contains(err.Error(), "unsupported on darwin") &&
+		!strings.Contains(err.Error(), "unsupported on linux") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		return fakeRuntime{
+			permissionMode: cfg.PermissionMode,
+			sandboxType:    cfg.SandboxType,
+		}, nil
+	}
+
 	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +139,34 @@ func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 	}
 	if console.execRuntime.PermissionMode() != toolexec.PermissionModeFullControl {
 		t.Fatalf("expected mode to remain full_control, got %q", console.execRuntime.PermissionMode())
+	}
+}
+
+func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		return fakeRuntime{
+			permissionMode: cfg.PermissionMode,
+			sandboxType:    cfg.SandboxType,
+			fallbackToHost: true,
+			fallbackReason: "probe failed",
+		}, nil
+	}
+
+	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
+	_, err = handleSandbox(console, []string{"bwrap"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "is unavailable") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
