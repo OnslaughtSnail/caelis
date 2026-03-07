@@ -32,10 +32,10 @@ const (
 
 // SandboxPolicy is a backend-agnostic sandbox policy summary.
 type SandboxPolicy struct {
-	Type             SandboxPolicyType
-	NetworkAccess    bool
-	WritableRoots    []string
-	ReadOnlySubpaths []string
+	Type             SandboxPolicyType `json:"type"`
+	NetworkAccess    bool              `json:"network_access"`
+	WritableRoots    []string          `json:"writable_roots"`
+	ReadOnlySubpaths []string          `json:"read_only_subpaths"`
 }
 
 // ExecutionRoute indicates where one command should run.
