@@ -222,6 +222,11 @@ func (s *AsyncSession) readOutput(reader io.Reader, stream string, buffer *RingB
 func (s *AsyncSession) waitForExit() {
 	err := s.cmd.Wait()
 
+	// Ensure stdout/stderr reader goroutines have drained the pipes into the
+	// ring buffers before marking the session complete. Without this, callers
+	// can observe HasExited/Wait returning before the final output is readable.
+	s.readersWg.Wait()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

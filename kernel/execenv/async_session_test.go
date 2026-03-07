@@ -115,21 +115,21 @@ func TestAsyncSession_ReadOutput(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Wait for first output
-	time.Sleep(50 * time.Millisecond)
+	var marker1, marker2 int64
+	waitForCondition(t, time.Second, func() bool {
+		stdout, stderr, nextStdout, nextStderr := session.ReadOutput(0, 0)
+		t.Logf("ReadOutput poll: stdout=%q stderr=%q markers=%d,%d", string(stdout), string(stderr), nextStdout, nextStderr)
+		marker1, marker2 = nextStdout, nextStderr
+		return strings.Contains(string(stdout), "first")
+	})
 
-	stdout1, stderr1, marker1, marker2 := session.ReadOutput(0, 0)
-	t.Logf("First read: stdout=%q stderr=%q markers=%d,%d", string(stdout1), string(stderr1), marker1, marker2)
-
-	// Wait for more output
-	time.Sleep(200 * time.Millisecond)
+	if _, err := session.WaitWithTimeout(2 * time.Second); err != nil {
+		t.Fatalf("Wait failed: %v", err)
+	}
 
 	stdout2, _, _, _ := session.ReadOutput(marker1, marker2)
-	t.Logf("Second read: stdout=%q", string(stdout2))
-
-	session.WaitWithTimeout(2 * time.Second)
-
 	finalStdout, _ := session.ReadAllOutput()
+	t.Logf("Second read: stdout=%q final=%q", string(stdout2), finalStdout)
 	if !strings.Contains(finalStdout, "first") || !strings.Contains(finalStdout, "second") {
 		t.Fatalf("Expected both 'first' and 'second' in output, got %q", finalStdout)
 	}
