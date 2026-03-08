@@ -150,7 +150,8 @@ func TestSessionApprovalKey_KeepsExactTextForNonWhitelistedCommandFamily(t *test
 
 func TestTerminalApprover_ChoicePromptMakesAlwaysScopeExplicit(t *testing.T) {
 	editor := &stubChoiceEditor{response: "a"}
-	approver := newTerminalApprover(editor, io.Discard, nil)
+	var out strings.Builder
+	approver := newTerminalApprover(editor, &out, newUI(&out, true, false))
 
 	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{
 		ToolName: "BASH",
@@ -163,7 +164,7 @@ func TestTerminalApprover_ChoicePromptMakesAlwaysScopeExplicit(t *testing.T) {
 	if !allowed {
 		t.Fatal("expected approval to succeed")
 	}
-	if editor.lastPrompt != "Approve command?" {
+	if editor.lastPrompt != "Would you like to run the following command?" {
 		t.Fatalf("unexpected choice prompt text %q", editor.lastPrompt)
 	}
 	if editor.lastDefaultChoice != "y" {
@@ -172,14 +173,27 @@ func TestTerminalApprover_ChoicePromptMakesAlwaysScopeExplicit(t *testing.T) {
 	if len(editor.lastChoices) != 3 {
 		t.Fatalf("expected 3 explicit approval choices, got %d", len(editor.lastChoices))
 	}
-	if !strings.Contains(editor.lastChoices[1].Detail, "go test") {
+	if editor.lastChoices[0].Label != "proceed" || editor.lastChoices[0].Detail != "just this once" {
+		t.Fatalf("unexpected one-time approval choice %+v", editor.lastChoices[0])
+	}
+	if editor.lastChoices[1].Label != "session" || !strings.Contains(editor.lastChoices[1].Detail, "don't ask again for: go test") {
 		t.Fatalf("expected always choice detail to mention scoped key, got %+v", editor.lastChoices[1])
 	}
-	if !strings.Contains(editor.lastChoices[0].Detail, "Run once") {
-		t.Fatalf("expected allow choice to describe one-time approval, got %+v", editor.lastChoices[0])
+	if editor.lastChoices[2].Label != "cancel" || editor.lastChoices[2].Detail != "continue without it" {
+		t.Fatalf("unexpected cancel choice %+v", editor.lastChoices[2])
 	}
-	if !strings.Contains(editor.lastChoices[2].Detail, "Esc") {
-		t.Fatalf("expected deny choice to mention Esc, got %+v", editor.lastChoices[2])
+	rendered := out.String()
+	if !strings.Contains(rendered, "Would you like to run the following command?") {
+		t.Fatalf("expected command approval title, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Permission: execute command") {
+		t.Fatalf("expected permission line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Command: $ cd /tmp && go test ./kernel/... -count=1 | grep PASS") {
+		t.Fatalf("expected command preview, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "You approved this session for commands matching go test.") {
+		t.Fatalf("expected approval transcript, got %q", rendered)
 	}
 }
 
@@ -202,7 +216,7 @@ func TestTerminalApprover_ChoicePromptOmitsAlwaysForUnknownCommandFamily(t *test
 		t.Fatalf("expected only allow/deny choices for unknown command family, got %d", len(editor.lastChoices))
 	}
 	for _, choice := range editor.lastChoices {
-		if choice.Value == "a" || strings.EqualFold(choice.Label, "always") {
+		if choice.Value == "a" || strings.EqualFold(choice.Label, "session") {
 			t.Fatalf("did not expect always choice for unknown command family, got %+v", editor.lastChoices)
 		}
 	}
@@ -220,12 +234,13 @@ func TestTerminalApprover_EOFIsCancel(t *testing.T) {
 	}
 }
 
-func TestTerminalApprover_AuthorizeToolAlwaysCachesByToolName(t *testing.T) {
+func TestTerminalApprover_AuthorizeToolAlwaysCachesByPathScope(t *testing.T) {
 	editor := &stubLineEditor{lines: []string{"a"}}
 	approver := newTerminalApprover(editor, io.Discard, nil)
 	req := kernelpolicy.ToolAuthorizationRequest{
 		ToolName: "WRITE",
-		Reason:   "filesystem mutation tool",
+		Reason:   "write target is outside workspace writable roots",
+		Path:     "/tmp/external/file.txt",
 	}
 
 	allowed, err := approver.AuthorizeTool(context.Background(), req)
@@ -239,15 +254,73 @@ func TestTerminalApprover_AuthorizeToolAlwaysCachesByToolName(t *testing.T) {
 		t.Fatalf("expected one prompt read, got %d", editor.reads)
 	}
 
-	allowed, err = approver.AuthorizeTool(context.Background(), req)
+	allowed, err = approver.AuthorizeTool(context.Background(), kernelpolicy.ToolAuthorizationRequest{
+		ToolName: "PATCH",
+		Reason:   "write target is outside workspace writable roots",
+		Path:     "/tmp/external/another.txt",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !allowed {
-		t.Fatal("expected session-whitelisted tool to pass")
+		t.Fatal("expected session-whitelisted scope to pass")
 	}
 	if editor.reads != 1 {
 		t.Fatalf("expected second authorization to skip prompt, reads=%d", editor.reads)
+	}
+}
+
+func TestTerminalApprover_AuthorizeToolPromptShowsPathPreviewAndScopedAlways(t *testing.T) {
+	editor := &stubChoiceEditor{response: "a"}
+	var out strings.Builder
+	approver := newTerminalApprover(editor, &out, newUI(&out, true, false))
+	req := kernelpolicy.ToolAuthorizationRequest{
+		ToolName: "PATCH",
+		Reason:   "write target is outside workspace writable roots",
+		Path:     "/tmp/external/docs/SKILL.md",
+		Preview:  "--- old\n+++ new\n-old\n+new",
+	}
+
+	allowed, err := approver.AuthorizeTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected approval to pass")
+	}
+	if editor.lastPrompt != "Would you like to make the following edits?" {
+		t.Fatalf("unexpected prompt %q", editor.lastPrompt)
+	}
+	if len(editor.lastChoices) != 3 {
+		t.Fatalf("expected 3 choices, got %d", len(editor.lastChoices))
+	}
+	if got := editor.lastChoices[0]; got.Label != "proceed" || got.Detail != "just this once" {
+		t.Fatalf("unexpected proceed choice %+v", got)
+	}
+	if got := editor.lastChoices[1].Detail; got != "don't ask again for: /tmp/external/docs" {
+		t.Fatalf("unexpected always detail %q", got)
+	}
+	if got := editor.lastChoices[2]; got.Label != "cancel" || got.Detail != "don't allow" {
+		t.Fatalf("unexpected cancel choice %+v", got)
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "Would you like to make the following edits?") {
+		t.Fatalf("expected edit approval title, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Permission: write outside workspace writable roots") {
+		t.Fatalf("expected permission line, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Path: /tmp/external/docs/SKILL.md") {
+		t.Fatalf("expected path in approval output, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Reason: write target is outside workspace writable roots") {
+		t.Fatalf("expected reason in approval output, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "You approved this session for edits under \"/tmp/external/docs\".") {
+		t.Fatalf("expected approval transcript, got %q", rendered)
+	}
+	if strings.Contains(rendered, "diff:") || strings.Contains(rendered, "--- old") || strings.Contains(rendered, "+new") {
+		t.Fatalf("did not expect legacy diff fallback in approval output, got %q", rendered)
 	}
 }
 

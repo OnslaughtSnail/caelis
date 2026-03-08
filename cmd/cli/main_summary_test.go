@@ -34,7 +34,7 @@ func TestSummarizeToolResponse_ReadTruncatedReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestSummarizeToolResponse_PatchIncludesMetadataPreview(t *testing.T) {
+func TestSummarizeToolResponse_PatchIsConcise(t *testing.T) {
 	got := summarizeToolResponse("PATCH", map[string]any{
 		"path":      "a.txt",
 		"replaced":  1,
@@ -50,8 +50,8 @@ func TestSummarizeToolResponse_PatchIncludesMetadataPreview(t *testing.T) {
 	if !strings.Contains(got, "edited a.txt") {
 		t.Fatalf("unexpected patch summary header: %q", got)
 	}
-	if !strings.Contains(got, "\n  @@ -5,1 +5,1 @@\n  --- old\n  +++ new\n  -old\n  +new") {
-		t.Fatalf("expected indented patch preview, got %q", got)
+	if strings.Contains(got, "--- old") || strings.Contains(got, "@@ -5,1 +5,1 @@") {
+		t.Fatalf("did not expect inline textual diff preview, got %q", got)
 	}
 }
 
@@ -67,7 +67,7 @@ func TestSummarizeToolResponse_PatchWithoutPreviewDoesNotRenderDiff(t *testing.T
 	}
 }
 
-func TestSummarizeToolResponse_PatchBuildsPreviewFromCallArgs(t *testing.T) {
+func TestSummarizeToolResponse_PatchIgnoresCallPreviewArgs(t *testing.T) {
 	got := summarizeToolResponseWithCall("PATCH", map[string]any{
 		"path":      "a.txt",
 		"replaced":  1,
@@ -81,8 +81,8 @@ func TestSummarizeToolResponse_PatchBuildsPreviewFromCallArgs(t *testing.T) {
 	if !strings.Contains(got, "edited a.txt") {
 		t.Fatalf("unexpected patch summary header: %q", got)
 	}
-	if !strings.Contains(got, "\n  --- old\n  +++ new\n  -line1\n  -old\n  +line1\n  +new") {
-		t.Fatalf("expected preview generated from call args, got %q", got)
+	if strings.Contains(got, "--- old") || strings.Contains(got, "+line1") {
+		t.Fatalf("did not expect diff preview generated from call args, got %q", got)
 	}
 }
 
@@ -123,7 +123,34 @@ func TestPrintEvent_PatchResponseUsesRecordedToolCallArgs(t *testing.T) {
 	if !strings.Contains(rendered, "edited a.txt") {
 		t.Fatalf("expected patch summary in rendered output, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "--- old") || !strings.Contains(rendered, "+beta") {
-		t.Fatalf("expected diff preview rendered from event args, got %q", rendered)
+	if strings.Contains(rendered, "--- old") || strings.Contains(rendered, "+beta") {
+		t.Fatalf("did not expect textual diff preview rendered from event args, got %q", rendered)
+	}
+}
+
+func TestTailLines_FiltersBlankLinesBeforeTail(t *testing.T) {
+	got := tailLines("a\n\nb\n \n\nc\n", 2)
+	if got != "...\nb\nc" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestUsageFloorFromMeta_PrefersTotalThenPromptPlusCompletion(t *testing.T) {
+	if got := usageFloorFromMeta(map[string]any{
+		"usage": map[string]any{
+			"prompt_tokens":     11,
+			"completion_tokens": 7,
+			"total_tokens":      21,
+		},
+	}); got != 21 {
+		t.Fatalf("expected total_tokens floor, got %d", got)
+	}
+	if got := usageFloorFromMeta(map[string]any{
+		"usage": map[string]any{
+			"prompt_tokens":     11,
+			"completion_tokens": 7,
+		},
+	}); got != 18 {
+		t.Fatalf("expected prompt+completion floor, got %d", got)
 	}
 }

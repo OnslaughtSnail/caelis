@@ -91,9 +91,18 @@ func (u *ui) Separator() {
 // Category 3: Approval Prompts
 // ---------------------------------------------------------------------------
 
-const approvalPromptAllowDeny = "  allow / deny (Esc cancels): "
-const approvalPromptAllowAlwaysDeny = "  allow / always / deny (Esc cancels): "
-const toolAuthPrompt = "  allow / always / deny (Esc cancels): "
+const approvalPromptAllowDeny = "  proceed / cancel (Esc): "
+const approvalPromptAllowAlwaysDeny = "  proceed / session / cancel (Esc): "
+const toolAuthPrompt = "  proceed / session / cancel (Esc): "
+
+// ApprovalTitle prints the approval request title.
+func (u *ui) ApprovalTitle(title string) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return
+	}
+	u.promptColor.Fprintf(u.out, "\n? %s\n", title)
+}
 
 // ApprovalHeader prints the approval request header.
 func (u *ui) ApprovalHeader(toolName, action string) {
@@ -114,15 +123,61 @@ func (u *ui) ApprovalReason(reason string) {
 	fmt.Fprintf(u.out, "  %s\n", reason)
 }
 
+// ApprovalMeta prints one labeled approval context line.
+func (u *ui) ApprovalMeta(label, value string) {
+	label = strings.TrimSpace(label)
+	value = strings.TrimSpace(value)
+	if label == "" || value == "" {
+		return
+	}
+	u.labelColor.Fprintf(u.out, "  %s:", label)
+	fmt.Fprintf(u.out, " %s\n", value)
+}
+
+// ApprovalPath prints the resolved path for one file authorization request.
+func (u *ui) ApprovalPath(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	u.labelColor.Fprintf(u.out, "  Path:")
+	fmt.Fprintf(u.out, " %s\n", path)
+}
+
+// ApprovalDiff prints a compact diff preview before approval choices.
+func (u *ui) ApprovalDiff(preview string) {
+	preview = strings.TrimSpace(preview)
+	if preview == "" {
+		return
+	}
+	fmt.Fprintln(u.out, "  diff:")
+	for _, line := range strings.Split(preview, "\n") {
+		fmt.Fprintf(u.out, "  %s\n", line)
+	}
+}
+
 // ApprovalCommand prints the command to be approved.
 func (u *ui) ApprovalCommand(command string) {
-	fmt.Fprint(u.out, "  ")
+	u.labelColor.Fprintf(u.out, "  Command:")
+	fmt.Fprint(u.out, " ")
 	u.cmdColor.Fprintf(u.out, "$ %s\n", command)
 }
 
 // ApprovalSessionNote prints the session-allow confirmation.
 func (u *ui) ApprovalSessionNote(key string) {
 	fmt.Fprintf(u.out, "  Allowed for the rest of this session: %s\n", key)
+}
+
+// ApprovalOutcome prints a short approval transcript entry.
+func (u *ui) ApprovalOutcome(approved bool, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if approved {
+		u.successColor.Fprintf(u.out, "✔ %s\n", text)
+		return
+	}
+	u.errorColor.Fprintf(u.out, "✗ %s\n", text)
 }
 
 // ---------------------------------------------------------------------------

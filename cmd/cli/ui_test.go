@@ -123,6 +123,16 @@ func TestUI_ApprovalHeader_NoAction(t *testing.T) {
 	}
 }
 
+func TestUI_ApprovalTitle(t *testing.T) {
+	var buf bytes.Buffer
+	u := testUI(&buf)
+	u.ApprovalTitle("Would you like to run the following command?")
+	got := buf.String()
+	if !strings.Contains(got, "? Would you like to run the following command?") {
+		t.Fatalf("unexpected ApprovalTitle output: %q", got)
+	}
+}
+
 func TestUI_ToolAuthHeader(t *testing.T) {
 	var buf bytes.Buffer
 	u := testUI(&buf)
@@ -138,8 +148,18 @@ func TestUI_ApprovalCommand(t *testing.T) {
 	u := testUI(&buf)
 	u.ApprovalCommand("go test ./...")
 	got := buf.String()
-	if !strings.Contains(got, "$ go test ./...") {
+	if !strings.Contains(got, "Command: $ go test ./...") {
 		t.Fatalf("unexpected ApprovalCommand output: %q", got)
+	}
+}
+
+func TestUI_ApprovalMeta(t *testing.T) {
+	var buf bytes.Buffer
+	u := testUI(&buf)
+	u.ApprovalMeta("Reason", "because it needs host access")
+	got := buf.String()
+	if !strings.Contains(got, "Reason: because it needs host access") {
+		t.Fatalf("unexpected ApprovalMeta output: %q", got)
 	}
 }
 
@@ -150,6 +170,17 @@ func TestUI_ApprovalSessionNote(t *testing.T) {
 	got := buf.String()
 	if !strings.Contains(got, "Allowed for the rest of this session: go test") {
 		t.Fatalf("unexpected ApprovalSessionNote output: %q", got)
+	}
+}
+
+func TestUI_ApprovalOutcome(t *testing.T) {
+	var buf bytes.Buffer
+	u := testUI(&buf)
+	u.ApprovalOutcome(true, "You approved it.")
+	u.ApprovalOutcome(false, "You did not approve it.")
+	got := buf.String()
+	if !strings.Contains(got, "✔ You approved it.") || !strings.Contains(got, "✗ You did not approve it.") {
+		t.Fatalf("unexpected ApprovalOutcome output: %q", got)
 	}
 }
 

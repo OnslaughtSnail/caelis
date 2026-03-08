@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.0.14 - 2026-03-08
+
+### CLI & TUI
+- Added live file-mutation diff previews for `WRITE` and `PATCH`, plus clearer fallback summaries when rich previews are skipped.
+- Refined approval prompts with scoped session approvals, clearer command/edit framing, and improved TUI hint/status behavior.
+- Improved resumed-session rendering, tool output panels, prompt guidance text, and folded diff presentation for large multi-hunk edits.
+
+### Runtime & Model Handling
+- Added conservative context-usage tracking in the console/TUI status bar using runtime-backed estimates and streamed usage metadata.
+- Improved model request retry handling with rate-limit aware backoff, clearer retry warnings, and safer handling for interrupted partial streams.
+- Added streamed usage support for OpenAI-compatible providers and surfaced model-catalog fallback hints during interactive connect.
+
+### Policy & Filesystem Tools
+- Unified `WRITE`/`PATCH` mutation planning and preview generation so workspace-boundary approvals can show scoped path context and mutation previews.
+- Expanded workspace-boundary and filesystem mutation coverage for external writes, path scoping, and diff preview generation.
+
 ## v0.0.11 - 2026-03-06
 
 ### Release Follow-up

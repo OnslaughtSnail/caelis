@@ -77,6 +77,9 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			Stream:    req.Stream,
 			MaxTokens: l.maxOutputTok,
 		}
+		if req.Stream {
+			payload.StreamOptions = &openAICompatStreamOptions{IncludeUsage: true}
+		}
 		if l.options.ApplyReasoning != nil {
 			l.options.ApplyReasoning(&payload, req.Reasoning)
 		}
@@ -239,14 +242,19 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 }
 
 type openAICompatRequest struct {
-	Model           string               `json:"model"`
-	Messages        []openAICompatReqMsg `json:"messages"`
-	Tools           []openAICompatTool   `json:"tools,omitempty"`
-	Stream          bool                 `json:"stream"`
-	MaxTokens       int                  `json:"max_tokens,omitempty"`
-	ReasoningEffort string               `json:"reasoning_effort,omitempty"`
-	Reasoning       *openAIReasoning     `json:"reasoning,omitempty"`
-	Thinking        *openAIThinking      `json:"thinking,omitempty"`
+	Model           string                     `json:"model"`
+	Messages        []openAICompatReqMsg       `json:"messages"`
+	Tools           []openAICompatTool         `json:"tools,omitempty"`
+	Stream          bool                       `json:"stream"`
+	StreamOptions   *openAICompatStreamOptions `json:"stream_options,omitempty"`
+	MaxTokens       int                        `json:"max_tokens,omitempty"`
+	ReasoningEffort string                     `json:"reasoning_effort,omitempty"`
+	Reasoning       *openAIReasoning           `json:"reasoning,omitempty"`
+	Thinking        *openAIThinking            `json:"thinking,omitempty"`
+}
+
+type openAICompatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type openAICompatMsg struct {

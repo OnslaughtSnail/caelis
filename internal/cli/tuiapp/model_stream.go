@@ -300,6 +300,14 @@ func (m *Model) currentToolOutputLines() []toolOutputLine {
 	if partial := strings.TrimSpace(m.toolOutput.stderrPartial); partial != "" {
 		content = append(content, toolOutputLine{text: partial, stream: "stderr"})
 	}
+	filtered := content[:0]
+	for _, line := range content {
+		if strings.TrimSpace(line.text) == "" {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	content = filtered
 	if len(content) > toolOutputPreviewLines {
 		content = content[len(content)-toolOutputPreviewLines:]
 	}
@@ -316,11 +324,10 @@ func (m *Model) renderToolOutputBlockLines(content []toolOutputLine) []string {
 		text := line.text
 		prefix := "  "
 		style := lipgloss.NewStyle().
-			Foreground(m.theme.TextPrimary).
-			Background(m.theme.ToolOutputBg)
+			Foreground(m.theme.TextPrimary)
 		if strings.EqualFold(strings.TrimSpace(line.stream), "stderr") {
 			prefix = "! "
-			style = m.theme.ErrorStyle().Background(m.theme.ToolOutputBg)
+			style = m.theme.ErrorStyle()
 		}
 		availableTextWidth := maxInt(1, panelInnerWidth-displayColumns(prefix))
 		if displayColumns(text) > availableTextWidth {
@@ -335,7 +342,6 @@ func (m *Model) renderToolOutputBlockLines(content []toolOutputLine) []string {
 	panel := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.PanelBorder).
-		Background(m.theme.ToolOutputBg).
 		Padding(0, 1).
 		Width(panelInnerWidth)
 	return strings.Split(panel.Render(strings.Join(lines, "\n")), "\n")

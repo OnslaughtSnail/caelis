@@ -176,6 +176,61 @@ func TestOpenAICompatStream_DoesNotApplyRequestTimeout(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatStream_IncludesUsageRequestOptionAndPropagatesUsage(t *testing.T) {
+	var includeUsage bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		streamOptions, _ := payload["stream_options"].(map[string]any)
+		includeUsage, _ = streamOptions["include_usage"].(bool)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18}}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	llm := newOpenAICompat(Config{
+		Provider: "openai-compatible",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	var (
+		gotErr error
+		usage  model.Usage
+	)
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   true,
+	}) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		if resp != nil && resp.TurnComplete {
+			usage = resp.Usage
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no stream error, got %v", gotErr)
+	}
+	if !includeUsage {
+		t.Fatal("expected stream_options.include_usage=true in request payload")
+	}
+	if usage.PromptTokens != 11 || usage.CompletionTokens != 7 || usage.TotalTokens != 18 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+}
+
 func TestOpenAICompatRequest_IncludesMaxTokens(t *testing.T) {
 	var gotMax float64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

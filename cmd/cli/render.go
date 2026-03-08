@@ -19,7 +19,7 @@ type runRenderConfig struct {
 	Verbose       bool
 	Writer        io.Writer
 	UI            *ui
-	OnUsage       func(int) // called with prompt_tokens count after run completes
+	OnUsage       func(int) // called with conservative usage floor after run completes
 	OnEvent       func(*session.Event) bool
 }
 
@@ -44,13 +44,8 @@ func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, r
 			continue
 		}
 		if ev.Meta != nil {
-			if raw, ok := ev.Meta["usage"]; ok {
-				if usageMap, ok := raw.(map[string]any); ok {
-					prompt := toInt(usageMap["prompt_tokens"])
-					if prompt > 0 {
-						render.lastPromptTokens = prompt
-					}
-				}
+			if usageFloor := usageFloorFromMeta(ev.Meta); usageFloor > 0 {
+				render.lastPromptTokens = usageFloor
 			}
 		}
 		if renderCfg.OnEvent != nil && renderCfg.OnEvent(ev) {
@@ -79,11 +74,12 @@ type renderState struct {
 	out                  io.Writer
 	ui                   *ui
 	pendingToolCalls     map[string]toolCallSnapshot
-	lastPromptTokens     int // most recent prompt token count from event metadata
+	lastPromptTokens     int // most recent conservative usage floor from event metadata
 }
 
 type toolCallSnapshot struct {
-	Args map[string]any
+	Args          map[string]any
+	RichDiffShown bool
 }
 
 func printEvent(ev *session.Event, state *renderState) {
@@ -92,18 +88,8 @@ func printEvent(ev *session.Event, state *renderState) {
 	}
 	// Track usage metadata from events.
 	if state != nil && ev.Meta != nil {
-		if raw, ok := ev.Meta["usage"]; ok {
-			if usageMap, ok := raw.(map[string]any); ok {
-				prompt := toInt(usageMap["prompt_tokens"])
-				completion := toInt(usageMap["completion_tokens"])
-				total := toInt(usageMap["total_tokens"])
-				if total == 0 {
-					total = prompt + completion
-				}
-				if prompt > 0 {
-					state.lastPromptTokens = prompt
-				}
-			}
+		if usageFloor := usageFloorFromMeta(ev.Meta); usageFloor > 0 {
+			state.lastPromptTokens = usageFloor
 		}
 	}
 	if state != nil && eventIsPartial(ev) {
@@ -413,25 +399,13 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	case "PATCH":
 		path := strings.TrimSpace(asString(result["path"]))
 		created := fmt.Sprint(result["created"]) == "true"
-		preview := patchPreviewFromEvent(callArgs)
-		if strings.TrimSpace(preview) == "" {
-			preview = patchPreviewFromMetadata(result)
-		}
-		hunk := patchHunkFromResult(result)
-		if strings.TrimSpace(hunk) != "" && strings.TrimSpace(preview) != "" {
-			preview = hunk + "\n" + preview
-		}
 		display := displayFileName(path)
 		if path != "" {
 			action := "edited"
 			if created {
 				action = "created"
 			}
-			summary := fmt.Sprintf("%s %s", action, display)
-			if strings.TrimSpace(preview) == "" {
-				return summary
-			}
-			return summary + "\n" + indentMultiline(preview, "  ")
+			return fmt.Sprintf("%s %s", action, display)
 		}
 	case "WRITE":
 		path := strings.TrimSpace(asString(result["path"]))
@@ -475,91 +449,6 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	}
 	sort.Strings(keys)
 	return fmt.Sprintf("{keys=%s}", strings.Join(keys, ","))
-}
-
-const (
-	patchPreviewSideLines = 30
-	patchPreviewLineWidth = 120
-)
-
-func patchPreviewFromEvent(callArgs map[string]any) string {
-	if len(callArgs) == 0 {
-		return ""
-	}
-	oldValue, oldOK := callArgs["old"].(string)
-	newValue, newOK := callArgs["new"].(string)
-	if !oldOK && !newOK {
-		return ""
-	}
-	return buildPatchPreview(oldValue, newValue)
-}
-
-func patchPreviewFromMetadata(result map[string]any) string {
-	patchMeta := patchMetadataFromResult(result)
-	preview, _ := patchMeta["preview"].(string)
-	return preview
-}
-
-func patchHunkFromResult(result map[string]any) string {
-	patchMeta := patchMetadataFromResult(result)
-	hunk, _ := patchMeta["hunk"].(string)
-	return hunk
-}
-
-func patchMetadataFromResult(result map[string]any) map[string]any {
-	if len(result) == 0 {
-		return nil
-	}
-	metadata, _ := result["metadata"].(map[string]any)
-	patchMeta, _ := metadata["patch"].(map[string]any)
-	return patchMeta
-}
-
-func buildPatchPreview(oldValue, newValue string) string {
-	oldLines, oldTruncated := buildPatchSide(oldValue, "-")
-	newLines, newTruncated := buildPatchSide(newValue, "+")
-	if len(oldLines) == 0 && len(newLines) == 0 {
-		return ""
-	}
-	lines := make([]string, 0, 2+len(oldLines)+len(newLines)+1)
-	lines = append(lines, "--- old", "+++ new")
-	lines = append(lines, oldLines...)
-	lines = append(lines, newLines...)
-	if oldTruncated || newTruncated {
-		lines = append(lines, "... (preview truncated)")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func buildPatchSide(content, prefix string) ([]string, bool) {
-	if content == "" {
-		return nil, false
-	}
-	if strings.HasSuffix(content, "\n") {
-		content = strings.TrimSuffix(content, "\n")
-	}
-	rawLines := strings.Split(content, "\n")
-	truncated := false
-	if len(rawLines) > patchPreviewSideLines {
-		rawLines = rawLines[:patchPreviewSideLines]
-		truncated = true
-	}
-	lines := make([]string, 0, len(rawLines))
-	for _, line := range rawLines {
-		lines = append(lines, prefix+truncatePatchLine(line, patchPreviewLineWidth))
-	}
-	return lines, truncated
-}
-
-func truncatePatchLine(line string, width int) string {
-	rs := []rune(line)
-	if width <= 0 || len(rs) <= width {
-		return line
-	}
-	if width <= 3 {
-		return string(rs[:width])
-	}
-	return string(rs[:width-3]) + "..."
 }
 
 func cloneAnyMap(input map[string]any) map[string]any {
@@ -668,6 +557,15 @@ func isReadOnlyFSTool(toolName string) bool {
 	}
 }
 
+func isFileMutationTool(toolName string) bool {
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "PATCH", "WRITE":
+		return true
+	default:
+		return false
+	}
+}
+
 // hasToolError returns true when a tool result contains an error field.
 func hasToolError(result map[string]any) bool {
 	return strings.TrimSpace(asString(result["error"])) != ""
@@ -679,10 +577,13 @@ func tailLines(text string, n int) string {
 	if n <= 0 {
 		n = 5
 	}
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	// strip trailing blank lines
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
+	rawLines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		return ""
@@ -691,17 +592,6 @@ func tailLines(text string, n int) string {
 		return strings.Join(lines, "\n")
 	}
 	return "...\n" + strings.Join(lines[len(lines)-n:], "\n")
-}
-
-func indentMultiline(input, indent string) string {
-	if input == "" {
-		return ""
-	}
-	lines := strings.Split(input, "\n")
-	for i := range lines {
-		lines[i] = indent + lines[i]
-	}
-	return strings.Join(lines, "\n")
 }
 
 func eventIsPartial(ev *session.Event) bool {
@@ -741,25 +631,40 @@ func eventChannel(ev *session.Event) string {
 }
 
 // extractLastUsage scans events in reverse to find the most recent usage
-// metadata and returns the prompt_tokens count (context window usage).
+// metadata and returns a conservative token floor derived from it.
 func extractLastUsage(events []*session.Event) int {
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
 		if ev == nil || ev.Meta == nil {
 			continue
 		}
-		raw, ok := ev.Meta["usage"]
-		if !ok {
-			continue
+		if usageFloor := usageFloorFromMeta(ev.Meta); usageFloor > 0 {
+			return usageFloor
 		}
-		usageMap, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		prompt := toInt(usageMap["prompt_tokens"])
-		if prompt > 0 {
-			return prompt
-		}
+	}
+	return 0
+}
+
+func usageFloorFromMeta(meta map[string]any) int {
+	if len(meta) == 0 {
+		return 0
+	}
+	raw, ok := meta["usage"]
+	if !ok {
+		return 0
+	}
+	usageMap, ok := raw.(map[string]any)
+	if !ok {
+		return 0
+	}
+	prompt := toInt(usageMap["prompt_tokens"])
+	completion := toInt(usageMap["completion_tokens"])
+	total := toInt(usageMap["total_tokens"])
+	if total > 0 {
+		return total
+	}
+	if prompt > 0 || completion > 0 {
+		return prompt + completion
 	}
 	return 0
 }

@@ -2,13 +2,10 @@ package filesystem
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"strings"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
 	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
 
@@ -64,48 +61,19 @@ func (t *WriteTool) Run(ctx context.Context, args map[string]any) (map[string]an
 		return nil, ctx.Err()
 	default:
 	}
-
-	pathArg, err := argparse.String(args, "path", true)
+	plan, err := planWriteMutation(t.runtime.FileSystem(), args)
 	if err != nil {
 		return nil, err
 	}
-	rawContent, exists := args["content"]
-	if !exists {
-		return nil, fmt.Errorf("tool: missing required arg %q", "content")
-	}
-	content, ok := rawContent.(string)
-	if !ok {
-		return nil, fmt.Errorf("tool: arg %q must be string", "content")
-	}
-
-	target, err := normalizePathWithFS(t.runtime.FileSystem(), pathArg)
-	if err != nil {
-		return nil, err
-	}
-
-	info, statErr := t.runtime.FileSystem().Stat(target)
-	created := false
-	mode := os.FileMode(0o644)
-	if statErr == nil {
-		if info.IsDir() {
-			return nil, fmt.Errorf("tool: target %q is directory", target)
-		}
-		mode = info.Mode()
-	} else if !os.IsNotExist(statErr) {
-		return nil, statErr
-	} else {
-		created = true
-	}
-
-	if err := t.runtime.FileSystem().WriteFile(target, []byte(content), mode); err != nil {
+	if err := t.runtime.FileSystem().WriteFile(plan.path, []byte(plan.after), plan.mode); err != nil {
 		return nil, err
 	}
 
 	return map[string]any{
-		"path":          target,
-		"created":       created,
-		"bytes_written": len([]byte(content)),
-		"line_count":    lineCount(content),
+		"path":          plan.path,
+		"created":       plan.created,
+		"bytes_written": len([]byte(plan.after)),
+		"line_count":    lineCount(plan.after),
 	}, nil
 }
 

@@ -1263,12 +1263,12 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 
 	respCh := make(chan tuievents.PromptResponse, 1)
 	_, _ = m.Update(tuievents.PromptRequestMsg{
-		Prompt:        "Approve command?",
+		Prompt:        "Would you like to run the following command?",
 		DefaultChoice: "y",
 		Choices: []tuievents.PromptChoice{
-			{Label: "allow", Value: "y", Detail: "Run once"},
-			{Label: "always", Value: "a", Detail: "Allow in this session: go test"},
-			{Label: "deny", Value: "n", Detail: "Cancel (Esc)"},
+			{Label: "proceed", Value: "y", Detail: "just this once"},
+			{Label: "session", Value: "a", Detail: "don't ask again for: go test"},
+			{Label: "cancel", Value: "n", Detail: "continue without it"},
 		},
 		Response: respCh,
 	})
@@ -1282,8 +1282,11 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 		t.Fatalf("expected default selection at allow, got %d", m.activePrompt.choiceIndex)
 	}
 	view := ansi.Strip(m.View())
-	if !strings.Contains(view, "allow") || !strings.Contains(view, "always") || !strings.Contains(view, "deny") {
+	if !strings.Contains(view, "proceed") || !strings.Contains(view, "session") || !strings.Contains(view, "cancel") {
 		t.Fatalf("expected approval list options in modal, got %q", view)
+	}
+	if !strings.Contains(view, "Press Enter to confirm or Esc to") {
+		t.Fatalf("expected approval footer hint in view, got %q", view)
 	}
 
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -1634,6 +1637,27 @@ func TestViewShowsCompactToolOutputPanelForShortOutput(t *testing.T) {
 	}
 	if len(contentLine) < 70 {
 		t.Fatalf("expected tool output content line to fill viewport width, got %q", contentLine)
+	}
+}
+
+func TestToolOutputPanelFiltersBlankLines(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stderr",
+		Chunk:  "line-1\n\n   \nline-2\n",
+	})
+
+	view := ansi.Strip(m.View())
+	if strings.Contains(view, "\n! \n") {
+		t.Fatalf("did not expect blank tool output rows, got:\n%s", view)
+	}
+	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected non-blank tool output rows, got:\n%s", view)
 	}
 }
 

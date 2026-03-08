@@ -127,7 +127,6 @@ func InitModelCatalogWithStatus(ctx context.Context, client *http.Client, overri
 	remote, err := fetchModelsDev(ctx, client)
 	remoteFetched := err == nil && len(remote) > 0
 	if err != nil {
-		log.Printf("[model-catalog] remote fetch failed, using embedded snapshot only: %v", err)
 		remote = nil
 	}
 

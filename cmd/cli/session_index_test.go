@@ -297,7 +297,7 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	}
 }
 
-func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
+func TestHandleResume_WithPatchResponse_DoesNotReplayDiffBlockMsg(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +306,11 @@ func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
 		_ = idx.Close()
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	diffFixtureDir := t.TempDir()
+	diffFixturePath := filepath.Join(diffFixtureDir, "a.txt")
+	if err := os.WriteFile(diffFixturePath, []byte("line1\nold\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{Store: store})
 	if err != nil {
@@ -324,7 +329,7 @@ func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
 				{
 					ID:   "call_patch_1",
 					Name: "PATCH",
-					Args: `{"path":"a.txt","old":"line1\nold","new":"line1\nnew"}`,
+					Args: fmt.Sprintf(`{"path":%q,"old":"old","new":"new"}`, diffFixturePath),
 				},
 			},
 		},
@@ -340,7 +345,7 @@ func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
 				ID:   "call_patch_1",
 				Name: "PATCH",
 				Result: map[string]any{
-					"path":      "a.txt",
+					"path":      diffFixturePath,
 					"created":   false,
 					"replaced":  1,
 					"old_count": 1,
@@ -363,6 +368,7 @@ func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
 		workspace:     workspace,
 		sessionIndex:  idx,
 		sessionID:     "default",
+		execRuntime:   previewTestRuntime{cwd: diffFixtureDir},
 		out:           &out,
 		ui:            newUI(&out, true, false),
 		showReasoning: true,
@@ -372,14 +378,21 @@ func TestHandleResume_WithPatchResponse_ReplaysDiffBlockMsg(t *testing.T) {
 		t.Fatal(err)
 	}
 	foundDiff := false
+	foundSummary := false
 	for _, raw := range sender.msgs {
 		if _, ok := raw.(tuievents.DiffBlockMsg); ok {
 			foundDiff = true
-			break
+		}
+		msg, ok := raw.(tuievents.LogChunkMsg)
+		if ok && strings.Contains(msg.Chunk, "✓ PATCH edited a.txt") {
+			foundSummary = true
 		}
 	}
-	if !foundDiff {
-		t.Fatalf("expected DiffBlockMsg in replay events, got %#v", sender.msgs)
+	if foundDiff {
+		t.Fatalf("did not expect DiffBlockMsg in replay events, got %#v", sender.msgs)
+	}
+	if !foundSummary {
+		t.Fatalf("expected patch summary in replay events, got %#v", sender.msgs)
 	}
 }
 

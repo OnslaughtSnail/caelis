@@ -14,6 +14,8 @@ import (
 const (
 	// SplitViewMinWidth is the minimum viewport width for side-by-side rendering.
 	SplitViewMinWidth = 120
+	// FoldContextLines is the number of unchanged lines to retain around each hunk.
+	FoldContextLines = 2
 )
 
 // Payload is the source data used to build a structured diff model.
@@ -36,6 +38,7 @@ const (
 	RowAdd
 	RowRemove
 	RowModified
+	RowFold
 )
 
 // InlineKind represents one semantic inline span.
@@ -57,8 +60,10 @@ type InlineSpan struct {
 type Row struct {
 	Kind RowKind
 
-	OldLineNo int
-	NewLineNo int
+	OldLineNo  int
+	NewLineNo  int
+	OldLineEnd int
+	NewLineEnd int
 
 	OldText string
 	NewText string
@@ -121,6 +126,7 @@ func BuildModel(payload Payload) Model {
 
 	tailRows, tailOldNo, tailNewNo := buildChangedRows(oldLines[oldCursor:], newLines[newCursor:], oldNo, newNo)
 	rows = append(rows, tailRows...)
+	rows = foldRows(rows, FoldContextLines)
 
 	return Model{
 		Tool:         payload.Tool,
@@ -150,7 +156,7 @@ func Render(model Model, width int, theme tuikit.Theme) []string {
 		return out
 	}
 	out = append(out, theme.DiffPanelBorderStyle().Render(strings.Repeat("─", width)))
-	if width >= SplitViewMinWidth {
+	if width >= SplitViewMinWidth && !isAddOnlyModel(model) {
 		out = append(out, renderSplit(model.Rows, width, theme)...)
 	} else {
 		out = append(out, renderUnified(model.Rows, width, theme)...)
@@ -174,11 +180,25 @@ func renderHeader(model Model, theme tuikit.Theme) string {
 	return theme.ToolStyle().Render("✓ ") + theme.ToolNameStyle().Render(tool) + " " + action + " " + target
 }
 
+func isAddOnlyModel(model Model) bool {
+	if len(model.Rows) == 0 {
+		return false
+	}
+	for _, row := range model.Rows {
+		if row.Kind != RowAdd {
+			return false
+		}
+	}
+	return true
+}
+
 func renderUnified(rows []Row, width int, theme tuikit.Theme) []string {
 	lineNoWidth := maxLineNoWidth(rows)
 	out := make([]string, 0, len(rows)+4)
 	for _, row := range rows {
 		switch row.Kind {
+		case RowFold:
+			out = append(out, renderFoldRow(row, width, theme))
 		case RowContext:
 			no := row.NewLineNo
 			if no <= 0 {
@@ -230,6 +250,8 @@ func renderSplit(rows []Row, width int, theme tuikit.Theme) []string {
 	out := make([]string, 0, len(rows)+4)
 	for _, row := range rows {
 		switch row.Kind {
+		case RowFold:
+			out = append(out, renderFoldRow(row, width, theme))
 		case RowContext:
 			left := renderSplitCell(row.OldLineNo, ' ', row.OldSpans, RowContext, lineNoWidth, leftWidth, theme)
 			right := renderSplitCell(row.NewLineNo, ' ', row.NewSpans, RowContext, lineNoWidth, rightWidth, theme)
@@ -249,6 +271,20 @@ func renderSplit(rows []Row, width int, theme tuikit.Theme) []string {
 		}
 	}
 	return out
+}
+
+func renderFoldRow(row Row, width int, theme tuikit.Theme) string {
+	text := strings.TrimSpace(foldNote(row))
+	if text == "" {
+		text = "..."
+	}
+	if width <= 0 {
+		return theme.DiffHunkStyle().Render(text)
+	}
+	if displayColumns(text) > width {
+		text = sliceByDisplayColumns(text, 0, maxInt(1, width-1)) + "…"
+	}
+	return theme.DiffHunkStyle().Render(text)
 }
 
 func renderSplitCell(lineNo int, marker rune, spans []InlineSpan, kind RowKind, lineNoWidth, cellWidth int, theme tuikit.Theme) string {
@@ -389,6 +425,116 @@ func splitContentLines(text string) []string {
 		normalized = strings.TrimSuffix(normalized, "\n")
 	}
 	return strings.Split(normalized, "\n")
+}
+
+func foldRows(rows []Row, contextLines int) []Row {
+	if len(rows) == 0 {
+		return nil
+	}
+	if contextLines < 0 {
+		contextLines = 0
+	}
+	keep := make([]bool, len(rows))
+	for i, row := range rows {
+		if row.Kind == RowContext {
+			continue
+		}
+		start := maxInt(0, i-contextLines)
+		end := minInt(len(rows)-1, i+contextLines)
+		for j := start; j <= end; j++ {
+			keep[j] = true
+		}
+	}
+	out := make([]Row, 0, len(rows))
+	for i := 0; i < len(rows); {
+		if keep[i] {
+			out = append(out, rows[i])
+			i++
+			continue
+		}
+		start := i
+		for i < len(rows) && !keep[i] {
+			i++
+		}
+		out = append(out, Row{
+			Kind:       RowFold,
+			OldLineNo:  firstNonZeroOldLine(rows[start:i]),
+			NewLineNo:  firstNonZeroNewLine(rows[start:i]),
+			OldLineEnd: lastNonZeroOldLine(rows[start:i]),
+			NewLineEnd: lastNonZeroNewLine(rows[start:i]),
+		})
+	}
+	return out
+}
+
+func foldNote(row Row) string {
+	oldCount := foldRangeCount(row.OldLineNo, row.OldLineEnd)
+	newCount := foldRangeCount(row.NewLineNo, row.NewLineEnd)
+	omitted := maxInt(oldCount, newCount)
+	if omitted <= 0 {
+		return "@@ ..."
+	}
+	unchangedLabel := fmt.Sprintf("%d unchanged lines", omitted)
+	if omitted == 1 {
+		unchangedLabel = "1 unchanged line"
+	}
+	return fmt.Sprintf(
+		"@@ -%s +%s @@ ... %s ...",
+		formatFoldRange(row.OldLineNo, row.OldLineEnd),
+		formatFoldRange(row.NewLineNo, row.NewLineEnd),
+		unchangedLabel,
+	)
+}
+
+func formatFoldRange(start, end int) string {
+	count := foldRangeCount(start, end)
+	if count <= 0 {
+		return "0,0"
+	}
+	return fmt.Sprintf("%d,%d", start, count)
+}
+
+func foldRangeCount(start, end int) int {
+	if start <= 0 || end < start {
+		return 0
+	}
+	return end - start + 1
+}
+
+func firstNonZeroOldLine(rows []Row) int {
+	for _, row := range rows {
+		if row.OldLineNo > 0 {
+			return row.OldLineNo
+		}
+	}
+	return 0
+}
+
+func lastNonZeroOldLine(rows []Row) int {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].OldLineNo > 0 {
+			return rows[i].OldLineNo
+		}
+	}
+	return 0
+}
+
+func firstNonZeroNewLine(rows []Row) int {
+	for _, row := range rows {
+		if row.NewLineNo > 0 {
+			return row.NewLineNo
+		}
+	}
+	return 0
+}
+
+func lastNonZeroNewLine(rows []Row) int {
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].NewLineNo > 0 {
+			return rows[i].NewLineNo
+		}
+	}
+	return 0
 }
 
 func buildChangedRows(oldLines, newLines []string, oldNo, newNo int) ([]Row, int, int) {
@@ -576,6 +722,43 @@ func appendInlineSpan(dst *[]InlineSpan, span InlineSpan) {
 
 func displayColumns(text string) int {
 	return runewidth.StringWidth(text)
+}
+
+func sliceByDisplayColumns(s string, start int, end int) string {
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if s == "" || start == end {
+		return ""
+	}
+	var b strings.Builder
+	col := 0
+	prevIncluded := false
+	for _, r := range s {
+		w := runewidth.RuneWidth(r)
+		if w < 0 {
+			w = 0
+		}
+		if w == 0 {
+			if prevIncluded {
+				b.WriteRune(r)
+			}
+			continue
+		}
+		if col >= end {
+			break
+		}
+		include := col >= start && col < end
+		if include {
+			b.WriteRune(r)
+		}
+		prevIncluded = include
+		col += w
+	}
+	return b.String()
 }
 
 func runeDisplayWidth(r rune) int {

@@ -682,16 +682,20 @@ func (m *Model) promptHintText() string {
 	text = strings.TrimSuffix(text, ":")
 	text = strings.TrimSpace(text)
 	if len(m.activePrompt.choices) > 0 {
+		footer := "Press Enter to confirm or Esc to cancel"
 		if m.activePrompt.filterable {
 			if m.activePrompt.multiSelect {
-				return text + "; type to filter, Space to toggle"
+				return text + "; type to filter, Space to toggle. " + footer
 			}
-			return text + "; type to filter"
+			return text + "; type to filter. " + footer
 		}
 		if m.activePrompt.multiSelect {
-			return text + "; Space to toggle"
+			return text + "; Space to toggle. " + footer
 		}
-		return text
+		if text == "" {
+			return footer
+		}
+		return text + " " + footer
 	}
 	if text == "" {
 		return "Enter a value"

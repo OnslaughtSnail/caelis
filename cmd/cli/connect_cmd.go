@@ -166,7 +166,10 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 		c.setPromptLoading(true)
 		defer c.setPromptLoading(false)
 	}
-	_, _ = connectModelCatalogRefreshFn(c.baseCtx)
+	status, refreshed := connectModelCatalogRefreshFn(c.baseCtx)
+	if refreshed && status.RemoteError != nil {
+		reportConnectCatalogFallback(c, status.RemoteError)
+	}
 
 	remoteModels, discoverErr := discoverModelsFn(c.baseCtx, baseCfg)
 	if discoverErr != nil && !shouldSuppressDiscoverModelsError(baseCfg, discoverErr) {
@@ -821,6 +824,23 @@ func shouldSuppressDiscoverModelsError(cfg modelproviders.Config, err error) boo
 		return true
 	}
 	return false
+}
+
+func reportConnectCatalogFallback(c *cliConsole, err error) {
+	if c == nil || err == nil {
+		return
+	}
+	const hint = "models.dev unavailable; using bundled model snapshot"
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.SetHintMsg{
+			Hint:       hint,
+			ClearAfter: transientHintDuration,
+		})
+		return
+	}
+	if c.ui != nil {
+		c.ui.Note("%s: %v\n", hint, err)
+	}
 }
 
 func (c *cliConsole) setPromptLoading(running bool) {

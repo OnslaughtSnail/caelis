@@ -151,6 +151,15 @@ type echoResp struct {
 	Echo string `json:"echo"`
 }
 
+func eventIsPartialEvent(ev *session.Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	raw, ok := ev.Meta["partial"]
+	flag, ok := raw.(bool)
+	return ok && flag
+}
+
 func jsonArgs(v map[string]any) string {
 	raw, err := json.Marshal(v)
 	if err != nil {
@@ -278,13 +287,22 @@ func TestLLMAgent_RetriesModelRequestAndSucceeds(t *testing.T) {
 	oldMaxRetries := modelRequestMaxRetries
 	oldBaseDelay := modelRetryBaseDelay
 	oldMaxDelay := modelRetryMaxDelay
+	oldRateLimitMaxRetries := rateLimitRequestMaxRetries
+	oldRateLimitBaseDelay := rateLimitRetryBaseDelay
+	oldRateLimitMaxDelay := rateLimitRetryMaxDelay
 	modelRequestMaxRetries = 5
 	modelRetryBaseDelay = time.Millisecond
 	modelRetryMaxDelay = 2 * time.Millisecond
+	rateLimitRequestMaxRetries = 7
+	rateLimitRetryBaseDelay = 5 * time.Millisecond
+	rateLimitRetryMaxDelay = 20 * time.Millisecond
 	t.Cleanup(func() {
 		modelRequestMaxRetries = oldMaxRetries
 		modelRetryBaseDelay = oldBaseDelay
 		modelRetryMaxDelay = oldMaxDelay
+		rateLimitRequestMaxRetries = oldRateLimitMaxRetries
+		rateLimitRetryBaseDelay = oldRateLimitBaseDelay
+		rateLimitRetryMaxDelay = oldRateLimitMaxDelay
 	})
 
 	attempts := 0
@@ -337,13 +355,22 @@ func TestLLMAgent_RetryExhaustedReturnsError(t *testing.T) {
 	oldMaxRetries := modelRequestMaxRetries
 	oldBaseDelay := modelRetryBaseDelay
 	oldMaxDelay := modelRetryMaxDelay
+	oldRateLimitMaxRetries := rateLimitRequestMaxRetries
+	oldRateLimitBaseDelay := rateLimitRetryBaseDelay
+	oldRateLimitMaxDelay := rateLimitRetryMaxDelay
 	modelRequestMaxRetries = 5
 	modelRetryBaseDelay = time.Millisecond
 	modelRetryMaxDelay = 2 * time.Millisecond
+	rateLimitRequestMaxRetries = 7
+	rateLimitRetryBaseDelay = 5 * time.Millisecond
+	rateLimitRetryMaxDelay = 20 * time.Millisecond
 	t.Cleanup(func() {
 		modelRequestMaxRetries = oldMaxRetries
 		modelRetryBaseDelay = oldBaseDelay
 		modelRetryMaxDelay = oldMaxDelay
+		rateLimitRequestMaxRetries = oldRateLimitMaxRetries
+		rateLimitRetryBaseDelay = oldRateLimitBaseDelay
+		rateLimitRetryMaxDelay = oldRateLimitMaxDelay
 	})
 
 	attempts := 0
@@ -376,6 +403,264 @@ func TestLLMAgent_RetryExhaustedReturnsError(t *testing.T) {
 		}
 	}
 	t.Fatal("expected retry exhausted error")
+}
+
+func TestLLMAgent_RateLimitRetriesUseDedicatedPolicy(t *testing.T) {
+	oldMaxRetries := modelRequestMaxRetries
+	oldBaseDelay := modelRetryBaseDelay
+	oldMaxDelay := modelRetryMaxDelay
+	oldRateLimitMaxRetries := rateLimitRequestMaxRetries
+	oldRateLimitBaseDelay := rateLimitRetryBaseDelay
+	oldRateLimitMaxDelay := rateLimitRetryMaxDelay
+	modelRequestMaxRetries = 5
+	modelRetryBaseDelay = time.Millisecond
+	modelRetryMaxDelay = 2 * time.Millisecond
+	rateLimitRequestMaxRetries = 7
+	rateLimitRetryBaseDelay = 120 * time.Millisecond
+	rateLimitRetryMaxDelay = 250 * time.Millisecond
+	t.Cleanup(func() {
+		modelRequestMaxRetries = oldMaxRetries
+		modelRetryBaseDelay = oldBaseDelay
+		modelRetryMaxDelay = oldMaxDelay
+		rateLimitRequestMaxRetries = oldRateLimitMaxRetries
+		rateLimitRetryBaseDelay = oldRateLimitBaseDelay
+		rateLimitRetryMaxDelay = oldRateLimitMaxDelay
+	})
+
+	attempts := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		_ = req
+		attempts++
+		if attempts <= 2 {
+			return nil, errors.New(`model: http status 429 body={"detail":"用户请求TPM超限，请减少tokens后重试","error":{"type":"USER_TPM_RATELIMITING"}}`)
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   nil,
+		toolMap: map[string]tool.Tool{},
+	}
+	var retryWarnings []string
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.Role == model.RoleSystem {
+			retryWarnings = append(retryWarnings, ev.Message.Text)
+		}
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts (2 retries), got %d", attempts)
+	}
+	if len(retryWarnings) != 2 {
+		t.Fatalf("expected 2 retry warnings, got %v", retryWarnings)
+	}
+	if !strings.Contains(retryWarnings[0], "hit rate limits") {
+		t.Fatalf("expected rate-limit warning text, got %v", retryWarnings)
+	}
+	if !strings.Contains(retryWarnings[0], "(1/7)") {
+		t.Fatalf("expected dedicated retry budget in warning, got %v", retryWarnings)
+	}
+	if !strings.Contains(retryWarnings[0], "HTTP 429 / Too Many Requests") {
+		t.Fatalf("expected generic 429 warning context, got %v", retryWarnings)
+	}
+	if strings.Contains(retryWarnings[0], `body={`) {
+		t.Fatalf("expected summarized warning without raw body, got %v", retryWarnings)
+	}
+	if strings.Contains(retryWarnings[0], "USER_TPM_RATELIMITING") || strings.Contains(retryWarnings[0], "用户请求TPM超限") {
+		t.Fatalf("expected no vendor-specific body detail in warning, got %v", retryWarnings)
+	}
+}
+
+func TestRetryDelayForAttempt_UsesConfiguredBounds(t *testing.T) {
+	oldBaseDelay := modelRetryBaseDelay
+	oldMaxDelay := modelRetryMaxDelay
+	modelRetryBaseDelay = time.Second
+	modelRetryMaxDelay = 3 * time.Minute
+	t.Cleanup(func() {
+		modelRetryBaseDelay = oldBaseDelay
+		modelRetryMaxDelay = oldMaxDelay
+	})
+
+	if got := retryDelayForAttempt(0); got != time.Second {
+		t.Fatalf("retry 0: want %s, got %s", time.Second, got)
+	}
+	if got := retryDelayForAttempt(1); got != 2*time.Second {
+		t.Fatalf("retry 1: want %s, got %s", 2*time.Second, got)
+	}
+	if got := retryDelayForAttempt(7); got != 128*time.Second {
+		t.Fatalf("retry 7: want %s, got %s", 128*time.Second, got)
+	}
+	if got := retryDelayForAttempt(8); got != 3*time.Minute {
+		t.Fatalf("retry 8: want %s, got %s", 3*time.Minute, got)
+	}
+	if got := retryDelayForAttempt(32); got != 3*time.Minute {
+		t.Fatalf("retry max cap: want %s, got %s", 3*time.Minute, got)
+	}
+}
+
+func TestRetryDelayForAttemptWithBounds_UsesRateLimitBounds(t *testing.T) {
+	if got := retryDelayForAttemptWithBounds(0, 5*time.Second, 3*time.Minute); got != 5*time.Second {
+		t.Fatalf("rate-limit retry 0: want %s, got %s", 5*time.Second, got)
+	}
+	if got := retryDelayForAttemptWithBounds(1, 5*time.Second, 3*time.Minute); got != 10*time.Second {
+		t.Fatalf("rate-limit retry 1: want %s, got %s", 10*time.Second, got)
+	}
+	if got := retryDelayForAttemptWithBounds(5, 5*time.Second, 3*time.Minute); got != 160*time.Second {
+		t.Fatalf("rate-limit retry 5: want %s, got %s", 160*time.Second, got)
+	}
+	if got := retryDelayForAttemptWithBounds(6, 5*time.Second, 3*time.Minute); got != 3*time.Minute {
+		t.Fatalf("rate-limit retry cap: want %s, got %s", 3*time.Minute, got)
+	}
+}
+
+func TestRetryWarningText_RateLimitIsFriendly(t *testing.T) {
+	text := retryWarningText(
+		1,
+		7,
+		5*time.Second,
+		errors.New(`model: http status 429 body={"detail":"用户请求TPM超限，请减少tokens后重试","error":{"type":"USER_TPM_RATELIMITING"}}`),
+	)
+	if !strings.Contains(text, "hit rate limits") {
+		t.Fatalf("expected friendly rate-limit warning, got %q", text)
+	}
+	if !strings.Contains(text, "HTTP 429 / Too Many Requests") {
+		t.Fatalf("expected generic 429 context in warning, got %q", text)
+	}
+	if strings.Contains(text, `body={`) || strings.Contains(text, "USER_TPM_RATELIMITING") || strings.Contains(text, "用户请求TPM超限") {
+		t.Fatalf("expected no vendor-specific body dump in warning, got %q", text)
+	}
+}
+
+func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
+	attempts := 0
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		attempts++
+		return []seqResult{
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "hello"},
+					Partial:      true,
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{err: errors.New("unexpected EOF while reading stream")},
+		}
+	})
+	ag, err := New(Config{Name: "test", EmitPartialEvents: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+	var (
+		warnings []string
+		partials []string
+		gotErr   error
+	)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			continue
+		}
+		if ev == nil {
+			continue
+		}
+		if ev.Message.Role == model.RoleSystem {
+			warnings = append(warnings, ev.Message.Text)
+		}
+		if eventIsPartialEvent(ev) {
+			partials = append(partials, ev.Message.Text)
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected interrupted response error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected no automatic retry after partial output, got %d attempts", attempts)
+	}
+	if len(partials) != 1 || partials[0] != "hello" {
+		t.Fatalf("expected one partial assistant chunk, got %#v", partials)
+	}
+	if len(warnings) == 0 || !strings.Contains(warnings[len(warnings)-1], "automatic retry was skipped") {
+		t.Fatalf("expected interrupted-response warning, got %#v", warnings)
+	}
+	if !strings.Contains(warnings[len(warnings)-1], "/continue") {
+		t.Fatalf("expected recovery hint in warning, got %#v", warnings)
+	}
+}
+
+func TestLLMAgent_EmptyResponseRetriesWhenNothingWasShown(t *testing.T) {
+	oldMaxRetries := modelRequestMaxRetries
+	oldBaseDelay := modelRetryBaseDelay
+	oldMaxDelay := modelRetryMaxDelay
+	modelRequestMaxRetries = 2
+	modelRetryBaseDelay = time.Millisecond
+	modelRetryMaxDelay = 2 * time.Millisecond
+	t.Cleanup(func() {
+		modelRequestMaxRetries = oldMaxRetries
+		modelRetryBaseDelay = oldBaseDelay
+		modelRetryMaxDelay = oldMaxDelay
+	})
+
+	attempts := 0
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		attempts++
+		if attempts <= 2 {
+			return nil
+		}
+		return []seqResult{{
+			resp: &model.Response{
+				Message:      model.Message{Role: model.RoleAssistant, Text: "done"},
+				TurnComplete: true,
+				Model:        "fake",
+				Provider:     "test-provider",
+			},
+		}}
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+	var warnings []string
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatalf("expected retry to recover empty responses, got %v", runErr)
+		}
+		if ev != nil && ev.Message.Role == model.RoleSystem {
+			warnings = append(warnings, ev.Message.Text)
+		}
+	}
+	if attempts != 3 {
+		t.Fatalf("expected retries for empty responses, got %d attempts", attempts)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("expected two retry warnings for empty responses, got %#v", warnings)
+	}
 }
 
 func TestLLMAgent_InvalidRawToolArgsFailsRun(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,7 +64,7 @@ type cliConsole struct {
 	verbose                bool
 	inputRefs              *inputReferenceResolver
 	tuiDiag                *tuiDiagnostics
-	lastPromptTokens       int // cached prompt token count from resume or run
+	lastPromptTokens       int // cached context usage estimate for TUI status
 
 	editor   lineEditor
 	prompter promptReader
@@ -456,12 +457,43 @@ func (c *cliConsole) runPrompt(input string) error {
 		Writer:        c.out,
 		UI:            c.ui,
 		OnEvent: func(ev *session.Event) bool {
+			c.refreshContextUsageFromEvent(ev)
 			return c.forwardEventToTUI(ev, pendingTUIToolCalls)
 		},
-		OnUsage: func(pt int) {
-			c.lastPromptTokens = pt
+		OnUsage: func(floor int) {
+			c.refreshContextUsageEstimate(floor)
 		},
 	})
+}
+
+func (c *cliConsole) refreshContextUsageFromEvent(ev *session.Event) {
+	if c == nil || ev == nil || eventIsPartial(ev) || ev.Message.Role != model.RoleAssistant {
+		return
+	}
+	c.refreshContextUsageEstimate(usageFloorFromMeta(ev.Meta))
+}
+
+func (c *cliConsole) refreshContextUsageEstimate(minimum int) {
+	if c == nil {
+		return
+	}
+	if minimum < 0 {
+		minimum = 0
+	}
+	current := minimum
+	if c.rt != nil && strings.TrimSpace(c.appName) != "" && strings.TrimSpace(c.userID) != "" && strings.TrimSpace(c.sessionID) != "" {
+		usage, err := c.rt.ContextUsage(c.baseCtx, runtime.UsageRequest{
+			AppName:             c.appName,
+			UserID:              c.userID,
+			SessionID:           c.sessionID,
+			Model:               c.llm,
+			ContextWindowTokens: c.contextWindow,
+		})
+		if err == nil && usage.CurrentTokens > current {
+			current = usage.CurrentTokens
+		}
+	}
+	c.lastPromptTokens = current
 }
 
 func (c *cliConsole) emitAssistantEventToTUI(ev *session.Event) {
@@ -517,7 +549,17 @@ func (c *cliConsole) emitAssistantChunkToTUI(kind string, text string, final boo
 	}
 }
 
+type tuiForwardOptions struct {
+	ShowMutationDiff bool
+}
+
 func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[string]toolCallSnapshot) bool {
+	return c.forwardEventToTUIWithOptions(ev, pendingToolCalls, tuiForwardOptions{
+		ShowMutationDiff: true,
+	})
+}
+
+func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingToolCalls map[string]toolCallSnapshot, opts tuiForwardOptions) bool {
 	if c == nil || c.tuiSender == nil || ev == nil {
 		return false
 	}
@@ -538,9 +580,20 @@ func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[s
 	if len(msg.ToolCalls) > 0 {
 		for _, call := range msg.ToolCalls {
 			parsedArgs := parseToolArgsForDisplay(call.Args)
+			var diffMsg tuievents.DiffBlockMsg
+			diffShown := false
+			if opts.ShowMutationDiff {
+				var tooLarge bool
+				var ok bool
+				diffMsg, tooLarge, ok = buildToolCallDiffBlockMsg(c.execRuntime, call.Name, parsedArgs)
+				if ok && !tooLarge {
+					diffShown = true
+				}
+			}
 			if pendingToolCalls != nil && call.ID != "" {
 				pendingToolCalls[call.ID] = toolCallSnapshot{
-					Args: cloneAnyMap(parsedArgs),
+					Args:          cloneAnyMap(parsedArgs),
+					RichDiffShown: diffShown,
 				}
 			}
 			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) {
@@ -553,6 +606,9 @@ func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[s
 			c.tuiSender.Send(tuievents.LogChunkMsg{
 				Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
 			})
+			if diffShown {
+				c.tuiSender.Send(diffMsg)
+			}
 		}
 		handled = true
 	}
@@ -568,26 +624,18 @@ func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[s
 				return true
 			}
 		}
-		var callArgs map[string]any
+		var (
+			callArgs      map[string]any
+			richDiffShown bool
+		)
 		if pendingToolCalls != nil && msg.ToolResponse.ID != "" {
 			if snapshot, ok := pendingToolCalls[msg.ToolResponse.ID]; ok {
 				callArgs = snapshot.Args
+				richDiffShown = snapshot.RichDiffShown
 				delete(pendingToolCalls, msg.ToolResponse.ID)
 			}
 		}
-		diffMsg, tooLarge, ok := buildPatchDiffBlockMsg(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
-		if ok {
-			if tooLarge {
-				summary := strings.TrimSpace(summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs))
-				if summary == "" {
-					summary = "rich diff skipped: too large"
-				} else {
-					summary += " (rich diff skipped: too large)"
-				}
-				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
-				return true
-			}
-			c.tuiSender.Send(diffMsg)
+		if isFileMutationTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) && richDiffShown {
 			return true
 		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).
@@ -1098,8 +1146,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 	if err != nil {
 		return err
 	}
-	// Extract usage info from the most recent event with usage metadata.
-	c.lastPromptTokens = extractLastUsage(events)
+	c.refreshContextUsageEstimate(extractLastUsage(events))
 	if c.tuiSender == nil || len(events) == 0 {
 		return nil
 	}
@@ -1135,7 +1182,9 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 			}
 			continue
 		}
-		if c.forwardEventToTUI(ev, pendingToolCalls) {
+		if c.forwardEventToTUIWithOptions(ev, pendingToolCalls, tuiForwardOptions{
+			ShowMutationDiff: false,
+		}) {
 			continue
 		}
 		text := strings.TrimSpace(msg.Text)
@@ -1210,7 +1259,7 @@ type terminalApprover struct {
 	ui             *ui
 	mu             sync.RWMutex
 	sessionAllowed map[string]struct{}
-	toolAllowed    map[string]struct{}
+	authAllowed    map[string]struct{}
 }
 
 func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalApprover {
@@ -1219,7 +1268,7 @@ func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalA
 		out:            out,
 		ui:             u,
 		sessionAllowed: map[string]struct{}{},
-		toolAllowed:    map[string]struct{}{},
+		authAllowed:    map[string]struct{}{},
 	}
 }
 
@@ -1232,63 +1281,75 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
+	a.renderCommandApprovalRequest(req)
 	line, err := a.readApprovalChoice(key)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+			a.emitCommandApprovalOutcome(req, key, "cancel")
 			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
 		}
 		return false, err
 	}
 	line = strings.ToLower(strings.TrimSpace(line))
 	switch line {
-	case "y", "yes":
+	case "y", "yes", "o", "once", "proceed":
+		a.emitCommandApprovalOutcome(req, key, "once")
 		return true, nil
-	case "a", "always":
+	case "a", "always", "s", "session":
 		if key != "" {
 			a.mu.Lock()
 			a.sessionAllowed[key] = struct{}{}
 			a.mu.Unlock()
 		}
+		a.emitCommandApprovalOutcome(req, key, "session")
 		return true, nil
 	case "n", "no", "", "c", "cancel":
+		a.emitCommandApprovalOutcome(req, key, "cancel")
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 	default:
+		a.emitCommandApprovalOutcome(req, key, "cancel")
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 	}
 }
 
 func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
 	_ = ctx
-	toolKey := toolApprovalKey(req.ToolName)
-	if toolKey == "" {
+	scopeKey := toolAuthorizationScopeKey(req)
+	if scopeKey == "" {
 		return true, nil
 	}
-	if a.isToolAllowedInSession(toolKey) {
+	if a.isAuthorizationAllowedInSession(scopeKey) {
 		return true, nil
 	}
 
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	line, err := a.readToolAuthorizationChoice(toolKey)
+	a.renderToolAuthorizationRequest(req)
+	line, err := a.readToolAuthorizationChoice(scopeKey)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+			a.emitToolApprovalOutcome(req, scopeKey, "cancel")
 			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
 		}
 		return false, err
 	}
 	line = strings.ToLower(strings.TrimSpace(line))
 	switch line {
-	case "y", "yes":
+	case "y", "yes", "o", "once", "proceed":
+		a.emitToolApprovalOutcome(req, scopeKey, "once")
 		return true, nil
-	case "a", "always":
+	case "a", "always", "s", "session":
 		a.mu.Lock()
-		a.toolAllowed[toolKey] = struct{}{}
+		a.authAllowed[scopeKey] = struct{}{}
 		a.mu.Unlock()
+		a.emitToolApprovalOutcome(req, scopeKey, "session")
 		return true, nil
 	case "n", "no", "", "c", "cancel":
+		a.emitToolApprovalOutcome(req, scopeKey, "cancel")
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 	default:
+		a.emitToolApprovalOutcome(req, scopeKey, "cancel")
 		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 	}
 }
@@ -1304,10 +1365,10 @@ func (a *terminalApprover) isAllowedInSession(command string) bool {
 	return ok
 }
 
-func (a *terminalApprover) isToolAllowedInSession(toolKey string) bool {
+func (a *terminalApprover) isAuthorizationAllowedInSession(scopeKey string) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	_, ok := a.toolAllowed[toolKey]
+	_, ok := a.authAllowed[scopeKey]
 	return ok
 }
 
@@ -1339,10 +1400,20 @@ func toolApprovalKey(toolName string) string {
 	return strings.ToUpper(strings.TrimSpace(toolName))
 }
 
+func toolAuthorizationScopeKey(req kernelpolicy.ToolAuthorizationRequest) string {
+	if key := strings.TrimSpace(req.ScopeKey); key != "" {
+		return key
+	}
+	if path := strings.TrimSpace(req.Path); path != "" {
+		return filepath.Dir(path)
+	}
+	return toolApprovalKey(req.ToolName)
+}
+
 func (a *terminalApprover) readApprovalChoice(sessionKey string) (string, error) {
 	if chooser, ok := a.prompter.(choicePromptReader); ok {
 		return chooser.RequestChoicePrompt(
-			"Approve command?",
+			commandApprovalTitle(),
 			approvalChoicesForSessionKey(sessionKey),
 			"y",
 			false,
@@ -1354,11 +1425,11 @@ func (a *terminalApprover) readApprovalChoice(sessionKey string) (string, error)
 	return a.prompter.ReadLine(approvalPromptAllowDeny)
 }
 
-func (a *terminalApprover) readToolAuthorizationChoice(toolKey string) (string, error) {
+func (a *terminalApprover) readToolAuthorizationChoice(scopeKey string) (string, error) {
 	if chooser, ok := a.prompter.(choicePromptReader); ok {
 		return chooser.RequestChoicePrompt(
-			"Authorize tool?",
-			toolAuthorizationChoices(toolKey),
+			toolAuthorizationTitle(),
+			toolAuthorizationChoices(scopeKey),
 			"y",
 			false,
 		)
@@ -1366,31 +1437,133 @@ func (a *terminalApprover) readToolAuthorizationChoice(toolKey string) (string, 
 	return a.prompter.ReadLine(toolAuthPrompt)
 }
 
+func (a *terminalApprover) renderCommandApprovalRequest(req toolexec.ApprovalRequest) {
+	if a == nil || a.ui == nil {
+		return
+	}
+	a.ui.ApprovalTitle(commandApprovalTitle())
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		a.ui.ApprovalMeta("Reason", reason)
+	}
+	if rule := commandPermissionText(req); rule != "" {
+		a.ui.ApprovalMeta("Permission", rule)
+	}
+	if command := strings.TrimSpace(req.Command); command != "" {
+		a.ui.ApprovalCommand(command)
+	}
+}
+
+func (a *terminalApprover) renderToolAuthorizationRequest(req kernelpolicy.ToolAuthorizationRequest) {
+	if a == nil || a.ui == nil {
+		return
+	}
+	a.ui.ApprovalTitle(toolAuthorizationTitle())
+	a.ui.ApprovalMeta("Permission", "write outside workspace writable roots")
+	a.ui.ApprovalPath(req.Path)
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		a.ui.ApprovalMeta("Reason", reason)
+	}
+}
+
 func approvalChoicesForSessionKey(sessionKey string) []tuievents.PromptChoice {
 	choices := []tuievents.PromptChoice{
-		{Label: "allow", Value: "y", Detail: "Run once"},
+		{Label: "proceed", Value: "y", Detail: "just this once"},
 	}
 	if sessionKey != "" {
 		choices = append(choices, tuievents.PromptChoice{
-			Label:  "always",
+			Label:  "session",
 			Value:  "a",
-			Detail: "Allow in this session: " + sessionKey,
+			Detail: "don't ask again for: " + sessionKey,
 		})
 	}
 	choices = append(choices, tuievents.PromptChoice{
-		Label:  "deny",
+		Label:  "cancel",
 		Value:  "n",
-		Detail: "Cancel (Esc)",
+		Detail: "continue without it",
 	})
 	return choices
 }
 
-func toolAuthorizationChoices(toolKey string) []tuievents.PromptChoice {
+func toolAuthorizationChoices(scopeKey string) []tuievents.PromptChoice {
 	return []tuievents.PromptChoice{
-		{Label: "allow", Value: "y", Detail: "Run once"},
-		{Label: "always", Value: "a", Detail: "Allow in this session: " + toolKey},
-		{Label: "deny", Value: "n", Detail: "Cancel (Esc)"},
+		{Label: "proceed", Value: "y", Detail: "just this once"},
+		{Label: "session", Value: "a", Detail: "don't ask again for: " + scopeKey},
+		{Label: "cancel", Value: "n", Detail: "don't allow"},
 	}
+}
+
+func commandApprovalTitle() string {
+	return "Would you like to run the following command?"
+}
+
+func toolAuthorizationTitle() string {
+	return "Would you like to make the following edits?"
+}
+
+func commandPermissionText(req toolexec.ApprovalRequest) string {
+	reason := strings.ToLower(strings.TrimSpace(req.Reason))
+	switch {
+	case strings.Contains(reason, "require_escalated"):
+		return "host command execution outside sandbox"
+	case strings.TrimSpace(req.Action) != "":
+		return strings.ReplaceAll(strings.TrimSpace(req.Action), "_", " ")
+	default:
+		return ""
+	}
+}
+
+func (a *terminalApprover) emitCommandApprovalOutcome(req toolexec.ApprovalRequest, sessionKey string, decision string) {
+	if a == nil || a.ui == nil {
+		return
+	}
+	target := shortApprovalTarget(req.Command)
+	switch decision {
+	case "once":
+		a.ui.ApprovalOutcome(true, "You approved running "+target+" this time.")
+	case "session":
+		scope := target
+		if strings.TrimSpace(sessionKey) != "" {
+			scope = sessionKey
+		}
+		a.ui.ApprovalOutcome(true, "You approved this session for commands matching "+scope+".")
+	case "cancel":
+		a.ui.ApprovalOutcome(false, "You did not approve running "+target+".")
+	}
+}
+
+func (a *terminalApprover) emitToolApprovalOutcome(req kernelpolicy.ToolAuthorizationRequest, scopeKey string, decision string) {
+	if a == nil || a.ui == nil {
+		return
+	}
+	target := shortApprovalTarget(req.Path)
+	if target == "\"\"" {
+		target = "these edits"
+	}
+	switch decision {
+	case "once":
+		a.ui.ApprovalOutcome(true, "You approved edits to "+target+" this time.")
+	case "session":
+		scope := target
+		if strings.TrimSpace(scopeKey) != "" {
+			scope = shortApprovalTarget(scopeKey)
+		}
+		a.ui.ApprovalOutcome(true, "You approved this session for edits under "+scope+".")
+	case "cancel":
+		a.ui.ApprovalOutcome(false, "You did not approve edits to "+target+".")
+	}
+}
+
+func shortApprovalTarget(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "\"\""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	const maxLen = 80
+	if len(text) > maxLen {
+		text = text[:maxLen-1] + "…"
+	}
+	return strconv.Quote(text)
 }
 
 func isApprovalWrapperCommand(base string) bool {

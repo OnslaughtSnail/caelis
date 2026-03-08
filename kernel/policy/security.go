@@ -14,6 +14,9 @@ type toolAuthorizerContextKey struct{}
 type ToolAuthorizationRequest struct {
 	ToolName string
 	Reason   string
+	Path     string
+	ScopeKey string
+	Preview  string
 }
 
 // ToolAuthorizer handles tool-level authorization decisions.

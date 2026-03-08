@@ -151,13 +151,13 @@ func (a *Agent) generateTurnResponse(
 	}
 	resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
 		return a.emitPartialResponse(partial, yield)
-	}, func(attempt int, delay time.Duration, cause error) error {
+	}, func(attempt int, maxRetries int, delay time.Duration, cause error) error {
 		ev := &session.Event{
 			ID:   newEventID(),
 			Time: time.Now(),
 			Message: model.Message{
 				Role: model.RoleSystem,
-				Text: fmt.Sprintf("warn: llm request failed, retrying in %s (%d/%d): %v", formatRetryDelay(delay), attempt, modelRequestMaxRetries, cause),
+				Text: retryWarningText(attempt, maxRetries, delay, cause),
 			},
 		}
 		if !yield(ev, nil) {
@@ -166,10 +166,20 @@ func (a *Agent) generateTurnResponse(
 		return nil
 	})
 	if err != nil {
+		if interrupted := interruptedResponseError(err); interrupted != nil {
+			ev := &session.Event{
+				ID:   newEventID(),
+				Time: time.Now(),
+				Message: model.Message{
+					Role: model.RoleSystem,
+					Text: interruptedResponseWarning(interrupted),
+				},
+			}
+			if !yield(ev, nil) {
+				return nil, errYieldStopped
+			}
+		}
 		return nil, err
-	}
-	if resp == nil {
-		return nil, fmt.Errorf("llmagent: empty model response")
 	}
 	return resp, nil
 }
@@ -549,10 +559,50 @@ var errYieldStopped = errors.New("llmagent: downstream yield stopped")
 var errStopAfterYieldedError = errors.New("llmagent: stop after yielded error")
 
 var (
-	modelRequestMaxRetries = 5
-	modelRetryBaseDelay    = 250 * time.Millisecond
-	modelRetryMaxDelay     = 4 * time.Second
+	modelRequestMaxRetries     = 5
+	modelRetryBaseDelay        = 1 * time.Second
+	modelRetryMaxDelay         = 3 * time.Minute
+	rateLimitRequestMaxRetries = 7
+	rateLimitRetryBaseDelay    = 5 * time.Second
+	rateLimitRetryMaxDelay     = 3 * time.Minute
 )
+
+type retryPolicy struct {
+	maxRetries  int
+	baseDelay   time.Duration
+	maxDelay    time.Duration
+	rateLimited bool
+}
+
+var errEmptyModelResponse = errors.New("llmagent: empty model response")
+
+type interruptedModelResponseError struct {
+	cause          error
+	partialEmitted bool
+}
+
+func (e *interruptedModelResponseError) Error() string {
+	if e == nil {
+		return "llmagent: interrupted model response"
+	}
+	switch {
+	case e.partialEmitted && e.cause != nil:
+		return fmt.Sprintf("llmagent: model response interrupted after partial output: %v", e.cause)
+	case e.partialEmitted:
+		return "llmagent: model response interrupted after partial output"
+	case e.cause != nil:
+		return fmt.Sprintf("llmagent: incomplete model response: %v", e.cause)
+	default:
+		return "llmagent: incomplete model response"
+	}
+}
+
+func (e *interruptedModelResponseError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
 
 func collectLast(ctx context.Context, seq iter.Seq2[*model.Response, error], onPartial func(*model.Response) error) (*model.Response, error) {
 	var last *model.Response
@@ -581,7 +631,7 @@ func (a *Agent) generateWithRetry(
 	ctx agent.InvocationContext,
 	req *model.Request,
 	onPartial func(*model.Response) error,
-	onRetry func(attempt int, delay time.Duration, cause error) error,
+	onRetry func(attempt int, maxRetries int, delay time.Duration, cause error) error,
 ) (*model.Response, error) {
 	retries := 0
 	for {
@@ -596,20 +646,40 @@ func (a *Agent) generateWithRetry(
 			return onPartial(partial)
 		})
 		if err == nil {
-			return resp, nil
+			switch {
+			case resp == nil:
+				err = errEmptyModelResponse
+			case resp.Partial || !resp.TurnComplete:
+				err = &interruptedModelResponseError{
+					cause:          fmt.Errorf("model returned without completing the turn"),
+					partialEmitted: emittedPartial,
+				}
+			default:
+				return resp, nil
+			}
 		}
 		if emittedPartial {
+			if interruptedResponseError(err) == nil {
+				err = &interruptedModelResponseError{
+					cause:          err,
+					partialEmitted: true,
+				}
+			}
 			return nil, err
 		}
 		if errors.Is(err, errYieldStopped) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
-		if retries >= modelRequestMaxRetries {
-			return nil, fmt.Errorf("llmagent: model request failed after %d retries: %w", modelRequestMaxRetries, err)
+		policy := retryPolicyForError(err)
+		if retries >= policy.maxRetries {
+			if policy.rateLimited {
+				return nil, fmt.Errorf("llmagent: model request hit rate limits after %d retries: %w", policy.maxRetries, err)
+			}
+			return nil, fmt.Errorf("llmagent: model request failed after %d retries: %w", policy.maxRetries, err)
 		}
-		delay := retryDelayForAttempt(retries)
+		delay := retryDelayForAttemptWithBounds(retries, policy.baseDelay, policy.maxDelay)
 		if onRetry != nil {
-			if retryErr := onRetry(retries+1, delay, err); retryErr != nil {
+			if retryErr := onRetry(retries+1, policy.maxRetries, delay, err); retryErr != nil {
 				return nil, retryErr
 			}
 		}
@@ -635,20 +705,161 @@ func formatRetryDelay(delay time.Duration) string {
 }
 
 func retryDelayForAttempt(retry int) time.Duration {
+	return retryDelayForAttemptWithBounds(retry, modelRetryBaseDelay, modelRetryMaxDelay)
+}
+
+func retryDelayForAttemptWithBounds(retry int, baseDelay, maxDelay time.Duration) time.Duration {
 	if retry < 0 {
 		retry = 0
 	}
-	delay := modelRetryBaseDelay
+	if baseDelay <= 0 {
+		baseDelay = time.Second
+	}
+	if maxDelay <= 0 {
+		maxDelay = baseDelay
+	}
+	delay := baseDelay
 	for i := 0; i < retry; i++ {
 		delay *= 2
-		if delay >= modelRetryMaxDelay {
-			return modelRetryMaxDelay
+		if delay >= maxDelay {
+			return maxDelay
 		}
 	}
-	if delay > modelRetryMaxDelay {
-		return modelRetryMaxDelay
+	if delay > maxDelay {
+		return maxDelay
 	}
 	return delay
+}
+
+func retryPolicyForError(err error) retryPolicy {
+	if isRateLimitError(err) {
+		return retryPolicy{
+			maxRetries:  rateLimitRequestMaxRetries,
+			baseDelay:   rateLimitRetryBaseDelay,
+			maxDelay:    rateLimitRetryMaxDelay,
+			rateLimited: true,
+		}
+	}
+	return retryPolicy{
+		maxRetries: modelRequestMaxRetries,
+		baseDelay:  modelRetryBaseDelay,
+		maxDelay:   modelRetryMaxDelay,
+	}
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "http status 429") ||
+		strings.Contains(text, "rate limit") ||
+		strings.Contains(text, "ratelimit") ||
+		strings.Contains(text, "too many requests")
+}
+
+func retryWarningText(attempt int, maxRetries int, delay time.Duration, cause error) string {
+	if isRateLimitError(cause) {
+		return fmt.Sprintf(
+			"warn: llm request hit rate limits (HTTP 429 / Too Many Requests), retrying in %s (%d/%d). Waiting longer before retrying.",
+			formatRetryDelay(delay),
+			attempt,
+			maxRetries,
+		)
+	}
+	summary := summarizeRetryCause(cause)
+	return fmt.Sprintf("warn: llm request failed, retrying in %s (%d/%d): %s", formatRetryDelay(delay), attempt, maxRetries, summary)
+}
+
+func summarizeRetryCause(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	text := strings.TrimSpace(err.Error())
+	if text == "" {
+		return "unknown error"
+	}
+	bodyIndex := strings.Index(text, " body=")
+	if bodyIndex < 0 {
+		return text
+	}
+	prefix := strings.TrimSpace(text[:bodyIndex])
+	body := strings.TrimSpace(text[bodyIndex+len(" body="):])
+	bodySummary := summarizeRetryBody(body)
+	switch {
+	case bodySummary == "":
+		return text
+	case prefix == "":
+		return bodySummary
+	default:
+		return prefix + ": " + bodySummary
+	}
+}
+
+func summarizeRetryBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return ""
+	}
+	detail := firstString(payload["detail"], payload["message"])
+	errPayload, _ := payload["error"].(map[string]any)
+	errMessage := firstString(errPayload["message"])
+	errType := firstString(errPayload["type"], errPayload["code"])
+	if detail == "" {
+		detail = errMessage
+	}
+	if detail == "" {
+		return errType
+	}
+	if errType == "" || strings.Contains(strings.ToLower(detail), strings.ToLower(errType)) {
+		return detail
+	}
+	return detail + " [" + errType + "]"
+}
+
+func firstString(values ...any) string {
+	for _, value := range values {
+		text, ok := value.(string)
+		if ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func interruptedResponseError(err error) *interruptedModelResponseError {
+	if err == nil {
+		return nil
+	}
+	var target *interruptedModelResponseError
+	if errors.As(err, &target) {
+		return target
+	}
+	return nil
+}
+
+func interruptedResponseWarning(err *interruptedModelResponseError) string {
+	if err == nil {
+		return "warn: model response was interrupted before the turn completed."
+	}
+	cause := summarizeRetryCause(err.cause)
+	if err.partialEmitted {
+		return fmt.Sprintf(
+			"warn: model response was interrupted before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content. Cause: %s. You can send /continue to resume.",
+			cause,
+		)
+	}
+	return fmt.Sprintf(
+		"warn: model returned incomplete output. The request was retried automatically when safe. Last cause: %s.",
+		cause,
+	)
 }
 
 func toolCallSignature(name string, args map[string]any) (string, error) {

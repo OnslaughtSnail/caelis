@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -165,5 +168,103 @@ func TestForwardEventToTUI_AssistantReasoningBeforeToolCall(t *testing.T) {
 	}
 	if !strings.Contains(callMsg.Chunk, "▸ LIST") {
 		t.Fatalf("expected tool call chunk, got %q", callMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_FileToolCallEmitsDiffPreviewBeforeToolResponse(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+	ev := &session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "WRITE", Args: fmt.Sprintf(`{"path":%q,"content":"new\n"}`, path)},
+			},
+		},
+	}
+
+	handled := c.forwardEventToTUI(ev, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected event to be handled by TUI forwarder")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected tool call and diff block messages, got %d", len(sender.msgs))
+	}
+	if _, ok := sender.msgs[0].(tuievents.LogChunkMsg); !ok {
+		t.Fatalf("expected first message LogChunkMsg, got %T", sender.msgs[0])
+	}
+	diffMsg, ok := sender.msgs[1].(tuievents.DiffBlockMsg)
+	if !ok {
+		t.Fatalf("expected second message DiffBlockMsg, got %T", sender.msgs[1])
+	}
+	if diffMsg.Tool != "WRITE" || diffMsg.Path != "a.txt" {
+		t.Fatalf("unexpected diff message: %+v", diffMsg)
+	}
+}
+
+func TestForwardEventToTUI_FileToolResponseFallsBackToSummaryWhenDiffSkipped(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "a.txt")
+	oldContent := strings.Repeat("old\n", 500)
+	newContent := strings.Repeat("new\n", 500)
+	if err := os.WriteFile(path, []byte(oldContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+	pending := map[string]toolCallSnapshot{}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "WRITE", Args: fmt.Sprintf(`{"path":%q,"content":%q}`, path, newContent)},
+			},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected tool call to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected only call log when diff is skipped, got %d messages", len(sender.msgs))
+	}
+
+	handled = c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_1",
+				Name: "WRITE",
+				Result: map[string]any{
+					"path":       path,
+					"created":    false,
+					"line_count": 500,
+				},
+			},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected tool response to be handled")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected summary fallback after tool response, got %d messages", len(sender.msgs))
+	}
+	summaryMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected summary LogChunkMsg, got %T", sender.msgs[1])
+	}
+	if !strings.Contains(summaryMsg.Chunk, "✓ WRITE wrote a.txt (500 lines)") {
+		t.Fatalf("unexpected summary chunk %q", summaryMsg.Chunk)
 	}
 }

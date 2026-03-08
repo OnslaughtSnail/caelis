@@ -108,12 +108,12 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 
 func newPromptState(req tuievents.PromptRequestMsg) *promptState {
 	state := &promptState{
-		prompt:     req.Prompt,
-		secret:     req.Secret,
-		response:   req.Response,
-		filterable: req.Filterable,
+		prompt:      req.Prompt,
+		secret:      req.Secret,
+		response:    req.Response,
+		filterable:  req.Filterable,
 		multiSelect: req.MultiSelect,
-		selected:   map[string]struct{}{},
+		selected:    map[string]struct{}{},
 	}
 	if req.Secret {
 		return state
@@ -179,6 +179,15 @@ func parsePromptChoices(prompt string) ([]promptChoice, int, bool) {
 			{label: "allow", value: "y"},
 			{label: "always", value: "a"},
 			{label: "deny", value: "n"},
+		}, 2, true
+	}
+	if strings.Contains(normalized, "once") &&
+		strings.Contains(normalized, "session") &&
+		strings.Contains(normalized, "cancel") {
+		return []promptChoice{
+			{label: "once", value: "y"},
+			{label: "session", value: "a"},
+			{label: "cancel", value: "n"},
 		}, 2, true
 	}
 	return nil, 0, false
@@ -288,10 +297,10 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 				head := append([]rune(nil), m.activePrompt.filter[:m.activePrompt.cursor]...)
 				head = append(head, r)
 				m.activePrompt.filter = append(head, m.activePrompt.filter[m.activePrompt.cursor:]...)
-			m.activePrompt.cursor++
-		}
-		m.clampPromptChoiceIndex()
-		return nil
+				m.activePrompt.cursor++
+			}
+			m.clampPromptChoiceIndex()
+			return nil
 		}
 		key := strings.ToLower(strings.TrimSpace(string(msg.Runes)))
 		for _, choice := range visible {

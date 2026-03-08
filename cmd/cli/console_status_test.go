@@ -8,6 +8,7 @@ import (
 	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
@@ -178,4 +179,56 @@ func appendLifecycleState(
 		Time:      time.Now(),
 		Meta:      meta,
 	})
+}
+
+func TestRefreshContextUsageFromEvent_FallsBackToRuntimeEstimateWithoutUsage(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := "app"
+	user := "u"
+	sid := "s-usage"
+	sess := &session.Session{AppName: app, UserID: user, ID: sid}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:        "ev-user",
+		SessionID: sid,
+		Time:      time.Now(),
+		Message: model.Message{
+			Role: model.RoleUser,
+			Text: "please summarize the current repo state and pending edits",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assistantEvent := &session.Event{
+		ID:        "ev-assistant",
+		SessionID: sid,
+		Time:      time.Now(),
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			Text: "I reviewed the repo and found two pending edit areas.",
+		},
+	}
+	if err := store.AppendEvent(context.Background(), sess, assistantEvent); err != nil {
+		t.Fatal(err)
+	}
+
+	console := &cliConsole{
+		baseCtx:          context.Background(),
+		rt:               rt,
+		appName:          app,
+		userID:           user,
+		sessionID:        sid,
+		contextWindow:    128000,
+		lastPromptTokens: 0,
+	}
+	console.refreshContextUsageFromEvent(assistantEvent)
+	if console.lastPromptTokens <= 0 {
+		t.Fatalf("expected runtime usage fallback to populate status tokens, got %d", console.lastPromptTokens)
+	}
 }

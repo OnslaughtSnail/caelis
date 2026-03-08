@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -209,6 +210,65 @@ func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 	}
 	if store.DefaultModel() != "deepseek/deepseek-chat" {
 		t.Fatalf("unexpected default model %q", store.DefaultModel())
+	}
+}
+
+func TestHandleConnect_TUIReportsTransientCatalogFallbackHint(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevRefresh := connectModelCatalogRefreshFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return []modelproviders.RemoteModel{{Name: "deepseek-chat"}}, nil
+	}
+	connectModelCatalogRefreshFn = func(baseCtx context.Context) (modelcatalog.CatalogInitStatus, bool) {
+		return modelcatalog.CatalogInitStatus{RemoteError: errors.New("models.dev timeout")}, true
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		connectModelCatalogRefreshFn = prevRefresh
+	})
+
+	store := &appConfigStore{path: filepath.Join(t.TempDir(), "config.json"), data: defaultAppConfig()}
+	sender := &testSender{}
+	prompter := &stubChoicePrompter{
+		choices: []string{"deepseek", "deepseek-chat"},
+		lines:   []string{"sk-test"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		configStore:  store,
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+		tuiSender:    sender,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	var hint tuievents.SetHintMsg
+	var found bool
+	for _, raw := range sender.msgs {
+		msg, ok := raw.(tuievents.SetHintMsg)
+		if !ok {
+			continue
+		}
+		hint = msg
+		found = true
+	}
+	if !found {
+		t.Fatal("expected transient catalog fallback hint")
+	}
+	if hint.Hint != "models.dev unavailable; using bundled model snapshot" {
+		t.Fatalf("unexpected hint text %q", hint.Hint)
+	}
+	if hint.ClearAfter <= 0 {
+		t.Fatalf("expected auto-clearing hint, got %s", hint.ClearAfter)
+	}
+	if strings.Contains(out.String(), "models.dev unavailable") {
+		t.Fatalf("expected no persistent fallback warning in TUI output, got %q", out.String())
 	}
 }
 

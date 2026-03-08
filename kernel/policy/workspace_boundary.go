@@ -71,7 +71,8 @@ func (h workspaceBoundaryHook) BeforeTool(ctx context.Context, in ToolInput) (To
 	}
 
 	args := resolveToolInputArgs(in)
-	targetPath := pathArgFromToolCall(args)
+	rawTargetPath, _ := args["path"].(string)
+	targetPath := resolveAbsPath(rawTargetPath, h.runtime.FileSystem())
 	if targetPath == "" {
 		// No path arg — let the tool itself handle the missing arg error.
 		return in, nil
@@ -89,10 +90,7 @@ func (h workspaceBoundaryHook) BeforeTool(ctx context.Context, in ToolInput) (To
 		}
 	}
 
-	allowed, err := authorizer.AuthorizeTool(ctx, ToolAuthorizationRequest{
-		ToolName: in.Call.Name,
-		Reason:   fmt.Sprintf("writing to %q outside workspace writable roots", targetPath),
-	})
+	allowed, err := authorizer.AuthorizeTool(ctx, externalWriteAuthorizationRequest(in.Call.Name, args, h.runtime, targetPath))
 	if err != nil {
 		return ToolInput{}, err
 	}

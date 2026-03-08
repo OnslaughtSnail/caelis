@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -39,14 +40,16 @@ type stubFS struct {
 	home string
 }
 
-func (f *stubFS) Getwd() (string, error)                      { return f.cwd, nil }
-func (f *stubFS) UserHomeDir() (string, error)                { return f.home, nil }
-func (f *stubFS) Open(string) (*os.File, error)               { return nil, errors.New("stub") }
-func (f *stubFS) ReadDir(string) ([]os.DirEntry, error)       { return nil, errors.New("stub") }
-func (f *stubFS) Stat(string) (os.FileInfo, error)            { return nil, errors.New("stub") }
-func (f *stubFS) ReadFile(string) ([]byte, error)             { return nil, errors.New("stub") }
-func (f *stubFS) WriteFile(string, []byte, os.FileMode) error { return errors.New("stub") }
-func (f *stubFS) Glob(string) ([]string, error)               { return nil, errors.New("stub") }
+func (f *stubFS) Getwd() (string, error)                     { return f.cwd, nil }
+func (f *stubFS) UserHomeDir() (string, error)               { return f.home, nil }
+func (f *stubFS) Open(name string) (*os.File, error)         { return os.Open(name) }
+func (f *stubFS) ReadDir(name string) ([]os.DirEntry, error) { return os.ReadDir(name) }
+func (f *stubFS) Stat(name string) (os.FileInfo, error)      { return os.Stat(name) }
+func (f *stubFS) ReadFile(name string) ([]byte, error)       { return os.ReadFile(name) }
+func (f *stubFS) WriteFile(name string, data []byte, mode os.FileMode) error {
+	return os.WriteFile(name, data, mode)
+}
+func (f *stubFS) Glob(pattern string) ([]string, error) { return filepath.Glob(pattern) }
 func (f *stubFS) WalkDir(string, fs.WalkDirFunc) error {
 	return errors.New("stub")
 }
@@ -133,6 +136,63 @@ func TestWorkspaceBoundary_ApprovedExternalWriteAllowed(t *testing.T) {
 	}
 	if authorizer.calls != 1 {
 		t.Fatalf("expected 1 authorization call, got %d", authorizer.calls)
+	}
+}
+
+func TestWorkspaceBoundary_ApprovalRequestIncludesPathScopeAndPreview(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a unix-style absolute path")
+	}
+	ws := t.TempDir()
+	targetPath := "/etc/hosts"
+	original, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("read target fixture: %v", err)
+	}
+	oldValue := string(original)
+	firstLine := strings.TrimSuffix(strings.SplitN(oldValue, "\n", 2)[0], "\r")
+	if strings.TrimSpace(firstLine) == "" {
+		t.Fatal("expected non-empty first line in /etc/hosts")
+	}
+	newValue := strings.Replace(oldValue, firstLine, firstLine+" localdomain", 1)
+	rt := &stubRuntime{
+		policy: toolexec.SandboxPolicy{
+			Type:          toolexec.SandboxPolicyWorkspaceWrite,
+			WritableRoots: []string{ws},
+		},
+		permission: toolexec.PermissionModeDefault,
+		fs:         &stubFS{cwd: ws, home: "/home/user"},
+	}
+	hook := WorkspaceBoundary(WorkspaceBoundaryConfig{Runtime: rt})
+	authorizer := &stubToolAuthorizer{allow: true}
+	ctx := WithToolAuthorizer(context.Background(), authorizer)
+
+	in := ToolInput{
+		Call: model.ToolCall{Name: "PATCH"},
+		Args: map[string]any{
+			"path": targetPath,
+			"old":  oldValue,
+			"new":  newValue,
+		},
+		Capability: toolcap.Capability{
+			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
+			Risk:       toolcap.RiskMedium,
+		},
+	}
+	if _, err := hook.BeforeTool(ctx, in); err != nil {
+		t.Fatalf("expected approval request to pass with authorizer, got %v", err)
+	}
+	if authorizer.last.Path != targetPath {
+		t.Fatalf("expected absolute target path, got %q", authorizer.last.Path)
+	}
+	if authorizer.last.ScopeKey != "/etc" {
+		t.Fatalf("expected directory scope %q, got %q", "/etc", authorizer.last.ScopeKey)
+	}
+	if !strings.Contains(authorizer.last.Preview, "--- old") || !strings.Contains(authorizer.last.Preview, "+++ new") {
+		t.Fatalf("expected diff preview headers, got %q", authorizer.last.Preview)
+	}
+	if !strings.Contains(authorizer.last.Preview, "-"+firstLine) || !strings.Contains(authorizer.last.Preview, "+"+firstLine+" localdomain") {
+		t.Fatalf("expected diff preview body, got %q", authorizer.last.Preview)
 	}
 }
 
