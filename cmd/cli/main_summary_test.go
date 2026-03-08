@@ -86,6 +86,63 @@ func TestSummarizeToolResponse_PatchIgnoresCallPreviewArgs(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolResponse_DelegateRendersAssistantWithoutChildID(t *testing.T) {
+	got := summarizeToolResponse("DELEGATE", map[string]any{
+		"child_session_id": "s-1234567890ab",
+		"summary":          "## Done\n\n- item",
+	})
+	if strings.Contains(got, "child=") {
+		t.Fatalf("did not expect child session id in delegate summary: %q", got)
+	}
+	if !strings.HasPrefix(got, "\n") {
+		t.Fatalf("expected delegate summary to render on the next line, got %q", got)
+	}
+	if !strings.Contains(got, "Done") {
+		t.Fatalf("unexpected delegate summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_DelegateRunningIncludesLatestOutput(t *testing.T) {
+	got := summarizeToolResponse("DELEGATE", map[string]any{
+		"task_id":       "t-1234567890ab",
+		"running":       true,
+		"latest_output": "line-1\nline-2",
+	})
+	if !strings.Contains(got, "task=t-12345678 running") || !strings.Contains(got, "line-2") {
+		t.Fatalf("unexpected delegate running summary: %q", got)
+	}
+}
+
+func TestRenderDelegateSummaryPreview_StripsCodeFences(t *testing.T) {
+	got := renderDelegateSummaryPreview("## Header\n\n```sh\necho hi\nls\n```\n\nDone")
+	if strings.Contains(got, "```") {
+		t.Fatalf("expected code fences stripped, got %q", got)
+	}
+	if strings.Contains(got, "echo hi") || strings.Contains(got, "ls") {
+		t.Fatalf("expected fenced block contents hidden, got %q", got)
+	}
+	if !strings.Contains(got, "Header") || !strings.Contains(got, "Done") {
+		t.Fatalf("unexpected delegate preview %q", got)
+	}
+}
+
+func TestCompactTaskPreview_StripsDelegateCodeFenceContent(t *testing.T) {
+	got := compactTaskPreview("step 1\n```text\n12\n-rw-r--r-- demo.html\n```\nstep 2")
+	if strings.Contains(got, "demo.html") || strings.Contains(got, "\n12\n") {
+		t.Fatalf("expected fenced output stripped from compact preview, got %q", got)
+	}
+	if !strings.Contains(got, "step 1") || !strings.Contains(got, "step 2") {
+		t.Fatalf("expected prose lines preserved, got %q", got)
+	}
+}
+
+func TestFormatToolResultLine_RendersMultilineBodyBelowHeader(t *testing.T) {
+	got := formatToolResultLine("✓ ", "DELEGATE", "\nline-1\nline-2")
+	if got != "✓ DELEGATE\nline-1\nline-2\n" {
+		t.Fatalf("unexpected multiline tool result rendering: %q", got)
+	}
+}
+
 func TestPrintEvent_PatchResponseUsesRecordedToolCallArgs(t *testing.T) {
 	var out bytes.Buffer
 	state := &renderState{

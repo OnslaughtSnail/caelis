@@ -7,10 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	launcherfull "github.com/OnslaughtSnail/caelis/cmd/launcher/full"
+	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/version"
 	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -22,14 +21,13 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/promptpipeline"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session/filestore"
+	taskfilestore "github.com/OnslaughtSnail/caelis/kernel/task/filestore"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/sandboxhelper"
 )
-
-var conversationSessionCounter atomic.Uint64
 
 func main() {
 	if sandboxhelper.MaybeRun(os.Args[1:]) {
@@ -73,7 +71,7 @@ func runCLI(ctx context.Context, args []string) error {
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	var (
-		toolProviders    = fs.String("tool-providers", pluginbuiltin.ProviderWorkspaceTools+","+pluginbuiltin.ProviderShellTools+","+providerLSPTools+","+pluginbuiltin.ProviderMCPTools, "Comma-separated tool providers")
+		toolProviders    = fs.String("tool-providers", pluginbuiltin.ProviderWorkspaceTools+","+pluginbuiltin.ProviderShellTools+","+pluginbuiltin.ProviderMCPTools, "Comma-separated tool providers")
 		policyProviders  = fs.String("policy-providers", pluginbuiltin.ProviderDefaultPolicy, "Comma-separated policy providers")
 		modelAlias       = fs.String("model", configStore.DefaultModel(), "Model alias")
 		uiMode           = fs.String("ui", string(uiModeAuto), "Interactive UI mode: auto|tui")
@@ -92,6 +90,7 @@ func runCLI(ctx context.Context, args []string) error {
 		contextWindow    = fs.Int("context-window", 0, "Model context window tokens override")
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
 		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default")
+		experimentalLSP  = fs.Bool("experimental-lsp", false, "Enable experimental CLI LSP tools plugin")
 		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
 		showVersion      = fs.Bool("version", false, "Show version and exit")
 		verbose          = fs.Bool("verbose", false, "Enable verbose output with debug details")
@@ -204,12 +203,18 @@ func runCLI(ctx context.Context, args []string) error {
 	}); err != nil {
 		return err
 	}
-	if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntime); err != nil {
-		return err
+	resolvedToolProviders := splitCSV(*toolProviders)
+	if *experimentalLSP {
+		resolvedToolProviders = appendProviderIfMissing(resolvedToolProviders, providerLSPTools)
+	}
+	if includesProvider(resolvedToolProviders, providerLSPTools) {
+		if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntime); err != nil {
+			return err
+		}
 	}
 	resolved, err := bootstrap.Assemble(ctx, bootstrap.AssembleSpec{
 		Registry:        pluginRegistry,
-		ToolProviders:   splitCSV(*toolProviders),
+		ToolProviders:   resolvedToolProviders,
 		PolicyProviders: splitCSV(*policyProviders),
 	})
 	if err != nil {
@@ -258,12 +263,23 @@ func runCLI(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	taskStoreImpl, err := taskfilestore.New(filepath.Join(eventStoreDir, ".tasks"))
+	if err != nil {
+		return err
+	}
 	index, err := newSessionIndex(*sessionIndexFile)
 	if err != nil {
 		return err
 	}
 	if err := index.SyncWorkspaceFromStoreDir(workspace, *appName, *userID, eventStoreDir); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: sync session index failed: %v\n", err)
+	}
+	if flagProvided(args, "session") {
+		if resolvedSessionID, ok, resolveErr := index.ResolveWorkspaceSessionID(workspace.Key, *sessionID); resolveErr != nil {
+			return resolveErr
+		} else if ok {
+			*sessionID = resolvedSessionID
+		}
 	}
 	defer func() {
 		if closeErr := index.Close(); closeErr != nil {
@@ -272,7 +288,8 @@ func runCLI(ctx context.Context, args []string) error {
 	}()
 	store := newIndexedSessionStore(storeImpl, index, workspace)
 	rt, err := runtime.New(runtime.Config{
-		Store: store,
+		Store:     store,
+		TaskStore: taskStoreImpl,
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio: *compactWatermark,
 		},
@@ -307,19 +324,19 @@ func runCLI(ctx context.Context, args []string) error {
 			return nil
 		}
 		ag, err := buildAgent(buildAgentInput{
-			AppName:                *appName,
-			WorkspaceDir:           workspace.CWD,
-			PromptConfigDir:        *promptConfigDir,
-			EnableLSPRoutingPolicy: hasLSPTools(resolved.Tools),
-			BasePrompt:             *systemPrompt,
-			RuntimeHint:            buildRuntimePromptHint(execRuntime),
-			SkillDirs:              skillDirList,
-			StreamModel:            false,
-			ThinkingMode:           modelRuntime.ThinkingMode,
-			ThinkingBudget:         modelRuntime.ThinkingBudget,
-			ReasoningEffort:        modelRuntime.ReasoningEffort,
-			ModelProvider:          resolveProviderName(factory, alias),
-			ModelName:              resolveModelName(factory, alias),
+			AppName:                     *appName,
+			WorkspaceDir:                workspace.CWD,
+			PromptConfigDir:             *promptConfigDir,
+			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
+			BasePrompt:                  *systemPrompt,
+			RuntimeHint:                 buildRuntimePromptHint(execRuntime),
+			SkillDirs:                   skillDirList,
+			StreamModel:                 false,
+			ThinkingMode:                modelRuntime.ThinkingMode,
+			ThinkingBudget:              modelRuntime.ThinkingBudget,
+			ReasoningEffort:             modelRuntime.ReasoningEffort,
+			ModelProvider:               resolveProviderName(factory, alias),
+			ModelName:                   resolveModelName(factory, alias),
 		})
 		if err != nil {
 			return err
@@ -370,55 +387,55 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 
 	console := newCLIConsole(cliConsoleConfig{
-		BaseContext:            ctx,
-		Runtime:                rt,
-		AppName:                *appName,
-		UserID:                 *userID,
-		SessionID:              *sessionID,
-		ContextWindow:          *contextWindow,
-		Workspace:              workspace,
-		Resolved:               resolved,
-		ExecRuntime:            execRuntime,
-		SandboxType:            strings.TrimSpace(*sandboxType),
-		SandboxHelperPath:      sandboxHelperPath,
-		ModelAlias:             alias,
-		Model:                  llm,
-		ModelFactory:           factory,
-		ConfigStore:            configStore,
-		CredentialStore:        credentials,
-		SessionIndex:           index,
-		SystemPrompt:           *systemPrompt,
-		PromptConfigDir:        *promptConfigDir,
-		EnableLSPRoutingPolicy: hasLSPTools(resolved.Tools),
-		SkillDirs:              skillDirList,
-		ThinkingMode:           modelRuntime.ThinkingMode,
-		ThinkingBudget:         modelRuntime.ThinkingBudget,
-		ReasoningEffort:        modelRuntime.ReasoningEffort,
-		InputRefs:              inputRefs,
-		TUIDiagnostics:         newTUIDiagnostics(),
-		HistoryFile:            historyPath,
-		Version:                version.String(),
-		NoColor:                *noColor,
-		Verbose:                *verbose,
-		UIMode:                 string(resolvedUIMode),
+		BaseContext:           ctx,
+		Runtime:               rt,
+		AppName:               *appName,
+		UserID:                *userID,
+		SessionID:             *sessionID,
+		ContextWindow:         *contextWindow,
+		Workspace:             workspace,
+		Resolved:              resolved,
+		ExecRuntime:           execRuntime,
+		SandboxType:           strings.TrimSpace(*sandboxType),
+		SandboxHelperPath:     sandboxHelperPath,
+		ModelAlias:            alias,
+		Model:                 llm,
+		ModelFactory:          factory,
+		ConfigStore:           configStore,
+		CredentialStore:       credentials,
+		SessionIndex:          index,
+		SystemPrompt:          *systemPrompt,
+		PromptConfigDir:       *promptConfigDir,
+		EnableExperimentalLSP: hasLSPTools(resolved.Tools),
+		SkillDirs:             skillDirList,
+		ThinkingMode:          modelRuntime.ThinkingMode,
+		ThinkingBudget:        modelRuntime.ThinkingBudget,
+		ReasoningEffort:       modelRuntime.ReasoningEffort,
+		InputRefs:             inputRefs,
+		TUIDiagnostics:        newTUIDiagnostics(),
+		HistoryFile:           historyPath,
+		Version:               version.String(),
+		NoColor:               *noColor,
+		Verbose:               *verbose,
+		UIMode:                string(resolvedUIMode),
 	})
 	return console.loop()
 }
 
 type buildAgentInput struct {
-	AppName                string
-	WorkspaceDir           string
-	PromptConfigDir        string
-	EnableLSPRoutingPolicy bool
-	BasePrompt             string
-	RuntimeHint            string
-	SkillDirs              []string
-	StreamModel            bool
-	ThinkingMode           string
-	ThinkingBudget         int
-	ReasoningEffort        string
-	ModelProvider          string
-	ModelName              string
+	AppName                     string
+	WorkspaceDir                string
+	PromptConfigDir             string
+	EnableExperimentalLSPPrompt bool
+	BasePrompt                  string
+	RuntimeHint                 string
+	SkillDirs                   []string
+	StreamModel                 bool
+	ThinkingMode                string
+	ThinkingBudget              int
+	ReasoningEffort             string
+	ModelProvider               string
+	ModelName                   string
 }
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
@@ -459,6 +476,26 @@ func splitCSV(input string) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+func appendProviderIfMissing(providers []string, name string) []string {
+	if includesProvider(providers, name) {
+		return providers
+	}
+	return append(providers, name)
+}
+
+func includesProvider(providers []string, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, provider := range providers {
+		if strings.TrimSpace(provider) == name {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveProviderName(factory *modelproviders.Factory, alias string) string {
@@ -556,8 +593,7 @@ func csvOrDash(items []string) string {
 }
 
 func nextConversationSessionID() string {
-	seq := conversationSessionCounter.Add(1)
-	return fmt.Sprintf("s-%d-%d", time.Now().UTC().UnixNano(), seq)
+	return idutil.NewSessionID()
 }
 
 func flagProvided(args []string, flagName string) bool {

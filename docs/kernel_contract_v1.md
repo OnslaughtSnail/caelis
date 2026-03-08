@@ -36,6 +36,18 @@ Lifecycle statuses:
 - `failed`
 - `completed`
 
+### Delegated Child-Run Lineage
+
+Delegated child-run session events may include:
+
+- `meta.parent_session_id`
+- `meta.child_session_id`
+- `meta.parent_tool_call_id`
+- `meta.delegation_id`
+
+These fields are for orchestration and observability. They are not forwarded into model-visible message content.
+CLI may display compact session/delegation prefixes for readability, but stored lineage values remain the full IDs.
+
 ### Model Visibility
 
 Runtime/tool metadata is for UI/orchestration and should not be forwarded to model context.

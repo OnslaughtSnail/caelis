@@ -1566,7 +1566,7 @@ func TestViewShowsPendingQueueWhileRunning(t *testing.T) {
 		{execLine: "second", displayLine: "second"},
 	}
 	view := m.View()
-	if !strings.Contains(view, "2 pending messages") {
+	if !strings.Contains(view, "2 pending") {
 		t.Fatalf("expected pending queue hint in running view, got:\n%s", view)
 	}
 }
@@ -1658,6 +1658,166 @@ func TestToolOutputPanelFiltersBlankLines(t *testing.T) {
 	}
 	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
 		t.Fatalf("expected non-blank tool output rows, got:\n%s", view)
+	}
+}
+
+func TestBashFinalReplacesPanelWithPlainHistoryText(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH {command=date}\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "line-1\nline-2\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Final:  true,
+	})
+
+	view := ansi.Strip(m.View())
+	if strings.Contains(view, "╭") || strings.Contains(view, "╰") {
+		t.Fatalf("expected bash panel to collapse into plain text on final, got:\n%s", view)
+	}
+	if !strings.Contains(view, "  line-1") || !strings.Contains(view, "  line-2") {
+		t.Fatalf("expected final bash output in history, got:\n%s", view)
+	}
+}
+
+func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=inspect}\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "reasoning",
+		Chunk:  "thinking...\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "tool_result",
+		Chunk:  "✓ LIST 10 entries\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "still working...\n",
+	})
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "thinking...") {
+		t.Fatalf("expected delegate reasoning in panel, got:\n%s", view)
+	}
+	if !strings.Contains(view, "· thinking...") {
+		t.Fatalf("expected delegate reasoning to use a lighter prefixed style, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ LIST 10 entries") {
+		t.Fatalf("expected delegate tool result hidden in panel, got:\n%s", view)
+	}
+	if strings.Contains(view, "▸ LIST") {
+		t.Fatalf("expected delegate tool trace hidden in panel, got:\n%s", view)
+	}
+	if !strings.Contains(view, "still working...") {
+		t.Fatalf("expected delegate assistant output in panel, got:\n%s", view)
+	}
+}
+
+func TestDelegatePanelSkipsFencedCodeBlockContent(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=inspect}\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone.\n",
+	})
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "working...") || !strings.Contains(view, "done.") {
+		t.Fatalf("expected prose lines to remain visible, got:\n%s", view)
+	}
+	if strings.Contains(view, "demo.html") || strings.Contains(view, "\n12\n") {
+		t.Fatalf("expected fenced command output hidden from delegate panel, got:\n%s", view)
+	}
+}
+
+func TestDelegatePanelPrioritizesAssistantLinesOverReasoningNoise(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=inspect}\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
+	for i := 1; i <= 5; i++ {
+		_, _ = m.Update(tuievents.ToolStreamMsg{
+			Tool:   "DELEGATE",
+			TaskID: "t-1",
+			CallID: "call-1",
+			Stream: "reasoning",
+			Chunk:  fmt.Sprintf("thinking-%d\n", i),
+		})
+	}
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "final visible update\n",
+	})
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "final visible update") {
+		t.Fatalf("expected assistant text to remain visible in delegate preview, got:\n%s", view)
+	}
+}
+
+func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH {command=first}\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "bash-line\n",
+	})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=second}\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "task-2", CallID: "call-2", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "task-2",
+		CallID: "call-2",
+		Stream: "assistant",
+		Chunk:  "delegate-line\n",
+	})
+
+	view := ansi.Strip(m.View())
+	bashIdx := strings.Index(view, "▸ BASH {command=first}")
+	bashLineIdx := strings.Index(view, "bash-line")
+	delegateCallIdx := strings.Index(view, "▸ DELEGATE {task=second}")
+	delegateLineIdx := strings.Index(view, "delegate-line")
+	if bashIdx < 0 || bashLineIdx < 0 || delegateCallIdx < 0 || delegateLineIdx < 0 {
+		t.Fatalf("expected call lines and anchored outputs, got:\n%s", view)
+	}
+	if !(bashIdx < bashLineIdx && bashLineIdx < delegateCallIdx && delegateCallIdx < delegateLineIdx) {
+		t.Fatalf("expected each tool output block below its own call line, got:\n%s", view)
 	}
 }
 

@@ -14,18 +14,22 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 // Config configures Runtime.
 type Config struct {
 	Store      session.Store
+	TaskStore  task.Store
 	Compaction CompactionConfig
 }
 
 // Runtime orchestrates session lifecycle and agent execution.
 type Runtime struct {
 	store              session.Store
+	taskStore          task.Store
+	taskRegistry       *task.Registry
 	compaction         CompactionConfig
 	compactionStrategy CompactionStrategy
 	runMu              sync.Mutex
@@ -43,6 +47,8 @@ func New(cfg Config) (*Runtime, error) {
 	}
 	return &Runtime{
 		store:              cfg.Store,
+		taskStore:          cfg.TaskStore,
+		taskRegistry:       task.NewRegistry(task.RegistryConfig{}),
 		compaction:         compactionCfg,
 		compactionStrategy: strategy,
 		activeRuns:         map[string]struct{}{},
@@ -102,6 +108,15 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		}
 		defer r.releaseRunLease(leaseKey)
 
+		if _, err := r.ReconcileSession(ctx, ReconcileSessionRequest{
+			AppName:   req.AppName,
+			UserID:    req.UserID,
+			SessionID: req.SessionID,
+		}); err != nil {
+			yield(nil, err)
+			return
+		}
+
 		sess, err := r.store.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
 		if err != nil {
 			yield(nil, err)
@@ -155,13 +170,7 @@ func (r *Runtime) prepareRunContext(
 		if recoveryEvent == nil {
 			continue
 		}
-		recoveryEvent.SessionID = sess.ID
-		if recoveryEvent.ID == "" {
-			recoveryEvent.ID = eventID()
-		}
-		if recoveryEvent.Time.IsZero() {
-			recoveryEvent.Time = time.Now()
-		}
+		prepareEvent(ctx, sess, recoveryEvent)
 		if err := r.store.AppendEvent(ctx, sess, recoveryEvent); err != nil {
 			emitRunError(err)
 			return nil, false
@@ -183,11 +192,9 @@ func (r *Runtime) prepareRunContext(
 		userMsg.ContentParts = parts
 	}
 	userEvent := &session.Event{
-		ID:        eventID(),
-		SessionID: sess.ID,
-		Time:      time.Now(),
-		Message:   userMsg,
+		Message: userMsg,
 	}
+	prepareEvent(ctx, sess, userEvent)
 	if err := r.store.AppendEvent(ctx, sess, userEvent); err != nil {
 		emitRunError(err)
 		return nil, false
@@ -236,7 +243,26 @@ func (r *Runtime) buildInvocationContext(
 	req RunRequest,
 	allEvents []*session.Event,
 ) (*invocationContext, error) {
-	allTools, err := tool.EnsureCoreTools(req.Tools, req.CoreTools)
+	subagentRunner := newSubagentRunner(r, sess, req)
+	runnerImpl, _ := subagentRunner.(*runtimeSubagentRunner)
+	coreTools := req.CoreTools
+	if _, delegated := delegationLineageFromContext(ctx); delegated {
+		coreTools.DisableDelegate = true
+	}
+	taskManager := newTaskManager(
+		r,
+		coreTools.Runtime,
+		r.resolveTaskRegistry(coreTools.TaskRegistry),
+		r.taskStore,
+		&sessionContext{appName: req.AppName, userID: req.UserID, sessionID: sess.ID},
+		req,
+		runnerImpl,
+	)
+	ctx = task.WithManager(ctx, taskManager)
+	if asyncRunner, ok := asyncBashRunner(coreTools.Runtime); ok {
+		ctx = withBashAsyncRunner(ctx, asyncRunner)
+	}
+	allTools, err := tool.EnsureCoreTools(req.Tools, coreTools)
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +283,7 @@ func (r *Runtime) buildInvocationContext(
 		tools:    allTools,
 		toolMap:  toolMap,
 		policies: append([]policy.Hook(nil), req.Policies...),
+		runner:   subagentRunner,
 	}, nil
 }
 
@@ -315,18 +342,10 @@ func (r *Runtime) runAgentExecution(
 							return false
 						}
 					}
-					refreshed, refreshErr := r.listContextWindowEvents(ctx, sess)
-					if refreshErr != nil {
-						emitRunError(refreshErr)
+					if err := r.refreshInvocationState(ctx, sess, inv); err != nil {
+						emitRunError(err)
 						return false
 					}
-					inv.events = r.projectInvocationEvents(refreshed)
-					state, stateErr := r.snapshotReadonlyState(ctx, sess)
-					if stateErr != nil {
-						emitRunError(stateErr)
-						return false
-					}
-					inv.state = state
 					retry = true
 					break
 				}
@@ -336,25 +355,17 @@ func (r *Runtime) runAgentExecution(
 			if ev == nil {
 				continue
 			}
-			if ev.ID == "" {
-				ev.ID = eventID()
-			}
-			if ev.Time.IsZero() {
-				ev.Time = time.Now()
-			}
-			ev.SessionID = sess.ID
+			prepareEvent(ctx, sess, ev)
 			if shouldPersistEvent(ev, req.PersistPartialEvents) {
 				if err := r.store.AppendEvent(ctx, sess, ev); err != nil {
 					emitRunError(err)
 					return false
 				}
 				if !isLifecycleEvent(ev) {
-					persisted, listErr := r.listContextWindowEvents(ctx, sess)
-					if listErr != nil {
-						emitRunError(listErr)
+					if err := r.refreshInvocationState(ctx, sess, inv); err != nil {
+						emitRunError(err)
 						return false
 					}
-					inv.events = r.projectInvocationEvents(persisted)
 				}
 			}
 			if !yield(ev, nil) {
@@ -370,6 +381,16 @@ func (r *Runtime) runAgentExecution(
 
 func runLeaseKey(appName, userID, sessionID string) string {
 	return strings.TrimSpace(appName) + "\x00" + strings.TrimSpace(userID) + "\x00" + strings.TrimSpace(sessionID)
+}
+
+func (r *Runtime) resolveTaskRegistry(override *task.Registry) *task.Registry {
+	if override != nil {
+		return override
+	}
+	if r == nil || r.taskRegistry == nil {
+		return task.NewRegistry(task.RegistryConfig{})
+	}
+	return r.taskRegistry
 }
 
 func (r *Runtime) acquireRunLease(key string) bool {
@@ -395,6 +416,17 @@ func (r *Runtime) releaseRunLease(key string) {
 	r.runMu.Lock()
 	defer r.runMu.Unlock()
 	delete(r.activeRuns, key)
+}
+
+func (r *Runtime) hasActiveRun(appName, userID, sessionID string) bool {
+	if r == nil {
+		return false
+	}
+	key := runLeaseKey(appName, userID, sessionID)
+	r.runMu.Lock()
+	defer r.runMu.Unlock()
+	_, ok := r.activeRuns[key]
+	return ok
 }
 
 // CompactRequest defines one manual compaction call.
@@ -465,6 +497,23 @@ func eventID() string {
 	return fmt.Sprintf("ev_%d", time.Now().UnixNano())
 }
 
+func (r *Runtime) refreshInvocationState(ctx context.Context, sess *session.Session, inv *invocationContext) error {
+	if r == nil || sess == nil || inv == nil {
+		return nil
+	}
+	persisted, err := r.listContextWindowEvents(ctx, sess)
+	if err != nil {
+		return err
+	}
+	state, err := r.snapshotReadonlyState(ctx, sess)
+	if err != nil {
+		return err
+	}
+	inv.events = r.projectInvocationEvents(persisted)
+	inv.state = state
+	return nil
+}
+
 func (r *Runtime) appendAndYieldLifecycle(
 	ctx context.Context,
 	sess *session.Session,
@@ -477,6 +526,7 @@ func (r *Runtime) appendAndYieldLifecycle(
 		return true
 	}
 	ev := lifecycleEvent(sess, status, phase, cause)
+	prepareEvent(ctx, sess, ev)
 	state, ok := runStateFromLifecycleEvent(ev)
 	if ok {
 		snapshot := runStateSnapshot(state)

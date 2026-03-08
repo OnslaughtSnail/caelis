@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -239,6 +240,9 @@ func printEvent(ev *session.Event, state *renderState) {
 					Args: cloneAnyMap(parsedArgs),
 				}
 			}
+			if strings.EqualFold(strings.TrimSpace(call.Name), "TASK") {
+				continue
+			}
 			if state.ui != nil {
 				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), call.Name, summarizeToolArgs(call.Name, parsedArgs))
 			} else {
@@ -254,6 +258,9 @@ func printEvent(ev *session.Event, state *renderState) {
 				delete(state.pendingToolCalls, msg.ToolResponse.ID)
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), "TASK") && !hasToolError(msg.ToolResponse.Result) {
+			return
+		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).
 		if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
 			return
@@ -263,9 +270,9 @@ func printEvent(ev *session.Event, state *renderState) {
 			return
 		}
 		if state.ui != nil {
-			fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolResultPrefix(), msg.ToolResponse.Name, summary)
+			fmt.Fprint(state.out, formatToolResultLine(state.ui.ToolResultPrefix(), msg.ToolResponse.Name, summary))
 		} else {
-			fmt.Fprintf(state.out, "✓ %s %s\n", msg.ToolResponse.Name, summary)
+			fmt.Fprint(state.out, formatToolResultLine("✓ ", msg.ToolResponse.Name, summary))
 		}
 		return
 	}
@@ -315,6 +322,15 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		if command != "" {
 			return fmt.Sprintf("{command=%s}", truncateInline(command, 120))
 		}
+	case "TASK":
+		action := strings.TrimSpace(asString(args["action"]))
+		taskID := strings.TrimSpace(asString(args["task_id"]))
+		if action != "" && taskID != "" {
+			return fmt.Sprintf("{action=%s task=%s}", action, idutil.ShortDisplay(taskID))
+		}
+		if action != "" {
+			return fmt.Sprintf("{action=%s}", action)
+		}
 	case "READ":
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
@@ -339,6 +355,16 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
 			return displayFileName(path)
+		}
+	case "DELEGATE":
+		task := strings.TrimSpace(asString(args["task"]))
+		if task != "" {
+			return fmt.Sprintf("{task=%s}", truncateInline(task, 120))
+		}
+	}
+	if isMCPToolName(toolName) {
+		if target := summarizeWebLikeTarget(args); target != "" {
+			return target
 		}
 	}
 	keys := make([]string, 0, len(args))
@@ -372,6 +398,12 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
 	case "BASH":
+		if taskID := strings.TrimSpace(asString(result["task_id"])); taskID != "" && fmt.Sprint(result["running"]) == "true" {
+			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
+				return fmt.Sprintf("task=%s running\n%s", idutil.ShortDisplay(taskID), preview)
+			}
+			return fmt.Sprintf("task=%s running", idutil.ShortDisplay(taskID))
+		}
 		exitCode, _ := asInt(result["exit_code"])
 		stdout := strings.TrimRight(asString(result["stdout"]), "\n")
 		stderr := strings.TrimRight(asString(result["stderr"]), "\n")
@@ -436,6 +468,34 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	case "STAT":
 		// Suppressed in printEvent; return empty for read-only tools.
 		return ""
+	case "DELEGATE":
+		taskID := strings.TrimSpace(asString(result["task_id"]))
+		summary := strings.TrimSpace(firstNonEmpty(result, "assistant", "summary", "output"))
+		if taskID != "" && fmt.Sprint(result["running"]) == "true" {
+			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
+				return fmt.Sprintf("task=%s running\n%s", idutil.ShortDisplay(taskID), preview)
+			}
+			return fmt.Sprintf("task=%s running", idutil.ShortDisplay(taskID))
+		}
+		if summary != "" {
+			return "\n" + renderDelegateSummaryPreview(summary)
+		}
+		if state := strings.TrimSpace(asString(result["state"])); state != "" {
+			return state
+		}
+	case "TASK":
+		taskID := strings.TrimSpace(asString(result["task_id"]))
+		state := strings.TrimSpace(asString(result["state"]))
+		output := strings.TrimSpace(firstNonEmptyMap(asMap(result["output"]), "stderr", "stdout", "log"))
+		if output == "" {
+			output = compactTaskPreview(firstNonEmpty(result, "latest_output"))
+		}
+		if taskID != "" && output != "" {
+			return fmt.Sprintf("task=%s %s\n%s", idutil.ShortDisplay(taskID), state, tailLines(output, 6))
+		}
+		if taskID != "" && state != "" {
+			return fmt.Sprintf("task=%s %s", idutil.ShortDisplay(taskID), state)
+		}
 	}
 	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
 		return truncateInline(value, 160)
@@ -449,6 +509,106 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	}
 	sort.Strings(keys)
 	return fmt.Sprintf("{keys=%s}", strings.Join(keys, ","))
+}
+
+func formatToolResultLine(prefix string, toolName string, summary string) string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		prefix = "✓"
+	}
+	toolName = strings.TrimSpace(toolName)
+	summary = strings.TrimRight(summary, "\n")
+	if strings.Contains(summary, "\n") || strings.HasPrefix(summary, "\n") {
+		body := strings.TrimLeft(summary, "\n")
+		if body == "" {
+			return fmt.Sprintf("%s %s\n", prefix, toolName)
+		}
+		return fmt.Sprintf("%s %s\n%s\n", prefix, toolName, body)
+	}
+	if summary == "" {
+		return fmt.Sprintf("%s %s\n", prefix, toolName)
+	}
+	return fmt.Sprintf("%s %s %s\n", prefix, toolName, summary)
+}
+
+func renderDelegateSummaryPreview(summary string) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return ""
+	}
+	lines := strings.Split(summary, "\n")
+	preview := make([]string, 0, len(lines))
+	inFence := false
+	for _, line := range lines {
+		trimmed := sanitizeDelegatePreviewLine(line, &inFence)
+		if trimmed == "" {
+			continue
+		}
+		preview = append(preview, trimmed)
+		if len(preview) >= 8 {
+			break
+		}
+	}
+	if len(preview) == 0 {
+		return summary
+	}
+	return strings.Join(preview, "\n")
+}
+
+func compactTaskPreview(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	preview := make([]string, 0, len(lines))
+	inFence := false
+	for _, line := range lines {
+		trimmed := sanitizeDelegatePreviewLine(line, &inFence)
+		if trimmed == "" {
+			continue
+		}
+		preview = append(preview, trimmed)
+	}
+	if len(preview) == 0 {
+		return ""
+	}
+	return tailLines(strings.Join(preview, "\n"), 4)
+}
+
+func sanitizeDelegatePreviewLine(line string, inFence *bool) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "```") {
+		if inFence != nil {
+			*inFence = !*inFence
+		}
+		return ""
+	}
+	if inFence != nil && *inFence {
+		return ""
+	}
+	return trimmed
+}
+
+func isMCPToolName(toolName string) bool {
+	return strings.Contains(strings.TrimSpace(strings.ToLower(toolName)), "__")
+}
+
+func summarizeWebLikeTarget(args map[string]any) string {
+	for _, key := range []string{"url", "uri", "endpoint"} {
+		if value := strings.TrimSpace(asString(args[key])); value != "" {
+			return fmt.Sprintf("{url=%s}", truncateInline(value, 120))
+		}
+	}
+	for _, key := range []string{"query", "q"} {
+		if value := strings.TrimSpace(asString(args[key])); value != "" {
+			return fmt.Sprintf("{query=%s}", truncateInline(value, 120))
+		}
+	}
+	return ""
 }
 
 func cloneAnyMap(input map[string]any) map[string]any {
@@ -521,6 +681,18 @@ func firstNonEmpty(values map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func asMap(v any) map[string]any {
+	value, _ := v.(map[string]any)
+	return value
+}
+
+func firstNonEmptyMap(values map[string]any, keys ...string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return firstNonEmpty(values, keys...)
 }
 
 func truncateInline(input string, limit int) string {

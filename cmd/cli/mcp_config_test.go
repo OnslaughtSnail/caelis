@@ -62,3 +62,29 @@ func TestLoadMCPToolManager_RejectLegacyFormat(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestLoadMCPToolManager_ParseWebSearchFetchExample(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	content := `{
+  "cache_ttl_seconds": 30,
+  "mcpServers": {
+    "web": {
+      "transport": "streamable",
+      "url": "http://127.0.0.1:8787/mcp",
+      "include_tools": ["search", "fetch"]
+    }
+  }
+}`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write cfg: %v", err)
+	}
+	manager, err := loadMCPToolManager(cfgPath)
+	if err != nil {
+		t.Fatalf("load manager: %v", err)
+	}
+	if manager == nil {
+		t.Fatal("expected non-nil manager")
+	}
+	_ = manager.Close()
+}

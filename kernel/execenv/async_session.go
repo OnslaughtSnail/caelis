@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	stdruntime "runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,7 @@ type AsyncSession struct {
 	exitErr      error
 	timeout      time.Duration // maximum session lifetime
 	idleTimeout  time.Duration // idle timeout
+	tty          bool
 }
 
 // AsyncOutputChunk represents a chunk of output from stdout or stderr in async sessions.
@@ -76,6 +78,7 @@ type SessionStatus struct {
 	ID           string
 	Command      string
 	Dir          string
+	TTY          bool
 	State        SessionState
 	StartTime    time.Time
 	LastActivity time.Time
@@ -93,6 +96,7 @@ type AsyncSessionConfig struct {
 	OutputBufferCap int           // Capacity for output ring buffers (default 64KB)
 	Timeout         time.Duration // Maximum session lifetime (0 = no limit)
 	IdleTimeout     time.Duration // Idle timeout (0 = no idle limit)
+	TTY             bool
 }
 
 const (
@@ -121,6 +125,7 @@ func NewAsyncSession(cfg AsyncSessionConfig) *AsyncSession {
 		cancel:       cancel,
 		timeout:      cfg.Timeout,
 		idleTimeout:  cfg.IdleTimeout,
+		tty:          cfg.TTY,
 	}
 	session.state.Store(SessionStateRunning)
 	session.lastActivity.Store(time.Now().UnixNano())
@@ -134,7 +139,10 @@ func (s *AsyncSession) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cmd := exec.CommandContext(s.ctx, "bash", "-lc", s.Command)
+	cmd, err := buildAsyncSessionCommand(s.ctx, s.Command, s.tty)
+	if err != nil {
+		return err
+	}
 	setProcessGroup(cmd)
 	if s.Dir != "" {
 		cmd.Dir = s.Dir
@@ -353,6 +361,7 @@ func (s *AsyncSession) Status() SessionStatus {
 		ID:           s.ID,
 		Command:      s.Command,
 		Dir:          s.Dir,
+		TTY:          s.tty,
 		State:        s.state.Load().(SessionState),
 		StartTime:    s.StartTime,
 		LastActivity: time.Unix(0, s.lastActivity.Load()),
@@ -370,6 +379,22 @@ func (s *AsyncSession) Status() SessionStatus {
 	_ = stderr
 
 	return status
+}
+
+func buildAsyncSessionCommand(ctx context.Context, command string, tty bool) (*exec.Cmd, error) {
+	if !tty {
+		return exec.CommandContext(ctx, "bash", "-lc", command), nil
+	}
+	scriptPath, err := exec.LookPath("script")
+	if err != nil {
+		return nil, fmt.Errorf("failed to locate script utility for tty mode: %w", err)
+	}
+	switch stdruntime.GOOS {
+	case "linux":
+		return exec.CommandContext(ctx, scriptPath, "-qefc", command, "/dev/null"), nil
+	default:
+		return exec.CommandContext(ctx, scriptPath, "-q", "/dev/null", "bash", "-lc", command), nil
+	}
 }
 
 // Info returns summary information about the session.

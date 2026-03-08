@@ -6,6 +6,7 @@ It is designed to be extracted as a standalone repository.
 ## Scope
 - Kernel-first architecture.
 - Minimal M1: single agent + synchronous tool loop.
+- Experimental delegated child-run prototype via core `DELEGATE`.
 - Compile-time plugin registration + provider-based assembly.
 - Built-in mandatory `READ` tool with line/token caps.
 - Modular system prompt pipeline with auto-seeded templates (`IDENTITY.md`, `AGENTS.md`, `USER.md`).
@@ -16,6 +17,7 @@ It is designed to be extracted as a standalone repository.
 - Tool execution runtime abstraction (`no_sandbox` / `sandbox` with extensible backend type).
 - Token-budget based auto compaction (append-only event strategy).
 - MCP ToolSet integration (`stdio` / `sse` / `streamable`), assembled via `mcp_tools` provider.
+- Experimental CLI-only LSP plugin provider (`lsp_tools`), opt-in via `-experimental-lsp`.
 - Full Bubble Tea TUI with streaming output, tool display, approval UX, reasoning blocks, and inline diff.
 - Model catalog (static snapshot + remote refresh) with per-model reasoning capability discovery.
 - Tool-level authorization baseline with per-tool allow/deny policy evaluation.
@@ -33,10 +35,11 @@ make test
 Run CLI:
 ```bash
 go run ./cmd/cli \
-  -tool-providers workspace_tools,shell_tools,lsp_tools,mcp_tools \
+  -tool-providers workspace_tools,shell_tools,mcp_tools \
   -policy-providers default_allow \
   -model deepseek/deepseek-chat \
   -permission-mode default \
+  -experimental-lsp \
   -mcp-config ~/.agents/mcp_servers.json \
   -stream=true \
   -thinking-mode=off \
@@ -105,7 +108,7 @@ System prompt pipeline order (high -> low):
 1. `~/.{app}/prompts/IDENTITY.md`
 2. `~/.{app}/prompts/AGENTS.md`
 3. `{workspace}/AGENTS.md` (optional)
-4. LSP routing policy (conditional, auto-enabled when `LSP_*` tools are available)
+4. CLI-provided runtime fragments (for example runtime context, experimental LSP routing when enabled)
 5. `~/.{app}/prompts/USER.md` + `-system-prompt` runtime override
 6. skills metadata section (auto-discovered)
 
@@ -128,6 +131,11 @@ MCP config example (`~/.agents/mcp_servers.json`):
   }
 }
 ```
+
+MCP Web tools guidance:
+- First phase uses MCP, not an in-kernel `web_tools` provider.
+- Prefer read-only `search` / `fetch` tool exposure.
+- Example config and UX notes: [docs/mcp_web_tools.md](docs/mcp_web_tools.md)
 
 Interactive slash commands:
 - `/help`: show command help
@@ -163,8 +171,9 @@ Config env placeholder behavior:
 - If config contains unresolved placeholders, startup fails with an explicit `invalid config` error and the unresolved env var name.
 
 LSP behavior:
-- LSP tools are injected by CLI plugin provider `lsp_tools` (no manual activation step).
-- CLI auto-detects workspace language and injects one language server toolset by default when a supported server exists locally.
+- LSP tools live in a CLI-only experimental plugin provider: `lsp_tools`.
+- They are disabled by default; enable them with `-experimental-lsp` or by explicitly adding `lsp_tools` to `-tool-providers`.
+- When enabled, CLI auto-detects workspace language and injects one language server toolset when a supported server exists locally.
 - Supported workspace language families: Go, Python, TypeScript, JavaScript, Rust, C/C++.
 
 Manual compaction command in interactive mode:
@@ -200,7 +209,7 @@ go run ./eval/cmd \
 - `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
 
 ## Release
-- Current release: `v0.0.2` (see `VERSION` and `CHANGELOG.md`).
+- Current release: `v0.0.15` (see `VERSION` and `CHANGELOG.md`).
 - Local dry-run package:
 ```bash
 make release-dry-run

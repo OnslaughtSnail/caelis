@@ -4,6 +4,7 @@ import (
 	"context"
 	"iter"
 
+	"github.com/OnslaughtSnail/caelis/kernel/delegation"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -43,9 +44,16 @@ type PolicyContext interface {
 	Policies() []policy.Hook
 }
 
+// DelegationContext exposes child-run orchestration capabilities.
+type DelegationContext interface {
+	ReadonlyContext
+	SubagentRunner() delegation.Runner
+}
+
 // InvocationContext composes all kernel contexts used by one agent run.
 type InvocationContext interface {
 	ModelContext
 	ToolContext
 	PolicyContext
+	DelegationContext
 }

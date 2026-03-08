@@ -12,11 +12,13 @@ type toolAuthorizerContextKey struct{}
 
 // ToolAuthorizationRequest describes one tool-level authorization request.
 type ToolAuthorizationRequest struct {
-	ToolName string
-	Reason   string
-	Path     string
-	ScopeKey string
-	Preview  string
+	ToolName   string
+	Permission string
+	Reason     string
+	Path       string
+	Target     string
+	ScopeKey   string
+	Preview    string
 }
 
 // ToolAuthorizer handles tool-level authorization decisions.
@@ -67,6 +69,7 @@ func NewSecurityBaseline(cfg SecurityBaselineConfig) Hook {
 	defaultAutoAllow := []string{
 		"READ", "LIST", "GLOB", "STAT", "SEARCH",
 		"WRITE", "PATCH",
+		"DELEGATE", "TASK",
 		"ECHO", "NOW",
 		"BASH", // BASH host escalation is gated by execution runtime approval flow.
 	}
@@ -111,10 +114,7 @@ func (h securityBaselineHook) BeforeTool(ctx context.Context, in ToolInput) (Too
 		}
 	}
 
-	allowed, err := authorizer.AuthorizeTool(ctx, ToolAuthorizationRequest{
-		ToolName: in.Call.Name,
-		Reason:   reason,
-	})
+	allowed, err := authorizer.AuthorizeTool(ctx, toolAuthorizationRequest(in.Call.Name, in.Args, reason))
 	if err != nil {
 		return ToolInput{}, err
 	}

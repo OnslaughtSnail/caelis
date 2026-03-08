@@ -202,52 +202,99 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	return m, nil
 }
 
-func (m *Model) handleToolStreamMsg(msg tuievents.ToolStreamMsg) (tea.Model, tea.Cmd) {
-	toolName := strings.TrimSpace(msg.Tool)
-	callID := strings.TrimSpace(msg.CallID)
-	if msg.Reset || (callID != "" && strings.TrimSpace(m.toolOutput.callID) != "" && callID != strings.TrimSpace(m.toolOutput.callID)) {
-		m.resetToolOutput(toolName, callID)
-		m.syncToolOutputBlock()
+func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea.Cmd) {
+	toolName := strings.TrimSpace(msg.Label)
+	if toolName == "" {
+		toolName = strings.TrimSpace(msg.Tool)
 	}
-	if toolName != "" && strings.TrimSpace(m.toolOutput.tool) == "" {
-		m.toolOutput.tool = toolName
-	}
-	if callID != "" && strings.TrimSpace(m.toolOutput.callID) == "" {
-		m.toolOutput.callID = callID
+	nextKey := m.toolOutputKey(msg)
+	panel := m.ensureToolOutputPanel(nextKey, toolName, strings.TrimSpace(msg.CallID), msg.Reset)
+	if panel == nil {
+		return m, nil
 	}
 	if msg.Final {
-		m.toolOutput.active = false
-		m.syncToolOutputBlock()
+		if strings.EqualFold(strings.TrimSpace(panel.tool), "BASH") {
+			m.finalizeBashToolOutputBlock(panel)
+			return m, nil
+		}
+		panel.active = false
 		return m, nil
 	}
 	if strings.TrimSpace(msg.Chunk) == "" {
 		return m, nil
 	}
-	m.toolOutput.active = true
-	m.appendToolOutputChunk(strings.TrimSpace(msg.Stream), msg.Chunk)
-	m.syncToolOutputBlock()
+	panel.active = true
+	m.appendToolOutputChunk(panel, strings.TrimSpace(msg.Stream), msg.Chunk)
+	m.syncAnchoredToolOutputBlock(panel)
 	return m, nil
 }
 
-func (m *Model) resetToolOutput(toolName, callID string) {
-	m.toolOutput = toolOutputState{
-		tool:   strings.TrimSpace(toolName),
-		callID: strings.TrimSpace(callID),
+func (m *Model) toolOutputKey(msg tuievents.TaskStreamMsg) string {
+	if taskID := strings.TrimSpace(msg.TaskID); taskID != "" {
+		return taskID
 	}
+	if callID := strings.TrimSpace(msg.CallID); callID != "" {
+		return callID
+	}
+	toolName := strings.TrimSpace(msg.Label)
+	if toolName == "" {
+		toolName = strings.TrimSpace(msg.Tool)
+	}
+	return toolName
 }
 
-func (m *Model) appendToolOutputChunk(stream, chunk string) {
+func (m *Model) ensureToolOutputPanel(key, toolName, callID string, reset bool) *toolOutputState {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil
+	}
+	if m.toolOutputs == nil {
+		m.toolOutputs = map[string]*toolOutputState{}
+	}
+	panel, ok := m.toolOutputs[key]
+	if !ok || reset {
+		panel = &toolOutputState{
+			key:    key,
+			tool:   strings.TrimSpace(toolName),
+			callID: strings.TrimSpace(callID),
+			start:  len(m.historyLines),
+			end:    len(m.historyLines),
+		}
+		m.toolOutputs[key] = panel
+	} else {
+		if strings.TrimSpace(panel.tool) == "" {
+			panel.tool = strings.TrimSpace(toolName)
+		}
+		if strings.TrimSpace(panel.callID) == "" {
+			panel.callID = strings.TrimSpace(callID)
+		}
+	}
+	return panel
+}
+
+func (m *Model) clearToolOutputPanels() {
+	m.toolOutputs = nil
+}
+
+func (m *Model) appendToolOutputChunk(panel *toolOutputState, stream, chunk string) {
+	if panel == nil {
+		return
+	}
 	normalized := tuikit.SanitizeLogText(chunk)
 	normalized = strings.ReplaceAll(strings.ReplaceAll(normalized, "\r\n", "\n"), "\r", "\n")
-	switch strings.ToLower(strings.TrimSpace(stream)) {
+	stream = strings.ToLower(strings.TrimSpace(stream))
+	if stream == "" {
+		stream = "stdout"
+	}
+	switch stream {
 	case "stderr":
-		m.toolOutput.stderrPartial = m.consumeToolOutputChunk(m.toolOutput.stderrPartial, normalized, "stderr")
+		panel.stderrPartial = m.consumeToolOutputChunk(panel, panel.stderrPartial, normalized, stream)
 	default:
-		m.toolOutput.stdoutPartial = m.consumeToolOutputChunk(m.toolOutput.stdoutPartial, normalized, "stdout")
+		panel.stdoutPartial = m.consumeToolOutputChunk(panel, panel.stdoutPartial, normalized, stream)
 	}
 }
 
-func (m *Model) consumeToolOutputChunk(partial, chunk, stream string) string {
+func (m *Model) consumeToolOutputChunk(panel *toolOutputState, partial, chunk, stream string) string {
 	if chunk == "" {
 		return partial
 	}
@@ -262,42 +309,38 @@ func (m *Model) consumeToolOutputChunk(partial, chunk, stream string) string {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		m.toolOutput.lines = append(m.toolOutput.lines, toolOutputLine{text: line, stream: stream})
+		if shouldSkipDelegatePreviewLine(panel, line) {
+			continue
+		}
+		panel.lines = append(panel.lines, toolOutputLine{text: line, stream: stream})
 	}
-	if len(m.toolOutput.lines) > toolOutputPreviewLines {
-		m.toolOutput.lines = append([]toolOutputLine(nil), m.toolOutput.lines[len(m.toolOutput.lines)-toolOutputPreviewLines:]...)
+	if len(panel.lines) > toolOutputPreviewLines {
+		panel.lines = append([]toolOutputLine(nil), panel.lines[len(panel.lines)-toolOutputPreviewLines:]...)
 	}
 	return buf
 }
 
-func (m *Model) syncToolOutputBlock() {
-	content := m.currentToolOutputLines()
-	if len(content) == 0 {
-		return
+func shouldSkipDelegatePreviewLine(panel *toolOutputState, line string) bool {
+	if panel == nil || !strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
+		return false
 	}
-	rendered := m.renderToolOutputBlockLines(content)
-	if m.toolOutput.block == nil {
-		start := len(m.historyLines)
-		m.historyLines = append(m.historyLines, rendered...)
-		m.toolOutput.block = &toolOutputBlockState{
-			start: start,
-			end:   start + len(rendered),
-		}
-		m.syncViewportContent()
-		return
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "```") {
+		panel.delegateFence = !panel.delegateFence
+		return true
 	}
-	block := m.toolOutput.block
-	m.replaceHistoryRange(block.start, block.end, rendered)
-	block.end = block.start + len(rendered)
-	m.syncViewportContent()
+	return panel.delegateFence
 }
 
-func (m *Model) currentToolOutputLines() []toolOutputLine {
-	content := append([]toolOutputLine(nil), m.toolOutput.lines...)
-	if partial := strings.TrimSpace(m.toolOutput.stdoutPartial); partial != "" {
+func (m *Model) currentToolOutputLines(panel *toolOutputState) []toolOutputLine {
+	if panel == nil {
+		return nil
+	}
+	content := append([]toolOutputLine(nil), panel.lines...)
+	if partial := strings.TrimSpace(panel.stdoutPartial); partial != "" {
 		content = append(content, toolOutputLine{text: partial, stream: "stdout"})
 	}
-	if partial := strings.TrimSpace(m.toolOutput.stderrPartial); partial != "" {
+	if partial := strings.TrimSpace(panel.stderrPartial); partial != "" {
 		content = append(content, toolOutputLine{text: partial, stream: "stderr"})
 	}
 	filtered := content[:0]
@@ -305,30 +348,33 @@ func (m *Model) currentToolOutputLines() []toolOutputLine {
 		if strings.TrimSpace(line.text) == "" {
 			continue
 		}
+		if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
+			switch strings.ToLower(strings.TrimSpace(line.stream)) {
+			case "assistant", "reasoning", "stderr":
+			default:
+				continue
+			}
+		}
 		filtered = append(filtered, line)
 	}
 	content = filtered
+	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
+		return prioritizeDelegatePreviewLines(content, toolOutputPreviewLines)
+	}
 	if len(content) > toolOutputPreviewLines {
 		content = content[len(content)-toolOutputPreviewLines:]
 	}
 	return content
 }
 
-func (m *Model) renderToolOutputBlockLines(content []toolOutputLine) []string {
+func (m *Model) renderToolOutputBlockLines(panel *toolOutputState, content []toolOutputLine) []string {
 	if len(content) == 0 {
 		return nil
 	}
 	lines := make([]string, 0, len(content))
 	panelInnerWidth := maxInt(1, m.viewport.Width-4)
 	for _, line := range content {
-		text := line.text
-		prefix := "  "
-		style := lipgloss.NewStyle().
-			Foreground(m.theme.TextPrimary)
-		if strings.EqualFold(strings.TrimSpace(line.stream), "stderr") {
-			prefix = "! "
-			style = m.theme.ErrorStyle()
-		}
+		text, prefix, style := m.renderToolOutputLine(panel, line)
 		availableTextWidth := maxInt(1, panelInnerWidth-displayColumns(prefix))
 		if displayColumns(text) > availableTextWidth {
 			if availableTextWidth == 1 {
@@ -339,12 +385,109 @@ func (m *Model) renderToolOutputBlockLines(content []toolOutputLine) []string {
 		}
 		lines = append(lines, style.Width(panelInnerWidth).Render(prefix+text))
 	}
-	panel := lipgloss.NewStyle().
+	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.PanelBorder).
 		Padding(0, 1).
 		Width(panelInnerWidth)
-	return strings.Split(panel.Render(strings.Join(lines, "\n")), "\n")
+	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
+}
+
+func (m *Model) syncAnchoredToolOutputBlock(panel *toolOutputState) {
+	if panel == nil {
+		return
+	}
+	content := m.currentToolOutputLines(panel)
+	lines := m.renderToolOutputBlockLines(panel, content)
+	oldLen := panel.end - panel.start
+	m.replaceHistoryRange(panel.start, panel.end, lines)
+	panel.end = panel.start + len(lines)
+	delta := len(lines) - oldLen
+	if delta != 0 {
+		m.shiftAnchoredBlocks(panel.end-delta, delta, panel.key)
+	}
+	m.syncViewportContent()
+}
+
+func (m *Model) finalizeBashToolOutputBlock(panel *toolOutputState) {
+	if panel == nil {
+		return
+	}
+	content := m.currentToolOutputLines(panel)
+	lines := m.renderFinalToolOutputHistoryLines(panel, content)
+	oldLen := panel.end - panel.start
+	m.replaceHistoryRange(panel.start, panel.end, lines)
+	newEnd := panel.start + len(lines)
+	delta := len(lines) - oldLen
+	delete(m.toolOutputs, panel.key)
+	if delta != 0 {
+		m.shiftAnchoredBlocks(newEnd-delta, delta, panel.key)
+	}
+	m.syncViewportContent()
+}
+
+func (m *Model) renderFinalToolOutputHistoryLines(panel *toolOutputState, content []toolOutputLine) []string {
+	if panel == nil || len(content) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(content))
+	for _, line := range content {
+		text := strings.TrimSpace(line.text)
+		if text == "" {
+			continue
+		}
+		prefix := "  "
+		if strings.EqualFold(strings.TrimSpace(line.stream), "stderr") {
+			lines = append(lines, m.theme.ErrorStyle().Render(prefix+text))
+			continue
+		}
+		lines = append(lines, tuikit.ColorizeLogLine(prefix+text, tuikit.LineStyleDefault, m.theme))
+	}
+	return lines
+}
+
+func (m *Model) renderToolOutputLine(panel *toolOutputState, line toolOutputLine) (text string, prefix string, style lipgloss.Style) {
+	text = strings.TrimSpace(line.text)
+	prefix = "  "
+	style = lipgloss.NewStyle().Foreground(m.theme.TextPrimary)
+	stream := strings.ToLower(strings.TrimSpace(line.stream))
+	if stream == "stderr" {
+		return text, "! ", m.theme.ErrorStyle()
+	}
+	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
+		switch stream {
+		case "reasoning":
+			return text, "· ", m.theme.ReasoningStyle()
+		case "assistant":
+			return text, "  ", m.theme.AssistantStyle()
+		}
+	}
+	return text, prefix, style
+}
+
+func prioritizeDelegatePreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
+	if len(content) <= limit || limit <= 0 {
+		return content
+	}
+	selected := make([]toolOutputLine, 0, minInt(limit, len(content)))
+	used := make([]bool, len(content))
+	for i := len(content) - 1; i >= 0 && len(selected) < limit; i-- {
+		switch strings.ToLower(strings.TrimSpace(content[i].stream)) {
+		case "assistant", "stderr":
+			selected = append(selected, content[i])
+			used[i] = true
+		}
+	}
+	for i := len(content) - 1; i >= 0 && len(selected) < limit; i-- {
+		if used[i] {
+			continue
+		}
+		selected = append(selected, content[i])
+	}
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	return selected
 }
 
 func (m *Model) replaceHistoryRange(start int, end int, replacement []string) {
@@ -363,6 +506,35 @@ func (m *Model) replaceHistoryRange(start int, end int, replacement []string) {
 	head := append([]string(nil), m.historyLines[:start]...)
 	head = append(head, replacement...)
 	m.historyLines = append(head, m.historyLines[end:]...)
+}
+
+func (m *Model) shiftAnchoredBlocks(threshold, delta int, skipKey string) {
+	if delta == 0 {
+		return
+	}
+	if m.assistantBlock != nil && m.assistantBlock.start >= threshold {
+		m.assistantBlock.start += delta
+		m.assistantBlock.end += delta
+	}
+	if m.reasoningBlock != nil && m.reasoningBlock.start >= threshold {
+		m.reasoningBlock.start += delta
+		m.reasoningBlock.end += delta
+	}
+	for i := range m.diffBlocks {
+		if m.diffBlocks[i].start >= threshold {
+			m.diffBlocks[i].start += delta
+			m.diffBlocks[i].end += delta
+		}
+	}
+	for key, panel := range m.toolOutputs {
+		if key == skipKey || panel == nil {
+			continue
+		}
+		if panel.start >= threshold {
+			panel.start += delta
+			panel.end += delta
+		}
+	}
 }
 
 func (m *Model) renderAssistantBlockLines(raw string) []string {
@@ -435,10 +607,7 @@ func (m *Model) rerenderDiffBlocks() {
 		if delta == 0 {
 			continue
 		}
-		for j := i + 1; j < len(m.diffBlocks); j++ {
-			m.diffBlocks[j].start += delta
-			m.diffBlocks[j].end += delta
-		}
+		m.shiftAnchoredBlocks(block.end-delta, delta, "")
 	}
 }
 
@@ -446,7 +615,7 @@ func (m *Model) resetConversationView() {
 	m.flushStream()
 	m.assistantBlock = nil
 	m.reasoningBlock = nil
-	m.toolOutput = toolOutputState{}
+	m.clearToolOutputPanels()
 	m.diffBlocks = m.diffBlocks[:0]
 	m.historyLines = m.historyLines[:0]
 	m.viewportStyledLines = m.viewportStyledLines[:0]

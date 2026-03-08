@@ -7,6 +7,7 @@ import (
 	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
 )
 
@@ -81,20 +82,19 @@ func (t *BashTool) handleReadOutput(ctx context.Context, runner toolexec.AsyncCo
 	}
 
 	result := map[string]any{
-		"session_id":       sessionID,
-		"stdout":           string(stdout),
-		"stderr":           string(stderr),
-		"stdout_marker":    newStdoutMarker,
-		"stderr_marker":    newStderrMarker,
-		"running":          status.State == toolexec.SessionStateRunning,
-		"state":            string(status.State),
+		"session_id":    sessionID,
+		"stdout":        string(stdout),
+		"stderr":        string(stderr),
+		"stdout_marker": newStdoutMarker,
+		"stderr_marker": newStderrMarker,
+		"running":       status.State == toolexec.SessionStateRunning,
+		"state":         string(status.State),
 	}
 
 	if status.State != toolexec.SessionStateRunning {
 		result["exit_code"] = status.ExitCode
 	}
-
-	return result, nil
+	return appendBashTaskResultEvents(ctx, result, false), nil
 }
 
 // handleGetStatus returns the status of an async session.
@@ -104,7 +104,7 @@ func (t *BashTool) handleGetStatus(ctx context.Context, runner toolexec.AsyncCom
 		return nil, fmt.Errorf("tool: failed to get session status: %w", err)
 	}
 
-	return map[string]any{
+	result := map[string]any{
 		"session_id":    sessionID,
 		"command":       status.Command,
 		"dir":           status.Dir,
@@ -116,7 +116,8 @@ func (t *BashTool) handleGetStatus(ctx context.Context, runner toolexec.AsyncCom
 		"stdout_bytes":  status.StdoutBytes,
 		"stderr_bytes":  status.StderrBytes,
 		"error":         status.Error,
-	}, nil
+	}
+	return appendBashTaskResultEvents(ctx, result, false), nil
 }
 
 // handleTerminate terminates an async session.
@@ -128,12 +129,15 @@ func (t *BashTool) handleTerminate(ctx context.Context, runner toolexec.AsyncCom
 		return nil, fmt.Errorf("tool: failed to terminate session: %w", err)
 	}
 
-	return map[string]any{
+	result := map[string]any{
 		"session_id": sessionID,
 		"terminated": true,
 		"stdout":     string(stdout),
 		"stderr":     string(stderr),
-	}, nil
+		"state":      string(toolexec.SessionStateTerminated),
+		"running":    false,
+	}
+	return appendBashTaskResultEvents(ctx, result, false), nil
 }
 
 // handleListSessions returns information about all sessions.
@@ -148,7 +152,7 @@ func (t *BashTool) handleListSessions(ctx context.Context) (map[string]any, erro
 
 	sessions := asyncRunner.ListSessions()
 	sessionList := make([]map[string]any, len(sessions))
-	
+
 	for i, s := range sessions {
 		sessionList[i] = map[string]any{
 			"session_id":    s.ID,
@@ -257,7 +261,7 @@ func (t *BashTool) runAsync(ctx context.Context, runner toolexec.CommandRunner, 
 		result["stderr_marker"] = int64(0)
 	}
 
-	return result, nil
+	return appendBashTaskResultEvents(ctx, result, true), nil
 }
 
 // getAsyncRunner returns the async runner if available.
@@ -277,4 +281,51 @@ func truncateCommand(cmd string, maxLen int) string {
 		return cmd
 	}
 	return cmd[:maxLen-3] + "..."
+}
+
+func appendBashTaskResultEvents(ctx context.Context, result map[string]any, reset bool) map[string]any {
+	sessionID := strings.TrimSpace(fmt.Sprint(result["session_id"]))
+	if sessionID == "" {
+		return result
+	}
+	callInfo, _ := toolexec.ToolCallInfoFromContext(ctx)
+	if reset {
+		result = taskstream.AppendResultEvent(result, taskstream.Event{
+			Label:  BashToolName,
+			TaskID: sessionID,
+			CallID: callInfo.ID,
+			State:  strings.TrimSpace(fmt.Sprint(result["state"])),
+			Reset:  true,
+		})
+	}
+	for _, item := range []struct {
+		stream string
+		key    string
+	}{
+		{stream: "stdout", key: "stdout"},
+		{stream: "stderr", key: "stderr"},
+	} {
+		chunk := strings.TrimSpace(fmt.Sprint(result[item.key]))
+		if chunk == "" {
+			continue
+		}
+		result = taskstream.AppendResultEvent(result, taskstream.Event{
+			Label:  BashToolName,
+			TaskID: sessionID,
+			CallID: callInfo.ID,
+			Stream: item.stream,
+			Chunk:  chunk,
+			State:  strings.TrimSpace(fmt.Sprint(result["state"])),
+		})
+	}
+	if running, _ := result["running"].(bool); !running {
+		result = taskstream.AppendResultEvent(result, taskstream.Event{
+			Label:  BashToolName,
+			TaskID: sessionID,
+			CallID: callInfo.ID,
+			State:  strings.TrimSpace(fmt.Sprint(result["state"])),
+			Final:  true,
+		})
+	}
+	return result
 }

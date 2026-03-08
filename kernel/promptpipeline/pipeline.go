@@ -7,10 +7,6 @@ import (
 
 // AssembleSpec describes prompt assembly inputs.
 type AssembleSpec struct {
-	BasePrompt             string
-	RuntimeHint            string
-	EnableLSPRoutingPolicy bool
-
 	IdentityPrompt string
 	IdentitySource string
 
@@ -20,16 +16,16 @@ type AssembleSpec struct {
 	WorkspaceAgentsPrompt string
 	WorkspaceAgentsSource string
 
-	UserPrompt string
-	UserSource string
-
 	SkillsMetaPrompt string
 	SkillsMetaSource string
+
+	Additional []PromptFragment
 }
 
 // PromptFragment is one assembled prompt section.
 type PromptFragment struct {
 	Stage   string
+	Title   string
 	Source  string
 	Content string
 }
@@ -82,34 +78,15 @@ func Assemble(spec AssembleSpec) (AssembleResult, error) {
 		})
 	}
 
-	if spec.EnableLSPRoutingPolicy {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Stage:   "lsp_routing_policy",
-			Source:  "builtin:lsp-routing-policy",
-			Content: defaultLSPRoutingPolicy,
-		})
-	}
-	if runtimeHint := normalizeText(spec.RuntimeHint); runtimeHint != "" {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Stage:   "runtime_context",
-			Source:  "runtime execution context",
-			Content: runtimeHint,
-		})
-	}
-
-	userParts := make([]string, 0, 2)
-	if text := normalizeText(spec.UserPrompt); text != "" {
-		userParts = append(userParts, text)
-	}
-	if value := normalizeText(spec.BasePrompt); value != "" {
-		userParts = append(userParts, "## Session Overrides\n\n"+value)
-	}
-	if len(userParts) > 0 {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Stage:   "user_custom",
-			Source:  strings.TrimSpace(spec.UserSource),
-			Content: strings.Join(userParts, "\n\n"),
-		})
+	for _, fragment := range spec.Additional {
+		if text := normalizeText(fragment.Content); text != "" {
+			out.Fragments = append(out.Fragments, PromptFragment{
+				Stage:   strings.TrimSpace(fragment.Stage),
+				Title:   strings.TrimSpace(fragment.Title),
+				Source:  strings.TrimSpace(fragment.Source),
+				Content: text,
+			})
+		}
 	}
 
 	if skillText := normalizeText(spec.SkillsMetaPrompt); skillText != "" {
@@ -126,15 +103,14 @@ func Assemble(spec AssembleSpec) (AssembleResult, error) {
 
 func renderPrompt(fragments []PromptFragment) string {
 	var b bytes.Buffer
-	b.WriteString("Priority rule: higher sections override lower sections.\n")
-	b.WriteString("Order: identity > global_agents > workspace_agents > lsp_routing_policy > runtime_context > user_custom > skills_meta.")
+	b.WriteString("Priority rule: earlier sections override later sections.")
 	for _, f := range fragments {
 		text := normalizeText(f.Content)
 		if text == "" {
 			continue
 		}
 		b.WriteString("\n\n### ")
-		b.WriteString(stageTitle(f.Stage))
+		b.WriteString(fragmentTitle(f))
 		if strings.TrimSpace(f.Source) != "" {
 			b.WriteString("\nsource: ")
 			b.WriteString(f.Source)
@@ -145,20 +121,17 @@ func renderPrompt(fragments []PromptFragment) string {
 	return strings.TrimSpace(b.String())
 }
 
-func stageTitle(stage string) string {
-	switch strings.TrimSpace(stage) {
+func fragmentTitle(fragment PromptFragment) string {
+	if title := strings.TrimSpace(fragment.Title); title != "" {
+		return title
+	}
+	switch strings.TrimSpace(fragment.Stage) {
 	case "identity":
 		return "Identity"
 	case "global_agents":
 		return "Global Instructions"
 	case "workspace_agents":
 		return "Workspace Instructions"
-	case "user_custom":
-		return "User Custom Instructions"
-	case "lsp_routing_policy":
-		return "LSP Routing Policy"
-	case "runtime_context":
-		return "Runtime Context"
 	case "skills_meta":
 		return "Skills Metadata"
 	default:

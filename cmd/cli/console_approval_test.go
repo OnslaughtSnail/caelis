@@ -58,7 +58,7 @@ func TestTerminalApprover_RequiresExplicitApprovalByDefault(t *testing.T) {
 	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{
 		ToolName: "BASH",
 		Action:   "execute_command",
-		Reason:   "sandbox_permissions=require_escalated requested",
+		Reason:   "require_escalated requested",
 		Command:  "head -70 main.go | tail -20",
 	})
 	if err != nil {
@@ -340,5 +340,49 @@ func TestTerminalApprover_AuthorizeToolCancelReturnsApprovalAborted(t *testing.T
 	}
 	if !toolexec.IsApprovalAborted(err) {
 		t.Fatalf("expected approval aborted, got %v", err)
+	}
+}
+
+func TestTerminalApprover_AuthorizeToolPromptShowsExternalMCPContext(t *testing.T) {
+	editor := &stubChoiceEditor{response: "a"}
+	var out strings.Builder
+	approver := newTerminalApprover(editor, &out, newUI(&out, true, false))
+	req := kernelpolicy.ToolAuthorizationRequest{
+		ToolName:   "web__search",
+		Permission: "external MCP tool call",
+		Reason:     "external MCP tool",
+		Target:     "https://example.com/search?q=caelis",
+		ScopeKey:   "example.com",
+		Preview:    "url=https://example.com/search?q=caelis, query=caelis",
+	}
+
+	allowed, err := approver.AuthorizeTool(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected approval to pass")
+	}
+	if editor.lastPrompt != "Would you like to call the following external tool?" {
+		t.Fatalf("unexpected prompt %q", editor.lastPrompt)
+	}
+	if got := editor.lastChoices[1].Detail; got != "don't ask again for: example.com" {
+		t.Fatalf("unexpected always detail %q", got)
+	}
+	rendered := out.String()
+	if !strings.Contains(rendered, "Permission: external MCP tool call") {
+		t.Fatalf("expected external tool permission, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Tool: web__search") {
+		t.Fatalf("expected tool name, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Target: https://example.com/search?q=caelis") {
+		t.Fatalf("expected target, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Request: url=https://example.com/search?q=caelis, query=caelis") {
+		t.Fatalf("expected request preview, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "You approved this session for tool requests under \"example.com\".") {
+		t.Fatalf("expected session approval transcript, got %q", rendered)
 	}
 }

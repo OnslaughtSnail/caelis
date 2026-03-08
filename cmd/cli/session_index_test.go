@@ -208,6 +208,48 @@ func TestHandleResume_WithSessionID_NonTUIStaysSilent(t *testing.T) {
 	}
 }
 
+func TestHandleResume_WithSessionPrefix_ResolvesUniqueMatch(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullSessionID := "s-1234567890ab"
+	if _, err := store.GetOrCreate(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: fullSessionID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", fullSessionID, time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:       context.Background(),
+		rt:            rt,
+		appName:       "app",
+		userID:        "u",
+		workspace:     workspace,
+		sessionIndex:  idx,
+		sessionID:     "default",
+		out:           &out,
+		ui:            newUI(&out, true, false),
+		showReasoning: true,
+	}
+	if _, err := handleResume(c, []string{"s-12345678"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.sessionID != fullSessionID {
+		t.Fatalf("expected session switched to %q, got %q", fullSessionID, c.sessionID)
+	}
+}
+
 func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {
@@ -426,6 +468,30 @@ func TestHandleResume_DefaultUsesMostRecentNonCurrent(t *testing.T) {
 	}
 	if c.sessionID != "previous" {
 		t.Fatalf("expected default /resume to use previous session, got %q", c.sessionID)
+	}
+}
+
+func TestSessionIndex_ResolveWorkspaceSessionID_AmbiguousPrefix(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	now := time.Now()
+	for _, sessionID := range []string{"s-1234567890ab", "s-1234567890cd"} {
+		if err := idx.UpsertSession(workspace, "app", "u", sessionID, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, ok, err := idx.ResolveWorkspaceSessionID(workspace.Key, "s-12345678")
+	if err == nil {
+		t.Fatal("expected ambiguous prefix error")
+	}
+	if ok {
+		t.Fatal("did not expect ambiguous prefix to resolve")
 	}
 }
 

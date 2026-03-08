@@ -2,6 +2,7 @@ package execenv
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -246,6 +247,42 @@ func TestHostRunner_AsyncWriteRead(t *testing.T) {
 
 	// Terminate
 	runner.TerminateSession(sessionID)
+}
+
+func TestHostRunner_AsyncTTYWriteRead(t *testing.T) {
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("script utility unavailable")
+	}
+	runner := newHostRunnerWithConfig(DefaultHostRunnerConfig())
+	defer runner.Close()
+
+	sessionID, err := runner.StartAsync(context.Background(), CommandRequest{
+		Command: `bash -c 'printf "name? "; read name; printf "hello %s\n" "$name"'`,
+		TTY:     true,
+	})
+	if err != nil {
+		t.Fatalf("StartAsync failed: %v", err)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		stdout, _, _, _, err := runner.ReadOutput(sessionID, 0, 0)
+		if err != nil {
+			t.Fatalf("ReadOutput failed: %v", err)
+		}
+		return strings.Contains(string(stdout), "name?")
+	})
+
+	if err := runner.WriteInput(sessionID, []byte("alice\n")); err != nil {
+		t.Fatalf("WriteInput failed: %v", err)
+	}
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		stdout, _, _, _, err := runner.ReadOutput(sessionID, 0, 0)
+		if err != nil {
+			t.Fatalf("ReadOutput failed: %v", err)
+		}
+		return strings.Contains(string(stdout), "hello alice")
+	})
 }
 
 func TestHostRunner_ListSessions(t *testing.T) {

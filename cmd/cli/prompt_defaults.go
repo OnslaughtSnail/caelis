@@ -1,8 +1,6 @@
-package promptpipeline
+package main
 
-// DefaultTemplates contains baseline prompt module templates used by
-// application layers when seeding prompt files.
-type DefaultTemplates struct {
+type defaultPromptTemplates struct {
 	Identity     string
 	GlobalAgents string
 	User         string
@@ -36,14 +34,13 @@ You are a pragmatic software engineering agent focused on correctness, clarity, 
 Add your long-lived custom preferences here.
 `
 
-	defaultLSPRoutingPolicy = `Use LSP_DEFINITION, LSP_REFERENCES to find definitions and usages by symbol name.
-Use LSP_SYMBOLS to discover symbol names when you don't know the exact name.
-Use SEARCH/GLOB for text-level pattern matching; use LSP tools for semantic symbol operations.
-If an LSP tool returns an error with a hint, follow the suggested fallback tool.`
+	defaultExperimentalLSPRoutingPrompt = `Use LSP_DEFINITION and LSP_REFERENCES to navigate by symbol name when the workspace language server is enabled.
+Use LSP_SYMBOLS to discover exact symbol names before semantic lookups.
+Use SEARCH and GLOB for text-level fallback when semantic lookup is unnecessary or unavailable.`
 )
 
-func Defaults() DefaultTemplates {
-	return DefaultTemplates{
+func defaultPromptTemplateSet() defaultPromptTemplates {
+	return defaultPromptTemplates{
 		Identity:     defaultIdentityTemplate,
 		GlobalAgents: defaultGlobalAgentsTemplate,
 		User:         defaultUserTemplate,

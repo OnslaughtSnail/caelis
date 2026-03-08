@@ -89,7 +89,7 @@ func TestRouteCommandExecution_UnsafeCommandSandboxAllow(t *testing.T) {
 	}
 }
 
-func TestRouteCommandExecution_InvalidSandboxPermissionDenied(t *testing.T) {
+func TestRouteCommandExecution_InvalidRequireEscalatedTypeDenied(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    testSandboxTypeForPolicy(),
@@ -103,11 +103,11 @@ func TestRouteCommandExecution_InvalidSandboxPermissionDenied(t *testing.T) {
 	in, err := hook.BeforeTool(context.Background(), ToolInput{
 		Call: model.ToolCall{
 			Name: "BASH",
-			Args: `{"command":"ls","sandbox_permissions":"invalid"}`,
+			Args: `{"command":"ls","require_escalated":"invalid"}`,
 		},
 		Args: map[string]any{
-			"command":             "ls",
-			"sandbox_permissions": "invalid",
+			"command":           "ls",
+			"require_escalated": "invalid",
 		},
 	})
 	if err != nil {
@@ -192,7 +192,7 @@ func TestDetectDestructiveCommand(t *testing.T) {
 	}
 }
 
-func TestRouteCommandExecution_DestructiveCommandRequiresApproval(t *testing.T) {
+func TestRouteCommandExecution_DestructiveCommandRequiresSandboxApproval(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    testSandboxTypeForPolicy(),

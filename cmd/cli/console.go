@@ -21,11 +21,13 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/skills"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
 
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	"github.com/OnslaughtSnail/caelis/internal/idutil"
 )
 
 type cliConsole struct {
@@ -43,28 +45,28 @@ type cliConsole struct {
 	sandboxType       string
 	sandboxHelperPath string
 
-	modelAlias             string
-	llm                    model.LLM
-	modelFactory           *modelproviders.Factory
-	configStore            *appConfigStore
-	credentialStore        *credentialStore
-	sessionIndex           *sessionIndex
-	systemPrompt           string
-	promptConfigDir        string
-	enableLSPRoutingPolicy bool
-	skillDirs              []string
-	streamModel            bool
-	thinkingMode           string
-	thinkingBudget         int
-	reasoningEffort        string
-	showReasoning          bool
-	version                string
-	uiMode                 interactiveUIMode
-	noColor                bool
-	verbose                bool
-	inputRefs              *inputReferenceResolver
-	tuiDiag                *tuiDiagnostics
-	lastPromptTokens       int // cached context usage estimate for TUI status
+	modelAlias            string
+	llm                   model.LLM
+	modelFactory          *modelproviders.Factory
+	configStore           *appConfigStore
+	credentialStore       *credentialStore
+	sessionIndex          *sessionIndex
+	systemPrompt          string
+	promptConfigDir       string
+	enableExperimentalLSP bool
+	skillDirs             []string
+	streamModel           bool
+	thinkingMode          string
+	thinkingBudget        int
+	reasoningEffort       string
+	showReasoning         bool
+	version               string
+	uiMode                interactiveUIMode
+	noColor               bool
+	verbose               bool
+	inputRefs             *inputReferenceResolver
+	tuiDiag               *tuiDiagnostics
+	lastPromptTokens      int // cached context usage estimate for TUI status
 
 	editor   lineEditor
 	prompter promptReader
@@ -119,44 +121,44 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 	var out io.Writer = os.Stdout
 	baseUI := newUI(out, cfg.NoColor, cfg.Verbose)
 	console := &cliConsole{
-		baseCtx:                cfg.BaseContext,
-		rt:                     cfg.Runtime,
-		appName:                cfg.AppName,
-		userID:                 cfg.UserID,
-		sessionID:              cfg.SessionID,
-		contextWindow:          cfg.ContextWindow,
-		workspace:              cfg.Workspace,
-		resolved:               cfg.Resolved,
-		execRuntime:            cfg.ExecRuntime,
-		sandboxType:            strings.TrimSpace(cfg.SandboxType),
-		sandboxHelperPath:      strings.TrimSpace(cfg.SandboxHelperPath),
-		modelAlias:             cfg.ModelAlias,
-		llm:                    cfg.Model,
-		modelFactory:           cfg.ModelFactory,
-		configStore:            cfg.ConfigStore,
-		credentialStore:        cfg.CredentialStore,
-		sessionIndex:           cfg.SessionIndex,
-		systemPrompt:           cfg.SystemPrompt,
-		promptConfigDir:        cfg.PromptConfigDir,
-		enableLSPRoutingPolicy: cfg.EnableLSPRoutingPolicy,
-		skillDirs:              append([]string(nil), cfg.SkillDirs...),
-		streamModel:            true,
-		thinkingMode:           cfg.ThinkingMode,
-		thinkingBudget:         cfg.ThinkingBudget,
-		reasoningEffort:        cfg.ReasoningEffort,
-		showReasoning:          true,
-		version:                strings.TrimSpace(cfg.Version),
-		uiMode:                 mode,
-		noColor:                cfg.NoColor,
-		verbose:                cfg.Verbose,
-		inputRefs:              cfg.InputRefs,
-		tuiDiag:                cfg.TUIDiagnostics,
-		imageCache:             image.NewCache(32),
-		connectModelCache:      map[string]connectModelCacheEntry{},
-		editor:                 editor,
-		prompter:               editor,
-		out:                    out,
-		ui:                     baseUI,
+		baseCtx:               cfg.BaseContext,
+		rt:                    cfg.Runtime,
+		appName:               cfg.AppName,
+		userID:                cfg.UserID,
+		sessionID:             cfg.SessionID,
+		contextWindow:         cfg.ContextWindow,
+		workspace:             cfg.Workspace,
+		resolved:              cfg.Resolved,
+		execRuntime:           cfg.ExecRuntime,
+		sandboxType:           strings.TrimSpace(cfg.SandboxType),
+		sandboxHelperPath:     strings.TrimSpace(cfg.SandboxHelperPath),
+		modelAlias:            cfg.ModelAlias,
+		llm:                   cfg.Model,
+		modelFactory:          cfg.ModelFactory,
+		configStore:           cfg.ConfigStore,
+		credentialStore:       cfg.CredentialStore,
+		sessionIndex:          cfg.SessionIndex,
+		systemPrompt:          cfg.SystemPrompt,
+		promptConfigDir:       cfg.PromptConfigDir,
+		enableExperimentalLSP: cfg.EnableExperimentalLSP,
+		skillDirs:             append([]string(nil), cfg.SkillDirs...),
+		streamModel:           true,
+		thinkingMode:          cfg.ThinkingMode,
+		thinkingBudget:        cfg.ThinkingBudget,
+		reasoningEffort:       cfg.ReasoningEffort,
+		showReasoning:         true,
+		version:               strings.TrimSpace(cfg.Version),
+		uiMode:                mode,
+		noColor:               cfg.NoColor,
+		verbose:               cfg.Verbose,
+		inputRefs:             cfg.InputRefs,
+		tuiDiag:               cfg.TUIDiagnostics,
+		imageCache:            image.NewCache(32),
+		connectModelCache:     map[string]connectModelCacheEntry{},
+		editor:                editor,
+		prompter:              editor,
+		out:                   out,
+		ui:                    baseUI,
 	}
 	console.approver = newTerminalApprover(console.prompter, out, baseUI)
 	console.commands = map[string]slashCommand{
@@ -189,37 +191,37 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 }
 
 type cliConsoleConfig struct {
-	BaseContext            context.Context
-	Runtime                *runtime.Runtime
-	AppName                string
-	UserID                 string
-	SessionID              string
-	ContextWindow          int
-	Workspace              workspaceContext
-	Resolved               *bootstrap.ResolvedSpec
-	ExecRuntime            toolexec.Runtime
-	SandboxType            string
-	SandboxHelperPath      string
-	ModelAlias             string
-	Model                  model.LLM
-	ModelFactory           *modelproviders.Factory
-	ConfigStore            *appConfigStore
-	CredentialStore        *credentialStore
-	SessionIndex           *sessionIndex
-	SystemPrompt           string
-	PromptConfigDir        string
-	EnableLSPRoutingPolicy bool
-	SkillDirs              []string
-	ThinkingMode           string
-	ThinkingBudget         int
-	ReasoningEffort        string
-	InputRefs              *inputReferenceResolver
-	TUIDiagnostics         *tuiDiagnostics
-	HistoryFile            string
-	Version                string
-	NoColor                bool
-	Verbose                bool
-	UIMode                 string
+	BaseContext           context.Context
+	Runtime               *runtime.Runtime
+	AppName               string
+	UserID                string
+	SessionID             string
+	ContextWindow         int
+	Workspace             workspaceContext
+	Resolved              *bootstrap.ResolvedSpec
+	ExecRuntime           toolexec.Runtime
+	SandboxType           string
+	SandboxHelperPath     string
+	ModelAlias            string
+	Model                 model.LLM
+	ModelFactory          *modelproviders.Factory
+	ConfigStore           *appConfigStore
+	CredentialStore       *credentialStore
+	SessionIndex          *sessionIndex
+	SystemPrompt          string
+	PromptConfigDir       string
+	EnableExperimentalLSP bool
+	SkillDirs             []string
+	ThinkingMode          string
+	ThinkingBudget        int
+	ReasoningEffort       string
+	InputRefs             *inputReferenceResolver
+	TUIDiagnostics        *tuiDiagnostics
+	HistoryFile           string
+	Version               string
+	NoColor               bool
+	Verbose               bool
+	UIMode                string
 }
 
 func (c *cliConsole) loop() error {
@@ -397,19 +399,19 @@ func (c *cliConsole) runPrompt(input string) error {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 	}
 	ag, err := buildAgent(buildAgentInput{
-		AppName:                c.appName,
-		WorkspaceDir:           c.workspace.CWD,
-		PromptConfigDir:        c.promptConfigDir,
-		EnableLSPRoutingPolicy: c.enableLSPRoutingPolicy,
-		BasePrompt:             c.systemPrompt,
-		RuntimeHint:            buildRuntimePromptHint(c.execRuntime),
-		SkillDirs:              c.skillDirs,
-		StreamModel:            c.streamModel,
-		ThinkingMode:           c.thinkingMode,
-		ThinkingBudget:         c.thinkingBudget,
-		ReasoningEffort:        c.reasoningEffort,
-		ModelProvider:          resolveProviderName(c.modelFactory, c.modelAlias),
-		ModelName:              resolveModelName(c.modelFactory, c.modelAlias),
+		AppName:                     c.appName,
+		WorkspaceDir:                c.workspace.CWD,
+		PromptConfigDir:             c.promptConfigDir,
+		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
+		BasePrompt:                  c.systemPrompt,
+		RuntimeHint:                 buildRuntimePromptHint(c.execRuntime),
+		SkillDirs:                   c.skillDirs,
+		StreamModel:                 c.streamModel,
+		ThinkingMode:                c.thinkingMode,
+		ThinkingBudget:              c.thinkingBudget,
+		ReasoningEffort:             c.reasoningEffort,
+		ModelProvider:               resolveProviderName(c.modelFactory, c.modelAlias),
+		ModelName:                   resolveModelName(c.modelFactory, c.modelAlias),
 	})
 	if err != nil {
 		return err
@@ -417,6 +419,21 @@ func (c *cliConsole) runPrompt(input string) error {
 	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
 	if c.tuiSender != nil {
+		ctx = taskstream.WithStreamer(ctx, taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
+			if c.tuiSender == nil {
+				return
+			}
+			c.tuiSender.Send(tuievents.TaskStreamMsg{
+				Label:  ev.Label,
+				TaskID: ev.TaskID,
+				CallID: ev.CallID,
+				Stream: ev.Stream,
+				Chunk:  ev.Chunk,
+				State:  ev.State,
+				Reset:  ev.Reset,
+				Final:  ev.Final,
+			})
+		}))
 		ctx = toolexec.WithOutputStreamer(ctx, toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
 			if c.tuiSender == nil || !strings.EqualFold(strings.TrimSpace(chunk.ToolName), toolshell.BashToolName) {
 				return
@@ -424,8 +441,8 @@ func (c *cliConsole) runPrompt(input string) error {
 			if strings.TrimSpace(chunk.Text) == "" {
 				return
 			}
-			c.tuiSender.Send(tuievents.ToolStreamMsg{
-				Tool:   chunk.ToolName,
+			c.tuiSender.Send(tuievents.TaskStreamMsg{
+				Label:  chunk.ToolName,
 				CallID: chunk.ToolCallID,
 				Stream: chunk.Stream,
 				Chunk:  chunk.Text,
@@ -596,16 +613,19 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 					RichDiffShown: diffShown,
 				}
 			}
-			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) {
-				c.tuiSender.Send(tuievents.ToolStreamMsg{
-					Tool:   call.Name,
-					CallID: call.ID,
-					Reset:  true,
-				})
+			if strings.EqualFold(strings.TrimSpace(call.Name), tool.TaskToolName) {
+				continue
 			}
 			c.tuiSender.Send(tuievents.LogChunkMsg{
 				Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
 			})
+			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) || strings.EqualFold(strings.TrimSpace(call.Name), tool.DelegateTaskToolName) {
+				c.tuiSender.Send(tuievents.TaskStreamMsg{
+					Label:  call.Name,
+					CallID: call.ID,
+					Reset:  true,
+				})
+			}
 			if diffShown {
 				c.tuiSender.Send(diffMsg)
 			}
@@ -613,14 +633,21 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		handled = true
 	}
 	if msg.ToolResponse != nil {
+		emittedTaskStream := c.emitTaskStreamFromToolResult(msg.ToolResponse)
+		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), tool.TaskToolName) && !hasToolError(msg.ToolResponse.Result) {
+			return emittedTaskStream
+		}
 		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), toolshell.BashToolName) {
-			c.tuiSender.Send(tuievents.ToolStreamMsg{
-				Tool:   msg.ToolResponse.Name,
+			c.tuiSender.Send(tuievents.TaskStreamMsg{
+				Label:  msg.ToolResponse.Name,
 				CallID: msg.ToolResponse.ID,
 				Final:  true,
 			})
 			if strings.TrimSpace(asString(msg.ToolResponse.Result["stdout"])) != "" ||
 				strings.TrimSpace(asString(msg.ToolResponse.Result["stderr"])) != "" {
+				return true
+			}
+			if emittedTaskStream {
 				return true
 			}
 		}
@@ -644,11 +671,42 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		}
 		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
 		if strings.TrimSpace(summary) != "" {
-			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("✓ %s %s\n", msg.ToolResponse.Name, summary)})
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", msg.ToolResponse.Name, summary)})
 		}
 		return true
 	}
 	return handled
+}
+
+func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool {
+	if c == nil || c.tuiSender == nil || resp == nil {
+		return false
+	}
+	events := taskstream.EventsFromResult(resp.Result)
+	if len(events) == 0 {
+		return false
+	}
+	for _, ev := range events {
+		label := ev.Label
+		if label == "" {
+			label = resp.Name
+		}
+		callID := ev.CallID
+		if callID == "" {
+			callID = resp.ID
+		}
+		c.tuiSender.Send(tuievents.TaskStreamMsg{
+			Label:  label,
+			TaskID: ev.TaskID,
+			CallID: callID,
+			Stream: ev.Stream,
+			Chunk:  ev.Chunk,
+			State:  ev.State,
+			Reset:  ev.Reset,
+			Final:  ev.Final,
+		})
+	}
+	return true
 }
 
 func (c *cliConsole) setActiveRunCancel(cancel context.CancelFunc) {
@@ -751,7 +809,7 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "started new session", ClearAfter: transientHintDuration})
 		return false, nil
 	}
-	c.printf("new session started: %s\n", c.sessionID)
+	c.printf("new session started: %s\n", idutil.ShortDisplay(c.sessionID))
 	return false, nil
 }
 
@@ -834,7 +892,7 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 
 	c.ui.Section("Session")
 	c.ui.KeyValue("workspace", c.workspace.CWD)
-	c.ui.KeyValue("session", c.sessionID)
+	c.ui.KeyValue("session", idutil.ShortDisplay(c.sessionID))
 
 	c.ui.Section("Security")
 	mode := c.execRuntime.PermissionMode()
@@ -1059,7 +1117,9 @@ func (c *cliConsole) applyModelRuntimeSettings(alias string) {
 
 func handleTools(c *cliConsole, args []string) (bool, error) {
 	_ = args
-	coreTools, err := tool.EnsureCoreTools(c.resolved.Tools, tool.CoreToolsConfig{Runtime: c.execRuntime})
+	coreTools, err := tool.EnsureCoreTools(c.resolved.Tools, tool.CoreToolsConfig{
+		Runtime: c.execRuntime,
+	})
 	if err != nil {
 		return false, err
 	}
@@ -1108,13 +1168,14 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 		if target == "" {
 			return false, fmt.Errorf("session-id is required")
 		}
-		ok, err := c.sessionIndex.HasWorkspaceSession(c.workspace.Key, target)
+		resolved, ok, err := c.sessionIndex.ResolveWorkspaceSessionID(c.workspace.Key, target)
 		if err != nil {
 			return false, err
 		}
 		if !ok {
 			return false, fmt.Errorf("session %q not found in current workspace", target)
 		}
+		target = resolved
 	} else {
 		rec, ok, err := c.sessionIndex.MostRecentWorkspaceSession(c.workspace.Key, c.sessionID)
 		if err != nil {
@@ -1126,6 +1187,13 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 		target = rec.SessionID
 	}
 	c.sessionID = target
+	if _, err := c.rt.ReconcileSession(c.baseCtx, runtime.ReconcileSessionRequest{
+		AppName:   c.appName,
+		UserID:    c.userID,
+		SessionID: c.sessionID,
+	}); err != nil {
+		return false, err
+	}
 	if err := c.renderResumedSessionEvents(); err != nil {
 		return false, err
 	}
@@ -1258,6 +1326,7 @@ type terminalApprover struct {
 	out            io.Writer
 	ui             *ui
 	mu             sync.RWMutex
+	promptMu       sync.Mutex
 	sessionAllowed map[string]struct{}
 	authAllowed    map[string]struct{}
 }
@@ -1274,12 +1343,14 @@ func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalA
 
 func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalRequest) (bool, error) {
 	_ = ctx
-	if a.isAllowedInSession(req.Command) {
-		return true, nil
-	}
 	key := sessionApprovalKey(req.Command)
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
+	}
+	a.promptMu.Lock()
+	defer a.promptMu.Unlock()
+	if a.isAllowedInSession(req.Command) {
+		return true, nil
 	}
 	a.renderCommandApprovalRequest(req)
 	line, err := a.readApprovalChoice(key)
@@ -1318,15 +1389,16 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 	if scopeKey == "" {
 		return true, nil
 	}
-	if a.isAuthorizationAllowedInSession(scopeKey) {
-		return true, nil
-	}
-
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
+	a.promptMu.Lock()
+	defer a.promptMu.Unlock()
+	if a.isAuthorizationAllowedInSession(scopeKey) {
+		return true, nil
+	}
 	a.renderToolAuthorizationRequest(req)
-	line, err := a.readToolAuthorizationChoice(scopeKey)
+	line, err := a.readToolAuthorizationChoice(scopeKey, toolAuthorizationTitle(req))
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			a.emitToolApprovalOutcome(req, scopeKey, "cancel")
@@ -1425,10 +1497,10 @@ func (a *terminalApprover) readApprovalChoice(sessionKey string) (string, error)
 	return a.prompter.ReadLine(approvalPromptAllowDeny)
 }
 
-func (a *terminalApprover) readToolAuthorizationChoice(scopeKey string) (string, error) {
+func (a *terminalApprover) readToolAuthorizationChoice(scopeKey string, title string) (string, error) {
 	if chooser, ok := a.prompter.(choicePromptReader); ok {
 		return chooser.RequestChoicePrompt(
-			toolAuthorizationTitle(),
+			title,
 			toolAuthorizationChoices(scopeKey),
 			"y",
 			false,
@@ -1457,11 +1529,19 @@ func (a *terminalApprover) renderToolAuthorizationRequest(req kernelpolicy.ToolA
 	if a == nil || a.ui == nil {
 		return
 	}
-	a.ui.ApprovalTitle(toolAuthorizationTitle())
-	a.ui.ApprovalMeta("Permission", "write outside workspace writable roots")
-	a.ui.ApprovalPath(req.Path)
+	a.ui.ApprovalTitle(toolAuthorizationTitle(req))
+	a.ui.ApprovalMeta("Tool", strings.TrimSpace(req.ToolName))
+	a.ui.ApprovalMeta("Permission", toolAuthorizationPermission(req))
+	if path := strings.TrimSpace(req.Path); path != "" {
+		a.ui.ApprovalPath(path)
+	} else if target := strings.TrimSpace(req.Target); target != "" {
+		a.ui.ApprovalMeta("Target", target)
+	}
 	if reason := strings.TrimSpace(req.Reason); reason != "" {
 		a.ui.ApprovalMeta("Reason", reason)
+	}
+	if preview := strings.TrimSpace(req.Preview); preview != "" && strings.TrimSpace(req.Path) == "" {
+		a.ui.ApprovalMeta("Request", preview)
 	}
 }
 
@@ -1496,8 +1576,24 @@ func commandApprovalTitle() string {
 	return "Would you like to run the following command?"
 }
 
-func toolAuthorizationTitle() string {
-	return "Would you like to make the following edits?"
+func toolAuthorizationTitle(req kernelpolicy.ToolAuthorizationRequest) string {
+	if strings.TrimSpace(req.Path) != "" {
+		return "Would you like to make the following edits?"
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(req.Permission)), "mcp") {
+		return "Would you like to call the following external tool?"
+	}
+	return "Would you like to authorize the following tool?"
+}
+
+func toolAuthorizationPermission(req kernelpolicy.ToolAuthorizationRequest) string {
+	if value := strings.TrimSpace(req.Permission); value != "" {
+		return value
+	}
+	if strings.TrimSpace(req.Path) != "" {
+		return "write outside workspace writable roots"
+	}
+	return "tool authorization"
 }
 
 func commandPermissionText(req toolexec.ApprovalRequest) string {
@@ -1535,22 +1631,38 @@ func (a *terminalApprover) emitToolApprovalOutcome(req kernelpolicy.ToolAuthoriz
 	if a == nil || a.ui == nil {
 		return
 	}
-	target := shortApprovalTarget(req.Path)
-	if target == "\"\"" {
-		target = "these edits"
-	}
+	target := toolApprovalOutcomeTarget(req)
 	switch decision {
 	case "once":
-		a.ui.ApprovalOutcome(true, "You approved edits to "+target+" this time.")
+		a.ui.ApprovalOutcome(true, "You approved "+target+" this time.")
 	case "session":
 		scope := target
 		if strings.TrimSpace(scopeKey) != "" {
 			scope = shortApprovalTarget(scopeKey)
 		}
-		a.ui.ApprovalOutcome(true, "You approved this session for edits under "+scope+".")
+		if strings.TrimSpace(req.Path) != "" {
+			a.ui.ApprovalOutcome(true, "You approved this session for edits under "+scope+".")
+		} else {
+			a.ui.ApprovalOutcome(true, "You approved this session for tool requests under "+scope+".")
+		}
 	case "cancel":
-		a.ui.ApprovalOutcome(false, "You did not approve edits to "+target+".")
+		a.ui.ApprovalOutcome(false, "You did not approve "+target+".")
 	}
+}
+
+func toolApprovalOutcomeTarget(req kernelpolicy.ToolAuthorizationRequest) string {
+	switch {
+	case strings.TrimSpace(req.Path) != "":
+		target := shortApprovalTarget(req.Path)
+		if target != "\"\"" {
+			return "edits to " + target
+		}
+	case strings.TrimSpace(req.Target) != "":
+		return "tool access to " + shortApprovalTarget(req.Target)
+	case strings.TrimSpace(req.ToolName) != "":
+		return "tool " + shortApprovalTarget(req.ToolName)
+	}
+	return "this tool request"
 }
 
 func shortApprovalTarget(text string) string {

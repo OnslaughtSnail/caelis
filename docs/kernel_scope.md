@@ -8,6 +8,7 @@
   - 单次 run 生命周期管理（running/completed/failed/interrupted/waiting_approval）
   - session single-flight、并发冲突治理
   - 事件持久化与历史恢复
+  - 最小 delegated child-run 编排与 lineage 元数据
 - 抽象契约：
   - `model.LLM`、`tool.Tool`、`policy.Hook`、`plugin.Registry`
   - 统一错误码与可机读状态

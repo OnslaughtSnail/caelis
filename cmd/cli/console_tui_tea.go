@@ -19,6 +19,7 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/skills"
@@ -395,7 +396,7 @@ func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp
 			}
 		}
 		out = append(out, tuiapp.ResumeCandidate{
-			SessionID: sid,
+			SessionID: idutil.ShortDisplay(sid),
 			Prompt:    truncateInline(prompt, 100),
 			Age:       age,
 		})

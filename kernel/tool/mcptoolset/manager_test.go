@@ -57,6 +57,13 @@ func TestMCPToolRunSuccess(t *testing.T) {
 	if out["echo"] != "hello" {
 		t.Fatalf("unexpected output: %#v", out)
 	}
+	meta, ok := out["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata in output: %#v", out)
+	}
+	if meta["mcp_server"] != "demo" || meta["mcp_tool"] != "echo" {
+		t.Fatalf("unexpected metadata: %#v", meta)
+	}
 }
 
 func TestMCPToolRunError(t *testing.T) {

@@ -145,6 +145,9 @@ func TestNextConversationSessionID(t *testing.T) {
 	if !strings.HasPrefix(a, "s-") || !strings.HasPrefix(b, "s-") {
 		t.Fatalf("expected session ids to have s- prefix, got %q, %q", a, b)
 	}
+	if len(a) > 16 || len(b) > 16 {
+		t.Fatalf("expected compact session ids, got %q (%d), %q (%d)", a, len(a), b, len(b))
+	}
 	if a == b {
 		t.Fatalf("expected unique session ids, got duplicated %q", a)
 	}

@@ -10,6 +10,7 @@ import (
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
 type recordingRunner struct {
@@ -17,6 +18,22 @@ type recordingRunner struct {
 	err    error
 	calls  []toolexec.CommandRequest
 	onRun  func(toolexec.CommandRequest)
+}
+
+type asyncRecordingRunner struct {
+	recordingRunner
+	status     toolexec.SessionStatus
+	readResult struct {
+		stdout       []byte
+		stderr       []byte
+		stdoutMarker int64
+		stderrMarker int64
+	}
+	startSessionID string
+}
+
+type stubTaskManager struct {
+	startBash task.Snapshot
 }
 
 func testSandboxType() string {
@@ -33,6 +50,79 @@ func (r *recordingRunner) Run(ctx context.Context, req toolexec.CommandRequest) 
 		r.onRun(req)
 	}
 	return r.result, r.err
+}
+
+func (r *asyncRecordingRunner) StartAsync(ctx context.Context, req toolexec.CommandRequest) (string, error) {
+	_, err := r.Run(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	if r.startSessionID == "" {
+		r.startSessionID = "bash-session-1"
+	}
+	return r.startSessionID, nil
+}
+
+func (r *asyncRecordingRunner) WriteInput(sessionID string, input []byte) error {
+	_ = sessionID
+	_ = input
+	return nil
+}
+
+func (r *asyncRecordingRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	_ = sessionID
+	_ = stdoutMarker
+	_ = stderrMarker
+	return r.readResult.stdout, r.readResult.stderr, r.readResult.stdoutMarker, r.readResult.stderrMarker, nil
+}
+
+func (r *asyncRecordingRunner) GetSessionStatus(sessionID string) (toolexec.SessionStatus, error) {
+	_ = sessionID
+	return r.status, nil
+}
+
+func (r *asyncRecordingRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (toolexec.CommandResult, error) {
+	_ = ctx
+	_ = sessionID
+	_ = timeout
+	return r.result, r.err
+}
+
+func (r *asyncRecordingRunner) TerminateSession(sessionID string) error {
+	_ = sessionID
+	return nil
+}
+
+func (r *asyncRecordingRunner) ListSessions() []toolexec.SessionInfo {
+	return nil
+}
+
+func (s *stubTaskManager) StartBash(context.Context, task.BashStartRequest) (task.Snapshot, error) {
+	return s.startBash, nil
+}
+
+func (s *stubTaskManager) StartDelegate(context.Context, task.DelegateStartRequest) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskManager) Wait(context.Context, task.ControlRequest) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskManager) Status(context.Context, task.ControlRequest) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskManager) Write(context.Context, task.ControlRequest) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskManager) Cancel(context.Context, task.ControlRequest) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskManager) List(context.Context) ([]task.Snapshot, error) {
+	return nil, nil
 }
 
 type failingProbeRunner struct {
@@ -140,6 +230,47 @@ func TestBash_StreamsCommandOutputThroughContext(t *testing.T) {
 	}
 }
 
+func TestBash_YieldReturnsSharedTaskHandle(t *testing.T) {
+	host := &asyncRecordingRunner{
+		status: toolexec.SessionStatus{
+			ID:      "bash-session-1",
+			Command: "sleep 1",
+			State:   toolexec.SessionStateRunning,
+		},
+		startSessionID: "bash-session-1",
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := task.WithManager(context.Background(), &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "t-bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	})
+	out, err := tool.Run(ctx, map[string]any{
+		"command":       "sleep 1",
+		"yield_time_ms": 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected yielded task handle, got %#v", out)
+	}
+}
+
 func TestBash_DefaultUnsafeCommandRunsInSandboxWithoutApprovalWhenNoApprover(t *testing.T) {
 	host := &recordingRunner{}
 	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
@@ -228,41 +359,6 @@ func TestBash_FullControlRunsOnHostWithoutApproval(t *testing.T) {
 	}
 }
 
-func TestBash_DefaultRequireEscalatedForcesHostApproval(t *testing.T) {
-	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-approved"}}
-	sandbox := &recordingRunner{}
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		HostRunner:     host,
-		SandboxRunner:  sandbox,
-		SandboxType:    testSandboxType(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool, err := NewBash(BashConfig{Runtime: rt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: true})
-	out, err := tool.Run(ctx, map[string]any{
-		"command":             "python3 app.py",
-		"sandbox_permissions": "require_escalated",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(host.calls) != 1 {
-		t.Fatalf("expected host runner called once, got %d", len(host.calls))
-	}
-	if len(sandbox.calls) != 0 {
-		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
-	}
-	if out["stdout"] != "host-approved" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
-}
-
 func TestBash_RequireEscalatedBoolForcesHostApproval(t *testing.T) {
 	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-approved"}}
 	sandbox := &recordingRunner{}
@@ -332,7 +428,7 @@ func TestBash_RequireEscalatedWhitelistedCommandSkipsApproval(t *testing.T) {
 	}
 }
 
-func TestBash_DefaultRequireEscalatedDeniedStopsExecution(t *testing.T) {
+func TestBash_RequireEscalatedDeniedStopsExecution(t *testing.T) {
 	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-approved"}}
 	sandbox := &recordingRunner{}
 	rt, err := toolexec.New(toolexec.Config{
@@ -350,8 +446,8 @@ func TestBash_DefaultRequireEscalatedDeniedStopsExecution(t *testing.T) {
 	}
 	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: false})
 	_, err = tool.Run(ctx, map[string]any{
-		"command":             "python3 app.py",
-		"sandbox_permissions": "require_escalated",
+		"command":           "python3 app.py",
+		"require_escalated": true,
 	})
 	if err == nil {
 		t.Fatal("expected approval denied error")
@@ -465,7 +561,7 @@ func TestBash_DefaultFallbackAllCommandsNeedApproval(t *testing.T) {
 	}
 }
 
-func TestBash_InvalidSandboxPermissions(t *testing.T) {
+func TestBash_InvalidRequireEscalatedType(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		HostRunner:     &recordingRunner{},
@@ -480,11 +576,63 @@ func TestBash_InvalidSandboxPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = tool.Run(context.Background(), map[string]any{
-		"command":             "ls",
-		"sandbox_permissions": "invalid",
+		"command":           "ls",
+		"require_escalated": "invalid",
 	})
 	if err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestBash_TTYWithoutYieldAutomaticallyBecomesTask(t *testing.T) {
+	host := &asyncRecordingRunner{
+		status: toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		readResult: struct {
+			stdout       []byte
+			stderr       []byte
+			stdoutMarker int64
+			stderrMarker int64
+		}{
+			stdout:       []byte("What is your name?\n"),
+			stdoutMarker: int64(len("What is your name?\n")),
+		},
+		startSessionID: "bash-session-1",
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := task.WithManager(context.Background(), &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:         "t-bash-1",
+			Kind:           task.KindBash,
+			State:          task.StateRunning,
+			Running:        true,
+			Yielded:        true,
+			SupportsInput:  true,
+			SupportsCancel: true,
+			Output:         task.Output{Stdout: "What is your name?\n"},
+		},
+	})
+	out, err := tool.Run(ctx, map[string]any{
+		"tty":     true,
+		"command": `bash -c 'echo "What is your name?"; read name; echo "Hello $name"'`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected interactive command to yield task handle, got %#v", out)
+	}
+	if got := out["supports_input"]; got != true {
+		t.Fatalf("expected interactive command to expose supports_input, got %#v", out)
 	}
 }
 

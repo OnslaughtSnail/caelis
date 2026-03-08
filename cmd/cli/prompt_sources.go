@@ -66,21 +66,43 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 	warnings = append(warnings, discovered.Warnings...)
 
+	additional := make([]promptpipeline.PromptFragment, 0, 3)
+	if runtimeHint := normalizePromptText(in.RuntimeHint); runtimeHint != "" {
+		additional = append(additional, promptpipeline.PromptFragment{
+			Stage:   "runtime_context",
+			Title:   "Runtime Context",
+			Source:  "runtime execution context",
+			Content: runtimeHint,
+		})
+	}
+	if userPrompt := buildUserPromptFragment(in.BasePrompt, user); userPrompt != "" {
+		additional = append(additional, promptpipeline.PromptFragment{
+			Stage:   "user_custom",
+			Title:   "User Custom Instructions",
+			Source:  files.UserPath,
+			Content: userPrompt,
+		})
+	}
+	if in.EnableExperimentalLSPPrompt {
+		additional = append(additional, promptpipeline.PromptFragment{
+			Stage:   "experimental_lsp",
+			Title:   "Experimental LSP Routing",
+			Source:  "cli:experimental-lsp-routing",
+			Content: defaultExperimentalLSPRoutingPrompt,
+		})
+	}
+
 	return promptSpecResult{
 		Spec: promptpipeline.AssembleSpec{
-			BasePrompt:             in.BasePrompt,
-			RuntimeHint:            in.RuntimeHint,
-			EnableLSPRoutingPolicy: in.EnableLSPRoutingPolicy,
-			IdentityPrompt:         identity,
-			IdentitySource:         files.IdentityPath,
-			GlobalAgentsPrompt:     global,
-			GlobalAgentsSource:     files.GlobalAgentsPath,
-			WorkspaceAgentsPrompt:  workspaceAgents,
-			WorkspaceAgentsSource:  files.WorkspaceAgentsPath,
-			UserPrompt:             user,
-			UserSource:             files.UserPath,
-			SkillsMetaPrompt:       skills.BuildMetaPrompt(discovered.Metas),
-			SkillsMetaSource:       "skills metadata",
+			IdentityPrompt:        identity,
+			IdentitySource:        files.IdentityPath,
+			GlobalAgentsPrompt:    global,
+			GlobalAgentsSource:    files.GlobalAgentsPath,
+			WorkspaceAgentsPrompt: workspaceAgents,
+			WorkspaceAgentsSource: files.WorkspaceAgentsPath,
+			SkillsMetaPrompt:      skills.BuildMetaPrompt(discovered.Metas),
+			SkillsMetaSource:      "skills metadata",
+			Additional:            additional,
 		},
 		Warnings: warnings,
 	}, nil
@@ -101,7 +123,7 @@ func ensurePromptFiles(appName string, configDir string, workspaceDir string) (p
 	if err := os.MkdirAll(resolvedConfigDir, 0o700); err != nil {
 		return promptFiles{}, fmt.Errorf("cli prompt: create config dir: %w", err)
 	}
-	defaults := promptpipeline.Defaults()
+	defaults := defaultPromptTemplateSet()
 	if err := writePromptFileIfMissing(files.IdentityPath, defaults.Identity); err != nil {
 		return promptFiles{}, err
 	}
@@ -198,4 +220,15 @@ func normalizePromptText(input string) string {
 	input = strings.ReplaceAll(input, "\r", "\n")
 	input = strings.TrimPrefix(input, "\ufeff")
 	return strings.TrimSpace(input)
+}
+
+func buildUserPromptFragment(basePrompt string, userPrompt string) string {
+	parts := make([]string, 0, 2)
+	if text := normalizePromptText(userPrompt); text != "" {
+		parts = append(parts, text)
+	}
+	if value := normalizePromptText(basePrompt); value != "" {
+		parts = append(parts, "## Session Overrides\n\n"+value)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }

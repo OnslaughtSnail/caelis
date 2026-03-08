@@ -111,7 +111,7 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 		return nil, nil
 	}
 	if notify != nil {
-		if !notify(compactionNoticeEvent(in.Trigger, currentTokens, windowTokens, "start")) {
+		if !notify(prepareEvent(ctx, in.Session, compactionNoticeEvent(in.Trigger, currentTokens, windowTokens, "start"))) {
 			return nil, nil
 		}
 	}
@@ -152,11 +152,12 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 	meta := compactionEvent.Meta[metaCompaction].(map[string]any)
 	meta["post_tokens"] = postTokens
 
+	prepareEvent(ctx, in.Session, compactionEvent)
 	if err := r.store.AppendEvent(ctx, in.Session, compactionEvent); err != nil {
 		return nil, err
 	}
 	if notify != nil {
-		if !notify(compactionNoticeEvent(in.Trigger, currentTokens, postTokens, "done")) {
+		if !notify(prepareEvent(ctx, in.Session, compactionNoticeEvent(in.Trigger, currentTokens, postTokens, "done"))) {
 			return nil, nil
 		}
 	}

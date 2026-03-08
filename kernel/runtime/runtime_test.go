@@ -2,15 +2,19 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -72,6 +76,20 @@ type blockingAgent struct {
 	once    sync.Once
 }
 
+type panicAgent struct{}
+
+func (a panicAgent) Name() string { return "panic-agent" }
+func (a panicAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		panic("boom")
+	}
+}
+
+type scriptedRuntimeLLM struct {
+	name string
+	run  func(*model.Request) (*model.Response, error)
+}
+
 func (a *blockingAgent) Name() string { return "blocking" }
 func (a *blockingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -81,6 +99,15 @@ func (a *blockingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 		})
 		<-a.release
 		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil)
+	}
+}
+
+func (l *scriptedRuntimeLLM) Name() string { return l.name }
+func (l *scriptedRuntimeLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+	_ = ctx
+	return func(yield func(*model.Response, error) bool) {
+		resp, err := l.run(req)
+		yield(resp, err)
 	}
 }
 
@@ -235,6 +262,210 @@ func TestRuntime_Run_ApprovalAbortedLifecycle(t *testing.T) {
 	}
 }
 
+func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := llmagent.New(llmagent.Config{Name: "delegate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &scriptedRuntimeLLM{
+		name: "delegate-llm",
+		run: func(req *model.Request) (*model.Response, error) {
+			last := req.Messages[len(req.Messages)-1]
+			switch last.Role {
+			case model.RoleUser:
+				switch last.TextContent() {
+				case "delegate please":
+					args, _ := json.Marshal(map[string]any{"task": "child task"})
+					return &model.Response{
+						Message: model.Message{
+							Role: model.RoleAssistant,
+							ToolCalls: []model.ToolCall{{
+								ID:   "call_delegate_1",
+								Name: tool.DelegateTaskToolName,
+								Args: string(args),
+							}},
+						},
+						TurnComplete: true,
+					}, nil
+				case "child task":
+					return &model.Response{
+						Message:      model.Message{Role: model.RoleAssistant, Text: "child done"},
+						TurnComplete: true,
+					}, nil
+				}
+			case model.RoleTool:
+				if last.ToolResponse != nil && last.ToolResponse.Name == tool.DelegateTaskToolName {
+					return &model.Response{
+						Message:      model.Message{Role: model.RoleAssistant, Text: "delegated complete"},
+						TurnComplete: true,
+					}, nil
+				}
+			}
+			return &model.Response{
+				Message:      model.Message{Role: model.RoleAssistant, Text: "fallback"},
+				TurnComplete: true,
+			}, nil
+		},
+	}
+
+	var parentEvents []*session.Event
+	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "parent-session",
+		Input:     "delegate please",
+		Agent:     ag,
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		parentEvents = append(parentEvents, ev)
+	}
+	if len(parentEvents) == 0 {
+		t.Fatal("expected parent events")
+	}
+
+	parentStored, err := store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "parent-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var childSessionID string
+	for _, ev := range parentStored {
+		if ev == nil || ev.Message.ToolResponse == nil || ev.Message.ToolResponse.Name != tool.DelegateTaskToolName {
+			continue
+		}
+		childSessionID, _ = ev.Message.ToolResponse.Result["child_session_id"].(string)
+	}
+	if childSessionID == "" {
+		t.Fatal("expected delegated child_session_id in parent tool response")
+	}
+	if !strings.HasPrefix(childSessionID, "s-") {
+		t.Fatalf("expected compact child session id, got %q", childSessionID)
+	}
+	if strings.Contains(childSessionID, "__delegate__") {
+		t.Fatalf("expected delegated child session id without embedded parent path, got %q", childSessionID)
+	}
+
+	childStored, err := store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: childSessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(childStored) < 2 {
+		t.Fatalf("expected child session events, got %d", len(childStored))
+	}
+	for _, ev := range childStored {
+		if ev == nil {
+			continue
+		}
+		if got := ev.Meta[metaParentSessionID]; got != "parent-session" {
+			t.Fatalf("expected parent lineage metadata, got %+v", ev.Meta)
+		}
+		if got := ev.Meta[metaChildSessionID]; got != childSessionID {
+			t.Fatalf("expected child lineage metadata, got %+v", ev.Meta)
+		}
+		if got := ev.Meta[metaParentToolCall]; got != "call_delegate_1" {
+			t.Fatalf("expected parent tool call lineage metadata, got %+v", ev.Meta)
+		}
+		if strings.TrimSpace(asStringValue(ev.Meta[metaDelegationID])) == "" {
+			t.Fatalf("expected delegation_id metadata, got %+v", ev.Meta)
+		}
+	}
+}
+
+func asStringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func TestRuntime_BuildInvocationContext_DisablesDelegateForChildRuns(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "child-session"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	ctx := withDelegationLineage(context.Background(), delegationLineage{
+		ParentSessionID: "parent-session",
+		ChildSessionID:  "child-session",
+		DelegationID:    "dlg-1",
+	})
+	inv, err := rt.buildInvocationContext(ctx, sess, RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "child-session",
+		Model:     newRuntimeTestLLM("fake"),
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := inv.Tool(tool.DelegateTaskToolName); ok {
+		t.Fatal("expected child invocation context to hide DELEGATE")
+	}
+	if _, ok := inv.Tool(tool.TaskToolName); !ok {
+		t.Fatal("expected child invocation context to keep TASK")
+	}
+}
+
+func TestDetachSubagentContext_FiltersNestedTaskStreams(t *testing.T) {
+	var seen []taskstream.Event
+	streamer := taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
+		seen = append(seen, ev)
+	})
+	ctx := taskstream.WithStreamer(context.Background(), streamer)
+	detached := detachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1"})
+
+	taskstream.Emit(detached, taskstream.Event{Label: "BASH", Stream: "stdout", Chunk: "hidden"})
+	taskstream.Emit(detached, taskstream.Event{Label: "DELEGATE", Stream: "assistant", Chunk: "visible"})
+
+	if len(seen) != 1 {
+		t.Fatalf("expected only delegated task stream to survive, got %+v", seen)
+	}
+	if seen[0].Label != "DELEGATE" || seen[0].Chunk != "visible" {
+		t.Fatalf("unexpected delegated task stream events: %+v", seen)
+	}
+}
+
+func TestDelegatePreviewFromEvents_SkipsFencedCodeBlockContent(t *testing.T) {
+	events := []*session.Event{
+		{Message: model.Message{Role: model.RoleAssistant, Text: "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone."}},
+	}
+	got := delegatePreviewFromEvents(events)
+	if strings.Contains(got, "demo.html") || strings.Contains(got, "\n12\n") {
+		t.Fatalf("expected fenced block content hidden, got %q", got)
+	}
+	if !strings.Contains(got, "working...") || !strings.Contains(got, "done.") {
+		t.Fatalf("expected prose lines preserved, got %q", got)
+	}
+}
+
+func TestDetachSubagentContext_DoesNotInheritOutputStreamer(t *testing.T) {
+	streamer := toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
+		t.Fatalf("did not expect delegated context to inherit output streamer: %+v", chunk)
+	})
+	ctx := toolexec.WithOutputStreamer(context.Background(), streamer)
+	detached := detachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1"})
+
+	if _, ok := toolexec.OutputStreamerFromContext(detached); ok {
+		t.Fatal("expected delegated context to omit output streamer")
+	}
+}
+
 func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})
@@ -341,6 +572,57 @@ func TestRuntime_ContextUsage(t *testing.T) {
 	}
 	if usage.Ratio <= 0 {
 		t.Fatalf("expected positive ratio, got %f", usage.Ratio)
+	}
+}
+
+func TestDetachedSubagentPanicPersistsFailedLifecycle(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeSubagentRunner{
+		runtime: rt,
+		parent:  &session.Session{AppName: "app", UserID: "u", ID: "parent"},
+		req: RunRequest{
+			AppName:   "app",
+			UserID:    "u",
+			Model:     newRuntimeTestLLM("fake"),
+			CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+		},
+	}
+	childReq := RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "child-panic",
+		Input:     "hello",
+		Agent:     panicAgent{},
+		Model:     newRuntimeTestLLM("fake"),
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}
+
+	runner.runDetachedSubagent(context.Background(), childReq, delegationLineage{
+		ParentSessionID: "parent",
+		ChildSessionID:  "child-panic",
+		DelegationID:    "dlg-panic",
+	})
+
+	state, err := rt.RunState(context.Background(), RunStateRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "child-panic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.HasLifecycle || state.Status != RunLifecycleStatusFailed {
+		t.Fatalf("expected failed lifecycle after detached panic, got %+v", state)
+	}
+	if state.Phase != "delegate_panic" {
+		t.Fatalf("expected delegate_panic phase, got %+v", state)
+	}
+	if !strings.Contains(state.Error, "subagent panic: boom") {
+		t.Fatalf("expected panic error recorded, got %+v", state)
 	}
 }
 

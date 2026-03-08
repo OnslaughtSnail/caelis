@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/kernel/delegation"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -25,6 +26,7 @@ type testCtx struct {
 	tools    []tool.Tool
 	toolMap  map[string]tool.Tool
 	policies []policy.Hook
+	runner   delegation.Runner
 }
 
 func (c *testCtx) Session() *session.Session { return c.session }
@@ -39,6 +41,9 @@ func (c *testCtx) Tool(name string) (tool.Tool, bool) {
 	return t, ok
 }
 func (c *testCtx) Policies() []policy.Hook { return c.policies }
+func (c *testCtx) SubagentRunner() delegation.Runner {
+	return c.runner
+}
 func (c *testCtx) recordVisibleEvent(ev *session.Event) {
 	if ev == nil {
 		return

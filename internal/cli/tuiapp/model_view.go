@@ -436,7 +436,12 @@ func (m *Model) buildRunningHintText() string {
 	if len(runningCarouselLines) > 0 {
 		text := frame + " " + runningCarouselLines[m.runningTip%len(runningCarouselLines)]
 		if queueText != "" {
-			return text + " │ " + queueText
+			combined := text + " │ " + queueText
+			maxWidth := maxInt(1, m.width) - 2
+			if displayColumns(combined) > maxWidth {
+				return text + " │ " + m.pendingQueueShortText()
+			}
+			return combined
 		}
 		return text
 	}
@@ -452,9 +457,17 @@ func (m *Model) pendingQueueHintText() string {
 		return ""
 	}
 	if n == 1 {
-		return "1 pending message; it will send after current run"
+		return "1 pending message"
 	}
-	return fmt.Sprintf("%d pending messages; they will send in order after current run", n)
+	return fmt.Sprintf("%d pending messages", n)
+}
+
+func (m *Model) pendingQueueShortText() string {
+	n := len(m.pendingQueue)
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d pending", n)
 }
 
 func (m *Model) renderHintArea() string {

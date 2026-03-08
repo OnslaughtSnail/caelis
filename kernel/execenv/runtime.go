@@ -98,6 +98,7 @@ type CommandRequest struct {
 	Dir         string
 	Timeout     time.Duration
 	IdleTimeout time.Duration
+	TTY         bool
 	OnOutput    func(CommandOutputChunk)
 }
 

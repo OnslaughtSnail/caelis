@@ -10,6 +10,8 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
+	ktool "github.com/OnslaughtSnail/caelis/kernel/tool"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
 	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
 )
@@ -19,6 +21,7 @@ const (
 	BashToolName       = "BASH"
 	defaultBashTimeout = 90 * time.Second
 	defaultBashIdle    = 45 * time.Second
+	defaultBashYield   = 1200 * time.Millisecond
 )
 
 // BashConfig configures the optional BASH tool.
@@ -76,7 +79,7 @@ func (t *BashTool) Declaration() model.ToolDefinition {
 			"type": "object",
 			"properties": map[string]any{
 				"command": map[string]any{"type": "string", "description": "shell command to execute"},
-				"dir":     map[string]any{"type": "string", "description": "working directory"},
+				"workdir": map[string]any{"type": "string", "description": "working directory"},
 				"timeout_ms": map[string]any{
 					"type":        "integer",
 					"description": "optional timeout in milliseconds, overrides default tool timeout",
@@ -89,164 +92,77 @@ func (t *BashTool) Declaration() model.ToolDefinition {
 					"type":        "boolean",
 					"description": "request host execution only when sandbox limits are blocking the task",
 				},
-				"sandbox_permissions": map[string]any{
-					"type":        "string",
-					"description": "legacy sandbox permission mode: auto|require_escalated",
-				},
-				"mode": map[string]any{
-					"type":        "string",
-					"enum":        []string{"sync", "async"},
-					"description": "execution mode: sync (wait for completion) or async (return session ID immediately)",
-				},
-				"session_id": map[string]any{
-					"type":        "string",
-					"description": "session ID for async operations (write, read, status, terminate)",
-				},
-				"action": map[string]any{
-					"type":        "string",
-					"enum":        []string{"execute", "write", "read", "status", "terminate", "list"},
-					"description": "action type: execute (default), write (send input), read (get output), status (check session), terminate (stop session), list (show all sessions)",
-				},
-				"input": map[string]any{
-					"type":        "string",
-					"description": "input to send to async session (for action=write)",
-				},
-				"initial_wait_ms": map[string]any{
+				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "for async mode, time to wait for initial output before returning (default 0, max 600000)",
+					"description": "optional wait time before yielding control. If the command is still running, returns a task_id for later TASK wait/status/write/cancel calls",
+				},
+				"tty": map[string]any{
+					"type":        "boolean",
+					"description": "allocate a pseudo-terminal for interactive commands. When tty=true and yield_time_ms is omitted, BASH returns a task_id after a short initial wait so TASK write can continue the session.",
 				},
 			},
-			"required": []string{},
+			"required":             []string{"command"},
+			"additionalProperties": false,
 		},
 	}
 }
 
 func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {
-	action, err := argparse.String(args, "action", false)
+	command, err := argparse.String(args, "command", true)
 	if err != nil {
 		return nil, err
 	}
-	if action == "" {
-		action = "execute"
+	workingDir, err := argparse.String(args, "workdir", false)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(workingDir) == "" {
+		workingDir, _ = argparse.String(args, "dir", false)
+	}
+	sandboxPermission, err := parseSandboxPermissionArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	timeoutMS, tmErr := argparse.Int(args, "timeout_ms", 0)
+	if tmErr != nil {
+		return nil, tmErr
+	}
+	if timeoutMS < 0 {
+		return nil, fmt.Errorf("tool: arg %q must be >= 0", "timeout_ms")
+	}
+	idleTimeoutMS, itErr := argparse.Int(args, "idle_timeout_ms", 0)
+	if itErr != nil {
+		return nil, itErr
+	}
+	if idleTimeoutMS < 0 {
+		return nil, fmt.Errorf("tool: arg %q must be >= 0", "idle_timeout_ms")
+	}
+	yieldMS, yErr := argparse.Int(args, "yield_time_ms", 0)
+	if yErr != nil {
+		return nil, yErr
+	}
+	if yieldMS < 0 {
+		return nil, fmt.Errorf("tool: arg %q must be >= 0", "yield_time_ms")
+	}
+	tty, ttyErr := argparse.Bool(args, "tty", false)
+	if ttyErr != nil {
+		return nil, ttyErr
+	}
+	if tty && yieldMS == 0 {
+		yieldMS = int(defaultBashYield / time.Millisecond)
 	}
 
-	// Read-only actions are safe without policy/approval evaluation.
-	switch action {
-	case "read", "status":
-		return t.handleAsyncReadOnlyAction(ctx, action, args)
-	case "list":
-		return t.handleListSessions(ctx)
+	timeout := t.cfg.Timeout
+	if timeoutMS > 0 {
+		timeout = time.Duration(timeoutMS) * time.Millisecond
 	}
-
-	// State-mutating actions (execute, write, terminate) go through the full
-	// resolveCommandDecision → resolveRunner → requestApproval pipeline so
-	// that every mutation is subject to a per-call policy decision.
-
-	var (
-		command   string
-		sessionID string
-	)
-
-	switch action {
-	case "execute":
-		command, err = argparse.String(args, "command", true)
-		if err != nil {
-			return nil, err
-		}
-	case "write":
-		sessionID, err = argparse.String(args, "session_id", true)
-		if err != nil {
-			return nil, fmt.Errorf("tool: session_id is required for action %q", action)
-		}
-		input, inputErr := argparse.String(args, "input", true)
-		if inputErr != nil {
-			return nil, fmt.Errorf("tool: input is required for write action")
-		}
-		// Use the input text as the command for policy evaluation so the
-		// policy engine can inspect what is being sent to the session.
-		command = input
-	case "terminate":
-		sessionID, err = argparse.String(args, "session_id", true)
-		if err != nil {
-			return nil, fmt.Errorf("tool: session_id is required for action %q", action)
-		}
-		asyncRunner := t.getAsyncRunner()
-		if asyncRunner == nil {
-			return nil, fmt.Errorf("tool: async execution is not supported in the current runtime")
-		}
-		status, statusErr := asyncRunner.GetSessionStatus(sessionID)
-		if statusErr != nil {
-			return nil, fmt.Errorf("tool: session %q not found: %w", sessionID, statusErr)
-		}
-		command = status.Command
-	default:
-		return nil, fmt.Errorf("tool: invalid action %q", action)
+	idleTimeout := t.cfg.IdleTimeout
+	if idleTimeoutMS > 0 {
+		idleTimeout = time.Duration(idleTimeoutMS) * time.Millisecond
 	}
-
-	// Parse execute-specific parameters.
-	var (
-		workingDir        string
-		sandboxPermission toolexec.SandboxPermission
-		timeout           time.Duration
-		idleTimeout       time.Duration
-		mode              string
-		initialWaitMS     int
-	)
-	if action == "execute" {
-		workingDir, err = argparse.String(args, "dir", false)
-		if err != nil {
+	if t.cfg.PreRun != nil {
+		if err := t.cfg.PreRun(command, workingDir); err != nil {
 			return nil, err
-		}
-		sandboxPermission, err = parseSandboxPermissionArgs(args)
-		if err != nil {
-			return nil, err
-		}
-		timeoutMS, tmErr := argparse.Int(args, "timeout_ms", 0)
-		if tmErr != nil {
-			return nil, tmErr
-		}
-		if timeoutMS < 0 {
-			return nil, fmt.Errorf("tool: arg %q must be >= 0", "timeout_ms")
-		}
-		idleTimeoutMS, itErr := argparse.Int(args, "idle_timeout_ms", 0)
-		if itErr != nil {
-			return nil, itErr
-		}
-		if idleTimeoutMS < 0 {
-			return nil, fmt.Errorf("tool: arg %q must be >= 0", "idle_timeout_ms")
-		}
-
-		mode, err = argparse.String(args, "mode", false)
-		if err != nil {
-			return nil, err
-		}
-		if mode == "" {
-			mode = "sync"
-		}
-		initialWaitMS, err = argparse.Int(args, "initial_wait_ms", 0)
-		if err != nil {
-			return nil, err
-		}
-		if initialWaitMS < 0 {
-			return nil, fmt.Errorf("tool: arg %q must be >= 0", "initial_wait_ms")
-		}
-		if initialWaitMS > 600000 {
-			initialWaitMS = 600000
-		}
-
-		timeout = t.cfg.Timeout
-		if timeoutMS > 0 {
-			timeout = time.Duration(timeoutMS) * time.Millisecond
-		}
-		idleTimeout = t.cfg.IdleTimeout
-		if idleTimeoutMS > 0 {
-			idleTimeout = time.Duration(idleTimeoutMS) * time.Millisecond
-		}
-
-		if t.cfg.PreRun != nil {
-			if err := t.cfg.PreRun(command, workingDir); err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -256,12 +172,9 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		return nil, err
 	}
 
-	// Async session operations always target the host runner (sessions run
-	// on the host and the sandbox runner does not implement
-	// AsyncCommandRunner), so override the route the policy engine picked.
-	// When escalating from sandbox to host, require approval so the caller
-	// cannot silently bypass the sandbox boundary.
-	if action == "write" || action == "terminate" || (action == "execute" && mode == "async") {
+	// Yielded/background execution requires host async support. Keep approval on
+	// host escalation explicit rather than leaking execenv session IDs upward.
+	if yieldMS > 0 {
 		if decision.Route != toolexec.ExecutionRouteHost {
 			decision.NeedApproval = true
 		}
@@ -287,25 +200,25 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		}
 	}
 
-	// Dispatch based on action.
-	switch action {
-	case "write":
-		asyncRunner := t.getAsyncRunner()
-		if asyncRunner == nil {
-			return nil, fmt.Errorf("tool: async execution is not supported in the current runtime")
+	if yieldMS > 0 {
+		manager, ok := task.ManagerFromContext(ctx)
+		if !ok || manager == nil {
+			return nil, fmt.Errorf("tool: task manager is unavailable")
 		}
-		return t.handleWriteInput(ctx, asyncRunner, sessionID, args)
-	case "terminate":
-		asyncRunner := t.getAsyncRunner()
-		if asyncRunner == nil {
-			return nil, fmt.Errorf("tool: async execution is not supported in the current runtime")
+		snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
+			Command:     command,
+			Workdir:     workingDir,
+			Yield:       time.Duration(yieldMS) * time.Millisecond,
+			Timeout:     timeout,
+			IdleTimeout: idleTimeout,
+			TTY:         tty,
+			Route:       string(decision.Route),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
 		}
-		return t.handleTerminate(ctx, asyncRunner, sessionID)
-	}
-
-	// action == "execute"
-	if mode == "async" {
-		return t.runAsync(ctx, runner, command, workingDir, time.Duration(initialWaitMS)*time.Millisecond, decision.Route, timeout, idleTimeout)
+		result := ktoolSnapshotResult(snapshot, string(decision.Route))
+		return ktoolAppendTaskEvents(result, snapshot), nil
 	}
 
 	result, err := runner.Run(ctx, toolexec.CommandRequest{
@@ -313,6 +226,7 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		Dir:         workingDir,
 		Timeout:     timeout,
 		IdleTimeout: idleTimeout,
+		TTY:         tty,
 		OnOutput: func(chunk toolexec.CommandOutputChunk) {
 			toolexec.EmitOutputChunk(ctx, chunk)
 		},
@@ -332,6 +246,7 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 			Dir:         workingDir,
 			Timeout:     timeout,
 			IdleTimeout: idleTimeout,
+			TTY:         tty,
 			OnOutput: func(chunk toolexec.CommandOutputChunk) {
 				toolexec.EmitOutputChunk(ctx, chunk)
 			},
@@ -340,12 +255,29 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
 	}
-	return map[string]any{
-		"stdout":    result.Stdout,
-		"stderr":    result.Stderr,
-		"exit_code": result.ExitCode,
-		"route":     string(decision.Route),
-	}, nil
+	return ktoolSnapshotResult(task.Snapshot{
+		Kind:           task.KindBash,
+		State:          task.StateCompleted,
+		Running:        false,
+		SupportsInput:  false,
+		SupportsCancel: false,
+		Output:         task.Output{Stdout: result.Stdout, Stderr: result.Stderr},
+		Result: map[string]any{
+			"exit_code": result.ExitCode,
+		},
+	}, string(decision.Route)), nil
+}
+
+func ktoolSnapshotResult(snapshot task.Snapshot, route string) map[string]any {
+	result := ktool.SnapshotResultMap(snapshot)
+	if strings.TrimSpace(route) != "" {
+		result["route"] = strings.TrimSpace(route)
+	}
+	return result
+}
+
+func ktoolAppendTaskEvents(result map[string]any, snapshot task.Snapshot) map[string]any {
+	return ktool.AppendTaskSnapshotEvents(result, snapshot)
 }
 
 func shouldEscalateWhenSandboxUnavailable(
@@ -455,19 +387,7 @@ func parseSandboxPermissionArgs(args map[string]any) (toolexec.SandboxPermission
 	if requireEscalated {
 		return toolexec.SandboxPermissionRequireEscalated, nil
 	}
-	raw, err := argparse.String(args, "sandbox_permissions", false)
-	if err != nil {
-		return "", err
-	}
-	value := toolexec.SandboxPermission(strings.TrimSpace(strings.ToLower(raw)))
-	switch value {
-	case "", toolexec.SandboxPermissionAuto:
-		return toolexec.SandboxPermissionAuto, nil
-	case toolexec.SandboxPermissionRequireEscalated:
-		return toolexec.SandboxPermissionRequireEscalated, nil
-	default:
-		return "", fmt.Errorf("tool: invalid sandbox_permissions %q, expected auto|require_escalated", raw)
-	}
+	return toolexec.SandboxPermissionAuto, nil
 }
 
 func (t *BashTool) resolveRunner(decision toolexec.CommandDecision) (toolexec.CommandRunner, bool, string, error) {

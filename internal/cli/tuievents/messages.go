@@ -94,11 +94,16 @@ type DiffBlockMsg struct {
 	Truncated bool
 }
 
-type ToolStreamMsg struct {
+type TaskStreamMsg struct {
+	Label  string
 	Tool   string
+	TaskID string
 	CallID string
 	Stream string
 	Chunk  string
+	State  string
 	Reset  bool
 	Final  bool
 }
+
+type ToolStreamMsg = TaskStreamMsg

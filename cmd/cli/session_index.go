@@ -244,6 +244,53 @@ func (s *sessionIndex) HasWorkspaceSession(workspaceKey, sessionID string) (bool
 	return true, nil
 }
 
+func (s *sessionIndex) ResolveWorkspaceSessionID(workspaceKey, prefix string) (string, bool, error) {
+	if s == nil || s.db == nil {
+		return "", false, nil
+	}
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	prefix = strings.TrimSpace(prefix)
+	if workspaceKey == "" || prefix == "" {
+		return "", false, fmt.Errorf("session index: workspace_key and session_id are required")
+	}
+	const q = `
+	SELECT session_id
+	FROM session_index
+	WHERE workspace_key = ? AND session_id LIKE ?
+	ORDER BY last_event_at DESC, created_at DESC
+	LIMIT 3`
+	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, prefix+"%")
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+
+	matches := make([]string, 0, 3)
+	for rows.Next() {
+		var sessionID string
+		if err := rows.Scan(&sessionID); err != nil {
+			return "", false, err
+		}
+		matches = append(matches, sessionID)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, err
+	}
+	for _, match := range matches {
+		if match == prefix {
+			return match, true, nil
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		return "", false, fmt.Errorf("session prefix %q is ambiguous in current workspace", prefix)
+	}
+}
+
 func (s *sessionIndex) SyncWorkspaceFromStoreDir(workspace workspaceContext, appName, userID, storeDir string) error {
 	if s == nil || s.db == nil {
 		return nil

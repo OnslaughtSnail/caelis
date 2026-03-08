@@ -81,8 +81,10 @@ func (h commandExecutionHook) BeforeTool(ctx context.Context, in ToolInput) (Too
 			decision.Metadata = map[string]any{}
 		}
 		decision.Metadata[DecisionMetaFallbackOnCommandNotFound] = true
-		// Destructive commands (rm, shred, dd with output) require approval even
-		// inside the sandbox so the user can review before data is deleted.
+		// Destructive commands (rm, shred, dd with output) still default to the
+		// sandbox route unless the caller explicitly requests escalation. This
+		// keeps the model-visible semantics sandbox-first while still surfacing an
+		// approval checkpoint before deletion happens.
 		if base, reason := detectDestructiveCommand(command); base != "" {
 			decision = DecisionWithRoute(Decision{
 				Effect: DecisionEffectRequireApproval,
@@ -133,15 +135,7 @@ func parseSandboxPermissionArgs(args map[string]any) (toolexec.SandboxPermission
 		}
 		return toolexec.SandboxPermissionAuto, nil
 	}
-	value, _ := args["sandbox_permissions"].(string)
-	switch toolexec.SandboxPermission(strings.TrimSpace(strings.ToLower(value))) {
-	case "", toolexec.SandboxPermissionAuto:
-		return toolexec.SandboxPermissionAuto, nil
-	case toolexec.SandboxPermissionRequireEscalated:
-		return toolexec.SandboxPermissionRequireEscalated, nil
-	default:
-		return "", fmt.Errorf("invalid sandbox_permissions %q", value)
-	}
+	return toolexec.SandboxPermissionAuto, nil
 }
 
 // detectDestructiveCommand checks whether the given shell command contains a

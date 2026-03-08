@@ -175,19 +175,17 @@ type toolOutputLine struct {
 	stream string
 }
 
-type toolOutputBlockState struct {
-	start int
-	end   int
-}
-
 type toolOutputState struct {
+	key           string
 	tool          string
 	callID        string
+	start         int
+	end           int
 	lines         []toolOutputLine
 	stdoutPartial string
 	stderrPartial string
+	delegateFence bool
 	active        bool
-	block         *toolOutputBlockState
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +214,7 @@ type Model struct {
 	reasoningBlock     *assistantBlockState
 	lastFinalAnswer    string
 	diffBlocks         []diffBlockState
-	toolOutput         toolOutputState
+	toolOutputs        map[string]*toolOutputState
 
 	// Fullscreen viewport — replaces tea.Println scrollback.
 	historyLines        []string // committed lines (pre-colorized)
@@ -545,7 +543,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuievents.DiffBlockMsg:
 		return m.handleDiffBlock(typed)
 
-	case tuievents.ToolStreamMsg:
+	case tuievents.TaskStreamMsg:
 		return m.handleToolStreamMsg(typed)
 
 	case tuievents.SetHintMsg:

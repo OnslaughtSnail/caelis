@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+## v0.0.15 - 2026-03-08
+
+### Runtime, Tasks & Delegation
+- Added core `DELEGATE` and `TASK` tools with unified async task control for delegated child runs and long-running shell work.
+- Added persisted task-ledger recovery so interrupted async tasks can be reconciled without leaving sessions in a broken state.
+- Added child-run lineage metadata on delegated session events (`parent_session_id`, `child_session_id`, `parent_tool_call_id`, `delegation_id`).
+- Hardened task and subagent failure handling for detached delegate runs, nil-context callers, and interrupted task controllers.
+
+### Shell & Interaction
+- Reworked `BASH` around `yield_time_ms`, `task_id`, and explicit `tty=true` PTY sessions for interactive command flows.
+- Removed legacy `sandbox_permissions` handling from `BASH` and aligned destructive-command routing with sandbox-first semantics unless explicitly escalated.
+
+### CLI, TUI & Prompt Assembly
+- Moved product prompt defaults out of `kernel/promptpipeline`, leaving kernel with a smaller prompt assembler and CLI-owned defaults.
+- Made LSP tools opt-in as an experimental CLI feature instead of a default capability.
+- Added anchored inline tool-output blocks in the TUI for `BASH` and `DELEGATE`, with filtered delegate previews that avoid leaking nested tool output into the main view.
+- Improved approval rendering and MCP web-tool guidance for read-only `search` / `fetch` style integrations.
+
 ## v0.0.14 - 2026-03-08
 
 ### CLI & TUI
@@ -63,6 +83,7 @@
 - UI mode abstraction (`ui.go`, `ui_mode.go`): `auto|tui|line` selection logic unified.
 - `/fork` slash command: fork current conversation into a new named session.
 - `/quit` alias for `/exit`.
+- Core `DELEGATE_TASK` tool: delegate a focused child run with isolated child session history.
 - `markdown_render.go`: standalone Markdown-to-ANSI renderer for line-editor mode.
 - Session index tests and coverage expansion.
 - Stream ordering guarantee tests (`console_stream_order_test.go`).

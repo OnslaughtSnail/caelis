@@ -120,7 +120,10 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, "bash", "-lc", req.Command)
+	cmd, err := buildAsyncSessionCommand(runCtx, req.Command, req.TTY)
+	if err != nil {
+		return CommandResult{}, err
+	}
 	applyNonInteractiveCommandDefaults(cmd)
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
@@ -137,35 +140,35 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 	}
 
 	// Use smart idle detection if enabled and idle timeout is long enough
-	var err error
+	var runErr error
 	if h.smartIdleConfig.Enabled && req.IdleTimeout > 0 && req.IdleTimeout >= h.smartIdleConfig.MinIdleDuration {
-		err = h.waitWithSmartIdleDetection(runCtx, cmd, req.IdleTimeout, &lastOutput, &stdout, &stderr)
+		runErr = h.waitWithSmartIdleDetection(runCtx, cmd, req.IdleTimeout, &lastOutput, &stdout, &stderr)
 	} else {
-		err = waitWithIdleTimeout(runCtx, cmd, req.IdleTimeout, &lastOutput)
+		runErr = waitWithIdleTimeout(runCtx, cmd, req.IdleTimeout, &lastOutput)
 	}
 
 	result := CommandResult{
 		Stdout: stdout.String(),
 		Stderr: stderr.String(),
 	}
-	if err == nil {
+	if runErr == nil {
 		return result, nil
 	}
-	result.ExitCode = resolveExitCode(err)
-	if errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+	result.ExitCode = resolveExitCode(runErr)
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) || errors.Is(runErr, context.DeadlineExceeded) {
 		label := "context deadline"
 		if req.Timeout > 0 {
 			label = req.Timeout.String()
 		}
 		return result, WrapCodedError(
 			ErrorCodeHostCommandTimeout,
-			err,
+			runErr,
 			"tool: command timed out after %s; %s",
 			label,
 			commandOutputSummary(result),
 		)
 	}
-	if errors.Is(err, errIdleTimeout) {
+	if errors.Is(runErr, errIdleTimeout) {
 		label := "idle limit"
 		if req.IdleTimeout > 0 {
 			label = req.IdleTimeout.String()
@@ -177,14 +180,14 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 			commandOutputSummary(result),
 		)
 	}
-	if errors.Is(err, errInteractivePrompt) {
+	if errors.Is(runErr, errInteractivePrompt) {
 		return result, NewCodedError(
 			ErrorCodeHostIdleTimeout,
 			"tool: command appears to be waiting for interactive input and was terminated; %s",
 			commandOutputSummary(result),
 		)
 	}
-	return result, fmt.Errorf("tool: command failed: %w; %s", err, commandOutputSummary(result))
+	return result, fmt.Errorf("tool: command failed: %w; %s", runErr, commandOutputSummary(result))
 }
 
 var errInteractivePrompt = errors.New("interactive prompt detected")
@@ -280,6 +283,7 @@ func (h *hostRunner) StartAsync(ctx context.Context, req CommandRequest) (string
 		OutputBufferCap: 256 * 1024, // 256KB for async sessions
 		Timeout:         req.Timeout,
 		IdleTimeout:     req.IdleTimeout,
+		TTY:             req.TTY,
 	})
 	if err != nil {
 		return "", err

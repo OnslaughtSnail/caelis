@@ -106,3 +106,11 @@ func TestSecurityBaseline_BashBypassesToolAuthorization(t *testing.T) {
 		t.Fatalf("expected BASH to bypass tool-level authorization, got %v", err)
 	}
 }
+
+func TestSecurityBaseline_TaskBypassesToolAuthorization(t *testing.T) {
+	hook := DefaultSecurityBaseline()
+	_, err := hook.BeforeTool(context.Background(), ToolInput{Call: model.ToolCall{Name: "TASK"}})
+	if err != nil {
+		t.Fatalf("expected TASK to bypass tool-level authorization, got %v", err)
+	}
+}

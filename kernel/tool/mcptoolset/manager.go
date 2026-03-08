@@ -448,7 +448,36 @@ func (t *mcpTool) Run(ctx context.Context, args map[string]any) (map[string]any,
 	if len(output) == 0 {
 		output["ok"] = true
 	}
+	output["metadata"] = map[string]any{
+		"mcp_server":   t.serverName,
+		"mcp_tool":     t.originalName,
+		"request_hint": summarizeMCPRequest(args),
+	}
 	return output, nil
+}
+
+func summarizeMCPRequest(args map[string]any) string {
+	for _, key := range []string{"url", "uri", "endpoint"} {
+		if value := strings.TrimSpace(asString(args[key])); value != "" {
+			return "url=" + value
+		}
+	}
+	for _, key := range []string{"query", "q"} {
+		if value := strings.TrimSpace(asString(args[key])); value != "" {
+			return "query=" + value
+		}
+	}
+	return ""
+}
+
+func asString(value any) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
 }
 
 func extractText(content []mcp.Content) string {
