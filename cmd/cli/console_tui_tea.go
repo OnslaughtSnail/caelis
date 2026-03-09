@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
 	"strconv"
@@ -181,6 +182,7 @@ func (c *cliConsole) loopTUITea() error {
 	c.ui = newUI(writer, true, c.verbose)
 	c.prompter = promptBroker
 	c.approver = newTerminalApprover(c.prompter, writer, c.ui)
+	c.approver.modeResolver = func() string { return c.sessionMode }
 	if c.tuiDiag != nil {
 		c.tuiDiag.SetRedrawMode("fullscreen")
 	}
@@ -199,7 +201,7 @@ func (c *cliConsole) loopTUITea() error {
 
 	model := tuiapp.NewModel(tuiapp.Config{
 		Version:         strings.TrimSpace(c.version),
-		Workspace:       c.workspace.CWD,
+		Workspace:       c.workspaceLine,
 		ModelAlias:      c.modelAlias,
 		ShowWelcomeCard: true,
 		Commands:        commandNames(c.commands),
@@ -217,6 +219,12 @@ func (c *cliConsole) loopTUITea() error {
 		},
 		CancelRunning: func() bool {
 			return c.cancelActiveRun()
+		},
+		ToggleMode: func() (string, error) {
+			return c.togglePlanMode()
+		},
+		ModeLabel: func() string {
+			return c.sessionModeLabel()
 		},
 		RefreshStatus: func() (string, string) {
 			return c.readTUIStatus()
@@ -347,18 +355,87 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 	return modelLabel, contextStr
 }
 
+func workspaceStatusLine(cwd string) string {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" {
+		return ""
+	}
+	label := shortenHomeDir(cwd)
+	if branch, dirty := gitBranchStatus(cwd); branch != "" {
+		label += " [" + branch
+		if dirty {
+			label += "*"
+		}
+		label += "]"
+	}
+	return label
+}
+
+func shortenHomeDir(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	return strings.Replace(path, home, "~", 1)
+}
+
+func gitBranchStatus(cwd string) (string, bool) {
+	branchOut, err := exec.Command("git", "-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		return "", false
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" {
+		return "", false
+	}
+	dirty := exec.Command("git", "-C", cwd, "diff", "--quiet", "--ignore-submodules", "HEAD", "--").Run() != nil
+	return branch, dirty
+}
+
 func (c *cliConsole) statusReasoningLevelLabel() string {
 	if c == nil {
 		return ""
 	}
-	if normalizeReasoningSelection(c.thinkingMode) == "off" {
+	profile := c.currentReasoningProfile()
+	thinking := normalizeReasoningSelection(c.thinkingMode)
+	switch profile.Mode {
+	case reasoningModeEffort:
+		if thinking == "off" {
+			return "reasoning off"
+		}
+		level := normalizeReasoningLevel(c.reasoningEffort)
+		if level == "" || level == "none" {
+			if profile.DefaultEffort == "" {
+				return "reasoning on"
+			}
+			return profile.DefaultEffort
+		}
+		return level
+	case reasoningModeToggle:
+		if thinking == "off" {
+			return "reasoning off"
+		}
+		return "reasoning on"
+	default:
 		return ""
 	}
-	level := normalizeReasoningLevel(c.reasoningEffort)
-	if level == "" || level == "none" {
-		return ""
+}
+
+func (c *cliConsole) currentReasoningProfile() reasoningProfile {
+	if c == nil {
+		return reasoningProfile{Mode: reasoningModeNone}
 	}
-	return level
+	if c.modelFactory != nil {
+		if cfg, ok := c.modelFactory.ConfigForAlias(c.modelAlias); ok {
+			return reasoningProfileForConfig(cfg)
+		}
+	}
+	provider := resolveProviderName(c.modelFactory, c.modelAlias)
+	model := resolveModelName(c.modelFactory, c.modelAlias)
+	if provider == "" && model == "" {
+		return reasoningProfile{Mode: reasoningModeNone}
+	}
+	return reasoningProfileForModel(provider, model)
 }
 
 func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp.ResumeCandidate, error) {

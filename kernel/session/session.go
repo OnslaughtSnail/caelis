@@ -36,6 +36,12 @@ type Store interface {
 	ReplaceState(context.Context, *Session, map[string]any) error
 }
 
+// ExistenceStore optionally exposes session existence checks without creating
+// missing sessions as a side effect.
+type ExistenceStore interface {
+	SessionExists(context.Context, *Session) (bool, error)
+}
+
 // ContextWindowStore optionally provides a reduced event window optimized for
 // model context construction (typically latest compaction checkpoint and newer
 // events).

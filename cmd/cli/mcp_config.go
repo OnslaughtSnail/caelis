@@ -33,33 +33,44 @@ type mcpServerRecord struct {
 const defaultMCPConfigLocation = "~/.agents/mcp_servers.json"
 
 func loadMCPToolManager(path string) (*toolmcp.Manager, error) {
+	cfg, err := loadMCPToolConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(cfg.Servers) == 0 {
+		return nil, nil
+	}
+	return toolmcp.NewManager(cfg)
+}
+
+func loadMCPToolConfig(path string) (toolmcp.Config, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = defaultMCPConfigLocation
 	}
 	resolved, err := resolvePath(path)
 	if err != nil {
-		return nil, fmt.Errorf("mcp config: resolve path %q: %w", path, err)
+		return toolmcp.Config{}, fmt.Errorf("mcp config: resolve path %q: %w", path, err)
 	}
 	raw, err := os.ReadFile(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return toolmcp.Config{}, nil
 		}
-		return nil, fmt.Errorf("mcp config: read %q: %w", resolved, err)
+		return toolmcp.Config{}, fmt.Errorf("mcp config: read %q: %w", resolved, err)
 	}
 	var cfgFile mcpConfigFile
 	if err := json.Unmarshal(raw, &cfgFile); err != nil {
-		return nil, fmt.Errorf("mcp config: parse %q: %w", resolved, err)
+		return toolmcp.Config{}, fmt.Errorf("mcp config: parse %q: %w", resolved, err)
 	}
 	if len(cfgFile.MCPServers) == 0 {
 		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &probe); err == nil {
 			if _, ok := probe["servers"]; ok {
-				return nil, fmt.Errorf("mcp config: parse %q: legacy \"servers\" format is not supported, use \"mcpServers\"", resolved)
+				return toolmcp.Config{}, fmt.Errorf("mcp config: parse %q: legacy \"servers\" format is not supported, use \"mcpServers\"", resolved)
 			}
 		}
-		return nil, nil
+		return toolmcp.Config{}, nil
 	}
 	names := make([]string, 0, len(cfgFile.MCPServers))
 	for name := range cfgFile.MCPServers {
@@ -95,12 +106,12 @@ func loadMCPToolManager(path string) (*toolmcp.Manager, error) {
 			IncludeTools: append([]string(nil), server.IncludeTools...),
 		}
 		if item.Name == "" {
-			return nil, fmt.Errorf("mcp config: mcpServers has empty key name")
+			return toolmcp.Config{}, fmt.Errorf("mcp config: mcpServers has empty key name")
 		}
 		if item.WorkDir != "" {
 			workDir, err := resolvePath(item.WorkDir)
 			if err != nil {
-				return nil, fmt.Errorf("mcp config: resolve workdir for mcpServers.%s: %w", item.Name, err)
+				return toolmcp.Config{}, fmt.Errorf("mcp config: resolve workdir for mcpServers.%s: %w", item.Name, err)
 			}
 			item.WorkDir = workDir
 		}
@@ -109,7 +120,7 @@ func loadMCPToolManager(path string) (*toolmcp.Manager, error) {
 		}
 		cfg.Servers = append(cfg.Servers, item)
 	}
-	return toolmcp.NewManager(cfg)
+	return cfg, nil
 }
 
 func defaultMCPConfigPath() string {

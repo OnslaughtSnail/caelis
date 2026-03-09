@@ -17,12 +17,12 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
 
-const maxInputBarRows = 6
+const maxInputBarRows = 4
 const ctrlCExitWindow = 2 * time.Second
-const reservedHintRows = 2
 const runningHintRotateEveryTicks = 40
 const copyHintDuration = 1600 * time.Millisecond
 const toolOutputPreviewLines = 4
+const inputHorizontalInset = tuikit.InputInset
 
 var runningBreathFrames = []string{"·", "•", "●", "•"}
 
@@ -85,6 +85,8 @@ type Config struct {
 	Wizards             []WizardDef
 	ExecuteLine         func(string) tuievents.TaskResultMsg
 	CancelRunning       func() bool
+	ToggleMode          func() (string, error)
+	ModeLabel           func() string
 	RefreshStatus       func() (string, string)
 	MentionComplete     func(string, int) ([]string, error)
 	SkillComplete       func(string, int) ([]string, error)
@@ -153,6 +155,15 @@ type textSelectionPoint struct {
 	col  int
 }
 
+type fixedSelectionArea string
+
+const (
+	fixedSelectionNone   fixedSelectionArea = ""
+	fixedSelectionHint   fixedSelectionArea = "hint"
+	fixedSelectionHeader fixedSelectionArea = "header"
+	fixedSelectionFooter fixedSelectionArea = "footer"
+)
+
 type pendingPrompt struct {
 	execLine    string
 	displayLine string
@@ -215,6 +226,14 @@ type Model struct {
 	lastFinalAnswer    string
 	diffBlocks         []diffBlockState
 	toolOutputs        map[string]*toolOutputState
+	welcomeCardPending bool
+	runStartedAt       time.Time
+	lastRunDuration    time.Duration
+	hasLastRunDuration bool
+
+	// Transient log tracking — retry/warn lines replace in-place like status updates.
+	transientLogIdx  int  // index in historyLines of the current transient line (-1 = none)
+	transientIsRetry bool // true when the transient slot holds a retry line
 
 	// Fullscreen viewport — replaces tea.Println scrollback.
 	historyLines        []string // committed lines (pre-colorized)
@@ -233,6 +252,12 @@ type Model struct {
 	inputSelecting      bool
 	inputSelectionStart textSelectionPoint
 	inputSelectionEnd   textSelectionPoint
+
+	// Fixed status-row drag-selection (hint/header/footer).
+	fixedSelecting      bool
+	fixedSelectionArea  fixedSelectionArea
+	fixedSelectionStart textSelectionPoint
+	fixedSelectionEnd   textSelectionPoint
 
 	// Input area
 	textarea textarea.Model
@@ -385,14 +410,19 @@ func NewModel(cfg Config) *Model {
 		palette:             palette,
 		viewport:            vp,
 		historyIndex:        -1,
+		transientLogIdx:     -1,
 		selectionStart:      textSelectionPoint{line: -1, col: -1},
 		selectionEnd:        textSelectionPoint{line: -1, col: -1},
 		inputSelectionStart: textSelectionPoint{line: -1, col: -1},
 		inputSelectionEnd:   textSelectionPoint{line: -1, col: -1},
+		fixedSelectionArea:  fixedSelectionNone,
+		fixedSelectionStart: textSelectionPoint{line: -1, col: -1},
+		fixedSelectionEnd:   textSelectionPoint{line: -1, col: -1},
 		inputLatencyWindow:  make([]time.Duration, 0, 128),
 		diag: Diagnostics{
 			RedrawMode: "fullscreen",
 		},
+		welcomeCardPending: cfg.ShowWelcomeCard,
 	}
 
 	if cfg.RefreshStatus != nil {
@@ -409,9 +439,6 @@ func NewModel(cfg Config) *Model {
 // ---------------------------------------------------------------------------
 
 func (m *Model) Init() tea.Cmd {
-	if m.cfg.ShowWelcomeCard {
-		m.appendWelcomeCard()
-	}
 	// Append initial welcome lines to the history buffer.
 	for _, line := range m.cfg.InitialLogs {
 		if strings.TrimSpace(line) == "" {
@@ -486,6 +513,7 @@ func (m *Model) appendWelcomeCard() {
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.PanelBorder).
 		Foreground(m.theme.TextPrimary).
+		Width(maxInt(30, minInt(72, maxInt(30, m.viewport.Width-6)))).
 		Padding(0, 2).
 		Margin(1, 0, 1, 1).
 		Render(body)
@@ -512,13 +540,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = typed.Width
 		m.height = typed.Height
-		m.textarea.SetWidth(maxInt(20, m.width-4))
+		m.textarea.SetWidth(maxInt(20, m.width-16-(inputHorizontalInset*2)))
 		m.adjustTextareaHeight()
 		m.palette.SetSize(maxInt(30, m.width-12), maxInt(8, minInt(16, m.height-10)))
 
 		vpHeight, _ := m.computeLayout()
-		m.viewport.Width = m.width
+		m.viewport.Width = maxInt(1, m.width-tuikit.GutterNarrative)
 		m.viewport.Height = vpHeight
+		if m.welcomeCardPending {
+			m.appendWelcomeCard()
+			m.welcomeCardPending = false
+		}
 		m.rerenderDiffBlocks()
 		m.syncViewportContent()
 
@@ -591,6 +623,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushStream()
 		m.finalizeAssistantBlock()
 		m.finalizeReasoningBlock()
+		if !m.runStartedAt.IsZero() {
+			m.lastRunDuration = time.Since(m.runStartedAt)
+			m.hasLastRunDuration = true
+			m.runStartedAt = time.Time{}
+		}
 		m.running = false
 		m.runningHint = ""
 		m.stopRunningAnimation()

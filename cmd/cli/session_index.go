@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	_ "modernc.org/sqlite"
@@ -105,7 +106,21 @@ func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, s
 	}
 	lastUser := ""
 	if ev != nil && ev.Message.Role == model.RoleUser && !isCompactionEventForIndex(ev) {
-		lastUser = strings.TrimSpace(ev.Message.Text)
+		lastUser = sessionmode.VisibleText(strings.TrimSpace(ev.Message.Text))
+		if lastUser == "" && len(ev.Message.ContentParts) > 0 {
+			parts := make([]string, 0, len(ev.Message.ContentParts))
+			for _, part := range ev.Message.ContentParts {
+				if part.Type != model.ContentPartText {
+					continue
+				}
+				text := strings.TrimSpace(part.Text)
+				if text == "" {
+					continue
+				}
+				parts = append(parts, text)
+			}
+			lastUser = sessionmode.VisibleText(strings.Join(parts, "\n"))
+		}
 	}
 	ts := at.UnixMilli()
 	s.mu.Lock()

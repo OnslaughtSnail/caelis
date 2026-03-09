@@ -48,6 +48,8 @@ func DetectLineStyleWithContext(line string, prevStyle LineStyle) LineStyle {
 		return LineStyleError
 	case strings.HasPrefix(trimmed, "warn:"):
 		return LineStyleWarn
+	case strings.HasPrefix(trimmed, "! "):
+		return LineStyleWarn
 	case strings.HasPrefix(trimmed, "note:"):
 		return LineStyleNote
 	case strings.HasPrefix(trimmed, "* "):
@@ -146,7 +148,10 @@ func ColorizeLogLine(line string, style LineStyle, theme Theme) string {
 	case LineStyleTool:
 		return colorizeToolLine(line, theme)
 	case LineStyleWarn:
-		return theme.WarnStyle().Render(line)
+		if strings.HasPrefix(strings.TrimSpace(line), "! ") {
+			return colorizeWarnLineWithBang(line, theme)
+		}
+		return colorizeWarnLine(line, theme)
 	case LineStyleError:
 		return theme.ErrorStyle().Render(line)
 	case LineStyleNote:
@@ -186,6 +191,14 @@ func colorizeUserLine(line string, theme Theme) string {
 	}
 	styledBody := styleUserMentions(content, theme)
 	return theme.UserPrefixStyle().Render("> ") + styledBody
+}
+
+func colorizeWarnLine(line string, theme Theme) string {
+	content := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "warn:"))
+	if content == "" {
+		return theme.WarnStyle().Render("! ")
+	}
+	return theme.WarnStyle().Render("! ") + theme.TextStyle().Render(content)
 }
 
 func styleUserMentions(text string, theme Theme) string {
@@ -298,4 +311,35 @@ func countLeadingSpaces(s string) int {
 		}
 	}
 	return n
+}
+
+// IsRetryLine returns true if the line looks like a retry/error log message
+// (e.g., "! llm request failed, retrying in 2s (1/5): ...").
+func IsRetryLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "! ") && !strings.HasPrefix(trimmed, "warn:") {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	return strings.Contains(lower, "retry") || strings.Contains(lower, "retrying")
+}
+
+// IsLogLine returns true if the line is a system/tool log rather than
+// narrative content (assistant/user/reasoning).
+func IsLogLine(style LineStyle) bool {
+	switch style {
+	case LineStyleTool, LineStyleWarn, LineStyleError, LineStyleNote:
+		return true
+	default:
+		return false
+	}
+}
+
+// colorizeWarnLineWithBang handles lines that already start with "! ".
+func colorizeWarnLineWithBang(line string, theme Theme) string {
+	content := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "!"))
+	if content == "" {
+		return theme.WarnStyle().Render("! ")
+	}
+	return theme.WarnStyle().Render("! ") + theme.TextStyle().Render(content)
 }

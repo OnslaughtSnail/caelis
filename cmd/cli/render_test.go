@@ -155,7 +155,7 @@ func TestPrintEvent_SystemWarningRenders(t *testing.T) {
 	}, state)
 
 	got := ansi.Strip(out.String())
-	if !strings.Contains(got, "warn: llm request failed, retrying in 2s (1/5)") {
+	if !strings.Contains(got, "! llm request failed, retrying in 2s (1/5)") {
 		t.Fatalf("expected warning output, got %q", got)
 	}
 }

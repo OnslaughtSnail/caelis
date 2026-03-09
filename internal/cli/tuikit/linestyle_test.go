@@ -18,6 +18,7 @@ func TestDetectLineStyle(t *testing.T) {
 		{"? Approval: run", LineStyleTool},
 		{"error: something broke", LineStyleError},
 		{"warn: be careful", LineStyleWarn},
+		{"! llm request failed, retrying in 2s", LineStyleWarn},
 		{"note: fyi", LineStyleNote},
 		{"  +added line", LineStyleDiffAdd},
 		{"  -removed line", LineStyleDiffRemove},
@@ -138,6 +139,17 @@ func TestColorizeDiffLines(t *testing.T) {
 	}
 }
 
+func TestColorizeWarnLine_UsesSymbolPrefix(t *testing.T) {
+	theme := DefaultTheme()
+	result := ColorizeLogLine("warn: be careful", LineStyleWarn, theme)
+	if !strings.Contains(result, "! ") {
+		t.Fatalf("expected symbol prefix in warn line, got %q", result)
+	}
+	if !strings.Contains(result, "be careful") {
+		t.Fatalf("expected warn message preserved, got %q", result)
+	}
+}
+
 func TestCountLeadingSpaces(t *testing.T) {
 	if countLeadingSpaces("  hello") != 2 {
 		t.Error("expected 2")
@@ -228,5 +240,92 @@ func TestIsBlockContinuable(t *testing.T) {
 	}
 	if isBlockContinuable(LineStyleDefault) {
 		t.Error("default should NOT be continuable")
+	}
+}
+
+func TestIsRetryLine(t *testing.T) {
+	if !IsRetryLine("! llm request failed, retrying in 2s (1/5): model: http status 400") {
+		t.Error("expected retry detection for bang-prefix retry line")
+	}
+	if !IsRetryLine("warn: retrying request after failure") {
+		t.Error("expected retry detection for warn-prefix retry line")
+	}
+	if IsRetryLine("! some other warning message") {
+		t.Error("non-retry bang line should not be detected as retry")
+	}
+	if IsRetryLine("* assistant text about retrying") {
+		t.Error("assistant text should not match retry detection")
+	}
+	if IsRetryLine("normal text") {
+		t.Error("normal text should not match retry detection")
+	}
+}
+
+func TestIsLogLine(t *testing.T) {
+	if !IsLogLine(LineStyleTool) {
+		t.Error("tool should be a log line")
+	}
+	if !IsLogLine(LineStyleWarn) {
+		t.Error("warn should be a log line")
+	}
+	if !IsLogLine(LineStyleError) {
+		t.Error("error should be a log line")
+	}
+	if !IsLogLine(LineStyleNote) {
+		t.Error("note should be a log line")
+	}
+	if IsLogLine(LineStyleAssistant) {
+		t.Error("assistant should not be a log line")
+	}
+	if IsLogLine(LineStyleUser) {
+		t.Error("user should not be a log line")
+	}
+	if IsLogLine(LineStyleDefault) {
+		t.Error("default should not be a log line")
+	}
+}
+
+func TestColorizeBangPrefixLine(t *testing.T) {
+	theme := DefaultTheme()
+	result := ColorizeLogLine("! some warning with bang", LineStyleWarn, theme)
+	if !strings.Contains(result, "! ") {
+		t.Fatalf("expected bang prefix in output, got %q", result)
+	}
+	if !strings.Contains(result, "some warning with bang") {
+		t.Fatalf("expected message preserved, got %q", result)
+	}
+}
+
+func TestLineExtraGutter(t *testing.T) {
+	tests := []struct {
+		style LineStyle
+		want  int
+	}{
+		{LineStyleAssistant, 0},
+		{LineStyleReasoning, 0},
+		{LineStyleDefault, 0},
+		{LineStyleUser, GutterUser - GutterNarrative},
+		{LineStyleTool, GutterLog - GutterNarrative},
+		{LineStyleWarn, GutterLog - GutterNarrative},
+		{LineStyleError, GutterLog - GutterNarrative},
+		{LineStyleNote, GutterLog - GutterNarrative},
+	}
+	for _, tt := range tests {
+		got := LineExtraGutter(tt.style)
+		if len(got) != tt.want {
+			t.Errorf("LineExtraGutter(%v) = %d spaces, want %d", tt.style, len(got), tt.want)
+		}
+	}
+}
+
+func TestSpacingTokenValues(t *testing.T) {
+	if SpaceTight != 0 {
+		t.Errorf("SpaceTight = %d, want 0", SpaceTight)
+	}
+	if SpaceNormal != 1 {
+		t.Errorf("SpaceNormal = %d, want 1", SpaceNormal)
+	}
+	if SpaceBlock != 2 {
+		t.Errorf("SpaceBlock = %d, want 2", SpaceBlock)
 	}
 }

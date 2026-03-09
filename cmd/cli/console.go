@@ -28,6 +28,7 @@ import (
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 )
 
 type cliConsole struct {
@@ -39,8 +40,10 @@ type cliConsole struct {
 	sessionID     string
 	contextWindow int
 	workspace     workspaceContext
+	workspaceLine string
 
 	resolved          *bootstrap.ResolvedSpec
+	sessionStore      session.Store
 	execRuntime       toolexec.Runtime
 	sandboxType       string
 	sandboxHelperPath string
@@ -67,6 +70,7 @@ type cliConsole struct {
 	inputRefs             *inputReferenceResolver
 	tuiDiag               *tuiDiagnostics
 	lastPromptTokens      int // cached context usage estimate for TUI status
+	sessionMode           string
 
 	editor   lineEditor
 	prompter promptReader
@@ -128,7 +132,9 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		sessionID:             cfg.SessionID,
 		contextWindow:         cfg.ContextWindow,
 		workspace:             cfg.Workspace,
+		workspaceLine:         strings.TrimSpace(cfg.WorkspaceLine),
 		resolved:              cfg.Resolved,
+		sessionStore:          cfg.SessionStore,
 		execRuntime:           cfg.ExecRuntime,
 		sandboxType:           strings.TrimSpace(cfg.SandboxType),
 		sandboxHelperPath:     strings.TrimSpace(cfg.SandboxHelperPath),
@@ -161,6 +167,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		ui:                    baseUI,
 	}
 	console.approver = newTerminalApprover(console.prompter, out, baseUI)
+	console.approver.modeResolver = func() string { return console.sessionMode }
 	console.commands = map[string]slashCommand{
 		"help":    {Usage: "/help", Description: "Show available commands", Handle: handleHelp},
 		"version": {Usage: "/version", Description: "Show version", Handle: handleVersion},
@@ -187,6 +194,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
 	}
 	console.applyModelRuntimeSettings(console.modelAlias)
+	console.syncSessionModeFromStore()
 	return console
 }
 
@@ -198,7 +206,9 @@ type cliConsoleConfig struct {
 	SessionID             string
 	ContextWindow         int
 	Workspace             workspaceContext
+	WorkspaceLine         string
 	Resolved              *bootstrap.ResolvedSpec
+	SessionStore          session.Store
 	ExecRuntime           toolexec.Runtime
 	SandboxType           string
 	SandboxHelperPath     string
@@ -375,6 +385,7 @@ func (c *cliConsole) runPrompt(input string) error {
 			}
 		}
 	}
+	resolvedInput = c.injectedPrompt(resolvedInput)
 	// Load image content parts from resolved file references.
 	var contentParts []model.ContentPart
 	if c.inputRefs != nil && len(resolvedPaths) > 0 {
@@ -801,6 +812,9 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 	c.sessionID = nextConversationSessionID()
 	c.lastPromptTokens = 0
 	_ = c.clearPendingAttachments()
+	if err := c.persistSessionMode(); err != nil {
+		return false, err
+	}
 	if c.tuiSender != nil {
 		c.tuiSender.Send(tuievents.ClearHistoryMsg{})
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
@@ -823,6 +837,9 @@ func handleFork(c *cliConsole, args []string) (bool, error) {
 	}
 	c.sessionID = nextConversationSessionID()
 	_ = c.clearPendingAttachments()
+	if err := c.persistSessionMode(); err != nil {
+		return false, err
+	}
 	if c.tuiSender != nil {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "fork succeeded", ClearAfter: transientHintDuration})
@@ -893,6 +910,7 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 	c.ui.Section("Session")
 	c.ui.KeyValue("workspace", c.workspace.CWD)
 	c.ui.KeyValue("session", idutil.ShortDisplay(c.sessionID))
+	c.ui.KeyValue("mode", sessionmode.Normalize(c.sessionMode))
 
 	c.ui.Section("Security")
 	mode := c.execRuntime.PermissionMode()
@@ -1194,6 +1212,7 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 	}); err != nil {
 		return false, err
 	}
+	c.sessionMode = c.loadSessionMode()
 	if err := c.renderResumedSessionEvents(); err != nil {
 		return false, err
 	}
@@ -1231,10 +1250,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 		}
 		msg := ev.Message
 		if msg.Role == model.RoleUser {
-			userText := strings.TrimSpace(msg.Text)
-			if userText == "" {
-				userText = userTextFromContentParts(msg.ContentParts)
-			}
+			userText := visibleUserText(msg)
 			if userText != "" {
 				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("> %s\n", userText)})
 			}
@@ -1325,6 +1341,7 @@ type terminalApprover struct {
 	prompter       promptReader
 	out            io.Writer
 	ui             *ui
+	modeResolver   func() string
 	mu             sync.RWMutex
 	promptMu       sync.Mutex
 	sessionAllowed map[string]struct{}
@@ -1343,6 +1360,12 @@ func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalA
 
 func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalRequest) (bool, error) {
 	_ = ctx
+	if sessionmode.IsFullAccess(a.currentMode()) {
+		if sessionmode.IsDangerousCommand(req.Command) {
+			return false, &toolexec.ApprovalAbortedError{Reason: "dangerous command blocked in full_access mode"}
+		}
+		return true, nil
+	}
 	key := sessionApprovalKey(req.Command)
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
@@ -1385,6 +1408,9 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 
 func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
 	_ = ctx
+	if sessionmode.IsFullAccess(a.currentMode()) {
+		return true, nil
+	}
 	scopeKey := toolAuthorizationScopeKey(req)
 	if scopeKey == "" {
 		return true, nil
@@ -1442,6 +1468,13 @@ func (a *terminalApprover) isAuthorizationAllowedInSession(scopeKey string) bool
 	defer a.mu.RUnlock()
 	_, ok := a.authAllowed[scopeKey]
 	return ok
+}
+
+func (a *terminalApprover) currentMode() string {
+	if a == nil || a.modeResolver == nil {
+		return sessionmode.DefaultMode
+	}
+	return sessionmode.Normalize(a.modeResolver())
 }
 
 func sessionApprovalKey(command string) string {

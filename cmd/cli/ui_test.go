@@ -85,7 +85,7 @@ func TestUI_Warn(t *testing.T) {
 	u := testUI(&buf)
 	u.Warn("sandbox unavailable\n")
 	got := buf.String()
-	if !strings.HasPrefix(got, "warn: sandbox unavailable") {
+	if !strings.HasPrefix(got, "! sandbox unavailable") {
 		t.Fatalf("unexpected Warn output: %q", got)
 	}
 }

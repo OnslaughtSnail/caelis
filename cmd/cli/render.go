@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -169,19 +170,22 @@ func printEvent(ev *session.Event, state *renderState) {
 				fmt.Fprintf(out, "%s%s\n", state.ui.SystemPrefix(), text)
 			}
 		} else {
-			fmt.Fprintln(out, text)
+			switch {
+			case strings.HasPrefix(text, "warn:"):
+				fmt.Fprintf(out, "! %s\n", strings.TrimSpace(strings.TrimPrefix(text, "warn:")))
+			default:
+				fmt.Fprintln(out, text)
+			}
 		}
 		return
 	}
 	if msg.Role == model.RoleUser {
 		if state != nil && state.replayUserMessages {
-			userText := strings.TrimSpace(msg.Text)
+			userText := visibleUserText(msg)
 			if userText == "" {
-				userText = userTextFromContentParts(msg.ContentParts)
+				return
 			}
-			if userText != "" {
-				fmt.Fprintf(state.out, "> %s\n", userText)
-			}
+			fmt.Fprintf(state.out, "> %s\n", userText)
 		}
 		// Show image attachment indicators for user messages.
 		if msg.HasImages() {
@@ -310,6 +314,14 @@ func userTextFromContentParts(parts []model.ContentPart) string {
 		texts = append(texts, text)
 	}
 	return strings.TrimSpace(strings.Join(texts, "\n"))
+}
+
+func visibleUserText(msg model.Message) string {
+	text := sessionmode.VisibleText(strings.TrimSpace(msg.Text))
+	if text != "" {
+		return text
+	}
+	return sessionmode.VisibleText(userTextFromContentParts(msg.ContentParts))
 }
 
 func summarizeToolArgs(toolName string, args map[string]any) string {

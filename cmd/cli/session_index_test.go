@@ -149,6 +149,39 @@ func TestSessionIndex_TouchEvent_CompactionDoesNotOverrideLastUserMessage(t *tes
 	}
 }
 
+func TestSessionIndex_TouchEvent_StripsHiddenSessionModePrefix(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-hidden"}
+	if err := idx.TouchEvent(workspace, "app", "u", "s-hidden", &session.Event{
+		Message: model.Message{
+			Role: model.RoleUser,
+			Text: `<caelis-session-mode mode="plan" hidden="true">
+This turn is running in PLAN mode.
+</caelis-session-mode>
+
+show the pending files`,
+		},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok, err := idx.MostRecentWorkspaceSession(workspace.Key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected indexed session")
+	}
+	if rec.LastUserMessage != "show the pending files" {
+		t.Fatalf("expected stripped user message, got %q", rec.LastUserMessage)
+	}
+}
+
 func TestHandleResume_WithSessionID_NonTUIStaysSilent(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {

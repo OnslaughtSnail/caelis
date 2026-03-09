@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
 
 func TestMentionQueryAtCursor(t *testing.T) {
@@ -665,6 +666,33 @@ func TestSetStatusMsgCanClearContext(t *testing.T) {
 	}
 }
 
+func TestShiftTabTogglesModeAndRefreshesStatus(t *testing.T) {
+	toggled := false
+	m := NewModel(Config{
+		ToggleMode: func() (string, error) {
+			toggled = true
+			return "plan mode enabled", nil
+		},
+		RefreshStatus: func() (string, string) {
+			return "model {plan}", "42/128k"
+		},
+	})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	next := updated.(*Model)
+	if !toggled {
+		t.Fatal("expected toggle callback")
+	}
+	if next.hint != "plan mode enabled" {
+		t.Fatalf("expected mode hint, got %q", next.hint)
+	}
+	if next.statusModel != "model {plan}" || next.statusContext != "42/128k" {
+		t.Fatalf("unexpected refreshed status %q %q", next.statusModel, next.statusContext)
+	}
+	if cmd == nil {
+		t.Fatal("expected hint clear command")
+	}
+}
+
 func TestObserveRenderStats(t *testing.T) {
 	m := NewModel(Config{})
 	m.observeRender(5*time.Millisecond, 100, "incremental")
@@ -898,8 +926,8 @@ func TestMouseDragCopiesSelection(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	resizeModel(m)
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "hello world\n"})
-	_, _ = m.Update(tea.MouseMsg{X: 0, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	_, cmd := m.Update(tea.MouseMsg{X: 5, Y: 0, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	_, _ = m.Update(tea.MouseMsg{X: tuikit.GutterNarrative, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	_, cmd := m.Update(tea.MouseMsg{X: tuikit.GutterNarrative + 5, Y: 0, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
 	if cmd == nil {
 		t.Fatal("expected clipboard command on mouse selection")
 	}
@@ -930,6 +958,32 @@ func TestInputMouseDragCopiesSelection(t *testing.T) {
 	start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines()))
 	if !ok || (start.line == end.line && start.col == end.col) {
 		t.Fatal("expected input selection to remain after mouse release")
+	}
+}
+
+func TestHeaderMouseDragCopiesSelection(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		Workspace:   "~/WorkDir/xueyongzhi/caelis [main]",
+		RefreshStatus: func() (string, string) {
+			return "claude-opus-4.6 [reasoning on]", "0/200.0k(0%)"
+		},
+	})
+	resizeModel(m)
+	layout := m.fixedRowLayout()
+	_, _ = m.Update(tea.MouseMsg{X: tuikit.StatusInset, Y: layout.headerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	_, cmd := m.Update(tea.MouseMsg{X: tuikit.StatusInset + 19, Y: layout.headerY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	if cmd == nil {
+		t.Fatal("expected clipboard command on header selection")
+	}
+	if !strings.Contains(m.hint, "copied") {
+		t.Fatalf("expected copy hint, got %q", m.hint)
+	}
+	if m.fixedSelectionArea != fixedSelectionHeader {
+		t.Fatalf("expected fixed header selection, got %q", m.fixedSelectionArea)
+	}
+	if got := m.fixedSelectionText(); strings.TrimSpace(got) == "" {
+		t.Fatal("expected copied header text")
 	}
 }
 
@@ -1285,7 +1339,7 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if !strings.Contains(view, "proceed") || !strings.Contains(view, "session") || !strings.Contains(view, "cancel") {
 		t.Fatalf("expected approval list options in modal, got %q", view)
 	}
-	if !strings.Contains(view, "Press Enter to confirm or Esc to") {
+	if !strings.Contains(view, "Press Enter to confirm") || !strings.Contains(view, "Esc") {
 		t.Fatalf("expected approval footer hint in view, got %q", view)
 	}
 
@@ -1870,42 +1924,56 @@ func TestAttachmentLabelHiddenInInputBar(t *testing.T) {
 	if !strings.Contains(line, ">") {
 		t.Fatalf("expected prompt, got %q", line)
 	}
+	if !strings.HasPrefix(line, strings.Repeat(" ", inputHorizontalInset)+">") {
+		t.Fatalf("expected inset input prompt, got %q", line)
+	}
 	if strings.Contains(line, "[1 image]") || strings.Contains(line, "[1 images]") {
 		t.Fatalf("expected attachment label hidden, got %q", line)
 	}
 }
 
-func TestHintAreaReservedHeightWithoutHintJitter(t *testing.T) {
+func TestFooterLeftShowsModeOnly(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	m.hint = ""
-	withoutHint := m.bottomSectionHeight()
-	withoutHintLine := m.renderHintArea()
+	m.cfg.ModeLabel = func() string { return "plan" }
+	if got := m.footerLeftText(); got != "plan  shift+tab switch mode" {
+		t.Fatalf("unexpected mode footer text %q", got)
+	}
+}
 
+func TestHintRowUsesHintInsteadOfFooter(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.cfg.ModeLabel = func() string { return "plan" }
 	m.hint = "temporary hint"
-	withHint := m.bottomSectionHeight()
-	withHintLine := m.renderHintArea()
+	if got := strings.TrimSpace(m.hintRowText()); got != "temporary hint" {
+		t.Fatalf("expected dedicated hint row text, got %q", got)
+	}
+	if got := m.footerLeftText(); got != "plan  shift+tab switch mode" {
+		t.Fatalf("expected footer mode text preserved, got %q", got)
+	}
+}
 
-	if withoutHint != withHint {
-		t.Fatalf("expected stable bottom height with/without hint, got %d vs %d", withoutHint, withHint)
+func TestFixedRowLayoutPlacesHintAboveHeader(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		Workspace:   "~/WorkDir/xueyongzhi/demo",
+		RefreshStatus: func() (string, string) {
+			return "openai-compatible/glm-5 [reasoning on]", "0/200.0k(0%)"
+		},
+	})
+	resizeModel(m)
+	layout := m.fixedRowLayout()
+	if layout.hintY >= layout.headerY {
+		t.Fatalf("expected hint row above header row, got hint=%d header=%d", layout.hintY, layout.headerY)
 	}
-	if strings.Count(withoutHintLine, "\n") != reservedHintRows-1 {
-		t.Fatalf("expected reserved hint area to keep %d rows when empty, got %q", reservedHintRows, withoutHintLine)
+	inputY, _, ok := m.inputAreaBounds()
+	if !ok {
+		t.Fatal("expected input area bounds")
 	}
-	if strings.Count(withHintLine, "\n") != reservedHintRows-1 {
-		t.Fatalf("expected reserved hint area to keep %d rows when populated, got %q", reservedHintRows, withHintLine)
-	}
-	withoutHintLines := strings.Split(withoutHintLine, "\n")
-	withHintLines := strings.Split(withHintLine, "\n")
-	if len(withoutHintLines) != reservedHintRows || len(withHintLines) != reservedHintRows {
-		t.Fatalf("expected %d hint rows, got empty=%d populated=%d", reservedHintRows, len(withoutHintLines), len(withHintLines))
-	}
-	if strings.TrimSpace(withoutHintLines[0]) != "" || strings.TrimSpace(withHintLines[0]) != "" {
-		t.Fatalf("expected top hint row reserved as spacing, got empty=%q populated=%q", withoutHintLines[0], withHintLines[0])
-	}
-	if strings.TrimSpace(withHintLines[1]) == "" {
-		t.Fatalf("expected populated hint text on second row, got %q", withHintLine)
+	if inputY <= layout.headerY {
+		t.Fatalf("expected input below header row, got input=%d header=%d", inputY, layout.headerY)
 	}
 }
 
@@ -2216,10 +2284,13 @@ func TestToolCallSpacing_GapBetweenCalls_NoGapBeforeResult(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ PATCH build.sh\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ PATCH edited build.sh\n"})
 	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
-	if !strings.Contains(joined, "▸ READ build.sh\n\n▸ PATCH build.sh") {
-		t.Fatalf("expected blank line between consecutive tool calls, got %q", joined)
+	if strings.Contains(joined, "\n·\n") {
+		t.Fatalf("did not expect synthetic dot spacer between tool calls, got %q", joined)
 	}
-	if strings.Contains(joined, "▸ PATCH build.sh\n\n✓ PATCH edited build.sh") {
+	if !strings.Contains(joined, "▸ READ build.sh\n") || !strings.Contains(joined, "▸ PATCH build.sh") {
+		t.Fatalf("expected both tool calls preserved, got %q", joined)
+	}
+	if strings.Contains(joined, "PATCH build.sh\n\n✓ PATCH edited") {
 		t.Fatalf("did not expect blank line between PATCH call and result, got %q", joined)
 	}
 }
@@ -2330,16 +2401,207 @@ func TestArrowKeysUseInputHistoryEvenWhenViewportHasScrollableContent(t *testing
 	}
 }
 
-func TestHelpHintsNoCopyMode(t *testing.T) {
+func TestMultilineInputUsesTextareaVerticalNavigationBeforeHistory(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	hints := m.buildHelpHints()
-	if !strings.Contains(hints, "pgup/pgdn: scroll") {
-		t.Fatalf("expected scroll hints in help text, got %q", hints)
+	typeAndEnter(m, "first")
+	m.textarea.SetValue("line1\nline2\nline3")
+	m.textarea.CursorEnd()
+	m.adjustTextareaHeight()
+	m.syncInputFromTextarea()
+
+	if got := m.textarea.Line(); got != 2 {
+		t.Fatalf("expected cursor on last input line, got %d", got)
 	}
-	if strings.Contains(hints, "copy mode") {
-		t.Fatalf("did not expect copy mode hints, got %q", hints)
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.textarea.Value(); got != "line1\nline2\nline3" {
+		t.Fatalf("expected textarea content preserved on internal up nav, got %q", got)
+	}
+	if got := m.textarea.Line(); got != 1 {
+		t.Fatalf("expected cursor to move within textarea, got line %d", got)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.textarea.Line(); got != 0 {
+		t.Fatalf("expected cursor to reach first textarea line, got %d", got)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.textarea.Value(); got != "first" {
+		t.Fatalf("expected history recall only after leaving first textarea line, got %q", got)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := m.textarea.Value(); got != "line1\nline2\nline3" {
+		t.Fatalf("expected draft restored from history, got %q", got)
+	}
+	if got := m.textarea.Line(); got != 2 {
+		t.Fatalf("expected restored draft cursor at last line, got %d", got)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if got := m.textarea.Line(); got != 1 {
+		t.Fatalf("expected cursor to move within restored multiline draft, got %d", got)
+	}
+}
+
+func TestViewShowsModeFooterWhenConfigured(t *testing.T) {
+	m := NewModel(Config{
+		Workspace: "/tmp/work",
+		ModeLabel: func() string { return "full_access" },
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "full_access  shift+tab switch mode") {
+		t.Fatalf("expected mode footer in view, got:\n%s", view)
+	}
+}
+
+func TestTransientRetryReplacement(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	// Emit 5 consecutive retry lines — only the last should remain.
+	for i := 1; i <= 5; i++ {
+		line := fmt.Sprintf("! llm request failed, retrying in %ds (%d/5): error\n", i, i)
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: line})
+	}
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	// Only the latest retry should be visible.
+	if !strings.Contains(joined, "5/5") {
+		t.Fatalf("expected latest retry visible, got %q", joined)
+	}
+	// Earlier retries must be gone.
+	if strings.Contains(joined, "1/5") {
+		t.Fatalf("expected earlier retries replaced, got %q", joined)
+	}
+	if strings.Contains(joined, "3/5") {
+		t.Fatalf("expected middle retries replaced, got %q", joined)
+	}
+	// Should occupy exactly 1 history line (the single transient slot).
+	count := 0
+	for _, l := range m.historyLines {
+		if strings.Contains(ansi.Strip(l), "retrying") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 retry line in history, got %d", count)
+	}
+}
+
+func TestTransientWarnReplacement(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! first warning\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! second warning\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! third warning\n"})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "third warning") {
+		t.Fatalf("expected latest warn visible, got %q", joined)
+	}
+	if strings.Contains(joined, "first warning") {
+		t.Fatalf("expected earlier warns replaced, got %q", joined)
+	}
+}
+
+func TestLogChunkKeepsAssistantAndToolBlocksContiguous(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* drafted a plan\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ SKILL.md\n"})
+
+	if len(m.historyLines) < 2 {
+		t.Fatalf("expected assistant and tool lines; got %d lines", len(m.historyLines))
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[0])); got != "* drafted a plan" {
+		t.Fatalf("unexpected first line %q", got)
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[1])); got != "▸ READ SKILL.md" {
+		t.Fatalf("unexpected tool line %q", got)
+	}
+}
+
+func TestSubmitLineAddsDividerBeforeUserMessage(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* assistant reply\n"})
+	m.hasLastRunDuration = true
+	m.lastRunDuration = 1250 * time.Millisecond
+	_, _ = m.submitLineWithDisplay("continue", "continue")
+
+	if len(m.historyLines) < 3 {
+		t.Fatalf("expected assistant, divider, user; got %d lines", len(m.historyLines))
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-2])); !strings.Contains(got, "1.2s") || !strings.Contains(got, "─") {
+		t.Fatalf("expected duration divider before user message, got %q", got)
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])); got != "> continue" {
+		t.Fatalf("unexpected user line %q", got)
+	}
+}
+
+func TestErrorAlwaysAppended(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "error: first failure\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "error: second failure\n"})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "first failure") {
+		t.Fatalf("expected first error preserved, got %q", joined)
+	}
+	if !strings.Contains(joined, "second failure") {
+		t.Fatalf("expected second error preserved, got %q", joined)
+	}
+}
+
+func TestRetryThenNonRetryBreaksTransient(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! retrying request (1/3)\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! retrying request (2/3)\n"})
+	// Non-retry line breaks the transient chain.
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ file.txt\n"})
+	// New retry starts a fresh transient slot.
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! retrying request (3/3)\n"})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	// The second retry (2/3) should be visible (was the last before break).
+	if !strings.Contains(joined, "2/3") {
+		t.Fatalf("expected last retry before break visible, got %q", joined)
+	}
+	// The tool line and the new retry (3/3) should both be present.
+	if !strings.Contains(joined, "READ file.txt") {
+		t.Fatalf("expected tool line preserved, got %q", joined)
+	}
+	if !strings.Contains(joined, "3/3") {
+		t.Fatalf("expected new retry after break visible, got %q", joined)
+	}
+}
+
+func TestLogBlockGapBetweenNarrativeAndTool(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "hello world", Final: true})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ file.txt\n"})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if strings.Contains(joined, "\n·\n") {
+		t.Fatalf("did not expect synthetic dot spacer between assistant and tool, got %q", joined)
+	}
+	if !strings.Contains(joined, "* hello world\n") || !strings.Contains(joined, "▸ READ file.txt") {
+		t.Fatalf("expected assistant and tool lines preserved, got %q", joined)
 	}
 }
 

@@ -27,57 +27,83 @@ func (m *Model) View() string {
 
 	var sections []string
 
-	// 1. Viewport (scrollable history + streaming + spinner).
-	sections = append(sections, m.viewport.View())
+	// 1. Viewport (scrollable history + streaming + spinner) with left gutter.
+	vpView := m.viewport.View()
+	if tuikit.GutterNarrative > 0 {
+		vpView = indentBlock(vpView, tuikit.GutterNarrative)
+	}
+	sections = append(sections, vpView)
+	sections = append(sections, "")
 
-	// 2. Dedicated hint area above input (always reserved to avoid layout jitter).
-	sections = append(sections, m.renderHintArea())
+	// 2. Hint row (contextual guidance).
+	sections = append(sections, m.renderHintRow())
+	sections = append(sections, "")
 
-	// 3. Separator between viewport area and input controls.
+	// 3. Workspace + model status.
+	sections = append(sections, m.renderStatusHeader())
+
+	// 4. Separator above the composer input.
 	if m.width > 0 {
 		sep := m.theme.SeparatorStyle().Render(strings.Repeat("─", m.width))
 		sections = append(sections, sep)
 	}
 
-	// 4. Prompt choices (if any).
+	// 5. Composer top padding before input.
+	for i := 0; i < tuikit.ComposerPadTop; i++ {
+		sections = append(sections, "")
+	}
+
+	// 6. Prompt choices (if any).
 	if m.activePrompt != nil {
 		if promptView := m.renderPromptModal(); promptView != "" {
 			sections = append(sections, promptView)
 		}
 	}
 
-	// 5. Input bar.
+	// 7. Input bar.
 	sections = append(sections, m.renderInputBar())
 
-	// 5b. @mention candidates inline list (below input, above status).
+	// 8. @mention candidates inline list (below input, above status).
 	if len(m.mentionCandidates) > 0 {
 		sections = append(sections, m.renderMentionList())
 	}
 
-	// 5c. $skill candidates inline list (below input, above status).
+	// 9. $skill candidates inline list.
 	if len(m.skillCandidates) > 0 {
 		sections = append(sections, m.renderSkillList())
 	}
 
-	// 5d. /resume candidates inline list (below input, above status).
+	// 10. /resume candidates inline list.
 	if len(m.resumeCandidates) > 0 {
 		sections = append(sections, m.renderResumeList())
 	}
 
-	// 5e. Generic slash argument candidates inline list.
+	// 11. Generic slash argument candidates inline list.
 	if len(m.slashArgCandidates) > 0 {
 		sections = append(sections, m.renderSlashArgList())
 	}
 
-	// 5f. Slash command candidates inline list.
+	// 12. Slash command candidates inline list.
 	if len(m.slashCandidates) > 0 {
 		sections = append(sections, m.renderSlashCommandList())
 	}
 
-	// 7. Status bar (with top padding).
-	sections = append(sections, "") // blank line before status
-	sections = append(sections, m.renderStatusBar())
-	sections = append(sections, "") // bottom margin for breathing room
+	// 13. Composer bottom padding before footer separator.
+	for i := 0; i < tuikit.ComposerPadBottom; i++ {
+		sections = append(sections, "")
+	}
+
+	// 14. Lower separator + secondary status bar.
+	if m.width > 0 {
+		sep := m.theme.SeparatorStyle().Render(strings.Repeat("─", m.width))
+		sections = append(sections, sep)
+	}
+	sections = append(sections, m.renderStatusFooter())
+
+	// 15. Status bar bottom padding.
+	for i := 0; i < tuikit.StatusBarPadBottom; i++ {
+		sections = append(sections, "")
+	}
 
 	view := strings.Join(sections, "\n")
 
@@ -108,14 +134,15 @@ func (m *Model) computeLayout() (int, int) {
 func (m *Model) bottomSectionHeight() int {
 	lines := 0
 
-	// Dedicated hint area (always reserved).
-	lines += reservedHintRows
+	// Spacer + hint row + hint/header gap + workspace/model row + composer top separator.
+	lines += 5
 
-	// Separator.
-	lines++
+	// Composer top padding between workspace/model row and input.
+	lines += tuikit.ComposerPadTop
 
-	// Input bar is always shown.
-	lines += maxInt(1, m.textarea.Height())
+	// Input bar (with minimum height).
+	inputH := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
+	lines += inputH
 
 	// Prompt choices, when present, render above the input bar.
 	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
@@ -166,8 +193,14 @@ func (m *Model) bottomSectionHeight() int {
 		}
 	}
 
-	// Blank line + status bar + bottom margin.
-	lines += 3
+	// Composer bottom padding.
+	lines += tuikit.ComposerPadBottom
+
+	// Lower separator + status footer.
+	lines += 2
+
+	// Status bar bottom padding.
+	lines += tuikit.StatusBarPadBottom
 
 	return lines
 }
@@ -241,6 +274,13 @@ func (m *Model) clearInputSelection() {
 	m.inputSelectionEnd = textSelectionPoint{line: -1, col: -1}
 }
 
+func (m *Model) clearFixedSelection() {
+	m.fixedSelecting = false
+	m.fixedSelectionArea = fixedSelectionNone
+	m.fixedSelectionStart = textSelectionPoint{line: -1, col: -1}
+	m.fixedSelectionEnd = textSelectionPoint{line: -1, col: -1}
+}
+
 func (m *Model) hasSelectionRange() bool {
 	start, end, ok := normalizedSelectionRange(m.selectionStart, m.selectionEnd, len(m.viewportPlainLines))
 	if !ok {
@@ -273,7 +313,7 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 		line = len(m.viewportPlainLines) - 1
 	}
 
-	col := x
+	col := x - tuikit.GutterNarrative
 	if col < 0 {
 		col = 0
 	}
@@ -286,8 +326,10 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 
 func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 	y := m.viewport.Height
-	y += reservedHintRows
-	y++ // separator
+	// spacer + hint + hint/header gap + workspace/model + separator = 5 lines above padding
+	y += 5
+	// composer top padding
+	y += tuikit.ComposerPadTop
 	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
 		n := len(m.visiblePromptChoices())
 		y += minInt(8, n)
@@ -295,7 +337,7 @@ func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 			y++
 		}
 	}
-	h := maxInt(1, m.textarea.Height())
+	h := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	return y, h, true
 }
 
@@ -345,16 +387,154 @@ func (m *Model) renderSelectionLines() []string {
 	return renderSelectionOnLines(m.viewportPlainLines, start, end)
 }
 
+type fixedTextRegion struct {
+	area fixedSelectionArea
+	y    int
+	text string
+}
+
+func (m *Model) fixedTextRegions() []fixedTextRegion {
+	layout := m.fixedRowLayout()
+	return []fixedTextRegion{
+		{area: fixedSelectionHint, y: layout.hintY, text: m.hintRowText()},
+		{area: fixedSelectionHeader, y: layout.headerY, text: m.headerRowText()},
+		{area: fixedSelectionFooter, y: layout.footerY, text: m.footerRowText()},
+	}
+}
+
+type fixedRowLayout struct {
+	hintY   int
+	headerY int
+	footerY int
+}
+
+func (m *Model) fixedRowLayout() fixedRowLayout {
+	y := m.viewport.Height
+	layout := fixedRowLayout{
+		hintY:   y + 1,
+		headerY: y + 3,
+	}
+	y += 5 // spacer + hint + hint/header gap + workspace/model + separator
+	y += tuikit.ComposerPadTop
+	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
+		n := len(m.visiblePromptChoices())
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
+	y += maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
+	if n := len(m.mentionCandidates); n > 0 {
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
+	if n := len(m.skillCandidates); n > 0 {
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
+	if n := len(m.resumeCandidates); n > 0 {
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
+	if n := len(m.slashArgCandidates); n > 0 {
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
+	if n := len(m.slashCandidates); n > 0 {
+		y += minInt(8, n)
+		if n > 8 {
+			y++
+		}
+	}
+	y += tuikit.ComposerPadBottom // composer bottom padding
+	y++                           // lower separator
+	layout.footerY = y
+	return layout
+}
+
+func (m *Model) fixedRegionAt(y int) (fixedTextRegion, bool) {
+	for _, region := range m.fixedTextRegions() {
+		if region.y == y {
+			return region, true
+		}
+	}
+	return fixedTextRegion{}, false
+}
+
+func (m *Model) fixedRowPoint(region fixedTextRegion, x int, clamp bool) (textSelectionPoint, bool) {
+	contentWidth := maxInt(1, maxInt(20, m.width)-(tuikit.StatusInset*2))
+	col := x - tuikit.StatusInset // account for status-row horizontal padding
+	if clamp {
+		if col < 0 {
+			col = 0
+		}
+		if col > contentWidth {
+			col = contentWidth
+		}
+	} else if col < 0 || col > contentWidth {
+		return textSelectionPoint{}, false
+	}
+	lineWidth := displayColumns(region.text)
+	if col > lineWidth {
+		col = lineWidth
+	}
+	return textSelectionPoint{line: 0, col: col}, true
+}
+
+func (m *Model) fixedSelectionText() string {
+	if m.fixedSelectionArea == fixedSelectionNone {
+		return ""
+	}
+	start, end, ok := normalizedSelectionRange(m.fixedSelectionStart, m.fixedSelectionEnd, 1)
+	if !ok {
+		return ""
+	}
+	for _, region := range m.fixedTextRegions() {
+		if region.area == m.fixedSelectionArea {
+			return selectionTextFromLines([]string{region.text}, start, end)
+		}
+	}
+	return ""
+}
+
+func (m *Model) renderFixedRow(area fixedSelectionArea, text string, style lipgloss.Style) string {
+	line := text
+	if m.fixedSelectionArea == area {
+		start, end, ok := normalizedSelectionRange(m.fixedSelectionStart, m.fixedSelectionEnd, 1)
+		if ok && (start.line != end.line || start.col != end.col) {
+			line = renderSelectionOnLines([]string{text}, start, end)[0]
+		}
+	}
+	return style.Render(line)
+}
+
 // ---------------------------------------------------------------------------
 // View sub-components
 // ---------------------------------------------------------------------------
 
 func (m *Model) buildHintLine() string {
-	text := m.buildHintText()
-	if text == "" {
-		return ""
+	return m.renderHintRow()
+}
+
+// indentBlock adds a fixed left margin to every line of a multi-line block.
+func indentBlock(block string, indent int) string {
+	if indent <= 0 || block == "" {
+		return block
 	}
-	return m.theme.HintStyle().Render("  " + text)
+	pad := strings.Repeat(" ", indent)
+	lines := strings.Split(block, "\n")
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) buildHintText() string {
@@ -428,7 +608,7 @@ func (m *Model) advanceRunningAnimation() {
 }
 
 func (m *Model) buildRunningHintText() string {
-	frame := "·"
+	frame := "•"
 	if len(runningBreathFrames) > 0 {
 		frame = runningBreathFrames[m.runningBeat%len(runningBreathFrames)]
 	}
@@ -470,36 +650,15 @@ func (m *Model) pendingQueueShortText() string {
 	return fmt.Sprintf("%d pending", n)
 }
 
-func (m *Model) renderHintArea() string {
-	w := maxInt(1, m.width)
-	blank := m.theme.HintStyle().Width(w).Render("")
-	text := strings.TrimSpace(m.buildHintText())
-	if text == "" {
-		return blank + "\n" + blank
-	}
-	if w <= 2 {
-		if displayColumns(text) > w {
-			text = sliceByDisplayColumns(text, 0, w)
-		}
-		return blank + "\n" + m.theme.HintStyle().Width(w).Render(text)
-	}
-	maxTextWidth := w - 2
-	if displayColumns(text) > maxTextWidth {
-		text = sliceByDisplayColumns(text, 0, maxTextWidth)
-	}
-	return blank + "\n" + m.theme.HintStyle().Width(w).Render("  "+text)
-}
-
 func (m *Model) renderInputBar() string {
 	if m.activePrompt != nil {
-		return m.renderPromptInputBar()
+		return insetRenderedBlock(m.renderPromptInputBar(), inputHorizontalInset)
 	}
 	if start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines())); ok &&
 		(start.line != end.line || start.col != end.col) {
 		lines := m.inputPlainLines()
 		return strings.Join(renderSelectionOnLines(lines, start, end), "\n")
 	}
-	w := maxInt(20, m.width)
 	prompt := m.theme.PromptStyle().Render("> ")
 	inputVal := m.textarea.View()
 	if m.isWizardActive() && m.wizard.hideInput() {
@@ -507,31 +666,16 @@ func (m *Model) renderInputBar() string {
 		inputVal = "/" + m.wizard.def.Command + " " + strings.Repeat("*", utf8.RuneCountInString(strings.TrimSpace(query)))
 	}
 	inputLine := renderMultilineInput(prompt, inputVal)
-	if strings.Contains(inputLine, "\n") {
-		return inputLine
-	}
-
-	// Build the help hints on the right side.
-	helpText := m.buildHelpHints()
-	helpRendered := m.theme.HelpHintTextStyle().Render(helpText)
-
-	// Compose: "> input                                   help hints"
-	inputWidth := lipgloss.Width(inputLine)
-	helpWidth := lipgloss.Width(helpRendered)
-
-	if inputWidth+helpWidth+2 <= w {
-		gap := w - inputWidth - helpWidth
-		return inputLine + strings.Repeat(" ", gap) + helpRendered
-	}
-	return inputLine
+	return insetRenderedBlock(inputLine, inputHorizontalInset)
 }
 
 func (m *Model) inputPlainLines() []string {
 	prompt := "> "
 	indent := strings.Repeat(" ", lipgloss.Width(prompt))
+	inset := strings.Repeat(" ", inputHorizontalInset)
 	value := m.textarea.Value()
 	if value == "" {
-		return []string{prompt}
+		return []string{inset + prompt}
 	}
 	wrapWidth := maxInt(1, m.textarea.Width())
 	contentLines := make([]string, 0, maxInt(1, m.textarea.Height()))
@@ -549,12 +693,24 @@ func (m *Model) inputPlainLines() []string {
 	out := make([]string, 0, len(contentLines))
 	for i, line := range contentLines {
 		if i == 0 {
-			out = append(out, prompt+line)
+			out = append(out, inset+prompt+line)
 			continue
 		}
-		out = append(out, indent+line)
+		out = append(out, inset+indent+line)
 	}
 	return out
+}
+
+func insetRenderedBlock(text string, inset int) string {
+	if inset <= 0 || text == "" {
+		return text
+	}
+	pad := strings.Repeat(" ", inset)
+	lines := strings.Split(text, "\n")
+	for i := range lines {
+		lines[i] = pad + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func renderMultilineInput(prompt string, input string) string {
@@ -570,30 +726,98 @@ func renderMultilineInput(prompt string, input string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *Model) buildHelpHints() string {
-	if m.running {
-		if len(m.pendingQueue) > 0 {
-			return "enter: queue │ esc: pop queued"
-		}
-		return "enter: queue │ esc: interrupt"
-	}
-	parts := []string{"enter: send", "ctrl+v: paste image", "pgup/pgdn: scroll", "ctrl+p: commands", "ctrl+c x2: quit"}
-	return strings.Join(parts, " │ ")
+func (m *Model) renderStatusHeader() string {
+	style := m.theme.StatusStyle().Width(maxInt(20, m.width))
+	return m.renderFixedRow(fixedSelectionHeader, m.headerRowText(), style)
 }
 
-func (m *Model) renderStatusBar() string {
+func (m *Model) renderHintRow() string {
+	style := m.theme.HintRowStyle().Width(maxInt(20, m.width))
+	return m.renderFixedRow(fixedSelectionHint, m.hintRowText(), style)
+}
+
+func (m *Model) hintRowText() string {
+	w := maxInt(20, m.width)
+	return tuikit.ComposeFooter(w-(tuikit.StatusInset*2), m.buildHintText(), "")
+}
+
+func (m *Model) headerRowText() string {
 	w := maxInt(20, m.width)
 	left := strings.TrimSpace(m.cfg.Workspace)
-	modelPart := strings.TrimSpace(m.statusModel)
-	contextPart := strings.TrimSpace(m.statusContext)
-	var right string
-	if contextPart != "" {
-		right = modelPart + "   " + contextPart
-	} else {
-		right = modelPart
+	right := strings.TrimSpace(m.statusModel)
+	return tuikit.ComposeFooter(w-(tuikit.StatusInset*2), left, right)
+}
+
+func (m *Model) renderStatusFooter() string {
+	style := m.theme.StatusStyle().Width(maxInt(20, m.width))
+	if m.fixedSelectionArea == fixedSelectionFooter {
+		return m.renderFixedRow(fixedSelectionFooter, m.footerRowText(), style)
 	}
-	content := tuikit.ComposeFooter(w-2, left, right)
-	return m.theme.StatusStyle().Width(w).Render(content)
+	contentWidth := maxInt(1, maxInt(20, m.width)-(tuikit.StatusInset*2))
+	left := m.renderFooterLeft()
+	right := m.theme.TextStyle().Render(strings.TrimSpace(m.statusContext))
+	return style.Render(composeStyledFooter(contentWidth, left, right))
+}
+
+func (m *Model) footerRowText() string {
+	w := maxInt(20, m.width)
+	left := m.footerLeftText()
+	right := strings.TrimSpace(m.statusContext)
+	return tuikit.ComposeFooter(w-(tuikit.StatusInset*2), left, right)
+}
+
+func (m *Model) footerLeftText() string {
+	if m.cfg.ModeLabel == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(m.cfg.ModeLabel())
+	if mode == "" {
+		return ""
+	}
+	return mode + "  shift+tab switch mode"
+}
+
+func (m *Model) renderFooterLeft() string {
+	if m.cfg.ModeLabel == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(m.cfg.ModeLabel())
+	if mode == "" {
+		return ""
+	}
+	modeText := m.theme.TextStyle().Bold(true).Render(mode)
+	hintText := m.theme.HelpHintTextStyle().Render("shift+tab switch mode")
+	return modeText + "  " + hintText
+}
+
+func composeStyledFooter(width int, left string, right string) string {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if width <= 0 {
+		return ""
+	}
+	leftWidth := lipgloss.Width(left)
+	rightWidth := lipgloss.Width(right)
+	if left == "" && right == "" {
+		return strings.Repeat(" ", width)
+	}
+	if left == "" {
+		if rightWidth >= width {
+			return right
+		}
+		return strings.Repeat(" ", width-rightWidth) + right
+	}
+	if right == "" {
+		if leftWidth >= width {
+			return left
+		}
+		return left + strings.Repeat(" ", width-leftWidth)
+	}
+	gap := width - leftWidth - rightWidth
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m *Model) renderPromptModal() string {
@@ -718,8 +942,8 @@ func (m *Model) promptHintText() string {
 
 func (m *Model) adjustTextareaHeight() {
 	height := desiredInputRows(m.textarea.Value(), m.textarea.Width(), maxInputBarRows)
-	if height < 1 {
-		height = 1
+	if height < tuikit.ComposerMinHeight {
+		height = tuikit.ComposerMinHeight
 	}
 	if m.textarea.Height() != height {
 		m.textarea.SetHeight(height)
@@ -782,5 +1006,5 @@ func (m *Model) renderMentionList() string {
 			fmt.Sprintf("  … and %d more", len(m.mentionCandidates)-maxItems),
 		))
 	}
-	return strings.Join(lines, "\n")
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }

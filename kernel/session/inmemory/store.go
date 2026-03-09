@@ -54,6 +54,18 @@ func (s *Store) GetOrCreate(ctx context.Context, req *session.Session) (*session
 	return &out, nil
 }
 
+func (s *Store) SessionExists(ctx context.Context, req *session.Session) (bool, error) {
+	_ = ctx
+	k, err := makeKey(req)
+	if err != nil {
+		return false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.data[k]
+	return ok, nil
+}
+
 func (s *Store) AppendEvent(ctx context.Context, req *session.Session, ev *session.Event) error {
 	_ = ctx
 	if ev == nil {

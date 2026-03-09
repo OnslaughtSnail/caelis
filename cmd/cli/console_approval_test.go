@@ -134,6 +134,61 @@ func TestTerminalApprover_CancelReturnsApprovalAborted(t *testing.T) {
 	}
 }
 
+func TestTerminalApprover_FullAccessAutoApprovesBenignCommand(t *testing.T) {
+	editor := &stubLineEditor{}
+	approver := newTerminalApprover(editor, io.Discard, nil)
+	approver.modeResolver = func() string { return "full_access" }
+
+	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "go test ./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected full_access to auto-approve benign command")
+	}
+	if editor.reads != 0 {
+		t.Fatalf("expected no prompt reads, got %d", editor.reads)
+	}
+}
+
+func TestTerminalApprover_FullAccessBlocksDangerousCommand(t *testing.T) {
+	editor := &stubLineEditor{}
+	approver := newTerminalApprover(editor, io.Discard, nil)
+	approver.modeResolver = func() string { return "full_access" }
+
+	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "rm -rf /tmp/x"})
+	if allowed {
+		t.Fatal("expected dangerous command to be denied")
+	}
+	if err == nil || !toolexec.IsApprovalAborted(err) {
+		t.Fatalf("expected approval aborted error, got %v", err)
+	}
+	if editor.reads != 0 {
+		t.Fatalf("expected no prompt reads, got %d", editor.reads)
+	}
+}
+
+func TestTerminalApprover_FullAccessAutoAuthorizesTools(t *testing.T) {
+	editor := &stubLineEditor{}
+	approver := newTerminalApprover(editor, io.Discard, nil)
+	approver.modeResolver = func() string { return "full_access" }
+
+	allowed, err := approver.AuthorizeTool(context.Background(), kernelpolicy.ToolAuthorizationRequest{
+		ToolName:   "WRITE",
+		Permission: "write file",
+		Path:       "/tmp/file.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected tool authorization bypass in full_access")
+	}
+	if editor.reads != 0 {
+		t.Fatalf("expected no prompt reads, got %d", editor.reads)
+	}
+}
+
 func TestSessionApprovalKey_StripsWrappersAndKeepsPrimaryCommandFamily(t *testing.T) {
 	key := sessionApprovalKey(`cd /tmp && go test ./kernel/... -count=1 2>&1 | grep PASS`)
 	if key != "go test" {

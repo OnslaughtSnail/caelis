@@ -186,7 +186,7 @@ func (u *ui) ApprovalOutcome(approved bool, text string) {
 
 // Warn prints a yellow warning.
 func (u *ui) Warn(format string, args ...any) {
-	u.warnColor.Fprint(u.out, "warn: ")
+	u.warnColor.Fprint(u.out, "! ")
 	fmt.Fprintf(u.out, format, args...)
 }
 

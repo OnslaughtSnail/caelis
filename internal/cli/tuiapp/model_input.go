@@ -1,12 +1,14 @@
 package tuiapp
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -20,6 +22,9 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if handled, cmd := m.handleInputAreaMouse(msg); handled {
 		return m, cmd
 	}
+	if handled, cmd := m.handleFixedAreaMouse(msg); handled {
+		return m, cmd
+	}
 	if m.viewport.Height <= 0 || len(m.viewportPlainLines) == 0 {
 		return m, nil
 	}
@@ -30,6 +35,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.clearInputSelection()
+		m.clearFixedSelection()
 		point, ok := m.mousePointToContentPoint(msg.X, msg.Y, false)
 		if !ok {
 			return m, nil
@@ -97,6 +103,7 @@ func (m *Model) handleInputAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 			return false, nil
 		}
 		m.clearSelection()
+		m.clearFixedSelection()
 		m.inputSelecting = true
 		m.inputSelectionStart = point
 		m.inputSelectionEnd = point
@@ -125,6 +132,69 @@ func (m *Model) handleInputAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 		text := selectionTextFromLines(lines, start, end)
 		if text == "" {
 			m.clearInputSelection()
+			return true, nil
+		}
+		const copyHint = "selected text copied to clipboard"
+		m.hint = copyHint
+		clipCmd := func() tea.Msg {
+			_ = clipboard.WriteAll(text)
+			return nil
+		}
+		return true, tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
+	}
+	return false, nil
+}
+
+func (m *Model) handleFixedAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
+	if msg.Button != tea.MouseButtonLeft && msg.Action != tea.MouseActionMotion && msg.Action != tea.MouseActionRelease {
+		return false, nil
+	}
+	switch msg.Action {
+	case tea.MouseActionPress:
+		region, ok := m.fixedRegionAt(msg.Y)
+		if !ok || msg.Button != tea.MouseButtonLeft {
+			return false, nil
+		}
+		point, ok := m.fixedRowPoint(region, msg.X, false)
+		if !ok {
+			return false, nil
+		}
+		m.clearSelection()
+		m.clearInputSelection()
+		m.fixedSelecting = true
+		m.fixedSelectionArea = region.area
+		m.fixedSelectionStart = point
+		m.fixedSelectionEnd = point
+		return true, nil
+
+	case tea.MouseActionMotion:
+		if !m.fixedSelecting || m.fixedSelectionArea == fixedSelectionNone {
+			return false, nil
+		}
+		region, ok := m.fixedRegionAt(msg.Y)
+		if !ok || region.area != m.fixedSelectionArea {
+			return false, nil
+		}
+		point, ok := m.fixedRowPoint(region, msg.X, true)
+		if !ok {
+			return false, nil
+		}
+		m.fixedSelectionEnd = point
+		return true, nil
+
+	case tea.MouseActionRelease:
+		if !m.fixedSelecting || m.fixedSelectionArea == fixedSelectionNone {
+			return false, nil
+		}
+		if region, ok := m.fixedRegionAt(msg.Y); ok && region.area == m.fixedSelectionArea {
+			if point, ok := m.fixedRowPoint(region, msg.X, true); ok {
+				m.fixedSelectionEnd = point
+			}
+		}
+		m.fixedSelecting = false
+		text := m.fixedSelectionText()
+		if text == "" {
+			m.clearFixedSelection()
 			return true, nil
 		}
 		const copyHint = "selected text copied to clipboard"
@@ -186,6 +256,21 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() != "ctrl+c" {
 		m.ctrlCArmed = false
 		m.lastCtrlCAt = time.Time{}
+	}
+	if msg.String() == "shift+tab" && !m.running && m.cfg.ToggleMode != nil {
+		hint, err := m.cfg.ToggleMode()
+		if err != nil {
+			m.hint = err.Error()
+			return m, nil
+		}
+		if strings.TrimSpace(hint) == "" {
+			hint = "mode updated"
+		}
+		if m.cfg.RefreshStatus != nil {
+			m.statusModel, m.statusContext = m.cfg.RefreshStatus()
+		}
+		m.hint = strings.TrimSpace(hint)
+		return m, clearHintLaterCmd(m.hint, copyHintDuration)
 	}
 
 	switch msg.String() {
@@ -260,6 +345,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "up":
+		if m.shouldUseTextareaVerticalNavigation(-1) {
+			var cmd tea.Cmd
+			m.textarea, cmd = m.textarea.Update(msg)
+			m.syncInputFromTextarea()
+			return m, cmd
+		}
 		if !m.running && len(m.history) > 0 {
 			val := m.textarea.Value()
 			if m.historyIndex == -1 {
@@ -277,6 +368,12 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down":
+		if m.shouldUseTextareaVerticalNavigation(1) {
+			var cmd tea.Cmd
+			m.textarea, cmd = m.textarea.Update(msg)
+			m.syncInputFromTextarea()
+			return m, cmd
+		}
 		if !m.running && m.historyIndex != -1 {
 			if m.historyIndex < len(m.history)-1 {
 				m.historyIndex++
@@ -413,10 +510,10 @@ func (m *Model) submitLine(line string) (tea.Model, tea.Cmd) {
 func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.Model, tea.Cmd) {
 	// Commit user input line to history buffer.
 	userLine := "> " + strings.TrimSpace(displayLine)
-	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
-	if m.hasCommittedLine {
-		m.historyLines = append(m.historyLines, "") // gap before user input
+	if m.hasCommittedLine && len(m.historyLines) > 0 && strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])) != "" {
+		m.historyLines = append(m.historyLines, m.userTurnDividerLine())
 	}
+	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
 	m.historyLines = append(m.historyLines, colored)
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleUser
@@ -442,6 +539,7 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 	m.clearSlashCompletion()
 
 	m.running = true
+	m.runStartedAt = time.Now()
 	m.startRunningAnimation()
 	m.userScrolledUp = false
 	m.syncViewportContent()
@@ -455,6 +553,76 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 		m.spinner.Tick,
 	}
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) shouldUseTextareaVerticalNavigation(direction int) bool {
+	if m.running {
+		return false
+	}
+	if strings.TrimSpace(m.textarea.Value()) == "" {
+		return false
+	}
+	lineInfo := m.textarea.LineInfo()
+	if m.textarea.LineCount() <= 1 && lineInfo.Height <= 1 {
+		return false
+	}
+	switch {
+	case direction < 0:
+		return m.textarea.Line() > 0 || lineInfo.RowOffset > 0
+	case direction > 0:
+		return m.textarea.Line() < m.textarea.LineCount()-1 || lineInfo.RowOffset+1 < lineInfo.Height
+	default:
+		return false
+	}
+}
+
+func (m *Model) userTurnDividerLine() string {
+	label := ""
+	if m.hasLastRunDuration {
+		label = formatTurnDuration(m.lastRunDuration)
+	}
+	contentWidth := maxInt(12, m.viewport.Width)
+	return m.theme.HelpHintTextStyle().Render(centeredDivider(contentWidth, label))
+}
+
+func formatTurnDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	minutes := int(d / time.Minute)
+	seconds := int((d % time.Minute) / time.Second)
+	return fmt.Sprintf("%dm%02ds", minutes, seconds)
+}
+
+func centeredDivider(width int, label string) string {
+	if width <= 0 {
+		return ""
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return strings.Repeat("─", width)
+	}
+	label = " " + label + " "
+	labelWidth := displayColumns(label)
+	if labelWidth >= width {
+		return label
+	}
+	remaining := width - labelWidth
+	left := remaining / 2
+	right := remaining - left
+	if left < 2 {
+		left = 2
+	}
+	if right < 2 {
+		right = 2
+	}
+	return strings.Repeat("─", left) + label + strings.Repeat("─", right)
 }
 
 func (m *Model) enqueuePendingPrompt(execLine string, displayLine string) {

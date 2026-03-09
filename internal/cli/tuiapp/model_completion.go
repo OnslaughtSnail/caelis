@@ -218,7 +218,7 @@ func (m *Model) renderSkillList() string {
 			fmt.Sprintf("  … and %d more", len(m.skillCandidates)-maxItems),
 		))
 	}
-	return strings.Join(lines, "\n")
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +376,7 @@ func (m *Model) renderResumeList() string {
 			fmt.Sprintf("  … and %d more", len(m.resumeCandidates)-end),
 		))
 	}
-	return strings.Join(lines, "\n")
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }
 
 func (m *Model) clearSlashArg() {
@@ -602,7 +602,7 @@ func (m *Model) renderSlashArgList() string {
 			fmt.Sprintf("  … and %d more", len(m.slashArgCandidates)-end),
 		))
 	}
-	return strings.Join(lines, "\n")
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }
 
 // ---------------------------------------------------------------------------
@@ -739,7 +739,7 @@ func (m *Model) renderSlashCommandList() string {
 			fmt.Sprintf("  … and %d more", len(m.slashCandidates)-end),
 		))
 	}
-	return strings.Join(lines, "\n")
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }
 
 func (m *Model) clearSlashCompletion() {

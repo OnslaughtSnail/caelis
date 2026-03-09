@@ -35,6 +35,7 @@ func main() {
 	}
 	launcher := launcherfull.NewLauncher(
 		runCLI,
+		runACP,
 		notImplementedLauncher("api"),
 		notImplementedLauncher("web"),
 	)
@@ -394,7 +395,9 @@ func runCLI(ctx context.Context, args []string) error {
 		SessionID:             *sessionID,
 		ContextWindow:         *contextWindow,
 		Workspace:             workspace,
+		WorkspaceLine:         workspaceStatusLine(workspace.CWD),
 		Resolved:              resolved,
+		SessionStore:          store,
 		ExecRuntime:           execRuntime,
 		SandboxType:           strings.TrimSpace(*sandboxType),
 		SandboxHelperPath:     sandboxHelperPath,

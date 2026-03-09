@@ -67,58 +67,58 @@ type Theme struct {
 
 func DefaultTheme() Theme {
 	return Theme{
-		AppBg:          lipgloss.Color("#101216"),
-		PanelBorder:    lipgloss.Color("#2f3f5f"),
-		PanelTitle:     lipgloss.Color("#4da3ff"),
-		TextPrimary:    lipgloss.Color("#d9dce3"),
-		TextSecondary:  lipgloss.Color("#8d96a5"),
-		Info:           lipgloss.Color("#4da3ff"),
+		AppBg:          lipgloss.Color("#111315"),
+		PanelBorder:    lipgloss.Color("#3f4652"),
+		PanelTitle:     lipgloss.Color("#f3f4f6"),
+		TextPrimary:    lipgloss.Color("#f5f5f5"),
+		TextSecondary:  lipgloss.Color("#a1a1aa"),
+		Info:           lipgloss.Color("#d4d4d8"),
 		Success:        lipgloss.Color("#56d364"),
 		Warning:        lipgloss.Color("#f5c451"),
 		Error:          lipgloss.Color("#ff7b72"),
-		Accent:         lipgloss.Color("#22d3ee"),
-		Focus:          lipgloss.Color("#4da3ff"),
-		ModalBg:        lipgloss.Color("#111827"),
-		StatusBg:       lipgloss.Color("#151b26"),
-		StatusText:     lipgloss.Color("#9fb0c9"),
-		CommandBg:      lipgloss.Color("#0f1728"),
-		CommandActive:  lipgloss.Color("#1f2a44"),
-		CommandText:    lipgloss.Color("#d4d8e0"),
-		CommandSubText: lipgloss.Color("#8d96a5"),
+		Accent:         lipgloss.Color("#e5e7eb"),
+		Focus:          lipgloss.Color("#f3f4f6"),
+		ModalBg:        lipgloss.Color("#15181d"),
+		StatusBg:       lipgloss.Color("#111315"),
+		StatusText:     lipgloss.Color("#d4d4d8"),
+		CommandBg:      lipgloss.Color("#111315"),
+		CommandActive:  lipgloss.Color("#111315"),
+		CommandText:    lipgloss.Color("#f5f5f5"),
+		CommandSubText: lipgloss.Color("#a1a1aa"),
 
 		AssistantFg:        lipgloss.Color("#56d364"),
 		ReasoningFg:        lipgloss.Color("#8d96a5"),
-		UserFg:             lipgloss.Color("#d9dce3"),
-		UserBg:             lipgloss.Color("#22344e"),
-		UserPrefixFg:       lipgloss.Color("#8fb7ff"),
-		UserMentionFg:      lipgloss.Color("#7cc5ff"),
-		ToolFg:             lipgloss.Color("#22d3ee"),
+		UserFg:             lipgloss.Color("#f5f5f5"),
+		UserBg:             lipgloss.Color("#111315"),
+		UserPrefixFg:       lipgloss.Color("#ffffff"),
+		UserMentionFg:      lipgloss.Color("#f5f5f5"),
+		ToolFg:             lipgloss.Color("#e5e7eb"),
 		DiffAddFg:          lipgloss.Color("#56d364"),
 		DiffRemoveFg:       lipgloss.Color("#ff7b72"),
 		DiffHeaderFg:       lipgloss.Color("#8d96a5"),
-		DiffHunkFg:         lipgloss.Color("#4da3ff"),
+		DiffHunkFg:         lipgloss.Color("#d4d4d8"),
 		DiffAddBg:          lipgloss.Color("#1d3328"),
 		DiffAddStrongBg:    lipgloss.Color("#285f3a"),
 		DiffRemoveBg:       lipgloss.Color("#3a2329"),
 		DiffRemoveStrongBg: lipgloss.Color("#6e2b34"),
 		DiffLineNoFg:       lipgloss.Color("#758195"),
 		DiffGutterFg:       lipgloss.Color("#8d96a5"),
-		DiffPanelBorder:    lipgloss.Color("#2f3f5f"),
-		SectionFg:          lipgloss.Color("#d9dce3"),
-		KeyLabelFg:         lipgloss.Color("#4da3ff"),
-		NoteFg:             lipgloss.Color("#8d96a5"),
-		PromptFg:           lipgloss.Color("#4da3ff"),
+		DiffPanelBorder:    lipgloss.Color("#3f4652"),
+		SectionFg:          lipgloss.Color("#f5f5f5"),
+		KeyLabelFg:         lipgloss.Color("#e5e7eb"),
+		NoteFg:             lipgloss.Color("#a1a1aa"),
+		PromptFg:           lipgloss.Color("#f5f5f5"),
 		CursorFg:           lipgloss.Color("#ffffff"),
 		ScrollHintFg:       lipgloss.Color("#f5c451"),
 
-		InputBarBg:   lipgloss.Color("#151b26"),
-		InputBarFg:   lipgloss.Color("#d9dce3"),
-		ToolOutputBg: lipgloss.Color("#101216"),
-		HelpHintFg:   lipgloss.Color("#5e6a7e"),
-		SpinnerFg:    lipgloss.Color("#4da3ff"),
-		SeparatorFg:  lipgloss.Color("#2f3f5f"),
-		RoleBorderFg: lipgloss.Color("#2f3f5f"),
-		NewMsgBg:     lipgloss.Color("#1f2a44"),
+		InputBarBg:   lipgloss.Color("#111315"),
+		InputBarFg:   lipgloss.Color("#f5f5f5"),
+		ToolOutputBg: lipgloss.Color("#111315"),
+		HelpHintFg:   lipgloss.Color("#a1a1aa"),
+		SpinnerFg:    lipgloss.Color("#e5e7eb"),
+		SeparatorFg:  lipgloss.Color("#3f4652"),
+		RoleBorderFg: lipgloss.Color("#3f4652"),
+		NewMsgBg:     lipgloss.Color("#111315"),
 	}
 }
 
@@ -132,13 +132,22 @@ func (t Theme) FrameStyle() lipgloss.Style {
 
 func (t Theme) StatusStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Background(t.StatusBg).
 		Foreground(t.StatusText).
-		Padding(0, 1)
+		Padding(0, StatusInset)
 }
 
 func (t Theme) HintStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(t.Accent)
+	return lipgloss.NewStyle().Foreground(t.TextSecondary)
+}
+
+func (t Theme) HintRowStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.TextSecondary).
+		Padding(0, StatusInset)
+}
+
+func (t Theme) TextStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.TextPrimary)
 }
 
 func (t Theme) TitleStyle() lipgloss.Style {
@@ -157,8 +166,9 @@ func (t Theme) ModalStyle() lipgloss.Style {
 
 func (t Theme) CommandActiveStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Background(t.CommandActive).
 		Foreground(t.CommandText).
+		Bold(true).
+		Underline(true).
 		Padding(0, 1)
 }
 
@@ -194,25 +204,17 @@ func (t Theme) ToolNameStyle() lipgloss.Style {
 
 // UserStyle renders user messages in a subtle chat bubble-like background.
 func (t Theme) UserStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(t.UserFg).
-		Background(t.UserBg)
+	return lipgloss.NewStyle().Foreground(t.UserFg).Bold(true)
 }
 
 // UserPrefixStyle renders the leading "> " marker for user messages.
 func (t Theme) UserPrefixStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(t.UserPrefixFg).
-		Background(t.UserBg).
-		Bold(true)
+	return lipgloss.NewStyle().Foreground(t.UserPrefixFg).Bold(true)
 }
 
 // UserMentionStyle renders @path mentions inside user messages.
 func (t Theme) UserMentionStyle() lipgloss.Style {
-	return lipgloss.NewStyle().
-		Foreground(t.UserMentionFg).
-		Background(t.UserBg).
-		Bold(true)
+	return lipgloss.NewStyle().Foreground(t.UserMentionFg).Bold(true)
 }
 
 // DiffAddStyle renders added lines in diffs (green).
@@ -263,6 +265,14 @@ func (t Theme) ErrorStyle() lipgloss.Style {
 // NoteStyle renders note text (dimmed).
 func (t Theme) NoteStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.NoteFg)
+}
+
+// LogBlockStyle renders log/tool output lines with a subtle left border
+// to visually separate them from narrative assistant text.
+func (t Theme) LogBlockStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.TextSecondary).
+		PaddingLeft(1)
 }
 
 // SectionStyle renders section headers (bold).
@@ -330,7 +340,6 @@ func ComposeFooter(width int, left string, right string) string {
 // InputBarStyle renders the input bar background.
 func (t Theme) InputBarStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Background(t.InputBarBg).
 		Foreground(t.InputBarFg).
 		Padding(0, 1)
 }
@@ -353,7 +362,7 @@ func (t Theme) SeparatorStyle() lipgloss.Style {
 // NewMsgIndicatorStyle renders the "new messages" indicator.
 func (t Theme) NewMsgIndicatorStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
-		Background(t.NewMsgBg).
 		Foreground(t.Warning).
+		Bold(true).
 		Padding(0, 1)
 }

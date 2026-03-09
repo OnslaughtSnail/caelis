@@ -79,6 +79,22 @@ func (s *Store) GetOrCreate(ctx context.Context, req *session.Session) (*session
 	return &cp, nil
 }
 
+func (s *Store) SessionExists(ctx context.Context, req *session.Session) (bool, error) {
+	_ = ctx
+	dir, err := s.sessionDir(req)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(filepath.Join(dir, "meta.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) AppendEvent(ctx context.Context, req *session.Session, ev *session.Event) error {
 	_ = ctx
 	if ev == nil {

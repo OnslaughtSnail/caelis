@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"strings"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuidiff"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -106,11 +107,6 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 		}
 	}
 	if *activeBlock == nil {
-		if m.hasCommittedLine && m.lastCommittedStyle != blockStyle &&
-			!(m.lastCommittedStyle == tuikit.LineStyleAssistant && blockStyle == tuikit.LineStyleReasoning) &&
-			!(m.lastCommittedStyle == tuikit.LineStyleReasoning && blockStyle == tuikit.LineStyleAssistant) {
-			m.historyLines = append(m.historyLines, "")
-		}
 		start := len(m.historyLines)
 		lines := render(text)
 		m.historyLines = append(m.historyLines, lines...)
@@ -184,9 +180,6 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	m.flushStream()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
-	if m.hasCommittedLine && !isToolCallLine(m.lastCommittedRaw) {
-		m.historyLines = append(m.historyLines, "")
-	}
 	start := len(m.historyLines)
 	lines := m.renderDiffBlockLines(msg)
 	m.historyLines = append(m.historyLines, lines...)
@@ -624,34 +617,122 @@ func (m *Model) resetConversationView() {
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.lastFinalAnswer = ""
+	m.transientLogIdx = -1
+	m.transientIsRetry = false
+	m.runStartedAt = time.Time{}
+	m.lastRunDuration = 0
+	m.hasLastRunDuration = false
 	m.clearSelection()
 	m.clearInputSelection()
 	m.userScrolledUp = false
 	if m.cfg.ShowWelcomeCard {
-		m.appendWelcomeCard()
+		if m.viewport.Width > 0 {
+			m.appendWelcomeCard()
+			m.welcomeCardPending = false
+		} else {
+			m.welcomeCardPending = true
+		}
 	}
 	m.syncViewportContent()
 }
 
 // commitLine colorizes one complete line and appends it to the history buffer.
+//
+// Transient log replacement rules:
+//   - Retry lines replace the previous retry line in-place (status-update style).
+//   - Consecutive warn lines replace the previous warn line in-place.
+//   - Error lines are always appended (never replaced).
+//   - Assistant narrative and other content are immutable.
+//
+// Spacing rules (from layout.go tokens):
+//   - Conversation turns: SpaceTurnGap
+//   - Log↔narrative boundary: SpaceLogBlockGap
+//   - Consecutive tool calls: SpaceToolGap
+//
+// User and log lines receive extra left gutter via LineExtraGutter().
 func (m *Model) commitLine(line string) {
 	if strings.TrimSpace(line) == "" && !m.hasCommittedLine {
 		return // skip leading blank lines
 	}
 
 	style := tuikit.DetectLineStyleWithContext(line, m.lastCommittedStyle)
+	isRetry := tuikit.IsRetryLine(line)
+	isWarn := !isRetry && style == tuikit.LineStyleWarn
 
-	// Insert visual gap before conversation turns.
-	if m.hasCommittedLine && (tuikit.ShouldInsertGap(true, m.lastCommittedStyle, style) || shouldInsertToolGap(m.lastCommittedRaw, line)) {
-		m.historyLines = append(m.historyLines, "")
+	// --- Transient log replacement ---
+	if isRetry && m.transientLogIdx >= 0 && m.transientIsRetry {
+		// Replace previous retry in-place.
+		colored := tuikit.ColorizeLogLine(line, style, m.theme)
+		colored = tuikit.LineExtraGutter(style) + colored
+		m.historyLines[m.transientLogIdx] = colored
+		m.lastCommittedStyle = style
+		m.lastCommittedRaw = line
+		m.syncViewportContent()
+		return
+	}
+	if isWarn && m.transientLogIdx >= 0 && !m.transientIsRetry {
+		// Replace previous consecutive warn in-place.
+		colored := tuikit.ColorizeLogLine(line, style, m.theme)
+		colored = tuikit.LineExtraGutter(style) + colored
+		m.historyLines[m.transientLogIdx] = colored
+		m.lastCommittedStyle = style
+		m.lastCommittedRaw = line
+		m.syncViewportContent()
+		return
+	}
+
+	// Leaving a transient slot — clear tracking.
+	m.transientLogIdx = -1
+
+	// Keep the transcript compact; region spacing is handled outside the viewport.
+	if m.hasCommittedLine {
+		m.insertSpacing(style, line)
 	}
 
 	colored := tuikit.ColorizeLogLine(line, style, m.theme)
+	colored = tuikit.LineExtraGutter(style) + colored
 	m.historyLines = append(m.historyLines, colored)
+
+	// Mark new transient slot for retry or warn.
+	if isRetry {
+		m.transientLogIdx = len(m.historyLines) - 1
+		m.transientIsRetry = true
+	} else if isWarn {
+		m.transientLogIdx = len(m.historyLines) - 1
+		m.transientIsRetry = false
+	}
 
 	m.lastCommittedStyle = style
 	m.lastCommittedRaw = line
 	m.hasCommittedLine = true
+}
+
+func (m *Model) insertSpacing(style tuikit.LineStyle, line string) {
+	if len(m.historyLines) == 0 {
+		return
+	}
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if strings.TrimSpace(m.lastCommittedRaw) == "" {
+		return
+	}
+	if strings.TrimSpace(m.historyLines[len(m.historyLines)-1]) == "" {
+		return
+	}
+	if shouldInsertBlockGap(m.lastCommittedStyle, style) {
+		m.historyLines = append(m.historyLines, "")
+	}
+}
+
+func shouldInsertBlockGap(prev tuikit.LineStyle, current tuikit.LineStyle) bool {
+	if prev == tuikit.LineStyleDefault || current == tuikit.LineStyleDefault {
+		return false
+	}
+	if current == tuikit.LineStyleUser {
+		return true
+	}
+	return false
 }
 
 // flushStream commits any remaining partial line in the stream buffer.
@@ -662,15 +743,6 @@ func (m *Model) flushStream() {
 	}
 	m.commitLine(m.streamLine)
 	m.streamLine = ""
-}
-
-func shouldInsertToolGap(prevLine string, currentLine string) bool {
-	prev := strings.TrimSpace(prevLine)
-	curr := strings.TrimSpace(currentLine)
-	if prev == "" || curr == "" {
-		return false
-	}
-	return strings.HasPrefix(prev, "▸ ") && strings.HasPrefix(curr, "▸ ")
 }
 
 func isToolCallLine(line string) bool {

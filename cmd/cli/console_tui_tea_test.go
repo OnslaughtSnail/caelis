@@ -323,3 +323,36 @@ func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) 
 		t.Fatalf("expected context ratio display for gemini, got %q", contextText)
 	}
 }
+
+func TestReadTUIStatus_ShowsToggleReasoningState(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:           "deepseek/deepseek-chat",
+		Provider:        "deepseek",
+		API:             modelproviders.APIDeepSeek,
+		Model:           "deepseek-chat",
+		ReasoningLevels: []string{"none", "high"},
+		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "token"},
+	}
+	modelcatalogApplyConfigDefaults(&cfg)
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+
+	c := &cliConsole{
+		modelAlias:    "deepseek/deepseek-chat",
+		modelFactory:  factory,
+		contextWindow: 128000,
+		thinkingMode:  "off",
+	}
+	modelText, _ := c.readTUIStatus()
+	if modelText != "deepseek/deepseek-chat [reasoning off]" {
+		t.Fatalf("unexpected toggle-off model text %q", modelText)
+	}
+
+	c.thinkingMode = "on"
+	modelText, _ = c.readTUIStatus()
+	if modelText != "deepseek/deepseek-chat [reasoning on]" {
+		t.Fatalf("unexpected toggle-on model text %q", modelText)
+	}
+}
