@@ -55,7 +55,6 @@ func TestBuildPromptAssembleSpec_LoadsPromptSources(t *testing.T) {
 		AppName:                     "demo-app",
 		WorkspaceDir:                workspace,
 		BasePrompt:                  "session override",
-		RuntimeHint:                 "runtime hint",
 		SkillDirs:                   []string{filepath.Join(t.TempDir(), "missing-skills-dir")},
 		EnableExperimentalLSPPrompt: true,
 	})
@@ -72,17 +71,14 @@ func TestBuildPromptAssembleSpec_LoadsPromptSources(t *testing.T) {
 	if !strings.Contains(spec.WorkspaceAgentsPrompt, "Workspace") {
 		t.Fatalf("expected workspace AGENTS loaded, got %q", spec.WorkspaceAgentsPrompt)
 	}
-	if len(spec.Additional) != 3 {
-		t.Fatalf("expected runtime + user + experimental lsp fragments, got %d", len(spec.Additional))
+	if len(spec.Additional) != 2 {
+		t.Fatalf("expected user + experimental lsp fragments, got %d", len(spec.Additional))
 	}
-	if spec.Additional[0].Title != "Runtime Context" {
-		t.Fatalf("unexpected runtime fragment: %+v", spec.Additional[0])
+	if !strings.Contains(spec.Additional[0].Content, "session override") {
+		t.Fatalf("expected session override in user fragment, got %q", spec.Additional[0].Content)
 	}
-	if !strings.Contains(spec.Additional[1].Content, "session override") {
-		t.Fatalf("expected session override in user fragment, got %q", spec.Additional[1].Content)
-	}
-	if spec.Additional[2].Title != "Experimental LSP Routing" {
-		t.Fatalf("unexpected lsp fragment: %+v", spec.Additional[2])
+	if spec.Additional[1].Title != "Experimental LSP Routing" {
+		t.Fatalf("unexpected lsp fragment: %+v", spec.Additional[1])
 	}
 	if len(result.Warnings) != 0 {
 		t.Fatalf("expected no warnings for missing skill dir, got %v", result.Warnings)

@@ -664,9 +664,64 @@ func (m *Model) renderInputBar() string {
 	if m.isWizardActive() && m.wizard.hideInput() {
 		query, _ := wizardQueryAtCursor(m.wizard.def.Command, m.input, m.cursor)
 		inputVal = "/" + m.wizard.def.Command + " " + strings.Repeat("*", utf8.RuneCountInString(strings.TrimSpace(query)))
+	} else if ghost := m.currentInputGhostHint(); ghost != "" {
+		// Hide the cursor while showing a ghost hint so the preview reads as one line.
+		inputVal = m.textarea.Value() + m.theme.HelpHintTextStyle().Render(ghost)
 	}
 	inputLine := renderMultilineInput(prompt, inputVal)
 	return insetRenderedBlock(inputLine, inputHorizontalInset)
+}
+
+func (m *Model) currentInputGhostHint() string {
+	if m == nil || m.activePrompt != nil || m.running {
+		return ""
+	}
+	value := m.textarea.Value()
+	if value == "" || strings.Contains(value, "\n") {
+		return ""
+	}
+	if m.cursor != len(m.input) {
+		return ""
+	}
+
+	suggestion := ""
+	switch {
+	case len(m.slashCandidates) > 0 && m.slashIndex >= 0 && m.slashIndex < len(m.slashCandidates):
+		suggestion = strings.TrimSpace(m.slashCandidates[m.slashIndex])
+	case len(m.resumeCandidates) > 0 && m.resumeIndex >= 0 && m.resumeIndex < len(m.resumeCandidates):
+		selected := strings.TrimSpace(m.resumeCandidates[m.resumeIndex].SessionID)
+		if selected != "" {
+			suggestion = "/resume " + selected
+		}
+	case len(m.slashArgCandidates) > 0 && m.slashArgIndex >= 0 && m.slashArgIndex < len(m.slashArgCandidates):
+		selected := strings.TrimSpace(m.slashArgCandidates[m.slashArgIndex].Value)
+		suggestion = m.suggestedSlashArgInput(selected)
+	}
+	if suggestion == "" || !strings.HasPrefix(suggestion, value) {
+		return ""
+	}
+	return suggestion[len(value):]
+}
+
+func (m *Model) suggestedSlashArgInput(choice string) string {
+	choice = strings.TrimSpace(choice)
+	if choice == "" {
+		return ""
+	}
+	command := strings.TrimSpace(m.slashArgCommand)
+	switch {
+	case command == "model":
+		return "/model " + choice
+	case command == "model use":
+		return "/model use " + choice
+	case strings.HasPrefix(command, "model use "):
+		return "/" + command + " " + choice
+	default:
+		if command == "" {
+			return ""
+		}
+		return "/" + command + " " + choice
+	}
 }
 
 func (m *Model) inputPlainLines() []string {
@@ -785,7 +840,11 @@ func (m *Model) renderFooterLeft() string {
 	if mode == "" {
 		return ""
 	}
-	modeText := m.theme.TextStyle().Bold(true).Render(mode)
+	modeStyle := m.theme.TextStyle().Bold(true)
+	if mode == "full_access" {
+		modeStyle = m.theme.WarnStyle().Bold(true)
+	}
+	modeText := modeStyle.Render(mode)
 	hintText := m.theme.HelpHintTextStyle().Render("shift+tab switch mode")
 	return modeText + "  " + hintText
 }
@@ -881,7 +940,7 @@ func (m *Model) renderPromptModal() string {
 func (m *Model) renderPromptInputBar() string {
 	prompt := m.theme.PromptStyle().Render("> ")
 	value, cursor := m.promptInputValue()
-	return renderMultilineInput(prompt, insertPromptCursor(value, cursor, m.theme.PromptStyle().Render("█")))
+	return renderMultilineInput(prompt, insertPromptCursor(value, cursor, m.promptCursorGlyph()))
 }
 
 func (m *Model) promptInputValue() (string, int) {
@@ -909,6 +968,10 @@ func insertPromptCursor(value string, cursor int, cursorGlyph string) string {
 	head := string(runes[:cursor])
 	tail := string(runes[cursor:])
 	return head + cursorGlyph + tail
+}
+
+func (m *Model) promptCursorGlyph() string {
+	return m.theme.PromptStyle().Render("█")
 }
 
 func (m *Model) promptHintText() string {

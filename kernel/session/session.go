@@ -36,6 +36,13 @@ type Store interface {
 	ReplaceState(context.Context, *Session, map[string]any) error
 }
 
+// StateUpdateStore optionally exposes an atomic read-modify-write state update.
+// Implementations should ensure the updater observes a consistent snapshot and
+// that unrelated keys are preserved across concurrent updates.
+type StateUpdateStore interface {
+	UpdateState(context.Context, *Session, func(map[string]any) (map[string]any, error)) error
+}
+
 // ExistenceStore optionally exposes session existence checks without creating
 // missing sessions as a side effect.
 type ExistenceStore interface {

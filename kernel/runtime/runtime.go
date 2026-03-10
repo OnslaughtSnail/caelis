@@ -147,6 +147,14 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			}
 			return
 		}
+		defer func() {
+			if inv == nil || inv.tasks == nil {
+				return
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			inv.tasks.cleanupTurn(cleanupCtx)
+		}()
 		if !r.runAgentExecution(ctx, sess, req, inv, emitRunError, yield) {
 			return
 		}
@@ -259,9 +267,6 @@ func (r *Runtime) buildInvocationContext(
 		runnerImpl,
 	)
 	ctx = task.WithManager(ctx, taskManager)
-	if asyncRunner, ok := asyncBashRunner(coreTools.Runtime); ok {
-		ctx = withBashAsyncRunner(ctx, asyncRunner)
-	}
 	allTools, err := tool.EnsureCoreTools(req.Tools, coreTools)
 	if err != nil {
 		return nil, err
@@ -284,6 +289,7 @@ func (r *Runtime) buildInvocationContext(
 		toolMap:  toolMap,
 		policies: append([]policy.Hook(nil), req.Policies...),
 		runner:   subagentRunner,
+		tasks:    taskManager,
 	}, nil
 }
 
@@ -530,20 +536,34 @@ func (r *Runtime) appendAndYieldLifecycle(
 	state, ok := runStateFromLifecycleEvent(ev)
 	if ok {
 		snapshot := runStateSnapshot(state)
-		// Merge lifecycle data into existing state instead of replacing
-		// the entire map, so that unrelated state keys are preserved.
-		existing, snapErr := r.store.SnapshotState(ctx, sess)
-		if snapErr != nil {
-			return yield(nil, fmt.Errorf("lifecycle state merge: failed to read existing state: %w", snapErr))
-		}
-		if existing == nil {
-			existing = map[string]any{}
-		}
-		for k, v := range snapshot {
-			existing[k] = v
-		}
-		if err := r.store.ReplaceState(ctx, sess, existing); err != nil {
-			return yield(nil, err)
+		if updater, ok := r.store.(session.StateUpdateStore); ok {
+			if err := updater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
+				if existing == nil {
+					existing = map[string]any{}
+				}
+				for k, v := range snapshot {
+					existing[k] = v
+				}
+				return existing, nil
+			}); err != nil {
+				return yield(nil, fmt.Errorf("lifecycle state merge: failed to update state: %w", err))
+			}
+		} else {
+			// Merge lifecycle data into existing state instead of replacing
+			// the entire map, so that unrelated state keys are preserved.
+			existing, snapErr := r.store.SnapshotState(ctx, sess)
+			if snapErr != nil {
+				return yield(nil, fmt.Errorf("lifecycle state merge: failed to read existing state: %w", snapErr))
+			}
+			if existing == nil {
+				existing = map[string]any{}
+			}
+			for k, v := range snapshot {
+				existing[k] = v
+			}
+			if err := r.store.ReplaceState(ctx, sess, existing); err != nil {
+				return yield(nil, err)
+			}
 		}
 	}
 	if !yield(ev, nil) {

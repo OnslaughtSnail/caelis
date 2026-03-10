@@ -325,6 +325,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		if m.running {
+			m.clearInputOverlays()
 			if _, ok := m.popPendingPrompt(); ok {
 				m.hint = ""
 				return m, nil
@@ -334,14 +335,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		m.clearMention()
-		m.clearSkill()
-		m.clearResume()
-		m.clearSlashArg()
-		m.clearSlashCompletion()
-		if m.showPalette {
-			m.showPalette = false
-		}
+		m.clearInputOverlays()
 		return m, nil
 
 	case "up":
@@ -427,6 +421,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.enqueuePendingPrompt(line, line)
 			return m, nil
 		}
+		if (line == "/connect" || strings.HasPrefix(line, "/connect ")) && m.findWizard("connect") == nil {
+			return m.submitLine("/connect")
+		}
 		if m.tryOpenSlashArgPicker(line) {
 			return m, nil
 		}
@@ -438,11 +435,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.adjustTextareaHeight()
 		m.input = m.input[:0]
 		m.cursor = 0
-		m.clearMention()
-		m.clearSkill()
-		m.clearResume()
-		m.clearSlashArg()
-		m.clearSlashCompletion()
+		m.clearInputOverlays()
 		return m, nil
 
 	case "ctrl+v":
@@ -491,11 +484,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(msg.Runes) > 0 || msg.String() == "backspace" || msg.String() == "delete" {
 			m.refreshMention()
 			m.refreshSkill()
-			if m.resumeActive {
-				m.updateResumeCandidates()
-			}
-			if m.slashArgActive {
-				m.updateSlashArgCandidates()
+			if m.isWizardActive() {
+				if m.resumeActive {
+					m.updateResumeCandidates()
+				}
+				if m.slashArgActive {
+					m.updateSlashArgCandidates()
+				}
+			} else {
+				m.syncSlashInputOverlays()
 			}
 			m.refreshSlashCommands()
 		}
@@ -532,11 +529,7 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 	m.adjustTextareaHeight()
 	m.input = m.input[:0]
 	m.cursor = 0
-	m.clearMention()
-	m.clearSkill()
-	m.clearResume()
-	m.clearSlashArg()
-	m.clearSlashCompletion()
+	m.clearInputOverlays()
 
 	m.running = true
 	m.runStartedAt = time.Now()
@@ -637,11 +630,7 @@ func (m *Model) enqueuePendingPrompt(execLine string, displayLine string) {
 	m.cursor = 0
 	m.historyIndex = -1
 	m.historyDraft = ""
-	m.clearMention()
-	m.clearSkill()
-	m.clearResume()
-	m.clearSlashArg()
-	m.clearSlashCompletion()
+	m.clearInputOverlays()
 }
 
 func (m *Model) dequeuePendingPrompt() (pendingPrompt, bool) {
@@ -678,7 +667,7 @@ func (m *Model) tryOpenSlashArgPicker(line string) bool {
 			return m.slashArgActive
 		}
 		switch text {
-		case "/sandbox", "/permission":
+		case "/model", "/sandbox", "/permission":
 			m.openSlashArgPicker(cmd)
 			return len(m.slashArgCandidates) > 0
 		}

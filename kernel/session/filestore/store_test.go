@@ -2,9 +2,11 @@ package filestore
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -156,6 +158,116 @@ func TestStore_ReplaceState_RoundTrip(t *testing.T) {
 	}
 	if lifecycle["status"] != "completed" {
 		t.Fatalf("unexpected lifecycle status %+v", lifecycle)
+	}
+}
+
+func TestStore_ReplaceState_IsAtomicAcrossStoreInstances(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	storeA, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{AppName: "app", UserID: "u", ID: "s-atomic"}
+	if _, err := storeA.GetOrCreate(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 32
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			store := storeA
+			if i%2 == 1 {
+				store = storeB
+			}
+			if err := store.ReplaceState(context.Background(), s, map[string]any{
+				"writer": i,
+				"acp": map[string]any{
+					"modeId": "default",
+				},
+			}); err != nil {
+				t.Errorf("replace state %d: %v", i, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	statePath := filepath.Join(root, "app", "u", "s-atomic", "state.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("expected valid json after concurrent writes, got %v: %s", err, string(raw))
+	}
+	if _, ok := got["writer"]; !ok {
+		t.Fatalf("expected final state to include writer marker, got %+v", got)
+	}
+}
+
+func TestStore_UpdateState_PreservesConcurrentIndependentKeys(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	storeA, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeB, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session.Session{AppName: "app", UserID: "u", ID: "s-update"}
+	if _, err := storeA.GetOrCreate(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := storeA.UpdateState(context.Background(), s, func(values map[string]any) (map[string]any, error) {
+			values["session_mode"] = "full_access"
+			return values, nil
+		}); err != nil {
+			t.Errorf("update session_mode: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := storeB.UpdateState(context.Background(), s, func(values map[string]any) (map[string]any, error) {
+			values["acp"] = map[string]any{
+				"configValues": map[string]any{
+					"thinking_mode": "off",
+				},
+			}
+			return values, nil
+		}); err != nil {
+			t.Errorf("update acp config: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	got, err := storeA.SnapshotState(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["session_mode"] != "full_access" {
+		t.Fatalf("expected session_mode to be preserved, got %+v", got)
+	}
+	acp, ok := got["acp"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected acp map, got %+v", got["acp"])
+	}
+	configValues, ok := acp["configValues"].(map[string]any)
+	if !ok || configValues["thinking_mode"] != "off" {
+		t.Fatalf("expected thinking_mode to be preserved, got %+v", acp)
 	}
 }
 

@@ -83,7 +83,7 @@ var providerTemplates = []providerTemplate{
 		api:                 modelproviders.APIDeepSeek,
 		provider:            "deepseek",
 		defaultBaseURL:      "https://api.deepseek.com/v1",
-		defaultContextToken: 64000,
+		defaultContextToken: 128000,
 		commonModels:        []string{"deepseek-chat", "deepseek-reasoner"},
 	},
 	{
@@ -91,7 +91,7 @@ var providerTemplates = []providerTemplate{
 		api:                 modelproviders.APIOpenAICompatible,
 		provider:            "xiaomi",
 		defaultBaseURL:      "https://api.xiaomimimo.com/v1",
-		defaultContextToken: 64000,
+		defaultContextToken: 128000,
 		commonModels:        []string{"mimo-v2-flash", "mimo-v2-reasoner"},
 	},
 	{
@@ -176,18 +176,18 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 		c.ui.Warn("list_models failed: %v\n", discoverErr)
 	}
 
-	choices := buildConnectModelChoices(tpl.provider, remoteModels)
-	if len(choices) == 0 {
-		choices = append(choices, connectModelChoice{
-			Name:    connectCustomModelValue,
-			Display: "输入自定义模型名",
-			Detail:  "provider 未返回模型目录，手动输入",
-		})
-	}
-
-	modelNames, err := promptConnectModelChoices(c, tpl.provider, choices)
-	if err != nil {
-		return false, err
+	var modelNames []string
+	if len(remoteModels) == 0 {
+		modelNames, err = promptConnectManualModelNames(c, tpl.provider)
+		if err != nil {
+			return false, err
+		}
+	} else {
+		choices := buildConnectModelChoices(tpl.provider, remoteModels)
+		modelNames, err = promptConnectModelChoices(c, tpl.provider, choices)
+		if err != nil {
+			return false, err
+		}
 	}
 	selected := make([]connectModelSelection, 0, len(modelNames))
 	for _, modelName := range modelNames {
@@ -239,9 +239,6 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	for _, selection := range selected {
 		c.ui.Success("Connected: %s\n", selection.cfg.Alias)
 	}
-	if c.credentialStore != nil {
-		c.ui.Note("api_key 已保存到本地凭据库，config 仅保存 credential_ref。\n")
-	}
 	return false, nil
 }
 
@@ -271,7 +268,11 @@ func promptProviderTemplate(c *cliConsole) (providerTemplate, error) {
 
 func buildConnectModelChoices(provider string, remoteModels []modelproviders.RemoteModel) []connectModelChoice {
 	seen := map[string]struct{}{}
-	out := make([]connectModelChoice, 0, len(remoteModels)+16)
+	out := []connectModelChoice{{
+		Name:    connectCustomModelValue,
+		Display: "输入自定义模型名",
+		Detail:  "手动输入 model 或 provider/model",
+	}}
 	add := func(name string, detail string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -291,21 +292,40 @@ func buildConnectModelChoices(provider string, remoteModels []modelproviders.Rem
 	for _, item := range remoteModels {
 		add(item.Name, describeRemoteModelDetail(item))
 	}
-	for _, name := range listProviderCatalogModels(provider) {
-		add(name, "")
-	}
-	for _, name := range commonModelsForProvider(provider) {
-		add(name, "")
-	}
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Name == connectCustomModelValue {
+			return true
+		}
+		if out[j].Name == connectCustomModelValue {
+			return false
+		}
 		return strings.ToLower(out[i].Display) < strings.ToLower(out[j].Display)
 	})
-	out = append(out, connectModelChoice{
-		Name:    connectCustomModelValue,
-		Display: "输入自定义模型名",
-		Detail:  "手动输入 provider/model",
-	})
 	return out
+}
+
+func promptConnectManualModelNames(c *cliConsole, provider string) ([]string, error) {
+	raw, err := c.promptText("model", "", false)
+	if err != nil {
+		return nil, err
+	}
+	parts := splitArrayInput(raw)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("model is required")
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name, normalizeErr := normalizeConnectModelName(provider, part)
+		if normalizeErr != nil {
+			return nil, normalizeErr
+		}
+		out = append(out, name)
+	}
+	out = dedupeOrderedStrings(out)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("model is required")
+	}
+	return out, nil
 }
 
 func promptConnectModelChoices(c *cliConsole, provider string, choices []connectModelChoice) ([]string, error) {
@@ -324,23 +344,39 @@ func promptConnectModelChoices(c *cliConsole, provider string, choices []connect
 	out := make([]string, 0, len(values))
 	for _, value := range values {
 		if value == connectCustomModelValue {
-			customValue, err := c.promptText("model", "", false)
+			customValues, err := promptConnectManualModelNames(c, provider)
 			if err != nil {
 				return nil, err
 			}
-			customValue = strings.TrimSpace(customValue)
-			if customValue == "" {
-				return nil, fmt.Errorf("model is required")
-			}
-			out = append(out, customValue)
+			out = append(out, customValues...)
 			continue
 		}
-		out = append(out, strings.TrimSpace(value))
+		name, err := normalizeConnectModelName(provider, value)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, name)
 	}
+	out = dedupeOrderedStrings(out)
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no model selected")
 	}
 	return out, nil
+}
+
+func normalizeConnectModelName(provider string, raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", fmt.Errorf("model is required")
+	}
+	providerPrefix := strings.ToLower(strings.TrimSpace(provider)) + "/"
+	if providerPrefix != "/" && strings.HasPrefix(strings.ToLower(value), providerPrefix) {
+		value = strings.TrimSpace(value[len(providerPrefix):])
+	}
+	if value == "" {
+		return "", fmt.Errorf("model is required")
+	}
+	return value, nil
 }
 
 func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg modelproviders.Config, credentialRef string, modelName string, remote *modelproviders.RemoteModel) (connectModelSelection, error) {
@@ -349,6 +385,9 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 		return connectModelSelection{}, fmt.Errorf("model is required")
 	}
 	alias := canonicalModelRef(baseCfg.Provider, modelName)
+	if c != nil && c.configStore != nil {
+		alias = c.configStore.ResolveOrAllocateModelAlias(baseCfg.Provider, modelName, baseCfg.BaseURL)
+	}
 	if alias == "" {
 		return connectModelSelection{}, fmt.Errorf("invalid provider/model")
 	}
@@ -394,15 +433,17 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 	if contextWindow <= 0 {
 		contextWindow = defaultContextWindowForTemplate(tpl)
 	}
+	if !baseKnown {
+		maxOutput = recommendedCatalogFallbackMaxOutputTokens(contextWindow, maxOutput, caps.SupportsReasoning)
+	}
 
 	if requiresAdvanced {
-		c.ui.Note("模型 %s 缺少完整能力定义，进入补充配置。\n", alias)
 		var err error
-		contextWindow, err = promptInt(c, "context_window_tokens", contextWindow)
+		contextWindow, err = promptTokenCount(c, "context_window_tokens", contextWindow)
 		if err != nil {
 			return connectModelSelection{}, err
 		}
-		maxOutput, err = promptInt(c, "max_output_tokens", maxOutput)
+		maxOutput, err = promptTokenCount(c, "max_output_tokens", maxOutput)
 		if err != nil {
 			return connectModelSelection{}, err
 		}
@@ -440,22 +481,14 @@ func applyConnectRuntimeDefaults(c *cliConsole, cfg *modelproviders.Config) {
 	cfg.ThinkingMode = defaultThinkingMode
 	cfg.ThinkingBudget = defaultThinkingBudget
 	cfg.ReasoningEffort = defaultReasoningEffort
-	if c != nil && c.configStore != nil {
-		settings := c.configStore.ModelRuntimeSettings(cfg.Alias)
-		cfg.ThinkingMode = settings.ThinkingMode
-		cfg.ThinkingBudget = settings.ThinkingBudget
-		cfg.ReasoningEffort = settings.ReasoningEffort
-	}
-	if len(cfg.ReasoningLevels) > 0 && cfg.ThinkingMode == defaultThinkingMode && cfg.ReasoningEffort == defaultReasoningEffort {
-		profile := reasoningProfileForConfig(*cfg)
-		switch profile.Mode {
-		case reasoningModeEffort:
-			cfg.ThinkingMode = "on"
-			cfg.ReasoningEffort = profile.DefaultEffort
-		case reasoningModeToggle:
-			cfg.ThinkingMode = defaultThinkingMode
-			cfg.ReasoningEffort = defaultReasoningEffort
-		}
+	profile := reasoningProfileForConfig(*cfg)
+	switch profile.Mode {
+	case reasoningModeEffort:
+		cfg.ThinkingMode = "on"
+		cfg.ReasoningEffort = profile.DefaultEffort
+	case reasoningModeToggle:
+		cfg.ThinkingMode = "on"
+		cfg.ReasoningEffort = defaultReasoningEffort
 	}
 }
 
@@ -513,7 +546,7 @@ func defaultMaxOutputForTemplate(tpl providerTemplate) int {
 	if tpl.defaultMaxOutputTok > 0 {
 		return tpl.defaultMaxOutputTok
 	}
-	return 4096
+	return 8192
 }
 
 func parseReasoningLevelsInput(raw string) ([]string, error) {
@@ -673,9 +706,10 @@ func (c *cliConsole) promptChoice(prompt string, choices []promptChoiceItem, def
 		promptChoices := make([]tuievents.PromptChoice, 0, len(choices))
 		for _, choice := range choices {
 			promptChoices = append(promptChoices, tuievents.PromptChoice{
-				Label:  choice.Label,
-				Value:  choice.Value,
-				Detail: choice.Detail,
+				Label:         choice.Label,
+				Value:         choice.Value,
+				Detail:        choice.Detail,
+				AlwaysVisible: choice.Value == connectCustomModelValue,
 			})
 		}
 		return requester.RequestChoicePrompt(prompt, promptChoices, defaultValue, filterable)
@@ -890,6 +924,55 @@ func promptInt(c *cliConsole, name string, defaultValue int) (int, error) {
 		return 0, fmt.Errorf("invalid %s: must be >= 0", name)
 	}
 	return value, nil
+}
+
+func promptTokenCount(c *cliConsole, name string, defaultValue int) (int, error) {
+	text, err := c.promptText(name+"(k)", formatTokenCountDefault(defaultValue), false)
+	if err != nil {
+		return 0, err
+	}
+	value, err := parseTokenCountInput(text)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %q", name, text)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("invalid %s: must be >= 0", name)
+	}
+	return value, nil
+}
+
+func formatTokenCountDefault(value int) string {
+	if value <= 0 {
+		return "0"
+	}
+	if value%1024 == 0 {
+		return strconv.Itoa(value/1024) + "k"
+	}
+	return strconv.Itoa(value)
+}
+
+func parseTokenCountInput(raw string) (int, error) {
+	text := strings.ToLower(strings.TrimSpace(raw))
+	if text == "" {
+		return 0, fmt.Errorf("empty token count")
+	}
+	multiplier := 1
+	switch {
+	case strings.HasSuffix(text, "k"):
+		multiplier = 1024
+		text = strings.TrimSpace(strings.TrimSuffix(text, "k"))
+	case strings.HasSuffix(text, "m"):
+		multiplier = 1024 * 1024
+		text = strings.TrimSpace(strings.TrimSuffix(text, "m"))
+	}
+	value, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, err
+	}
+	if multiplier == 1 && value > 0 && value <= 4096 {
+		multiplier = 1024
+	}
+	return value * multiplier, nil
 }
 
 func promptIntInRange(c *cliConsole, name string, minValue, maxValue, defaultValue int) (int, error) {

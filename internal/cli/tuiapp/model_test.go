@@ -46,14 +46,31 @@ func TestResumeQueryAtCursor(t *testing.T) {
 func TestSlashArgQueryAtCursor(t *testing.T) {
 	cmd, query, ok := slashArgQueryAtCursor([]rune("/model gpt"), len([]rune("/model gpt")))
 	if !ok {
-		t.Fatal("expected slash-arg query")
+		t.Fatal("expected slash-arg query for partial /model subcommand")
 	}
 	if cmd != "model" || query != "gpt" {
-		t.Fatalf("unexpected slash-arg parse: cmd=%q query=%q", cmd, query)
+		t.Fatalf("unexpected partial model subcommand parse: cmd=%q query=%q", cmd, query)
 	}
-	_, _, ok = slashArgQueryAtCursor([]rune("/model a b"), len([]rune("/model a b")))
-	if ok {
-		t.Fatal("did not expect slash-arg query for multiple args")
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/model rm"), len([]rune("/model rm")))
+	if !ok {
+		t.Fatal("expected model subcommand query")
+	}
+	if cmd != "model" || query != "rm" {
+		t.Fatalf("unexpected model subcommand parse: cmd=%q query=%q", cmd, query)
+	}
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/model rm "), len([]rune("/model rm ")))
+	if !ok {
+		t.Fatal("expected model alias picker parse")
+	}
+	if cmd != "model rm" || query != "" {
+		t.Fatalf("unexpected model alias parse: cmd=%q query=%q", cmd, query)
+	}
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/model use mimo "), len([]rune("/model use mimo ")))
+	if !ok {
+		t.Fatal("expected model reasoning picker parse")
+	}
+	if cmd != "model use mimo" || query != "" {
+		t.Fatalf("unexpected model reasoning parse: cmd=%q query=%q", cmd, query)
 	}
 	_, _, ok = slashArgQueryAtCursor([]rune("/model"), len([]rune("/model")))
 	if ok {
@@ -76,6 +93,87 @@ func TestSlashCommandQueryAtCursor(t *testing.T) {
 	_, ok = slashCommandQueryAtCursor([]rune("/resume s-1"), len([]rune("/resume s-1")))
 	if ok {
 		t.Fatal("did not expect slash-command query with args")
+	}
+}
+
+func TestCurrentInputGhostHint_ForSlashCommand(t *testing.T) {
+	m := NewModel(Config{
+		Commands:    []string{"model", "status"},
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+	typeRunes(m, "/mo")
+	if got := m.currentInputGhostHint(); got != "del" {
+		t.Fatalf("expected ghost hint 'del', got %q", got)
+	}
+}
+
+func TestCurrentInputGhostHint_ForModelAlias(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			switch command {
+			case "model":
+				return []SlashArgCandidate{{Value: "use", Display: "use"}}, nil
+			case "model use":
+				return []SlashArgCandidate{{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"}}, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model use xia")
+	if got := m.currentInputGhostHint(); got != "omi/mimo-v2-flash" {
+		t.Fatalf("expected model alias ghost hint, got %q", got)
+	}
+}
+
+func TestCurrentInputGhostHint_ForModelActionPrefix(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			if command != "model" {
+				return nil, nil
+			}
+			return []SlashArgCandidate{{Value: "list", Display: "list"}}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model l")
+	if got := m.currentInputGhostHint(); got != "ist" {
+		t.Fatalf("expected model action ghost hint, got %q", got)
+	}
+}
+
+func TestCurrentInputGhostHint_ForResume(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+			return []ResumeCandidate{{SessionID: "s-123", Prompt: "demo", Age: "1m"}}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/resume ")
+	if got := m.currentInputGhostHint(); got != "s-123" {
+		t.Fatalf("expected resume ghost hint, got %q", got)
+	}
+}
+
+func TestRenderInputBar_ShowsGhostHintWithoutCursor(t *testing.T) {
+	m := NewModel(Config{
+		Commands:    []string{"model", "status"},
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+	typeRunes(m, "/mo")
+
+	line := m.renderInputBar()
+	if !strings.Contains(line, "/model") {
+		t.Fatalf("expected ghost completion in input bar, got %q", line)
+	}
+	if strings.Contains(line, "█") {
+		t.Fatalf("expected ghost render without cursor glyph, got %q", line)
 	}
 }
 
@@ -307,22 +405,28 @@ func TestResumeOverlayScrollWindowKeepsSelectedVisible(t *testing.T) {
 	}
 }
 
-func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
+func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
 		ExecuteLine: func(line string) tuievents.TaskResultMsg {
 			called = line
 			return tuievents.TaskResultMsg{}
 		},
-		Wizards: testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			switch {
 			case command == "model":
 				return []SlashArgCandidate{
+					{Value: "list", Display: "list"},
+					{Value: "use", Display: "use"},
+					{Value: "rm", Display: "rm"},
+					{Value: "edit", Display: "edit"},
+				}, nil
+			case command == "model use":
+				return []SlashArgCandidate{
 					{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
 					{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
 				}, nil
-			case strings.HasPrefix(command, "model-reasoning:"):
+			case command == "model use xiaomi/mimo-v2-flash":
 				return []SlashArgCandidate{
 					{Value: "off", Display: "off"},
 					{Value: "on", Display: "on"},
@@ -335,12 +439,23 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 	resizeModel(m)
 	typeRunes(m, "/model")
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if len(m.slashArgCandidates) != 2 {
-		t.Fatalf("expected 2 slash-arg candidates, got %d", len(m.slashArgCandidates))
+	if len(m.slashArgCandidates) != 4 {
+		t.Fatalf("expected 4 model action candidates, got %d", len(m.slashArgCandidates))
 	}
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if !strings.HasPrefix(m.slashArgCommand, "model-reasoning:") {
+	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
+		t.Fatalf("expected model alias step, got %q", got)
+	}
+	if len(m.slashArgCandidates) != 2 {
+		t.Fatalf("expected 2 alias candidates, got %d", len(m.slashArgCandidates))
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := strings.TrimSpace(m.textarea.Value()); got != "/model use xiaomi/mimo-v2-flash" {
+		t.Fatalf("expected alias completion in input, got %q", got)
+	}
+	if got := strings.TrimSpace(m.slashArgCommand); got != "model use xiaomi/mimo-v2-flash" {
 		t.Fatalf("expected model reasoning step, got %q", m.slashArgCommand)
 	}
 	if len(m.slashArgCandidates) != 2 {
@@ -348,8 +463,18 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 	}
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("expected no command while accepting final reasoning completion")
+	}
+	if got := strings.TrimSpace(m.textarea.Value()); got != "/model use xiaomi/mimo-v2-flash on" {
+		t.Fatalf("expected completed model command in input, got %q", got)
+	}
+	if m.slashArgActive {
+		t.Fatal("expected slash-arg overlay closed after final completion")
+	}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("expected command on slash-arg enter")
+		t.Fatal("expected command when executing completed model command")
 	}
 	batchMsg := cmd()
 	if batchMsg == nil {
@@ -359,8 +484,236 @@ func TestSlashArgOverlayEnterExecutesSelectedCandidate(t *testing.T) {
 	if !found {
 		t.Fatal("expected TaskResultMsg in batch")
 	}
-	if called != "/model xiaomi/mimo-v2-flash on" {
-		t.Fatalf("expected '/model xiaomi/mimo-v2-flash on', got %q", called)
+	if called != "/model use xiaomi/mimo-v2-flash on" {
+		t.Fatalf("expected '/model use xiaomi/mimo-v2-flash on', got %q", called)
+	}
+}
+
+func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			switch {
+			case command == "model":
+				return []SlashArgCandidate{
+					{Value: "list", Display: "list"},
+					{Value: "use", Display: "use"},
+					{Value: "rm", Display: "rm"},
+					{Value: "edit", Display: "edit"},
+				}, nil
+			case command == "model use":
+				return []SlashArgCandidate{
+					{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
+					{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
+				}, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model ")
+	if !m.slashArgActive {
+		t.Fatal("expected slash-arg wizard active after trailing space")
+	}
+	if len(m.slashArgCandidates) != 4 {
+		t.Fatalf("expected model action candidates, got %d", len(m.slashArgCandidates))
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
+		t.Fatalf("expected alias step command 'model use', got %q", got)
+	}
+	if len(m.slashArgCandidates) != 2 {
+		t.Fatalf("expected alias candidates after selecting use, got %d", len(m.slashArgCandidates))
+	}
+}
+
+func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			switch command {
+			case "model":
+				return []SlashArgCandidate{
+					{Value: "list", Display: "list"},
+					{Value: "use", Display: "use"},
+					{Value: "rm", Display: "rm"},
+					{Value: "edit", Display: "edit"},
+				}, nil
+			case "model use":
+				return []SlashArgCandidate{
+					{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
+					{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
+				}, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model use ")
+	if !m.slashArgActive {
+		t.Fatal("expected slash-arg wizard active after typed subcommand")
+	}
+	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
+		t.Fatalf("expected alias step command 'model use', got %q", got)
+	}
+	if len(m.slashArgCandidates) != 2 {
+		t.Fatalf("expected 2 alias candidates, got %d", len(m.slashArgCandidates))
+	}
+}
+
+func TestModelListExecutesOnSingleEnterWhenAlreadyComplete(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(line)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			if command != "model" {
+				return nil, nil
+			}
+			return []SlashArgCandidate{
+				{Value: "list", Display: "list"},
+				{Value: "use", Display: "use"},
+			}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model list")
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command for exact /model list")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/model list" {
+		t.Fatalf("expected '/model list', got %q", called)
+	}
+}
+
+func TestModelListExecutesOnSingleEnterWhenExactQueryHasNoCandidates(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(line)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			if command != "model" {
+				return nil, nil
+			}
+			switch strings.TrimSpace(query) {
+			case "":
+				return []SlashArgCandidate{
+					{Value: "list", Display: "list"},
+					{Value: "use", Display: "use"},
+				}, nil
+			case "l":
+				return []SlashArgCandidate{{Value: "list", Display: "list"}}, nil
+			case "list":
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model list")
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command for exact /model list without candidates")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/model list" {
+		t.Fatalf("expected '/model list', got %q", called)
+	}
+}
+
+func TestModelListExecutesAfterRemovingTrailingSpaceFromCompletion(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(line)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			if command != "model" {
+				return nil, nil
+			}
+			switch strings.TrimSpace(query) {
+			case "":
+				return []SlashArgCandidate{
+					{Value: "list", Display: "list"},
+					{Value: "use", Display: "use"},
+				}, nil
+			case "l":
+				return []SlashArgCandidate{{Value: "list", Display: "list"}}, nil
+			case "list":
+				return nil, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model l")
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if got := m.textarea.Value(); got != "/model list " {
+		t.Fatalf("expected '/model list ' after tab completion, got %q", got)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if got := m.textarea.Value(); got != "/model list" {
+		t.Fatalf("expected '/model list' after removing trailing space, got %q", got)
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command after removing trailing completion space")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/model list" {
+		t.Fatalf("expected '/model list', got %q", called)
+	}
+}
+
+func TestModelRmExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(line)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			if command != "model rm" {
+				return nil, nil
+			}
+			return []SlashArgCandidate{{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"}}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model rm xiaomi/mimo-v2-flash")
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command for exact /model rm alias")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/model rm xiaomi/mimo-v2-flash" {
+		t.Fatalf("expected '/model rm xiaomi/mimo-v2-flash', got %q", called)
 	}
 }
 
@@ -547,7 +900,7 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 			case "connect-context:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-custom":
 				return []SlashArgCandidate{{Value: "128000", Display: "128000"}}, nil
 			case "connect-maxout:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-custom":
-				return []SlashArgCandidate{{Value: "4096", Display: "4096"}}, nil
+				return []SlashArgCandidate{{Value: "32768", Display: "32768"}}, nil
 			case "connect-reasoning-levels:openai|https%3A%2F%2Fapi.openai.com%2Fv1|60|sk-test|gpt-custom":
 				return []SlashArgCandidate{{Value: "-", Display: "(empty, unknown support)"}}, nil
 			default:
@@ -594,7 +947,7 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 	if !findAndRunTaskResult(batchMsg, m) {
 		t.Fatal("expected TaskResultMsg in batch")
 	}
-	if called != "/connect openai gpt-custom https://api.openai.com/v1 60 sk-test 128000 4096 -" {
+	if called != "/connect openai gpt-custom https://api.openai.com/v1 60 sk-test 128000 32768 -" {
 		t.Fatalf("unexpected connect command %q", called)
 	}
 }
@@ -844,12 +1197,17 @@ func TestSlashCommandListAppearsOnSlashInput(t *testing.T) {
 	}
 }
 
-func TestSpecialSlashCommandsDoNotAutoOpenArgPickerWhileTyping(t *testing.T) {
+func TestSlashCommandsAutoOpenRelevantPickers(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"model", "resume", "connect"},
 		ExecuteLine: noopExecute,
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			return []SlashArgCandidate{{Value: "x", Display: "x"}}, nil
+			switch command {
+			case "model":
+				return []SlashArgCandidate{{Value: "use", Display: "use"}}, nil
+			default:
+				return nil, nil
+			}
 		},
 		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
 			return []ResumeCandidate{{SessionID: "s-1", Prompt: "p", Age: "1m"}}, nil
@@ -857,14 +1215,48 @@ func TestSpecialSlashCommandsDoNotAutoOpenArgPickerWhileTyping(t *testing.T) {
 	})
 	resizeModel(m)
 	typeRunes(m, "/model ")
-	if len(m.slashArgCandidates) != 0 {
-		t.Fatalf("expected no auto slash-arg picker, got %d", len(m.slashArgCandidates))
+	if len(m.slashArgCandidates) == 0 {
+		t.Fatal("expected model picker to auto-open on trailing space")
 	}
 	m.textarea.SetValue("")
 	m.syncInputFromTextarea()
+	m.clearInputOverlays()
+	typeRunes(m, "/connect ")
+	if len(m.slashArgCandidates) != 0 {
+		t.Fatal("did not expect connect to open slash-arg picker while typing")
+	}
+	m.textarea.SetValue("")
+	m.syncInputFromTextarea()
+	m.clearInputOverlays()
 	typeRunes(m, "/resume ")
-	if len(m.resumeCandidates) != 0 {
-		t.Fatalf("expected no auto resume picker, got %d", len(m.resumeCandidates))
+	if len(m.resumeCandidates) == 0 {
+		t.Fatal("expected resume picker to auto-open on trailing space")
+	}
+}
+
+func TestConnectEnterNormalizesToInteractiveCommand(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = line
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/connect openai-compatible")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command for /connect enter")
+	}
+	msg := cmd()
+	if msg == nil {
+		t.Fatal("expected non-nil batch message")
+	}
+	if !findAndRunTaskResult(msg, m) {
+		t.Fatal("expected TaskResultMsg in batch")
+	}
+	if called != "/connect" {
+		t.Fatalf("expected normalized '/connect', got %q", called)
 	}
 }
 
@@ -903,14 +1295,13 @@ func TestSlashCommandEnterOpensModelPicker(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"model", "status"},
 		ExecuteLine: noopExecute,
-		Wizards:     testWizards(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			if command != "model" {
 				return nil, nil
 			}
 			return []SlashArgCandidate{
-				{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
-				{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
+				{Value: "list", Display: "list"},
+				{Value: "use", Display: "use"},
 			}, nil
 		},
 	})
@@ -1429,6 +1820,72 @@ func TestPromptChoiceRequestSupportsMultiSelect(t *testing.T) {
 	case resp := <-respCh:
 		if resp.Line != "gpt-4o,o3" {
 			t.Fatalf("unexpected multi-select response %q", resp.Line)
+		}
+	default:
+		t.Fatal("expected prompt response after enter")
+	}
+}
+
+func TestPromptChoiceRequestKeepsAlwaysVisibleChoiceWhenFilterMisses(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Select model",
+		Choices: []tuievents.PromptChoice{
+			{Label: "openai/gpt-4o", Value: "gpt-4o"},
+			{Label: "输入自定义模型名", Value: "__custom_model__", AlwaysVisible: true},
+		},
+		Filterable:  true,
+		MultiSelect: true,
+		Response:    respCh,
+	})
+
+	_, _ = m.Update(tea.KeyMsg{Runes: []rune("doubao-seed-2-0-code")})
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "输入自定义模型名") {
+		t.Fatalf("expected always visible custom choice in prompt, got %q", view)
+	}
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case resp := <-respCh:
+		if resp.Err != nil {
+			t.Fatalf("expected successful prompt response, got err=%v", resp.Err)
+		}
+		if resp.Line != "__custom_model__" {
+			t.Fatalf("expected custom choice selected, got %q", resp.Line)
+		}
+	default:
+		t.Fatal("expected prompt response after enter")
+	}
+}
+
+func TestPromptChoiceRequestWithCustomChoiceUsesCustomOnEmptyEnter(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Select model",
+		Choices: []tuievents.PromptChoice{
+			{Label: "openai/gpt-4o", Value: "gpt-4o"},
+			{Label: "输入自定义模型名", Value: "__custom_model__", AlwaysVisible: true},
+		},
+		Filterable:  true,
+		MultiSelect: true,
+		Response:    respCh,
+	})
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case resp := <-respCh:
+		if resp.Err != nil {
+			t.Fatalf("expected successful prompt response, got err=%v", resp.Err)
+		}
+		if resp.Line != "__custom_model__" {
+			t.Fatalf("expected custom choice selected on empty enter, got %q", resp.Line)
 		}
 	default:
 		t.Fatal("expected prompt response after enter")
@@ -2196,7 +2653,86 @@ func TestEnterSlashWhileRunningDoesNotQueue(t *testing.T) {
 	}
 }
 
+func TestTaskResultClearsHiddenSlashArgState(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.slashArgActive = true
+	m.slashArgCommand = ""
+
+	_, _ = m.Update(tuievents.TaskResultMsg{Err: noopError("execution interrupted")})
+
+	if m.slashArgActive {
+		t.Fatal("expected stale slash arg state to be cleared after task result")
+	}
+}
+
+func TestInterruptedTaskResultDropsPartialAssistantOutput(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "partial answer", Final: false})
+	if m.assistantBlock == nil {
+		t.Fatal("expected partial assistant block before interrupt")
+	}
+
+	_, _ = m.Update(tuievents.TaskResultMsg{Interrupted: true})
+
+	if m.assistantBlock != nil {
+		t.Fatal("expected assistant block cleared after interrupt")
+	}
+	if strings.Contains(strings.Join(m.historyLines, "\n"), "partial answer") {
+		t.Fatalf("expected partial answer removed after interrupt, got %#v", m.historyLines)
+	}
+}
+
+func TestEscInterruptThenEnterSubmitsNewMessage(t *testing.T) {
+	var interrupted bool
+	var called []string
+	m := NewModel(Config{
+		CancelRunning: func() bool {
+			interrupted = true
+			return true
+		},
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = append(called, strings.TrimSpace(line))
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+	m.running = true
+	m.slashArgActive = true
+	m.slashArgCommand = ""
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if !interrupted {
+		t.Fatal("expected running task to be interrupted")
+	}
+
+	_, _ = m.Update(tuievents.TaskResultMsg{Interrupted: true})
+	typeRunes(m, "follow-up")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected follow-up submit command after interrupt")
+	}
+	msg := cmd()
+	if msg == nil {
+		t.Fatal("expected non-nil submit result")
+	}
+	if !findAndRunTaskResult(msg, m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if len(called) != 1 || called[0] != "follow-up" {
+		t.Fatalf("expected follow-up prompt to execute, got %+v", called)
+	}
+}
+
 func noopCancelRunning() bool { return true }
+
+type noopError string
+
+func (e noopError) Error() string { return string(e) }
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2718,32 +3254,6 @@ func buildConnectWizardPayloadForTest(state map[string]string) string {
 		"|" + url.QueryEscape(state["model"])
 }
 
-func testModelWizard() WizardDef {
-	return WizardDef{
-		Command: "model",
-		Steps: []WizardStepDef{
-			{
-				Key:       "alias",
-				HintLabel: "/model",
-				CompletionCommand: func(_ map[string]string) string {
-					return "model"
-				},
-			},
-			{
-				Key:          "reasoning",
-				HintLabel:    "/model reasoning",
-				FreeformHint: "/model reasoning: type option and press enter",
-				CompletionCommand: func(s map[string]string) string {
-					return "model-reasoning:" + url.QueryEscape(strings.ToLower(strings.TrimSpace(s["alias"])))
-				},
-			},
-		},
-		BuildExecLine: func(s map[string]string) string {
-			return "/model " + s["alias"] + " " + s["reasoning"]
-		},
-	}
-}
-
 func testWizards() []WizardDef {
-	return []WizardDef{testConnectWizard(), testModelWizard()}
+	return []WizardDef{testConnectWizard()}
 }

@@ -39,6 +39,7 @@ type landlockRunner struct {
 	probe          func() error
 	goos           string
 	policy         SandboxPolicy
+	sessionManager *SessionManager
 }
 
 func newLandlockRunner(policy SandboxPolicy, helperPath string) CommandRunner {
@@ -49,6 +50,7 @@ func newLandlockRunner(policy SandboxPolicy, helperPath string) CommandRunner {
 		probe:          probeLandlockSupport,
 		goos:           stdruntime.GOOS,
 		policy:         policy,
+		sessionManager: NewSessionManager(DefaultSessionManagerConfig()),
 	}
 }
 
@@ -133,12 +135,91 @@ func (l *landlockRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 		}
 		return result, NewCodedError(
 			ErrorCodeSandboxIdleTimeout,
-			"tool: landlock sandbox command produced no output for %s and was terminated (likely interactive/long-running; try larger idle_timeout_ms); %s",
+			"tool: landlock sandbox command produced no output for %s and was terminated (likely interactive or long-running); %s",
 			label,
 			commandOutputSummary(result),
 		)
 	}
 	return result, fmt.Errorf("tool: landlock sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
+}
+
+func (l *landlockRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+	if req.TTY {
+		return "", fmt.Errorf("tool: landlock async tty is not supported")
+	}
+	policyCWD, err := resolveHostWorkDir(req.Dir)
+	if err != nil {
+		return "", fmt.Errorf("tool: resolve landlock workdir failed: %w", err)
+	}
+	exePath, err := l.resolveHelperPath()
+	if err != nil {
+		return "", fmt.Errorf("tool: resolve landlock helper path failed: %w", err)
+	}
+	session, err := l.sessionManager.StartSession(AsyncSessionConfig{
+		Command:         req.Command,
+		Dir:             req.Dir,
+		OutputBufferCap: 256 * 1024,
+		Timeout:         req.Timeout,
+		IdleTimeout:     req.IdleTimeout,
+		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
+			helperArgs, err := buildLandlockHelperArgs(l.policy, policyCWD, policyCWD, cfg.Command)
+			if err != nil {
+				return nil, err
+			}
+			cmd := l.execCommand(ctx, exePath, helperArgs...)
+			cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+			return cmd, nil
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return session.ID, nil
+}
+
+func (l *landlockRunner) WriteInput(sessionID string, input []byte) error {
+	return l.sessionManager.WriteInput(sessionID, input)
+}
+
+func (l *landlockRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	return l.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+}
+
+func (l *landlockRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
+	return l.sessionManager.GetSessionStatus(sessionID)
+}
+
+func (l *landlockRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	exitCode, err := l.sessionManager.WaitSession(waitCtx, sessionID)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	result, err := l.sessionManager.GetResult(sessionID)
+	if err != nil {
+		return CommandResult{ExitCode: exitCode}, nil
+	}
+	return result, nil
+}
+
+func (l *landlockRunner) TerminateSession(sessionID string) error {
+	return l.sessionManager.TerminateSession(sessionID)
+}
+
+func (l *landlockRunner) ListSessions() []SessionInfo {
+	return l.sessionManager.ListSessions()
+}
+
+func (l *landlockRunner) Close() error {
+	if l.sessionManager != nil {
+		return l.sessionManager.Close()
+	}
+	return nil
 }
 
 func buildLandlockHelperArgs(policy SandboxPolicy, policyCWD, commandCWD, command string) ([]string, error) {

@@ -43,6 +43,10 @@ func modelcatalogApplyConfigDefaults(cfg *modelproviders.Config) {
 	modelcatalog.ApplyConfigDefaults(cfg)
 }
 
+func recommendedCatalogFallbackMaxOutputTokens(contextWindow int, suggested int, supportsReasoning bool) int {
+	return modelcatalog.RecommendedFallbackMaxOutputTokens(contextWindow, suggested, supportsReasoning)
+}
+
 func normalizeCatalogReasoningEffort(effort string) string {
 	return modelcatalog.NormalizeReasoningEffort(effort)
 }

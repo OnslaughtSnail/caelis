@@ -79,6 +79,9 @@ func TestLookupModelCapabilities_UnknownModel(t *testing.T) {
 	if caps.ContextWindowTokens != defaults.ContextWindowTokens {
 		t.Fatalf("expected default context %d, got %d", defaults.ContextWindowTokens, caps.ContextWindowTokens)
 	}
+	if caps.DefaultMaxOutputTokens != defaults.DefaultMaxOutputTokens {
+		t.Fatalf("expected default max output %d, got %d", defaults.DefaultMaxOutputTokens, caps.DefaultMaxOutputTokens)
+	}
 }
 
 func TestLookupModelCapabilities_CaseInsensitive(t *testing.T) {
@@ -174,6 +177,18 @@ func TestApplyConfigDefaults_UnknownModelGetsDefaults(t *testing.T) {
 	}
 	if cfg.MaxOutputTok != defaults.DefaultMaxOutputTokens {
 		t.Fatalf("expected default max_output %d, got %d", defaults.DefaultMaxOutputTokens, cfg.MaxOutputTok)
+	}
+}
+
+func TestApplyConfigDefaults_UnknownModelCapsDefaultOutputByContext(t *testing.T) {
+	cfg := &modelproviders.Config{
+		Provider:            "some-provider",
+		Model:               "unknown-model",
+		ContextWindowTokens: 16000,
+	}
+	ApplyConfigDefaults(cfg)
+	if cfg.MaxOutputTok != 2000 {
+		t.Fatalf("expected max_output capped to context/8 = 2000, got %d", cfg.MaxOutputTok)
 	}
 }
 

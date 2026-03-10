@@ -262,29 +262,30 @@ func entryToCaps(e capEntry) ModelCapabilities {
 		SupportsJSONOutput:     e.JSONOutput,
 	}
 	normalizeModelCapabilitiesReasoning(&caps)
-	if caps.DefaultMaxOutputTokens <= 0 {
-		caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.SupportsReasoning)
+		if caps.DefaultMaxOutputTokens <= 0 {
+			caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.ContextWindowTokens, caps.SupportsReasoning)
+		}
+		return caps
 	}
-	return caps
-}
 
 // defaultMaxOutputHeuristic applies a conservative default when
 // DefaultMaxOutputTokens is not explicitly specified in the source data.
-func defaultMaxOutputHeuristic(maxOut int, reasoning bool) int {
+func defaultMaxOutputHeuristic(maxOut int, contextWindow int, reasoning bool) int {
 	if maxOut <= 0 {
-		return 4096
+		return conservativeDefaultMaxOutputTokens(contextWindow, reasoning)
 	}
+	base := maxOut
 	if reasoning {
 		// Reasoning models often need more output headroom.
-		if maxOut >= 32768 {
-			return 32768
+		if base >= 32768 {
+			base = 32768
 		}
-		return maxOut
+		return capSuggestedDefaultMaxOutput(contextWindow, base, true)
 	}
-	if maxOut <= 8192 {
-		return maxOut
+	if base > 8192 {
+		base = 8192
 	}
-	return 8192
+	return capSuggestedDefaultMaxOutput(contextWindow, base, false)
 }
 
 // ---------------------------------------------------------------------------

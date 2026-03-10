@@ -98,10 +98,14 @@ Approval UX in interactive CLI:
 - On cancel, current agent run stops immediately and control returns to the user prompt.
 
 BASH timeout behavior:
-- BASH tool has a default timeout of `90s` for host and sandbox execution.
-- BASH tool has a default no-output timeout of `45s` (idle timeout) to stop interactive/long-running commands that stop producing output.
-- Optional tool args `timeout_ms` and `idle_timeout_ms` can override per call.
-- For commands that may start interactive loops (`go run ...`, `npm start`, etc), prefer one-shot/non-interactive flags and set explicit `timeout_ms`.
+- BASH tool has a default timeout of `30m` for direct foreground execution.
+- BASH tool has no default idle timeout; long-running commands are expected to use async task flow rather than be killed for silence alone.
+- `yield_time_ms` now controls foreground vs async behavior:
+  - omitted: wait briefly (`5s`) and return a `task_id` if still running
+  - `0`: return a `task_id` immediately
+  - `-1`: force synchronous foreground execution until completion
+- When `tty=true` and `yield_time_ms` is omitted, BASH waits briefly (`1200ms`) and then returns a `task_id` so `TASK write` can continue the interactive session.
+- Per-call `timeout_ms` and `idle_timeout_ms` overrides were removed from the BASH tool schema.
 - Host/sandbox execution enforces non-interactive environment defaults (`CI=1`, `TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `PAGER=cat`, `NO_COLOR=1`).
 
 System prompt pipeline order (high -> low):

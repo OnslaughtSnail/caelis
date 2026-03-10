@@ -11,10 +11,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
-func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceDir string, caps ClientCapabilities) toolexec.Runtime {
+func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceDir string, caps ClientCapabilities, modeResolver func() string) toolexec.Runtime {
 	if base == nil {
 		return nil
 	}
@@ -27,36 +28,84 @@ func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceDir strin
 	}
 	hostRunner := base.HostRunner()
 	sandboxRunner := base.SandboxRunner()
-	if caps.Terminal {
-		asyncRunner := NewAsyncCommandRunner(conn, sessionID)
-		hostRunner = asyncRunner
-		sandboxRunner = asyncRunner
+	var terminalRunner toolexec.AsyncCommandRunner
+	if caps.Terminal && conn != nil && base.PermissionMode() != toolexec.PermissionModeFullControl {
+		terminalRunner = NewAsyncCommandRunner(conn, sessionID)
 	}
 	return &runtimeBridge{
-		base:          base,
-		fileSystem:    fileSystem,
-		hostRunner:    hostRunner,
-		sandboxRunner: sandboxRunner,
+		base:           base,
+		fileSystem:     fileSystem,
+		hostRunner:     hostRunner,
+		sandboxRunner:  sandboxRunner,
+		terminalRunner: terminalRunner,
+		modeResolver:   modeResolver,
 	}
 }
 
 type runtimeBridge struct {
-	base          toolexec.Runtime
-	fileSystem    toolexec.FileSystem
-	hostRunner    toolexec.CommandRunner
-	sandboxRunner toolexec.CommandRunner
+	base           toolexec.Runtime
+	fileSystem     toolexec.FileSystem
+	hostRunner     toolexec.CommandRunner
+	sandboxRunner  toolexec.CommandRunner
+	terminalRunner toolexec.AsyncCommandRunner
+	modeResolver   func() string
 }
 
-func (r *runtimeBridge) PermissionMode() toolexec.PermissionMode { return r.base.PermissionMode() }
-func (r *runtimeBridge) SandboxType() string                     { return r.base.SandboxType() }
-func (r *runtimeBridge) SandboxPolicy() toolexec.SandboxPolicy   { return r.base.SandboxPolicy() }
-func (r *runtimeBridge) FallbackToHost() bool                    { return r.base.FallbackToHost() }
-func (r *runtimeBridge) FallbackReason() string                  { return r.base.FallbackReason() }
-func (r *runtimeBridge) FileSystem() toolexec.FileSystem         { return r.fileSystem }
-func (r *runtimeBridge) HostRunner() toolexec.CommandRunner      { return r.hostRunner }
-func (r *runtimeBridge) SandboxRunner() toolexec.CommandRunner   { return r.sandboxRunner }
+func (r *runtimeBridge) PermissionMode() toolexec.PermissionMode {
+	if r == nil {
+		return toolexec.PermissionModeDefault
+	}
+	if r.base != nil && r.base.PermissionMode() == toolexec.PermissionModeFullControl {
+		return toolexec.PermissionModeFullControl
+	}
+	if r.modeResolver != nil && sessionmode.PermissionMode(r.modeResolver()) == toolexec.PermissionModeFullControl {
+		return toolexec.PermissionModeFullControl
+	}
+	return r.base.PermissionMode()
+}
+func (r *runtimeBridge) SandboxType() string { return r.base.SandboxType() }
+func (r *runtimeBridge) SandboxPolicy() toolexec.SandboxPolicy {
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return toolexec.SandboxPolicy{
+			Type:          toolexec.SandboxPolicyDangerFull,
+			NetworkAccess: true,
+		}
+	}
+	return r.base.SandboxPolicy()
+}
+func (r *runtimeBridge) FallbackToHost() bool {
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return false
+	}
+	return r.base.FallbackToHost()
+}
+func (r *runtimeBridge) FallbackReason() string {
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return ""
+	}
+	return r.base.FallbackReason()
+}
+func (r *runtimeBridge) FileSystem() toolexec.FileSystem { return r.fileSystem }
+func (r *runtimeBridge) HostRunner() toolexec.CommandRunner {
+	if r.terminalRunner != nil {
+		return r.terminalRunner
+	}
+	return r.hostRunner
+}
+func (r *runtimeBridge) SandboxRunner() toolexec.CommandRunner {
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return r.HostRunner()
+	}
+	if r.terminalRunner != nil {
+		return r.terminalRunner
+	}
+	return r.sandboxRunner
+}
 
 func (r *runtimeBridge) DecideRoute(command string, sandboxPermission toolexec.SandboxPermission) toolexec.CommandDecision {
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return toolexec.CommandDecision{Route: toolexec.ExecutionRouteHost}
+	}
 	if sandboxPermission == toolexec.SandboxPermissionRequireEscalated {
 		return r.base.DecideRoute(command, sandboxPermission)
 	}
@@ -83,7 +132,7 @@ func (f *clientFileSystem) WalkDir(root string, fn fs.WalkDirFunc) error {
 }
 
 func (f *clientFileSystem) Open(path string) (*os.File, error) {
-	if !f.caps.FS.ReadTextFile {
+	if !f.useClientReadFS() {
 		return f.base.Open(path)
 	}
 	data, err := f.ReadFile(path)
@@ -109,7 +158,7 @@ func (f *clientFileSystem) Open(path string) (*os.File, error) {
 }
 
 func (f *clientFileSystem) ReadFile(path string) ([]byte, error) {
-	if !f.caps.FS.ReadTextFile {
+	if !f.useClientReadFS() {
 		return f.base.ReadFile(path)
 	}
 	var resp ReadTextFileResponse
@@ -124,7 +173,7 @@ func (f *clientFileSystem) ReadFile(path string) ([]byte, error) {
 
 func (f *clientFileSystem) WriteFile(path string, data []byte, perm os.FileMode) error {
 	_ = perm
-	if !f.caps.FS.WriteTextFile {
+	if !f.useClientWriteFS() {
 		return f.base.WriteFile(path, data, perm)
 	}
 	return f.conn.Call(context.Background(), MethodWriteTextFile, WriteTextFileRequest{
@@ -132,6 +181,14 @@ func (f *clientFileSystem) WriteFile(path string, data []byte, perm os.FileMode)
 		Path:      path,
 		Content:   string(data),
 	}, nil)
+}
+
+func (f *clientFileSystem) useClientReadFS() bool {
+	return f != nil && f.conn != nil && f.caps.FS.ReadTextFile
+}
+
+func (f *clientFileSystem) useClientWriteFS() bool {
+	return f != nil && f.conn != nil && f.caps.FS.WriteTextFile
 }
 
 type clientCommandRunner struct {

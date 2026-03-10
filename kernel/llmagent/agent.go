@@ -166,7 +166,7 @@ func (a *Agent) generateTurnResponse(
 		return nil
 	})
 	if err != nil {
-		if interrupted := interruptedResponseError(err); interrupted != nil {
+		if interrupted := interruptedResponseError(err); interrupted != nil && !shouldSuppressInterruptedResponseWarning(interrupted) {
 			ev := &session.Event{
 				ID:   newEventID(),
 				Time: time.Now(),
@@ -278,13 +278,13 @@ func (a *Agent) executeToolCall(
 			return fmt.Errorf("llmagent: invalid tool call %q arguments: %w", call.Name, argErr)
 		}
 		sig := toolArgParseErrorSignature(call)
-		if sig == state.lastCallSig {
+		if duplicateGuardEnabled(call.Name, nil) && sig == state.lastCallSig {
 			state.consecutiveDupCnt++
 		} else {
 			state.lastCallSig = sig
 			state.consecutiveDupCnt = 1
 		}
-		if state.consecutiveDupCnt > 2 {
+		if duplicateGuardEnabled(call.Name, nil) && state.consecutiveDupCnt > 2 {
 			errMsg := fmt.Sprintf("duplicate tool call detected for %q", call.Name)
 			toolMsg := model.Message{
 				Role: model.RoleTool,
@@ -322,13 +322,13 @@ func (a *Agent) executeToolCall(
 	if sigErr != nil {
 		return sigErr
 	}
-	if sig == state.lastCallSig {
+	if duplicateGuardEnabled(call.Name, args) && sig == state.lastCallSig {
 		state.consecutiveDupCnt++
 	} else {
 		state.lastCallSig = sig
 		state.consecutiveDupCnt = 1
 	}
-	if state.consecutiveDupCnt > 2 {
+	if duplicateGuardEnabled(call.Name, args) && state.consecutiveDupCnt > 2 {
 		errMsg := fmt.Sprintf("duplicate tool call detected for %q", call.Name)
 		toolMsg := model.Message{
 			Role: model.RoleTool,
@@ -862,6 +862,13 @@ func interruptedResponseWarning(err *interruptedModelResponseError) string {
 	)
 }
 
+func shouldSuppressInterruptedResponseWarning(err *interruptedModelResponseError) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err.cause, context.Canceled) || errors.Is(err.cause, context.DeadlineExceeded)
+}
+
 func toolCallSignature(name string, args map[string]any) (string, error) {
 	norm := normalize(args)
 	raw, err := json.Marshal(norm)
@@ -869,6 +876,15 @@ func toolCallSignature(name string, args map[string]any) (string, error) {
 		return "", err
 	}
 	return name + ":" + string(raw), nil
+}
+
+func duplicateGuardEnabled(name string, args map[string]any) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "TASK":
+		return false
+	default:
+		return true
+	}
 }
 
 func normalize(input map[string]any) any {

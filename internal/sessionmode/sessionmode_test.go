@@ -1,6 +1,10 @@
 package sessionmode
 
-import "testing"
+import (
+	"testing"
+
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+)
 
 func TestInjectAndVisibleText(t *testing.T) {
 	injected := Inject("Implement the fix.", PlanMode)
@@ -9,6 +13,12 @@ func TestInjectAndVisibleText(t *testing.T) {
 	}
 	if got := VisibleText(Inject("Review the diff.", DefaultMode)); got != "Review the diff." {
 		t.Fatalf("expected default mode prompt preserved, got %q", got)
+	}
+	if got := Inject("Apply the patch.", FullMode); got != "Apply the patch." {
+		t.Fatalf("expected full_access mode to avoid prompt injection, got %q", got)
+	}
+	if got := Inject("", FullMode); got != "" {
+		t.Fatalf("expected empty full_access input to remain empty, got %q", got)
 	}
 }
 
@@ -49,5 +59,29 @@ func TestIsDangerousCommand(t *testing.T) {
 	}
 	if IsDangerousCommand("go test ./...") {
 		t.Fatal("did not expect benign command to be flagged")
+	}
+}
+
+func TestPermissionModeMapping(t *testing.T) {
+	if got := PermissionMode(DefaultMode); got != toolexec.PermissionModeDefault {
+		t.Fatalf("expected default session mode to use default permission mode, got %q", got)
+	}
+	if got := PermissionMode(PlanMode); got != toolexec.PermissionModeDefault {
+		t.Fatalf("expected plan session mode to use default permission mode, got %q", got)
+	}
+	if got := PermissionMode(FullMode); got != toolexec.PermissionModeFullControl {
+		t.Fatalf("expected full_access session mode to use full_control permission mode, got %q", got)
+	}
+}
+
+func TestModeForPermission(t *testing.T) {
+	if got := ModeForPermission(toolexec.PermissionModeFullControl, DefaultMode); got != FullMode {
+		t.Fatalf("expected full_control to map to full_access, got %q", got)
+	}
+	if got := ModeForPermission(toolexec.PermissionModeDefault, PlanMode); got != PlanMode {
+		t.Fatalf("expected default permission mode to preserve plan mode, got %q", got)
+	}
+	if got := ModeForPermission(toolexec.PermissionModeDefault, FullMode); got != DefaultMode {
+		t.Fatalf("expected default permission mode to clear full_access back to default, got %q", got)
 	}
 }

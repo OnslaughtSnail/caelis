@@ -193,7 +193,6 @@ func runACP(ctx context.Context, args []string) error {
 				PromptConfigDir:             *promptConfigDir,
 				EnableExperimentalLSPPrompt: *experimentalLSP,
 				BasePrompt:                  *systemPrompt,
-				RuntimeHint:                 buildRuntimePromptHint(baseRuntime),
 				SkillDirs:                   skillDirList,
 				StreamModel:                 stream,
 				ThinkingMode:                resolvedThinkingMode,
@@ -203,8 +202,8 @@ func runACP(ctx context.Context, args []string) error {
 				ModelName:                   resolveModelName(factory, alias),
 			})
 		},
-		NewSessionResources: func(ctx context.Context, sessionID string, caps internalacp.ClientCapabilities, mcpServers []internalacp.MCPServer) (*internalacp.SessionResources, error) {
-			execRuntime := internalacp.NewRuntime(baseRuntime, conn, sessionID, workspace.CWD, caps)
+		NewSessionResources: func(ctx context.Context, sessionID string, caps internalacp.ClientCapabilities, mcpServers []internalacp.MCPServer, modeResolver func() string) (*internalacp.SessionResources, error) {
+			execRuntime := internalacp.NewRuntime(baseRuntime, conn, sessionID, workspace.CWD, caps, modeResolver)
 			mcpCfg, err := buildACPMCPConfig(baseMCPConfig, mcpServers)
 			if err != nil {
 				return nil, err

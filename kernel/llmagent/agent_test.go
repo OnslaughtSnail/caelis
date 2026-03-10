@@ -611,6 +611,59 @@ func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
 	}
 }
 
+func TestLLMAgent_PartialStreamCancellationStaysSilent(t *testing.T) {
+	attempts := 0
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		attempts++
+		return []seqResult{
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "hello"},
+					Partial:      true,
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{err: context.Canceled},
+		}
+	})
+	ag, err := New(Config{Name: "test", EmitPartialEvents: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+	var (
+		warnings []string
+		gotErr   error
+	)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			continue
+		}
+		if ev != nil && ev.Message.Role == model.RoleSystem {
+			warnings = append(warnings, ev.Message.Text)
+		}
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Fatalf("expected canceled error, got %v", gotErr)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected no retry after cancel, got %d attempts", attempts)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no interruption warning on cancel, got %#v", warnings)
+	}
+}
+
 func TestLLMAgent_EmptyResponseRetriesWhenNothingWasShown(t *testing.T) {
 	oldMaxRetries := modelRequestMaxRetries
 	oldBaseDelay := modelRetryBaseDelay
@@ -1180,6 +1233,66 @@ func TestLLMAgent_NonConsecutiveSameToolCallIsNotDuplicate(t *testing.T) {
 	}
 	if readCalled != 1 {
 		t.Fatalf("expected READ to be called 1 time, got %d", readCalled)
+	}
+}
+
+func TestLLMAgent_TaskPollingIsNotTreatedAsDuplicate(t *testing.T) {
+	taskCalled := 0
+	taskTool := namedTool{
+		name: "TASK",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			taskCalled++
+			return map[string]any{
+				"task_id": "t-1",
+				"state":   "running",
+				"running": true,
+			}, nil
+		},
+	}
+
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		switch step {
+		case 1, 2, 3:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   fmt.Sprintf("task-call-%d", step),
+					Name: "TASK",
+					Args: jsonArgs(map[string]any{"action": "wait", "task_id": "t-1", "yield_time_ms": 5000}),
+				}},
+			}}, nil
+		default:
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{taskTool},
+		toolMap: map[string]tool.Tool{"TASK": taskTool},
+	}
+
+	var gotErr error
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no duplicate error for TASK polling, got: %v", gotErr)
+	}
+	if taskCalled != 3 {
+		t.Fatalf("expected TASK to run 3 times, got %d", taskCalled)
 	}
 }
 

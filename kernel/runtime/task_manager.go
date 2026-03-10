@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/delegation"
@@ -22,6 +23,9 @@ type runtimeTaskManager struct {
 	parent    *sessionContext
 	runReq    RunRequest
 	subagents *runtimeSubagentRunner
+
+	turnMu      sync.Mutex
+	turnTaskIDs []string
 }
 
 type sessionContext struct {
@@ -41,7 +45,7 @@ const (
 	taskSpecPrompt        = "task"
 )
 
-func newTaskManager(r *Runtime, execRuntime toolexec.Runtime, registry *task.Registry, store task.Store, parent *sessionContext, req RunRequest, runner *runtimeSubagentRunner) task.Manager {
+func newTaskManager(r *Runtime, execRuntime toolexec.Runtime, registry *task.Registry, store task.Store, parent *sessionContext, req RunRequest, runner *runtimeSubagentRunner) *runtimeTaskManager {
 	if registry == nil {
 		registry = task.NewRegistry(task.RegistryConfig{})
 	}
@@ -108,7 +112,7 @@ func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controlle
 	}
 	switch entry.Kind {
 	case task.KindBash:
-		runner, ok := asyncBashRunner(m.execenv)
+		runner, ok := asyncBashRunnerForRoute(m.execenv, stringValue(entry.Spec, taskSpecRoute))
 		if !ok || runner == nil {
 			return nil
 		}
@@ -185,12 +189,12 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 	if strings.TrimSpace(req.Command) == "" {
 		return task.Snapshot{}, fmt.Errorf("task: bash command is required")
 	}
-	if req.Yield <= 0 {
-		return task.Snapshot{}, fmt.Errorf("task: async bash requires yield_time_ms > 0")
+	if req.Yield < 0 {
+		return task.Snapshot{}, fmt.Errorf("task: async bash requires yield_time_ms >= 0")
 	}
-	asyncRunner, ok := bashAsyncRunnerFromContext(ctx)
+	asyncRunner, ok := asyncBashRunnerForRoute(m.execenv, strings.TrimSpace(req.Route))
 	if !ok || asyncRunner == nil {
-		return task.Snapshot{}, fmt.Errorf("task: async bash is not supported in the current runtime")
+		return task.Snapshot{}, fmt.Errorf("task: async bash is not supported for route %q", strings.TrimSpace(req.Route))
 	}
 	sessionID, err := asyncRunner.StartAsync(ctx, toolexec.CommandRequest{
 		Command:     req.Command,
@@ -212,6 +216,7 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 		store:     m.store,
 	}
 	record := m.registry.Create(task.KindBash, req.Command, controller, true, true)
+	m.trackTurnTask(record.ID)
 	record.Session = task.SessionRef{AppName: m.parent.appName, UserID: m.parent.userID, SessionID: m.parent.sessionID}
 	record.Spec = map[string]any{
 		taskSpecCommand:       req.Command,
@@ -238,7 +243,7 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 	if m.subagents == nil {
 		return task.Snapshot{}, fmt.Errorf("task: delegate runtime is unavailable")
 	}
-	if req.Yield <= 0 {
+	if req.Yield < 0 {
 		result, err := m.subagents.RunSubagent(ctx, delegation.RunRequest{Input: req.Task})
 		if err != nil {
 			return task.Snapshot{}, err
@@ -265,6 +270,7 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 		return task.Snapshot{}, err
 	}
 	record := m.registry.Create(task.KindDelegate, req.Task, nil, false, true)
+	m.trackTurnTask(record.ID)
 	lineage.TaskID = record.ID
 	baseCtx, cancel := context.WithCancel(detachSubagentContext(ctx, lineage))
 	controller := &delegateTaskController{
@@ -303,10 +309,47 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 	return snapshot, nil
 }
 
+func (m *runtimeTaskManager) trackTurnTask(taskID string) {
+	if m == nil || strings.TrimSpace(taskID) == "" {
+		return
+	}
+	m.turnMu.Lock()
+	defer m.turnMu.Unlock()
+	m.turnTaskIDs = append(m.turnTaskIDs, strings.TrimSpace(taskID))
+}
+
+func (m *runtimeTaskManager) cleanupTurn(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.turnMu.Lock()
+	taskIDs := append([]string(nil), m.turnTaskIDs...)
+	m.turnTaskIDs = nil
+	m.turnMu.Unlock()
+	for _, taskID := range taskIDs {
+		record, err := m.ensureRecord(ctx, taskID)
+		if err != nil || record == nil || record.Backend == nil {
+			continue
+		}
+		var running, supportsCancel bool
+		record.WithLock(func(one *task.Record) {
+			running = one.Running
+			supportsCancel = one.SupportsCancel
+		})
+		if !running || !supportsCancel {
+			continue
+		}
+		_, _ = record.Backend.Cancel(ctx, record)
+	}
+}
+
 func (m *runtimeTaskManager) Wait(ctx context.Context, req task.ControlRequest) (task.Snapshot, error) {
 	record, err := m.ensureRecord(ctx, req.TaskID)
 	if err != nil {
 		return task.Snapshot{}, err
+	}
+	if snapshot, ok := persistedFinalTaskSnapshot(record); ok {
+		return snapshot, nil
 	}
 	if record.Backend == nil {
 		return task.Snapshot{}, fmt.Errorf("task: controller missing for %q", req.TaskID)
@@ -323,6 +366,9 @@ func (m *runtimeTaskManager) Status(ctx context.Context, req task.ControlRequest
 	record, err := m.ensureRecord(ctx, req.TaskID)
 	if err != nil {
 		return task.Snapshot{}, err
+	}
+	if snapshot, ok := persistedFinalTaskSnapshot(record); ok {
+		return snapshot, nil
 	}
 	if record.Backend == nil {
 		return task.Snapshot{}, fmt.Errorf("task: controller missing for %q", req.TaskID)
@@ -348,6 +394,9 @@ func (m *runtimeTaskManager) Cancel(ctx context.Context, req task.ControlRequest
 	record, err := m.ensureRecord(ctx, req.TaskID)
 	if err != nil {
 		return task.Snapshot{}, err
+	}
+	if snapshot, ok := persistedFinalTaskSnapshot(record); ok {
+		return snapshot, nil
 	}
 	if record.Backend == nil {
 		return task.Snapshot{}, fmt.Errorf("task: controller missing for %q", req.TaskID)
@@ -827,26 +876,26 @@ func delegatePreviewLine(line string, inFence *bool) string {
 	return trimmed
 }
 
-func bashAsyncRunnerFromContext(ctx context.Context) (toolexec.AsyncCommandRunner, bool) {
-	runner, ok := ctx.Value(bashAsyncRunnerContextKey{}).(toolexec.AsyncCommandRunner)
-	return runner, ok
-}
-
-type bashAsyncRunnerContextKey struct{}
-
-func withBashAsyncRunner(ctx context.Context, runner toolexec.AsyncCommandRunner) context.Context {
-	if ctx == nil || runner == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, bashAsyncRunnerContextKey{}, runner)
-}
-
-func asyncBashRunner(execRuntime toolexec.Runtime) (toolexec.AsyncCommandRunner, bool) {
-	if execRuntime == nil || execRuntime.HostRunner() == nil {
+func asyncBashRunnerForRoute(execRuntime toolexec.Runtime, route string) (toolexec.AsyncCommandRunner, bool) {
+	if execRuntime == nil {
 		return nil, false
 	}
-	runner, ok := execRuntime.HostRunner().(toolexec.AsyncCommandRunner)
-	return runner, ok
+	switch strings.TrimSpace(route) {
+	case "", string(toolexec.ExecutionRouteSandbox):
+		if execRuntime.SandboxRunner() == nil {
+			return nil, false
+		}
+		runner, ok := execRuntime.SandboxRunner().(toolexec.AsyncCommandRunner)
+		return runner, ok
+	case string(toolexec.ExecutionRouteHost):
+		if execRuntime.HostRunner() == nil {
+			return nil, false
+		}
+		runner, ok := execRuntime.HostRunner().(toolexec.AsyncCommandRunner)
+		return runner, ok
+	default:
+		return nil, false
+	}
 }
 
 func bashTaskState(state toolexec.SessionState) task.State {
@@ -891,4 +940,25 @@ func delegateEventLogLine(ev *session.Event) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func persistedFinalTaskSnapshot(record *task.Record) (task.Snapshot, bool) {
+	if record == nil {
+		return task.Snapshot{}, false
+	}
+	var (
+		snapshot task.Snapshot
+		ok       bool
+	)
+	record.WithLock(func(one *task.Record) {
+		if one == nil || one.Running {
+			return
+		}
+		switch one.State {
+		case task.StateCompleted, task.StateFailed, task.StateCancelled, task.StateInterrupted, task.StateTerminated:
+			snapshot = one.LockedSnapshot(task.Output{})
+			ok = true
+		}
+	})
+	return snapshot, ok
 }

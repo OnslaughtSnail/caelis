@@ -65,6 +65,73 @@ func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 	}
 }
 
+func TestCompleteModelCandidates_ShowsEndpointOnlyForDuplicateProviderModel(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	configs := []modelproviders.Config{
+		{Alias: "openai-compatible/minimax-m2.5", Provider: "openai-compatible", API: modelproviders.APIOpenAICompatible, Model: "minimax-m2.5", BaseURL: "https://a.example/v1", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
+		{Alias: "openai-compatible/minimax-m2.5@b_example_v1", Provider: "openai-compatible", API: modelproviders.APIOpenAICompatible, Model: "minimax-m2.5", BaseURL: "https://b.example/v1", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
+	}
+	for _, cfg := range configs {
+		modelcatalogApplyConfigDefaults(&cfg)
+		if err := factory.Register(cfg); err != nil {
+			t.Fatalf("register config: %v", err)
+		}
+	}
+
+	store := &appConfigStore{data: appConfig{
+		Providers: []providerRecord{
+			{Alias: configs[0].Alias, Provider: configs[0].Provider, API: string(configs[0].API), Model: configs[0].Model, BaseURL: configs[0].BaseURL},
+			{Alias: configs[1].Alias, Provider: configs[1].Provider, API: string(configs[1].API), Model: configs[1].Model, BaseURL: configs[1].BaseURL},
+		},
+	}}
+	c := &cliConsole{modelFactory: factory, configStore: store}
+	got := c.completeModelCandidates("", 10)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(got))
+	}
+	if !strings.Contains(got[0].Display, "a.example/v1") && !strings.Contains(got[1].Display, "a.example/v1") {
+		t.Fatalf("expected duplicate display to include first endpoint, got %+v", got)
+	}
+	if !strings.Contains(got[0].Display, "b.example/v1") && !strings.Contains(got[1].Display, "b.example/v1") {
+		t.Fatalf("expected duplicate display to include second endpoint, got %+v", got)
+	}
+	filtered := c.completeModelCandidates("b.example", 10)
+	if len(filtered) != 0 {
+		t.Fatalf("expected endpoint excluded from filter, got %+v", filtered)
+	}
+}
+
+func TestCompleteModelCommandCandidates_UsesSubcommands(t *testing.T) {
+	c := &cliConsole{}
+	got := c.completeModelCommandCandidates("u", 10)
+	if len(got) != 1 || got[0].Value != "use" {
+		t.Fatalf("unexpected model action candidates: %+v", got)
+	}
+}
+
+func TestCompleteSlashArgCandidates_ModelUseReturnsAliasCandidates(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:    "deepseek/deepseek-chat",
+		Provider: "deepseek",
+		API:      modelproviders.APIDeepSeek,
+		Model:    "deepseek-chat",
+		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+	}
+	modelcatalogApplyConfigDefaults(&cfg)
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+	c := &cliConsole{modelFactory: factory}
+	got, err := c.completeSlashArgCandidates("model use", "", 10)
+	if err != nil {
+		t.Fatalf("completeSlashArgCandidates failed: %v", err)
+	}
+	if len(got) != 1 || got[0].Value != "deepseek/deepseek-chat" {
+		t.Fatalf("unexpected alias candidates: %+v", got)
+	}
+}
+
 func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{

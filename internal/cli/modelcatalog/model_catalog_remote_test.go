@@ -207,6 +207,9 @@ func TestSearchCapSnapshot_ExactMatch(t *testing.T) {
 	if caps.ContextWindowTokens != 128000 {
 		t.Errorf("want 128000, got %d", caps.ContextWindowTokens)
 	}
+	if caps.DefaultMaxOutputTokens != 8192 {
+		t.Errorf("want default max output 8192, got %d", caps.DefaultMaxOutputTokens)
+	}
 }
 
 func TestSearchCapSnapshot_PrefixMatch(t *testing.T) {
@@ -272,32 +275,38 @@ func TestSearchCapSnapshot_NilSnapshot(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultMaxOutputHeuristic_ReasoningLargeModel(t *testing.T) {
-	if got := defaultMaxOutputHeuristic(65536, true); got != 32768 {
+	if got := defaultMaxOutputHeuristic(65536, 128000, true); got != 32768 {
 		t.Errorf("want 32768, got %d", got)
 	}
 }
 
 func TestDefaultMaxOutputHeuristic_NonReasoningLargeModel(t *testing.T) {
-	if got := defaultMaxOutputHeuristic(65536, false); got != 8192 {
+	if got := defaultMaxOutputHeuristic(65536, 128000, false); got != 8192 {
 		t.Errorf("want 8192, got %d", got)
 	}
 }
 
 func TestDefaultMaxOutputHeuristic_NonReasoningSmallModel(t *testing.T) {
-	if got := defaultMaxOutputHeuristic(4096, false); got != 4096 {
+	if got := defaultMaxOutputHeuristic(4096, 128000, false); got != 4096 {
 		t.Errorf("want 4096 (pass-through), got %d", got)
 	}
 }
 
 func TestDefaultMaxOutputHeuristic_ZeroMaxOut(t *testing.T) {
-	if got := defaultMaxOutputHeuristic(0, false); got != 4096 {
-		t.Errorf("want fallback 4096, got %d", got)
+	if got := defaultMaxOutputHeuristic(0, 128000, false); got != 8192 {
+		t.Errorf("want fallback 8192, got %d", got)
 	}
 }
 
 func TestDefaultMaxOutputHeuristic_ReasoningSmallModel(t *testing.T) {
-	if got := defaultMaxOutputHeuristic(16384, true); got != 16384 {
+	if got := defaultMaxOutputHeuristic(16384, 128000, true); got != 16384 {
 		t.Errorf("want 16384 (reasoning < 32768 passes through), got %d", got)
+	}
+}
+
+func TestDefaultMaxOutputHeuristic_CapsNonReasoningByContext(t *testing.T) {
+	if got := defaultMaxOutputHeuristic(65536, 16000, false); got != 2000 {
+		t.Errorf("want context/8 cap 2000, got %d", got)
 	}
 }
 

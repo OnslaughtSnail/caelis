@@ -92,6 +92,20 @@ func TestNew_FullControlRoutesToHost(t *testing.T) {
 	}
 }
 
+func TestNew_FullControlSandboxRunnerFallsBackToHostRunner(t *testing.T) {
+	host := &closeableRunner{}
+	rt, err := New(Config{
+		PermissionMode: PermissionModeFullControl,
+		HostRunner:     host,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.SandboxRunner() != host {
+		t.Fatalf("expected sandbox runner to reuse host runner in full_control mode, got %#v", rt.SandboxRunner())
+	}
+}
+
 func TestNew_DefaultRoutesSafeCommandToSandbox(t *testing.T) {
 	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,

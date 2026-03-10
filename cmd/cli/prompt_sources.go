@@ -66,15 +66,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 	warnings = append(warnings, discovered.Warnings...)
 
-	additional := make([]promptpipeline.PromptFragment, 0, 3)
-	if runtimeHint := normalizePromptText(in.RuntimeHint); runtimeHint != "" {
-		additional = append(additional, promptpipeline.PromptFragment{
-			Stage:   "runtime_context",
-			Title:   "Runtime Context",
-			Source:  "runtime execution context",
-			Content: runtimeHint,
-		})
-	}
+	additional := make([]promptpipeline.PromptFragment, 0, 2)
 	if userPrompt := buildUserPromptFragment(in.BasePrompt, user); userPrompt != "" {
 		additional = append(additional, promptpipeline.PromptFragment{
 			Stage:   "user_custom",

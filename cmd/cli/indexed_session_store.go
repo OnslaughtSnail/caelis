@@ -57,6 +57,22 @@ func (s *indexedSessionStore) ReplaceState(ctx context.Context, req *session.Ses
 	return s.inner.ReplaceState(ctx, req, values)
 }
 
+func (s *indexedSessionStore) UpdateState(ctx context.Context, req *session.Session, update func(map[string]any) (map[string]any, error)) error {
+	withUpdate, ok := s.inner.(session.StateUpdateStore)
+	if !ok {
+		current, err := s.inner.SnapshotState(ctx, req)
+		if err != nil {
+			return err
+		}
+		next, err := update(current)
+		if err != nil {
+			return err
+		}
+		return s.inner.ReplaceState(ctx, req, next)
+	}
+	return withUpdate.UpdateState(ctx, req, update)
+}
+
 func (s *indexedSessionStore) ListContextWindowEvents(ctx context.Context, req *session.Session) ([]*session.Event, error) {
 	if withWindow, ok := s.inner.(session.ContextWindowStore); ok {
 		return withWindow.ListContextWindowEvents(ctx, req)

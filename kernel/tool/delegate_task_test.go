@@ -9,17 +9,19 @@ import (
 )
 
 type stubTaskManager struct {
-	delegate task.Snapshot
-	wait     task.Snapshot
-	status   task.Snapshot
-	lastWait task.ControlRequest
+	delegate  task.Snapshot
+	wait      task.Snapshot
+	status    task.Snapshot
+	lastWait  task.ControlRequest
+	lastStart task.DelegateStartRequest
 }
 
 func (s *stubTaskManager) StartBash(context.Context, task.BashStartRequest) (task.Snapshot, error) {
 	return task.Snapshot{}, nil
 }
 
-func (s *stubTaskManager) StartDelegate(context.Context, task.DelegateStartRequest) (task.Snapshot, error) {
+func (s *stubTaskManager) StartDelegate(_ context.Context, req task.DelegateStartRequest) (task.Snapshot, error) {
+	s.lastStart = req
 	return s.delegate, nil
 }
 
@@ -114,6 +116,63 @@ func TestDelegateTaskTool_UsesSharedTaskManager(t *testing.T) {
 	}
 	if manager.lastWait.Yield != 2500*time.Millisecond {
 		t.Fatalf("expected wait yield to propagate, got %s", manager.lastWait.Yield)
+	}
+}
+
+func TestDelegateTaskTool_DefaultYieldStartsBackgroundTask(t *testing.T) {
+	manager := &stubTaskManager{
+		delegate: task.Snapshot{
+			TaskID:  "t-async",
+			Kind:    task.KindDelegate,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	}
+	delegateTool, err := NewDelegateTask()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := delegateTool.Run(task.WithManager(context.Background(), manager), map[string]any{
+		"task": "do work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["task_id"] != "t-async" || out["running"] != true {
+		t.Fatalf("unexpected delegate result: %#v", out)
+	}
+	if manager.lastStart.Yield != defaultDelegateYield {
+		t.Fatalf("expected default delegate wait %s, got %s", defaultDelegateYield, manager.lastStart.Yield)
+	}
+}
+
+func TestDelegateTaskTool_ExplicitZeroYieldReturnsImmediateTask(t *testing.T) {
+	manager := &stubTaskManager{
+		delegate: task.Snapshot{
+			TaskID:  "t-async",
+			Kind:    task.KindDelegate,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	}
+	delegateTool, err := NewDelegateTask()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := delegateTool.Run(task.WithManager(context.Background(), manager), map[string]any{
+		"task":          "do work",
+		"yield_time_ms": 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["task_id"] != "t-async" || out["running"] != true {
+		t.Fatalf("unexpected delegate result: %#v", out)
+	}
+	if manager.lastStart.Yield != 0 {
+		t.Fatalf("expected zero delegate wait, got %s", manager.lastStart.Yield)
 	}
 }
 

@@ -30,18 +30,20 @@ func (f seatbeltSandboxFactory) Build(cfg Config) (CommandRunner, error) {
 }
 
 type seatbeltRunner struct {
-	execCommand func(context.Context, string, ...string) *exec.Cmd
-	lookPath    func(string) (string, error)
-	goos        string
-	policy      SandboxPolicy
+	execCommand    func(context.Context, string, ...string) *exec.Cmd
+	lookPath       func(string) (string, error)
+	goos           string
+	policy         SandboxPolicy
+	sessionManager *SessionManager
 }
 
 func newSeatbeltRunner(policy SandboxPolicy) CommandRunner {
 	return &seatbeltRunner{
-		execCommand: exec.CommandContext,
-		lookPath:    exec.LookPath,
-		goos:        stdruntime.GOOS,
-		policy:      policy,
+		execCommand:    exec.CommandContext,
+		lookPath:       exec.LookPath,
+		goos:           stdruntime.GOOS,
+		policy:         policy,
+		sessionManager: NewSessionManager(DefaultSessionManagerConfig()),
 	}
 }
 
@@ -127,12 +129,87 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 		}
 		return result, NewCodedError(
 			ErrorCodeSandboxIdleTimeout,
-			"tool: seatbelt sandbox command produced no output for %s and was terminated (likely interactive/long-running; try larger idle_timeout_ms); %s",
+			"tool: seatbelt sandbox command produced no output for %s and was terminated (likely interactive or long-running); %s",
 			label,
 			commandOutputSummary(result),
 		)
 	}
 	return result, fmt.Errorf("tool: seatbelt sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
+}
+
+func (s *seatbeltRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+	if req.TTY {
+		return "", fmt.Errorf("tool: seatbelt async tty is not supported")
+	}
+	workDir, err := resolveHostWorkDir(req.Dir)
+	if err != nil {
+		return "", fmt.Errorf("tool: resolve seatbelt workdir failed: %w", err)
+	}
+	session, err := s.sessionManager.StartSession(AsyncSessionConfig{
+		Command:         req.Command,
+		Dir:             req.Dir,
+		OutputBufferCap: 256 * 1024,
+		Timeout:         req.Timeout,
+		IdleTimeout:     req.IdleTimeout,
+		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
+			profile := buildSeatbeltProfile(s.policy, workDir)
+			cmd := s.execCommand(ctx, "sandbox-exec", "-p", profile, "bash", "-lc", cfg.Command)
+			if strings.TrimSpace(cfg.Dir) != "" {
+				cmd.Dir = cfg.Dir
+			}
+			cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+			return cmd, nil
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return session.ID, nil
+}
+
+func (s *seatbeltRunner) WriteInput(sessionID string, input []byte) error {
+	return s.sessionManager.WriteInput(sessionID, input)
+}
+
+func (s *seatbeltRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	return s.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+}
+
+func (s *seatbeltRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
+	return s.sessionManager.GetSessionStatus(sessionID)
+}
+
+func (s *seatbeltRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	exitCode, err := s.sessionManager.WaitSession(waitCtx, sessionID)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	result, err := s.sessionManager.GetResult(sessionID)
+	if err != nil {
+		return CommandResult{ExitCode: exitCode}, nil
+	}
+	return result, nil
+}
+
+func (s *seatbeltRunner) TerminateSession(sessionID string) error {
+	return s.sessionManager.TerminateSession(sessionID)
+}
+
+func (s *seatbeltRunner) ListSessions() []SessionInfo {
+	return s.sessionManager.ListSessions()
+}
+
+func (s *seatbeltRunner) Close() error {
+	if s.sessionManager != nil {
+		return s.sessionManager.Close()
+	}
+	return nil
 }
 
 func buildSeatbeltProfile(policy SandboxPolicy, workDir string) string {

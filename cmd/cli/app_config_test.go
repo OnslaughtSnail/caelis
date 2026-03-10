@@ -164,6 +164,29 @@ func TestNormalizeProviderAuthRecord_PrefersCredentialRefAndKeepsLegacyTokenFall
 	}
 }
 
+func TestAppConfig_ResolveOrAllocateModelAlias_DistinguishesEndpoint(t *testing.T) {
+	store := &appConfigStore{path: filepath.Join(t.TempDir(), "config.json"), data: defaultAppConfig()}
+	if got := store.ResolveOrAllocateModelAlias("openai-compatible", "minimax-m2.5", "https://a.example/v1"); got != "openai-compatible/minimax-m2.5" {
+		t.Fatalf("unexpected initial alias %q", got)
+	}
+	if err := store.UpsertProvider(modelproviders.Config{
+		Alias:    "openai-compatible/minimax-m2.5",
+		Provider: "openai-compatible",
+		API:      modelproviders.APIOpenAICompatible,
+		Model:    "minimax-m2.5",
+		BaseURL:  "https://a.example/v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.ResolveOrAllocateModelAlias("openai-compatible", "minimax-m2.5", "https://a.example/v1"); got != "openai-compatible/minimax-m2.5" {
+		t.Fatalf("expected same endpoint to reuse alias, got %q", got)
+	}
+	got := store.ResolveOrAllocateModelAlias("openai-compatible", "minimax-m2.5", "https://b.example/v1")
+	if got == "openai-compatible/minimax-m2.5" || !strings.HasPrefix(got, "openai-compatible/minimax-m2.5@") {
+		t.Fatalf("expected endpoint-scoped alias, got %q", got)
+	}
+}
+
 func TestAppNameFromArgs(t *testing.T) {
 	got := appNameFromArgs([]string{"-model", "fake", "-app", "my-app"}, "fallback")
 	if got != "my-app" {

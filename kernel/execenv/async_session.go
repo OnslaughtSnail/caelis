@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	stdruntime "runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,7 @@ type AsyncSession struct {
 	timeout      time.Duration // maximum session lifetime
 	idleTimeout  time.Duration // idle timeout
 	tty          bool
+	buildCommand func(context.Context, AsyncSessionConfig) (*exec.Cmd, error)
 }
 
 // AsyncOutputChunk represents a chunk of output from stdout or stderr in async sessions.
@@ -97,6 +99,7 @@ type AsyncSessionConfig struct {
 	Timeout         time.Duration // Maximum session lifetime (0 = no limit)
 	IdleTimeout     time.Duration // Idle timeout (0 = no idle limit)
 	TTY             bool
+	BuildCommand    func(context.Context, AsyncSessionConfig) (*exec.Cmd, error)
 }
 
 const (
@@ -126,6 +129,7 @@ func NewAsyncSession(cfg AsyncSessionConfig) *AsyncSession {
 		timeout:      cfg.Timeout,
 		idleTimeout:  cfg.IdleTimeout,
 		tty:          cfg.TTY,
+		buildCommand: cfg.BuildCommand,
 	}
 	session.state.Store(SessionStateRunning)
 	session.lastActivity.Store(time.Now().UnixNano())
@@ -139,17 +143,31 @@ func (s *AsyncSession) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	cmd, err := buildAsyncSessionCommand(s.ctx, s.Command, s.tty)
+	cfg := AsyncSessionConfig{
+		Command:      s.Command,
+		Dir:          s.Dir,
+		Timeout:      s.timeout,
+		IdleTimeout:  s.idleTimeout,
+		TTY:          s.tty,
+		BuildCommand: s.buildCommand,
+	}
+	buildFn := s.buildCommand
+	if buildFn == nil {
+		buildFn = buildAsyncSessionCommandFromConfig
+	}
+	cmd, err := buildFn(s.ctx, cfg)
 	if err != nil {
 		return err
 	}
 	setProcessGroup(cmd)
-	if s.Dir != "" {
+	if s.Dir != "" && strings.TrimSpace(cmd.Dir) == "" {
 		cmd.Dir = s.Dir
 	}
 
 	// Set up environment
-	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+	if len(cmd.Env) == 0 {
+		cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+	}
 
 	// Create pipes
 	stdin, err := cmd.StdinPipe()
@@ -395,6 +413,10 @@ func buildAsyncSessionCommand(ctx context.Context, command string, tty bool) (*e
 	default:
 		return exec.CommandContext(ctx, scriptPath, "-q", "/dev/null", "bash", "-lc", command), nil
 	}
+}
+
+func buildAsyncSessionCommandFromConfig(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
+	return buildAsyncSessionCommand(ctx, cfg.Command, cfg.TTY)
 }
 
 // Info returns summary information about the session.

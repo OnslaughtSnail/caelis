@@ -176,6 +176,7 @@ func runCLI(ctx context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "warn: close execution runtime failed: %v\n", closeErr)
 		}
 	}()
+	execRuntimeView := newSwappableRuntime(execRuntime)
 	if err := configStore.SetRuntimeSettings(runtimeSettings{
 		PermissionMode: *permissionMode,
 		SandboxType:    *sandboxType,
@@ -199,7 +200,7 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 	pluginRegistry := plugin.NewRegistry()
 	if err := pluginbuiltin.RegisterAll(pluginRegistry, pluginbuiltin.RegisterOptions{
-		ExecutionRuntime: execRuntime,
+		ExecutionRuntime: execRuntimeView,
 		MCPToolManager:   mcpManager,
 	}); err != nil {
 		return err
@@ -209,7 +210,7 @@ func runCLI(ctx context.Context, args []string) error {
 		resolvedToolProviders = appendProviderIfMissing(resolvedToolProviders, providerLSPTools)
 	}
 	if includesProvider(resolvedToolProviders, providerLSPTools) {
-		if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntime); err != nil {
+		if err := registerCLILSPToolProvider(pluginRegistry, workspace.CWD, execRuntimeView); err != nil {
 			return err
 		}
 	}
@@ -330,7 +331,6 @@ func runCLI(ctx context.Context, args []string) error {
 			PromptConfigDir:             *promptConfigDir,
 			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 			BasePrompt:                  *systemPrompt,
-			RuntimeHint:                 buildRuntimePromptHint(execRuntime),
 			SkillDirs:                   skillDirList,
 			StreamModel:                 false,
 			ThinkingMode:                modelRuntime.ThinkingMode,
@@ -399,6 +399,7 @@ func runCLI(ctx context.Context, args []string) error {
 		Resolved:              resolved,
 		SessionStore:          store,
 		ExecRuntime:           execRuntime,
+		ExecRuntimeView:       execRuntimeView,
 		SandboxType:           strings.TrimSpace(*sandboxType),
 		SandboxHelperPath:     sandboxHelperPath,
 		ModelAlias:            alias,
@@ -431,7 +432,6 @@ type buildAgentInput struct {
 	PromptConfigDir             string
 	EnableExperimentalLSPPrompt bool
 	BasePrompt                  string
-	RuntimeHint                 string
 	SkillDirs                   []string
 	StreamModel                 bool
 	ThinkingMode                string

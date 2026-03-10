@@ -268,3 +268,149 @@ func TestForwardEventToTUI_FileToolResponseFallsBackToSummaryWhenDiffSkipped(t *
 		t.Fatalf("unexpected summary chunk %q", summaryMsg.Chunk)
 	}
 }
+
+func TestForwardEventToTUI_BashSuccessWithoutOutputDoesNotEmitExitCodeLine(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_bash",
+				Name: "BASH",
+				Result: map[string]any{
+					"exit_code": 0,
+				},
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected bash tool response to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected only final task-stream marker, got %#v", sender.msgs)
+	}
+	msg, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected TaskStreamMsg, got %T", sender.msgs[0])
+	}
+	if !msg.Final || msg.CallID != "call_bash" {
+		t.Fatalf("unexpected task stream message: %+v", msg)
+	}
+}
+
+func TestForwardEventToTUI_BashErrorWithoutOutputEmitsCleanSummary(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_bash",
+				Name: "BASH",
+				Result: map[string]any{
+					"error": "tool: BASH failed (route=sandbox): tool: sandbox runner is unavailable",
+				},
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected bash tool response to be handled")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected final task-stream marker and error summary, got %#v", sender.msgs)
+	}
+	logMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[1])
+	}
+	if !strings.Contains(logMsg.Chunk, "! BASH") || !strings.Contains(logMsg.Chunk, "sandbox runner is unavailable") {
+		t.Fatalf("unexpected bash error log chunk: %q", logMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_TaskWaitEmitsFriendlySummary(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+	pending := map[string]toolCallSnapshot{
+		"call_task_1": {
+			Args: map[string]any{
+				"action":        "wait",
+				"task_id":       "t-1234567890ab",
+				"yield_time_ms": 5000,
+			},
+		},
+	}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_task_1",
+				Name: "TASK",
+				Result: map[string]any{
+					"task_id": "t-1234567890ab",
+					"state":   "running",
+					"running": true,
+				},
+			},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected TASK wait response to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected one summary message, got %#v", sender.msgs)
+	}
+	logMsg, ok := sender.msgs[0].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
+	}
+	if !strings.Contains(logMsg.Chunk, "✓ Wait -> Waited 5 s") {
+		t.Fatalf("unexpected TASK wait log chunk: %q", logMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_TaskListEmitsFriendlySummary(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+	pending := map[string]toolCallSnapshot{
+		"call_task_list": {
+			Args: map[string]any{
+				"action": "list",
+			},
+		},
+	}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_task_list",
+				Name: "TASK",
+				Result: map[string]any{
+					"count": 2,
+					"tasks": []any{
+						map[string]any{"task_id": "t-1", "state": "running", "running": true},
+						map[string]any{"task_id": "t-2", "state": "cancelled", "running": false},
+					},
+				},
+			},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected TASK list response to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected one summary message, got %#v", sender.msgs)
+	}
+	logMsg, ok := sender.msgs[0].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
+	}
+	if !strings.Contains(logMsg.Chunk, "✓ List -> Listed 2 tasks (1 running)") {
+		t.Fatalf("unexpected TASK list log chunk: %q", logMsg.Chunk)
+	}
+}

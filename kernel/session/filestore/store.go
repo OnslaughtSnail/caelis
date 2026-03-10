@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -208,7 +209,19 @@ func (s *Store) SnapshotState(ctx context.Context, req *session.Session) (map[st
 }
 
 func (s *Store) ReplaceState(ctx context.Context, req *session.Session, values map[string]any) error {
-	_ = ctx
+	return s.UpdateState(ctx, req, func(map[string]any) (map[string]any, error) {
+		next := map[string]any{}
+		for key, value := range values {
+			next[key] = value
+		}
+		return next, nil
+	})
+}
+
+func (s *Store) UpdateState(ctx context.Context, req *session.Session, update func(map[string]any) (map[string]any, error)) error {
+	if update == nil {
+		return nil
+	}
 	dir, err := s.sessionDir(req)
 	if err != nil {
 		return err
@@ -218,11 +231,94 @@ func (s *Store) ReplaceState(ctx context.Context, req *session.Session, values m
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	raw, err := json.MarshalIndent(values, "", "  ")
+	statePath := filepath.Join(dir, "state.json")
+	lockPath := filepath.Join(dir, ".state.lock")
+	return withStateFileLock(ctx, lockPath, func() error {
+		current := map[string]any{}
+		raw, err := os.ReadFile(statePath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if len(raw) > 0 {
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return err
+			}
+		}
+		next, err := update(current)
+		if err != nil {
+			return err
+		}
+		if next == nil {
+			next = map[string]any{}
+		}
+		encoded, err := json.MarshalIndent(next, "", "  ")
+		if err != nil {
+			return err
+		}
+		return writeFileAtomically(statePath, encoded, 0o644)
+	})
+}
+
+func writeFileAtomically(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o644)
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
+func withStateFileLock(ctx context.Context, lockPath string, fn func() error) error {
+	const (
+		lockWait  = 10 * time.Millisecond
+		staleAge  = 30 * time.Second
+		lockPerm  = 0o700
+	)
+	for {
+		err := os.Mkdir(lockPath, lockPerm)
+		if err == nil {
+			defer os.Remove(lockPath)
+			return fn()
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, statErr := os.Stat(lockPath)
+		if statErr == nil && time.Since(info.ModTime()) > staleAge {
+			_ = os.RemoveAll(lockPath)
+			continue
+		}
+		if ctx != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(lockWait):
+			}
+			continue
+		}
+		time.Sleep(lockWait)
+	}
 }
 
 func (s *Store) sessionDir(req *session.Session) (string, error) {

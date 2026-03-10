@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## v0.0.17 - 2026-03-10
+
+### CLI, TUI & Model UX
+- Reworked `/model` slash UX with subcommand-aware completion for `list` / `use` / `rm` / `edit`, ghost hints, auto-open pickers, and duplicate-endpoint disambiguation.
+- Added model removal cleanup for saved provider credentials and improved multi-select prompt flows with custom-choice passthrough and safer interruption handling.
+- Improved console and TUI rendering for `TASK` / `BASH` results with friendlier summaries, clearer full-access status styling, and cleanup of partial assistant output after interrupted runs.
+
+### Runtime, Sessions & ACP
+- Synced session mode with runtime permission mode, added swappable runtime views for CLI tools/providers, and limited hidden prompt injection to plan mode so runtime defaults no longer leak into assembled prompts.
+- Added atomic session-state update support across indexed, in-memory, and file-backed stores so concurrent runtime and ACP updates preserve unrelated state.
+- Improved ACP runtime/session resources with mode-aware full-access bridging, client filesystem preservation under ACP full access, and buffered/coalesced assistant partial-content delivery.
+
+### Shell, Sandbox & Task Execution
+- Added async session support to `bwrap`, `landlock`, and `seatbelt` sandboxes, while making full-control runtimes consistently collapse sandbox execution back onto the host runner.
+- Updated `BASH` and `DELEGATE` wait semantics so omitted `yield_time_ms` waits briefly before backgrounding, `0` returns immediately, and `-1` forces synchronous completion.
+- Added turn-scoped cleanup for background tasks, persisted final task snapshots across turns, and relaxed duplicate-call suppression for repeated `TASK` polling.
+
+### Model Catalog & Dependencies
+- Refreshed the bundled models.dev capability snapshot and provider overlays with broader catalog coverage plus more conservative context-aware fallback max-output defaults.
+- Promoted `golang.org/x/sys` to a direct dependency for the updated runtime and session plumbing.
+
 ## v0.0.15 - 2026-03-08
 
 ### Runtime, Tasks & Delegation

@@ -192,6 +192,9 @@ func (r *runtimeImpl) HostRunner() CommandRunner {
 }
 
 func (r *runtimeImpl) SandboxRunner() CommandRunner {
+	if r.permissionMode == PermissionModeFullControl {
+		return r.hostRunner
+	}
 	return r.sandboxRunner
 }
 

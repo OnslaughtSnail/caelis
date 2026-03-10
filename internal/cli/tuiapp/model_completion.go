@@ -243,6 +243,19 @@ func (m *Model) openResumePicker() {
 	m.updateResumeCandidates()
 }
 
+func (m *Model) activateResumePickerFromInput() {
+	if m.resumeActive {
+		m.updateResumeCandidates()
+		return
+	}
+	m.clearMention()
+	m.clearSkill()
+	m.clearSlashArg()
+	m.clearSlashCompletion()
+	m.resumeActive = true
+	m.updateResumeCandidates()
+}
+
 func (m *Model) updateResumeCandidates() {
 	if !m.resumeActive || m.cfg.ResumeComplete == nil || m.running {
 		m.resumeCandidates = nil
@@ -406,6 +419,49 @@ func (m *Model) openSlashArgPicker(command string) {
 	m.updateSlashArgCandidates()
 }
 
+func (m *Model) activateSlashArgPickerFromInput(command string) {
+	cmd := strings.ToLower(strings.TrimSpace(command))
+	if cmd == "" {
+		return
+	}
+	if m.slashArgActive && strings.TrimSpace(m.slashArgCommand) == cmd && !m.isWizardActive() {
+		m.updateSlashArgCandidates()
+		return
+	}
+	m.clearMention()
+	m.clearSkill()
+	m.clearResume()
+	m.clearSlashCompletion()
+	m.slashArgActive = true
+	m.slashArgCommand = cmd
+	m.wizard = nil
+	m.updateSlashArgCandidates()
+}
+
+func (m *Model) syncSlashInputOverlays() {
+	if m.running {
+		return
+	}
+	raw := string(m.input[:m.cursor])
+	trimmed := strings.TrimSpace(raw)
+	hasResumePrefix := strings.HasPrefix(raw, "/resume ")
+	hasBareResumeTrigger := strings.EqualFold(trimmed, "/resume") && len(raw) > 0 && (raw[len(raw)-1] == ' ' || raw[len(raw)-1] == '\t')
+	if hasResumePrefix || hasBareResumeTrigger {
+		m.activateResumePickerFromInput()
+		return
+	}
+	if m.resumeActive {
+		m.clearResume()
+	}
+	if command, _, ok := slashArgQueryAtCursor(m.input, m.cursor); ok {
+		m.activateSlashArgPickerFromInput(command)
+		return
+	}
+	if m.slashArgActive && !m.isWizardActive() {
+		m.clearSlashArg()
+	}
+}
+
 func (m *Model) updateSlashArgCandidates() {
 	if !m.slashArgActive || m.cfg.SlashArgComplete == nil || m.running {
 		m.slashArgCandidates = nil
@@ -512,11 +568,89 @@ func (m *Model) applySlashArgCompletion() {
 	}
 	// Non-wizard: fill and close.
 	command := strings.TrimSpace(m.slashArgCommand)
+	switch command {
+	case "model":
+		m.setInputText("/model " + choice + " ")
+		switch choice {
+		case "use", "rm", "edit":
+			m.activateSlashArgPickerFromInput("model " + choice)
+		default:
+			m.clearSlashArg()
+		}
+		return
+	case "model use":
+		m.setInputText("/model use " + choice + " ")
+		m.activateSlashArgPickerFromInput("model use " + choice)
+		return
+	case "model use ":
+		m.setInputText("/model use " + choice + " ")
+		m.clearSlashArg()
+		return
+	}
+	if strings.HasPrefix(command, "model use ") {
+		m.setInputText("/" + command + " " + choice)
+		m.clearSlashArg()
+		return
+	}
 	m.setInputText("/" + command + " " + choice + " ")
 	m.clearSlashArg()
 }
 
+func (m *Model) shouldExecuteSlashArgSelection(command string, choice string) bool {
+	command = strings.TrimSpace(command)
+	choice = strings.TrimSpace(choice)
+	if command == "" || choice == "" {
+		return false
+	}
+	current := strings.TrimSpace(m.textarea.Value())
+	if current == "" {
+		return false
+	}
+	if current != strings.TrimSpace(m.suggestedSlashArgInput(choice)) {
+		return false
+	}
+	switch command {
+	case "model":
+		return choice == "list"
+	case "model use":
+		return false
+	case "model rm", "model edit":
+		return true
+	}
+	if strings.HasPrefix(command, "model use ") {
+		return true
+	}
+	return true
+}
+
+func isExecutableSlashArgInput(line string) bool {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(fields[0])) {
+	case "/sandbox", "/permission":
+		return len(fields) >= 2
+	case "/model":
+		action := strings.ToLower(strings.TrimSpace(fields[1]))
+		switch action {
+		case "list":
+			return len(fields) == 2
+		case "use", "rm", "edit":
+			return len(fields) >= 3
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
 func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if m.slashArgActive && strings.TrimSpace(m.slashArgCommand) == "" && !m.isWizardActive() {
+		m.clearSlashArg()
+		return false, nil
+	}
 	switch msg.String() {
 	case "esc":
 		if m.slashArgActive {
@@ -548,6 +682,12 @@ func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			handled, cmd := m.handleWizardEnter()
 			return handled, cmd
 		}
+		line := strings.TrimSpace(m.textarea.Value())
+		if len(m.slashArgCandidates) == 0 && isExecutableSlashArgInput(line) {
+			m.clearSlashArg()
+			_, cmd := m.submitLine(line)
+			return true, cmd
+		}
 		// Non-wizard: single-step slash arg.
 		selected := ""
 		if len(m.slashArgCandidates) > 0 && m.slashArgIndex >= 0 && m.slashArgIndex < len(m.slashArgCandidates) {
@@ -557,8 +697,19 @@ func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 		command := strings.TrimSpace(m.slashArgCommand)
-		_, cmd := m.submitLine("/" + command + " " + selected)
-		return true, cmd
+		if m.shouldExecuteSlashArgSelection(command, selected) {
+			m.clearSlashArg()
+			_, cmd := m.submitLine(line)
+			return true, cmd
+		}
+		if command == "model" || command == "model use" || strings.HasPrefix(command, "model use ") {
+			m.applySlashArgCompletion()
+			m.syncTextareaFromInput()
+			return true, nil
+		}
+		m.applySlashArgCompletion()
+		m.syncTextareaFromInput()
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -691,7 +842,7 @@ func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		if selected == "" {
 			return true, nil
 		}
-		if selected == "/model" || selected == "/sandbox" || selected == "/connect" || selected == "/permission" || selected == "/resume" {
+		if selected == "/model" || selected == "/sandbox" || selected == "/permission" || selected == "/resume" {
 			m.setInputText(selected)
 			m.syncTextareaFromInput()
 			m.clearSlashCompletion()
@@ -746,6 +897,17 @@ func (m *Model) clearSlashCompletion() {
 	m.slashCandidates = nil
 	m.slashIndex = 0
 	m.slashPrefix = ""
+}
+
+func (m *Model) clearInputOverlays() {
+	m.clearMention()
+	m.clearSkill()
+	m.clearResume()
+	m.clearSlashArg()
+	m.clearSlashCompletion()
+	if m.showPalette {
+		m.showPalette = false
+	}
 }
 
 func (m *Model) setInputText(text string) {

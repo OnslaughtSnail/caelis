@@ -337,6 +337,122 @@ func TestServer_Prompt_UsesACPTerminalForBash(t *testing.T) {
 	}
 }
 
+func TestServer_Prompt_CoalescesAssistantPartialsIntoFinalMessage(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{
+					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: "hel"}},
+					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: "lo"}},
+					{Message: model.Message{Role: model.RoleAssistant, Text: "hello"}},
+				},
+			},
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "stream"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+
+	h.waitNotifications(t, 1)
+	texts := h.notificationTexts(UpdateAgentMessage)
+	if len(texts) != 1 || texts[0] != "hello" {
+		t.Fatalf("expected one coalesced assistant message, got %#v", texts)
+	}
+}
+
+func TestServer_Prompt_FinalMessageOnlyEmitsUnsentSuffixAfterFlush(t *testing.T) {
+	prefix := strings.Repeat("a", partialFlushHardLimit)
+	suffix := "tail"
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{
+					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: prefix}},
+					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: suffix}},
+					{Message: model.Message{Role: model.RoleAssistant, Text: prefix + suffix}},
+				},
+			},
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "stream"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+
+	h.waitNotifications(t, 2)
+	texts := h.notificationTexts(UpdateAgentMessage)
+	if len(texts) != 2 || !containsText(texts, prefix) || !containsText(texts, suffix) {
+		t.Fatalf("expected flushed prefix and final suffix, got %#v", texts)
+	}
+}
+
+func TestServer_LoadSessionSuppressesPersistedPartialChunks(t *testing.T) {
+	store := sessionmem.New()
+	h := newHarness(t, harnessConfig{store: store})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+	}, &InitializeResponse{})
+
+	sess := &session.Session{AppName: "caelis", UserID: "tester", ID: "persisted-session"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatalf("get or create session: %v", err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		Message: model.Message{Role: model.RoleUser, Text: "hello"},
+	}); err != nil {
+		t.Fatalf("append user event: %v", err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		Message: model.Message{Role: model.RoleAssistant, Text: "hel"},
+		Meta:    map[string]any{"partial": true, "channel": "answer"},
+	}); err != nil {
+		t.Fatalf("append partial event: %v", err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+	}); err != nil {
+		t.Fatalf("append final event: %v", err)
+	}
+
+	h.resetNotifications()
+	mustCall(t, h.client, MethodSessionLoad, LoadSessionRequest{
+		SessionID: sess.ID,
+		CWD:       h.workspace,
+	}, &LoadSessionResponse{})
+	h.waitNotifications(t, 2)
+
+	if texts := h.notificationTexts(UpdateAgentMessage); len(texts) != 1 || texts[0] != "hello" {
+		t.Fatalf("expected only final assistant replay, got %#v", texts)
+	}
+}
+
 func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		llm: &scriptedLLM{
@@ -582,8 +698,8 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		DefaultModeID: cfg.defaultModeID,
 		SessionConfig: cfg.sessionConfig,
 		NewAgent:      agentFactory,
-		NewSessionResources: func(ctx context.Context, sessionID string, caps ClientCapabilities, _ []MCPServer) (*SessionResources, error) {
-			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, h.workspace, caps)
+		NewSessionResources: func(ctx context.Context, sessionID string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
+			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, h.workspace, caps, modeResolver)
 			tools := make([]tool.Tool, 0, 1)
 			bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: execRuntime})
 			if err != nil {
@@ -713,6 +829,31 @@ func (h *harness) notificationTypes() []string {
 		}
 		_ = json.Unmarshal(raw, &marker)
 		out = append(out, marker.SessionUpdate)
+	}
+	return out
+}
+
+func (h *harness) notificationTexts(updateType string) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := []string{}
+	for _, note := range h.notifications {
+		raw, err := json.Marshal(note.Update)
+		if err != nil {
+			continue
+		}
+		var update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			Content       struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(raw, &update); err != nil {
+			continue
+		}
+		if update.SessionUpdate == updateType {
+			out = append(out, update.Content.Text)
+		}
 	}
 	return out
 }
@@ -896,6 +1037,15 @@ func containsAll(items []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+func containsText(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func testSandboxType() string {

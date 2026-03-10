@@ -262,9 +262,6 @@ func printEvent(ev *session.Event, state *renderState) {
 				delete(state.pendingToolCalls, msg.ToolResponse.ID)
 			}
 		}
-		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), "TASK") && !hasToolError(msg.ToolResponse.Result) {
-			return
-		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).
 		if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
 			return
@@ -273,10 +270,11 @@ func printEvent(ev *session.Event, state *renderState) {
 		if strings.TrimSpace(summary) == "" {
 			return
 		}
+		displayName := displayToolResponseName(msg.ToolResponse.Name, callArgs, msg.ToolResponse.Result)
 		if state.ui != nil {
-			fmt.Fprint(state.out, formatToolResultLine(state.ui.ToolResultPrefix(), msg.ToolResponse.Name, summary))
+			fmt.Fprint(state.out, formatToolResultLine(state.ui.ToolResultPrefix(), displayName, summary))
 		} else {
-			fmt.Fprint(state.out, formatToolResultLine("✓ ", msg.ToolResponse.Name, summary))
+			fmt.Fprint(state.out, formatToolResultLine("✓ ", displayName, summary))
 		}
 		return
 	}
@@ -416,6 +414,9 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 			}
 			return fmt.Sprintf("task=%s running", idutil.ShortDisplay(taskID))
 		}
+		if errText := summarizeBashToolError(result); errText != "" {
+			return errText
+		}
 		exitCode, _ := asInt(result["exit_code"])
 		stdout := strings.TrimRight(asString(result["stdout"]), "\n")
 		stderr := strings.TrimRight(asString(result["stderr"]), "\n")
@@ -496,17 +497,14 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 			return state
 		}
 	case "TASK":
-		taskID := strings.TrimSpace(asString(result["task_id"]))
-		state := strings.TrimSpace(asString(result["state"]))
-		output := strings.TrimSpace(firstNonEmptyMap(asMap(result["output"]), "stderr", "stdout", "log"))
-		if output == "" {
-			output = compactTaskPreview(firstNonEmpty(result, "latest_output"))
+		taskState := strings.TrimSpace(asString(result["state"]))
+		action := strings.TrimSpace(asString(callArgs["action"]))
+		headline := summarizeTaskAction(action, callArgs, result)
+		if headline == "" && taskState != "" {
+			headline = taskState
 		}
-		if taskID != "" && output != "" {
-			return fmt.Sprintf("task=%s %s\n%s", idutil.ShortDisplay(taskID), state, tailLines(output, 6))
-		}
-		if taskID != "" && state != "" {
-			return fmt.Sprintf("task=%s %s", idutil.ShortDisplay(taskID), state)
+		if headline != "" {
+			return headline
 		}
 	}
 	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
@@ -586,6 +584,146 @@ func compactTaskPreview(text string) string {
 		return ""
 	}
 	return tailLines(strings.Join(preview, "\n"), 4)
+}
+
+func summarizeTaskAction(action string, callArgs map[string]any, result map[string]any) string {
+	taskState := strings.TrimSpace(asString(result["state"]))
+	running := fmt.Sprint(result["running"]) == "true"
+	count, _ := asInt(result["count"])
+	stateLabel := friendlyTaskStateLabel(taskState, running)
+	waited := ""
+	if rawWaitMS, ok := callArgs["yield_time_ms"]; ok {
+		waitMS, _ := asInt(rawWaitMS)
+		waited = friendlyWaitLabel(waitMS)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "wait":
+		if waited != "" {
+			if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
+				return "-> Waited " + waited + ", " + strings.ToLower(stateLabel)
+			}
+			return "-> Waited " + waited
+		}
+		if stateLabel != "" {
+			return "-> " + stateLabel
+		}
+	case "status":
+		if stateLabel != "" {
+			return "-> " + stateLabel
+		}
+	case "write":
+		if waited != "" {
+			if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
+				return "-> Sent input, " + strings.ToLower(stateLabel)
+			}
+			return "-> Sent input, waited " + waited
+		}
+		return "-> Sent input"
+	case "cancel":
+		if stateLabel != "" {
+			return "-> " + stateLabel
+		}
+		return "-> Cancelled"
+	case "list":
+		runningCount := countRunningTasks(result["tasks"])
+		if count == 1 {
+			if runningCount == 1 {
+				return "-> Listed 1 task (1 running)"
+			}
+			return "-> Listed 1 task"
+		}
+		if count > 0 {
+			if runningCount > 0 {
+				return fmt.Sprintf("-> Listed %d tasks (%d running)", count, runningCount)
+			}
+			return fmt.Sprintf("-> Listed %d tasks", count)
+		}
+		return "-> Listed tasks"
+	}
+	return ""
+}
+
+func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {
+	displayName := strings.TrimSpace(toolName)
+	if strings.EqualFold(displayName, "TASK") && !hasToolError(result) {
+		return taskActionDisplayName(strings.TrimSpace(asString(callArgs["action"])))
+	}
+	return displayName
+}
+
+func taskActionDisplayName(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "wait":
+		return "Wait"
+	case "status":
+		return "Check"
+	case "write":
+		return "Write"
+	case "cancel":
+		return "Cancel"
+	case "list":
+		return "List"
+	default:
+		return "Task"
+	}
+}
+
+func friendlyTaskStateLabel(state string, running bool) string {
+	if running || strings.EqualFold(strings.TrimSpace(state), "running") {
+		return "Running"
+	}
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "waiting_input":
+		return "Waiting for input"
+	case "waiting_approval":
+		return "Waiting for approval"
+	case "completed":
+		return "Completed"
+	case "cancelled":
+		return "Cancelled"
+	case "failed":
+		return "Failed"
+	case "interrupted":
+		return "Interrupted"
+	case "terminated":
+		return "Terminated"
+	default:
+		return ""
+	}
+}
+
+func countRunningTasks(raw any) int {
+	items, ok := raw.([]any)
+	if !ok {
+		return 0
+	}
+	count := 0
+	for _, item := range items {
+		one, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fmt.Sprint(one["running"]) == "true" || strings.EqualFold(strings.TrimSpace(asString(one["state"])), "running") {
+			count++
+		}
+	}
+	return count
+}
+
+func friendlyWaitLabel(waitMS int) string {
+	switch {
+	case waitMS < 0:
+		return ""
+	case waitMS == 0:
+		return "0s"
+	case waitMS%1000 == 0:
+		return fmt.Sprintf("%d s", waitMS/1000)
+	case waitMS < 1000:
+		return fmt.Sprintf("%dms", waitMS)
+	default:
+		return fmt.Sprintf("%.1f s", float64(waitMS)/1000.0)
+	}
 }
 
 func sanitizeDelegatePreviewLine(line string, inFence *bool) string {
@@ -753,6 +891,33 @@ func isFileMutationTool(toolName string) bool {
 // hasToolError returns true when a tool result contains an error field.
 func hasToolError(result map[string]any) bool {
 	return strings.TrimSpace(asString(result["error"])) != ""
+}
+
+func summarizeBashToolError(result map[string]any) string {
+	errText := strings.TrimSpace(asString(result["error"]))
+	if errText == "" {
+		return ""
+	}
+	errText = strings.TrimPrefix(errText, "tool: ")
+	const failedPrefix = "BASH failed (route="
+	lower := strings.ToLower(errText)
+	if idx := strings.Index(lower, strings.ToLower(failedPrefix)); idx >= 0 {
+		trimmed := errText[idx+len(failedPrefix):]
+		if closeIdx := strings.Index(trimmed, ")"); closeIdx >= 0 {
+			route := strings.TrimSpace(trimmed[:closeIdx])
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed[closeIdx+1:], ":"))
+			rest = strings.TrimPrefix(rest, "tool: ")
+			if route != "" && rest != "" {
+				errText = route + " route failed: " + rest
+			} else if rest != "" {
+				errText = rest
+			}
+		}
+	}
+	if stderr := strings.TrimSpace(asString(result["stderr"])); stderr != "" && !strings.Contains(errText, stderr) {
+		return truncateInline(errText, 160) + "\n" + tailLines(stderr, 6)
+	}
+	return truncateInline(errText, 160)
 }
 
 // tailLines returns the last n non-empty lines of text.  When the total line

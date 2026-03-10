@@ -34,6 +34,18 @@ func TestSummarizeToolResponse_ReadTruncatedReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolResponse_BashErrorPrefersErrorOverMissingExitCode(t *testing.T) {
+	got := summarizeToolResponse("BASH", map[string]any{
+		"error": "tool: BASH failed (route=sandbox): tool: sandbox runner is unavailable",
+	})
+	if !strings.Contains(got, "sandbox route failed") || !strings.Contains(got, "sandbox runner is unavailable") {
+		t.Fatalf("unexpected bash error summary: %q", got)
+	}
+	if strings.Contains(got, "exit_code=0") {
+		t.Fatalf("did not expect fallback success summary for bash error: %q", got)
+	}
+}
+
 func TestSummarizeToolResponse_PatchIsConcise(t *testing.T) {
 	got := summarizeToolResponse("PATCH", map[string]any{
 		"path":      "a.txt",
@@ -110,6 +122,93 @@ func TestSummarizeToolResponse_DelegateRunningIncludesLatestOutput(t *testing.T)
 	})
 	if !strings.Contains(got, "task=t-12345678 running") || !strings.Contains(got, "line-2") {
 		t.Fatalf("unexpected delegate running summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_TaskWaitRendersFriendlySummary(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"task_id":       "t-1234567890ab",
+		"state":         "running",
+		"running":       true,
+		"latest_output": "line-1\nline-2",
+	}, map[string]any{
+		"action":        "wait",
+		"task_id":       "t-1234567890ab",
+		"yield_time_ms": 5000,
+	})
+	if got != "-> Waited 5 s" {
+		t.Fatalf("unexpected task wait summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_TaskStatusRendersFriendlyState(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"task_id": "t-1234567890ab",
+		"state":   "waiting_input",
+		"running": false,
+	}, map[string]any{
+		"action":  "status",
+		"task_id": "t-1234567890ab",
+	})
+	if got != "-> Waiting for input" {
+		t.Fatalf("unexpected task status summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_TaskListRendersFriendlySummary(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"count": 2,
+		"tasks": []any{
+			map[string]any{"task_id": "t-1", "state": "running", "running": true},
+			map[string]any{"task_id": "t-2", "state": "cancelled", "running": false},
+		},
+	}, map[string]any{
+		"action": "list",
+	})
+	if got != "-> Listed 2 tasks (1 running)" {
+		t.Fatalf("unexpected task list summary: %q", got)
+	}
+}
+
+func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
+	var out bytes.Buffer
+	state := &renderState{
+		out:              &out,
+		pendingToolCalls: map[string]toolCallSnapshot{},
+	}
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{
+					ID:   "call_task_1",
+					Name: "TASK",
+					Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
+				},
+			},
+		},
+	}, state)
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_task_1",
+				Name: "TASK",
+				Result: map[string]any{
+					"task_id":       "t-1234567890ab",
+					"state":         "running",
+					"running":       true,
+					"latest_output": "line-1\nline-2",
+				},
+			},
+		},
+	}, state)
+	rendered := out.String()
+	if !strings.Contains(rendered, "✓ Wait -> Waited 5 s") {
+		t.Fatalf("expected friendly TASK render, got %q", rendered)
+	}
+	if strings.Contains(rendered, "t-1234567890ab") || strings.Contains(rendered, "line-2") {
+		t.Fatalf("did not expect task id or output preview in TASK render, got %q", rendered)
 	}
 }
 

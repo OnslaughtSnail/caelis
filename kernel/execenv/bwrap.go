@@ -30,22 +30,24 @@ func (f bwrapSandboxFactory) Build(cfg Config) (CommandRunner, error) {
 }
 
 type bwrapRunner struct {
-	execCommand func(context.Context, string, ...string) *exec.Cmd
-	lookPath    func(string) (string, error)
-	readFile    func(string) ([]byte, error)
-	stat        func(string) (os.FileInfo, error)
-	goos        string
-	policy      SandboxPolicy
+	execCommand    func(context.Context, string, ...string) *exec.Cmd
+	lookPath       func(string) (string, error)
+	readFile       func(string) ([]byte, error)
+	stat           func(string) (os.FileInfo, error)
+	goos           string
+	policy         SandboxPolicy
+	sessionManager *SessionManager
 }
 
 func newBwrapRunner(policy SandboxPolicy) CommandRunner {
 	return &bwrapRunner{
-		execCommand: exec.CommandContext,
-		lookPath:    exec.LookPath,
-		readFile:    os.ReadFile,
-		stat:        os.Stat,
-		goos:        stdruntime.GOOS,
-		policy:      policy,
+		execCommand:    exec.CommandContext,
+		lookPath:       exec.LookPath,
+		readFile:       os.ReadFile,
+		stat:           os.Stat,
+		goos:           stdruntime.GOOS,
+		policy:         policy,
+		sessionManager: NewSessionManager(DefaultSessionManagerConfig()),
 	}
 }
 
@@ -209,12 +211,88 @@ func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResul
 		}
 		return result, NewCodedError(
 			ErrorCodeSandboxIdleTimeout,
-			"tool: bwrap sandbox command produced no output for %s and was terminated (likely interactive/long-running; try larger idle_timeout_ms); %s",
+			"tool: bwrap sandbox command produced no output for %s and was terminated (likely interactive or long-running); %s",
 			label,
 			commandOutputSummary(result),
 		)
 	}
 	return result, fmt.Errorf("tool: bwrap sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
+}
+
+func (b *bwrapRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+	if req.TTY {
+		return "", fmt.Errorf("tool: bwrap async tty is not supported")
+	}
+	workDir, err := resolveHostWorkDir(req.Dir)
+	if err != nil {
+		return "", fmt.Errorf("tool: resolve bwrap workdir failed: %w", err)
+	}
+	session, err := b.sessionManager.StartSession(AsyncSessionConfig{
+		Command:         req.Command,
+		Dir:             req.Dir,
+		OutputBufferCap: 256 * 1024,
+		Timeout:         req.Timeout,
+		IdleTimeout:     req.IdleTimeout,
+		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
+			bwrapArgs := buildBwrapArgs(b.policy, workDir)
+			args := append(bwrapArgs, "--", "bash", "-lc", cfg.Command)
+			cmd := b.execCommand(ctx, "bwrap", args...)
+			if strings.TrimSpace(cfg.Dir) != "" {
+				cmd.Dir = cfg.Dir
+			}
+			cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+			return cmd, nil
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return session.ID, nil
+}
+
+func (b *bwrapRunner) WriteInput(sessionID string, input []byte) error {
+	return b.sessionManager.WriteInput(sessionID, input)
+}
+
+func (b *bwrapRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	return b.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+}
+
+func (b *bwrapRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
+	return b.sessionManager.GetSessionStatus(sessionID)
+}
+
+func (b *bwrapRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	waitCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	exitCode, err := b.sessionManager.WaitSession(waitCtx, sessionID)
+	if err != nil {
+		return CommandResult{}, err
+	}
+	result, err := b.sessionManager.GetResult(sessionID)
+	if err != nil {
+		return CommandResult{ExitCode: exitCode}, nil
+	}
+	return result, nil
+}
+
+func (b *bwrapRunner) TerminateSession(sessionID string) error {
+	return b.sessionManager.TerminateSession(sessionID)
+}
+
+func (b *bwrapRunner) ListSessions() []SessionInfo {
+	return b.sessionManager.ListSessions()
+}
+
+func (b *bwrapRunner) Close() error {
+	if b.sessionManager != nil {
+		return b.sessionManager.Close()
+	}
+	return nil
 }
 
 // buildBwrapArgs constructs bubblewrap arguments from the sandbox policy.

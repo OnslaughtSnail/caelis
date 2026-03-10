@@ -44,12 +44,45 @@ const (
 func DefaultModelCapabilities() ModelCapabilities {
 	return ModelCapabilities{
 		ContextWindowTokens:    128000,
-		MaxOutputTokens:        4096,
-		DefaultMaxOutputTokens: 4096,
+		MaxOutputTokens:        32768,
+		DefaultMaxOutputTokens: conservativeDefaultMaxOutputTokens(128000, false),
 		SupportsToolCalls:      true,
 		ReasoningMode:          ReasoningModeNone,
 		SupportsJSONOutput:     true,
 	}
+}
+
+func conservativeDefaultMaxOutputTokens(contextWindow int, reasoning bool) int {
+	defaultTokens := 8192
+	if reasoning {
+		defaultTokens = 32768
+	}
+	return capSuggestedDefaultMaxOutput(contextWindow, defaultTokens, reasoning)
+}
+
+func capSuggestedDefaultMaxOutput(contextWindow int, suggested int, reasoning bool) int {
+	if suggested <= 0 {
+		return suggested
+	}
+	if reasoning || contextWindow <= 0 {
+		return suggested
+	}
+	contextCap := contextWindow / 8
+	if contextCap > 0 && contextCap < suggested {
+		return contextCap
+	}
+	return suggested
+}
+
+func RecommendedFallbackMaxOutputTokens(contextWindow int, suggested int, reasoning bool) int {
+	conservative := conservativeDefaultMaxOutputTokens(contextWindow, reasoning)
+	if suggested <= 0 {
+		return conservative
+	}
+	if suggested < conservative {
+		return suggested
+	}
+	return conservative
 }
 
 // catalogEntry maps a provider+model pattern to capabilities.
@@ -476,7 +509,7 @@ func ApplyConfigDefaults(cfg *modelproviders.Config) {
 				cfg.ContextWindowTokens = defaults.ContextWindowTokens
 			}
 			if cfg.MaxOutputTok <= 0 {
-				cfg.MaxOutputTok = defaults.DefaultMaxOutputTokens
+				cfg.MaxOutputTok = RecommendedFallbackMaxOutputTokens(cfg.ContextWindowTokens, defaults.DefaultMaxOutputTokens, defaults.SupportsReasoning)
 			}
 			return
 		}
@@ -485,7 +518,11 @@ func ApplyConfigDefaults(cfg *modelproviders.Config) {
 		cfg.ContextWindowTokens = caps.ContextWindowTokens
 	}
 	if cfg.MaxOutputTok <= 0 {
-		cfg.MaxOutputTok = caps.DefaultMaxOutputTokens
+		if found {
+			cfg.MaxOutputTok = caps.DefaultMaxOutputTokens
+		} else {
+			cfg.MaxOutputTok = RecommendedFallbackMaxOutputTokens(cfg.ContextWindowTokens, caps.DefaultMaxOutputTokens, caps.SupportsReasoning)
+		}
 	}
 	if strings.TrimSpace(cfg.ReasoningMode) == "" {
 		cfg.ReasoningMode = caps.ReasoningMode

@@ -68,6 +68,18 @@ func (m *Model) finalizeAssistantBlock() {
 	m.assistantBlock = nil
 }
 
+func (m *Model) discardActiveAssistantStream() {
+	m.streamLine = ""
+	m.lastFinalAnswer = ""
+	first, second := &m.assistantBlock, &m.reasoningBlock
+	if m.assistantBlock != nil && m.reasoningBlock != nil && m.reasoningBlock.start > m.assistantBlock.start {
+		first, second = &m.reasoningBlock, &m.assistantBlock
+	}
+	m.discardAssistantBlock(first)
+	m.discardAssistantBlock(second)
+	m.syncViewportContent()
+}
+
 func (m *Model) handleReasoningStream(text string, final bool) (tea.Model, tea.Cmd) {
 	return m.handleStreamBlock("reasoning", text, final)
 }
@@ -167,6 +179,32 @@ func mergeStreamChunk(existing string, incoming string, final bool) string {
 		return existing
 	}
 	return existing + incoming
+}
+
+func (m *Model) discardAssistantBlock(block **assistantBlockState) {
+	if block == nil || *block == nil {
+		return
+	}
+	current := *block
+	start := current.start
+	end := current.end
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if start > len(m.historyLines) {
+		start = len(m.historyLines)
+	}
+	if end > len(m.historyLines) {
+		end = len(m.historyLines)
+	}
+	if end > start {
+		m.replaceHistoryRange(start, end, nil)
+		m.shiftAnchoredBlocks(end, start-end, "")
+	}
+	*block = nil
 }
 
 func (m *Model) finalizeReasoningBlock() {

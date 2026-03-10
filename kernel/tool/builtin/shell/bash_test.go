@@ -34,6 +34,7 @@ type asyncRecordingRunner struct {
 
 type stubTaskManager struct {
 	startBash task.Snapshot
+	lastBash  task.BashStartRequest
 }
 
 func testSandboxType() string {
@@ -97,7 +98,8 @@ func (r *asyncRecordingRunner) ListSessions() []toolexec.SessionInfo {
 	return nil
 }
 
-func (s *stubTaskManager) StartBash(context.Context, task.BashStartRequest) (task.Snapshot, error) {
+func (s *stubTaskManager) StartBash(_ context.Context, req task.BashStartRequest) (task.Snapshot, error) {
+	s.lastBash = req
 	return s.startBash, nil
 }
 
@@ -347,7 +349,10 @@ func TestBash_FullControlRunsOnHostWithoutApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := tool.Run(context.Background(), map[string]any{"command": "cat <<'EOF' > a.txt\nx\nEOF"})
+	out, err := tool.Run(context.Background(), map[string]any{
+		"command":       "cat <<'EOF' > a.txt\nx\nEOF",
+		"yield_time_ms": -1,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +641,87 @@ func TestBash_TTYWithoutYieldAutomaticallyBecomesTask(t *testing.T) {
 	}
 }
 
-func TestBash_AppliesDefaultTimeout(t *testing.T) {
+func TestBash_DefaultYieldInFullControlStartsTask(t *testing.T) {
+	host := &asyncRecordingRunner{
+		status:         toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		startSessionID: "bash-session-1",
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "t-bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	}
+	ctx := task.WithManager(context.Background(), manager)
+	out, err := tool.Run(ctx, map[string]any{"command": "sleep 1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected default yield task handle, got %#v", out)
+	}
+	if manager.lastBash.Yield != defaultBashWait {
+		t.Fatalf("expected default wait %s, got %s", defaultBashWait, manager.lastBash.Yield)
+	}
+}
+
+func TestBash_DefaultYieldInSandboxStartsSandboxTask(t *testing.T) {
+	sandbox := &asyncRecordingRunner{
+		status:         toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		startSessionID: "sandbox-session-1",
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		HostRunner:     &recordingRunner{},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "t-bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	}
+	out, err := tool.Run(task.WithManager(context.Background(), manager), map[string]any{"command": "sleep 1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected sandbox task handle, got %#v", out)
+	}
+	if manager.lastBash.Route != string(toolexec.ExecutionRouteSandbox) {
+		t.Fatalf("expected sandbox route, got %+v", manager.lastBash)
+	}
+	if manager.lastBash.Yield != defaultBashWait {
+		t.Fatalf("expected default wait %s, got %s", defaultBashWait, manager.lastBash.Yield)
+	}
+}
+
+func TestBash_ExplicitNegativeOneYieldStaysSynchronous(t *testing.T) {
 	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
@@ -651,7 +736,10 @@ func TestBash_AppliesDefaultTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tool.Run(context.Background(), map[string]any{"command": "ls"}); err != nil {
+	if _, err := tool.Run(context.Background(), map[string]any{
+		"command":       "ls",
+		"yield_time_ms": -1,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if len(sandbox.calls) != 1 {
@@ -661,17 +749,18 @@ func TestBash_AppliesDefaultTimeout(t *testing.T) {
 		t.Fatalf("expected default timeout %s, got %s", defaultBashTimeout, sandbox.calls[0].Timeout)
 	}
 	if sandbox.calls[0].IdleTimeout != defaultBashIdle {
-		t.Fatalf("expected default idle timeout %s, got %s", defaultBashIdle, sandbox.calls[0].IdleTimeout)
+		t.Fatalf("expected default idle timeout %v, got %s", defaultBashIdle, sandbox.calls[0].IdleTimeout)
 	}
 }
 
-func TestBash_TimeoutOverrideViaArgs(t *testing.T) {
-	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
+func TestBash_ExplicitZeroYieldReturnsImmediateTask(t *testing.T) {
+	host := &asyncRecordingRunner{
+		status:         toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		startSessionID: "bash-session-1",
+	}
 	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		HostRunner:     &recordingRunner{},
-		SandboxRunner:  sandbox,
-		SandboxType:    testSandboxType(),
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -680,95 +769,27 @@ func TestBash_TimeoutOverrideViaArgs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tool.Run(context.Background(), map[string]any{
-		"command":    "ls",
-		"timeout_ms": 1500,
-	}); err != nil {
-		t.Fatal(err)
+	manager := &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "t-bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
 	}
-	if len(sandbox.calls) != 1 {
-		t.Fatalf("expected one sandbox call, got %d", len(sandbox.calls))
-	}
-	if sandbox.calls[0].Timeout != 1500*time.Millisecond {
-		t.Fatalf("expected timeout 1500ms, got %s", sandbox.calls[0].Timeout)
-	}
-	if sandbox.calls[0].IdleTimeout != defaultBashIdle {
-		t.Fatalf("expected idle timeout to remain default %s, got %s", defaultBashIdle, sandbox.calls[0].IdleTimeout)
-	}
-}
-
-func TestBash_NegativeTimeoutRejected(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		HostRunner:     &recordingRunner{},
-		SandboxRunner:  &recordingRunner{},
-		SandboxType:    testSandboxType(),
+	out, err := tool.Run(task.WithManager(context.Background(), manager), map[string]any{
+		"command":       "sleep 1",
+		"yield_time_ms": 0,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, err := NewBash(BashConfig{Runtime: rt})
-	if err != nil {
-		t.Fatal(err)
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected immediate task handle, got %#v", out)
 	}
-	_, err = tool.Run(context.Background(), map[string]any{
-		"command":    "ls",
-		"timeout_ms": -1,
-	})
-	if err == nil {
-		t.Fatal("expected timeout validation error")
-	}
-}
-
-func TestBash_IdleTimeoutOverrideViaArgs(t *testing.T) {
-	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		HostRunner:     &recordingRunner{},
-		SandboxRunner:  sandbox,
-		SandboxType:    testSandboxType(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool, err := NewBash(BashConfig{Runtime: rt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tool.Run(context.Background(), map[string]any{
-		"command":         "ls",
-		"idle_timeout_ms": 2300,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if len(sandbox.calls) != 1 {
-		t.Fatalf("expected one sandbox call, got %d", len(sandbox.calls))
-	}
-	if sandbox.calls[0].IdleTimeout != 2300*time.Millisecond {
-		t.Fatalf("expected idle timeout 2300ms, got %s", sandbox.calls[0].IdleTimeout)
-	}
-}
-
-func TestBash_NegativeIdleTimeoutRejected(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		HostRunner:     &recordingRunner{},
-		SandboxRunner:  &recordingRunner{},
-		SandboxType:    testSandboxType(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool, err := NewBash(BashConfig{Runtime: rt})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = tool.Run(context.Background(), map[string]any{
-		"command":         "ls",
-		"idle_timeout_ms": -1,
-	})
-	if err == nil {
-		t.Fatal("expected idle timeout validation error")
+	if manager.lastBash.Yield != 0 {
+		t.Fatalf("expected immediate return yield 0, got %s", manager.lastBash.Yield)
 	}
 }
 

@@ -108,12 +108,13 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 
 func newPromptState(req tuievents.PromptRequestMsg) *promptState {
 	state := &promptState{
-		prompt:      req.Prompt,
-		secret:      req.Secret,
-		response:    req.Response,
-		filterable:  req.Filterable,
-		multiSelect: req.MultiSelect,
-		selected:    map[string]struct{}{},
+		prompt:             req.Prompt,
+		secret:             req.Secret,
+		response:           req.Response,
+		filterable:         req.Filterable,
+		multiSelect:        req.MultiSelect,
+		allowFreeformInput: req.AllowFreeformInput,
+		selected:           map[string]struct{}{},
 	}
 	if req.Secret {
 		return state
@@ -133,9 +134,10 @@ func newPromptState(req tuievents.PromptRequestMsg) *promptState {
 				continue
 			}
 			state.choices = append(state.choices, promptChoice{
-				label:  label,
-				value:  value,
-				detail: strings.TrimSpace(choice.Detail),
+				label:         label,
+				value:         value,
+				detail:        strings.TrimSpace(choice.Detail),
+				alwaysVisible: choice.AlwaysVisible,
 			})
 		}
 		for _, selected := range req.SelectedChoices {
@@ -277,6 +279,13 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "enter":
 		visible = m.visiblePromptChoices()
+		if m.activePrompt.multiSelect && len(m.activePrompt.selected) == 0 {
+			filterValue := strings.TrimSpace(string(m.activePrompt.filter))
+			if custom, ok := firstAlwaysVisibleChoice(m.activePrompt.choices); ok && (filterValue == "" || len(visible) == 0 || promptChoicesOnlyAlwaysVisible(visible)) {
+				m.finishPrompt(custom.value, nil)
+				return nil
+			}
+		}
 		if len(visible) == 0 {
 			return nil
 		}
@@ -325,13 +334,51 @@ func (m *Model) visiblePromptChoices() []promptChoice {
 		return m.activePrompt.choices
 	}
 	out := make([]promptChoice, 0, len(m.activePrompt.choices))
+	pinned := make([]promptChoice, 0, 1)
 	for _, choice := range m.activePrompt.choices {
+		if choice.alwaysVisible {
+			pinned = append(pinned, choice)
+		}
 		text := strings.ToLower(strings.TrimSpace(choice.label + " " + choice.value + " " + choice.detail))
 		if strings.Contains(text, query) {
 			out = append(out, choice)
 		}
 	}
+	if len(pinned) == 0 {
+		return out
+	}
+	seen := make(map[string]struct{}, len(out))
+	for _, choice := range out {
+		seen[choice.value] = struct{}{}
+	}
+	for _, choice := range pinned {
+		if _, ok := seen[choice.value]; ok {
+			continue
+		}
+		out = append(out, choice)
+	}
 	return out
+}
+
+func promptChoicesOnlyAlwaysVisible(choices []promptChoice) bool {
+	if len(choices) == 0 {
+		return false
+	}
+	for _, choice := range choices {
+		if !choice.alwaysVisible {
+			return false
+		}
+	}
+	return true
+}
+
+func firstAlwaysVisibleChoice(choices []promptChoice) (promptChoice, bool) {
+	for _, choice := range choices {
+		if choice.alwaysVisible {
+			return choice, true
+		}
+	}
+	return promptChoice{}, false
 }
 
 func (m *Model) clampPromptChoiceIndex() {

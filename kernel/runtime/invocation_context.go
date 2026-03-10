@@ -20,6 +20,7 @@ type invocationContext struct {
 	toolMap  map[string]tool.Tool
 	policies []policy.Hook
 	runner   delegation.Runner
+	tasks    *runtimeTaskManager
 }
 
 func (c *invocationContext) Session() *session.Session {

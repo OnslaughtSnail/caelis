@@ -175,7 +175,7 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 		}
 		return result, NewCodedError(
 			ErrorCodeHostIdleTimeout,
-			"tool: command produced no output for %s and was terminated (likely interactive/long-running; try larger idle_timeout_ms); %s",
+			"tool: command produced no output for %s and was terminated (likely interactive or long-running); %s",
 			label,
 			commandOutputSummary(result),
 		)

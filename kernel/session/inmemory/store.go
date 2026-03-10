@@ -161,3 +161,33 @@ func (s *Store) ReplaceState(ctx context.Context, req *session.Session, values m
 	e.state = next
 	return nil
 }
+
+func (s *Store) UpdateState(ctx context.Context, req *session.Session, update func(map[string]any) (map[string]any, error)) error {
+	_ = ctx
+	if update == nil {
+		return nil
+	}
+	k, err := makeKey(req)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.data[k]
+	if !ok {
+		return session.ErrSessionNotFound
+	}
+	current := map[string]any{}
+	maps.Copy(current, e.state)
+	next, err := update(current)
+	if err != nil {
+		return err
+	}
+	if next == nil {
+		next = map[string]any{}
+	}
+	snapshot := map[string]any{}
+	maps.Copy(snapshot, next)
+	e.state = snapshot
+	return nil
+}

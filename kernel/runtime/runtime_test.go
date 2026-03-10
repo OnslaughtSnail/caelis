@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -14,6 +15,8 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
+	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -76,6 +79,10 @@ type blockingAgent struct {
 	once    sync.Once
 }
 
+type backgroundBashAgent struct {
+	taskID string
+}
+
 type panicAgent struct{}
 
 func (a panicAgent) Name() string { return "panic-agent" }
@@ -99,6 +106,29 @@ func (a *blockingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 		})
 		<-a.release
 		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil)
+	}
+}
+
+func (a *backgroundBashAgent) Name() string { return "background-bash" }
+func (a *backgroundBashAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		manager, ok := task.ManagerFromContext(ctx)
+		if !ok || manager == nil {
+			yield(nil, context.Canceled)
+			return
+		}
+		snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
+			Command: "sleep 30",
+			Yield:   10 * time.Millisecond,
+			Timeout: time.Minute,
+			Route:   string(toolexec.ExecutionRouteHost),
+		})
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		a.taskID = snapshot.TaskID
+		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "scheduled"}}, nil)
 	}
 }
 
@@ -280,7 +310,7 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 			case model.RoleUser:
 				switch last.TextContent() {
 				case "delegate please":
-					args, _ := json.Marshal(map[string]any{"task": "child task"})
+					args, _ := json.Marshal(map[string]any{"task": "child task", "yield_time_ms": -1})
 					return &model.Response{
 						Message: model.Message{
 							Role: model.RoleAssistant,
@@ -721,6 +751,40 @@ func TestRuntime_Run_SessionSingleFlight(t *testing.T) {
 
 	close(release)
 	<-firstRunDone
+}
+
+func TestRuntime_Run_CleansUpTurnScopedBackgroundTasks(t *testing.T) {
+	store := inmemory.New()
+	taskStore := taskinmemory.New()
+	rt, err := New(Config{Store: store, TaskStore: taskStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	agent := &backgroundBashAgent{}
+	for _, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-cleanup",
+		Input:     "hello",
+		Agent:     agent,
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	if strings.TrimSpace(agent.taskID) == "" {
+		t.Fatal("expected background task id")
+	}
+	entry, err := taskStore.Get(context.Background(), agent.taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.State != task.StateCancelled || entry.Running {
+		t.Fatalf("expected turn-scoped task to be cancelled, got state=%q running=%v result=%#v", entry.State, entry.Running, entry.Result)
+	}
 }
 
 func lifecycleStatuses(events []*session.Event) []string {

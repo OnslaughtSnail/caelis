@@ -157,26 +157,74 @@ func slashArgQueryAtCursor(input []rune, cursor int) (string, string, bool) {
 		return "", "", false
 	}
 	command := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(fields[0])), "/")
+	hasTrailingDelimiter := false
+	if len(raw) > 0 {
+		last := raw[len(raw)-1]
+		hasTrailingDelimiter = last == ' ' || last == '\t'
+	}
 	switch command {
-	case "model", "sandbox", "connect", "permission":
+	case "model":
+		if len(fields) == 1 {
+			if !hasTrailingDelimiter {
+				return "", "", false
+			}
+			return command, "", true
+		}
+		action := strings.ToLower(strings.TrimSpace(fields[1]))
+		if len(fields) == 2 {
+			if hasTrailingDelimiter {
+				switch action {
+				case "list":
+					return "", "", false
+				case "use", "rm", "edit":
+					return "model " + action, "", true
+				default:
+					return "", "", false
+				}
+			}
+			if action == "" {
+				return "", "", false
+			}
+			switch action {
+			case "list", "use", "rm", "edit":
+			default:
+				return "model", action, true
+			}
+			return "model", action, true
+		}
+		switch action {
+		case "list", "use", "rm", "edit":
+		default:
+			return "", "", false
+		}
+		if action != "use" {
+			return "model " + action, strings.TrimSpace(fields[2]), true
+		}
+		alias := strings.TrimSpace(fields[2])
+		if alias == "" {
+			return "", "", false
+		}
+		if len(fields) == 3 {
+			if hasTrailingDelimiter {
+				return "model use " + alias, "", true
+			}
+			return "model use", alias, true
+		}
+		return "model use " + alias, strings.TrimSpace(strings.Join(fields[3:], " ")), true
+	case "sandbox", "permission":
+		if len(fields) == 1 {
+			if !hasTrailingDelimiter {
+				return "", "", false
+			}
+			return command, "", true
+		}
+		if len(fields) == 2 {
+			return command, strings.TrimSpace(fields[1]), true
+		}
+		return "", "", false
 	default:
 		return "", "", false
 	}
-	if len(fields) == 1 {
-		// Require a trailing space after command before opening the arg picker.
-		if len(raw) == 0 {
-			return "", "", false
-		}
-		last := raw[len(raw)-1]
-		if last != ' ' && last != '\t' {
-			return "", "", false
-		}
-		return command, "", true
-	}
-	if len(fields) == 2 {
-		return command, strings.TrimSpace(fields[1]), true
-	}
-	return "", "", false
 }
 
 func slashCommandQueryAtCursor(input []rune, cursor int) (string, bool) {

@@ -130,24 +130,26 @@ func (i commandItem) FilterValue() string { return i.name }
 // ---------------------------------------------------------------------------
 
 type promptState struct {
-	prompt       string
-	secret       bool
-	input        []rune
-	cursor       int
-	choices      []promptChoice
-	choiceIndex  int
-	scrollOffset int
-	filter       []rune
-	filterable   bool
-	multiSelect  bool
-	selected     map[string]struct{}
-	response     chan tuievents.PromptResponse
+	prompt             string
+	secret             bool
+	input              []rune
+	cursor             int
+	choices            []promptChoice
+	choiceIndex        int
+	scrollOffset       int
+	filter             []rune
+	filterable         bool
+	multiSelect        bool
+	allowFreeformInput bool
+	selected           map[string]struct{}
+	response           chan tuievents.PromptResponse
 }
 
 type promptChoice struct {
-	label  string
-	value  string
-	detail string
+	label         string
+	value         string
+	detail        string
+	alwaysVisible bool
 }
 
 type textSelectionPoint struct {
@@ -619,10 +621,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuievents.TaskResultMsg:
-		// Commit any remaining streaming content.
-		m.flushStream()
-		m.finalizeAssistantBlock()
-		m.finalizeReasoningBlock()
+		if typed.Interrupted {
+			m.discardActiveAssistantStream()
+		} else {
+			// Commit any remaining streaming content.
+			m.flushStream()
+			m.finalizeAssistantBlock()
+			m.finalizeReasoningBlock()
+		}
 		if !m.runStartedAt.IsZero() {
 			m.lastRunDuration = time.Since(m.runStartedAt)
 			m.hasLastRunDuration = true
@@ -632,7 +638,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runningHint = ""
 		m.stopRunningAnimation()
 		m.attachmentCount = 0
-		if typed.Err != nil {
+		m.clearInputOverlays()
+		if typed.Err != nil && !typed.Interrupted {
 			// Suppress prompt interrupt/EOF errors — these are user-initiated
 			// cancel actions (e.g., pressing Esc during /connect prompts) and
 			// should not be displayed as errors.

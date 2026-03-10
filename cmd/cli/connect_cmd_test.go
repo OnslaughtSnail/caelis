@@ -140,7 +140,7 @@ func TestHandleConnectRejectsPositionalArgs(t *testing.T) {
 	}
 }
 
-func TestBuildConnectModelChoicesIncludesCatalogAndCustom(t *testing.T) {
+func TestBuildConnectModelChoicesIncludesRemoteAndCustomOnly(t *testing.T) {
 	got := buildConnectModelChoices("deepseek", []modelproviders.RemoteModel{
 		{Name: "deepseek-chat"},
 	})
@@ -157,7 +157,7 @@ func TestBuildConnectModelChoicesIncludesCatalogAndCustom(t *testing.T) {
 			foundCustom = true
 		}
 	}
-	if !foundChat || !foundReasoner || !foundCustom {
+	if !foundChat || foundReasoner || !foundCustom {
 		t.Fatalf("unexpected model choices: %+v", got)
 	}
 }
@@ -210,6 +210,68 @@ func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 	}
 	if store.DefaultModel() != "deepseek/deepseek-chat" {
 		t.Fatalf("unexpected default model %q", store.DefaultModel())
+	}
+}
+
+func TestHandleConnect_ReinitializesReasoningDefaultsAndOmitsNotes(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return []modelproviders.RemoteModel{{Name: "deepseek-chat"}}, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	store := &appConfigStore{path: filepath.Join(t.TempDir(), "config.json"), data: defaultAppConfig()}
+	if err := store.UpsertProvider(modelproviders.Config{
+		Alias:        "deepseek/deepseek-chat",
+		Provider:     "deepseek",
+		API:          modelproviders.APIDeepSeek,
+		BaseURL:      "https://api.deepseek.com/v1",
+		Model:        "deepseek-chat",
+		ThinkingMode: "off",
+	}); err != nil {
+		t.Fatalf("seed config failed: %v", err)
+	}
+	prompter := &stubChoicePrompter{
+		choices: []string{"deepseek", "deepseek-chat"},
+		lines:   []string{"sk-test"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		configStore:  store,
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	if c.thinkingMode != "on" {
+		t.Fatalf("expected connect to initialize reasoning on, got %q", c.thinkingMode)
+	}
+	settings := store.ModelRuntimeSettings("deepseek/deepseek-chat")
+	if settings.ThinkingMode != "on" {
+		t.Fatalf("expected persisted thinking mode on, got %q", settings.ThinkingMode)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("deepseek/deepseek-chat")
+	if !ok {
+		t.Fatal("expected connected model config")
+	}
+	if cfg.ThinkingMode != "on" {
+		t.Fatalf("expected registered config thinking mode on, got %q", cfg.ThinkingMode)
+	}
+	if strings.Contains(out.String(), "credential_ref") {
+		t.Fatalf("expected credential note removed, got %q", out.String())
 	}
 }
 
@@ -291,7 +353,7 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	})
 
 	prompter := &stubChoicePrompter{
-		choices: []string{"openai", connectCustomModelValue, reasoningModeEffort, "low,high"},
+		choices: []string{"openai", reasoningModeEffort, "low,high"},
 		lines:   []string{"sk-test", "gpt-custom", "", "", "minimal,xhigh"},
 	}
 	var out bytes.Buffer
@@ -310,8 +372,11 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	if !ok {
 		t.Fatal("expected unknown model to be registered")
 	}
-	if cfg.ContextWindowTokens != 128000 || cfg.MaxOutputTok != 4096 {
+	if cfg.ContextWindowTokens != 128000 || cfg.MaxOutputTok != 8192 {
 		t.Fatalf("unexpected advanced defaults %+v", cfg)
+	}
+	if strings.Contains(out.String(), "缺少完整能力定义") {
+		t.Fatalf("expected advanced-model note removed, got %q", out.String())
 	}
 	if cfg.ReasoningMode != reasoningModeEffort {
 		t.Fatalf("expected reasoning mode effort, got %q", cfg.ReasoningMode)
@@ -336,6 +401,50 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 		if cfg.ReasoningLevels[i] != wantLevels[i] {
 			t.Fatalf("unexpected reasoning levels %+v", cfg.ReasoningLevels)
 		}
+	}
+}
+
+func TestHandleConnect_NoDiscoveredModelsPromptsManualInputAndStripsProviderPrefix(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return nil, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, io.EOF
+			}),
+		}, "")
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"openai-compatible"},
+		lines:   []string{"https://example.invalid/v1", "sk-test", "openai-compatible/gpt-4o-mini"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("openai-compatible/gpt-4o-mini")
+	if !ok {
+		t.Fatal("expected model to be registered from manual input")
+	}
+	if cfg.Model != "gpt-4o-mini" {
+		t.Fatalf("expected stripped model name, got %q", cfg.Model)
 	}
 }
 
@@ -375,5 +484,38 @@ func TestParseReasoningLevelsInput_Invalid(t *testing.T) {
 	_, err := parseReasoningLevelsInput("minimal,unknown")
 	if err == nil {
 		t.Fatal("expected invalid reasoning level error")
+	}
+}
+
+func TestParseTokenCountInput(t *testing.T) {
+	cases := []struct {
+		input string
+		want  int
+	}{
+		{input: "128k", want: 128 * 1024},
+		{input: "128", want: 128 * 1024},
+		{input: "32768", want: 32768},
+		{input: "1m", want: 1024 * 1024},
+	}
+	for _, tc := range cases {
+		got, err := parseTokenCountInput(tc.input)
+		if err != nil {
+			t.Fatalf("parseTokenCountInput(%q) failed: %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Fatalf("parseTokenCountInput(%q)=%d want %d", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestFormatTokenCountDefault(t *testing.T) {
+	if got := formatTokenCountDefault(128 * 1024); got != "128k" {
+		t.Fatalf("unexpected formatted default %q", got)
+	}
+	if got := formatTokenCountDefault(32768); got != "32k" {
+		t.Fatalf("unexpected formatted default %q", got)
+	}
+	if got := formatTokenCountDefault(12345); got != "12345" {
+		t.Fatalf("unexpected formatted default %q", got)
 	}
 }

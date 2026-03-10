@@ -344,8 +344,15 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	if len(sender.msgs) == 0 {
 		t.Fatal("expected TUI replay events")
 	}
-	if _, ok := sender.msgs[0].(tuievents.ClearHistoryMsg); !ok {
-		t.Fatalf("expected first replay message to clear history, got %T", sender.msgs[0])
+	foundClear := false
+	for _, raw := range sender.msgs {
+		if _, ok := raw.(tuievents.ClearHistoryMsg); ok {
+			foundClear = true
+			break
+		}
+	}
+	if !foundClear {
+		t.Fatalf("expected replay stream to clear history, got %#v", sender.msgs)
 	}
 	foundUser := false
 	foundAssistant := false

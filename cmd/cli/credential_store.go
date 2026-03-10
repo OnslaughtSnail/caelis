@@ -141,6 +141,21 @@ func (s *credentialStore) Get(ref string) (credentialRecord, bool) {
 	return record, true
 }
 
+func (s *credentialStore) Delete(ref string) error {
+	if s == nil {
+		return nil
+	}
+	key := normalizeCredentialRef(ref)
+	if key == "" {
+		return nil
+	}
+	if _, ok := s.data.Credentials[key]; !ok {
+		return nil
+	}
+	delete(s.data.Credentials, key)
+	return s.save()
+}
+
 func (s *credentialStore) save() error {
 	if s == nil {
 		return nil

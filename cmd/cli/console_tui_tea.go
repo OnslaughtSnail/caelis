@@ -95,18 +95,25 @@ func (b *teaPromptBroker) ReadSecret(prompt string) (string, error) {
 }
 
 func (b *teaPromptBroker) requestPrompt(prompt string, secret bool) (string, error) {
-	return b.requestPromptWithOptions(prompt, secret, nil, "", nil, false, false)
+	return b.requestPromptWithOptions(prompt, secret, nil, "", nil, false, false, false)
 }
 
 func (b *teaPromptBroker) RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error) {
-	return b.requestPromptWithOptions(prompt, false, choices, defaultChoice, nil, filterable, false)
+	return b.requestPromptWithOptions(prompt, false, choices, defaultChoice, nil, filterable, false, false)
 }
 
 func (b *teaPromptBroker) RequestMultiChoicePrompt(prompt string, choices []tuievents.PromptChoice, selectedChoices []string, filterable bool) (string, error) {
-	return b.requestPromptWithOptions(prompt, false, choices, "", selectedChoices, filterable, true)
+	allowFreeformInput := false
+	for _, choice := range choices {
+		if choice.AlwaysVisible {
+			allowFreeformInput = true
+			break
+		}
+	}
+	return b.requestPromptWithOptions(prompt, false, choices, "", selectedChoices, filterable, true, allowFreeformInput)
 }
 
-func (b *teaPromptBroker) requestPromptWithOptions(prompt string, secret bool, choices []tuievents.PromptChoice, defaultChoice string, selectedChoices []string, filterable bool, multiSelect bool) (string, error) {
+func (b *teaPromptBroker) requestPromptWithOptions(prompt string, secret bool, choices []tuievents.PromptChoice, defaultChoice string, selectedChoices []string, filterable bool, multiSelect bool, allowFreeformInput bool) (string, error) {
 	response := make(chan tuievents.PromptResponse, 1)
 
 	b.mu.Lock()
@@ -118,14 +125,15 @@ func (b *teaPromptBroker) requestPromptWithOptions(prompt string, secret bool, c
 	b.mu.Unlock()
 
 	b.sender.Send(tuievents.PromptRequestMsg{
-		Prompt:          prompt,
-		Secret:          secret,
-		Choices:         append([]tuievents.PromptChoice(nil), choices...),
-		DefaultChoice:   defaultChoice,
-		SelectedChoices: append([]string(nil), selectedChoices...),
-		Filterable:      filterable,
-		MultiSelect:     multiSelect,
-		Response:        response,
+		Prompt:             prompt,
+		Secret:             secret,
+		Choices:            append([]tuievents.PromptChoice(nil), choices...),
+		DefaultChoice:      defaultChoice,
+		SelectedChoices:    append([]string(nil), selectedChoices...),
+		Filterable:         filterable,
+		MultiSelect:        multiSelect,
+		AllowFreeformInput: allowFreeformInput,
+		Response:           response,
 	})
 
 	result, ok := <-response
@@ -213,7 +221,7 @@ func (c *cliConsole) loopTUITea() error {
 			}
 			err := c.runPrompt(line)
 			if errors.Is(err, context.Canceled) {
-				return tuievents.TaskResultMsg{Err: errors.New("execution interrupted")}
+				return tuievents.TaskResultMsg{Interrupted: true}
 			}
 			return tuievents.TaskResultMsg{Err: err}
 		},
@@ -491,12 +499,27 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 	rawCmd := strings.TrimSpace(command)
 	cmd := strings.ToLower(rawCmd)
 	switch {
+	case strings.HasPrefix(cmd, "model use "):
+		alias := strings.TrimSpace(rawCmd[len("model use "):])
+		if alias == "" {
+			return nil, nil
+		}
+		return c.completeModelReasoningCandidates(alias, query, limit), nil
 	case strings.HasPrefix(cmd, "model-reasoning:"):
 		alias, ok := parseModelReasoningPayload(rawCmd)
 		if !ok {
 			return nil, nil
 		}
 		return c.completeModelReasoningCandidates(alias, query, limit), nil
+	case strings.HasPrefix(cmd, "model "):
+		actionQuery := strings.TrimSpace(strings.TrimPrefix(rawCmd, "model"))
+		if actionQuery == "" {
+			return c.completeModelCommandCandidates(query, limit), nil
+		}
+		if query != "" {
+			actionQuery += " " + query
+		}
+		return c.completeModelCommandCandidates(actionQuery, limit), nil
 	case strings.HasPrefix(cmd, "connect-model:"):
 		payload := strings.TrimPrefix(rawCmd, "connect-model:")
 		provider, baseURL, timeoutSeconds, apiKey, hasRemoteContext := parseConnectModelPayload(payload)
@@ -523,7 +546,7 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 	}
 	switch cmd {
 	case "model":
-		return c.completeModelCandidates(query, limit), nil
+		return c.completeModelCommandCandidates(query, limit), nil
 	case "sandbox":
 		return c.completeSandboxCandidates(query, limit), nil
 	case "connect":
@@ -622,6 +645,7 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 		alias    string
 		provider string
 		model    string
+		baseURL  string
 	}
 	parse := func(alias string) item {
 		one := item{alias: strings.ToLower(strings.TrimSpace(alias))}
@@ -632,6 +656,7 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 			if cfg, ok := c.modelFactory.ConfigForAlias(one.alias); ok {
 				one.provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
 				one.model = strings.TrimSpace(cfg.Model)
+				one.baseURL = strings.TrimSpace(cfg.BaseURL)
 			}
 		}
 		if one.provider == "" || one.model == "" {
@@ -650,7 +675,7 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 
 	aliases := make([]string, 0, 16)
 	if c.configStore != nil {
-		aliases = append(aliases, c.configStore.ConfiguredModelRefs()...)
+		aliases = append(aliases, c.configStore.ConfiguredModelAliases()...)
 	}
 	if len(aliases) == 0 && c.modelFactory != nil {
 		aliases = append(aliases, c.modelFactory.ListModels()...)
@@ -659,30 +684,20 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 		return nil
 	}
 
-	byKey := map[string]item{}
+	items := make([]item, 0, len(aliases))
 	for _, alias := range aliases {
 		parsed := parse(alias)
 		if parsed.alias == "" {
 			continue
 		}
-		key := parsed.alias
-		if parsed.provider != "" && parsed.model != "" {
-			key = parsed.provider + "/" + strings.ToLower(parsed.model)
-		}
-		prev, exists := byKey[key]
-		if !exists {
-			byKey[key] = parsed
+		items = append(items, parsed)
+	}
+	duplicateCount := map[string]int{}
+	for _, one := range items {
+		if one.provider == "" || one.model == "" {
 			continue
 		}
-		// Prefer canonical provider/model refs when multiple aliases map to one model.
-		if strings.Contains(parsed.alias, "/") && !strings.Contains(prev.alias, "/") {
-			byKey[key] = parsed
-		}
-	}
-
-	items := make([]item, 0, len(byKey))
-	for _, one := range byKey {
-		items = append(items, one)
+		duplicateCount[one.provider+"/"+strings.ToLower(one.model)]++
 	}
 	sort.SliceStable(items, func(i, j int) bool {
 		pi := items[i].provider
@@ -702,11 +717,14 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 	out := make([]tuiapp.SlashArgCandidate, 0, minInt(limit, len(items)))
 	for _, one := range items {
 		display := one.alias
-		if one.provider != "" && one.model != "" && one.alias != one.provider+"/"+strings.ToLower(one.model) {
-			display = fmt.Sprintf("%s/%s (%s)", one.provider, one.model, one.alias)
+		if one.provider != "" && one.model != "" {
+			display = canonicalModelRef(one.provider, one.model)
+			if duplicateCount[one.provider+"/"+strings.ToLower(one.model)] > 1 {
+				display = fmt.Sprintf("%s (%s)", display, compactEndpointForDisplay(one.baseURL))
+			}
 		}
 		if q != "" {
-			text := strings.ToLower(display + " " + one.alias + " " + one.provider + " " + one.model)
+			text := strings.ToLower(one.provider + " " + one.model)
 			if !strings.Contains(text, q) {
 				continue
 			}
@@ -720,6 +738,91 @@ func (c *cliConsole) completeModelCandidates(query string, limit int) []tuiapp.S
 		}
 	}
 	return out
+}
+
+func (c *cliConsole) completeModelCommandCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	raw := strings.TrimLeft(query, " \t")
+	hasTrailingSpace := strings.HasSuffix(query, " ") || strings.HasSuffix(query, "\t")
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return completeModelActionCandidates("", limit)
+	}
+	action := strings.ToLower(strings.TrimSpace(fields[0]))
+	if !hasTrailingSpace && len(fields) == 1 {
+		switch action {
+		case "list", "use", "rm", "edit":
+		default:
+			return completeModelActionCandidates(action, limit)
+		}
+	}
+	switch action {
+	case "list":
+		return nil
+	case "use":
+		if len(fields) == 1 {
+			return c.completeModelCandidates("", limit)
+		}
+		if len(fields) == 2 && !hasTrailingSpace {
+			return c.completeModelCandidates(fields[1], limit)
+		}
+		alias := fields[1]
+		reasoningQuery := ""
+		if len(fields) >= 3 {
+			reasoningQuery = fields[len(fields)-1]
+		}
+		return c.completeModelReasoningCandidates(alias, reasoningQuery, limit)
+	case "rm", "edit":
+		if len(fields) == 1 {
+			return c.completeModelCandidates("", limit)
+		}
+		return c.completeModelCandidates(fields[len(fields)-1], limit)
+	default:
+		return completeModelActionCandidates(action, limit)
+	}
+}
+
+func completeModelActionCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	actions := []tuiapp.SlashArgCandidate{
+		{Value: "list", Display: "list"},
+		{Value: "use", Display: "use"},
+		{Value: "rm", Display: "rm"},
+		{Value: "edit", Display: "edit"},
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]tuiapp.SlashArgCandidate, 0, len(actions))
+	for _, one := range actions {
+		if q != "" && !strings.Contains(strings.ToLower(one.Value), q) {
+			continue
+		}
+		out = append(out, one)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func compactEndpointForDisplay(baseURL string) string {
+	value := strings.TrimSpace(baseURL)
+	if value == "" {
+		return "default endpoint"
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	host := strings.TrimSpace(parsed.Host)
+	path := strings.Trim(strings.TrimSpace(parsed.Path), "/")
+	if host == "" {
+		return value
+	}
+	if path == "" {
+		return host
+	}
+	return host + "/" + path
 }
 
 func (c *cliConsole) completeModelReasoningCandidates(alias string, query string, limit int) []tuiapp.SlashArgCandidate {
@@ -969,7 +1072,7 @@ func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens
 	model = strings.TrimSpace(model)
 
 	contextWindowTokens = defaultCatalogModelCapabilities().ContextWindowTokens
-	maxOutputTokens = 4096
+	maxOutputTokens = defaultCatalogModelCapabilities().DefaultMaxOutputTokens
 	if tpl, ok := findProviderTemplate(provider); ok {
 		if tpl.defaultContextToken > 0 {
 			contextWindowTokens = tpl.defaultContextToken
@@ -985,6 +1088,9 @@ func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens
 			maxOutputTokens = caps.DefaultMaxOutputTokens
 		} else if caps.MaxOutputTokens > 0 {
 			maxOutputTokens = caps.MaxOutputTokens
+		}
+		if _, exactKnown := lookupBaseCatalogModelCapabilities(provider, model); !exactKnown {
+			maxOutputTokens = recommendedCatalogFallbackMaxOutputTokens(contextWindowTokens, maxOutputTokens, caps.SupportsReasoning)
 		}
 		reasoningLevels = normalizeReasoningLevels(caps.ReasoningEfforts)
 		if len(reasoningLevels) == 0 && !caps.SupportsReasoning {
@@ -1210,9 +1316,7 @@ func (c *cliConsole) completeConnectTimeoutCandidates(query string, limit int) [
 // ---------------------------------------------------------------------------
 
 func buildWizardDefs() []tuiapp.WizardDef {
-	return []tuiapp.WizardDef{
-		buildModelWizard(),
-	}
+	return nil
 }
 
 func buildModelWizard() tuiapp.WizardDef {
@@ -1220,10 +1324,24 @@ func buildModelWizard() tuiapp.WizardDef {
 		Command: "model",
 		Steps: []tuiapp.WizardStepDef{
 			{
-				Key:       "alias",
+				Key:       "action",
 				HintLabel: "/model",
 				CompletionCommand: func(_ map[string]string) string {
 					return "model"
+				},
+			},
+			{
+				Key:       "alias",
+				HintLabel: "/model alias",
+				CompletionCommand: func(s map[string]string) string {
+					action := strings.ToLower(strings.TrimSpace(s["action"]))
+					if action == "list" || action == "" {
+						return ""
+					}
+					return "model " + action
+				},
+				ShouldSkip: func(s map[string]string) bool {
+					return strings.ToLower(strings.TrimSpace(s["action"])) == "list"
 				},
 			},
 			{
@@ -1231,12 +1349,31 @@ func buildModelWizard() tuiapp.WizardDef {
 				HintLabel:    "/model reasoning",
 				FreeformHint: "/model reasoning: type option and press enter",
 				CompletionCommand: func(s map[string]string) string {
+					if strings.ToLower(strings.TrimSpace(s["action"])) != "use" {
+						return ""
+					}
 					return "model-reasoning:" + url.QueryEscape(strings.ToLower(strings.TrimSpace(s["alias"])))
+				},
+				ShouldSkip: func(s map[string]string) bool {
+					return strings.ToLower(strings.TrimSpace(s["action"])) != "use"
 				},
 			},
 		},
 		BuildExecLine: func(s map[string]string) string {
-			return "/model " + s["alias"] + " " + s["reasoning"]
+			action := strings.ToLower(strings.TrimSpace(s["action"]))
+			switch action {
+			case "list":
+				return "/model list"
+			case "rm", "edit":
+				return "/model " + action + " " + s["alias"]
+			case "use":
+				if strings.TrimSpace(s["reasoning"]) != "" {
+					return "/model use " + s["alias"] + " " + s["reasoning"]
+				}
+				return "/model use " + s["alias"]
+			default:
+				return "/model " + action
+			}
 		},
 	}
 }

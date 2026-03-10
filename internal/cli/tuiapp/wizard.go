@@ -161,6 +161,134 @@ func (m *Model) startWizard(def *WizardDef) {
 	m.advanceWizardStep("")
 }
 
+func (m *Model) advanceWizardCursor() bool {
+	w := m.wizard
+	if w == nil {
+		return false
+	}
+	for {
+		w.stepIndex++
+		if w.stepIndex >= len(w.def.Steps) {
+			return false
+		}
+		step := &w.def.Steps[w.stepIndex]
+		if step.ShouldSkip != nil && step.ShouldSkip(w.state) {
+			continue
+		}
+		return true
+	}
+}
+
+func (m *Model) activateWizardFromInput(line string) bool {
+	raw := strings.TrimSpace(line)
+	if raw == "" || !strings.HasPrefix(raw, "/") {
+		return false
+	}
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return false
+	}
+	command := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(fields[0])), "/")
+	def := m.findWizard(command)
+	if def == nil {
+		return false
+	}
+	hasTrailingDelimiter := strings.HasSuffix(line, " ") || strings.HasSuffix(line, "\t")
+	if len(fields) == 1 && !hasTrailingDelimiter {
+		return false
+	}
+
+	args := fields[1:]
+	committedArgs := args
+	pendingQuery := ""
+	if !hasTrailingDelimiter && len(args) > 0 {
+		committedArgs = args[:len(args)-1]
+		pendingQuery = strings.TrimSpace(args[len(args)-1])
+	}
+
+	m.clearMention()
+	m.clearSkill()
+	m.clearResume()
+	m.clearSlashCompletion()
+	m.wizard = &wizardRuntime{
+		def:       def,
+		stepIndex: -1,
+		state:     make(map[string]string),
+	}
+
+	if !m.advanceWizardCursor() {
+		m.clearWizard()
+		return false
+	}
+	for _, arg := range committedArgs {
+		step := m.wizard.currentStep()
+		if step == nil {
+			m.clearWizard()
+			return false
+		}
+		value := strings.TrimSpace(arg)
+		if value == "" {
+			m.clearWizard()
+			return false
+		}
+		m.wizard.state[step.Key] = value
+		if m.wizard.def.OnStepConfirm != nil {
+			m.wizard.def.OnStepConfirm(step.Key, value, nil, m.wizard.state)
+		}
+		if !m.advanceWizardCursor() {
+			m.clearWizard()
+			return false
+		}
+	}
+
+	m.slashArgActive = true
+	m.slashArgCommand = m.wizard.completionCommand()
+	m.slashArgQuery = ""
+	m.slashArgIndex = 0
+	m.slashArgCandidates = nil
+	m.setInputText("/" + def.Command + " " + pendingQuery)
+	m.syncTextareaFromInput()
+	m.updateSlashArgCandidates()
+	return true
+}
+
+func (m *Model) tryAdvanceWizardOnTrailingDelimiter() (bool, tea.Cmd) {
+	if !m.isWizardActive() || !m.slashArgActive {
+		return false, nil
+	}
+	text := m.textarea.Value()
+	if !strings.HasSuffix(text, " ") && !strings.HasSuffix(text, "\t") {
+		return false, nil
+	}
+	step := m.wizard.currentStep()
+	if step == nil {
+		return false, nil
+	}
+	query, ok := wizardQueryAtCursor(m.wizard.def.Command, m.input, m.cursor)
+	if !ok {
+		return false, nil
+	}
+	value := strings.TrimSpace(query)
+	if value == "" {
+		return false, nil
+	}
+	var candidate *SlashArgCandidate
+	for i := range m.slashArgCandidates {
+		if strings.EqualFold(strings.TrimSpace(m.slashArgCandidates[i].Value), value) {
+			c := m.slashArgCandidates[i]
+			candidate = &c
+			value = strings.TrimSpace(c.Value)
+			break
+		}
+	}
+	if step.Validate != nil {
+		if err := step.Validate(value); err != nil {
+			return false, nil
+		}
+	}
+	return true, m.advanceWizardStep(value, candidate)
+}
+
 // advanceWizardStep stores the given value for the current step (if any),
 // invokes OnStepConfirm, and moves to the next non-skipped step. When all
 // steps are exhausted it builds the exec line and submits it.
@@ -185,17 +313,8 @@ func (m *Model) advanceWizardStep(value string, candidateOpt ...*SlashArgCandida
 	}
 
 	// Advance to next non-skipped step.
-	for {
-		w.stepIndex++
-		if w.stepIndex >= len(w.def.Steps) {
-			// All steps done — build and submit.
-			return m.wizardSubmit()
-		}
-		step := &w.def.Steps[w.stepIndex]
-		if step.ShouldSkip != nil && step.ShouldSkip(w.state) {
-			continue
-		}
-		break
+	if !m.advanceWizardCursor() {
+		return m.wizardSubmit()
 	}
 
 	// Open the new step.

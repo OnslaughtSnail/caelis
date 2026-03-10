@@ -45,6 +45,7 @@ type cliConsole struct {
 	resolved          *bootstrap.ResolvedSpec
 	sessionStore      session.Store
 	execRuntime       toolexec.Runtime
+	execRuntimeView   *swappableRuntime
 	sandboxType       string
 	sandboxHelperPath string
 
@@ -136,6 +137,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		resolved:              cfg.Resolved,
 		sessionStore:          cfg.SessionStore,
 		execRuntime:           cfg.ExecRuntime,
+		execRuntimeView:       cfg.ExecRuntimeView,
 		sandboxType:           strings.TrimSpace(cfg.SandboxType),
 		sandboxHelperPath:     strings.TrimSpace(cfg.SandboxHelperPath),
 		modelAlias:            cfg.ModelAlias,
@@ -187,7 +189,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type",
 			Handle:      handleSandbox,
 		},
-		"model":   {Usage: "/model <alias> [reasoning]", Description: "Switch active model and reasoning level", Handle: handleModel},
+		"model":   {Usage: "/model list | /model use <alias> [reasoning] | /model rm <alias> | /model edit <alias>", Description: "List, switch, remove, or edit configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
 		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
@@ -210,6 +212,7 @@ type cliConsoleConfig struct {
 	Resolved              *bootstrap.ResolvedSpec
 	SessionStore          session.Store
 	ExecRuntime           toolexec.Runtime
+	ExecRuntimeView       *swappableRuntime
 	SandboxType           string
 	SandboxHelperPath     string
 	ModelAlias            string
@@ -305,7 +308,6 @@ func (c *cliConsole) loopLine() error {
 		}
 		if err := c.runPrompt(line); err != nil {
 			if errors.Is(err, context.Canceled) {
-				c.ui.Warn("execution interrupted\n")
 				continue
 			}
 			c.ui.Error("%v\n", err)
@@ -415,7 +417,6 @@ func (c *cliConsole) runPrompt(input string) error {
 		PromptConfigDir:             c.promptConfigDir,
 		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
 		BasePrompt:                  c.systemPrompt,
-		RuntimeHint:                 buildRuntimePromptHint(c.execRuntime),
 		SkillDirs:                   c.skillDirs,
 		StreamModel:                 c.streamModel,
 		ThinkingMode:                c.thinkingMode,
@@ -645,20 +646,20 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 	}
 	if msg.ToolResponse != nil {
 		emittedTaskStream := c.emitTaskStreamFromToolResult(msg.ToolResponse)
-		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), tool.TaskToolName) && !hasToolError(msg.ToolResponse.Result) {
-			return emittedTaskStream
-		}
+		toolName := strings.TrimSpace(msg.ToolResponse.Name)
 		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), toolshell.BashToolName) {
 			c.tuiSender.Send(tuievents.TaskStreamMsg{
 				Label:  msg.ToolResponse.Name,
 				CallID: msg.ToolResponse.ID,
 				Final:  true,
 			})
+			hasError := hasToolError(msg.ToolResponse.Result)
+			exitCode, _ := asInt(msg.ToolResponse.Result["exit_code"])
 			if strings.TrimSpace(asString(msg.ToolResponse.Result["stdout"])) != "" ||
 				strings.TrimSpace(asString(msg.ToolResponse.Result["stderr"])) != "" {
 				return true
 			}
-			if emittedTaskStream {
+			if emittedTaskStream || (!hasError && exitCode == 0) {
 				return true
 			}
 		}
@@ -682,7 +683,15 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		}
 		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
 		if strings.TrimSpace(summary) != "" {
-			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", msg.ToolResponse.Name, summary)})
+			prefix := "✓ "
+			if hasToolError(msg.ToolResponse.Result) {
+				prefix = "! "
+			}
+			displayName := displayToolResponseName(toolName, callArgs, msg.ToolResponse.Result)
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine(prefix, displayName, summary)})
+		}
+		if strings.EqualFold(toolName, tool.TaskToolName) {
+			return emittedTaskStream || strings.TrimSpace(summary) != ""
 		}
 		return true
 	}
@@ -972,26 +981,29 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 
 func handlePermission(c *cliConsole, args []string) (bool, error) {
 	if len(args) == 0 {
-		c.printf("permission_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), c.sandboxType)
+		c.printf("permission_mode=%s session_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), c.sandboxType)
 		return false, nil
 	}
 	if len(args) != 1 {
 		return false, fmt.Errorf("usage: /permission [default|full_control]")
 	}
-	mode := toolexec.PermissionMode(strings.ToLower(strings.TrimSpace(args[0])))
+	raw := strings.ToLower(strings.TrimSpace(args[0]))
+	if raw == sessionmode.FullMode {
+		raw = string(toolexec.PermissionModeFullControl)
+	}
+	mode := toolexec.PermissionMode(raw)
 	switch mode {
 	case toolexec.PermissionModeDefault, toolexec.PermissionModeFullControl:
 	default:
 		return false, fmt.Errorf("invalid permission mode %q, expected default|full_control", args[0])
 	}
-	if err := c.updateExecutionRuntime(mode, c.sandboxType); err != nil {
+	if err := c.setPermissionMode(mode); err != nil {
 		return false, err
 	}
-	c.persistRuntimeSettings()
 	if c.execRuntime.FallbackToHost() {
-		c.printf("permission updated: mode=%s sandbox_type=%s (fallback: host+approval, reason=%s)\n", c.execRuntime.PermissionMode(), c.sandboxType, c.execRuntime.FallbackReason())
+		c.printf("permission updated: permission_mode=%s session_mode=%s sandbox_type=%s (fallback: host+approval, reason=%s)\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), c.sandboxType, c.execRuntime.FallbackReason())
 	} else {
-		c.printf("permission updated: mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), c.sandboxType)
+		c.printf("permission updated: permission_mode=%s session_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), c.sandboxType)
 	}
 	return false, nil
 }
@@ -1032,8 +1044,29 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 }
 
 func handleModel(c *cliConsole, args []string) (bool, error) {
+	if len(args) == 0 {
+		return false, fmt.Errorf("usage: /model list | /model use <alias> [reasoning] | /model rm <alias> | /model edit <alias>")
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "list":
+		if len(args) != 1 {
+			return false, fmt.Errorf("usage: /model list")
+		}
+		return handleModelList(c)
+	case "use":
+		return handleModelUse(c, args[1:])
+	case "rm":
+		return handleModelDelete(c, args[1:])
+	case "edit":
+		return handleModelEdit(c, args[1:])
+	default:
+		return handleModelUse(c, args)
+	}
+}
+
+func handleModelUse(c *cliConsole, args []string) (bool, error) {
 	if len(args) < 1 || len(args) > 2 {
-		return false, fmt.Errorf("usage: /model <alias> [reasoning]")
+		return false, fmt.Errorf("usage: /model use <alias> [reasoning]")
 	}
 	if c.modelFactory == nil {
 		return false, fmt.Errorf("model factory is not configured")
@@ -1095,6 +1128,159 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 	return false, nil
 }
 
+func handleModelDelete(c *cliConsole, args []string) (bool, error) {
+	if len(args) != 1 {
+		return false, fmt.Errorf("usage: /model rm <alias>")
+	}
+	if c.configStore == nil {
+		return false, fmt.Errorf("config store is not configured")
+	}
+	alias := strings.TrimSpace(args[0])
+	if alias == "" {
+		return false, fmt.Errorf("model alias is required")
+	}
+	if resolved := c.configStore.ResolveModelAlias(alias); resolved != "" {
+		alias = resolved
+	}
+	removed, ok, err := c.configStore.RemoveProvider(alias)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("model %q is not configured", alias)
+	}
+	credentialRef := normalizeCredentialRef(removed.Auth.CredentialRef)
+	if credentialRef == "" {
+		credentialRef = defaultCredentialRef(removed.Provider, removed.BaseURL)
+	}
+	if credentialRef != "" && c.credentialStore != nil && !c.configStore.CredentialRefInUse(credentialRef, removed.Alias) {
+		if err := c.credentialStore.Delete(credentialRef); err != nil {
+			return false, err
+		}
+	}
+	if err := c.reloadConfiguredModels(); err != nil {
+		return false, err
+	}
+	c.printf("model removed: %s\n", strings.ToLower(strings.TrimSpace(removed.Alias)))
+	return false, nil
+}
+
+func handleModelList(c *cliConsole) (bool, error) {
+	if c.modelFactory == nil {
+		return false, fmt.Errorf("model factory is not configured")
+	}
+	candidates := c.completeModelCandidates("", 1000)
+	if len(candidates) == 0 {
+		c.printf("no configured models\n")
+		return false, nil
+	}
+	c.printf("models:\n")
+	for _, candidate := range candidates {
+		marker := " "
+		if strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(c.modelAlias)) {
+			marker = "*"
+		}
+		c.printf("  %s %s", marker, candidate.Value)
+		if strings.TrimSpace(candidate.Display) != "" && candidate.Display != candidate.Value {
+			c.printf(" -> %s", candidate.Display)
+		}
+		c.printf("\n")
+	}
+	return false, nil
+}
+
+func handleModelEdit(c *cliConsole, args []string) (bool, error) {
+	if len(args) != 1 {
+		return false, fmt.Errorf("usage: /model edit <alias>")
+	}
+	if c.configStore == nil {
+		return false, fmt.Errorf("config store is not configured")
+	}
+	if c.modelFactory == nil {
+		return false, fmt.Errorf("model factory is not configured")
+	}
+	alias := strings.TrimSpace(args[0])
+	if alias == "" {
+		return false, fmt.Errorf("model alias is required")
+	}
+	if resolved := c.configStore.ResolveModelAlias(alias); resolved != "" {
+		alias = resolved
+	}
+	currentCfg, ok := c.modelFactory.ConfigForAlias(alias)
+	if !ok {
+		return false, fmt.Errorf("model %q is not configured", alias)
+	}
+	currentCfg = hydrateProviderAuthToken(currentCfg, c.credentialStore)
+
+	baseURL, err := c.promptText("base_url", currentCfg.BaseURL, false)
+	if err != nil {
+		return false, err
+	}
+	modelName, err := c.promptText("model", currentCfg.Model, false)
+	if err != nil {
+		return false, err
+	}
+	modelName, err = normalizeConnectModelName(currentCfg.Provider, modelName)
+	if err != nil {
+		return false, err
+	}
+	token := currentCfg.Auth.Token
+	if currentCfg.Auth.Type != modelproviders.AuthNone {
+		inputToken, err := c.promptText("api_key(blank to keep current)", "", true)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(inputToken) != "" {
+			token = strings.TrimSpace(inputToken)
+		}
+	}
+
+	updatedCfg := currentCfg
+	updatedCfg.BaseURL = strings.TrimSpace(baseURL)
+	updatedCfg.Model = modelName
+	updatedCfg.Auth.Token = token
+	updatedCfg.Auth.CredentialRef = normalizeCredentialRef(defaultCredentialRef(updatedCfg.Provider, updatedCfg.BaseURL))
+	updatedCfg.Alias = c.configStore.ResolveOrAllocateModelAlias(updatedCfg.Provider, updatedCfg.Model, updatedCfg.BaseURL)
+	modelcatalogApplyConfigDefaults(&updatedCfg)
+
+	oldAlias := strings.ToLower(strings.TrimSpace(currentCfg.Alias))
+	oldCredentialRef := normalizeCredentialRef(currentCfg.Auth.CredentialRef)
+	if oldCredentialRef == "" {
+		oldCredentialRef = defaultCredentialRef(currentCfg.Provider, currentCfg.BaseURL)
+	}
+	if updatedCfg.Alias != oldAlias {
+		if _, _, err := c.configStore.RemoveProvider(oldAlias); err != nil {
+			return false, err
+		}
+	}
+	persistCfg := updatedCfg
+	persistCfg.Auth.Token = ""
+	if err := c.configStore.UpsertProvider(persistCfg); err != nil {
+		return false, err
+	}
+	if updatedCfg.Auth.CredentialRef != "" && c.credentialStore != nil && updatedCfg.Auth.Type != modelproviders.AuthNone {
+		if err := c.credentialStore.Upsert(updatedCfg.Auth.CredentialRef, credentialRecord{
+			Type:  string(updatedCfg.Auth.Type),
+			Token: token,
+		}); err != nil {
+			return false, err
+		}
+	}
+	if oldCredentialRef != "" && oldCredentialRef != updatedCfg.Auth.CredentialRef && c.credentialStore != nil && !c.configStore.CredentialRefInUse(oldCredentialRef, oldAlias) {
+		if err := c.credentialStore.Delete(oldCredentialRef); err != nil {
+			return false, err
+		}
+	}
+	if err := c.reloadConfiguredModels(); err != nil {
+		return false, err
+	}
+	if err := c.configStore.SetDefaultModel(updatedCfg.Alias); err != nil {
+		return false, err
+	}
+	c.printf("model updated: %s\n", updatedCfg.Alias)
+	return false, nil
+}
+
 // resolveContextWindowForDisplay returns the context window token limit for the
 // current model. Uses the explicit CLI override first, then the connected model
 // config value, then falls back to the model capability catalog.
@@ -1131,6 +1317,50 @@ func (c *cliConsole) applyModelRuntimeSettings(alias string) {
 	c.thinkingMode = settings.ThinkingMode
 	c.thinkingBudget = settings.ThinkingBudget
 	c.reasoningEffort = settings.ReasoningEffort
+}
+
+func (c *cliConsole) reloadConfiguredModels() error {
+	factory := modelproviders.NewFactory()
+	if c.configStore != nil {
+		for _, providerCfg := range c.configStore.ProviderConfigs() {
+			providerCfg = hydrateProviderAuthToken(providerCfg, c.credentialStore)
+			modelcatalogApplyConfigDefaults(&providerCfg)
+			if err := factory.Register(providerCfg); err != nil {
+				return err
+			}
+		}
+	}
+	c.modelFactory = factory
+
+	currentAlias := strings.ToLower(strings.TrimSpace(c.modelAlias))
+	if c.configStore != nil && currentAlias != "" {
+		currentAlias = c.configStore.ResolveModelAlias(currentAlias)
+	}
+	if currentAlias == "" && c.configStore != nil {
+		currentAlias = c.configStore.DefaultModel()
+	}
+	if currentAlias != "" {
+		if _, ok := factory.ConfigForAlias(currentAlias); !ok && c.configStore != nil {
+			currentAlias = c.configStore.DefaultModel()
+		}
+	}
+	if currentAlias == "" {
+		c.modelAlias = ""
+		c.llm = nil
+		c.applyModelRuntimeSettings("")
+		return nil
+	}
+	llm, err := factory.NewByAlias(currentAlias)
+	if err != nil {
+		c.modelAlias = ""
+		c.llm = nil
+		c.applyModelRuntimeSettings("")
+		return nil
+	}
+	c.modelAlias = currentAlias
+	c.llm = llm
+	c.applyModelRuntimeSettings(currentAlias)
+	return nil
 }
 
 func handleTools(c *cliConsole, args []string) (bool, error) {
@@ -1212,7 +1442,9 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 	}); err != nil {
 		return false, err
 	}
-	c.sessionMode = c.loadSessionMode()
+	if err := c.restoreSessionMode(c.loadSessionMode()); err != nil {
+		return false, err
+	}
 	if err := c.renderResumedSessionEvents(); err != nil {
 		return false, err
 	}
@@ -1292,8 +1524,14 @@ func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandbo
 		return err
 	}
 	c.execRuntime = nextRuntime
+	if c.execRuntimeView != nil {
+		c.execRuntimeView.Set(nextRuntime)
+	}
 	if err := c.refreshShellToolRuntime(); err != nil {
 		c.execRuntime = prevRuntime
+		if c.execRuntimeView != nil {
+			c.execRuntimeView.Set(prevRuntime)
+		}
 		_ = toolexec.Close(nextRuntime)
 		return err
 	}

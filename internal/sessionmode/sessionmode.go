@@ -3,6 +3,8 @@ package sessionmode
 import (
 	"path/filepath"
 	"strings"
+
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
 const (
@@ -50,6 +52,25 @@ func DisplayLabel(mode string) string {
 
 func IsFullAccess(mode string) bool {
 	return Normalize(mode) == FullMode
+}
+
+func PermissionMode(mode string) toolexec.PermissionMode {
+	if IsFullAccess(mode) {
+		return toolexec.PermissionModeFullControl
+	}
+	return toolexec.PermissionModeDefault
+}
+
+func ModeForPermission(permissionMode toolexec.PermissionMode, currentMode string) string {
+	switch permissionMode {
+	case toolexec.PermissionModeFullControl:
+		return FullMode
+	default:
+		if Normalize(currentMode) == PlanMode {
+			return PlanMode
+		}
+		return DefaultMode
+	}
 }
 
 func IsDangerousCommand(command string) bool {
@@ -272,7 +293,10 @@ func shellSegmentTokens(segment string) []string {
 
 func Inject(input string, mode string) string {
 	visible := Strip(input)
-	control := controlBlock(Normalize(mode))
+	if Normalize(mode) != PlanMode {
+		return visible
+	}
+	control := controlBlock(PlanMode)
 	visible = strings.TrimSpace(visible)
 	if visible == "" {
 		return control
@@ -320,13 +344,7 @@ func controlBlock(mode string) string {
 		return `<caelis-session-mode mode="plan" hidden="true">
 This turn is running in PLAN mode. Focus on analysis, planning, tradeoffs, and implementation strategy. Do not make changes unless the user explicitly asks you to execute them.
 </caelis-session-mode>`
-	case FullMode:
-		return `<caelis-session-mode mode="full_access" hidden="true">
-This turn is running in FULL_ACCESS mode. You may execute changes directly without waiting for approval, but avoid dangerous destructive commands that could damage the host or delete data.
-</caelis-session-mode>`
 	default:
-		return `<caelis-session-mode mode="default" hidden="true">
-This turn is running in DEFAULT mode. Follow the user's request normally.
-</caelis-session-mode>`
+		return ""
 	}
 }

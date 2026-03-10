@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -398,6 +400,22 @@ func (s *appConfigStore) ConfiguredModelRefs() []string {
 	return out
 }
 
+func (s *appConfigStore) ConfiguredModelAliases() []string {
+	if s == nil || len(s.data.Providers) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.data.Providers))
+	for _, rec := range s.data.Providers {
+		alias := strings.ToLower(strings.TrimSpace(rec.Alias))
+		if alias == "" {
+			continue
+		}
+		out = append(out, alias)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *appConfigStore) ResolveModelAlias(input string) string {
 	target := strings.ToLower(strings.TrimSpace(input))
 	if target == "" {
@@ -406,6 +424,7 @@ func (s *appConfigStore) ResolveModelAlias(input string) string {
 	if s == nil {
 		return target
 	}
+	matches := make([]string, 0, 2)
 	for _, rec := range s.data.Providers {
 		alias := strings.ToLower(strings.TrimSpace(rec.Alias))
 		if alias == target {
@@ -413,8 +432,11 @@ func (s *appConfigStore) ResolveModelAlias(input string) string {
 		}
 		ref := canonicalModelRef(rec.Provider, rec.Model)
 		if ref != "" && ref == target {
-			return alias
+			matches = append(matches, alias)
 		}
+	}
+	if len(matches) == 1 {
+		return matches[0]
 	}
 	return target
 }
@@ -553,6 +575,108 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		s.data.Providers = append(s.data.Providers, record)
 	}
 	return s.save()
+}
+
+func (s *appConfigStore) ResolveOrAllocateModelAlias(provider string, modelName string, baseURL string) string {
+	ref := canonicalModelRef(provider, modelName)
+	if ref == "" {
+		return ""
+	}
+	if s == nil {
+		return ref
+	}
+	targetEndpoint := normalizedProviderEndpoint(baseURL)
+	candidateUsed := false
+	for _, rec := range s.data.Providers {
+		if canonicalModelRef(rec.Provider, rec.Model) != ref {
+			continue
+		}
+		alias := strings.ToLower(strings.TrimSpace(rec.Alias))
+		if alias == "" {
+			continue
+		}
+		if normalizedProviderEndpoint(rec.BaseURL) == targetEndpoint {
+			return alias
+		}
+		if alias == ref {
+			candidateUsed = true
+		}
+	}
+	if !candidateUsed {
+		return ref
+	}
+	suffix := endpointAliasSuffix(baseURL)
+	alias := ref + "@" + suffix
+	if !s.providerAliasExists(alias) {
+		return alias
+	}
+	base := alias
+	for i := 2; ; i++ {
+		alias = fmt.Sprintf("%s-%d", base, i)
+		if !s.providerAliasExists(alias) {
+			return alias
+		}
+	}
+}
+
+func (s *appConfigStore) providerAliasExists(alias string) bool {
+	target := strings.ToLower(strings.TrimSpace(alias))
+	if target == "" || s == nil {
+		return false
+	}
+	for _, rec := range s.data.Providers {
+		if strings.ToLower(strings.TrimSpace(rec.Alias)) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *appConfigStore) RemoveProvider(alias string) (providerRecord, bool, error) {
+	target := strings.ToLower(strings.TrimSpace(alias))
+	if s == nil || target == "" {
+		return providerRecord{}, false, nil
+	}
+	for i := range s.data.Providers {
+		if strings.ToLower(strings.TrimSpace(s.data.Providers[i].Alias)) != target {
+			continue
+		}
+		removed := s.data.Providers[i]
+		s.data.Providers = append(s.data.Providers[:i], s.data.Providers[i+1:]...)
+		if strings.EqualFold(strings.TrimSpace(s.data.DefaultModel), target) {
+			s.data.DefaultModel = ""
+			if len(s.data.Providers) > 0 {
+				aliases := s.ConfiguredModelAliases()
+				if len(aliases) > 0 {
+					s.data.DefaultModel = aliases[0]
+				}
+			}
+		}
+		return removed, true, s.save()
+	}
+	return providerRecord{}, false, nil
+}
+
+func (s *appConfigStore) CredentialRefInUse(ref string, exceptAlias string) bool {
+	key := normalizeCredentialRef(ref)
+	skip := strings.ToLower(strings.TrimSpace(exceptAlias))
+	if s == nil || key == "" {
+		return false
+	}
+	for _, rec := range s.data.Providers {
+		alias := strings.ToLower(strings.TrimSpace(rec.Alias))
+		if alias == "" || alias == skip {
+			continue
+		}
+		recRef := normalizeCredentialRef(rec.Auth.CredentialRef)
+		if recRef == "" {
+			recRef = defaultCredentialRef(rec.Provider, rec.BaseURL)
+		}
+		if recRef == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *appConfigStore) save() error {
@@ -861,4 +985,48 @@ func canonicalModelRef(provider, modelName string) string {
 		return ""
 	}
 	return provider + "/" + modelName
+}
+
+func normalizedProviderEndpoint(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return strings.TrimRight(strings.ToLower(value), "/")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	normalized := strings.TrimRight(parsed.String(), "/")
+	return normalized
+}
+
+func endpointAliasSuffix(baseURL string) string {
+	normalized := normalizedProviderEndpoint(baseURL)
+	if normalized == "" {
+		return "alt"
+	}
+	parsed, err := url.Parse(normalized)
+	value := ""
+	if err == nil {
+		value = normalizeCredentialRef(parsed.Host)
+		pathPart := normalizeCredentialRef(parsed.Path)
+		if pathPart != "" {
+			if value != "" {
+				value += "_"
+			}
+			value += pathPart
+		}
+	}
+	if value == "" {
+		value = normalizeCredentialRef(normalized)
+	}
+	if len(value) > 48 {
+		sum := sha1.Sum([]byte(normalized))
+		value = value[:36] + "_" + fmt.Sprintf("%x", sum[:4])
+	}
+	return value
 }

@@ -124,7 +124,7 @@ func mergeCapabilities(base ModelCapabilities, overlay overlayEntry) ModelCapabi
 	}
 	normalizeModelCapabilitiesReasoning(&out)
 	if out.DefaultMaxOutputTokens <= 0 {
-		out.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(out.MaxOutputTokens, out.SupportsReasoning)
+		out.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(out.MaxOutputTokens, out.ContextWindowTokens, out.SupportsReasoning)
 	}
 	return out
 }

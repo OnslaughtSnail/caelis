@@ -21,19 +21,21 @@ type SetRunningMsg struct {
 }
 
 type TaskResultMsg struct {
-	ExitNow bool
-	Err     error
+	ExitNow     bool
+	Err         error
+	Interrupted bool
 }
 
 type PromptRequestMsg struct {
-	Prompt          string
-	Secret          bool
-	Choices         []PromptChoice
-	DefaultChoice   string
-	SelectedChoices []string
-	Filterable      bool
-	MultiSelect     bool
-	Response        chan PromptResponse
+	Prompt             string
+	Secret             bool
+	Choices            []PromptChoice
+	DefaultChoice      string
+	SelectedChoices    []string
+	Filterable         bool
+	MultiSelect        bool
+	AllowFreeformInput bool
+	Response           chan PromptResponse
 }
 
 type PromptResponse struct {
@@ -42,9 +44,10 @@ type PromptResponse struct {
 }
 
 type PromptChoice struct {
-	Label  string
-	Value  string
-	Detail string
+	Label         string
+	Value         string
+	Detail        string
+	AlwaysVisible bool
 }
 
 const (
