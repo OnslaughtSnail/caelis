@@ -108,13 +108,18 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 
 func newPromptState(req tuievents.PromptRequestMsg) *promptState {
 	state := &promptState{
+		title:              strings.TrimSpace(req.Title),
 		prompt:             req.Prompt,
+		details:            append([]tuievents.PromptDetail(nil), req.Details...),
 		secret:             req.Secret,
 		response:           req.Response,
 		filterable:         req.Filterable,
 		multiSelect:        req.MultiSelect,
 		allowFreeformInput: req.AllowFreeformInput,
 		selected:           map[string]struct{}{},
+	}
+	if state.title == "" {
+		state.title = strings.TrimSpace(req.Prompt)
 	}
 	if req.Secret {
 		return state

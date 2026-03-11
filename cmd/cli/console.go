@@ -112,6 +112,10 @@ type choicePromptReader interface {
 	RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error)
 }
 
+type structuredPromptReader interface {
+	RequestStructuredPrompt(req tuievents.PromptRequestMsg) (string, error)
+}
+
 type connectModelCacheEntry struct {
 	models    []string
 	expiresAt time.Time
@@ -681,7 +685,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
 		if strings.TrimSpace(summary) != "" {
 			prefix := "✓ "
-			if hasToolError(msg.ToolResponse.Result) {
+			if hasToolError(msg.ToolResponse.Result) && !strings.EqualFold(toolName, toolshell.BashToolName) {
 				prefix = "! "
 			}
 			displayName := displayToolResponseName(toolName, callArgs, msg.ToolResponse.Result)
@@ -1610,8 +1614,7 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 	if a.isAllowedInSession(req.Command) {
 		return true, nil
 	}
-	a.renderCommandApprovalRequest(req)
-	line, err := a.readApprovalChoice(key)
+	line, err := a.readApprovalChoice(req, key)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			a.emitCommandApprovalOutcome(req, key, "cancel")
@@ -1658,8 +1661,7 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 	if a.isAuthorizationAllowedInSession(scopeKey) {
 		return true, nil
 	}
-	a.renderToolAuthorizationRequest(req)
-	line, err := a.readToolAuthorizationChoice(scopeKey, toolAuthorizationTitle(req))
+	line, err := a.readToolAuthorizationChoice(req, scopeKey)
 	if err != nil {
 		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
 			a.emitToolApprovalOutcome(req, scopeKey, "cancel")
@@ -1750,7 +1752,11 @@ func toolAuthorizationScopeKey(req kernelpolicy.ToolAuthorizationRequest) string
 	return toolApprovalKey(req.ToolName)
 }
 
-func (a *terminalApprover) readApprovalChoice(sessionKey string) (string, error) {
+func (a *terminalApprover) readApprovalChoice(req toolexec.ApprovalRequest, sessionKey string) (string, error) {
+	if chooser, ok := a.prompter.(structuredPromptReader); ok {
+		return chooser.RequestStructuredPrompt(commandApprovalPromptRequest(req, sessionKey))
+	}
+	a.renderCommandApprovalRequest(req)
 	if chooser, ok := a.prompter.(choicePromptReader); ok {
 		return chooser.RequestChoicePrompt(
 			commandApprovalTitle(),
@@ -1765,10 +1771,14 @@ func (a *terminalApprover) readApprovalChoice(sessionKey string) (string, error)
 	return a.prompter.ReadLine(approvalPromptAllowDeny)
 }
 
-func (a *terminalApprover) readToolAuthorizationChoice(scopeKey string, title string) (string, error) {
+func (a *terminalApprover) readToolAuthorizationChoice(req kernelpolicy.ToolAuthorizationRequest, scopeKey string) (string, error) {
+	if chooser, ok := a.prompter.(structuredPromptReader); ok {
+		return chooser.RequestStructuredPrompt(toolAuthorizationPromptRequest(req, scopeKey))
+	}
+	a.renderToolAuthorizationRequest(req)
 	if chooser, ok := a.prompter.(choicePromptReader); ok {
 		return chooser.RequestChoicePrompt(
-			title,
+			toolAuthorizationTitle(req),
 			toolAuthorizationChoices(scopeKey),
 			"y",
 			false,
@@ -1880,6 +1890,9 @@ func (a *terminalApprover) emitCommandApprovalOutcome(req toolexec.ApprovalReque
 	if a == nil || a.ui == nil {
 		return
 	}
+	if a.usesStructuredPrompts() {
+		return
+	}
 	target := shortApprovalTarget(req.Command)
 	switch decision {
 	case "once":
@@ -1899,6 +1912,9 @@ func (a *terminalApprover) emitToolApprovalOutcome(req kernelpolicy.ToolAuthoriz
 	if a == nil || a.ui == nil {
 		return
 	}
+	if a.usesStructuredPrompts() {
+		return
+	}
 	target := toolApprovalOutcomeTarget(req)
 	switch decision {
 	case "once":
@@ -1915,6 +1931,67 @@ func (a *terminalApprover) emitToolApprovalOutcome(req kernelpolicy.ToolAuthoriz
 		}
 	case "cancel":
 		a.ui.ApprovalOutcome(false, "You did not approve "+target+".")
+	}
+}
+
+func (a *terminalApprover) usesStructuredPrompts() bool {
+	if a == nil || a.prompter == nil {
+		return false
+	}
+	_, ok := a.prompter.(structuredPromptReader)
+	return ok
+}
+
+func commandApprovalPromptRequest(req toolexec.ApprovalRequest, sessionKey string) tuievents.PromptRequestMsg {
+	details := make([]tuievents.PromptDetail, 0, 3)
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Reason", Value: reason})
+	}
+	if rule := commandPermissionText(req); rule != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Permission", Value: rule})
+	}
+	if command := strings.TrimSpace(req.Command); command != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Command", Value: "$ " + command, Emphasis: true})
+	}
+	return tuievents.PromptRequestMsg{
+		Title:         commandApprovalTitle(),
+		Prompt:        commandApprovalTitle(),
+		Details:       details,
+		Choices:       approvalChoicesForSessionKey(sessionKey),
+		DefaultChoice: "y",
+	}
+}
+
+func toolAuthorizationPromptRequest(req kernelpolicy.ToolAuthorizationRequest, scopeKey string) tuievents.PromptRequestMsg {
+	details := []tuievents.PromptDetail{
+		{Label: "Tool", Value: strings.TrimSpace(req.ToolName)},
+		{Label: "Permission", Value: toolAuthorizationPermission(req)},
+	}
+	if path := strings.TrimSpace(req.Path); path != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Path", Value: path, Emphasis: true})
+	} else if target := strings.TrimSpace(req.Target); target != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Target", Value: target, Emphasis: true})
+	}
+	if reason := strings.TrimSpace(req.Reason); reason != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Reason", Value: reason})
+	}
+	if preview := strings.TrimSpace(req.Preview); preview != "" && strings.TrimSpace(req.Path) == "" {
+		details = append(details, tuievents.PromptDetail{Label: "Request", Value: preview})
+	}
+	filtered := make([]tuievents.PromptDetail, 0, len(details))
+	for _, detail := range details {
+		if strings.TrimSpace(detail.Label) == "" || strings.TrimSpace(detail.Value) == "" {
+			continue
+		}
+		filtered = append(filtered, detail)
+	}
+	title := toolAuthorizationTitle(req)
+	return tuievents.PromptRequestMsg{
+		Title:         title,
+		Prompt:        title,
+		Details:       filtered,
+		Choices:       toolAuthorizationChoices(scopeKey),
+		DefaultChoice: "y",
 	}
 }
 

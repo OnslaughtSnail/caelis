@@ -57,6 +57,12 @@ func TestLooksLikeMarkdown(t *testing.T) {
 	if !looksLikeMarkdown("## title\n\n- a\n- b") {
 		t.Fatal("expected markdown to be detected")
 	}
+	if !looksLikeMarkdown("行内公式 $E=mc^2$") {
+		t.Fatal("expected inline math markdown to be detected")
+	}
+	if looksLikeMarkdown("价格从 $5 到 $10") {
+		t.Fatal("did not expect currency text to be detected as markdown")
+	}
 	if looksLikeMarkdown("plain response without markdown markers") {
 		t.Fatal("did not expect plain text to be detected as markdown")
 	}
@@ -77,6 +83,33 @@ func TestRenderAssistantMarkdownHidesHeadingMarkers(t *testing.T) {
 	}
 	if !strings.Contains(got, "Heading") {
 		t.Fatalf("expected heading text preserved, got %q", got)
+	}
+}
+
+func TestRenderAssistantMarkdownFormatsInlineMathAsCode(t *testing.T) {
+	got := ansi.Strip(renderAssistantMarkdown("结果是 $E=mc^2$"))
+	if !strings.Contains(got, "E=mc^2") {
+		t.Fatalf("expected inline math content preserved, got %q", got)
+	}
+	if strings.Contains(got, "$E=mc^2$") {
+		t.Fatalf("expected inline math delimiters normalized, got %q", got)
+	}
+}
+
+func TestRenderAssistantMarkdownKeepsCurrencyTextPlain(t *testing.T) {
+	in := "价格从 $5 到 $10"
+	if got := ansi.Strip(renderAssistantMarkdown(in)); got != in {
+		t.Fatalf("expected currency text unchanged, got %q", got)
+	}
+}
+
+func TestRenderAssistantMarkdownFormatsBlockMathAsCodeBlock(t *testing.T) {
+	got := ansi.Strip(renderAssistantMarkdown("$$\nx = {-b \\pm \\sqrt{b^2-4ac} \\over 2a}\n$$"))
+	if !strings.Contains(got, "x = {-b \\pm \\sqrt{b^2-4ac} \\over 2a}") {
+		t.Fatalf("expected block math content preserved, got %q", got)
+	}
+	if strings.Contains(got, "$$") {
+		t.Fatalf("expected block math delimiters normalized, got %q", got)
 	}
 }
 

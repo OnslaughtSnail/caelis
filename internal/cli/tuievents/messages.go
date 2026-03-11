@@ -27,7 +27,9 @@ type TaskResultMsg struct {
 }
 
 type PromptRequestMsg struct {
+	Title              string
 	Prompt             string
+	Details            []PromptDetail
 	Secret             bool
 	Choices            []PromptChoice
 	DefaultChoice      string
@@ -48,6 +50,12 @@ type PromptChoice struct {
 	Value         string
 	Detail        string
 	AlwaysVisible bool
+}
+
+type PromptDetail struct {
+	Label    string
+	Value    string
+	Emphasis bool
 }
 
 const (

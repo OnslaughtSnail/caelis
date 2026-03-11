@@ -300,7 +300,7 @@ func TestForwardEventToTUI_BashSuccessWithoutOutputDoesNotEmitExitCodeLine(t *te
 	}
 }
 
-func TestForwardEventToTUI_BashErrorWithoutOutputEmitsCleanSummary(t *testing.T) {
+func TestForwardEventToTUI_BashErrorWithoutOutputEmitsToolResultSummary(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{tuiSender: sender}
 
@@ -320,14 +320,24 @@ func TestForwardEventToTUI_BashErrorWithoutOutputEmitsCleanSummary(t *testing.T)
 		t.Fatal("expected bash tool response to be handled")
 	}
 	if len(sender.msgs) != 2 {
-		t.Fatalf("expected final task-stream marker and error summary, got %#v", sender.msgs)
+		t.Fatalf("expected final task-stream marker and tool result summary, got %#v", sender.msgs)
+	}
+	finalMsg, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected TaskStreamMsg, got %T", sender.msgs[0])
+	}
+	if !finalMsg.Final || finalMsg.Label != "BASH" {
+		t.Fatalf("unexpected final bash task message: %#v", finalMsg)
 	}
 	logMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
 	if !ok {
 		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[1])
 	}
-	if !strings.Contains(logMsg.Chunk, "! BASH") || !strings.Contains(logMsg.Chunk, "sandbox runner is unavailable") {
-		t.Fatalf("unexpected bash error log chunk: %q", logMsg.Chunk)
+	if !strings.Contains(logMsg.Chunk, "✓ BASH") || strings.Contains(logMsg.Chunk, "! BASH") {
+		t.Fatalf("expected unified tool result line, got %q", logMsg.Chunk)
+	}
+	if !strings.Contains(logMsg.Chunk, "sandbox runner is unavailable") {
+		t.Fatalf("expected bash error details in summary, got %q", logMsg.Chunk)
 	}
 }
 

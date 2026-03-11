@@ -664,6 +664,81 @@ func TestLLMAgent_PartialStreamCancellationStaysSilent(t *testing.T) {
 	}
 }
 
+func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		return []seqResult{
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "## Heading"},
+					Partial:      true,
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "\n\n"},
+					Partial:      true,
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "- item"},
+					Partial:      true,
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "## Heading\n\n- item"},
+					TurnComplete: true,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+		}
+	})
+	ag, err := New(Config{Name: "test", EmitPartialEvents: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+
+	var partials []string
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev == nil || !eventIsPartialEvent(ev) {
+			continue
+		}
+		partials = append(partials, ev.Message.Text)
+	}
+
+	want := []string{"## Heading", "\n\n", "- item"}
+	if len(partials) != len(want) {
+		t.Fatalf("expected %d partials, got %#v", len(want), partials)
+	}
+	for i := range want {
+		if partials[i] != want[i] {
+			t.Fatalf("unexpected partials: got %#v want %#v", partials, want)
+		}
+	}
+}
+
 func TestLLMAgent_EmptyResponseRetriesWhenNothingWasShown(t *testing.T) {
 	oldMaxRetries := modelRequestMaxRetries
 	oldBaseDelay := modelRetryBaseDelay

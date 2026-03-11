@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -145,12 +146,8 @@ func (m *Model) bottomSectionHeight() int {
 	lines += inputH
 
 	// Prompt choices, when present, render above the input bar.
-	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
-		n := len(m.visiblePromptChoices())
-		lines += minInt(8, n)
-		if n > 8 {
-			lines++
-		}
+	if modalLines := m.promptModalLineCount(); modalLines > 0 {
+		lines += modalLines
 	}
 
 	// Mention candidates.
@@ -331,11 +328,7 @@ func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 	// composer top padding
 	y += tuikit.ComposerPadTop
 	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
-		n := len(m.visiblePromptChoices())
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
+		y += m.promptModalLineCount()
 	}
 	h := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	return y, h, true
@@ -887,9 +880,23 @@ func (m *Model) renderPromptModal() string {
 	if len(p.choices) == 0 {
 		return ""
 	}
+	bodyLines := make([]string, 0, 24)
+	if title := strings.TrimSpace(p.title); title != "" {
+		bodyLines = append(bodyLines, m.theme.TitleStyle().Render(title))
+	}
+	if len(p.details) > 0 {
+		if len(bodyLines) > 0 {
+			bodyLines = append(bodyLines, "")
+		}
+		bodyLines = append(bodyLines, m.renderPromptDetailLines(p.details)...)
+	}
 	visible := m.visiblePromptChoices()
 	if len(visible) == 0 {
-		return m.theme.HelpHintTextStyle().Render("  no matching choices")
+		if len(bodyLines) > 0 {
+			bodyLines = append(bodyLines, "")
+		}
+		bodyLines = append(bodyLines, m.theme.HelpHintTextStyle().Render("no matching choices"))
+		return m.renderPromptModalBox(bodyLines)
 	}
 	const maxVisiblePromptChoices = 8
 	m.syncPromptChoiceWindow()
@@ -931,10 +938,71 @@ func (m *Model) renderPromptModal() string {
 	}
 	if len(visible) > end {
 		lines = append(lines, m.theme.HelpHintTextStyle().Render(
-			fmt.Sprintf("  … and %d more", len(visible)-end),
+			fmt.Sprintf("… and %d more", len(visible)-end),
 		))
 	}
-	return strings.Join(lines, "\n")
+	if len(bodyLines) > 0 {
+		bodyLines = append(bodyLines, "")
+	}
+	bodyLines = append(bodyLines, lines...)
+	return m.renderPromptModalBox(bodyLines)
+}
+
+func (m *Model) promptModalLineCount() int {
+	if m.activePrompt == nil || len(m.activePrompt.choices) == 0 {
+		return 0
+	}
+	text := ansi.Strip(m.renderPromptModal())
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
+func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []string {
+	if len(details) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(details)*3)
+	for _, detail := range details {
+		label := strings.TrimSpace(detail.Label)
+		value := strings.TrimSpace(detail.Value)
+		if label == "" || value == "" {
+			continue
+		}
+		lines = append(lines, m.theme.KeyLabelStyle().Render(strings.ToUpper(label)))
+		valueStyle := m.theme.TextStyle()
+		if detail.Emphasis {
+			valueStyle = valueStyle.Bold(true)
+		}
+		for _, line := range strings.Split(value, "\n") {
+			line = strings.TrimRight(line, "\r")
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			lines = append(lines, valueStyle.Render("  "+line))
+		}
+	}
+	return lines
+}
+
+func (m *Model) renderPromptModalBox(lines []string) string {
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		filtered = append(filtered, line)
+	}
+	body := strings.Join(filtered, "\n")
+	width := minInt(maxInt(44, m.width-(inputHorizontalInset*2)), 96)
+	if width <= 0 {
+		width = 72
+	}
+	box := lipgloss.NewStyle().
+		Background(m.theme.ModalBg).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.Focus).
+		Padding(0, 1).
+		Width(width)
+	return insetRenderedBlock(box.Render(body), inputHorizontalInset)
 }
 
 func (m *Model) renderPromptInputBar() string {
@@ -979,23 +1047,23 @@ func (m *Model) promptHintText() string {
 		return ""
 	}
 	text := strings.TrimSpace(m.activePrompt.prompt)
+	if text == "" {
+		text = strings.TrimSpace(m.activePrompt.title)
+	}
 	text = strings.TrimSuffix(text, ":")
 	text = strings.TrimSpace(text)
 	if len(m.activePrompt.choices) > 0 {
-		footer := "Press Enter to confirm or Esc to cancel"
+		footer := "Use ↑/↓ to choose, Enter to confirm, Esc to cancel"
 		if m.activePrompt.filterable {
 			if m.activePrompt.multiSelect {
-				return text + "; type to filter, Space to toggle. " + footer
+				return "Type to filter, Space to toggle. " + footer
 			}
-			return text + "; type to filter. " + footer
+			return "Type to filter. " + footer
 		}
 		if m.activePrompt.multiSelect {
-			return text + "; Space to toggle. " + footer
+			return "Space toggles selections. " + footer
 		}
-		if text == "" {
-			return footer
-		}
-		return text + " " + footer
+		return footer
 	}
 	if text == "" {
 		return "Enter a value"

@@ -9,6 +9,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ---------------------------------------------------------------------------
@@ -94,19 +95,20 @@ func normalizeStreamKind(kind string) string {
 }
 
 func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Model, tea.Cmd) {
-	if text == "" {
+	streamKind := normalizeStreamKind(kind)
+	if text == "" && !(streamKind == "reasoning" && final) {
 		return m, nil
 	}
-	streamKind := normalizeStreamKind(kind)
 	blockStyle := tuikit.LineStyleAssistant
 	blockMarker := "* "
-	render := m.renderAssistantBlockLines
+	renderAssistant := func(raw string) []string {
+		return m.renderAssistantBlockLines(raw)
+	}
 
 	var activeBlock **assistantBlockState
 	if streamKind == "reasoning" {
 		blockStyle = tuikit.LineStyleReasoning
 		blockMarker = "│ "
-		render = m.renderReasoningBlockLines
 		activeBlock = &m.reasoningBlock
 	} else {
 		activeBlock = &m.assistantBlock
@@ -118,9 +120,20 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 			return m, nil
 		}
 	}
+	if streamKind == "reasoning" && final {
+		if *activeBlock != nil {
+			m.discardAssistantBlock(activeBlock)
+			m.refreshHistoryTailState()
+			m.syncViewportContent()
+		}
+		return m, nil
+	}
 	if *activeBlock == nil {
 		start := len(m.historyLines)
-		lines := render(text)
+		lines := m.renderReasoningBlockLines(text)
+		if streamKind == "answer" {
+			lines = renderAssistant(text)
+		}
 		m.historyLines = append(m.historyLines, lines...)
 		*activeBlock = &assistantBlockState{
 			start: start,
@@ -141,7 +154,10 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 	}
 	block := *activeBlock
 	block.raw = mergeStreamChunk(block.raw, text, final)
-	lines := render(block.raw)
+	lines := m.renderReasoningBlockLines(block.raw)
+	if streamKind == "answer" {
+		lines = renderAssistant(block.raw)
+	}
 	m.replaceHistoryRange(block.start, block.end, lines)
 	block.end = block.start + len(lines)
 	if final {
@@ -454,6 +470,7 @@ func (m *Model) finalizeBashToolOutputBlock(panel *toolOutputState) {
 	if delta != 0 {
 		m.shiftAnchoredBlocks(newEnd-delta, delta, panel.key)
 	}
+	m.refreshHistoryTailState()
 	m.syncViewportContent()
 }
 
@@ -571,7 +588,7 @@ func (m *Model) shiftAnchoredBlocks(threshold, delta int, skipKey string) {
 func (m *Model) renderAssistantBlockLines(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
 	isMarkdown := looksLikeMarkdown(trimmed)
-	rendered := renderAssistantMarkdown(trimmed)
+	rendered := renderAssistantMarkdown(trimmed, maxInt(20, m.viewport.Width))
 	if rendered == "" {
 		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
 	}
@@ -672,6 +689,22 @@ func (m *Model) resetConversationView() {
 		}
 	}
 	m.syncViewportContent()
+}
+
+func (m *Model) refreshHistoryTailState() {
+	m.lastCommittedStyle = tuikit.LineStyleDefault
+	m.lastCommittedRaw = ""
+	m.hasCommittedLine = false
+	for i := len(m.historyLines) - 1; i >= 0; i-- {
+		raw := ansi.Strip(m.historyLines[i])
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		m.lastCommittedRaw = raw
+		m.lastCommittedStyle = tuikit.DetectLineStyle(raw)
+		m.hasCommittedLine = true
+		return
+	}
 }
 
 // commitLine colorizes one complete line and appends it to the history buffer.

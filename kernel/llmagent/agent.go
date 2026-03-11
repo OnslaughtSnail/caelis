@@ -188,7 +188,7 @@ func (a *Agent) emitPartialResponse(partial *model.Response, yield func(*session
 	if partial == nil || !a.cfg.EmitPartialEvents || !partial.Partial {
 		return nil
 	}
-	if strings.TrimSpace(partial.Message.Reasoning) != "" {
+	if partial.Message.Reasoning != "" {
 		ev := &session.Event{
 			ID:   newEventID(),
 			Time: time.Now(),
@@ -205,7 +205,7 @@ func (a *Agent) emitPartialResponse(partial *model.Response, yield func(*session
 			return errYieldStopped
 		}
 	}
-	if strings.TrimSpace(partial.Message.Text) != "" {
+	if partial.Message.Text != "" {
 		ev := &session.Event{
 			ID:      newEventID(),
 			Time:    time.Now(),

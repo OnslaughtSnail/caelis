@@ -1576,11 +1576,8 @@ func TestReasoningStreamKeepsBlockStyleAcrossParagraphs(t *testing.T) {
 	})
 
 	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
-	if !strings.Contains(joined, "· 第一段") {
-		t.Fatalf("expected first reasoning paragraph, got %q", joined)
-	}
-	if !strings.Contains(joined, "  第二段") {
-		t.Fatalf("expected second reasoning paragraph with reasoning prefix, got %q", joined)
+	if strings.Contains(joined, "第一段") || strings.Contains(joined, "第二段") {
+		t.Fatalf("expected finalized reasoning block to auto-collapse, got %q", joined)
 	}
 }
 
@@ -1598,11 +1595,11 @@ func TestAssistantAfterReasoningHasNoExtraGap(t *testing.T) {
 	})
 
 	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
-	if strings.Contains(joined, "· thinking\n\n* final answer") {
-		t.Fatalf("expected no blank gap between reasoning and assistant, got %q", joined)
+	if strings.Contains(joined, "thinking") {
+		t.Fatalf("expected finalized reasoning hidden before answer render, got %q", joined)
 	}
-	if !strings.Contains(joined, "· thinking\n* final answer") {
-		t.Fatalf("expected assistant immediately after reasoning, got %q", joined)
+	if !strings.Contains(joined, "* final answer") {
+		t.Fatalf("expected assistant answer to remain visible, got %q", joined)
 	}
 }
 
@@ -1730,8 +1727,11 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if !strings.Contains(view, "proceed") || !strings.Contains(view, "session") || !strings.Contains(view, "cancel") {
 		t.Fatalf("expected approval list options in modal, got %q", view)
 	}
-	if !strings.Contains(view, "Press Enter to confirm") || !strings.Contains(view, "Esc") {
+	if !strings.Contains(view, "Use ↑/↓ to choose, Enter to confirm, Esc to cancel") {
 		t.Fatalf("expected approval footer hint in view, got %q", view)
+	}
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "Would you like to run the following command?") {
+		t.Fatalf("expected boxed approval modal in view, got %q", view)
 	}
 
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -2172,7 +2172,7 @@ func TestToolOutputPanelFiltersBlankLines(t *testing.T) {
 	}
 }
 
-func TestBashFinalReplacesPanelWithPlainHistoryText(t *testing.T) {
+func TestBashFinalCollapsesPanelIntoPlainHistoryText(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
@@ -2192,10 +2192,10 @@ func TestBashFinalReplacesPanelWithPlainHistoryText(t *testing.T) {
 
 	view := ansi.Strip(m.View())
 	if strings.Contains(view, "╭") || strings.Contains(view, "╰") {
-		t.Fatalf("expected bash panel to collapse into plain text on final, got:\n%s", view)
+		t.Fatalf("expected bash panel to collapse on final, got:\n%s", view)
 	}
-	if !strings.Contains(view, "  line-1") || !strings.Contains(view, "  line-2") {
-		t.Fatalf("expected final bash output in history, got:\n%s", view)
+	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected final bash output to remain in history, got:\n%s", view)
 	}
 }
 

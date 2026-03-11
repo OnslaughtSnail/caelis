@@ -102,6 +102,10 @@ func (b *teaPromptBroker) RequestChoicePrompt(prompt string, choices []tuievents
 	return b.requestPromptWithOptions(prompt, false, choices, defaultChoice, nil, filterable, false, false)
 }
 
+func (b *teaPromptBroker) RequestStructuredPrompt(req tuievents.PromptRequestMsg) (string, error) {
+	return b.requestPromptWithRequest(req)
+}
+
 func (b *teaPromptBroker) RequestMultiChoicePrompt(prompt string, choices []tuievents.PromptChoice, selectedChoices []string, filterable bool) (string, error) {
 	allowFreeformInput := false
 	for _, choice := range choices {
@@ -114,6 +118,20 @@ func (b *teaPromptBroker) RequestMultiChoicePrompt(prompt string, choices []tuie
 }
 
 func (b *teaPromptBroker) requestPromptWithOptions(prompt string, secret bool, choices []tuievents.PromptChoice, defaultChoice string, selectedChoices []string, filterable bool, multiSelect bool, allowFreeformInput bool) (string, error) {
+	req := tuievents.PromptRequestMsg{
+		Prompt:             prompt,
+		Secret:             secret,
+		Choices:            append([]tuievents.PromptChoice(nil), choices...),
+		DefaultChoice:      defaultChoice,
+		SelectedChoices:    append([]string(nil), selectedChoices...),
+		Filterable:         filterable,
+		MultiSelect:        multiSelect,
+		AllowFreeformInput: allowFreeformInput,
+	}
+	return b.requestPromptWithRequest(req)
+}
+
+func (b *teaPromptBroker) requestPromptWithRequest(req tuievents.PromptRequestMsg) (string, error) {
 	response := make(chan tuievents.PromptResponse, 1)
 
 	b.mu.Lock()
@@ -124,17 +142,11 @@ func (b *teaPromptBroker) requestPromptWithOptions(prompt string, secret bool, c
 	b.pending[response] = struct{}{}
 	b.mu.Unlock()
 
-	b.sender.Send(tuievents.PromptRequestMsg{
-		Prompt:             prompt,
-		Secret:             secret,
-		Choices:            append([]tuievents.PromptChoice(nil), choices...),
-		DefaultChoice:      defaultChoice,
-		SelectedChoices:    append([]string(nil), selectedChoices...),
-		Filterable:         filterable,
-		MultiSelect:        multiSelect,
-		AllowFreeformInput: allowFreeformInput,
-		Response:           response,
-	})
+	req.Response = response
+	req.Choices = append([]tuievents.PromptChoice(nil), req.Choices...)
+	req.SelectedChoices = append([]string(nil), req.SelectedChoices...)
+	req.Details = append([]tuievents.PromptDetail(nil), req.Details...)
+	b.sender.Send(req)
 
 	result, ok := <-response
 	b.mu.Lock()

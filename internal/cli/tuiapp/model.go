@@ -130,7 +130,9 @@ func (i commandItem) FilterValue() string { return i.name }
 // ---------------------------------------------------------------------------
 
 type promptState struct {
+	title              string
 	prompt             string
+	details            []tuievents.PromptDetail
 	secret             bool
 	input              []rune
 	cursor             int
