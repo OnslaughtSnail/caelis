@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,7 +32,7 @@ type SessionResources struct {
 	Close    func(context.Context) error
 }
 
-type SessionResourceFactory func(context.Context, string, ClientCapabilities, []MCPServer, func() string) (*SessionResources, error)
+type SessionResourceFactory func(context.Context, string, string, ClientCapabilities, []MCPServer, func() string) (*SessionResources, error)
 type AgentSessionConfig struct {
 	ModeID       string
 	ConfigValues map[string]string
@@ -46,7 +47,7 @@ type SessionConfigOptionTemplate struct {
 	Options      []SessionConfigSelectOption
 }
 
-type AgentFactory func(stream bool, cfg AgentSessionConfig) (agent.Agent, error)
+type AgentFactory func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error)
 
 type AuthValidator func(context.Context, AuthenticateRequest) error
 
@@ -57,7 +58,7 @@ type ServerConfig struct {
 	Model               model.LLM
 	AppName             string
 	UserID              string
-	WorkspaceDir        string
+	WorkspaceRoot       string
 	ProtocolVersion     string
 	AgentInfo           *Implementation
 	AuthMethods         []AuthMethod
@@ -128,9 +129,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.NewAgent == nil {
 		return nil, fmt.Errorf("acp: agent factory is required")
 	}
-	cfg.WorkspaceDir = filepath.Clean(strings.TrimSpace(cfg.WorkspaceDir))
-	if cfg.WorkspaceDir == "" {
-		return nil, fmt.Errorf("acp: workspace dir is required")
+	cfg.WorkspaceRoot = filepath.Clean(strings.TrimSpace(cfg.WorkspaceRoot))
+	if cfg.WorkspaceRoot == "" {
+		return nil, fmt.Errorf("acp: workspace root is required")
 	}
 	if cfg.ProtocolVersion == "" {
 		cfg.ProtocolVersion = "0.2.0"
@@ -287,7 +288,7 @@ func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSess
 		modeID:       s.initialModeID(),
 		configValues: s.initialConfigValues(),
 	}
-	resources, err := s.newResources(ctx, sessionID, req.MCPServers, sess.mode)
+	resources, err := s.newResources(ctx, sessionID, sess.cwd, req.MCPServers, sess.mode)
 	if err != nil {
 		return NewSessionResponse{}, err
 	}
@@ -329,9 +330,19 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 	if err != nil {
 		return LoadSessionResponse{}, err
 	}
-	modeID, configValues := s.restoreSessionState(state)
+	modeID, configValues, storedCWD := s.restoreSessionState(state)
+	resolvedCWD := filepath.Clean(req.CWD)
+	if storedCWD != "" && storedCWD != resolvedCWD {
+		return LoadSessionResponse{}, fmt.Errorf("cwd %q does not match persisted session cwd %q", resolvedCWD, storedCWD)
+	}
+	if storedCWD != "" {
+		resolvedCWD = storedCWD
+	}
 	sess := s.loadedSession(req.SessionID)
 	if sess != nil {
+		if sess.cwd != resolvedCWD {
+			return LoadSessionResponse{}, fmt.Errorf("session %q is already loaded with cwd %q", req.SessionID, sess.cwd)
+		}
 		sess.stateMu.Lock()
 		sess.modeID = modeID
 		sess.configValues = configValues
@@ -339,11 +350,11 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 	} else {
 		sess = &serverSession{
 			id:           req.SessionID,
-			cwd:          filepath.Clean(req.CWD),
+			cwd:          resolvedCWD,
 			modeID:       modeID,
 			configValues: configValues,
 		}
-		resources, err := s.newResources(ctx, req.SessionID, req.MCPServers, sess.mode)
+		resources, err := s.newResources(ctx, req.SessionID, sess.cwd, req.MCPServers, sess.mode)
 		if err != nil {
 			return LoadSessionResponse{}, err
 		}
@@ -380,7 +391,7 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 	if err != nil {
 		return PromptResponse{}, err
 	}
-	ag, err := s.cfg.NewAgent(true, sess.agentConfig())
+	ag, err := s.cfg.NewAgent(true, sess.cwd, sess.agentConfig())
 	if err != nil {
 		return PromptResponse{}, err
 	}
@@ -622,7 +633,7 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 			ToolCallID:    msg.ToolResponse.ID,
 			Title:         &title,
 			Status:        ptr(status),
-			RawOutput:     msg.ToolResponse.Result,
+			RawOutput:     sanitizeToolResultForACP(msg.ToolResponse.Result),
 			Locations:     toolLocations(nil, msg.ToolResponse.Result),
 		}
 		return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: update})
@@ -762,8 +773,11 @@ func (s *Server) validateSessionCWD(cwd string) error {
 	if value == "" {
 		return fmt.Errorf("cwd is required")
 	}
-	if value != s.cfg.WorkspaceDir {
-		return fmt.Errorf("cwd %q does not match server workspace %q", value, s.cfg.WorkspaceDir)
+	if !filepath.IsAbs(value) {
+		return fmt.Errorf("cwd %q must be an absolute path", value)
+	}
+	if !pathWithinRoot(s.cfg.WorkspaceRoot, value) {
+		return fmt.Errorf("cwd %q is outside workspace root %q", value, s.cfg.WorkspaceRoot)
 	}
 	return nil
 }
@@ -821,7 +835,7 @@ func (s *Server) initialConfigValues() map[string]string {
 	return values
 }
 
-func (s *Server) restoreSessionState(state map[string]any) (string, map[string]string) {
+func (s *Server) restoreSessionState(state map[string]any) (string, map[string]string, string) {
 	modeID := sessionmode.LoadSnapshot(state)
 	if !s.modeExists(modeID) {
 		modeID = s.initialModeID()
@@ -829,7 +843,12 @@ func (s *Server) restoreSessionState(state map[string]any) (string, map[string]s
 	values := s.initialConfigValues()
 	raw := anyMap(state["acp"])
 	if raw == nil {
-		return modeID, values
+		return modeID, values, ""
+	}
+	cwd, _ := raw["cwd"].(string)
+	cwd = filepath.Clean(strings.TrimSpace(cwd))
+	if !filepath.IsAbs(cwd) {
+		cwd = ""
 	}
 	if storedMode, _ := raw["modeId"].(string); s.modeExists(storedMode) {
 		modeID = strings.TrimSpace(storedMode)
@@ -847,7 +866,7 @@ func (s *Server) restoreSessionState(state map[string]any) (string, map[string]s
 			values[template.ID] = strings.TrimSpace(rawValue)
 		}
 	}
-	return modeID, values
+	return modeID, values, cwd
 }
 
 func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Session, sess *serverSession) error {
@@ -863,6 +882,7 @@ func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Sessi
 			}
 			values = sessionmode.StoreSnapshot(values, modeID)
 			values["acp"] = map[string]any{
+				"cwd":          sess.cwd,
 				"modeId":       modeID,
 				"configValues": configValues,
 			}
@@ -878,6 +898,7 @@ func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Sessi
 	}
 	values = sessionmode.StoreSnapshot(values, modeID)
 	values["acp"] = map[string]any{
+		"cwd":          sess.cwd,
 		"modeId":       modeID,
 		"configValues": configValues,
 	}
@@ -956,11 +977,11 @@ func (s *Server) notifyConfigOptions(sessionID string, options []SessionConfigOp
 	})
 }
 
-func (s *Server) newResources(ctx context.Context, sessionID string, mcpServers []MCPServer, modeResolver func() string) (*SessionResources, error) {
+func (s *Server) newResources(ctx context.Context, sessionID string, sessionCWD string, mcpServers []MCPServer, modeResolver func() string) (*SessionResources, error) {
 	s.mu.Lock()
 	caps := s.clientCaps
 	s.mu.Unlock()
-	return s.cfg.NewSessionResources(ctx, sessionID, caps, mcpServers, modeResolver)
+	return s.cfg.NewSessionResources(ctx, sessionID, sessionCWD, caps, mcpServers, modeResolver)
 }
 
 func (s *Server) ensureSessionExists(ctx context.Context, sessRef *session.Session) error {
@@ -1017,6 +1038,55 @@ func (s *serverSession) agentConfig() AgentSessionConfig {
 	return AgentSessionConfig{
 		ModeID:       s.mode(),
 		ConfigValues: s.configSnapshot(),
+	}
+}
+
+func pathWithinRoot(root string, path string) bool {
+	root = resolvePathForContainment(root)
+	path = resolvePathForContainment(path)
+	if root == "" || path == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
+}
+
+func resolvePathForContainment(path string) string {
+	current := filepath.Clean(strings.TrimSpace(path))
+	if current == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(current); err == nil {
+		return filepath.Clean(resolved)
+	}
+	suffix := make([]string, 0, 4)
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(strings.TrimSpace(path))
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+		if _, err := os.Lstat(current); err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(current)
+		if err != nil {
+			continue
+		}
+		for i := len(suffix) - 1; i >= 0; i-- {
+			resolved = filepath.Join(resolved, suffix[i])
+		}
+		return filepath.Clean(resolved)
 	}
 }
 
@@ -1260,6 +1330,43 @@ func hasToolError(result map[string]any) bool {
 	}
 	text := strings.TrimSpace(fmt.Sprint(result["error"]))
 	return text != "" && text != "<nil>"
+}
+
+func sanitizeToolResultForACP(result map[string]any) map[string]any {
+	return sanitizeToolResultMapForACP(result, true)
+}
+
+func sanitizeToolResultMapForACP(result map[string]any, topLevel bool) map[string]any {
+	if len(result) == 0 {
+		return result
+	}
+	out := make(map[string]any, len(result))
+	for key, value := range result {
+		trimmed := strings.TrimSpace(key)
+		if strings.HasPrefix(trimmed, "_ui_") {
+			continue
+		}
+		if topLevel && strings.EqualFold(trimmed, "metadata") {
+			continue
+		}
+		out[key] = sanitizeToolResultValueForACP(value)
+	}
+	return out
+}
+
+func sanitizeToolResultValueForACP(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return sanitizeToolResultMapForACP(typed, false)
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, one := range typed {
+			out = append(out, sanitizeToolResultValueForACP(one))
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func ptr[T any](v T) *T {

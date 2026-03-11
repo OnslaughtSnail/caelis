@@ -128,7 +128,7 @@ func (h *hostRunner) Run(ctx context.Context, req CommandRequest) (CommandResult
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
 	}
-	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+	cmd.Env = mergeCommandEnv(req.EnvOverrides)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	lastOutput := atomic.Int64{}
@@ -280,6 +280,7 @@ func (h *hostRunner) StartAsync(ctx context.Context, req CommandRequest) (string
 	session, err := h.sessionManager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
+		Env:             mergeCommandEnv(req.EnvOverrides),
 		OutputBufferCap: 256 * 1024, // 256KB for async sessions
 		Timeout:         req.Timeout,
 		IdleTimeout:     req.IdleTimeout,

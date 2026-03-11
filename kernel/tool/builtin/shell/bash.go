@@ -112,6 +112,9 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if strings.TrimSpace(workingDir) == "" {
 		workingDir, _ = argparse.String(args, "dir", false)
 	}
+	if strings.TrimSpace(workingDir) == "" && t.runtime != nil && t.runtime.FileSystem() != nil {
+		workingDir, _ = t.runtime.FileSystem().Getwd()
+	}
 	sandboxPermission, err := parseSandboxPermissionArgs(args)
 	if err != nil {
 		return nil, err
@@ -143,11 +146,15 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 			return nil, err
 		}
 	}
-
 	// Policy evaluation — all state-mutating actions go through this.
 	decision, policyDecision, err := t.resolveCommandDecision(ctx, command, sandboxPermission)
 	if err != nil {
 		return nil, err
+	}
+	if isACPXCommand(command) && decision.Route == toolexec.ExecutionRouteSandbox {
+		return nil, &toolexec.ApprovalRequiredError{
+			Reason: "acpx must run outside the Caelis sandbox: operation not permitted; rerun this command with require_escalated=true",
+		}
 	}
 
 	// Interactive async commands still require host execution because sandbox

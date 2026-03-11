@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
 type Kind string
@@ -54,13 +55,15 @@ type Snapshot struct {
 }
 
 type BashStartRequest struct {
-	Command     string
-	Workdir     string
-	Yield       time.Duration
-	Timeout     time.Duration
-	IdleTimeout time.Duration
-	TTY         bool
-	Route       string
+	Command               string
+	Workdir               string
+	Yield                 time.Duration
+	Timeout               time.Duration
+	IdleTimeout           time.Duration
+	TTY                   bool
+	Route                 string
+	EnvOverrides          map[string]string
+	SandboxPolicyOverride *toolexec.SandboxPolicy
 }
 
 type DelegateStartRequest struct {
@@ -102,6 +105,9 @@ type Entry struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	HeartbeatAt    time.Time
+	StdoutCursor   int64
+	StderrCursor   int64
+	EventCursor    int
 	Spec           map[string]any
 	Result         map[string]any
 }

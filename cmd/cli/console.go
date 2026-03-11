@@ -625,11 +625,8 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 					RichDiffShown: diffShown,
 				}
 			}
-			if strings.EqualFold(strings.TrimSpace(call.Name), tool.TaskToolName) {
-				continue
-			}
 			c.tuiSender.Send(tuievents.LogChunkMsg{
-				Chunk: fmt.Sprintf("▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs)),
+				Chunk: fmt.Sprintf("▸ %s %s\n", displayToolCallName(call.Name, parsedArgs), summarizeToolArgs(call.Name, parsedArgs)),
 			})
 			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) || strings.EqualFold(strings.TrimSpace(call.Name), tool.DelegateTaskToolName) {
 				c.tuiSender.Send(tuievents.TaskStreamMsg{

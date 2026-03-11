@@ -65,23 +65,26 @@ func (m *runtimeTaskManager) persistRecord(ctx context.Context, record *task.Rec
 		return nil
 	}
 	var entry *task.Entry
-	record.WithLock(func(one *task.Record) {
-		entry = &task.Entry{
-			TaskID:         one.ID,
-			Kind:           one.Kind,
-			Session:        one.Session,
+		record.WithLock(func(one *task.Record) {
+			entry = &task.Entry{
+				TaskID:         one.ID,
+				Kind:           one.Kind,
+				Session:        one.Session,
 			Title:          one.Title,
 			State:          one.State,
 			Running:        one.Running,
 			SupportsInput:  one.SupportsInput,
-			SupportsCancel: one.SupportsCancel,
-			CreatedAt:      one.CreatedAt,
-			UpdatedAt:      one.UpdatedAt,
-			HeartbeatAt:    one.UpdatedAt,
-			Spec:           task.CloneEntry(&task.Entry{Spec: one.Spec}).Spec,
-			Result:         task.CloneEntry(&task.Entry{Result: one.Result}).Result,
-		}
-	})
+				SupportsCancel: one.SupportsCancel,
+				CreatedAt:      one.CreatedAt,
+				UpdatedAt:      one.UpdatedAt,
+				HeartbeatAt:    one.UpdatedAt,
+				StdoutCursor:   one.StdoutCursor,
+				StderrCursor:   one.StderrCursor,
+				EventCursor:    one.EventCursor,
+				Spec:           task.CloneEntry(&task.Entry{Spec: one.Spec}).Spec,
+				Result:         task.CloneEntry(&task.Entry{Result: one.Result}).Result,
+			}
+		})
 	if entry == nil {
 		return nil
 	}
@@ -153,6 +156,9 @@ func entryToRecord(entry *task.Entry) *task.Record {
 		SupportsCancel: entry.SupportsCancel,
 		CreatedAt:      entry.CreatedAt,
 		UpdatedAt:      entry.UpdatedAt,
+		StdoutCursor:   entry.StdoutCursor,
+		StderrCursor:   entry.StderrCursor,
+		EventCursor:    entry.EventCursor,
 		Session:        entry.Session,
 		Spec:           task.CloneEntry(&task.Entry{Spec: entry.Spec}).Spec,
 		Result:         task.CloneEntry(&task.Entry{Result: entry.Result}).Result,
@@ -178,6 +184,9 @@ func persistControllerRecord(ctx context.Context, store task.Store, record *task
 			CreatedAt:      one.CreatedAt,
 			UpdatedAt:      one.UpdatedAt,
 			HeartbeatAt:    one.UpdatedAt,
+			StdoutCursor:   one.StdoutCursor,
+			StderrCursor:   one.StderrCursor,
+			EventCursor:    one.EventCursor,
 			Spec:           task.CloneEntry(&task.Entry{Spec: one.Spec}).Spec,
 			Result:         task.CloneEntry(&task.Entry{Result: one.Result}).Result,
 		}
@@ -197,11 +206,13 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 		return task.Snapshot{}, fmt.Errorf("task: async bash is not supported for route %q", strings.TrimSpace(req.Route))
 	}
 	sessionID, err := asyncRunner.StartAsync(ctx, toolexec.CommandRequest{
-		Command:     req.Command,
-		Dir:         req.Workdir,
-		Timeout:     req.Timeout,
-		IdleTimeout: req.IdleTimeout,
-		TTY:         req.TTY,
+		Command:               req.Command,
+		Dir:                   req.Workdir,
+		Timeout:               req.Timeout,
+		IdleTimeout:           req.IdleTimeout,
+		TTY:                   req.TTY,
+		EnvOverrides:          req.EnvOverrides,
+		SandboxPolicyOverride: req.SandboxPolicyOverride,
 	})
 	if err != nil {
 		return task.Snapshot{}, err
@@ -663,6 +674,10 @@ func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, 
 	if yield > 0 {
 		deadline = time.Now().Add(yield)
 	}
+	var baselineCursor int
+	record.WithLock(func(one *task.Record) {
+		baselineCursor = one.EventCursor
+	})
 	for {
 		select {
 		case <-ctx.Done():
@@ -673,7 +688,11 @@ func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, 
 		if err != nil {
 			return task.Snapshot{}, err
 		}
-		if strings.TrimSpace(snapshot.Output.Log) != "" || !snapshot.Running {
+		var advanced bool
+		record.WithLock(func(one *task.Record) {
+			advanced = one.EventCursor > baselineCursor
+		})
+		if advanced || !snapshot.Running {
 			return snapshot, nil
 		}
 		if deadline.IsZero() || time.Now().After(deadline) {

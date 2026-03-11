@@ -161,7 +161,8 @@ func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResul
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("tool: resolve bwrap workdir failed: %w", err)
 	}
-	bwrapArgs := buildBwrapArgs(b.policy, workDir)
+	effectivePolicy := sandboxPolicyForCommand(b.policy, req)
+	bwrapArgs := buildBwrapArgs(effectivePolicy, workDir)
 
 	args := append(bwrapArgs, "--", "bash", "-lc", req.Command)
 	cmd := b.execCommand(runCtx, "bwrap", args...)
@@ -169,7 +170,7 @@ func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResul
 	if strings.TrimSpace(req.Dir) != "" {
 		cmd.Dir = req.Dir
 	}
-	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+	cmd.Env = mergeCommandEnv(req.EnvOverrides)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -227,20 +228,22 @@ func (b *bwrapRunner) StartAsync(ctx context.Context, req CommandRequest) (strin
 	if err != nil {
 		return "", fmt.Errorf("tool: resolve bwrap workdir failed: %w", err)
 	}
+	effectivePolicy := sandboxPolicyForCommand(b.policy, req)
 	session, err := b.sessionManager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
+		Env:             mergeCommandEnv(req.EnvOverrides),
 		OutputBufferCap: 256 * 1024,
 		Timeout:         req.Timeout,
 		IdleTimeout:     req.IdleTimeout,
 		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
-			bwrapArgs := buildBwrapArgs(b.policy, workDir)
+			bwrapArgs := buildBwrapArgs(effectivePolicy, workDir)
 			args := append(bwrapArgs, "--", "bash", "-lc", cfg.Command)
 			cmd := b.execCommand(ctx, "bwrap", args...)
 			if strings.TrimSpace(cfg.Dir) != "" {
 				cmd.Dir = cfg.Dir
 			}
-			cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+			cmd.Env = append([]string(nil), cfg.Env...)
 			return cmd, nil
 		},
 	})

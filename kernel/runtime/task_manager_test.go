@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 )
@@ -74,3 +75,113 @@ func TestTaskManager_WaitReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) 
 		t.Fatalf("expected persisted cancelled snapshot from wait, got state=%q running=%v", snapshot.State, snapshot.Running)
 	}
 }
+
+func TestTaskManager_WaitUsesPersistedOutputCursorsAcrossTurns(t *testing.T) {
+	store := taskinmemory.New()
+	entry := &task.Entry{
+		TaskID:         "t-running-bash",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "s"},
+		Title:          "acpx prompt",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		StdoutCursor:   4,
+		Spec: map[string]any{
+			taskSpecCommand:       "acpx prompt",
+			taskSpecWorkdir:       "/tmp",
+			taskSpecRoute:         "host",
+			taskSpecExecSessionID: "sess-1",
+		},
+		Result: map[string]any{
+			"state":         string(task.StateRunning),
+			"latest_output": "DONE",
+		},
+	}
+	if err := store.Upsert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &stubAsyncTaskRunner{
+		stdoutByMarker: map[int64][]byte{
+			0: []byte("DONE"),
+		},
+		status: toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+	}
+	manager := newTaskManager(nil, taskTestRuntime{host: runner}, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "s"}, RunRequest{}, nil)
+
+	start := time.Now()
+	snapshot, err := manager.Wait(context.Background(), task.ControlRequest{
+		TaskID: entry.TaskID,
+		Yield:  10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.lastStdoutMarker; got != 4 {
+		t.Fatalf("expected wait to resume from persisted stdout cursor, got %d", got)
+	}
+	if snapshot.Output.Stdout != "" {
+		t.Fatalf("did not expect stale stdout replay, got %q", snapshot.Output.Stdout)
+	}
+	if time.Since(start) < 100*time.Millisecond {
+		t.Fatalf("expected wait to block for at least one poll interval, only waited %s", time.Since(start))
+	}
+}
+
+type taskTestRuntime struct {
+	host toolexec.AsyncCommandRunner
+}
+
+func (r taskTestRuntime) PermissionMode() toolexec.PermissionMode           { return toolexec.PermissionModeDefault }
+func (r taskTestRuntime) SandboxType() string                               { return "" }
+func (r taskTestRuntime) SandboxPolicy() toolexec.SandboxPolicy             { return toolexec.SandboxPolicy{} }
+func (r taskTestRuntime) FallbackToHost() bool                              { return false }
+func (r taskTestRuntime) FallbackReason() string                            { return "" }
+func (r taskTestRuntime) FileSystem() toolexec.FileSystem                   { return nil }
+func (r taskTestRuntime) HostRunner() toolexec.CommandRunner                { return r.host }
+func (r taskTestRuntime) SandboxRunner() toolexec.CommandRunner             { return nil }
+func (r taskTestRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
+	return toolexec.CommandDecision{}
+}
+
+type stubAsyncTaskRunner struct {
+	lastStdoutMarker int64
+	lastStderrMarker int64
+	stdoutByMarker   map[int64][]byte
+	stderrByMarker   map[int64][]byte
+	status           toolexec.SessionStatus
+}
+
+func (s *stubAsyncTaskRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
+func (s *stubAsyncTaskRunner) StartAsync(context.Context, toolexec.CommandRequest) (string, error) {
+	return "", nil
+}
+
+func (s *stubAsyncTaskRunner) WriteInput(string, []byte) error { return nil }
+
+func (s *stubAsyncTaskRunner) ReadOutput(_ string, stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
+	s.lastStdoutMarker = stdoutMarker
+	s.lastStderrMarker = stderrMarker
+	stdout := append([]byte(nil), s.stdoutByMarker[stdoutMarker]...)
+	stderr := append([]byte(nil), s.stderrByMarker[stderrMarker]...)
+	return stdout, stderr, stdoutMarker + int64(len(stdout)), stderrMarker + int64(len(stderr)), nil
+}
+
+func (s *stubAsyncTaskRunner) GetSessionStatus(string) (toolexec.SessionStatus, error) {
+	return s.status, nil
+}
+
+func (s *stubAsyncTaskRunner) WaitSession(context.Context, string, time.Duration) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
+func (s *stubAsyncTaskRunner) TerminateSession(string) error { return nil }
+
+func (s *stubAsyncTaskRunner) ListSessions() []toolexec.SessionInfo { return nil }

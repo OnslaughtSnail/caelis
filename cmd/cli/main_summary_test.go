@@ -136,7 +136,7 @@ func TestSummarizeToolResponse_TaskWaitRendersFriendlySummary(t *testing.T) {
 		"task_id":       "t-1234567890ab",
 		"yield_time_ms": 5000,
 	})
-	if got != "-> Waited 5 s" {
+	if got != "5 s" {
 		t.Fatalf("unexpected task wait summary: %q", got)
 	}
 }
@@ -150,7 +150,7 @@ func TestSummarizeToolResponse_TaskStatusRendersFriendlyState(t *testing.T) {
 		"action":  "status",
 		"task_id": "t-1234567890ab",
 	})
-	if got != "-> Waiting for input" {
+	if got != "Waiting for input" {
 		t.Fatalf("unexpected task status summary: %q", got)
 	}
 }
@@ -165,8 +165,19 @@ func TestSummarizeToolResponse_TaskListRendersFriendlySummary(t *testing.T) {
 	}, map[string]any{
 		"action": "list",
 	})
-	if got != "-> Listed 2 tasks (1 running)" {
+	if got != "Listed 2 tasks (1 running)" {
 		t.Fatalf("unexpected task list summary: %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_TaskWaitRendersDuration(t *testing.T) {
+	got := summarizeToolArgs("TASK", map[string]any{
+		"action":        "wait",
+		"task_id":       "t-1234567890ab",
+		"yield_time_ms": 5000,
+	})
+	if got != "5 s" {
+		t.Fatalf("unexpected task wait args summary: %q", got)
 	}
 }
 
@@ -204,7 +215,10 @@ func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
 		},
 	}, state)
 	rendered := out.String()
-	if !strings.Contains(rendered, "✓ Wait -> Waited 5 s") {
+	if !strings.Contains(rendered, "▸ WAIT 5 s") {
+		t.Fatalf("expected WAIT call render, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "✓ WAITED 5 s") {
 		t.Fatalf("expected friendly TASK render, got %q", rendered)
 	}
 	if strings.Contains(rendered, "t-1234567890ab") || strings.Contains(rendered, "line-2") {

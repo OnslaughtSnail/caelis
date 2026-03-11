@@ -331,20 +331,26 @@ func TestForwardEventToTUI_BashErrorWithoutOutputEmitsCleanSummary(t *testing.T)
 	}
 }
 
-func TestForwardEventToTUI_TaskWaitEmitsFriendlySummary(t *testing.T) {
+func TestForwardEventToTUI_TaskWaitEmitsVirtualCallAndFriendlySummary(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{tuiSender: sender}
-	pending := map[string]toolCallSnapshot{
-		"call_task_1": {
-			Args: map[string]any{
-				"action":        "wait",
-				"task_id":       "t-1234567890ab",
-				"yield_time_ms": 5000,
-			},
-		},
-	}
+	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "call_task_1",
+				Name: "TASK",
+				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
+			}},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected TASK wait call to be handled")
+	}
+
+	handled = c.forwardEventToTUI(&session.Event{
 		Message: model.Message{
 			Role: model.RoleTool,
 			ToolResponse: &model.ToolResponse{
@@ -361,14 +367,21 @@ func TestForwardEventToTUI_TaskWaitEmitsFriendlySummary(t *testing.T) {
 	if !handled {
 		t.Fatal("expected TASK wait response to be handled")
 	}
-	if len(sender.msgs) != 1 {
-		t.Fatalf("expected one summary message, got %#v", sender.msgs)
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected call and summary messages, got %#v", sender.msgs)
 	}
-	logMsg, ok := sender.msgs[0].(tuievents.LogChunkMsg)
+	callMsg, ok := sender.msgs[0].(tuievents.LogChunkMsg)
 	if !ok {
-		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
+		t.Fatalf("expected first LogChunkMsg, got %T", sender.msgs[0])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ Wait -> Waited 5 s") {
+	if !strings.Contains(callMsg.Chunk, "▸ WAIT 5 s") {
+		t.Fatalf("unexpected TASK wait call chunk: %q", callMsg.Chunk)
+	}
+	logMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected second LogChunkMsg, got %T", sender.msgs[1])
+	}
+	if !strings.Contains(logMsg.Chunk, "✓ WAITED 5 s") {
 		t.Fatalf("unexpected TASK wait log chunk: %q", logMsg.Chunk)
 	}
 }
@@ -410,7 +423,7 @@ func TestForwardEventToTUI_TaskListEmitsFriendlySummary(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ List -> Listed 2 tasks (1 running)") {
+	if !strings.Contains(logMsg.Chunk, "✓ LIST Listed 2 tasks (1 running)") {
 		t.Fatalf("unexpected TASK list log chunk: %q", logMsg.Chunk)
 	}
 }

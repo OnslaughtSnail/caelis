@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
+	stdruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -15,25 +15,33 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
-func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceDir string, caps ClientCapabilities, modeResolver func() string) toolexec.Runtime {
+func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceRoot, sessionCWD string, caps ClientCapabilities, modeResolver func() string) toolexec.Runtime {
 	if base == nil {
 		return nil
 	}
-	workspaceDir = filepath.Clean(strings.TrimSpace(workspaceDir))
+	workspaceRoot = filepath.Clean(strings.TrimSpace(workspaceRoot))
+	sessionCWD = normalizeSessionDir(sessionCWD)
+	if sessionCWD == "" {
+		sessionCWD = normalizeSessionDir(workspaceRoot)
+	}
+	baseFS := base.FileSystem()
 	fileSystem := &clientFileSystem{
-		base:      base.FileSystem(),
+		base:      baseFS,
 		conn:      conn,
 		sessionID: strings.TrimSpace(sessionID),
+		cwd:       sessionCWD,
 		caps:      caps,
 	}
-	hostRunner := base.HostRunner()
-	sandboxRunner := base.SandboxRunner()
+	hostRunner := wrapSessionCommandRunner(base.HostRunner(), sessionCWD)
+	sandboxRunner := wrapSessionCommandRunner(base.SandboxRunner(), sessionCWD)
 	var terminalRunner toolexec.AsyncCommandRunner
 	if caps.Terminal && conn != nil && base.PermissionMode() != toolexec.PermissionModeFullControl {
-		terminalRunner = NewAsyncCommandRunner(conn, sessionID)
+		terminalRunner = wrapSessionAsyncCommandRunner(NewAsyncCommandRunner(conn, sessionID), sessionCWD)
 	}
 	return &runtimeBridge{
 		base:           base,
+		workspaceRoot:  workspaceRoot,
+		sessionCWD:     sessionCWD,
 		fileSystem:     fileSystem,
 		hostRunner:     hostRunner,
 		sandboxRunner:  sandboxRunner,
@@ -44,6 +52,8 @@ func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceDir strin
 
 type runtimeBridge struct {
 	base           toolexec.Runtime
+	workspaceRoot  string
+	sessionCWD     string
 	fileSystem     toolexec.FileSystem
 	hostRunner     toolexec.CommandRunner
 	sandboxRunner  toolexec.CommandRunner
@@ -119,10 +129,16 @@ type clientFileSystem struct {
 	base      toolexec.FileSystem
 	conn      *Conn
 	sessionID string
+	cwd       string
 	caps      ClientCapabilities
 }
 
-func (f *clientFileSystem) Getwd() (string, error)                     { return f.base.Getwd() }
+func (f *clientFileSystem) Getwd() (string, error) {
+	if cwd := normalizeSessionDir(f.cwd); cwd != "" {
+		return cwd, nil
+	}
+	return f.base.Getwd()
+}
 func (f *clientFileSystem) UserHomeDir() (string, error)               { return f.base.UserHomeDir() }
 func (f *clientFileSystem) ReadDir(path string) ([]os.DirEntry, error) { return f.base.ReadDir(path) }
 func (f *clientFileSystem) Stat(path string) (os.FileInfo, error)      { return f.base.Stat(path) }
@@ -151,7 +167,7 @@ func (f *clientFileSystem) Open(path string) (*os.File, error) {
 		file.Close()
 		return nil, err
 	}
-	if runtime.GOOS != "windows" {
+	if stdruntime.GOOS != "windows" {
 		_ = os.Remove(file.Name())
 	}
 	return file, nil
@@ -244,10 +260,73 @@ func (r *clientCommandRunner) Run(ctx context.Context, req toolexec.CommandReque
 
 func shellCommand(input string) (string, []string) {
 	input = strings.TrimSpace(input)
-	if runtime.GOOS == "windows" {
+	if stdruntime.GOOS == "windows" {
 		return "cmd.exe", []string{"/C", input}
 	}
 	return "sh", []string{"-lc", input}
+}
+
+type sessionCommandRunner struct {
+	base       toolexec.CommandRunner
+	sessionCWD string
+}
+
+func wrapSessionCommandRunner(base toolexec.CommandRunner, sessionCWD string) toolexec.CommandRunner {
+	if base == nil {
+		return nil
+	}
+	if async, ok := base.(toolexec.AsyncCommandRunner); ok {
+		return &sessionAsyncCommandRunner{
+			AsyncCommandRunner: async,
+			sessionCWD:         normalizeSessionDir(sessionCWD),
+		}
+	}
+	return &sessionCommandRunner{
+		base:       base,
+		sessionCWD: normalizeSessionDir(sessionCWD),
+	}
+}
+
+func (r *sessionCommandRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return r.base.Run(ctx, sessionCommandRequest(req, r.sessionCWD))
+}
+
+type sessionAsyncCommandRunner struct {
+	toolexec.AsyncCommandRunner
+	sessionCWD string
+}
+
+func wrapSessionAsyncCommandRunner(base toolexec.AsyncCommandRunner, sessionCWD string) toolexec.AsyncCommandRunner {
+	if base == nil {
+		return nil
+	}
+	return &sessionAsyncCommandRunner{
+		AsyncCommandRunner: base,
+		sessionCWD:         normalizeSessionDir(sessionCWD),
+	}
+}
+
+func (r *sessionAsyncCommandRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return r.AsyncCommandRunner.Run(ctx, sessionCommandRequest(req, r.sessionCWD))
+}
+
+func (r *sessionAsyncCommandRunner) StartAsync(ctx context.Context, req toolexec.CommandRequest) (string, error) {
+	return r.AsyncCommandRunner.StartAsync(ctx, sessionCommandRequest(req, r.sessionCWD))
+}
+
+func sessionCommandRequest(req toolexec.CommandRequest, sessionCWD string) toolexec.CommandRequest {
+	if strings.TrimSpace(req.Dir) == "" && strings.TrimSpace(sessionCWD) != "" {
+		req.Dir = sessionCWD
+	}
+	return req
+}
+
+func normalizeSessionDir(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(trimmed)
 }
 
 type commandSession struct {

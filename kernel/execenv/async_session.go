@@ -32,6 +32,7 @@ type AsyncSession struct {
 	ID        string
 	Command   string
 	Dir       string
+	Env       []string
 	StartTime time.Time
 
 	cmd          *exec.Cmd
@@ -118,6 +119,7 @@ func NewAsyncSession(cfg AsyncSessionConfig) *AsyncSession {
 		ID:           uuid.New().String(),
 		Command:      cfg.Command,
 		Dir:          cfg.Dir,
+		Env:          append([]string(nil), cfg.Env...),
 		StartTime:    time.Now(),
 		stdoutBuffer: NewRingBuffer(cfg.OutputBufferCap),
 		stderrBuffer: NewRingBuffer(cfg.OutputBufferCap),
@@ -146,6 +148,7 @@ func (s *AsyncSession) Start() error {
 	cfg := AsyncSessionConfig{
 		Command:      s.Command,
 		Dir:          s.Dir,
+		Env:          append([]string(nil), s.Env...),
 		Timeout:      s.timeout,
 		IdleTimeout:  s.idleTimeout,
 		TTY:          s.tty,
@@ -165,6 +168,9 @@ func (s *AsyncSession) Start() error {
 	}
 
 	// Set up environment
+	if len(cmd.Env) == 0 && len(cfg.Env) > 0 {
+		cmd.Env = append([]string(nil), cfg.Env...)
+	}
 	if len(cmd.Env) == 0 {
 		cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
 	}

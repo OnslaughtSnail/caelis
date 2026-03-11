@@ -3,6 +3,8 @@ package shell
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -35,6 +37,11 @@ type asyncRecordingRunner struct {
 type stubTaskManager struct {
 	startBash task.Snapshot
 	lastBash  task.BashStartRequest
+}
+
+type stubFileSystem struct {
+	cwd  string
+	home string
 }
 
 func testSandboxType() string {
@@ -118,6 +125,16 @@ func (s *stubTaskManager) Status(context.Context, task.ControlRequest) (task.Sna
 func (s *stubTaskManager) Write(context.Context, task.ControlRequest) (task.Snapshot, error) {
 	return task.Snapshot{}, nil
 }
+
+func (s stubFileSystem) Getwd() (string, error)                      { return s.cwd, nil }
+func (s stubFileSystem) UserHomeDir() (string, error)                { return s.home, nil }
+func (s stubFileSystem) Open(string) (*os.File, error)               { return nil, fs.ErrNotExist }
+func (s stubFileSystem) ReadDir(string) ([]os.DirEntry, error)       { return nil, fs.ErrNotExist }
+func (s stubFileSystem) Stat(string) (os.FileInfo, error)            { return nil, fs.ErrNotExist }
+func (s stubFileSystem) ReadFile(string) ([]byte, error)             { return nil, fs.ErrNotExist }
+func (s stubFileSystem) WriteFile(string, []byte, os.FileMode) error { return fs.ErrPermission }
+func (s stubFileSystem) Glob(string) ([]string, error)               { return nil, nil }
+func (s stubFileSystem) WalkDir(string, fs.WalkDirFunc) error        { return nil }
 
 func (s *stubTaskManager) Cancel(context.Context, task.ControlRequest) (task.Snapshot, error) {
 	return task.Snapshot{}, nil
@@ -960,5 +977,101 @@ func TestBash_ErrorIncludesRouteForDebug(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "route=sandbox") {
 		t.Fatalf("expected route in error message, got: %v", err)
+	}
+}
+
+func TestBash_DefaultsWorkdirFromRuntimeFileSystem(t *testing.T) {
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		FileSystem:     stubFileSystem{cwd: "/workspace/subdir", home: "/home/tester"},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Run(context.Background(), map[string]any{"command": "pwd"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sandbox.calls) != 1 {
+		t.Fatalf("expected one sandbox call, got %d", len(sandbox.calls))
+	}
+	if sandbox.calls[0].Dir != "/workspace/subdir" {
+		t.Fatalf("expected runtime cwd as default workdir, got %q", sandbox.calls[0].Dir)
+	}
+}
+
+func TestBash_ACPXCommandRequiresHostEscalation(t *testing.T) {
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		FileSystem:     stubFileSystem{cwd: "/repo", home: "/home/tester"},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{"command": "acpx codex exec 'inspect repo'"})
+	if err == nil {
+		t.Fatal("expected approval-required error")
+	}
+	var approvalErr *toolexec.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected ApprovalRequiredError, got %T: %v", err, err)
+	}
+	if !strings.Contains(approvalErr.Reason, "operation not permitted") || !strings.Contains(approvalErr.Reason, "require_escalated=true") {
+		t.Fatalf("unexpected approval reason: %q", approvalErr.Reason)
+	}
+	if len(sandbox.calls) != 0 {
+		t.Fatalf("expected sandbox runner not called, got %d calls", len(sandbox.calls))
+	}
+}
+
+func TestBash_ACPXCommandRunsOnHostWhenEscalated(t *testing.T) {
+	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-ok"}}
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		FileSystem:     stubFileSystem{cwd: "/repo", home: "/home/tester"},
+		HostRunner:     host,
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: true})
+	out, err := tool.Run(ctx, map[string]any{
+		"command":           "acpx codex exec 'inspect repo'",
+		"require_escalated": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["stdout"] != "host-ok" {
+		t.Fatalf("unexpected stdout: %v", out["stdout"])
+	}
+	if len(host.calls) != 1 {
+		t.Fatalf("expected host runner called once, got %d", len(host.calls))
+	}
+	if len(sandbox.calls) != 0 {
+		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
+	}
+	if host.calls[0].Command != "acpx codex exec 'inspect repo'" {
+		t.Fatalf("expected host command unchanged, got %q", host.calls[0].Command)
 	}
 }

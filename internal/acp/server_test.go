@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"os"
+	"path/filepath"
 	stdruntime "runtime"
 	"strings"
 	"sync"
@@ -169,9 +171,10 @@ func TestServer_SessionModeAndConfigPersistAcrossLoad(t *testing.T) {
 				{Value: "on", Name: "on"},
 			},
 		}},
-		newAgent: func(stream bool, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+			_ = sessionCWD
 			captured = cfg
-			return newLLMAgentFactory(t)(stream, cfg)
+			return newLLMAgentFactory(t)(stream, sessionCWD, cfg)
 		},
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
@@ -337,6 +340,103 @@ func TestServer_Prompt_UsesACPTerminalForBash(t *testing.T) {
 	}
 }
 
+func TestServer_Prompt_FiltersInternalToolMetadataFromACPUpdates(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+			_ = stream
+			_ = sessionCWD
+			_ = cfg
+			return scriptedAgent{
+				name: "metadata-filter",
+				events: []*session.Event{{
+					Message: model.Message{
+						Role: model.RoleTool,
+						ToolResponse: &model.ToolResponse{
+							ID:   "call_patch_1",
+							Name: "PATCH",
+							Result: map[string]any{
+								"path":        "demo.txt",
+								"ok":          true,
+								"_ui_preview": "--- old\n+++ new",
+								"metadata": map[string]any{
+									"patch": map[string]any{
+										"preview": "--- old\n+++ new",
+									},
+								},
+								"payload": map[string]any{
+									"metadata": map[string]any{
+										"keep": "yes",
+									},
+									"_ui_note": "internal",
+									"value":    "ok",
+								},
+							},
+						},
+					},
+				}},
+			}, nil
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{ProtocolVersion: "0.2.0"}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	h.resetNotifications()
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "filter"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+
+	h.waitNotifications(t, 1)
+	h.mu.Lock()
+	notes := append([]SessionNotification(nil), h.notifications...)
+	h.mu.Unlock()
+	for _, note := range notes {
+		raw, err := json.Marshal(note.Update)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var update struct {
+			SessionUpdate string         `json:"sessionUpdate"`
+			RawOutput     map[string]any `json:"rawOutput"`
+		}
+		if err := json.Unmarshal(raw, &update); err != nil {
+			t.Fatal(err)
+		}
+		if update.SessionUpdate != UpdateToolCallState {
+			continue
+		}
+		if _, ok := update.RawOutput["_ui_preview"]; ok {
+			t.Fatalf("did not expect _ui metadata in ACP rawOutput: %#v", update.RawOutput)
+		}
+		if _, ok := update.RawOutput["metadata"]; ok {
+			t.Fatalf("did not expect metadata in ACP rawOutput: %#v", update.RawOutput)
+		}
+		if update.RawOutput["path"] != "demo.txt" || update.RawOutput["ok"] != true {
+			t.Fatalf("expected visible fields preserved, got %#v", update.RawOutput)
+		}
+		payload, _ := update.RawOutput["payload"].(map[string]any)
+		if payload["value"] != "ok" {
+			t.Fatalf("expected payload preserved, got %#v", payload)
+		}
+		if _, ok := payload["_ui_note"]; ok {
+			t.Fatalf("did not expect nested _ui metadata in ACP rawOutput: %#v", payload)
+		}
+		nestedMeta, _ := payload["metadata"].(map[string]any)
+		if nestedMeta["keep"] != "yes" {
+			t.Fatalf("expected nested metadata preserved, got %#v", payload)
+		}
+		return
+	}
+	t.Fatal("expected tool call state notification")
+}
+
 func TestServer_Prompt_CoalescesAssistantPartialsIntoFinalMessage(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		llm: &scriptedLLM{
@@ -500,7 +600,8 @@ func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+			_ = sessionCWD
 			_ = cfg
 			return blockingAgent{name: "block", blocker: blocker}, nil
 		},
@@ -541,7 +642,8 @@ func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 func TestServer_SessionLoadKeepsCancelForActiveRun(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+			_ = sessionCWD
 			_ = cfg
 			return blockingAgent{name: "block", blocker: blocker}, nil
 		},
@@ -607,6 +709,90 @@ func TestServer_SessionLoadUnknownIDReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestServer_SessionNewAllowsWorkspaceRootSubdir(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		workspaceRoot: "/workspace",
+		workspace:     "/workspace/subdir",
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+	}, &InitializeResponse{})
+
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{
+		CWD: "/workspace/subdir/project",
+	}, &newResp)
+	if strings.TrimSpace(newResp.SessionID) == "" {
+		t.Fatal("expected session id")
+	}
+}
+
+func TestServer_SessionRejectsCWDOutsideWorkspaceRoot(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		workspaceRoot: "/workspace",
+		workspace:     "/workspace/subdir",
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+	}, &InitializeResponse{})
+
+	var newResp NewSessionResponse
+	err := h.client.Call(context.Background(), MethodSessionNew, NewSessionRequest{
+		CWD: "/outside",
+	}, &newResp)
+	if err == nil || !strings.Contains(err.Error(), "outside workspace root") {
+		t.Fatalf("expected workspace root validation error, got %v", err)
+	}
+}
+
+func TestPathWithinRootRejectsSymlinkEscape(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(root, "link-out")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	if pathWithinRoot(root, link) {
+		t.Fatalf("expected symlink target outside root to be rejected")
+	}
+	if pathWithinRoot(root, filepath.Join(link, "child")) {
+		t.Fatalf("expected descendant of external symlink target to be rejected")
+	}
+}
+
+func TestServer_SessionLoadRejectsPersistedCWDMismatch(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		workspaceRoot: "/workspace",
+		workspace:     "/workspace/subdir",
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+	}, &InitializeResponse{})
+
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{
+		CWD: "/workspace/subdir/project-a",
+	}, &newResp)
+
+	var loadResp LoadSessionResponse
+	err := h.client.Call(context.Background(), MethodSessionLoad, LoadSessionRequest{
+		SessionID: newResp.SessionID,
+		CWD:       "/workspace/subdir/project-b",
+	}, &loadResp)
+	if err == nil || !strings.Contains(err.Error(), "persisted session cwd") {
+		t.Fatalf("expected persisted cwd mismatch error, got %v", err)
+	}
+}
+
 type harnessConfig struct {
 	clientCaps    ClientCapabilities
 	llm           model.LLM
@@ -617,6 +803,8 @@ type harnessConfig struct {
 	sessionModes  []SessionMode
 	defaultModeID string
 	sessionConfig []SessionConfigOptionTemplate
+	workspaceRoot string
+	workspace     string
 }
 
 type harness struct {
@@ -676,6 +864,16 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 			}),
 		},
 	}
+	if root := strings.TrimSpace(cfg.workspaceRoot); root != "" {
+		h.workspace = filepath.Clean(root)
+	}
+	if workspace := strings.TrimSpace(cfg.workspace); workspace != "" {
+		h.workspace = filepath.Clean(workspace)
+	}
+	workspaceRoot := h.workspace
+	if root := strings.TrimSpace(cfg.workspaceRoot); root != "" {
+		workspaceRoot = filepath.Clean(root)
+	}
 	agentFactory := cfg.newAgent
 	if agentFactory == nil {
 		agentFactory = newLLMAgentFactory(t)
@@ -691,15 +889,15 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		Model:         modelImpl,
 		AppName:       "caelis",
 		UserID:        "tester",
-		WorkspaceDir:  h.workspace,
+		WorkspaceRoot: workspaceRoot,
 		AuthMethods:   cfg.authMethods,
 		Authenticate:  cfg.authenticate,
 		SessionModes:  cfg.sessionModes,
 		DefaultModeID: cfg.defaultModeID,
 		SessionConfig: cfg.sessionConfig,
 		NewAgent:      agentFactory,
-		NewSessionResources: func(ctx context.Context, sessionID string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
-			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, h.workspace, caps, modeResolver)
+		NewSessionResources: func(ctx context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
+			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, workspaceRoot, sessionCWD, caps, modeResolver)
 			tools := make([]tool.Tool, 0, 1)
 			bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: execRuntime})
 			if err != nil {
@@ -974,7 +1172,8 @@ func TestServer_PlanModeInjectsHiddenPromptButLoadReplaysVisibleText(t *testing.
 
 func newLLMAgentFactory(t *testing.T) AgentFactory {
 	t.Helper()
-	return func(stream bool, cfg AgentSessionConfig) (agent.Agent, error) {
+	return func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+		_ = sessionCWD
 		_ = cfg
 		return llmagent.New(llmagent.Config{
 			Name:              "test",
@@ -998,6 +1197,24 @@ func (a blockingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event
 		case <-ctx.Done():
 			yield(nil, ctx.Err())
 		case <-a.blocker:
+		}
+	}
+}
+
+type scriptedAgent struct {
+	name   string
+	events []*session.Event
+}
+
+func (a scriptedAgent) Name() string { return a.name }
+
+func (a scriptedAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		_ = ctx
+		for _, ev := range a.events {
+			if !yield(ev, nil) {
+				return
+			}
 		}
 	}
 }

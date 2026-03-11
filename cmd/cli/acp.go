@@ -52,6 +52,7 @@ func runACP(ctx context.Context, args []string) error {
 		compactWatermark = fs.Float64("compact-watermark", 0.7, "Auto compaction watermark ratio (0.5-0.9)")
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
 		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default")
+		workspaceRoot    = fs.String("workspace-root", "", "Workspace root for ACP session cwd validation (default: git root or current directory)")
 		experimentalLSP  = fs.Bool("experimental-lsp", false, "Enable experimental CLI LSP tools plugin")
 		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
 		authMethodID     = fs.String("auth-method-id", "", "Optional ACP auth method id; when set, clients must authenticate before using session methods")
@@ -78,6 +79,10 @@ func runACP(ctx context.Context, args []string) error {
 		return err
 	}
 	workspace, err := resolveWorkspaceContext()
+	if err != nil {
+		return err
+	}
+	resolvedWorkspaceRoot, err := resolveWorkspaceRoot(workspace.CWD, *workspaceRoot)
 	if err != nil {
 		return err
 	}
@@ -173,7 +178,7 @@ func runACP(ctx context.Context, args []string) error {
 		Model:           llm,
 		AppName:         *appName,
 		UserID:          *userID,
-		WorkspaceDir:    workspace.CWD,
+		WorkspaceRoot:   resolvedWorkspaceRoot,
 		ProtocolVersion: "0.2.0",
 		AgentInfo: &internalacp.Implementation{
 			Name:    *appName,
@@ -185,11 +190,11 @@ func runACP(ctx context.Context, args []string) error {
 		SessionModes:  sessionModes,
 		DefaultModeID: "default",
 		SessionConfig: sessionConfig,
-		NewAgent: func(stream bool, sessionCfg internalacp.AgentSessionConfig) (agent.Agent, error) {
+		NewAgent: func(stream bool, sessionCWD string, sessionCfg internalacp.AgentSessionConfig) (agent.Agent, error) {
 			resolvedThinkingMode, resolvedReasoningEffort := resolveACPSessionReasoning(modelRuntime, sessionCfg.ConfigValues)
 			return buildAgent(buildAgentInput{
 				AppName:                     *appName,
-				WorkspaceDir:                workspace.CWD,
+				WorkspaceDir:                sessionCWD,
 				PromptConfigDir:             *promptConfigDir,
 				EnableExperimentalLSPPrompt: *experimentalLSP,
 				BasePrompt:                  *systemPrompt,
@@ -202,8 +207,8 @@ func runACP(ctx context.Context, args []string) error {
 				ModelName:                   resolveModelName(factory, alias),
 			})
 		},
-		NewSessionResources: func(ctx context.Context, sessionID string, caps internalacp.ClientCapabilities, mcpServers []internalacp.MCPServer, modeResolver func() string) (*internalacp.SessionResources, error) {
-			execRuntime := internalacp.NewRuntime(baseRuntime, conn, sessionID, workspace.CWD, caps, modeResolver)
+		NewSessionResources: func(ctx context.Context, sessionID string, sessionCWD string, caps internalacp.ClientCapabilities, mcpServers []internalacp.MCPServer, modeResolver func() string) (*internalacp.SessionResources, error) {
+			execRuntime := internalacp.NewRuntime(baseRuntime, conn, sessionID, resolvedWorkspaceRoot, sessionCWD, caps, modeResolver)
 			mcpCfg, err := buildACPMCPConfig(baseMCPConfig, mcpServers)
 			if err != nil {
 				return nil, err
@@ -230,7 +235,7 @@ func runACP(ctx context.Context, args []string) error {
 				resolvedToolProviders = appendProviderIfMissing(resolvedToolProviders, providerLSPTools)
 			}
 			if includesProvider(resolvedToolProviders, providerLSPTools) {
-				if err := registerCLILSPToolProvider(registry, workspace.CWD, execRuntime); err != nil {
+				if err := registerCLILSPToolProvider(registry, sessionCWD, execRuntime); err != nil {
 					if manager != nil {
 						_ = manager.Close()
 					}

@@ -79,7 +79,8 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("tool: resolve seatbelt workdir failed: %w", err)
 	}
-	profile := buildSeatbeltProfile(s.policy, workDir)
+	effectivePolicy := sandboxPolicyForCommand(s.policy, req)
+	profile := buildSeatbeltProfile(effectivePolicy, workDir)
 
 	args := []string{"-p", profile, "bash", "-lc", req.Command}
 	cmd := s.execCommand(runCtx, "sandbox-exec", args...)
@@ -87,7 +88,7 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	if strings.TrimSpace(req.Dir) != "" {
 		cmd.Dir = req.Dir
 	}
-	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+	cmd.Env = mergeCommandEnv(req.EnvOverrides)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -145,19 +146,21 @@ func (s *seatbeltRunner) StartAsync(ctx context.Context, req CommandRequest) (st
 	if err != nil {
 		return "", fmt.Errorf("tool: resolve seatbelt workdir failed: %w", err)
 	}
+	effectivePolicy := sandboxPolicyForCommand(s.policy, req)
 	session, err := s.sessionManager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
+		Env:             mergeCommandEnv(req.EnvOverrides),
 		OutputBufferCap: 256 * 1024,
 		Timeout:         req.Timeout,
 		IdleTimeout:     req.IdleTimeout,
 		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
-			profile := buildSeatbeltProfile(s.policy, workDir)
+			profile := buildSeatbeltProfile(effectivePolicy, workDir)
 			cmd := s.execCommand(ctx, "sandbox-exec", "-p", profile, "bash", "-lc", cfg.Command)
 			if strings.TrimSpace(cfg.Dir) != "" {
 				cmd.Dir = cfg.Dir
 			}
-			cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+			cmd.Env = append([]string(nil), cfg.Env...)
 			return cmd, nil
 		},
 	})

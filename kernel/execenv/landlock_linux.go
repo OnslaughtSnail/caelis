@@ -82,18 +82,19 @@ func (l *landlockRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("tool: resolve landlock workdir failed: %w", err)
 	}
+	effectivePolicy := sandboxPolicyForCommand(l.policy, req)
 	exePath, err := l.resolveHelperPath()
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("tool: resolve landlock helper path failed: %w", err)
 	}
-	helperArgs, err := buildLandlockHelperArgs(l.policy, policyCWD, policyCWD, req.Command)
+	helperArgs, err := buildLandlockHelperArgs(effectivePolicy, policyCWD, policyCWD, req.Command)
 	if err != nil {
 		return CommandResult{}, fmt.Errorf("tool: build landlock helper args failed: %w", err)
 	}
 
 	cmd := l.execCommand(runCtx, exePath, helperArgs...)
 	applyNonInteractiveCommandDefaults(cmd)
-	cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+	cmd.Env = mergeCommandEnv(req.EnvOverrides)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -151,6 +152,7 @@ func (l *landlockRunner) StartAsync(ctx context.Context, req CommandRequest) (st
 	if err != nil {
 		return "", fmt.Errorf("tool: resolve landlock workdir failed: %w", err)
 	}
+	effectivePolicy := sandboxPolicyForCommand(l.policy, req)
 	exePath, err := l.resolveHelperPath()
 	if err != nil {
 		return "", fmt.Errorf("tool: resolve landlock helper path failed: %w", err)
@@ -158,16 +160,17 @@ func (l *landlockRunner) StartAsync(ctx context.Context, req CommandRequest) (st
 	session, err := l.sessionManager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
+		Env:             mergeCommandEnv(req.EnvOverrides),
 		OutputBufferCap: 256 * 1024,
 		Timeout:         req.Timeout,
 		IdleTimeout:     req.IdleTimeout,
 		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
-			helperArgs, err := buildLandlockHelperArgs(l.policy, policyCWD, policyCWD, cfg.Command)
+			helperArgs, err := buildLandlockHelperArgs(effectivePolicy, policyCWD, policyCWD, cfg.Command)
 			if err != nil {
 				return nil, err
 			}
 			cmd := l.execCommand(ctx, exePath, helperArgs...)
-			cmd.Env = append(os.Environ(), defaultCommandEnvVars...)
+			cmd.Env = append([]string(nil), cfg.Env...)
 			return cmd, nil
 		},
 	})

@@ -59,7 +59,7 @@ func TestNewRuntime_UsesACPAsyncRunnerForTerminalCapability(t *testing.T) {
 		}, func(context.Context, Message) {})
 	}()
 
-	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", ClientCapabilities{
+	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace", ClientCapabilities{
 		Terminal: true,
 	}, nil)
 	asyncRunner, ok := rt.HostRunner().(toolexec.AsyncCommandRunner)
@@ -139,15 +139,15 @@ func TestNewRuntime_FallsBackWithoutTerminalCapability(t *testing.T) {
 	}
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
-	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", ClientCapabilities{}, nil)
+	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace", ClientCapabilities{}, nil)
 	if _, ok := rt.HostRunner().(toolexec.AsyncCommandRunner); ok {
 		t.Fatal("did not expect async host runner without terminal capability")
 	}
-	if rt.HostRunner() != baseHost {
-		t.Fatal("expected host runner fallback to base runtime")
+	if rt.HostRunner() == nil {
+		t.Fatal("expected host runner fallback to stay available")
 	}
-	if rt.SandboxRunner() != baseSandbox {
-		t.Fatal("expected sandbox runner fallback to base runtime")
+	if rt.SandboxRunner() == nil {
+		t.Fatal("expected sandbox runner fallback to stay available")
 	}
 }
 
@@ -163,7 +163,7 @@ func TestNewRuntime_FullAccessModeBypassesSandbox(t *testing.T) {
 	}
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
-	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", ClientCapabilities{}, func() string {
+	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace", ClientCapabilities{}, func() string {
 		return "full_access"
 	})
 	if rt.PermissionMode() != toolexec.PermissionModeFullControl {
@@ -231,7 +231,7 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 		}, func(context.Context, Message) {})
 	}()
 
-	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", ClientCapabilities{
+	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace", ClientCapabilities{
 		Terminal: true,
 	}, func() string {
 		return "full_access"
@@ -294,7 +294,7 @@ func TestNewRuntime_FullAccessModeKeepsACPFileSystemBridge(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "full-access.txt")
-	rt := NewRuntime(baseRuntime, clientConn, "session-1", dir, ClientCapabilities{
+	rt := NewRuntime(baseRuntime, clientConn, "session-1", dir, dir, ClientCapabilities{
 		FS: FileSystemCapabilities{
 			ReadTextFile:  true,
 			WriteTextFile: true,
@@ -336,7 +336,7 @@ func TestNewRuntime_BaseFullControlOverridesDefaultSessionMode(t *testing.T) {
 	}
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
-	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", ClientCapabilities{
+	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace", ClientCapabilities{
 		Terminal: true,
 	}, func() string {
 		return "default"
@@ -344,12 +344,66 @@ func TestNewRuntime_BaseFullControlOverridesDefaultSessionMode(t *testing.T) {
 	if rt.PermissionMode() != toolexec.PermissionModeFullControl {
 		t.Fatalf("expected base full_control permission mode to be preserved, got %q", rt.PermissionMode())
 	}
-	if rt.HostRunner() != baseHost {
-		t.Fatal("expected host runner to stay on the base runtime when base permission is full_control")
+	if rt.HostRunner() == nil {
+		t.Fatal("expected host runner to stay available when base permission is full_control")
 	}
-	if rt.SandboxRunner() != baseHost {
+	if rt.SandboxRunner() != rt.HostRunner() {
 		t.Fatal("expected sandbox runner to collapse to host runner when base permission is full_control")
 	}
+}
+
+func TestNewRuntime_FileSystemGetwdUsesSessionCWD(t *testing.T) {
+	baseRuntime, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    testSandboxType(),
+		HostRunner:     stubRunner{},
+		SandboxRunner:  stubRunner{},
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer func() { _ = toolexec.Close(baseRuntime) }()
+
+	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace/subdir", ClientCapabilities{}, nil)
+	cwd, err := rt.FileSystem().Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if cwd != "/workspace/subdir" {
+		t.Fatalf("expected session cwd, got %q", cwd)
+	}
+}
+
+func TestNewRuntime_DefaultsCommandDirToSessionCWD(t *testing.T) {
+	host := &recordingRunner{}
+	baseRuntime, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    testSandboxType(),
+		HostRunner:     host,
+		SandboxRunner:  stubRunner{},
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer func() { _ = toolexec.Close(baseRuntime) }()
+
+	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace/subdir", ClientCapabilities{}, nil)
+	if _, err := rt.HostRunner().Run(context.Background(), toolexec.CommandRequest{Command: "pwd"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if host.lastDir != "/workspace/subdir" {
+		t.Fatalf("expected host runner dir /workspace/subdir, got %q", host.lastDir)
+	}
+}
+
+type recordingRunner struct {
+	lastDir string
+}
+
+func (r *recordingRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	_ = ctx
+	r.lastDir = req.Dir
+	return toolexec.CommandResult{Stdout: req.Dir}, nil
 }
 
 func TestNewRuntime_BaseFullControlKeepsACPFileSystemBridge(t *testing.T) {
@@ -402,7 +456,7 @@ func TestNewRuntime_BaseFullControlKeepsACPFileSystemBridge(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "base-full-control.txt")
-	rt := NewRuntime(baseRuntime, clientConn, "session-1", dir, ClientCapabilities{
+	rt := NewRuntime(baseRuntime, clientConn, "session-1", dir, dir, ClientCapabilities{
 		FS: FileSystemCapabilities{
 			ReadTextFile:  true,
 			WriteTextFile: true,

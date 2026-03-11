@@ -244,13 +244,12 @@ func printEvent(ev *session.Event, state *renderState) {
 					Args: cloneAnyMap(parsedArgs),
 				}
 			}
-			if strings.EqualFold(strings.TrimSpace(call.Name), "TASK") {
-				continue
-			}
+			displayName := displayToolCallName(call.Name, parsedArgs)
+			summary := summarizeToolArgs(call.Name, parsedArgs)
 			if state.ui != nil {
-				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), call.Name, summarizeToolArgs(call.Name, parsedArgs))
+				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), displayName, summary)
 			} else {
-				fmt.Fprintf(state.out, "▸ %s %s\n", call.Name, summarizeToolArgs(call.Name, parsedArgs))
+				fmt.Fprintf(state.out, "▸ %s %s\n", displayName, summary)
 			}
 		}
 	}
@@ -334,6 +333,14 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		}
 	case "TASK":
 		action := strings.TrimSpace(asString(args["action"]))
+		if strings.EqualFold(action, "wait") {
+			if rawWaitMS, ok := args["yield_time_ms"]; ok {
+				waitMS, _ := asInt(rawWaitMS)
+				if waited := friendlyWaitLabel(waitMS); waited != "" {
+					return waited
+				}
+			}
+		}
 		taskID := strings.TrimSpace(asString(args["task_id"]))
 		if action != "" && taskID != "" {
 			return fmt.Sprintf("{action=%s task=%s}", action, idutil.ShortDisplay(taskID))
@@ -388,6 +395,14 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		parts = append(parts, fmt.Sprintf("%s=%s", key, truncateInline(value, 72)))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func displayToolCallName(toolName string, callArgs map[string]any) string {
+	displayName := strings.TrimSpace(toolName)
+	if strings.EqualFold(displayName, "TASK") {
+		return taskActionCallDisplayName(strings.TrimSpace(asString(callArgs["action"])))
+	}
+	return displayName
 }
 
 func parseToolArgsForDisplay(raw string) map[string]any {
@@ -601,45 +616,45 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 	case "wait":
 		if waited != "" {
 			if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
-				return "-> Waited " + waited + ", " + strings.ToLower(stateLabel)
+				return waited + ", " + strings.ToLower(stateLabel)
 			}
-			return "-> Waited " + waited
+			return waited
 		}
 		if stateLabel != "" {
-			return "-> " + stateLabel
+			return stateLabel
 		}
 	case "status":
 		if stateLabel != "" {
-			return "-> " + stateLabel
+			return stateLabel
 		}
 	case "write":
 		if waited != "" {
 			if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
-				return "-> Sent input, " + strings.ToLower(stateLabel)
+				return "Sent input, " + strings.ToLower(stateLabel)
 			}
-			return "-> Sent input, waited " + waited
+			return "Sent input, waited " + waited
 		}
-		return "-> Sent input"
+		return "Sent input"
 	case "cancel":
 		if stateLabel != "" {
-			return "-> " + stateLabel
+			return stateLabel
 		}
-		return "-> Cancelled"
+		return "Cancelled"
 	case "list":
 		runningCount := countRunningTasks(result["tasks"])
 		if count == 1 {
 			if runningCount == 1 {
-				return "-> Listed 1 task (1 running)"
+				return "Listed 1 task (1 running)"
 			}
-			return "-> Listed 1 task"
+			return "Listed 1 task"
 		}
 		if count > 0 {
 			if runningCount > 0 {
-				return fmt.Sprintf("-> Listed %d tasks (%d running)", count, runningCount)
+				return fmt.Sprintf("Listed %d tasks (%d running)", count, runningCount)
 			}
-			return fmt.Sprintf("-> Listed %d tasks", count)
+			return fmt.Sprintf("Listed %d tasks", count)
 		}
-		return "-> Listed tasks"
+		return "Listed tasks"
 	}
 	return ""
 }
@@ -647,25 +662,36 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {
 	displayName := strings.TrimSpace(toolName)
 	if strings.EqualFold(displayName, "TASK") && !hasToolError(result) {
-		return taskActionDisplayName(strings.TrimSpace(asString(callArgs["action"])))
+		return taskActionResultDisplayName(strings.TrimSpace(asString(callArgs["action"])))
 	}
 	return displayName
 }
 
-func taskActionDisplayName(action string) string {
+func taskActionCallDisplayName(action string) string {
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "wait":
-		return "Wait"
+		return "WAIT"
 	case "status":
-		return "Check"
+		return "CHECK"
 	case "write":
-		return "Write"
+		return "WRITE"
 	case "cancel":
-		return "Cancel"
+		return "CANCEL"
 	case "list":
-		return "List"
+		return "LIST"
 	default:
-		return "Task"
+		return "TASK"
+	}
+}
+
+func taskActionResultDisplayName(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "wait":
+		return "WAITED"
+	case "cancel":
+		return "CANCELLED"
+	default:
+		return taskActionCallDisplayName(action)
 	}
 }
 

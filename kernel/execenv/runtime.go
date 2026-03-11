@@ -94,12 +94,14 @@ type FileSystem interface {
 
 // CommandRequest is one command execution request.
 type CommandRequest struct {
-	Command     string
-	Dir         string
-	Timeout     time.Duration
-	IdleTimeout time.Duration
-	TTY         bool
-	OnOutput    func(CommandOutputChunk)
+	Command               string
+	Dir                   string
+	Timeout               time.Duration
+	IdleTimeout           time.Duration
+	TTY                   bool
+	EnvOverrides          map[string]string
+	SandboxPolicyOverride *SandboxPolicy
+	OnOutput              func(CommandOutputChunk)
 }
 
 type CommandOutputChunk struct {
@@ -158,6 +160,47 @@ type runtimeImpl struct {
 	closers        []runtimeCloser
 	closeOnce      sync.Once
 	closeErr       error
+}
+
+func cloneSandboxPolicy(policy SandboxPolicy) SandboxPolicy {
+	policy.WritableRoots = append([]string(nil), policy.WritableRoots...)
+	policy.ReadOnlySubpaths = append([]string(nil), policy.ReadOnlySubpaths...)
+	return policy
+}
+
+func sandboxPolicyForCommand(base SandboxPolicy, req CommandRequest) SandboxPolicy {
+	if req.SandboxPolicyOverride == nil {
+		return cloneSandboxPolicy(base)
+	}
+	return deriveSandboxPolicy(PermissionModeDefault, cloneSandboxPolicy(*req.SandboxPolicyOverride))
+}
+
+func mergeCommandEnv(overrides map[string]string) []string {
+	env := append([]string(nil), os.Environ()...)
+	env = append(env, defaultCommandEnvVars...)
+	if len(overrides) == 0 {
+		return env
+	}
+	index := make(map[string]int, len(env))
+	for i, entry := range env {
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			index[key] = i
+		}
+	}
+	for key, value := range overrides {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		entry := trimmedKey + "=" + value
+		if at, ok := index[trimmedKey]; ok {
+			env[at] = entry
+			continue
+		}
+		index[trimmedKey] = len(env)
+		env = append(env, entry)
+	}
+	return env
 }
 
 func (r *runtimeImpl) PermissionMode() PermissionMode {
