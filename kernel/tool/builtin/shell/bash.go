@@ -21,7 +21,6 @@ const (
 	BashToolName       = "BASH"
 	defaultBashTimeout = 30 * time.Minute
 	defaultBashIdle    = 0
-	defaultBashYield   = 1200 * time.Millisecond
 	defaultBashWait    = 5 * time.Second
 )
 
@@ -87,11 +86,11 @@ func (t *BashTool) Declaration() model.ToolDefinition {
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "optional wait time before yielding control. If omitted, BASH waits briefly and returns a task_id if still running. Set to 0 to return a task_id immediately without waiting, or -1 to wait synchronously until completion.",
+					"description": "optional wait time before yielding control. Values greater than 0 wait that many milliseconds. If omitted or set to 0 or a negative value, BASH waits 5 seconds and returns a task_id if still running.",
 				},
 				"tty": map[string]any{
 					"type":        "boolean",
-					"description": "allocate a pseudo-terminal for interactive commands. When tty=true and yield_time_ms is omitted, BASH returns a task_id after a short initial wait so TASK write can continue the session.",
+					"description": "allocate a pseudo-terminal for interactive commands.",
 				},
 			},
 			"required":             []string{"command"},
@@ -119,23 +118,19 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
-	_, yieldSpecified := args["yield_time_ms"]
+	rawYield, yieldSpecified := args["yield_time_ms"]
+	yieldSpecified = yieldSpecified && rawYield != nil
 	yieldMS, yErr := argparse.Int(args, "yield_time_ms", 0)
 	if yErr != nil {
 		return nil, yErr
 	}
-	if yieldMS < -1 {
-		return nil, fmt.Errorf("tool: arg %q must be >= -1", "yield_time_ms")
-	}
-	forceSync := yieldSpecified && yieldMS == -1
+	explicitYieldMS := yieldMS
+	asyncYieldRequested := yieldSpecified && explicitYieldMS > 0
 	tty, ttyErr := argparse.Bool(args, "tty", false)
 	if ttyErr != nil {
 		return nil, ttyErr
 	}
-	if !yieldSpecified && tty {
-		yieldMS = int(defaultBashYield / time.Millisecond)
-	}
-	if !yieldSpecified && !tty {
+	if !yieldSpecified || explicitYieldMS <= 0 {
 		yieldMS = int(defaultBashWait / time.Millisecond)
 	}
 
@@ -159,7 +154,7 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 
 	// Interactive async commands still require host execution because sandbox
 	// backends currently do not provide PTY sessions.
-	if !forceSync && tty && decision.Route != toolexec.ExecutionRouteHost {
+	if tty && decision.Route != toolexec.ExecutionRouteHost {
 		if decision.Route != toolexec.ExecutionRouteHost {
 			decision.NeedApproval = true
 		}
@@ -185,33 +180,31 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		}
 	}
 
-	if !forceSync {
-		if _, ok := runner.(toolexec.AsyncCommandRunner); !ok {
-			if yieldSpecified {
-				return nil, fmt.Errorf("tool: BASH failed (route=%s): async execution is not supported", decision.Route)
+	if _, ok := runner.(toolexec.AsyncCommandRunner); !ok {
+		if asyncYieldRequested {
+			return nil, fmt.Errorf("tool: BASH failed (route=%s): async execution is not supported", decision.Route)
+		}
+	} else {
+		manager, ok := task.ManagerFromContext(ctx)
+		if !ok || manager == nil {
+			if asyncYieldRequested {
+				return nil, fmt.Errorf("tool: task manager is unavailable")
 			}
 		} else {
-			manager, ok := task.ManagerFromContext(ctx)
-			if !ok || manager == nil {
-				if yieldSpecified {
-					return nil, fmt.Errorf("tool: task manager is unavailable")
-				}
-			} else {
-				snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
-					Command:     command,
-					Workdir:     workingDir,
-					Yield:       time.Duration(yieldMS) * time.Millisecond,
-					Timeout:     timeout,
-					IdleTimeout: idleTimeout,
-					TTY:         tty,
-					Route:       string(decision.Route),
-				})
-				if err != nil {
-					return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
-				}
-				result := ktoolSnapshotResult(snapshot, string(decision.Route))
-				return ktoolAppendTaskEvents(result, snapshot), nil
+			snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
+				Command:     command,
+				Workdir:     workingDir,
+				Yield:       time.Duration(yieldMS) * time.Millisecond,
+				Timeout:     timeout,
+				IdleTimeout: idleTimeout,
+				TTY:         tty,
+				Route:       string(decision.Route),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
 			}
+			result := ktoolSnapshotResult(snapshot, string(decision.Route))
+			return ktoolAppendTaskEvents(result, snapshot), nil
 		}
 	}
 

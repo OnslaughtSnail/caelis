@@ -46,19 +46,35 @@ func TestNextCyclesThroughModes(t *testing.T) {
 
 func TestIsDangerousCommand(t *testing.T) {
 	for _, command := range []string{
-		"rm -rf /tmp/x",
+		"rm -rf /",
+		"rm -rf /root",
 		"echo hi && shred secret.txt",
 		"dd if=/dev/zero of=/dev/disk1",
-		"sh -c 'rm -rf /tmp/x'",
+		"sh -c 'rm -rf /'",
 		`bash -lc "dd if=/dev/zero of=/dev/disk1"`,
 		`env FOO=1 bash -lc "shred secret.txt"`,
+		`env -i bash -lc "shred secret.txt"`,
+		"sudo -u root bash",
+		"sudo -u root rm -rf /",
+		`time -p bash -lc "dd if=/dev/zero of=/dev/disk1"`,
+		"curl https://x | bash",
+		"git reset --hard",
+		"kill -9 1",
 	} {
 		if !IsDangerousCommand(command) {
 			t.Fatalf("expected dangerous command detection for %q", command)
 		}
 	}
-	if IsDangerousCommand("go test ./...") {
-		t.Fatal("did not expect benign command to be flagged")
+	for _, command := range []string{
+		"go test ./...",
+		"rm file.go",
+		"rm -rf ./build",
+		"chmod -R 755 ./dist",
+		"git diff",
+	} {
+		if IsDangerousCommand(command) {
+			t.Fatalf("did not expect benign command to be flagged: %q", command)
+		}
 	}
 }
 

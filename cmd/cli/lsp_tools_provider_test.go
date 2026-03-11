@@ -91,13 +91,13 @@ func TestResolveLSPServerCommand_PrefersWorkspaceNodeBin(t *testing.T) {
 }
 
 func TestHasLSPTools(t *testing.T) {
-	echoTool, err := tool.NewFunction[struct{}, struct{}]("echo", "echo", func(_ context.Context, _ struct{}) (struct{}, error) {
+	echoTool, err := tool.NewFunction("echo", "echo", func(_ context.Context, _ struct{}) (struct{}, error) {
 		return struct{}{}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	lspTool, err := tool.NewFunction[struct{}, struct{}]("LSP_DIAGNOSTICS", "lsp", func(_ context.Context, _ struct{}) (struct{}, error) {
+	lspTool, err := tool.NewFunction("LSP_DIAGNOSTICS", "lsp", func(_ context.Context, _ struct{}) (struct{}, error) {
 		return struct{}{}, nil
 	})
 	if err != nil {

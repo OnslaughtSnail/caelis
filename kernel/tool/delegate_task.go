@@ -44,7 +44,7 @@ func (t *delegateTaskTool) Declaration() model.ToolDefinition {
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "Optional wait time before yielding control back. If omitted, DELEGATE waits before returning a task_id if the child task is still running. Set to 0 to return a task_id immediately without waiting, or -1 to wait synchronously until completion.",
+					"description": "Optional wait time before yielding control back. Values greater than 0 wait that many milliseconds. If omitted or set to 0 or a negative value, DELEGATE waits 30 seconds before returning a task_id if the child task is still running.",
 				},
 			},
 			"required":             []string{"task"},
@@ -66,12 +66,10 @@ func (t *delegateTaskTool) Run(ctx context.Context, args map[string]any) (map[st
 	if taskText == "" {
 		return nil, fmt.Errorf("tool: arg %q is required", "task")
 	}
-	_, yieldSpecified := args["yield_time_ms"]
+	rawYield, yieldSpecified := args["yield_time_ms"]
+	yieldSpecified = yieldSpecified && rawYield != nil
 	yieldMS := asIntArg(args, "yield_time_ms")
-	if yieldMS < -1 {
-		return nil, fmt.Errorf("tool: arg %q must be >= -1", "yield_time_ms")
-	}
-	if !yieldSpecified {
+	if !yieldSpecified || yieldMS <= 0 {
 		yieldMS = int(defaultDelegateYield / time.Millisecond)
 	}
 	snapshot, err := manager.StartDelegate(ctx, task.DelegateStartRequest{

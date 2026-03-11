@@ -119,6 +119,59 @@ func TestDelegateTaskTool_UsesSharedTaskManager(t *testing.T) {
 	}
 }
 
+func TestTaskTool_DefaultWaitUsesFiveSeconds(t *testing.T) {
+	manager := &stubTaskManager{
+		wait: task.Snapshot{
+			TaskID:  "t-async",
+			Kind:    task.KindDelegate,
+			State:   task.StateRunning,
+			Running: true,
+		},
+	}
+	taskTool, err := NewTaskTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = taskTool.Run(task.WithManager(context.Background(), manager), map[string]any{
+		"action":  "wait",
+		"task_id": "t-async",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.lastWait.Yield != defaultTaskWait {
+		t.Fatalf("expected default task wait %s, got %s", defaultTaskWait, manager.lastWait.Yield)
+	}
+}
+
+func TestTaskTool_NegativeWaitFallsBackToFiveSeconds(t *testing.T) {
+	manager := &stubTaskManager{
+		wait: task.Snapshot{
+			TaskID:  "t-async",
+			Kind:    task.KindDelegate,
+			State:   task.StateRunning,
+			Running: true,
+		},
+	}
+	taskTool, err := NewTaskTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = taskTool.Run(task.WithManager(context.Background(), manager), map[string]any{
+		"action":        "wait",
+		"task_id":       "t-async",
+		"yield_time_ms": -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.lastWait.Yield != defaultTaskWait {
+		t.Fatalf("expected negative task wait to fall back to %s, got %s", defaultTaskWait, manager.lastWait.Yield)
+	}
+}
+
 func TestDelegateTaskTool_DefaultYieldStartsBackgroundTask(t *testing.T) {
 	manager := &stubTaskManager{
 		delegate: task.Snapshot{
@@ -147,7 +200,7 @@ func TestDelegateTaskTool_DefaultYieldStartsBackgroundTask(t *testing.T) {
 	}
 }
 
-func TestDelegateTaskTool_ExplicitZeroYieldReturnsImmediateTask(t *testing.T) {
+func TestDelegateTaskTool_ExplicitZeroYieldFallsBackToDefaultWait(t *testing.T) {
 	manager := &stubTaskManager{
 		delegate: task.Snapshot{
 			TaskID:  "t-async",
@@ -171,8 +224,8 @@ func TestDelegateTaskTool_ExplicitZeroYieldReturnsImmediateTask(t *testing.T) {
 	if out["task_id"] != "t-async" || out["running"] != true {
 		t.Fatalf("unexpected delegate result: %#v", out)
 	}
-	if manager.lastStart.Yield != 0 {
-		t.Fatalf("expected zero delegate wait, got %s", manager.lastStart.Yield)
+	if manager.lastStart.Yield != defaultDelegateYield {
+		t.Fatalf("expected zero delegate wait to fall back to %s, got %s", defaultDelegateYield, manager.lastStart.Yield)
 	}
 }
 

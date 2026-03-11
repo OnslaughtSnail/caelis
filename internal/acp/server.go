@@ -22,6 +22,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -77,6 +78,7 @@ type Server struct {
 	clientCaps ClientCapabilities
 	authOK     bool
 	sessions   map[string]*serverSession
+	liveStream map[string]*serverSession
 }
 
 type serverSession struct {
@@ -144,9 +146,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		cfg.DefaultModeID = strings.TrimSpace(cfg.SessionModes[0].ID)
 	}
 	return &Server{
-		cfg:      cfg,
-		authOK:   len(cfg.AuthMethods) == 0,
-		sessions: map[string]*serverSession{},
+		cfg:        cfg,
+		authOK:     len(cfg.AuthMethods) == 0,
+		sessions:   map[string]*serverSession{},
+		liveStream: map[string]*serverSession{},
 	}, nil
 }
 
@@ -426,6 +429,31 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 	approver := newPermissionBridge(s.cfg.Conn, req.SessionID, sess.mode)
 	runCtx = toolexec.WithApprover(runCtx, approver)
 	runCtx = policy.WithToolAuthorizer(runCtx, approver)
+	var (
+		sessionStreamErrMu sync.Mutex
+		sessionStreamErr   error
+	)
+	setSessionStreamErr := func(err error) {
+		if err == nil {
+			return
+		}
+		sessionStreamErrMu.Lock()
+		if sessionStreamErr == nil {
+			sessionStreamErr = err
+			cancel()
+		}
+		sessionStreamErrMu.Unlock()
+	}
+	getSessionStreamErr := func() error {
+		sessionStreamErrMu.Lock()
+		defer sessionStreamErrMu.Unlock()
+		return sessionStreamErr
+	}
+	runCtx = sessionstream.WithStreamer(runCtx, sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		if err := s.notifySessionStreamUpdate(req.SessionID, update); err != nil {
+			setSessionStreamErr(err)
+		}
+	}))
 	stopReason := StopReasonEndTurn
 	for ev, runErr := range s.cfg.Runtime.Run(runCtx, runtime.RunRequest{
 		AppName:   s.cfg.AppName,
@@ -440,6 +468,9 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		},
 		Policies: sess.resources.Policies,
 	}) {
+		if streamErr := getSessionStreamErr(); streamErr != nil {
+			return PromptResponse{}, streamErr
+		}
 		if runErr != nil {
 			if errors.Is(runErr, context.Canceled) || toolexec.IsApprovalAborted(runErr) {
 				stopReason = StopReasonCancelled
@@ -463,6 +494,9 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		if err := s.notifyEvent(req.SessionID, ev, sess); err != nil {
 			return PromptResponse{}, err
 		}
+	}
+	if streamErr := getSessionStreamErr(); streamErr != nil {
+		return PromptResponse{}, streamErr
 	}
 	return PromptResponse{StopReason: stopReason}, nil
 }
@@ -639,6 +673,58 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 		return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: update})
 	}
 	return nil
+}
+
+func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessionstream.Update) error {
+	if update.Event == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(update.SessionID)
+	if sessionID == "" || sessionID == strings.TrimSpace(rootSessionID) {
+		return nil
+	}
+	var streamSess *serverSession
+	if eventIsPartial(update.Event) || update.Event.Message.Role == model.RoleAssistant {
+		streamSess = s.liveStreamSession(sessionID)
+	}
+	if err := s.notifyEvent(sessionID, update.Event, streamSess); err != nil {
+		return err
+	}
+	if info, ok := runtime.LifecycleFromEvent(update.Event); ok {
+		switch info.Status {
+		case runtime.RunLifecycleStatusCompleted, runtime.RunLifecycleStatusFailed, runtime.RunLifecycleStatusInterrupted:
+			s.dropLiveStreamSession(sessionID)
+		}
+	}
+	return nil
+}
+
+func (s *Server) liveStreamSession(sessionID string) *serverSession {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.liveStream == nil {
+		s.liveStream = map[string]*serverSession{}
+	}
+	if sess, ok := s.liveStream[sessionID]; ok && sess != nil {
+		return sess
+	}
+	sess := &serverSession{id: sessionID}
+	s.liveStream[sessionID] = sess
+	return sess
+}
+
+func (s *Server) dropLiveStreamSession(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.liveStream, sessionID)
 }
 
 func (s *Server) emitBufferedPartial(sessionID string, sess *serverSession, channel string, text string) error {

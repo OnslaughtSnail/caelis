@@ -16,6 +16,9 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
+const defaultFriendlyWaitMS = 5000
+const defaultFriendlyDelegateWaitMS = 30000
+
 type runRenderConfig struct {
 	ShowReasoning bool
 	Verbose       bool
@@ -334,19 +337,22 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "TASK":
 		action := strings.TrimSpace(asString(args["action"]))
 		if strings.EqualFold(action, "wait") {
-			if rawWaitMS, ok := args["yield_time_ms"]; ok {
-				waitMS, _ := asInt(rawWaitMS)
-				if waited := friendlyWaitLabel(waitMS); waited != "" {
-					return waited
-				}
+			if waited := friendlyWaitLabel(effectiveTaskWaitMS(action, args)); waited != "" {
+				return waited
 			}
+			return ""
 		}
-		taskID := strings.TrimSpace(asString(args["task_id"]))
-		if action != "" && taskID != "" {
-			return fmt.Sprintf("{action=%s task=%s}", action, idutil.ShortDisplay(taskID))
-		}
-		if action != "" {
-			return fmt.Sprintf("{action=%s}", action)
+		switch strings.ToLower(action) {
+		case "status", "cancel":
+			return ""
+		default:
+			taskID := strings.TrimSpace(asString(args["task_id"]))
+			if action != "" && taskID != "" {
+				return fmt.Sprintf("{action=%s task=%s}", action, idutil.ShortDisplay(taskID))
+			}
+			if action != "" {
+				return fmt.Sprintf("{action=%s}", action)
+			}
 		}
 	case "READ":
 		path := strings.TrimSpace(asString(args["path"]))
@@ -423,11 +429,18 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
 	case "BASH":
-		if taskID := strings.TrimSpace(asString(result["task_id"])); taskID != "" && fmt.Sprint(result["running"]) == "true" {
+		if fmt.Sprint(result["running"]) == "true" {
+			summary := friendlyYieldLabel(effectiveBashYieldMS(callArgs))
 			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
-				return fmt.Sprintf("task=%s running\n%s", idutil.ShortDisplay(taskID), preview)
+				if summary == "" {
+					return preview
+				}
+				return fmt.Sprintf("%s\n%s", summary, preview)
 			}
-			return fmt.Sprintf("task=%s running", idutil.ShortDisplay(taskID))
+			if summary != "" {
+				return summary
+			}
+			return "Running"
 		}
 		if errText := summarizeBashToolError(result); errText != "" {
 			return errText
@@ -497,13 +510,19 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		// Suppressed in printEvent; return empty for read-only tools.
 		return ""
 	case "DELEGATE":
-		taskID := strings.TrimSpace(asString(result["task_id"]))
 		summary := strings.TrimSpace(firstNonEmpty(result, "assistant", "summary", "output"))
-		if taskID != "" && fmt.Sprint(result["running"]) == "true" {
+		if fmt.Sprint(result["running"]) == "true" {
+			headline := friendlyYieldLabel(effectiveDelegateYieldMS(callArgs))
 			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
-				return fmt.Sprintf("task=%s running\n%s", idutil.ShortDisplay(taskID), preview)
+				if headline == "" {
+					return preview
+				}
+				return fmt.Sprintf("%s\n%s", headline, preview)
 			}
-			return fmt.Sprintf("task=%s running", idutil.ShortDisplay(taskID))
+			if headline != "" {
+				return headline
+			}
+			return "Running"
 		}
 		if summary != "" {
 			return "\n" + renderDelegateSummaryPreview(summary)
@@ -515,12 +534,10 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		taskState := strings.TrimSpace(asString(result["state"]))
 		action := strings.TrimSpace(asString(callArgs["action"]))
 		headline := summarizeTaskAction(action, callArgs, result)
-		if headline == "" && taskState != "" {
+		if headline == "" && taskState != "" && !(strings.EqualFold(action, "cancel") && strings.EqualFold(taskState, "cancelled")) {
 			headline = taskState
 		}
-		if headline != "" {
-			return headline
-		}
+		return headline
 	}
 	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
 		return truncateInline(value, 160)
@@ -607,17 +624,26 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 	count, _ := asInt(result["count"])
 	stateLabel := friendlyTaskStateLabel(taskState, running)
 	waited := ""
-	if rawWaitMS, ok := callArgs["yield_time_ms"]; ok {
-		waitMS, _ := asInt(rawWaitMS)
-		waited = friendlyWaitLabel(waitMS)
+	requestedWaitMS, hasRequestedWait := effectiveTaskWaitMSForResult(action, callArgs)
+	if hasRequestedWait {
+		waited = friendlyWaitLabel(requestedWaitMS)
+	}
+	actualWaitMS, hasActualWait := taskActualWaitMS(result)
+	if hasActualWait && actualWaitMS > 0 {
+		waited = friendlyWaitLabel(actualWaitMS)
 	}
 
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "wait":
-		if waited != "" {
-			if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
-				return waited + ", " + strings.ToLower(stateLabel)
+		if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
+			return stateLabel
+		}
+		if hasActualWait && hasRequestedWait && requestedWaitMS > 0 && actualWaitMS+250 < requestedWaitMS {
+			if stateLabel != "" {
+				return stateLabel
 			}
+		}
+		if waited != "" {
 			return waited
 		}
 		if stateLabel != "" {
@@ -628,18 +654,21 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 			return stateLabel
 		}
 	case "write":
+		if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
+			return "Sent input, " + strings.ToLower(stateLabel)
+		}
 		if waited != "" {
-			if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
-				return "Sent input, " + strings.ToLower(stateLabel)
-			}
 			return "Sent input, waited " + waited
 		}
 		return "Sent input"
 	case "cancel":
+		if strings.EqualFold(stateLabel, "Cancelled") {
+			return ""
+		}
 		if stateLabel != "" {
 			return stateLabel
 		}
-		return "Cancelled"
+		return ""
 	case "list":
 		runningCount := countRunningTasks(result["tasks"])
 		if count == 1 {
@@ -657,6 +686,29 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 		return "Listed tasks"
 	}
 	return ""
+}
+
+func taskActualWaitMS(result map[string]any) (int, bool) {
+	if len(result) == 0 {
+		return 0, false
+	}
+	waitMS, ok := asInt(result["waited_ms"])
+	if !ok || waitMS < 0 {
+		return 0, false
+	}
+	return waitMS, true
+}
+
+func effectiveDelegateYieldMS(callArgs map[string]any) int {
+	if len(callArgs) == 0 {
+		return defaultFriendlyDelegateWaitMS
+	}
+	if rawWaitMS, ok := callArgs["yield_time_ms"]; ok && rawWaitMS != nil {
+		if waitMS, ok := asInt(rawWaitMS); ok && waitMS > 0 {
+			return waitMS
+		}
+	}
+	return defaultFriendlyDelegateWaitMS
 }
 
 func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {
@@ -752,6 +804,57 @@ func friendlyWaitLabel(waitMS int) string {
 	}
 }
 
+func friendlyYieldLabel(waitMS int) string {
+	if waited := friendlyWaitLabel(waitMS); waited != "" {
+		return "yielded after " + waited
+	}
+	return ""
+}
+
+func effectiveBashYieldMS(callArgs map[string]any) int {
+	if len(callArgs) == 0 {
+		return defaultFriendlyWaitMS
+	}
+	if rawWaitMS, ok := callArgs["yield_time_ms"]; ok && rawWaitMS != nil {
+		if waitMS, ok := asInt(rawWaitMS); ok && waitMS >= 0 {
+			if waitMS == 0 {
+				return defaultFriendlyWaitMS
+			}
+			return waitMS
+		}
+	}
+	return defaultFriendlyWaitMS
+}
+
+func effectiveTaskWaitMS(action string, args map[string]any) int {
+	if !strings.EqualFold(strings.TrimSpace(action), "wait") {
+		return -1
+	}
+	if len(args) == 0 {
+		return defaultFriendlyWaitMS
+	}
+	rawWaitMS, ok := args["yield_time_ms"]
+	if !ok || rawWaitMS == nil {
+		return defaultFriendlyWaitMS
+	}
+	waitMS, ok := asInt(rawWaitMS)
+	if !ok {
+		return defaultFriendlyWaitMS
+	}
+	if waitMS <= 0 {
+		return defaultFriendlyWaitMS
+	}
+	return waitMS
+}
+
+func effectiveTaskWaitMSForResult(action string, callArgs map[string]any) (int, bool) {
+	waitMS := effectiveTaskWaitMS(action, callArgs)
+	if waitMS < 0 {
+		return 0, false
+	}
+	return waitMS, true
+}
+
 func sanitizeDelegatePreviewLine(line string, inFence *bool) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -830,14 +933,6 @@ func asInt(v any) (int, bool) {
 	}
 }
 
-func valueOrDash(v any) string {
-	text := strings.TrimSpace(asString(v))
-	if text == "" {
-		return "-"
-	}
-	return text
-}
-
 func countLines(text string) int {
 	if text == "" {
 		return 0
@@ -857,18 +952,6 @@ func firstNonEmpty(values map[string]any, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func asMap(v any) map[string]any {
-	value, _ := v.(map[string]any)
-	return value
-}
-
-func firstNonEmptyMap(values map[string]any, keys ...string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return firstNonEmpty(values, keys...)
 }
 
 func truncateInline(input string, limit int) string {
@@ -979,15 +1062,6 @@ func eventIsPartial(ev *session.Event) bool {
 	}
 	flag, ok := raw.(bool)
 	return ok && flag
-}
-
-// isCompactionMeta returns true if the event is an internal compaction summary.
-func isCompactionMeta(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, ok := ev.Meta["kind"].(string)
-	return ok && strings.TrimSpace(kind) == "compaction"
 }
 
 func eventChannel(ev *session.Event) string {

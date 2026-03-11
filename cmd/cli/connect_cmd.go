@@ -474,7 +474,7 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 	}, nil
 }
 
-func applyConnectRuntimeDefaults(c *cliConsole, cfg *modelproviders.Config) {
+func applyConnectRuntimeDefaults(_ *cliConsole, cfg *modelproviders.Config) {
 	if cfg == nil {
 		return
 	}

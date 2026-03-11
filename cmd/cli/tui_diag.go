@@ -199,13 +199,6 @@ func (d *tuiDiagnostics) Snapshot() tuiDiagnosticsSnapshot {
 	}
 }
 
-func formatTUIDiagnosticsTime(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-	return t.Format(time.RFC3339)
-}
-
 func (s tuiDiagnosticsSnapshot) Summary() string {
 	return fmt.Sprintf("redraw=%s frames=%d incr=%d full=%d slow=%d avg=%s p95_input=%s mention_latency=%s",
 		s.RedrawMode,

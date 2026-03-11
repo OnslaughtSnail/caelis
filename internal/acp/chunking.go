@@ -46,10 +46,6 @@ type adaptivePartialChunkingPolicy struct {
 	lastCatchUpExitAt    time.Time
 }
 
-func (p *adaptivePartialChunkingPolicy) reset() {
-	*p = adaptivePartialChunkingPolicy{}
-}
-
 func (p *adaptivePartialChunkingPolicy) thresholds(snapshot partialQueueSnapshot, now time.Time) partialFlushThresholds {
 	switch p.decide(snapshot, now) {
 	case partialChunkingCatchUp:

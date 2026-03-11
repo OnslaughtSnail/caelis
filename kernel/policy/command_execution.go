@@ -3,9 +3,9 @@ package policy
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/internal/cmdsafety"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
@@ -70,6 +70,13 @@ func (h commandExecutionHook) BeforeTool(ctx context.Context, in ToolInput) (Too
 		}
 		return in, nil
 	}
+	if _, reason := detectDestructiveCommand(command); reason != "" {
+		in.Decision = Decision{
+			Effect: DecisionEffectDeny,
+			Reason: reason,
+		}
+		return in, nil
+	}
 
 	routeDecision := h.runtime.DecideRoute(command, permission)
 	switch routeDecision.Route {
@@ -81,18 +88,6 @@ func (h commandExecutionHook) BeforeTool(ctx context.Context, in ToolInput) (Too
 			decision.Metadata = map[string]any{}
 		}
 		decision.Metadata[DecisionMetaFallbackOnCommandNotFound] = true
-		// Destructive commands (rm, shred, dd with output) still default to the
-		// sandbox route unless the caller explicitly requests escalation. This
-		// keeps the model-visible semantics sandbox-first while still surfacing an
-		// approval checkpoint before deletion happens.
-		if base, reason := detectDestructiveCommand(command); base != "" {
-			decision = DecisionWithRoute(Decision{
-				Effect: DecisionEffectRequireApproval,
-				Reason: reason,
-			}, DecisionRouteSandbox)
-			decision.Metadata[DecisionMetaFallbackOnCommandNotFound] = true
-			_ = base
-		}
 		in.Decision = decision
 	case toolexec.ExecutionRouteHost:
 		if routeDecision.Escalation != nil {
@@ -139,34 +134,10 @@ func parseSandboxPermissionArgs(args map[string]any) (toolexec.SandboxPermission
 }
 
 // detectDestructiveCommand checks whether the given shell command contains a
-// known destructive operation.  Returns (baseName, reason) when detected, or
-// ("", "") when safe.  The heuristic is intentionally conservative: it only
+// known destructive operation. Returns (baseName, reason) when detected, or
+// ("", "") when safe. The heuristic is intentionally conservative: it only
 // matches clear-cut data-deletion commands so that false positives are
 // avoided for legitimate operations like "grep -r ... | rm".
 func detectDestructiveCommand(command string) (string, string) {
-	fields := strings.Fields(strings.TrimSpace(command))
-	if len(fields) == 0 {
-		return "", ""
-	}
-	// Scan all tokens so compound commands like "echo hi && rm -rf dir/"
-	// are also detected. We skip shell operators themselves.
-	for _, token := range fields {
-		base := filepath.Base(token)
-		switch base {
-		case "rm", "rmdir":
-			return base, fmt.Sprintf("%q deletes files and requires approval", base)
-		case "shred":
-			return base, "shred permanently destroys file contents and requires approval"
-		case "dd":
-			// Only flag dd when it has an output file (of=...) argument.
-			for _, f := range fields {
-				if strings.HasPrefix(f, "of=") {
-					return base, "dd with output file requires approval"
-				}
-			}
-		case "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.fat", "mke2fs":
-			return base, fmt.Sprintf("%q formats a filesystem and requires approval", base)
-		}
-	}
-	return "", ""
+	return cmdsafety.DetectBlockedCommand(command)
 }

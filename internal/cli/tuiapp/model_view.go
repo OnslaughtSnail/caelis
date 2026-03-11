@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,7 +21,7 @@ func (m *Model) View() string {
 	}
 
 	// Recalculate layout in case bottom section height changed.
-	vpHeight, _ := m.computeLayout()
+	vpHeight, bottomHeight := m.computeLayout()
 	if m.viewport.Height != vpHeight {
 		m.viewport.Height = vpHeight
 		m.syncViewportContent()
@@ -30,6 +31,7 @@ func (m *Model) View() string {
 
 	// 1. Viewport (scrollable history + streaming + spinner) with left gutter.
 	vpView := m.viewport.View()
+	vpView = m.renderViewportScrollbar(vpView)
 	if tuikit.GutterNarrative > 0 {
 		vpView = indentBlock(vpView, tuikit.GutterNarrative)
 	}
@@ -54,65 +56,65 @@ func (m *Model) View() string {
 		sections = append(sections, "")
 	}
 
-	// 6. Prompt choices (if any).
-	if m.activePrompt != nil {
-		if promptView := m.renderPromptModal(); promptView != "" {
-			sections = append(sections, promptView)
-		}
-	}
-
-	// 7. Input bar.
+	// 6. Input bar.
 	sections = append(sections, m.renderInputBar())
 
-	// 8. @mention candidates inline list (below input, above status).
+	// 7. @mention candidates inline list (below input, above status).
 	if len(m.mentionCandidates) > 0 {
 		sections = append(sections, m.renderMentionList())
 	}
 
-	// 9. $skill candidates inline list.
+	// 8. $skill candidates inline list.
 	if len(m.skillCandidates) > 0 {
 		sections = append(sections, m.renderSkillList())
 	}
 
-	// 10. /resume candidates inline list.
+	// 9. /resume candidates inline list.
 	if len(m.resumeCandidates) > 0 {
 		sections = append(sections, m.renderResumeList())
 	}
 
-	// 11. Generic slash argument candidates inline list.
+	// 10. Generic slash argument candidates inline list.
 	if len(m.slashArgCandidates) > 0 {
 		sections = append(sections, m.renderSlashArgList())
 	}
 
-	// 12. Slash command candidates inline list.
+	// 11. Slash command candidates inline list.
 	if len(m.slashCandidates) > 0 {
 		sections = append(sections, m.renderSlashCommandList())
 	}
 
-	// 13. Composer bottom padding before footer separator.
+	// 12. Composer bottom padding before footer separator.
 	for i := 0; i < tuikit.ComposerPadBottom; i++ {
 		sections = append(sections, "")
 	}
 
-	// 14. Lower separator + secondary status bar.
+	// 13. Lower separator + secondary status bar.
 	if m.width > 0 {
 		sep := m.theme.SeparatorStyle().Render(strings.Repeat("─", m.width))
 		sections = append(sections, sep)
 	}
 	sections = append(sections, m.renderStatusFooter())
 
-	// 15. Status bar bottom padding.
+	// 14. Status bar bottom padding.
 	for i := 0; i < tuikit.StatusBarPadBottom; i++ {
 		sections = append(sections, "")
 	}
 
 	view := strings.Join(sections, "\n")
 
+	if m.activePrompt != nil && m.width > 0 && m.height > 0 {
+		if promptView := m.renderPromptModal(); promptView != "" {
+			view = overlayAboveBottomArea(view, promptView, m.width, bottomHeight, 0)
+		}
+	}
+
 	// Overlay: command palette.
-	if m.showPalette && m.width > 0 && m.height > 0 {
+	if m.shouldRenderPalette() && m.width > 0 && m.height > 0 {
 		lineCount := strings.Count(view, "\n") + 1
-		paletteView := m.theme.ModalStyle().Render(m.palette.View())
-		view = overlayBottom(view, paletteView, m.width, lineCount)
+		if paletteView := m.renderPaletteOverlay(); paletteView != "" {
+			view = overlayBottom(view, paletteView, m.width, lineCount)
+		}
 	}
 
 	duration := time.Since(start)
@@ -144,11 +146,6 @@ func (m *Model) bottomSectionHeight() int {
 	// Input bar (with minimum height).
 	inputH := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	lines += inputH
-
-	// Prompt choices, when present, render above the input bar.
-	if modalLines := m.promptModalLineCount(); modalLines > 0 {
-		lines += modalLines
-	}
 
 	// Mention candidates.
 	if n := len(m.mentionCandidates); n > 0 {
@@ -327,9 +324,6 @@ func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 	y += 5
 	// composer top padding
 	y += tuikit.ComposerPadTop
-	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
-		y += m.promptModalLineCount()
-	}
 	h := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	return y, h, true
 }
@@ -353,7 +347,7 @@ func (m *Model) mousePointToInputPoint(x int, y int, clamp bool, lines []string)
 	if ry >= len(lines) {
 		ry = len(lines) - 1
 	}
-	col := x
+	col := x - inputHorizontalInset
 	if col < 0 {
 		col = 0
 	}
@@ -409,13 +403,6 @@ func (m *Model) fixedRowLayout() fixedRowLayout {
 	}
 	y += 5 // spacer + hint + hint/header gap + workspace/model + separator
 	y += tuikit.ComposerPadTop
-	if m.activePrompt != nil && len(m.activePrompt.choices) > 0 {
-		n := len(m.visiblePromptChoices())
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
-	}
 	y += maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	if n := len(m.mentionCandidates); n > 0 {
 		y += minInt(8, n)
@@ -601,27 +588,73 @@ func (m *Model) advanceRunningAnimation() {
 }
 
 func (m *Model) buildRunningHintText() string {
-	frame := "•"
-	if len(runningBreathFrames) > 0 {
-		frame = runningBreathFrames[m.runningBeat%len(runningBreathFrames)]
+	frame := strings.TrimSpace(ansi.Strip(m.spinner.View()))
+	if frame == "" {
+		frame = "⠋"
 	}
 	queueText := m.pendingQueueHintText()
 	if len(runningCarouselLines) > 0 {
-		text := frame + " " + runningCarouselLines[m.runningTip%len(runningCarouselLines)]
+		text := m.renderRunningTickerText(runningCarouselLines[m.runningTip%len(runningCarouselLines)])
+		prefix := m.theme.SpinnerStyle().Render(frame)
 		if queueText != "" {
-			combined := text + " │ " + queueText
+			queue := m.theme.HelpHintTextStyle().Render("│ " + queueText)
+			combined := prefix + " " + text + " " + queue
 			maxWidth := maxInt(1, m.width) - 2
 			if displayColumns(combined) > maxWidth {
-				return text + " │ " + m.pendingQueueShortText()
+				return prefix + " " + text + " " + m.theme.HelpHintTextStyle().Render("│ "+m.pendingQueueShortText())
 			}
 			return combined
 		}
-		return text
+		return prefix + " " + text
 	}
 	if queueText != "" {
-		return frame + " " + queueText
+		return m.theme.SpinnerStyle().Render(frame) + " " + m.theme.HelpHintTextStyle().Render(queueText)
 	}
-	return frame
+	return m.theme.SpinnerStyle().Render(frame)
+}
+
+func (m *Model) renderRunningTickerText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) == 0 {
+		return ""
+	}
+	totalWidth := maxInt(1, displayColumns(text))
+	pathWidth := float64(totalWidth) + (runningLightLead * 2)
+	head := math.Mod(float64(m.runningTick)*runningLightSpeed, pathWidth) - runningLightLead
+	styles := []lipgloss.Style{
+		m.theme.HelpHintTextStyle(),
+		lipgloss.NewStyle().Foreground(m.theme.TextSecondary),
+		lipgloss.NewStyle().Foreground(m.theme.Info),
+		lipgloss.NewStyle().Foreground(m.theme.SpinnerFg),
+		lipgloss.NewStyle().Foreground(m.theme.Focus),
+	}
+
+	var out strings.Builder
+	column := 0
+	for _, r := range runes {
+		runeWidth := maxInt(1, displayColumns(string(r)))
+		center := float64(column) + (float64(runeWidth) / 2)
+		distance := math.Abs(center - head)
+		level := 0
+		intensity := 1 - (distance / runningLightBandRadius)
+		switch {
+		case intensity >= 0.82:
+			level = 4
+		case intensity >= 0.62:
+			level = 3
+		case intensity >= 0.42:
+			level = 2
+		case intensity >= 0.22:
+			level = 1
+		}
+		out.WriteString(styles[level].Render(string(r)))
+		column += runeWidth
+	}
+	return out.String()
 }
 
 func (m *Model) pendingQueueHintText() string {
@@ -650,19 +683,24 @@ func (m *Model) renderInputBar() string {
 	if start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines())); ok &&
 		(start.line != end.line || start.col != end.col) {
 		lines := m.inputPlainLines()
-		return strings.Join(renderSelectionOnLines(lines, start, end), "\n")
+		return insetRenderedBlock(strings.Join(renderSelectionOnLines(lines, start, end), "\n"), inputHorizontalInset)
 	}
 	prompt := m.theme.PromptStyle().Render("> ")
-	inputVal := m.textarea.View()
 	if m.isWizardActive() && m.wizard.hideInput() {
 		query, _ := wizardQueryAtCursor(m.wizard.def.Command, m.input, m.cursor)
-		inputVal = "/" + m.wizard.def.Command + " " + strings.Repeat("*", utf8.RuneCountInString(strings.TrimSpace(query)))
-	} else if ghost := m.currentInputGhostHint(); ghost != "" {
-		// Hide the cursor while showing a ghost hint so the preview reads as one line.
-		inputVal = m.textarea.Value() + m.theme.HelpHintTextStyle().Render(ghost)
+		inputVal := "/" + m.wizard.def.Command + " " + strings.Repeat("*", utf8.RuneCountInString(strings.TrimSpace(query)))
+		return insetRenderedBlock(renderMultilineInput(prompt, inputVal), inputHorizontalInset)
 	}
-	inputLine := renderMultilineInput(prompt, inputVal)
-	return insetRenderedBlock(inputLine, inputHorizontalInset)
+	if ghost := m.currentInputGhostHint(); ghost == "" {
+		rendered, _ := m.visibleTextareaLines()
+		return insetRenderedBlock(strings.Join(rendered, "\n"), inputHorizontalInset)
+	}
+	ghost := m.currentInputGhostHint()
+	inputVal := m.textarea.Value()
+	if inputVal == "" {
+		return insetRenderedBlock(prompt+m.theme.HelpHintTextStyle().Render(ghost), inputHorizontalInset)
+	}
+	return insetRenderedBlock(prompt+inputVal+m.theme.HelpHintTextStyle().Render(ghost), inputHorizontalInset)
 }
 
 func (m *Model) currentInputGhostHint() string {
@@ -718,35 +756,101 @@ func (m *Model) suggestedSlashArgInput(choice string) string {
 }
 
 func (m *Model) inputPlainLines() []string {
-	prompt := "> "
-	indent := strings.Repeat(" ", lipgloss.Width(prompt))
-	inset := strings.Repeat(" ", inputHorizontalInset)
+	_, plain := m.visibleTextareaLines()
+	return plain
+}
+
+func inputWrappedRowCount(value string, width int) int {
+	if width <= 0 {
+		width = 1
+	}
+	if value == "" {
+		return 1
+	}
+	rows := 0
+	for _, line := range strings.Split(value, "\n") {
+		wrapped := ansi.HardwrapWc(line, width, true)
+		if wrapped == "" {
+			rows++
+			continue
+		}
+		rows += strings.Count(wrapped, "\n") + 1
+	}
+	if rows <= 0 {
+		return 1
+	}
+	return rows
+}
+
+func (m *Model) visibleTextareaLines() ([]string, []string) {
+	targetHeight := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
+	totalRows := inputWrappedRowCount(m.textarea.Value(), m.textarea.Width())
+	cursorRow := m.inputCursorVisualRow()
+	start := 0
+	if totalRows > targetHeight {
+		start = cursorRow - targetHeight + 1
+		if start < 0 {
+			start = 0
+		}
+		maxStart := totalRows - targetHeight
+		if start > maxStart {
+			start = maxStart
+		}
+	}
+
+	ta := m.textarea
+	ta.MaxHeight = 0
+	ta.SetHeight(maxInt(targetHeight, totalRows))
+	ta.SetPromptFunc(2, func(lineIdx int) string {
+		if lineIdx == start {
+			return "> "
+		}
+		return "  "
+	})
+	ta, _ = ta.Update(nil)
+
+	rawView := strings.TrimRight(ta.View(), "\n")
+	if rawView == "" {
+		return []string{"> "}, []string{"> "}
+	}
+	rawLines := strings.Split(rawView, "\n")
+	plainLines := make([]string, len(rawLines))
+	for i, line := range rawLines {
+		plainLines[i] = ansi.Strip(line)
+	}
+	end := minInt(len(rawLines), start+targetHeight)
+	return rawLines[start:end], plainLines[start:end]
+}
+
+func (m *Model) inputCursorVisualRow() int {
 	value := m.textarea.Value()
 	if value == "" {
-		return []string{inset + prompt}
+		return 0
 	}
-	wrapWidth := maxInt(1, m.textarea.Width())
-	contentLines := make([]string, 0, maxInt(1, m.textarea.Height()))
-	for _, line := range strings.Split(value, "\n") {
-		wrapped := ansi.HardwrapWc(line, wrapWidth, true)
-		if wrapped == "" {
-			contentLines = append(contentLines, "")
-			continue
+	width := maxInt(1, m.textarea.Width())
+	lines := strings.Split(value, "\n")
+	cursorLine := m.textarea.Line()
+	lineInfo := m.textarea.LineInfo()
+	row := 0
+	for idx, line := range lines {
+		wrapped := ansi.HardwrapWc(line, width, true)
+		count := 1
+		if wrapped != "" {
+			count = strings.Count(wrapped, "\n") + 1
 		}
-		contentLines = append(contentLines, strings.Split(wrapped, "\n")...)
-	}
-	if len(contentLines) == 0 {
-		contentLines = append(contentLines, "")
-	}
-	out := make([]string, 0, len(contentLines))
-	for i, line := range contentLines {
-		if i == 0 {
-			out = append(out, inset+prompt+line)
-			continue
+		if idx == cursorLine {
+			offset := lineInfo.RowOffset
+			if offset < 0 {
+				offset = 0
+			}
+			if offset >= count {
+				offset = count - 1
+			}
+			return row + offset
 		}
-		out = append(out, inset+indent+line)
+		row += count
 	}
-	return out
+	return row
 }
 
 func insetRenderedBlock(text string, inset int) string {
@@ -786,7 +890,7 @@ func (m *Model) renderHintRow() string {
 
 func (m *Model) hintRowText() string {
 	w := maxInt(20, m.width)
-	return tuikit.ComposeFooter(w-(tuikit.StatusInset*2), m.buildHintText(), "")
+	return composeStyledFooter(w-(tuikit.StatusInset*2), m.buildHintText(), "")
 }
 
 func (m *Model) headerRowText() string {
@@ -805,6 +909,69 @@ func (m *Model) renderStatusFooter() string {
 	left := m.renderFooterLeft()
 	right := m.theme.TextStyle().Render(strings.TrimSpace(m.statusContext))
 	return style.Render(composeStyledFooter(contentWidth, left, right))
+}
+
+func (m *Model) shouldRenderPalette() bool {
+	return m.showPalette || m.paletteAnimLines > 0
+}
+
+func (m *Model) fullPaletteLineCount() int {
+	if m.width <= 0 || m.height <= 0 {
+		return 0
+	}
+	text := ansi.Strip(m.theme.ModalStyle().Render(m.palette.View()))
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
+func (m *Model) renderPaletteOverlay() string {
+	full := m.theme.ModalStyle().Render(m.palette.View())
+	if full == "" {
+		return ""
+	}
+	lines := strings.Split(full, "\n")
+	visible := m.paletteAnimLines
+	if visible <= 0 {
+		return ""
+	}
+	if visible >= len(lines) {
+		return full
+	}
+	return strings.Join(lines[len(lines)-visible:], "\n")
+}
+
+func (m *Model) renderViewportScrollbar(vpView string) string {
+	if m.viewportScrollbarWidth() == 0 || vpView == "" {
+		return vpView
+	}
+	total := m.viewport.TotalLineCount()
+	visible := maxInt(1, m.viewport.Height)
+	if total <= visible {
+		return vpView
+	}
+	lines := strings.Split(vpView, "\n")
+	if len(lines) == 0 {
+		return vpView
+	}
+	thumbHeight := maxInt(1, visible*visible/maxInt(visible, total))
+	maxStart := maxInt(0, visible-thumbHeight)
+	thumbStart := 0
+	if total > visible && maxStart > 0 {
+		thumbStart = (m.viewport.YOffset * maxStart) / maxInt(1, total-visible)
+	}
+	for i := range lines {
+		glyph := m.theme.ScrollbarTrackStyle().Render("│")
+		if i >= thumbStart && i < thumbStart+thumbHeight {
+			glyph = m.theme.ScrollbarThumbStyle().Render("█")
+		}
+		if pad := m.viewport.Width - lipgloss.Width(lines[i]); pad > 0 {
+			lines[i] += strings.Repeat(" ", pad)
+		}
+		lines[i] += glyph
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) footerRowText() string {
@@ -925,14 +1092,14 @@ func (m *Model) renderPromptModal() string {
 		if actualIndex == p.choiceIndex {
 			line := m.theme.PromptStyle().Render("▸ ") + m.theme.CommandActiveStyle().Render(marker+choice.label)
 			if choice.detail != "" {
-				line += " " + m.theme.HelpHintTextStyle().Render(choice.detail)
+				line += "  " + m.theme.HelpHintTextStyle().Render(choice.detail)
 			}
 			lines = append(lines, line)
 			continue
 		}
-		line := "  " + m.theme.HelpHintTextStyle().Render(marker+choice.label)
+		line := "  " + m.theme.TextStyle().Render(marker+choice.label)
 		if choice.detail != "" {
-			line += " " + m.theme.HelpHintTextStyle().Render(choice.detail)
+			line += "  " + m.theme.HelpHintTextStyle().Render(choice.detail)
 		}
 		lines = append(lines, line)
 	}
@@ -948,39 +1115,33 @@ func (m *Model) renderPromptModal() string {
 	return m.renderPromptModalBox(bodyLines)
 }
 
-func (m *Model) promptModalLineCount() int {
-	if m.activePrompt == nil || len(m.activePrompt.choices) == 0 {
-		return 0
-	}
-	text := ansi.Strip(m.renderPromptModal())
-	if text == "" {
-		return 0
-	}
-	return strings.Count(text, "\n") + 1
-}
-
 func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []string {
 	if len(details) == 0 {
 		return nil
 	}
-	lines := make([]string, 0, len(details)*3)
+	lines := make([]string, 0, len(details)*2)
 	for _, detail := range details {
 		label := strings.TrimSpace(detail.Label)
 		value := strings.TrimSpace(detail.Value)
 		if label == "" || value == "" {
 			continue
 		}
-		lines = append(lines, m.theme.KeyLabelStyle().Render(strings.ToUpper(label)))
 		valueStyle := m.theme.TextStyle()
 		if detail.Emphasis {
 			valueStyle = valueStyle.Bold(true)
 		}
-		for _, line := range strings.Split(value, "\n") {
+		valueLines := strings.Split(value, "\n")
+		first := strings.TrimRight(valueLines[0], "\r")
+		if strings.TrimSpace(first) == "" {
+			continue
+		}
+		lines = append(lines, m.theme.KeyLabelStyle().Render(strings.ToUpper(label)+":")+" "+valueStyle.Render(first))
+		for _, line := range valueLines[1:] {
 			line = strings.TrimRight(line, "\r")
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
-			lines = append(lines, valueStyle.Render("  "+line))
+			lines = append(lines, "  "+valueStyle.Render(line))
 		}
 	}
 	return lines
@@ -992,17 +1153,17 @@ func (m *Model) renderPromptModalBox(lines []string) string {
 		filtered = append(filtered, line)
 	}
 	body := strings.Join(filtered, "\n")
-	width := minInt(maxInt(44, m.width-(inputHorizontalInset*2)), 96)
+	inset := tuikit.GutterNarrative
+	width := minInt(maxInt(44, m.width-(inset*2)), 96)
 	if width <= 0 {
 		width = 72
 	}
 	box := lipgloss.NewStyle().
-		Background(m.theme.ModalBg).
 		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Focus).
 		Padding(0, 1).
 		Width(width)
-	return insetRenderedBlock(box.Render(body), inputHorizontalInset)
+	return insetRenderedBlock(box.Render(body), inset)
 }
 
 func (m *Model) renderPromptInputBar() string {
@@ -1053,15 +1214,15 @@ func (m *Model) promptHintText() string {
 	text = strings.TrimSuffix(text, ":")
 	text = strings.TrimSpace(text)
 	if len(m.activePrompt.choices) > 0 {
-		footer := "Use ↑/↓ to choose, Enter to confirm, Esc to cancel"
+		footer := "↑/↓ move  enter confirm  esc cancel"
 		if m.activePrompt.filterable {
 			if m.activePrompt.multiSelect {
-				return "Type to filter, Space to toggle. " + footer
+				return "type filter  space toggle  " + footer
 			}
-			return "Type to filter. " + footer
+			return "type filter  " + footer
 		}
 		if m.activePrompt.multiSelect {
-			return "Space toggles selections. " + footer
+			return "space toggle  " + footer
 		}
 		return footer
 	}

@@ -12,7 +12,8 @@ import (
 )
 
 const (
-	TaskToolName = "TASK"
+	TaskToolName    = "TASK"
+	defaultTaskWait = 5 * time.Second
 )
 
 type taskTool struct{}
@@ -39,7 +40,7 @@ func (t *taskTool) Declaration() model.ToolDefinition {
 				"action": map[string]any{
 					"type":        "string",
 					"enum":        []string{"wait", "status", "write", "cancel", "list"},
-					"description": "wait for output, inspect status, send input, cancel a task, or list tracked tasks",
+					"description": "wait for a fresh task snapshot, inspect status, send input, cancel a task, or list tracked tasks",
 				},
 				"task_id": map[string]any{
 					"type":        "string",
@@ -51,7 +52,7 @@ func (t *taskTool) Declaration() model.ToolDefinition {
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "For action=wait or action=write, how long to wait for more output before returning.",
+					"description": "For action=wait or action=write, how long to wait before returning an updated task snapshot. Values greater than 0 wait that many milliseconds. If omitted or set to 0 or a negative value, TASK waits 5 seconds.",
 				},
 			},
 			"required":             []string{"action"},
@@ -77,9 +78,14 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		TaskID: strings.TrimSpace(asStringArg(args, "task_id")),
 		Input:  asStringArg(args, "input"),
 	}
+	rawYield, yieldSpecified := args["yield_time_ms"]
+	yieldSpecified = yieldSpecified && rawYield != nil
 	yieldMS := asIntArg(args, "yield_time_ms")
+	if (action == "wait" || action == "write") && (!yieldSpecified || yieldMS <= 0) {
+		yieldMS = int(defaultTaskWait / time.Millisecond)
+	}
 	if yieldMS < 0 {
-		return nil, fmt.Errorf("tool: arg %q must be >= 0", "yield_time_ms")
+		yieldMS = 0
 	}
 	req.Yield = time.Duration(yieldMS) * time.Millisecond
 
@@ -88,11 +94,14 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
 		}
+		startedAt := time.Now()
 		snapshot, err := manager.Wait(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
+		result := AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot)
+		result["waited_ms"] = int(time.Since(startedAt).Milliseconds())
+		return result, nil
 	case "status":
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
@@ -106,11 +115,14 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
 		}
+		startedAt := time.Now()
 		snapshot, err := manager.Write(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
+		result := AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot)
+		result["waited_ms"] = int(time.Since(startedAt).Milliseconds())
+		return result, nil
 	case "cancel":
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")

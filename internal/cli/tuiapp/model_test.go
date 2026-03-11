@@ -177,6 +177,59 @@ func TestRenderInputBar_ShowsGhostHintWithoutCursor(t *testing.T) {
 	}
 }
 
+func TestRenderInputBar_LeftAlignsPrompt(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+
+	line := m.renderInputBar()
+	if !strings.HasPrefix(line, strings.Repeat(" ", inputHorizontalInset)+"> ") {
+		t.Fatalf("expected left-aligned prompt, got %q", line)
+	}
+}
+
+func TestPaletteAnimation_OpenAndClose(t *testing.T) {
+	m := NewModel(Config{
+		Commands:    []string{"help", "status"},
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if cmd == nil {
+		t.Fatal("expected palette animation command on open")
+	}
+	if !m.showPalette || !m.paletteAnimating {
+		t.Fatalf("expected palette open animation, show=%v anim=%v", m.showPalette, m.paletteAnimating)
+	}
+
+	_, _ = m.Update(paletteAnimationMsg{})
+	if m.paletteAnimLines <= 0 {
+		t.Fatalf("expected palette animation to advance, got %d", m.paletteAnimLines)
+	}
+
+	cmd = m.handlePaletteKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected palette animation command on close")
+	}
+	if m.showPalette {
+		t.Fatal("expected palette to begin closing")
+	}
+}
+
+func TestViewRendersScrollbarWhenViewportOverflows(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	for i := 0; i < 40; i++ {
+		m.historyLines = append(m.historyLines, fmt.Sprintf("line %02d", i))
+	}
+	m.syncViewportContent()
+
+	view := m.View()
+	if !strings.Contains(view, "█") {
+		t.Fatalf("expected viewport scrollbar in view, got:\n%s", view)
+	}
+}
+
 func TestConnectWizardQueryAtCursor(t *testing.T) {
 	query, ok := wizardQueryAtCursor("connect", []rune("/connect openai"), len([]rune("/connect openai")))
 	if !ok {
@@ -1702,15 +1755,17 @@ func TestAssistantFinalDuplicateEventIsSuppressed(t *testing.T) {
 func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
+	baseBottom := m.bottomSectionHeight()
 
 	respCh := make(chan tuievents.PromptResponse, 1)
 	_, _ = m.Update(tuievents.PromptRequestMsg{
 		Prompt:        "Would you like to run the following command?",
+		Details:       []tuievents.PromptDetail{{Label: "BASH", Value: "pfctl -s info", Emphasis: true}},
 		DefaultChoice: "y",
 		Choices: []tuievents.PromptChoice{
-			{Label: "proceed", Value: "y", Detail: "just this once"},
-			{Label: "session", Value: "a", Detail: "don't ask again for: go test"},
-			{Label: "cancel", Value: "n", Detail: "continue without it"},
+			{Label: "approve", Value: "y", Detail: "this time"},
+			{Label: "always", Value: "a", Detail: "remember go test"},
+			{Label: "reject", Value: "n", Detail: "skip it"},
 		},
 		Response: respCh,
 	})
@@ -1723,15 +1778,34 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if m.activePrompt.choiceIndex != 0 {
 		t.Fatalf("expected default selection at allow, got %d", m.activePrompt.choiceIndex)
 	}
+	if got := m.bottomSectionHeight(); got != baseBottom {
+		t.Fatalf("expected prompt overlay not to change bottom height, before=%d after=%d", baseBottom, got)
+	}
 	view := ansi.Strip(m.View())
-	if !strings.Contains(view, "proceed") || !strings.Contains(view, "session") || !strings.Contains(view, "cancel") {
+	if !strings.Contains(view, "BASH: pfctl -s info") {
+		t.Fatalf("expected compact approval summary in modal, got %q", view)
+	}
+	if !strings.Contains(view, "approve") || !strings.Contains(view, "always") || !strings.Contains(view, "reject") {
 		t.Fatalf("expected approval list options in modal, got %q", view)
 	}
-	if !strings.Contains(view, "Use ↑/↓ to choose, Enter to confirm, Esc to cancel") {
+	if !strings.Contains(view, "↑/↓ move  enter confirm  esc cancel") {
 		t.Fatalf("expected approval footer hint in view, got %q", view)
 	}
 	if !strings.Contains(view, "╭") || !strings.Contains(view, "Would you like to run the following command?") {
 		t.Fatalf("expected boxed approval modal in view, got %q", view)
+	}
+	var modalLine string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "╭") {
+			modalLine = line
+			break
+		}
+	}
+	if modalLine == "" {
+		t.Fatalf("expected modal border line in view, got %q", view)
+	}
+	if !strings.HasPrefix(modalLine, strings.Repeat(" ", tuikit.GutterNarrative)+"╭") {
+		t.Fatalf("expected modal to align with narrative gutter, got %q", modalLine)
 	}
 
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
@@ -2025,7 +2099,7 @@ func TestViewShowsBreathingHintWhenRunning(t *testing.T) {
 	m.startRunningAnimation()
 	m.runningTip = 0
 	m.syncViewportContent()
-	view := m.View()
+	view := ansi.Strip(m.View())
 
 	if !strings.Contains(view, "Queue your next prompt now; it will run after this one.") {
 		t.Fatalf("expected running carousel text in view when running, got:\n%s", view)
@@ -2059,7 +2133,7 @@ func TestViewShowsInputWhenRunningForQueueing(t *testing.T) {
 	resizeModel(m)
 
 	m.running = true
-	view := m.View()
+	view := ansi.Strip(m.View())
 	if !strings.Contains(view, ">") {
 		t.Fatalf("expected input prompt while running for queueing, got:\n%s", view)
 	}
@@ -2076,7 +2150,7 @@ func TestViewShowsPendingQueueWhileRunning(t *testing.T) {
 		{execLine: "first", displayLine: "first"},
 		{execLine: "second", displayLine: "second"},
 	}
-	view := m.View()
+	view := ansi.Strip(m.View())
 	if !strings.Contains(view, "2 pending") {
 		t.Fatalf("expected pending queue hint in running view, got:\n%s", view)
 	}
@@ -2172,7 +2246,7 @@ func TestToolOutputPanelFiltersBlankLines(t *testing.T) {
 	}
 }
 
-func TestBashFinalCollapsesPanelIntoPlainHistoryText(t *testing.T) {
+func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
@@ -2191,11 +2265,97 @@ func TestBashFinalCollapsesPanelIntoPlainHistoryText(t *testing.T) {
 	})
 
 	view := ansi.Strip(m.View())
-	if strings.Contains(view, "╭") || strings.Contains(view, "╰") {
-		t.Fatalf("expected bash panel to collapse on final, got:\n%s", view)
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected bash panel to remain visible immediately after final, got:\n%s", view)
 	}
-	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
-		t.Fatalf("expected final bash output to remain in history, got:\n%s", view)
+	panel := m.toolOutputs["call-1"]
+	if panel == nil || !panel.closing || panel.fadeQueued {
+		t.Fatalf("expected bash panel to wait for later content before fading, got %#v", panel)
+	}
+}
+
+func TestBashFinalDoesNotFadeOnDividerOnly(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "line-1\nline-2\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Final:  true,
+	})
+	m.historyLines = append(m.historyLines, m.userTurnDividerLine())
+	cmd := m.maybeStartClosingToolOutputFades()
+	if cmd != nil {
+		t.Fatal("expected divider-only content to not trigger bash fade")
+	}
+	panel := m.toolOutputs["call-1"]
+	if panel == nil || panel.fadeQueued {
+		t.Fatalf("expected bash panel to remain pending after divider, got %#v", panel)
+	}
+}
+
+func TestBashFinalFadeStartsAfterNewContentAndRemovesLineByLine(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	var cmd tea.Cmd
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "line-1\nline-2\nline-3\nline-4\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Final:  true,
+	})
+	_, cmd = m.Update(tuievents.LogChunkMsg{Chunk: "* next block\n"})
+	if cmd == nil {
+		t.Fatal("expected new content below bash panel to trigger fade")
+	}
+	panel := m.toolOutputs["call-1"]
+	if panel == nil || !panel.fadeQueued {
+		t.Fatalf("expected bash fade to be queued after new content, got %#v", panel)
+	}
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"line-1", "line-2", "line-3", "line-4", "next block"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q before fade starts, got:\n%s", want, view)
+		}
+	}
+
+	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 1})
+	view = ansi.Strip(m.View())
+	if strings.Contains(view, "line-1") || !strings.Contains(view, "line-4") {
+		t.Fatalf("expected first fade step to drop the oldest visible line, got:\n%s", view)
+	}
+
+	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 2})
+	view = ansi.Strip(m.View())
+	if strings.Contains(view, "line-2") || !strings.Contains(view, "line-4") {
+		t.Fatalf("expected second fade step to keep shrinking the panel, got:\n%s", view)
+	}
+
+	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 3})
+	view = ansi.Strip(m.View())
+	if strings.Contains(view, "line-3") || !strings.Contains(view, "line-4") {
+		t.Fatalf("expected third fade step to leave only the newest line, got:\n%s", view)
+	}
+
+	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 4})
+	view = ansi.Strip(m.View())
+	if strings.Contains(view, "╭") || strings.Contains(view, "╰") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") || strings.Contains(view, "line-3") || strings.Contains(view, "line-4") {
+		t.Fatalf("expected bash panel to disappear after fade completes, got:\n%s", view)
 	}
 }
 
@@ -2381,11 +2541,50 @@ func TestAttachmentLabelHiddenInInputBar(t *testing.T) {
 	if !strings.Contains(line, ">") {
 		t.Fatalf("expected prompt, got %q", line)
 	}
-	if !strings.HasPrefix(line, strings.Repeat(" ", inputHorizontalInset)+">") {
+	if !strings.HasPrefix(line, strings.Repeat(" ", inputHorizontalInset)+"> ") {
 		t.Fatalf("expected inset input prompt, got %q", line)
 	}
 	if strings.Contains(line, "[1 image]") || strings.Contains(line, "[1 images]") {
 		t.Fatalf("expected attachment label hidden, got %q", line)
+	}
+}
+
+func TestRenderInputBar_ShowsLastVisibleRows(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 48, Height: 20})
+	m.textarea.SetValue("line1 line1 line1 line1 line1\nline2\nline3\nline4\nline5")
+	m.textarea.CursorEnd()
+	m.syncInputFromTextarea()
+
+	rendered := m.renderInputBar()
+	if strings.Contains(rendered, "line1") {
+		t.Fatalf("expected older wrapped content hidden, got %q", rendered)
+	}
+	for _, want := range []string{"line2", "line3", "line4", "line5"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected visible tail row %q in %q", want, rendered)
+		}
+	}
+	lines := strings.Split(rendered, "\n")
+	if len(lines) == 0 || !strings.Contains(lines[0], "> ") {
+		t.Fatalf("expected prompt on first visible row, got %q", rendered)
+	}
+}
+
+func TestRenderInputBar_UsesTextareaCursorForChineseText(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	m.textarea.SetWidth(12)
+	m.textarea.SetValue("你都能做")
+	m.textarea.CursorEnd()
+	m.adjustTextareaHeight()
+	m.syncInputFromTextarea()
+
+	rendered := m.renderInputBar()
+	if !strings.Contains(rendered, "你都能做") {
+		t.Fatalf("expected chinese text preserved, got %q", rendered)
+	}
+	if strings.Contains(rendered, "█你") || strings.Contains(rendered, "都█") || strings.Contains(rendered, "能█") || strings.Contains(rendered, "做█你") {
+		t.Fatalf("expected cursor not inserted into middle of chinese text, got %q", rendered)
 	}
 }
 
@@ -2539,8 +2738,8 @@ func TestCtrlCRequiresDoublePressToQuitWhenIdle(t *testing.T) {
 	if m.quit {
 		t.Fatal("expected first Ctrl+C not to quit")
 	}
-	if cmd != nil {
-		t.Fatal("expected nil cmd on first Ctrl+C")
+	if cmd == nil {
+		t.Fatal("expected expiry cmd on first Ctrl+C")
 	}
 	if !strings.Contains(m.hint, "again to quit") {
 		t.Fatalf("expected double-press hint, got %q", m.hint)
@@ -2553,6 +2752,48 @@ func TestCtrlCRequiresDoublePressToQuitWhenIdle(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected tea.Quit command")
+	}
+}
+
+func TestCtrlCHintExpiresWithConfirmWindow(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("expected expiry cmd on first Ctrl+C")
+	}
+	if !m.ctrlCArmed {
+		t.Fatal("expected Ctrl+C confirm state to be armed")
+	}
+	armedAt := m.lastCtrlCAt
+
+	_, _ = m.Update(ctrlCExpireMsg{armedAt: armedAt})
+	if m.ctrlCArmed {
+		t.Fatal("expected Ctrl+C confirm state to expire")
+	}
+	if strings.Contains(m.hint, "again to quit") {
+		t.Fatalf("expected quit hint cleared after expiry, got %q", m.hint)
+	}
+}
+
+func TestCtrlCAfterExpiryRequiresTwoPressesAgain(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	armedAt := m.lastCtrlCAt
+	_, _ = m.Update(ctrlCExpireMsg{armedAt: armedAt})
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if m.quit {
+		t.Fatal("expected first Ctrl+C after expiry not to quit")
+	}
+	if cmd == nil {
+		t.Fatal("expected expiry cmd on re-arming Ctrl+C")
+	}
+	if !strings.Contains(m.hint, "again to quit") {
+		t.Fatalf("expected quit hint after re-arming, got %q", m.hint)
 	}
 }
 
@@ -3064,23 +3305,44 @@ func TestLogChunkKeepsAssistantAndToolBlocksContiguous(t *testing.T) {
 	}
 }
 
-func TestSubmitLineAddsDividerBeforeUserMessage(t *testing.T) {
+func TestTaskResultAddsDividerAfterAgentTurn(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* assistant reply\n"})
-	m.hasLastRunDuration = true
-	m.lastRunDuration = 1250 * time.Millisecond
 	_, _ = m.submitLineWithDisplay("continue", "continue")
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* assistant reply\n"})
+	m.lastRunDuration = 1250 * time.Millisecond
+	m.hasLastRunDuration = true
+	m.runStartedAt = time.Time{}
+	_, _ = m.Update(tuievents.TaskResultMsg{})
 
 	if len(m.historyLines) < 3 {
-		t.Fatalf("expected assistant, divider, user; got %d lines", len(m.historyLines))
+		t.Fatalf("expected user, assistant, divider; got %d lines", len(m.historyLines))
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-2])); !strings.Contains(got, "1.2s") || !strings.Contains(got, "─") {
-		t.Fatalf("expected duration divider before user message, got %q", got)
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])); !strings.Contains(got, "1.2s") || !strings.Contains(got, "─") {
+		t.Fatalf("expected duration divider after completed turn, got %q", got)
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])); got != "> continue" {
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-2])); got != "* assistant reply" {
+		t.Fatalf("expected assistant line before divider, got %q", got)
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-3])); got != "> continue" {
 		t.Fatalf("unexpected user line %q", got)
+	}
+}
+
+func TestTaskResultDoesNotAddDividerForSlashCommand(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.submitLineWithDisplay("/status", "/status")
+	m.runStartedAt = time.Now().Add(-1500 * time.Millisecond)
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	if len(m.historyLines) != 1 {
+		t.Fatalf("expected slash command to avoid turn divider, got %d lines", len(m.historyLines))
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[0])); got != "> /status" {
+		t.Fatalf("unexpected slash command line %q", got)
 	}
 }
 

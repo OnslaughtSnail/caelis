@@ -16,7 +16,7 @@ var (
 	markdownRendererOnce           sync.Once
 	markdownRenderer               *glamour.TermRenderer
 	ErrMarkdownRendererUnavailable = errors.New("markdown renderer unavailable")
-	blockMathPattern               = regexp.MustCompile("(?ms)(^|\\n)\\$\\$\\s*\\n?(.*?)\\n?\\s*\\$\\$")
+	blockMathPattern               = regexp.MustCompile(`(?ms)(^|\n)\$\$\s*\n?(.*?)\n?\s*\$\$`)
 	inlineMathPattern              = regexp.MustCompile(`(^|[^\\$])\$([^\n$]+?)\$`)
 )
 

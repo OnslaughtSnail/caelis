@@ -12,7 +12,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 )
 
 const (
@@ -54,43 +54,20 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req delegation.
 	if err != nil {
 		return delegation.RunResult{}, err
 	}
-	taskstream.Emit(ctx, taskstream.Event{
-		Label:  "DELEGATE",
-		TaskID: lineageTaskID(lineage, childReq.SessionID),
-		CallID: lineageCallID(lineage),
-		State:  string(RunLifecycleStatusRunning),
-		Reset:  true,
-	})
-	var assistant string
-	for ev, runErr := range r.runtime.Run(withDelegationLineage(ctx, lineage), childReq) {
+	for ev, runErr := range r.runtime.Run(attachSubagentContext(ctx, lineage), childReq) {
 		if runErr != nil {
-			taskstream.Emit(ctx, taskstream.Event{
-				Label:  "DELEGATE",
-				TaskID: lineageTaskID(lineage, childReq.SessionID),
-				CallID: lineageCallID(lineage),
-				Stream: "stderr",
-				Chunk:  runErr.Error(),
-				State:  string(RunLifecycleStatusFailed),
-				Final:  true,
-			})
 			return delegation.RunResult{}, runErr
 		}
-		assistant = r.consumeChildEvent(ctx, lineage, ev, assistant)
+		_ = ev
 	}
-	taskstream.Emit(ctx, taskstream.Event{
-		Label:  "DELEGATE",
-		TaskID: lineageTaskID(lineage, childReq.SessionID),
-		CallID: lineageCallID(lineage),
-		State:  string(RunLifecycleStatusCompleted),
-		Final:  true,
-	})
-	return delegation.RunResult{
-		SessionID:    childReq.SessionID,
-		DelegationID: lineage.DelegationID,
-		Assistant:    assistant,
-		State:        string(RunLifecycleStatusCompleted),
-		Running:      false,
-	}, nil
+	result, err := r.inspectSubagent(ctx, childReq.SessionID)
+	if err != nil {
+		return delegation.RunResult{}, err
+	}
+	if strings.TrimSpace(result.DelegationID) == "" {
+		result.DelegationID = lineage.DelegationID
+	}
+	return result, nil
 }
 
 func (r *runtimeSubagentRunner) StartSubagent(ctx context.Context, req delegation.RunRequest) (delegation.RunResult, error) {
@@ -98,13 +75,6 @@ func (r *runtimeSubagentRunner) StartSubagent(ctx context.Context, req delegatio
 	if err != nil {
 		return delegation.RunResult{}, err
 	}
-	taskstream.Emit(ctx, taskstream.Event{
-		Label:  "DELEGATE",
-		TaskID: lineageTaskID(lineage, childReq.SessionID),
-		CallID: lineageCallID(lineage),
-		State:  string(RunLifecycleStatusRunning),
-		Reset:  true,
-	})
 	go r.runDetachedSubagent(detachSubagentContext(ctx, lineage), childReq, lineage)
 	return delegation.RunResult{
 		SessionID:    childReq.SessionID,
@@ -169,22 +139,32 @@ func detachSubagentContext(ctx context.Context, lineage delegationLineage) conte
 	if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
 		base = policy.WithToolAuthorizer(base, authorizer)
 	}
-	if streamer, ok := taskstream.StreamerFromContext(ctx); ok {
-		base = taskstream.WithStreamer(base, delegatedTaskStreamer(streamer))
+	if streamer, ok := sessionstream.StreamerFromContext(ctx); ok {
+		base = sessionstream.WithStreamer(base, streamer)
 	}
 	return base
 }
 
-func delegatedTaskStreamer(streamer taskstream.Streamer) taskstream.Streamer {
-	if streamer == nil {
-		return nil
+func attachSubagentContext(ctx context.Context, lineage delegationLineage) context.Context {
+	base := withDelegationLineage(context.Background(), lineage)
+	if approver, ok := toolexec.ApproverFromContext(ctx); ok {
+		base = toolexec.WithApprover(base, approver)
 	}
-	return taskstream.StreamerFunc(func(ctx context.Context, ev taskstream.Event) {
-		if !strings.EqualFold(strings.TrimSpace(ev.Label), "DELEGATE") {
-			return
-		}
-		streamer.StreamTask(ctx, ev)
-	})
+	if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
+		base = policy.WithToolAuthorizer(base, authorizer)
+	}
+	if streamer, ok := sessionstream.StreamerFromContext(ctx); ok {
+		base = sessionstream.WithStreamer(base, streamer)
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		base, cancel = context.WithDeadline(base, deadline)
+		context.AfterFunc(ctx, cancel)
+		return base
+	}
+	base, cancel := context.WithCancel(base)
+	context.AfterFunc(ctx, cancel)
+	return base
 }
 
 func delegationLineageFromContext(ctx context.Context) (delegationLineage, bool) {
@@ -241,14 +221,6 @@ func prepareEvent(ctx context.Context, sess *session.Session, ev *session.Event)
 	return ev
 }
 
-func isPartialEvent(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	raw, ok := ev.Meta["partial"].(bool)
-	return ok && raw
-}
-
 func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req delegation.RunRequest) (RunRequest, delegationLineage, error) {
 	if r == nil || r.runtime == nil || r.parent == nil {
 		return RunRequest{}, delegationLineage{}, fmt.Errorf("runtime: subagent runner is unavailable")
@@ -272,112 +244,19 @@ func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req delegat
 	return childReq, lineage, nil
 }
 
-func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, lineage delegationLineage) {
+func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, _ delegationLineage) {
 	defer func() {
 		if p := recover(); p != nil {
 			panicErr := fmt.Errorf("subagent panic: %v", p)
 			r.persistDetachedSubagentFailure(ctx, childReq, panicErr)
-			taskstream.Emit(ctx, taskstream.Event{
-				Label:  "DELEGATE",
-				TaskID: lineageTaskID(lineage, childReq.SessionID),
-				CallID: lineageCallID(lineage),
-				Stream: "stderr",
-				Chunk:  panicErr.Error(),
-				State:  string(RunLifecycleStatusFailed),
-				Final:  true,
-			})
 		}
 	}()
-	var assistant string
 	for ev, runErr := range r.runtime.Run(ctx, childReq) {
 		if runErr != nil {
-			taskstream.Emit(ctx, taskstream.Event{
-				Label:  "DELEGATE",
-				TaskID: lineageTaskID(lineage, childReq.SessionID),
-				CallID: lineageCallID(lineage),
-				Stream: "stderr",
-				Chunk:  runErr.Error(),
-				State:  string(RunLifecycleStatusFailed),
-				Final:  true,
-			})
 			return
 		}
-		assistant = r.consumeChildEvent(ctx, lineage, ev, assistant)
-		_ = assistant
+		_ = ev
 	}
-	taskstream.Emit(ctx, taskstream.Event{
-		Label:  "DELEGATE",
-		TaskID: lineageTaskID(lineage, childReq.SessionID),
-		CallID: lineageCallID(lineage),
-		State:  string(RunLifecycleStatusCompleted),
-		Final:  true,
-	})
-}
-
-func (r *runtimeSubagentRunner) consumeChildEvent(ctx context.Context, lineage delegationLineage, ev *session.Event, assistant string) string {
-	if ev == nil {
-		return assistant
-	}
-	if isLifecycleEvent(ev) {
-		status := lifecycleStatusFromEvent(ev)
-		if status != "" {
-			taskstream.Emit(ctx, taskstream.Event{
-				Label:  "DELEGATE",
-				TaskID: lineageTaskID(lineage, lineage.ChildSessionID),
-				CallID: lineageCallID(lineage),
-				State:  status,
-			})
-		}
-		return assistant
-	}
-	msg := ev.Message
-	partial := isPartialEvent(ev)
-	reasoning := msg.Reasoning
-	if partial {
-		if text := strings.TrimSpace(reasoning); text != "" {
-			taskstream.Emit(ctx, taskstream.Event{
-				Label:  "DELEGATE",
-				TaskID: lineageTaskID(lineage, lineage.ChildSessionID),
-				CallID: lineageCallID(lineage),
-				Stream: "reasoning",
-				Chunk:  reasoning,
-			})
-		}
-	} else if text := strings.TrimSpace(reasoning); text != "" {
-		taskstream.Emit(ctx, taskstream.Event{
-			Label:  "DELEGATE",
-			TaskID: lineageTaskID(lineage, lineage.ChildSessionID),
-			CallID: lineageCallID(lineage),
-			Stream: "reasoning",
-			Chunk:  text + "\n",
-		})
-	}
-	text := msg.TextContent()
-	if partial {
-		if text != "" {
-			assistant = text
-			taskstream.Emit(ctx, taskstream.Event{
-				Label:  "DELEGATE",
-				TaskID: lineageTaskID(lineage, lineage.ChildSessionID),
-				CallID: lineageCallID(lineage),
-				Stream: "assistant",
-				Chunk:  text,
-			})
-		}
-		return assistant
-	}
-	text = strings.TrimSpace(text)
-	if text != "" {
-		assistant = text
-		taskstream.Emit(ctx, taskstream.Event{
-			Label:  "DELEGATE",
-			TaskID: lineageTaskID(lineage, lineage.ChildSessionID),
-			CallID: lineageCallID(lineage),
-			Stream: "assistant",
-			Chunk:  text + "\n",
-		})
-	}
-	return assistant
 }
 
 func (r *runtimeSubagentRunner) persistDetachedSubagentFailure(ctx context.Context, childReq RunRequest, cause error) {
@@ -446,17 +325,6 @@ func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID s
 	return result, nil
 }
 
-func lifecycleStatusFromEvent(ev *session.Event) string {
-	if ev == nil || ev.Meta == nil {
-		return ""
-	}
-	raw, ok := ev.Meta[MetaLifecycle].(map[string]any)
-	if !ok || len(raw) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(subagentStringValue(raw["status"]))
-}
-
 func subagentStringValue(value any) string {
 	if value == nil {
 		return ""
@@ -465,18 +333,4 @@ func subagentStringValue(value any) string {
 		return text
 	}
 	return fmt.Sprint(value)
-}
-
-func lineageTaskID(lineage delegationLineage, fallback string) string {
-	if value := strings.TrimSpace(lineage.TaskID); value != "" {
-		return value
-	}
-	return strings.TrimSpace(fallback)
-}
-
-func lineageCallID(lineage delegationLineage) string {
-	if value := strings.TrimSpace(lineage.TaskID); value != "" {
-		return value
-	}
-	return strings.TrimSpace(lineage.ParentToolCall)
 }

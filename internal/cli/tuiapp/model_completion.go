@@ -15,8 +15,12 @@ import (
 
 func (m *Model) togglePalette() {
 	m.showPalette = !m.showPalette
+	m.paletteAnimating = true
 	if m.showPalette {
 		m.palette.ResetSelected()
+		if m.paletteAnimLines < 0 {
+			m.paletteAnimLines = 0
+		}
 	}
 }
 
@@ -24,7 +28,8 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "esc":
 		m.showPalette = false
-		return nil
+		m.paletteAnimating = true
+		return animatePaletteCmd()
 	case "enter":
 		item, ok := m.palette.SelectedItem().(commandItem)
 		if ok {
@@ -35,7 +40,8 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) tea.Cmd {
 			m.refreshSlashCommands()
 		}
 		m.showPalette = false
-		return nil
+		m.paletteAnimating = true
+		return animatePaletteCmd()
 	}
 	var cmd tea.Cmd
 	m.palette, cmd = m.palette.Update(msg)

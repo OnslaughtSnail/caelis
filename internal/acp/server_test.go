@@ -114,6 +114,71 @@ func TestServer_InitializeAcceptsNumericProtocolVersion(t *testing.T) {
 	}
 }
 
+func TestServer_PromptForwardsDelegatedChildSessionUpdates(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.Message{
+						Role: model.RoleAssistant,
+						ToolCalls: []model.ToolCall{{
+							ID:   "call_delegate_1",
+							Name: tool.DelegateTaskToolName,
+							Args: `{"task":"child task","yield_time_ms":0}`,
+						}},
+					},
+				}},
+				{{Message: model.Message{Role: model.RoleAssistant, Text: "child done"}}},
+				{{Message: model.Message{Role: model.RoleAssistant, Text: "delegated complete"}}},
+			},
+		},
+	})
+	defer h.close()
+
+	var initResp InitializeResponse
+	if err := h.client.Call(context.Background(), MethodInitialize, InitializeRequest{
+		ProtocolVersion: "0.2.0",
+		ClientCapabilities: ClientCapabilities{
+			FS: FileSystemCapabilities{},
+		},
+	}, &initResp); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+
+	var newResp NewSessionResponse
+	if err := h.client.Call(context.Background(), MethodSessionNew, NewSessionRequest{
+		CWD: h.workspace,
+	}, &newResp); err != nil {
+		t.Fatalf("session/new: %v", err)
+	}
+
+	h.resetNotifications()
+	var promptResp PromptResponse
+	if err := h.client.Call(context.Background(), MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "delegate please"})},
+	}, &promptResp); err != nil {
+		t.Fatalf("session/prompt: %v", err)
+	}
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+
+	h.waitNotifications(t, 5)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var childSessionIDs []string
+	for _, note := range h.notifications {
+		if strings.TrimSpace(note.SessionID) == "" || note.SessionID == newResp.SessionID {
+			continue
+		}
+		childSessionIDs = append(childSessionIDs, note.SessionID)
+	}
+	if len(childSessionIDs) == 0 {
+		t.Fatalf("expected delegated child session notifications, got %+v", h.notifications)
+	}
+}
+
 func TestServer_AuthenticateRequiredBeforeSessionMethods(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		authMethods: []AuthMethod{{

@@ -368,7 +368,7 @@ func TestBash_FullControlRunsOnHostWithoutApproval(t *testing.T) {
 	}
 	out, err := tool.Run(context.Background(), map[string]any{
 		"command":       "cat <<'EOF' > a.txt\nx\nEOF",
-		"yield_time_ms": -1,
+		"yield_time_ms": 0,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -738,13 +738,14 @@ func TestBash_DefaultYieldInSandboxStartsSandboxTask(t *testing.T) {
 	}
 }
 
-func TestBash_ExplicitNegativeOneYieldStaysSynchronous(t *testing.T) {
-	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
+func TestBash_NilYieldUsesDefaultWait(t *testing.T) {
+	host := &asyncRecordingRunner{
+		status:         toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		startSessionID: "bash-session-1",
+	}
 	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		HostRunner:     &recordingRunner{},
-		SandboxRunner:  sandbox,
-		SandboxType:    testSandboxType(),
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -753,24 +754,72 @@ func TestBash_ExplicitNegativeOneYieldStaysSynchronous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tool.Run(context.Background(), map[string]any{
-		"command":       "ls",
-		"yield_time_ms": -1,
-	}); err != nil {
+	manager := &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "t-bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	}
+	ctx := task.WithManager(context.Background(), manager)
+	out, err := tool.Run(ctx, map[string]any{
+		"command":       "sleep 1",
+		"yield_time_ms": nil,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sandbox.calls) != 1 {
-		t.Fatalf("expected one sandbox call, got %d", len(sandbox.calls))
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected default yield task handle, got %#v", out)
 	}
-	if sandbox.calls[0].Timeout != defaultBashTimeout {
-		t.Fatalf("expected default timeout %s, got %s", defaultBashTimeout, sandbox.calls[0].Timeout)
-	}
-	if sandbox.calls[0].IdleTimeout != defaultBashIdle {
-		t.Fatalf("expected default idle timeout %v, got %s", defaultBashIdle, sandbox.calls[0].IdleTimeout)
+	if manager.lastBash.Yield != defaultBashWait {
+		t.Fatalf("expected nil yield to fall back to default wait %s, got %s", defaultBashWait, manager.lastBash.Yield)
 	}
 }
 
-func TestBash_ExplicitZeroYieldReturnsImmediateTask(t *testing.T) {
+func TestBash_ExplicitNegativeYieldFallsBackToDefaultWait(t *testing.T) {
+	host := &asyncRecordingRunner{
+		status:         toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		startSessionID: "bash-session-1",
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "t-bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+			Yielded: true,
+		},
+	}
+	out, err := tool.Run(task.WithManager(context.Background(), manager), map[string]any{
+		"command":       "ls",
+		"yield_time_ms": -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out["task_id"]; got != "t-bash-1" {
+		t.Fatalf("expected default-yield task handle, got %#v", out)
+	}
+	if manager.lastBash.Yield != defaultBashWait {
+		t.Fatalf("expected negative yield to fall back to default wait %s, got %s", defaultBashWait, manager.lastBash.Yield)
+	}
+}
+
+func TestBash_ExplicitZeroYieldUsesDefaultWait(t *testing.T) {
 	host := &asyncRecordingRunner{
 		status:         toolexec.SessionStatus{State: toolexec.SessionStateRunning},
 		startSessionID: "bash-session-1",
@@ -803,10 +852,10 @@ func TestBash_ExplicitZeroYieldReturnsImmediateTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := out["task_id"]; got != "t-bash-1" {
-		t.Fatalf("expected immediate task handle, got %#v", out)
+		t.Fatalf("expected default-yield task handle, got %#v", out)
 	}
-	if manager.lastBash.Yield != 0 {
-		t.Fatalf("expected immediate return yield 0, got %s", manager.lastBash.Yield)
+	if manager.lastBash.Yield != defaultBashWait {
+		t.Fatalf("expected explicit zero to fall back to default wait %s, got %s", defaultBashWait, manager.lastBash.Yield)
 	}
 }
 

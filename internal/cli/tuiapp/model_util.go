@@ -51,10 +51,6 @@ func (m *Model) observeRender(duration time.Duration, bytes int, redrawMode stri
 	}
 }
 
-func (m *Model) requestFullRepaint() {
-	m.pendingFullRepaint = true
-}
-
 func (m *Model) observeInputLatency() {
 	if m.pendingInputAt.IsZero() {
 		return
@@ -313,7 +309,7 @@ func replaceRuneSpan(input []rune, start int, end int, replacement string) ([]ru
 }
 
 // overlayBottom places an overlay box near the bottom of the base text.
-func overlayBottom(base string, overlay string, width int, baseLineCount int) string {
+func overlayBottom(base string, overlay string, width int, _ int) string {
 	baseLines := strings.Split(base, "\n")
 	overlayLines := strings.Split(overlay, "\n")
 	if len(baseLines) == 0 {
@@ -326,6 +322,29 @@ func overlayBottom(base string, overlay string, width int, baseLineCount int) st
 			continue
 		}
 		baseLines[row] = padCenter(line, width)
+	}
+	return strings.Join(baseLines, "\n")
+}
+
+func overlayAboveBottomArea(base string, overlay string, width int, bottomHeight int, gap int) string {
+	baseLines := strings.Split(base, "\n")
+	overlayLines := strings.Split(overlay, "\n")
+	if len(baseLines) == 0 || len(overlayLines) == 0 {
+		return base
+	}
+	startRow := len(baseLines) - bottomHeight - len(overlayLines) - gap
+	if startRow < 0 {
+		startRow = 0
+	}
+	for i, line := range overlayLines {
+		row := startRow + i
+		if row < 0 || row >= len(baseLines) {
+			continue
+		}
+		if pad := width - lipgloss.Width(line); pad > 0 {
+			line += strings.Repeat(" ", pad)
+		}
+		baseLines[row] = line
 	}
 	return strings.Join(baseLines, "\n")
 }

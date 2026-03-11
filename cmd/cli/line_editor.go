@@ -284,7 +284,7 @@ func (l *linerEditor) Close() error {
 		if err != nil {
 			retErr = fmt.Errorf("cli: write history: %w", err)
 		} else {
-			if _, err := l.state.WriteHistory(f); err != nil && retErr == nil {
+			if _, err := l.state.WriteHistory(f); err != nil {
 				retErr = fmt.Errorf("cli: write history: %w", err)
 			}
 			if err := f.Close(); err != nil && retErr == nil {

@@ -156,7 +156,7 @@ func TestTerminalApprover_FullAccessBlocksDangerousCommand(t *testing.T) {
 	approver := newTerminalApprover(editor, io.Discard, nil)
 	approver.modeResolver = func() string { return "full_access" }
 
-	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "rm -rf /tmp/x"})
+	allowed, err := approver.Approve(context.Background(), toolexec.ApprovalRequest{Command: "rm -rf /"})
 	if allowed {
 		t.Fatal("expected dangerous command to be denied")
 	}
@@ -228,24 +228,21 @@ func TestTerminalApprover_ChoicePromptMakesAlwaysScopeExplicit(t *testing.T) {
 	if len(editor.lastChoices) != 3 {
 		t.Fatalf("expected 3 explicit approval choices, got %d", len(editor.lastChoices))
 	}
-	if editor.lastChoices[0].Label != "proceed" || editor.lastChoices[0].Detail != "just this once" {
+	if editor.lastChoices[0].Label != "approve" || editor.lastChoices[0].Detail != "this time" {
 		t.Fatalf("unexpected one-time approval choice %+v", editor.lastChoices[0])
 	}
-	if editor.lastChoices[1].Label != "session" || !strings.Contains(editor.lastChoices[1].Detail, "don't ask again for: go test") {
+	if editor.lastChoices[1].Label != "always" || !strings.Contains(editor.lastChoices[1].Detail, "remember go test") {
 		t.Fatalf("expected always choice detail to mention scoped key, got %+v", editor.lastChoices[1])
 	}
-	if editor.lastChoices[2].Label != "cancel" || editor.lastChoices[2].Detail != "continue without it" {
+	if editor.lastChoices[2].Label != "reject" || editor.lastChoices[2].Detail != "skip it" {
 		t.Fatalf("unexpected cancel choice %+v", editor.lastChoices[2])
 	}
 	rendered := out.String()
 	if !strings.Contains(rendered, "Would you like to run the following command?") {
 		t.Fatalf("expected command approval title, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Permission: execute command") {
-		t.Fatalf("expected permission line, got %q", rendered)
-	}
-	if !strings.Contains(rendered, "Command: $ cd /tmp && go test ./kernel/... -count=1 | grep PASS") {
-		t.Fatalf("expected command preview, got %q", rendered)
+	if !strings.Contains(rendered, "BASH: cd /tmp && go test ./kernel/... -count=1 | grep PASS") {
+		t.Fatalf("expected compact command summary, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "You approved this session for commands matching go test.") {
 		t.Fatalf("expected approval transcript, got %q", rendered)
@@ -271,7 +268,7 @@ func TestTerminalApprover_ChoicePromptOmitsAlwaysForUnknownCommandFamily(t *test
 		t.Fatalf("expected only allow/deny choices for unknown command family, got %d", len(editor.lastChoices))
 	}
 	for _, choice := range editor.lastChoices {
-		if choice.Value == "a" || strings.EqualFold(choice.Label, "session") {
+		if choice.Value == "a" || strings.EqualFold(choice.Label, "always") {
 			t.Fatalf("did not expect always choice for unknown command family, got %+v", editor.lastChoices)
 		}
 	}
@@ -349,24 +346,21 @@ func TestTerminalApprover_AuthorizeToolPromptShowsPathPreviewAndScopedAlways(t *
 	if len(editor.lastChoices) != 3 {
 		t.Fatalf("expected 3 choices, got %d", len(editor.lastChoices))
 	}
-	if got := editor.lastChoices[0]; got.Label != "proceed" || got.Detail != "just this once" {
+	if got := editor.lastChoices[0]; got.Label != "approve" || got.Detail != "this time" {
 		t.Fatalf("unexpected proceed choice %+v", got)
 	}
-	if got := editor.lastChoices[1].Detail; got != "don't ask again for: /tmp/external/docs" {
+	if got := editor.lastChoices[1].Detail; got != "remember /tmp/external/docs" {
 		t.Fatalf("unexpected always detail %q", got)
 	}
-	if got := editor.lastChoices[2]; got.Label != "cancel" || got.Detail != "don't allow" {
+	if got := editor.lastChoices[2]; got.Label != "reject" || got.Detail != "skip it" {
 		t.Fatalf("unexpected cancel choice %+v", got)
 	}
 	rendered := out.String()
 	if !strings.Contains(rendered, "Would you like to make the following edits?") {
 		t.Fatalf("expected edit approval title, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Permission: write outside workspace writable roots") {
-		t.Fatalf("expected permission line, got %q", rendered)
-	}
-	if !strings.Contains(rendered, "Path: /tmp/external/docs/SKILL.md") {
-		t.Fatalf("expected path in approval output, got %q", rendered)
+	if !strings.Contains(rendered, "PATCH: /tmp/external/docs/SKILL.md") {
+		t.Fatalf("expected compact patch summary, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "Reason: write target is outside workspace writable roots") {
 		t.Fatalf("expected reason in approval output, got %q", rendered)
@@ -421,23 +415,32 @@ func TestTerminalApprover_AuthorizeToolPromptShowsExternalMCPContext(t *testing.
 	if editor.lastPrompt != "Would you like to call the following external tool?" {
 		t.Fatalf("unexpected prompt %q", editor.lastPrompt)
 	}
-	if got := editor.lastChoices[1].Detail; got != "don't ask again for: example.com" {
+	if got := editor.lastChoices[1].Detail; got != "remember example.com" {
 		t.Fatalf("unexpected always detail %q", got)
 	}
 	rendered := out.String()
-	if !strings.Contains(rendered, "Permission: external MCP tool call") {
-		t.Fatalf("expected external tool permission, got %q", rendered)
+	if !strings.Contains(rendered, "WEB__SEARCH: https://example.com/search?q=caelis") {
+		t.Fatalf("expected external tool summary, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Tool: web__search") {
-		t.Fatalf("expected tool name, got %q", rendered)
-	}
-	if !strings.Contains(rendered, "Target: https://example.com/search?q=caelis") {
-		t.Fatalf("expected target, got %q", rendered)
-	}
-	if !strings.Contains(rendered, "Request: url=https://example.com/search?q=caelis, query=caelis") {
-		t.Fatalf("expected request preview, got %q", rendered)
+	if !strings.Contains(rendered, "Reason: external MCP tool") {
+		t.Fatalf("expected external tool reason, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "You approved this session for tool requests under \"example.com\".") {
 		t.Fatalf("expected session approval transcript, got %q", rendered)
+	}
+}
+
+func TestCommandApprovalPromptRequestOmitsGenericReasonAndPermission(t *testing.T) {
+	req := commandApprovalPromptRequest(toolexec.ApprovalRequest{
+		ToolName: "BASH",
+		Action:   "execute_command",
+		Reason:   "require_escalated requested",
+		Command:  "pfctl -s info",
+	}, "pfctl")
+	if len(req.Details) != 1 {
+		t.Fatalf("expected exactly one detail, got %+v", req.Details)
+	}
+	if got := req.Details[0]; got.Label != "BASH" || got.Value != "pfctl -s info" {
+		t.Fatalf("unexpected compact detail %+v", got)
 	}
 }

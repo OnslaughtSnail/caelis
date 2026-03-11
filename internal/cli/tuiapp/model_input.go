@@ -8,7 +8,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
 )
 
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -307,7 +306,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ctrlCArmed = true
 		m.lastCtrlCAt = now
 		m.hint = "press Ctrl+C again to quit"
-		return m, nil
+		return m, expireCtrlCCmd(now)
 
 	case "ctrl+d":
 		if !m.running && len(m.input) == 0 && m.textarea.Value() == "" {
@@ -321,7 +320,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.togglePalette()
-		return m, nil
+		return m, animatePaletteCmd()
 
 	case "esc":
 		if m.running {
@@ -507,9 +506,6 @@ func (m *Model) submitLine(line string) (tea.Model, tea.Cmd) {
 func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.Model, tea.Cmd) {
 	// Commit user input line to history buffer.
 	userLine := "> " + strings.TrimSpace(displayLine)
-	if m.hasCommittedLine && len(m.historyLines) > 0 && strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])) != "" {
-		m.historyLines = append(m.historyLines, m.userTurnDividerLine())
-	}
 	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
 	m.historyLines = append(m.historyLines, colored)
 	m.hasCommittedLine = true
@@ -533,6 +529,8 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 
 	m.running = true
 	m.runStartedAt = time.Now()
+	m.hasLastRunDuration = false
+	m.showTurnDivider = !strings.HasPrefix(strings.TrimSpace(execLine), "/")
 	m.startRunningAnimation()
 	m.userScrolledUp = false
 	m.syncViewportContent()

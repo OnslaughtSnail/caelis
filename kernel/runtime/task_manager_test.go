@@ -2,10 +2,15 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/session"
+	sessioninmemory "github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 )
@@ -132,18 +137,124 @@ func TestTaskManager_WaitUsesPersistedOutputCursorsAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestTaskManager_BashWaitDoesNotReturnEarlyOnOutput(t *testing.T) {
+	store := taskinmemory.New()
+	entry := &task.Entry{
+		TaskID:         "t-bash-output",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "s"},
+		Title:          "echo hi",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecCommand:       "echo hi",
+			taskSpecWorkdir:       "/tmp",
+			taskSpecRoute:         "host",
+			taskSpecExecSessionID: "sess-1",
+		},
+		Result: map[string]any{
+			"state": string(task.StateRunning),
+		},
+	}
+	if err := store.Upsert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &stubAsyncTaskRunner{
+		stdoutByMarker: map[int64][]byte{
+			0: []byte("hi\n"),
+		},
+		status: toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+	}
+	manager := newTaskManager(nil, taskTestRuntime{host: runner}, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "s"}, RunRequest{}, nil)
+
+	start := time.Now()
+	snapshot, err := manager.Wait(context.Background(), task.ControlRequest{
+		TaskID: entry.TaskID,
+		Yield:  250 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Fatalf("expected wait to honor yield window despite output, only waited %s", elapsed)
+	}
+	if strings.TrimSpace(snapshot.Output.Stdout) != "hi" {
+		t.Fatalf("expected collected stdout in snapshot, got %q", snapshot.Output.Stdout)
+	}
+}
+
+func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) {
+	sessStore := sessioninmemory.New()
+	rt, err := New(Config{Store: sessStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	childSess := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	if _, err := sessStore.GetOrCreate(context.Background(), childSess); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessStore.AppendEvent(context.Background(), childSess, lifecycleEvent(childSess, RunLifecycleStatusRunning, "run", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessStore.AppendEvent(context.Background(), childSess, &session.Event{
+		Message: model.Message{Role: model.RoleAssistant, Text: "still working"},
+		Time:    time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	record := &task.Record{
+		ID:      "t-delegate-output",
+		Kind:    task.KindDelegate,
+		Title:   "delegate job",
+		State:   task.StateRunning,
+		Running: true,
+		Session: task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	controller := &delegateTaskController{
+		runtime:      rt,
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "child-1",
+		delegationID: "d-1",
+	}
+
+	start := time.Now()
+	snapshot, err := controller.Wait(context.Background(), record, 250*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
+		t.Fatalf("expected delegate wait to honor yield window despite new events, only waited %s; snapshot=%#v", elapsed, snapshot)
+	}
+	if !snapshot.Running {
+		t.Fatalf("expected delegate snapshot to remain running, got state=%q running=%v", snapshot.State, snapshot.Running)
+	}
+	if got := snapshot.Result["latest_output"]; !strings.Contains(strings.TrimSpace(fmt.Sprint(got)), "still working") {
+		t.Fatalf("expected delegate latest_output in snapshot result, got %#v", snapshot.Result)
+	}
+}
+
 type taskTestRuntime struct {
 	host toolexec.AsyncCommandRunner
 }
 
-func (r taskTestRuntime) PermissionMode() toolexec.PermissionMode           { return toolexec.PermissionModeDefault }
-func (r taskTestRuntime) SandboxType() string                               { return "" }
-func (r taskTestRuntime) SandboxPolicy() toolexec.SandboxPolicy             { return toolexec.SandboxPolicy{} }
-func (r taskTestRuntime) FallbackToHost() bool                              { return false }
-func (r taskTestRuntime) FallbackReason() string                            { return "" }
-func (r taskTestRuntime) FileSystem() toolexec.FileSystem                   { return nil }
-func (r taskTestRuntime) HostRunner() toolexec.CommandRunner                { return r.host }
-func (r taskTestRuntime) SandboxRunner() toolexec.CommandRunner             { return nil }
+func (r taskTestRuntime) PermissionMode() toolexec.PermissionMode {
+	return toolexec.PermissionModeDefault
+}
+func (r taskTestRuntime) SandboxType() string                   { return "" }
+func (r taskTestRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
+func (r taskTestRuntime) FallbackToHost() bool                  { return false }
+func (r taskTestRuntime) FallbackReason() string                { return "" }
+func (r taskTestRuntime) FileSystem() toolexec.FileSystem       { return nil }
+func (r taskTestRuntime) HostRunner() toolexec.CommandRunner    { return r.host }
+func (r taskTestRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
 func (r taskTestRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{}
 }

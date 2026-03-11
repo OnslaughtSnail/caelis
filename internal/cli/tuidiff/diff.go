@@ -177,7 +177,7 @@ func renderHeader(model Model, theme tuikit.Theme) string {
 	if model.Created {
 		action = "created"
 	}
-	return theme.ToolStyle().Render("✓ ") + theme.ToolNameStyle().Render(tool) + " " + action + " " + target
+	return theme.ToolStyle().Render("✓ ") + theme.ToolNameStyle().Render(tool) + " " + action + " " + tuikit.LinkifyText(target, theme.LinkStyle())
 }
 
 func isAddOnlyModel(model Model) bool {

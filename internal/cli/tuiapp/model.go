@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
@@ -19,12 +20,21 @@ import (
 
 const maxInputBarRows = 4
 const ctrlCExitWindow = 2 * time.Second
-const runningHintRotateEveryTicks = 40
+const runningHintRotateEveryTicks = 60
+const runningLightSpeed = 0.55
+const runningLightBandRadius = 5.5
+const runningLightLead = 4.0
 const copyHintDuration = 1600 * time.Millisecond
 const toolOutputPreviewLines = 4
+const toolOutputFadeHold = 650 * time.Millisecond
+const toolOutputFadeInterval = 110 * time.Millisecond
 const inputHorizontalInset = tuikit.InputInset
+const paletteAnimationInterval = 16 * time.Millisecond
+const paletteAnimationStep = 3
 
 var runningBreathFrames = []string{"·", "•", "●", "•"}
+
+var runningSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 var runningCarouselLines = []string{
 	"Queue your next prompt now; it will run after this one.",
@@ -38,6 +48,22 @@ type clearHintMsg struct {
 	expected string
 }
 
+type ctrlCExpireMsg struct {
+	armedAt time.Time
+}
+
+type paletteAnimationMsg struct{}
+type toolOutputFadeMsg struct {
+	key  string
+	step int
+}
+
+func animatePaletteCmd() tea.Cmd {
+	return tea.Tick(paletteAnimationInterval, func(time.Time) tea.Msg {
+		return paletteAnimationMsg{}
+	})
+}
+
 func clearHintLaterCmd(expected string, after time.Duration) tea.Cmd {
 	expected = strings.TrimSpace(expected)
 	if expected == "" || after <= 0 {
@@ -45,6 +71,15 @@ func clearHintLaterCmd(expected string, after time.Duration) tea.Cmd {
 	}
 	return tea.Tick(after, func(time.Time) tea.Msg {
 		return clearHintMsg{expected: expected}
+	})
+}
+
+func expireCtrlCCmd(armedAt time.Time) tea.Cmd {
+	if armedAt.IsZero() {
+		return nil
+	}
+	return tea.Tick(ctrlCExitWindow, func(time.Time) tea.Msg {
+		return ctrlCExpireMsg{armedAt: armedAt}
 	})
 }
 
@@ -201,6 +236,10 @@ type toolOutputState struct {
 	stderrPartial string
 	delegateFence bool
 	active        bool
+	closing       bool
+	fadeStep      int
+	fadeQueued    bool
+	fadeLineCount int
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +273,7 @@ type Model struct {
 	runStartedAt       time.Time
 	lastRunDuration    time.Duration
 	hasLastRunDuration bool
+	showTurnDivider    bool
 
 	// Transient log tracking — retry/warn lines replace in-place like status updates.
 	transientLogIdx  int  // index in historyLines of the current transient line (-1 = none)
@@ -285,8 +325,10 @@ type Model struct {
 	hint          string
 
 	// Command palette (Ctrl+P overlay)
-	showPalette bool
-	palette     list.Model
+	showPalette      bool
+	palette          list.Model
+	paletteAnimLines int
+	paletteAnimating bool
 
 	// @mention completion
 	mentionQuery      string
@@ -353,7 +395,7 @@ type Model struct {
 // ---------------------------------------------------------------------------
 
 func NewModel(cfg Config) *Model {
-	theme := tuikit.DefaultTheme()
+	theme := tuikit.ResolveThemeFromEnv()
 
 	// Command palette
 	items := make([]list.Item, 0, len(cfg.Commands))
@@ -376,7 +418,13 @@ func NewModel(cfg Config) *Model {
 	// Textarea for input
 	ta := textarea.New()
 	ta.Placeholder = "Type your message, @path/to/file or $skill"
-	ta.Prompt = ""
+	ta.Prompt = "> "
+	ta.SetPromptFunc(2, func(lineIdx int) string {
+		if lineIdx == 0 {
+			return "> "
+		}
+		return "  "
+	})
 	ta.CharLimit = 0
 	ta.SetWidth(80)
 	ta.SetHeight(1)
@@ -384,13 +432,22 @@ func NewModel(cfg Config) *Model {
 	ta.ShowLineNumbers = false
 	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	ta.FocusedStyle.Base = lipgloss.NewStyle()
+	ta.FocusedStyle.Prompt = theme.PromptStyle()
+	ta.FocusedStyle.Text = theme.TextStyle()
+	ta.FocusedStyle.Placeholder = theme.HelpHintTextStyle()
 	ta.BlurredStyle.CursorLine = lipgloss.NewStyle()
 	ta.BlurredStyle.Base = lipgloss.NewStyle()
+	ta.BlurredStyle.Prompt = theme.PromptStyle()
+	ta.BlurredStyle.Text = theme.TextStyle()
+	ta.BlurredStyle.Placeholder = theme.HelpHintTextStyle()
 	ta.Focus()
 
 	// Spinner
 	sp := spinner.New()
-	sp.Spinner = spinner.Points
+	sp.Spinner = spinner.Spinner{
+		Frames: runningSpinnerFrames,
+		FPS:    60 * time.Millisecond,
+	}
 	sp.Style = theme.SpinnerStyle()
 
 	// Viewport for fullscreen scrollable history.
@@ -549,8 +606,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.palette.SetSize(maxInt(30, m.width-12), maxInt(8, minInt(16, m.height-10)))
 
 		vpHeight, _ := m.computeLayout()
-		m.viewport.Width = maxInt(1, m.width-tuikit.GutterNarrative)
+		m.viewport.Width = m.viewportContentWidth()
 		m.viewport.Height = vpHeight
+		m.syncPaletteAnimationTarget()
 		if m.welcomeCardPending {
 			m.appendWelcomeCard()
 			m.welcomeCardPending = false
@@ -591,6 +649,42 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hint = ""
 		}
 		return m, nil
+
+	case ctrlCExpireMsg:
+		if m.ctrlCArmed && m.lastCtrlCAt.Equal(typed.armedAt) {
+			m.ctrlCArmed = false
+			m.lastCtrlCAt = time.Time{}
+			if strings.TrimSpace(m.hint) == "press Ctrl+C again to quit" {
+				m.hint = ""
+			}
+		}
+		return m, nil
+
+	case paletteAnimationMsg:
+		if !m.paletteAnimating {
+			return m, nil
+		}
+		target := m.paletteAnimationTarget()
+		switch {
+		case m.paletteAnimLines < target:
+			m.paletteAnimLines += paletteAnimationStep
+			if m.paletteAnimLines > target {
+				m.paletteAnimLines = target
+			}
+		case m.paletteAnimLines > target:
+			m.paletteAnimLines -= paletteAnimationStep
+			if m.paletteAnimLines < target {
+				m.paletteAnimLines = target
+			}
+		}
+		if m.paletteAnimLines == target {
+			m.paletteAnimating = false
+			return m, nil
+		}
+		return m, animatePaletteCmd()
+
+	case toolOutputFadeMsg:
+		return m.handleToolOutputFadeMsg(typed)
 
 	case tuievents.SetRunningMsg:
 		wasRunning := m.running
@@ -656,7 +750,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyLines = append(m.historyLines, colored)
 			}
 		}
+		if m.showTurnDivider && len(m.historyLines) > 0 &&
+			strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])) != "" {
+			m.historyLines = append(m.historyLines, m.userTurnDividerLine())
+		}
+		m.showTurnDivider = false
 		m.syncViewportContent()
+		if cmd := m.maybeStartClosingToolOutputFades(); cmd != nil {
+			return m, cmd
+		}
 		if typed.ExitNow {
 			m.quit = true
 			return m, tea.Quit
@@ -714,4 +816,30 @@ func (m *Model) syncTextareaFromInput() {
 	m.textarea.SetValue(string(m.input))
 	m.textarea.CursorEnd()
 	m.adjustTextareaHeight()
+}
+
+func (m *Model) viewportScrollbarWidth() int {
+	if m.width < 48 {
+		return 0
+	}
+	return 1
+}
+
+func (m *Model) viewportContentWidth() int {
+	return maxInt(1, m.width-tuikit.GutterNarrative-m.viewportScrollbarWidth())
+}
+
+func (m *Model) paletteAnimationTarget() int {
+	if !m.showPalette {
+		return 0
+	}
+	return m.fullPaletteLineCount()
+}
+
+func (m *Model) syncPaletteAnimationTarget() {
+	target := m.paletteAnimationTarget()
+	if m.paletteAnimating {
+		return
+	}
+	m.paletteAnimLines = target
 }

@@ -115,13 +115,35 @@ func TestSummarizeToolResponse_DelegateRendersAssistantWithoutChildID(t *testing
 }
 
 func TestSummarizeToolResponse_DelegateRunningIncludesLatestOutput(t *testing.T) {
-	got := summarizeToolResponse("DELEGATE", map[string]any{
+	got := summarizeToolResponseWithCall("DELEGATE", map[string]any{
 		"task_id":       "t-1234567890ab",
 		"running":       true,
 		"latest_output": "line-1\nline-2",
+	}, map[string]any{
+		"task":          "inspect repo",
+		"yield_time_ms": 30000,
 	})
-	if !strings.Contains(got, "task=t-12345678 running") || !strings.Contains(got, "line-2") {
+	if !strings.Contains(got, "yielded after 30 s") || !strings.Contains(got, "line-2") {
 		t.Fatalf("unexpected delegate running summary: %q", got)
+	}
+	if strings.Contains(got, "t-1234567890ab") {
+		t.Fatalf("did not expect task id in delegate running summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_BashYieldIsFriendly(t *testing.T) {
+	got := summarizeToolResponseWithCall("BASH", map[string]any{
+		"task_id": "t-1234567890ab",
+		"running": true,
+	}, map[string]any{
+		"command":       "sleep 10",
+		"yield_time_ms": 2000,
+	})
+	if got != "yielded after 2 s" {
+		t.Fatalf("unexpected bash running summary: %q", got)
+	}
+	if strings.Contains(got, "t-1234567890ab") {
+		t.Fatalf("did not expect task id in bash running summary: %q", got)
 	}
 }
 
@@ -138,6 +160,38 @@ func TestSummarizeToolResponse_TaskWaitRendersFriendlySummary(t *testing.T) {
 	})
 	if got != "5 s" {
 		t.Fatalf("unexpected task wait summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_TaskWaitCompletedDoesNotEchoRequestedDuration(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"task_id": "t-1234567890ab",
+		"state":   "completed",
+		"running": false,
+	}, map[string]any{
+		"action":        "wait",
+		"task_id":       "t-1234567890ab",
+		"yield_time_ms": 10000,
+	})
+	if got != "Completed" {
+		t.Fatalf("unexpected completed task wait summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_TaskWaitFastRunningPrefersStateOverRequestedDuration(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"task_id":       "t-1234567890ab",
+		"state":         "running",
+		"running":       true,
+		"waited_ms":     0,
+		"latest_output": "still going",
+	}, map[string]any{
+		"action":        "wait",
+		"task_id":       "t-1234567890ab",
+		"yield_time_ms": 30000,
+	})
+	if got != "Running" {
+		t.Fatalf("unexpected fast-running task wait summary: %q", got)
 	}
 }
 
@@ -178,6 +232,56 @@ func TestSummarizeToolArgs_TaskWaitRendersDuration(t *testing.T) {
 	})
 	if got != "5 s" {
 		t.Fatalf("unexpected task wait args summary: %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_TaskWaitDefaultsToFiveSeconds(t *testing.T) {
+	got := summarizeToolArgs("TASK", map[string]any{
+		"action":  "wait",
+		"task_id": "t-1234567890ab",
+	})
+	if got != "5 s" {
+		t.Fatalf("unexpected default task wait args summary: %q", got)
+	}
+	if strings.Contains(got, "t-1234567890ab") {
+		t.Fatalf("did not expect task id in wait args summary: %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_TaskWaitZeroFallsBackToDefault(t *testing.T) {
+	got := summarizeToolArgs("TASK", map[string]any{
+		"action":        "wait",
+		"task_id":       "t-1234567890ab",
+		"yield_time_ms": 0,
+	})
+	if got != "5 s" {
+		t.Fatalf("unexpected explicit zero task wait args summary: %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_TaskWaitNegativeFallsBackToDefault(t *testing.T) {
+	got := summarizeToolArgs("TASK", map[string]any{
+		"action":        "wait",
+		"task_id":       "t-1234567890ab",
+		"yield_time_ms": -1,
+	})
+	if got != "5 s" {
+		t.Fatalf("unexpected negative task wait args summary: %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_TaskStatusAndCancelHideRawTaskIDs(t *testing.T) {
+	if got := summarizeToolArgs("TASK", map[string]any{
+		"action":  "status",
+		"task_id": "t-1234567890ab",
+	}); got != "" {
+		t.Fatalf("expected empty status args summary, got %q", got)
+	}
+	if got := summarizeToolArgs("TASK", map[string]any{
+		"action":  "cancel",
+		"task_id": "t-1234567890ab",
+	}); got != "" {
+		t.Fatalf("expected empty cancel args summary, got %q", got)
 	}
 }
 
@@ -223,6 +327,82 @@ func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
 	}
 	if strings.Contains(rendered, "t-1234567890ab") || strings.Contains(rendered, "line-2") {
 		t.Fatalf("did not expect task id or output preview in TASK render, got %q", rendered)
+	}
+}
+
+func TestPrintEvent_TaskResponseWithoutYieldUsesDefaultFriendlyWait(t *testing.T) {
+	var out bytes.Buffer
+	state := &renderState{
+		out:              &out,
+		pendingToolCalls: map[string]toolCallSnapshot{},
+	}
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{
+					ID:   "call_task_2",
+					Name: "TASK",
+					Args: `{"action":"wait","task_id":"t-1234567890ab"}`,
+				},
+			},
+		},
+	}, state)
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_task_2",
+				Name: "TASK",
+				Result: map[string]any{
+					"task_id": "t-1234567890ab",
+					"state":   "running",
+					"running": true,
+				},
+			},
+		},
+	}, state)
+	rendered := out.String()
+	if !strings.Contains(rendered, "▸ WAIT 5 s") || !strings.Contains(rendered, "✓ WAITED 5 s") {
+		t.Fatalf("expected default friendly wait rendering, got %q", rendered)
+	}
+}
+
+func TestPrintEvent_TaskStatusAndCancelHideRawArgs(t *testing.T) {
+	var out bytes.Buffer
+	state := &renderState{
+		out:              &out,
+		pendingToolCalls: map[string]toolCallSnapshot{},
+	}
+	printEvent(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{ID: "call_task_status", Name: "TASK", Args: `{"action":"status","task_id":"t-1234567890ab"}`},
+				{ID: "call_task_cancel", Name: "TASK", Args: `{"action":"cancel","task_id":"t-1234567890ab"}`},
+			},
+		},
+	}, state)
+	rendered := out.String()
+	if !strings.Contains(rendered, "▸ CHECK") || !strings.Contains(rendered, "▸ CANCEL") {
+		t.Fatalf("expected friendly CHECK/CANCEL call rendering, got %q", rendered)
+	}
+	if strings.Contains(rendered, "action=status") || strings.Contains(rendered, "action=cancel") || strings.Contains(rendered, "t-1234567890ab") {
+		t.Fatalf("did not expect raw task args in CHECK/CANCEL rendering, got %q", rendered)
+	}
+}
+
+func TestSummarizeToolResponse_TaskCancelAvoidsDuplicateCancelledLabel(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"task_id": "t-1234567890ab",
+		"state":   "cancelled",
+		"running": false,
+	}, map[string]any{
+		"action":  "cancel",
+		"task_id": "t-1234567890ab",
+	})
+	if got != "" {
+		t.Fatalf("expected empty cancel summary to avoid duplicate label, got %q", got)
 	}
 }
 

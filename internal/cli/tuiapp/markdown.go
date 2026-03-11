@@ -3,10 +3,12 @@ package tuiapp
 import (
 	"errors"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
@@ -15,11 +17,11 @@ import (
 var (
 	errMarkdownRendererUnavailable = errors.New("markdown renderer unavailable")
 	markdownRendererCache          sync.Map
-	blockMathPattern               = regexp.MustCompile("(?ms)(^|\\n)\\$\\$\\s*\\n?(.*?)\\n?\\s*\\$\\$")
+	blockMathPattern               = regexp.MustCompile(`(?ms)(^|\n)\$\$\s*\n?(.*?)\n?\s*\$\$`)
 	inlineMathPattern              = regexp.MustCompile(`(^|[^\\$])\$([^\n$]+?)\$`)
 )
 
-func renderAssistantMarkdown(text string, width int) string {
+func renderAssistantMarkdown(text string, width int, theme tuikit.Theme) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return ""
@@ -28,7 +30,7 @@ func renderAssistantMarkdown(text string, width int) string {
 	if !looksLikeMarkdown(normalized) {
 		return trimmed
 	}
-	rendered, err := renderMarkdown(normalized, width)
+	rendered, err := renderMarkdown(normalized, width, theme)
 	if err != nil {
 		return trimmed
 	}
@@ -39,35 +41,46 @@ func renderAssistantMarkdown(text string, width int) string {
 	return rendered
 }
 
-func renderMarkdown(input string, width int) (string, error) {
+func renderMarkdown(input string, width int, theme tuikit.Theme) (string, error) {
 	if width <= 0 {
 		width = 80
 	}
-	renderer, err := markdownRenderer(width)
+	renderer, err := markdownRenderer(width, theme)
 	if err != nil {
 		return "", errMarkdownRendererUnavailable
 	}
 	return renderer.Render(input)
 }
 
-func markdownRenderer(width int) (*glamour.TermRenderer, error) {
-	if cached, ok := markdownRendererCache.Load(width); ok {
+func markdownRenderer(width int, theme tuikit.Theme) (*glamour.TermRenderer, error) {
+	key := markdownRendererKey(width, theme)
+	if cached, ok := markdownRendererCache.Load(key); ok {
 		if renderer, ok := cached.(*glamour.TermRenderer); ok && renderer != nil {
 			return renderer, nil
 		}
 	}
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(markdownStyleConfig()),
+		glamour.WithStyles(markdownStyleConfig(theme)),
 		glamour.WithWordWrap(width),
 	)
 	if err != nil {
 		return nil, err
 	}
-	markdownRendererCache.Store(width, renderer)
+	markdownRendererCache.Store(key, renderer)
 	return renderer, nil
 }
 
-func markdownStyleConfig() ansi.StyleConfig {
+func markdownRendererKey(width int, theme tuikit.Theme) string {
+	return strings.Join([]string{
+		stringValue(theme.CodeFg),
+		stringValue(theme.CodeBg),
+		stringValue(theme.CodeBlockFg),
+		stringValue(theme.CodeBlockBg),
+		stringValue(theme.LinkFg),
+	}, "|") + "|" + strconv.Itoa(width)
+}
+
+func markdownStyleConfig(theme tuikit.Theme) ansi.StyleConfig {
 	style := styles.DarkStyleConfig
 	// Keep headings readable, but hide Markdown heading markers.
 	style.H1.Prefix = ""
@@ -87,15 +100,25 @@ func markdownStyleConfig() ansi.StyleConfig {
 	style.Enumeration.Color = nil
 	style.Item.Color = nil
 	// Reduce code background flashing during streaming rerenders.
-	style.Code.BackgroundColor = nil
-	style.Code.Color = stringPtr("#f5c451")
-	style.CodeBlock.BackgroundColor = nil
-	style.CodeBlock.Color = stringPtr("#d4d4d8")
+	style.Document.BackgroundColor = stringPtr(stringValue(theme.AppBg))
+	style.Link.Underline = boolPtr(true)
+	style.Link.Color = stringPtr(stringValue(theme.LinkFg))
+	style.LinkText.Underline = boolPtr(true)
+	style.LinkText.Color = stringPtr(stringValue(theme.LinkFg))
+	style.Code.BackgroundColor = stringPtr(stringValue(theme.CodeBg))
+	style.Code.Color = stringPtr(stringValue(theme.CodeFg))
+	style.CodeBlock.BackgroundColor = stringPtr(stringValue(theme.CodeBlockBg))
+	style.CodeBlock.Color = stringPtr(stringValue(theme.CodeBlockFg))
 	if style.CodeBlock.Chroma == nil {
 		style.CodeBlock.Chroma = &ansi.Chroma{}
 	}
-	style.CodeBlock.Chroma.Background.BackgroundColor = nil
-	style.CodeBlock.Chroma.Background.Color = stringPtr("#d4d4d8")
+	style.CodeBlock.Chroma.Text = ansi.StylePrimitive{
+		Color: stringPtr(stringValue(theme.CodeBlockFg)),
+	}
+	style.CodeBlock.Chroma.Background = ansi.StylePrimitive{
+		BackgroundColor: stringPtr(stringValue(theme.CodeBlockBg)),
+		Color:           stringPtr(stringValue(theme.CodeBlockFg)),
+	}
 	return style
 }
 
@@ -216,5 +239,16 @@ func isInlineMathBody(body string) bool {
 }
 
 func stringPtr(value string) *string {
+	return &value
+}
+
+func stringValue(color interface{}) string {
+	if value, ok := color.(interface{ String() string }); ok {
+		return value.String()
+	}
+	return ""
+}
+
+func boolPtr(value bool) *bool {
 	return &value
 }

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.0.18 - 2026-03-11
+
+### CLI, TUI & Interaction
+- Refreshed the Bubble Tea console with updated theming, markdown/code styling, prompt overlays, palette animation, viewport scrollbars, and improved multi-line input rendering.
+- Added delegated child-session previews in the TUI plus friendlier `BASH` / `DELEGATE` / `TASK` summaries, approval prompts, and task wait messaging.
+- Expanded console and TUI coverage for stream ordering, approvals, task summaries, palette/input behavior, and line-editor interactions.
+
+### Runtime, Delegation & Session Streaming
+- Added raw `sessionstream` plumbing so delegated child runs can project live session events back into the parent UI with preserved lineage metadata.
+- Reworked subagent and task-manager handling around attached/detached child contexts, delegate inspection, persisted task snapshots, and session-backed delegate previews.
+- Added delegate metadata helpers plus improved runtime/test coverage for child lineage, session streaming, and task lifecycle reporting.
+
+### Safety, Execution & Task Semantics
+- Introduced centralized dangerous-command detection shared by session mode and command-policy preflight checks, including wrapper-aware handling for commands invoked through `env`, `sudo`, and `time`.
+- Tightened shell/task execution semantics around bounded default waits for `BASH`, `DELEGATE`, and `TASK`, and aligned `TASK` wording around returning refreshed task snapshots.
+- Added text sanitization and command-safety test coverage to lock in the new preflight checks and CLI rendering behavior.
+
 ## v0.0.17 - 2026-03-10
 
 ### CLI, TUI & Model UX

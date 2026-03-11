@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
@@ -310,7 +311,7 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 			case model.RoleUser:
 				switch last.TextContent() {
 				case "delegate please":
-					args, _ := json.Marshal(map[string]any{"task": "child task", "yield_time_ms": -1})
+					args, _ := json.Marshal(map[string]any{"task": "child task", "yield_time_ms": 0})
 					return &model.Response{
 						Message: model.Message{
 							Role: model.RoleAssistant,
@@ -343,8 +344,14 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 		},
 	}
 
-	var parentEvents []*session.Event
-	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+	var (
+		parentEvents []*session.Event
+		liveUpdates  []sessionstream.Update
+	)
+	runCtx := sessionstream.WithStreamer(context.Background(), sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		liveUpdates = append(liveUpdates, update)
+	}))
+	for ev, runErr := range rt.Run(runCtx, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "parent-session",
@@ -383,9 +390,20 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 		t.Fatalf("expected delegated child session id without embedded parent path, got %q", childSessionID)
 	}
 
-	childStored, err := store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: childSessionID})
-	if err != nil {
-		t.Fatal(err)
+	var childStored []*session.Event
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		childStored, err = store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: childSessionID})
+		if err == nil && len(childStored) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if len(childStored) < 2 {
 		t.Fatalf("expected child session events, got %d", len(childStored))
@@ -406,6 +424,19 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 		if strings.TrimSpace(asStringValue(ev.Meta[metaDelegationID])) == "" {
 			t.Fatalf("expected delegation_id metadata, got %+v", ev.Meta)
 		}
+	}
+	var sawLiveChild bool
+	for _, update := range liveUpdates {
+		if update.Event == nil || strings.TrimSpace(update.SessionID) != childSessionID {
+			continue
+		}
+		if got := update.Event.Meta[metaParentToolCall]; got != "call_delegate_1" {
+			t.Fatalf("expected raw child update to preserve parent tool call metadata, got %+v", update.Event.Meta)
+		}
+		sawLiveChild = true
+	}
+	if !sawLiveChild {
+		t.Fatal("expected raw sessionstream updates for delegated child session")
 	}
 }
 
@@ -452,22 +483,27 @@ func TestRuntime_BuildInvocationContext_DisablesDelegateForChildRuns(t *testing.
 	}
 }
 
-func TestDetachSubagentContext_FiltersNestedTaskStreams(t *testing.T) {
-	var seen []taskstream.Event
+func TestDetachSubagentContext_DoesNotInheritTaskStreamer(t *testing.T) {
 	streamer := taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
-		seen = append(seen, ev)
+		t.Fatalf("did not expect detached delegated context to inherit task streamer: %+v", ev)
 	})
 	ctx := taskstream.WithStreamer(context.Background(), streamer)
 	detached := detachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1"})
 
-	taskstream.Emit(detached, taskstream.Event{Label: "BASH", Stream: "stdout", Chunk: "hidden"})
-	taskstream.Emit(detached, taskstream.Event{Label: "DELEGATE", Stream: "assistant", Chunk: "visible"})
-
-	if len(seen) != 1 {
-		t.Fatalf("expected only delegated task stream to survive, got %+v", seen)
+	if _, ok := taskstream.StreamerFromContext(detached); ok {
+		t.Fatal("expected detached delegated context to omit task streamer")
 	}
-	if seen[0].Label != "DELEGATE" || seen[0].Chunk != "visible" {
-		t.Fatalf("unexpected delegated task stream events: %+v", seen)
+}
+
+func TestAttachSubagentContext_DoesNotInheritTaskStreamer(t *testing.T) {
+	streamer := taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
+		t.Fatalf("did not expect attached delegated context to inherit task streamer: %+v", ev)
+	})
+	ctx := taskstream.WithStreamer(context.Background(), streamer)
+	attached := attachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1", TaskID: "t-parent"})
+
+	if _, ok := taskstream.StreamerFromContext(attached); ok {
+		t.Fatal("expected attached delegated context to omit task streamer")
 	}
 }
 
@@ -493,6 +529,86 @@ func TestDetachSubagentContext_DoesNotInheritOutputStreamer(t *testing.T) {
 
 	if _, ok := toolexec.OutputStreamerFromContext(detached); ok {
 		t.Fatal("expected delegated context to omit output streamer")
+	}
+}
+
+func TestAttachSubagentContext_DoesNotInheritOutputStreamer(t *testing.T) {
+	streamer := toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
+		t.Fatalf("did not expect delegated context to inherit output streamer: %+v", chunk)
+	})
+	ctx := toolexec.WithOutputStreamer(context.Background(), streamer)
+	attached := attachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1"})
+
+	if _, ok := toolexec.OutputStreamerFromContext(attached); ok {
+		t.Fatal("expected attached delegated context to omit output streamer")
+	}
+}
+
+func TestDetachSubagentContext_DoesNotRerouteOutputStreamer(t *testing.T) {
+	var seen []taskstream.Event
+	streamer := taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
+		seen = append(seen, ev)
+	})
+	ctx := taskstream.WithStreamer(context.Background(), streamer)
+	ctx = toolexec.WithOutputStreamer(ctx, toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
+		t.Fatalf("did not expect original output streamer to be used directly: %+v", chunk)
+	}))
+	detached := detachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1", TaskID: "t-parent"})
+
+	if _, ok := toolexec.OutputStreamerFromContext(detached); ok {
+		t.Fatal("expected delegated context to omit output streamer")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("did not expect delegated output reroute events, got %+v", seen)
+	}
+}
+
+func TestAttachSubagentContext_DoesNotRerouteOutputStreamer(t *testing.T) {
+	var seen []taskstream.Event
+	streamer := taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
+		seen = append(seen, ev)
+	})
+	ctx := taskstream.WithStreamer(context.Background(), streamer)
+	ctx = toolexec.WithOutputStreamer(ctx, toolexec.OutputStreamerFunc(func(_ context.Context, chunk toolexec.OutputChunk) {
+		t.Fatalf("did not expect original output streamer to be used directly: %+v", chunk)
+	}))
+	attached := attachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1", TaskID: "t-parent"})
+
+	if _, ok := toolexec.OutputStreamerFromContext(attached); ok {
+		t.Fatal("expected attached delegated context to omit output streamer")
+	}
+	if len(seen) != 0 {
+		t.Fatalf("did not expect delegated output reroute events, got %+v", seen)
+	}
+}
+
+func TestDetachSubagentContext_InheritsSessionEventStreamer(t *testing.T) {
+	var seen []sessionstream.Update
+	streamer := sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		seen = append(seen, update)
+	})
+	ctx := sessionstream.WithStreamer(context.Background(), streamer)
+	detached := detachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1"})
+
+	sessionstream.Emit(detached, "child-session", &session.Event{SessionID: "child-session"})
+
+	if len(seen) != 1 || seen[0].SessionID != "child-session" {
+		t.Fatalf("expected detached delegated context to preserve raw sessionstream, got %+v", seen)
+	}
+}
+
+func TestAttachSubagentContext_InheritsSessionEventStreamer(t *testing.T) {
+	var seen []sessionstream.Update
+	streamer := sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		seen = append(seen, update)
+	})
+	ctx := sessionstream.WithStreamer(context.Background(), streamer)
+	attached := attachSubagentContext(ctx, delegationLineage{DelegationID: "dlg-1", TaskID: "t-parent"})
+
+	sessionstream.Emit(attached, "child-session", &session.Event{SessionID: "child-session"})
+
+	if len(seen) != 1 || seen[0].SessionID != "child-session" {
+		t.Fatalf("expected attached delegated context to preserve raw sessionstream, got %+v", seen)
 	}
 }
 

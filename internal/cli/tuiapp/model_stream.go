@@ -55,11 +55,7 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 	}
 
 	m.syncViewportContent()
-	return m, nil
-}
-
-func (m *Model) handleAssistantStream(text string, final bool) (tea.Model, tea.Cmd) {
-	return m.handleStreamBlock("answer", text, final)
+	return m, m.maybeStartClosingToolOutputFades()
 }
 
 func (m *Model) finalizeAssistantBlock() {
@@ -79,10 +75,6 @@ func (m *Model) discardActiveAssistantStream() {
 	m.discardAssistantBlock(first)
 	m.discardAssistantBlock(second)
 	m.syncViewportContent()
-}
-
-func (m *Model) handleReasoningStream(text string, final bool) (tea.Model, tea.Cmd) {
-	return m.handleStreamBlock("reasoning", text, final)
 }
 
 func normalizeStreamKind(kind string) string {
@@ -126,7 +118,7 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 			m.refreshHistoryTailState()
 			m.syncViewportContent()
 		}
-		return m, nil
+		return m, m.maybeStartClosingToolOutputFades()
 	}
 	if *activeBlock == nil {
 		start := len(m.historyLines)
@@ -150,7 +142,7 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 			}
 		}
 		m.syncViewportContent()
-		return m, nil
+		return m, m.maybeStartClosingToolOutputFades()
 	}
 	block := *activeBlock
 	block.raw = mergeStreamChunk(block.raw, text, final)
@@ -169,7 +161,7 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 	m.lastCommittedStyle = blockStyle
 	m.lastCommittedRaw = blockMarker
 	m.syncViewportContent()
-	return m, nil
+	return m, m.maybeStartClosingToolOutputFades()
 }
 
 func mergeStreamChunk(existing string, incoming string, final bool) string {
@@ -246,7 +238,7 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.syncViewportContent()
-	return m, nil
+	return m, m.maybeStartClosingToolOutputFades()
 }
 
 func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea.Cmd) {
@@ -261,8 +253,11 @@ func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea
 	}
 	if msg.Final {
 		if strings.EqualFold(strings.TrimSpace(panel.tool), "BASH") {
-			m.finalizeBashToolOutputBlock(panel)
-			return m, nil
+			cmd := m.beginFinalizeBashToolOutputBlock(panel)
+			if cmd == nil {
+				cmd = m.maybeStartClosingToolOutputFades()
+			}
+			return m, cmd
 		}
 		panel.active = false
 		return m, nil
@@ -316,6 +311,8 @@ func (m *Model) ensureToolOutputPanel(key, toolName, callID string, reset bool) 
 			panel.callID = strings.TrimSpace(callID)
 		}
 	}
+	panel.closing = false
+	panel.fadeStep = 0
 	return panel
 }
 
@@ -406,12 +403,27 @@ func (m *Model) currentToolOutputLines(panel *toolOutputState) []toolOutputLine 
 	}
 	content = filtered
 	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-		return prioritizeDelegatePreviewLines(content, toolOutputPreviewLines)
+		content = prioritizeDelegatePreviewLines(content, toolOutputPreviewLines)
+		return m.applyClosingToolOutputWindow(panel, content)
 	}
 	if len(content) > toolOutputPreviewLines {
 		content = content[len(content)-toolOutputPreviewLines:]
 	}
-	return content
+	return m.applyClosingToolOutputWindow(panel, content)
+}
+
+func (m *Model) applyClosingToolOutputWindow(panel *toolOutputState, content []toolOutputLine) []toolOutputLine {
+	if panel == nil || !panel.closing || panel.fadeStep <= 0 || len(content) == 0 {
+		return content
+	}
+	visible := len(content) - panel.fadeStep
+	if visible <= 0 {
+		return nil
+	}
+	if visible >= len(content) {
+		return content
+	}
+	return content[len(content)-visible:]
 }
 
 func (m *Model) renderToolOutputBlockLines(panel *toolOutputState, content []toolOutputLine) []string {
@@ -434,8 +446,9 @@ func (m *Model) renderToolOutputBlockLines(panel *toolOutputState, content []too
 	}
 	boxStyle := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.PanelBorder).
+		BorderForeground(m.toolOutputBorderColor(panel)).
 		Padding(0, 1).
+		Faint(panel != nil && panel.closing).
 		Width(panelInnerWidth)
 	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
 }
@@ -456,46 +469,73 @@ func (m *Model) syncAnchoredToolOutputBlock(panel *toolOutputState) {
 	m.syncViewportContent()
 }
 
+func (m *Model) beginFinalizeBashToolOutputBlock(panel *toolOutputState) tea.Cmd {
+	if panel == nil {
+		return nil
+	}
+	content := m.currentToolOutputLines(panel)
+	if len(content) == 0 {
+		m.finalizeBashToolOutputBlock(panel)
+		return nil
+	}
+	panel.active = false
+	panel.closing = true
+	panel.fadeStep = 0
+	panel.fadeQueued = false
+	panel.fadeLineCount = len(content)
+	m.syncAnchoredToolOutputBlock(panel)
+	return nil
+}
+
 func (m *Model) finalizeBashToolOutputBlock(panel *toolOutputState) {
 	if panel == nil {
 		return
 	}
-	content := m.currentToolOutputLines(panel)
-	lines := m.renderFinalToolOutputHistoryLines(panel, content)
 	oldLen := panel.end - panel.start
-	m.replaceHistoryRange(panel.start, panel.end, lines)
-	newEnd := panel.start + len(lines)
-	delta := len(lines) - oldLen
+	m.replaceHistoryRange(panel.start, panel.end, nil)
+	delta := -oldLen
 	delete(m.toolOutputs, panel.key)
 	if delta != 0 {
-		m.shiftAnchoredBlocks(newEnd-delta, delta, panel.key)
+		m.shiftAnchoredBlocks(panel.end, delta, panel.key)
 	}
 	m.refreshHistoryTailState()
 	m.syncViewportContent()
 }
 
-func (m *Model) renderFinalToolOutputHistoryLines(panel *toolOutputState, content []toolOutputLine) []string {
-	if panel == nil || len(content) == 0 {
+func toolOutputFadeCmd(key string, step int, after time.Duration) tea.Cmd {
+	key = strings.TrimSpace(key)
+	if key == "" || step <= 0 || after <= 0 {
 		return nil
 	}
-	lines := make([]string, 0, len(content))
-	for _, line := range content {
-		text := strings.TrimSpace(line.text)
-		if text == "" {
-			continue
-		}
-		prefix := "  "
-		if strings.EqualFold(strings.TrimSpace(line.stream), "stderr") {
-			lines = append(lines, m.theme.ErrorStyle().Render(prefix+text))
-			continue
-		}
-		lines = append(lines, tuikit.ColorizeLogLine(prefix+text, tuikit.LineStyleDefault, m.theme))
+	return tea.Tick(after, func(time.Time) tea.Msg {
+		return toolOutputFadeMsg{key: key, step: step}
+	})
+}
+
+func (m *Model) handleToolOutputFadeMsg(msg toolOutputFadeMsg) (tea.Model, tea.Cmd) {
+	if m == nil || m.toolOutputs == nil {
+		return m, nil
 	}
-	return lines
+	panel, ok := m.toolOutputs[strings.TrimSpace(msg.key)]
+	if !ok || panel == nil || !panel.closing {
+		return m, nil
+	}
+	panel.fadeQueued = false
+	if panel.fadeLineCount <= 0 {
+		panel.fadeLineCount = len(m.currentToolOutputLines(panel))
+	}
+	if msg.step >= panel.fadeLineCount {
+		m.finalizeBashToolOutputBlock(panel)
+		return m, nil
+	}
+	panel.fadeStep = msg.step
+	m.syncAnchoredToolOutputBlock(panel)
+	panel.fadeQueued = true
+	return m, toolOutputFadeCmd(panel.key, msg.step+1, toolOutputFadeInterval)
 }
 
 func (m *Model) renderToolOutputLine(panel *toolOutputState, line toolOutputLine) (text string, prefix string, style lipgloss.Style) {
-	text = strings.TrimSpace(line.text)
+	text = tuikit.LinkifyText(strings.TrimSpace(line.text), m.theme.LinkStyle())
 	prefix = "  "
 	style = lipgloss.NewStyle().Foreground(m.theme.TextPrimary)
 	stream := strings.ToLower(strings.TrimSpace(line.stream))
@@ -510,7 +550,81 @@ func (m *Model) renderToolOutputLine(panel *toolOutputState, line toolOutputLine
 			return text, "  ", m.theme.AssistantStyle()
 		}
 	}
+	style = m.applyToolOutputFadeStyle(panel, style)
 	return text, prefix, style
+}
+
+func (m *Model) applyToolOutputFadeStyle(panel *toolOutputState, style lipgloss.Style) lipgloss.Style {
+	if panel == nil || !panel.closing {
+		return style
+	}
+	style = style.Faint(true)
+	if panel.fadeStep > 0 {
+		style = style.Foreground(m.theme.TextSecondary)
+	}
+	return style
+}
+
+func (m *Model) toolOutputBorderColor(panel *toolOutputState) lipgloss.TerminalColor {
+	if panel == nil || !panel.closing {
+		return m.theme.PanelBorder
+	}
+	return m.theme.TextSecondary
+}
+
+func (m *Model) maybeStartClosingToolOutputFades() tea.Cmd {
+	if m == nil || len(m.toolOutputs) == 0 {
+		return nil
+	}
+	cmds := make([]tea.Cmd, 0, len(m.toolOutputs))
+	for _, panel := range m.toolOutputs {
+		if panel == nil || !panel.closing || panel.fadeQueued || panel.fadeStep > 0 {
+			continue
+		}
+		if !m.hasMeaningfulContentBelow(panel) {
+			continue
+		}
+		panel.fadeQueued = true
+		cmds = append(cmds, toolOutputFadeCmd(panel.key, 1, toolOutputFadeHold))
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) hasMeaningfulContentBelow(panel *toolOutputState) bool {
+	if panel == nil || panel.end >= len(m.historyLines) {
+		return false
+	}
+	for _, line := range m.historyLines[panel.end:] {
+		raw := strings.TrimSpace(ansi.Strip(line))
+		if raw == "" {
+			continue
+		}
+		if isDividerLike(raw) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isDividerLike(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return true
+	}
+	for _, r := range text {
+		switch {
+		case r == '─' || r == ' ':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == ':' || r == 'm' || r == 's':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func prioritizeDelegatePreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
@@ -588,11 +702,11 @@ func (m *Model) shiftAnchoredBlocks(threshold, delta int, skipKey string) {
 func (m *Model) renderAssistantBlockLines(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
 	isMarkdown := looksLikeMarkdown(trimmed)
-	rendered := renderAssistantMarkdown(trimmed, maxInt(20, m.viewport.Width))
+	rendered := renderAssistantMarkdown(trimmed, maxInt(20, m.viewport.Width), m.theme)
 	if rendered == "" {
 		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
 	}
-	lines := strings.Split(rendered, "\n")
+	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
 	if len(lines) > 0 {
 		lines[0] = tuikit.ColorizeLogLine("* "+lines[0], tuikit.LineStyleAssistant, m.theme)
 	}
@@ -604,6 +718,16 @@ func (m *Model) renderAssistantBlockLines(raw string) []string {
 			continue
 		}
 		lines[i] = tuikit.ColorizeLogLine(lines[i], tuikit.LineStyleAssistant, m.theme)
+	}
+	return lines
+}
+
+func trimLeadingBlankLines(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+		lines = lines[1:]
+	}
+	if len(lines) == 0 {
+		return []string{""}
 	}
 	return lines
 }
@@ -814,8 +938,4 @@ func (m *Model) flushStream() {
 	}
 	m.commitLine(m.streamLine)
 	m.streamLine = ""
-}
-
-func isToolCallLine(line string) bool {
-	return strings.HasPrefix(strings.TrimSpace(line), "▸ ")
 }

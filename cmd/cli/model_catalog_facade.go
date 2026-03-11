@@ -27,10 +27,6 @@ func lookupSuggestedCatalogModelCapabilities(provider, modelName string) (modelc
 	return modelcatalog.LookupSuggestedModelCapabilities(provider, modelName)
 }
 
-func listProviderCatalogModels(provider string) []string {
-	return modelcatalog.ListCatalogModels(provider)
-}
-
 func defaultCatalogReasoningEffort(provider, modelName string) string {
 	return modelcatalog.DefaultReasoningEffortForModel(provider, modelName)
 }

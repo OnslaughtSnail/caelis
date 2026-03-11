@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	kernelpolicy "github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/skills"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
@@ -90,6 +90,7 @@ type cliConsole struct {
 	pendingAttachments  []model.ContentPart
 	pendingAttachmentMu sync.Mutex
 	tuiSender           interface{ Send(msg any) } // set in TUI mode for hint updates
+	delegatePreviewer   *delegatePreviewProjector
 	connectModelCacheMu sync.Mutex
 	connectModelCache   map[string]connectModelCacheEntry
 }
@@ -167,6 +168,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		tuiDiag:               cfg.TUIDiagnostics,
 		imageCache:            image.NewCache(32),
 		connectModelCache:     map[string]connectModelCacheEntry{},
+		delegatePreviewer:     newDelegatePreviewProjector(),
 		editor:                editor,
 		prompter:              editor,
 		out:                   out,
@@ -247,88 +249,6 @@ func (c *cliConsole) loop() error {
 		return c.loopTUITea()
 	default:
 		return fmt.Errorf("unsupported ui mode %q", c.uiMode)
-	}
-}
-
-func (c *cliConsole) loopLine() error {
-	if c.editor == nil {
-		return fmt.Errorf("line editor is not available")
-	}
-	for _, line := range c.startupLines() {
-		c.printf("%s\n", line)
-	}
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, os.Interrupt)
-	exitCh := make(chan struct{}, 1)
-	stopSignals := make(chan struct{})
-	go c.handleInterruptSignals(sigCh, exitCh, stopSignals)
-	defer func() {
-		close(stopSignals)
-		signal.Stop(sigCh)
-		if c.editor != nil {
-			_ = c.editor.Close()
-		}
-		if closeErr := toolexec.Close(c.execRuntime); closeErr != nil {
-			c.printf("warn: close execution runtime failed: %v\n", closeErr)
-		}
-	}()
-	for {
-		select {
-		case <-exitCh:
-			c.printf("\n")
-			return nil
-		default:
-		}
-		line, err := c.editor.ReadLine("> ")
-		if err != nil {
-			if errors.Is(err, errInputInterrupt) {
-				if c.registerInterruptAndShouldExit() {
-					c.printf("\n")
-					return nil
-				}
-				c.printf("\n")
-				continue
-			}
-			if errors.Is(err, errInputEOF) {
-				c.printf("\n")
-				return nil
-			}
-			return err
-		}
-		if line == "" {
-			c.resetInterruptWindow()
-			continue
-		}
-		c.resetInterruptWindow()
-		if strings.HasPrefix(line, "/") {
-			exitNow, err := c.handleSlash(line)
-			if err != nil {
-				c.ui.Error("%v\n", err)
-			}
-			if exitNow {
-				return nil
-			}
-			continue
-		}
-		if err := c.runPrompt(line); err != nil {
-			if errors.Is(err, context.Canceled) {
-				continue
-			}
-			c.ui.Error("%v\n", err)
-		}
-	}
-}
-
-func (c *cliConsole) startupLines() []string {
-	versionText := strings.TrimSpace(c.version)
-	if versionText == "" {
-		versionText = "unknown"
-	}
-	return []string{
-		fmt.Sprintf("Caelis %s", versionText),
-		fmt.Sprintf("Workspace  %s", strings.TrimSpace(c.workspace.CWD)),
-		"Commands   /help  /resume  /new",
-		"Tip        Type your message and press Enter",
 	}
 }
 
@@ -463,6 +383,9 @@ func (c *cliConsole) runPrompt(input string) error {
 				Stream: chunk.Stream,
 				Chunk:  chunk.Text,
 			})
+		}))
+		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+			c.forwardSessionEventToTUI(c.sessionID, update)
 		}))
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -775,12 +698,6 @@ func (c *cliConsole) registerInterruptAndShouldExit() bool {
 	shouldExit := !c.lastInterruptAt.IsZero() && now.Sub(c.lastInterruptAt) <= interruptExitWindow
 	c.lastInterruptAt = now
 	return shouldExit
-}
-
-func (c *cliConsole) resetInterruptWindow() {
-	c.interruptMu.Lock()
-	defer c.interruptMu.Unlock()
-	c.lastInterruptAt = time.Time{}
 }
 
 func handleHelp(c *cliConsole, args []string) (bool, error) {
@@ -1792,14 +1709,11 @@ func (a *terminalApprover) renderCommandApprovalRequest(req toolexec.ApprovalReq
 		return
 	}
 	a.ui.ApprovalTitle(commandApprovalTitle())
-	if reason := strings.TrimSpace(req.Reason); reason != "" {
+	if label, value := commandApprovalSummary(req); label != "" && value != "" {
+		a.ui.ApprovalMeta(label, value)
+	}
+	if reason := approvalReasonText(req.Reason); reason != "" {
 		a.ui.ApprovalMeta("Reason", reason)
-	}
-	if rule := commandPermissionText(req); rule != "" {
-		a.ui.ApprovalMeta("Permission", rule)
-	}
-	if command := strings.TrimSpace(req.Command); command != "" {
-		a.ui.ApprovalCommand(command)
 	}
 }
 
@@ -1808,45 +1722,38 @@ func (a *terminalApprover) renderToolAuthorizationRequest(req kernelpolicy.ToolA
 		return
 	}
 	a.ui.ApprovalTitle(toolAuthorizationTitle(req))
-	a.ui.ApprovalMeta("Tool", strings.TrimSpace(req.ToolName))
-	a.ui.ApprovalMeta("Permission", toolAuthorizationPermission(req))
-	if path := strings.TrimSpace(req.Path); path != "" {
-		a.ui.ApprovalPath(path)
-	} else if target := strings.TrimSpace(req.Target); target != "" {
-		a.ui.ApprovalMeta("Target", target)
+	if label, value := toolAuthorizationSummary(req); label != "" && value != "" {
+		a.ui.ApprovalMeta(label, value)
 	}
-	if reason := strings.TrimSpace(req.Reason); reason != "" {
+	if reason := approvalReasonText(req.Reason); reason != "" {
 		a.ui.ApprovalMeta("Reason", reason)
-	}
-	if preview := strings.TrimSpace(req.Preview); preview != "" && strings.TrimSpace(req.Path) == "" {
-		a.ui.ApprovalMeta("Request", preview)
 	}
 }
 
 func approvalChoicesForSessionKey(sessionKey string) []tuievents.PromptChoice {
 	choices := []tuievents.PromptChoice{
-		{Label: "proceed", Value: "y", Detail: "just this once"},
+		{Label: "approve", Value: "y", Detail: "this time"},
 	}
 	if sessionKey != "" {
 		choices = append(choices, tuievents.PromptChoice{
-			Label:  "session",
+			Label:  "always",
 			Value:  "a",
-			Detail: "don't ask again for: " + sessionKey,
+			Detail: "remember " + compactApprovalScope(sessionKey),
 		})
 	}
 	choices = append(choices, tuievents.PromptChoice{
-		Label:  "cancel",
+		Label:  "reject",
 		Value:  "n",
-		Detail: "continue without it",
+		Detail: "skip it",
 	})
 	return choices
 }
 
 func toolAuthorizationChoices(scopeKey string) []tuievents.PromptChoice {
 	return []tuievents.PromptChoice{
-		{Label: "proceed", Value: "y", Detail: "just this once"},
-		{Label: "session", Value: "a", Detail: "don't ask again for: " + scopeKey},
-		{Label: "cancel", Value: "n", Detail: "don't allow"},
+		{Label: "approve", Value: "y", Detail: "this time"},
+		{Label: "always", Value: "a", Detail: "remember " + compactApprovalScope(scopeKey)},
+		{Label: "reject", Value: "n", Detail: "skip it"},
 	}
 }
 
@@ -1862,28 +1769,6 @@ func toolAuthorizationTitle(req kernelpolicy.ToolAuthorizationRequest) string {
 		return "Would you like to call the following external tool?"
 	}
 	return "Would you like to authorize the following tool?"
-}
-
-func toolAuthorizationPermission(req kernelpolicy.ToolAuthorizationRequest) string {
-	if value := strings.TrimSpace(req.Permission); value != "" {
-		return value
-	}
-	if strings.TrimSpace(req.Path) != "" {
-		return "write outside workspace writable roots"
-	}
-	return "tool authorization"
-}
-
-func commandPermissionText(req toolexec.ApprovalRequest) string {
-	reason := strings.ToLower(strings.TrimSpace(req.Reason))
-	switch {
-	case strings.Contains(reason, "require_escalated"):
-		return "host command execution outside sandbox"
-	case strings.TrimSpace(req.Action) != "":
-		return strings.ReplaceAll(strings.TrimSpace(req.Action), "_", " ")
-	default:
-		return ""
-	}
 }
 
 func (a *terminalApprover) emitCommandApprovalOutcome(req toolexec.ApprovalRequest, sessionKey string, decision string) {
@@ -1943,15 +1828,12 @@ func (a *terminalApprover) usesStructuredPrompts() bool {
 }
 
 func commandApprovalPromptRequest(req toolexec.ApprovalRequest, sessionKey string) tuievents.PromptRequestMsg {
-	details := make([]tuievents.PromptDetail, 0, 3)
-	if reason := strings.TrimSpace(req.Reason); reason != "" {
+	details := make([]tuievents.PromptDetail, 0, 2)
+	if label, value := commandApprovalSummary(req); label != "" && value != "" {
+		details = append(details, tuievents.PromptDetail{Label: label, Value: value, Emphasis: true})
+	}
+	if reason := approvalReasonText(req.Reason); reason != "" {
 		details = append(details, tuievents.PromptDetail{Label: "Reason", Value: reason})
-	}
-	if rule := commandPermissionText(req); rule != "" {
-		details = append(details, tuievents.PromptDetail{Label: "Permission", Value: rule})
-	}
-	if command := strings.TrimSpace(req.Command); command != "" {
-		details = append(details, tuievents.PromptDetail{Label: "Command", Value: "$ " + command, Emphasis: true})
 	}
 	return tuievents.PromptRequestMsg{
 		Title:         commandApprovalTitle(),
@@ -1963,36 +1845,71 @@ func commandApprovalPromptRequest(req toolexec.ApprovalRequest, sessionKey strin
 }
 
 func toolAuthorizationPromptRequest(req kernelpolicy.ToolAuthorizationRequest, scopeKey string) tuievents.PromptRequestMsg {
-	details := []tuievents.PromptDetail{
-		{Label: "Tool", Value: strings.TrimSpace(req.ToolName)},
-		{Label: "Permission", Value: toolAuthorizationPermission(req)},
+	details := make([]tuievents.PromptDetail, 0, 2)
+	if label, value := toolAuthorizationSummary(req); label != "" && value != "" {
+		details = append(details, tuievents.PromptDetail{Label: label, Value: value, Emphasis: true})
 	}
-	if path := strings.TrimSpace(req.Path); path != "" {
-		details = append(details, tuievents.PromptDetail{Label: "Path", Value: path, Emphasis: true})
-	} else if target := strings.TrimSpace(req.Target); target != "" {
-		details = append(details, tuievents.PromptDetail{Label: "Target", Value: target, Emphasis: true})
-	}
-	if reason := strings.TrimSpace(req.Reason); reason != "" {
+	if reason := approvalReasonText(req.Reason); reason != "" {
 		details = append(details, tuievents.PromptDetail{Label: "Reason", Value: reason})
-	}
-	if preview := strings.TrimSpace(req.Preview); preview != "" && strings.TrimSpace(req.Path) == "" {
-		details = append(details, tuievents.PromptDetail{Label: "Request", Value: preview})
-	}
-	filtered := make([]tuievents.PromptDetail, 0, len(details))
-	for _, detail := range details {
-		if strings.TrimSpace(detail.Label) == "" || strings.TrimSpace(detail.Value) == "" {
-			continue
-		}
-		filtered = append(filtered, detail)
 	}
 	title := toolAuthorizationTitle(req)
 	return tuievents.PromptRequestMsg{
 		Title:         title,
 		Prompt:        title,
-		Details:       filtered,
+		Details:       details,
 		Choices:       toolAuthorizationChoices(scopeKey),
 		DefaultChoice: "y",
 	}
+}
+
+func approvalReasonText(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	lower := strings.ToLower(reason)
+	switch lower {
+	case "require_escalated requested":
+		return ""
+	default:
+		return reason
+	}
+}
+
+func commandApprovalSummary(req toolexec.ApprovalRequest) (label string, value string) {
+	label = strings.ToUpper(strings.TrimSpace(req.ToolName))
+	if label == "" {
+		label = "COMMAND"
+	}
+	value = strings.TrimSpace(req.Command)
+	if value != "" {
+		return label, value
+	}
+	if action := strings.TrimSpace(req.Action); action != "" {
+		return label, strings.ReplaceAll(action, "_", " ")
+	}
+	return "", ""
+}
+
+func toolAuthorizationSummary(req kernelpolicy.ToolAuthorizationRequest) (label string, value string) {
+	label = strings.ToUpper(strings.TrimSpace(req.ToolName))
+	if label == "" {
+		label = "TOOL"
+	}
+	switch {
+	case strings.TrimSpace(req.Path) != "":
+		value = strings.TrimSpace(req.Path)
+	case strings.TrimSpace(req.Target) != "":
+		value = strings.TrimSpace(req.Target)
+	case strings.TrimSpace(req.Preview) != "":
+		value = strings.TrimSpace(req.Preview)
+	default:
+		value = approvalReasonText(req.Reason)
+	}
+	if value == "" {
+		return "", ""
+	}
+	return label, value
 }
 
 func toolApprovalOutcomeTarget(req kernelpolicy.ToolAuthorizationRequest) string {
@@ -2008,6 +1925,14 @@ func toolApprovalOutcomeTarget(req kernelpolicy.ToolAuthorizationRequest) string
 		return "tool " + shortApprovalTarget(req.ToolName)
 	}
 	return "this tool request"
+}
+
+func compactApprovalScope(scope string) string {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return "this"
+	}
+	return truncateInline(scope, 24)
 }
 
 func shortApprovalTarget(text string) string {

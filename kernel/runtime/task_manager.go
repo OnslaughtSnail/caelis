@@ -65,26 +65,26 @@ func (m *runtimeTaskManager) persistRecord(ctx context.Context, record *task.Rec
 		return nil
 	}
 	var entry *task.Entry
-		record.WithLock(func(one *task.Record) {
-			entry = &task.Entry{
-				TaskID:         one.ID,
-				Kind:           one.Kind,
-				Session:        one.Session,
+	record.WithLock(func(one *task.Record) {
+		entry = &task.Entry{
+			TaskID:         one.ID,
+			Kind:           one.Kind,
+			Session:        one.Session,
 			Title:          one.Title,
 			State:          one.State,
 			Running:        one.Running,
 			SupportsInput:  one.SupportsInput,
-				SupportsCancel: one.SupportsCancel,
-				CreatedAt:      one.CreatedAt,
-				UpdatedAt:      one.UpdatedAt,
-				HeartbeatAt:    one.UpdatedAt,
-				StdoutCursor:   one.StdoutCursor,
-				StderrCursor:   one.StderrCursor,
-				EventCursor:    one.EventCursor,
-				Spec:           task.CloneEntry(&task.Entry{Spec: one.Spec}).Spec,
-				Result:         task.CloneEntry(&task.Entry{Result: one.Result}).Result,
-			}
-		})
+			SupportsCancel: one.SupportsCancel,
+			CreatedAt:      one.CreatedAt,
+			UpdatedAt:      one.UpdatedAt,
+			HeartbeatAt:    one.UpdatedAt,
+			StdoutCursor:   one.StdoutCursor,
+			StderrCursor:   one.StderrCursor,
+			EventCursor:    one.EventCursor,
+			Spec:           task.CloneEntry(&task.Entry{Spec: one.Spec}).Spec,
+			Result:         task.CloneEntry(&task.Entry{Result: one.Result}).Result,
+		}
+	})
 	if entry == nil {
 		return nil
 	}
@@ -199,7 +199,7 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 		return task.Snapshot{}, fmt.Errorf("task: bash command is required")
 	}
 	if req.Yield < 0 {
-		return task.Snapshot{}, fmt.Errorf("task: async bash requires yield_time_ms >= 0")
+		req.Yield = 0
 	}
 	asyncRunner, ok := asyncBashRunnerForRoute(m.execenv, strings.TrimSpace(req.Route))
 	if !ok || asyncRunner == nil {
@@ -255,25 +255,7 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 		return task.Snapshot{}, fmt.Errorf("task: delegate runtime is unavailable")
 	}
 	if req.Yield < 0 {
-		result, err := m.subagents.RunSubagent(ctx, delegation.RunRequest{Input: req.Task})
-		if err != nil {
-			return task.Snapshot{}, err
-		}
-		return task.Snapshot{
-			Kind:           task.KindDelegate,
-			Title:          req.Task,
-			State:          task.StateCompleted,
-			Running:        false,
-			SupportsInput:  false,
-			SupportsCancel: false,
-			Result: map[string]any{
-				"child_session_id": result.SessionID,
-				"delegation_id":    result.DelegationID,
-				"assistant":        result.Assistant,
-				"summary":          result.Assistant,
-				"state":            result.State,
-			},
-		}, nil
+		req.Yield = 0
 	}
 
 	childReq, lineage, err := m.subagents.prepareChildRun(ctx, delegation.RunRequest{Input: req.Task})
@@ -543,7 +525,7 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 		})
 		_ = persistControllerRecord(ctx, c.store, record)
 
-		if strings.TrimSpace(output.Stdout) != "" || strings.TrimSpace(output.Stderr) != "" || !snapshot.Running {
+		if !snapshot.Running {
 			return snapshot, nil
 		}
 		if deadline.IsZero() || time.Now().After(deadline) {
@@ -674,10 +656,6 @@ func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, 
 	if yield > 0 {
 		deadline = time.Now().Add(yield)
 	}
-	var baselineCursor int
-	record.WithLock(func(one *task.Record) {
-		baselineCursor = one.EventCursor
-	})
 	for {
 		select {
 		case <-ctx.Done():
@@ -688,11 +666,7 @@ func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, 
 		if err != nil {
 			return task.Snapshot{}, err
 		}
-		var advanced bool
-		record.WithLock(func(one *task.Record) {
-			advanced = one.EventCursor > baselineCursor
-		})
-		if advanced || !snapshot.Running {
+		if !snapshot.Running {
 			return snapshot, nil
 		}
 		if deadline.IsZero() || time.Now().After(deadline) {

@@ -262,7 +262,7 @@ func runACP(ctx context.Context, args []string) error {
 				Policies: resolved.Policies,
 				Close: func(closeCtx context.Context) error {
 					var firstErr error
-					if err := resolved.Close(closeCtx); err != nil && firstErr == nil {
+					if err := resolved.Close(closeCtx); err != nil {
 						firstErr = err
 					}
 					if manager != nil {

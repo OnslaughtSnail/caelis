@@ -142,7 +142,7 @@ func ColorizeLogLine(line string, style LineStyle, theme Theme) string {
 	case LineStyleAssistant:
 		return colorizeAssistantLine(line, theme)
 	case LineStyleReasoning:
-		return theme.ReasoningStyle().Render(line)
+		return theme.ReasoningStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleUser:
 		return colorizeUserLine(line, theme)
 	case LineStyleTool:
@@ -153,32 +153,32 @@ func ColorizeLogLine(line string, style LineStyle, theme Theme) string {
 		}
 		return colorizeWarnLine(line, theme)
 	case LineStyleError:
-		return theme.ErrorStyle().Render(line)
+		return theme.ErrorStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleNote:
-		return theme.NoteStyle().Render(line)
+		return theme.NoteStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleKeyValue:
 		return colorizeKeyValueLine(line, theme)
 	case LineStyleSection:
-		return theme.SectionStyle().Render(line)
+		return theme.SectionStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleDiffAdd:
-		return theme.DiffAddStyle().Render(line)
+		return theme.DiffAddStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleDiffRemove:
-		return theme.DiffRemoveStyle().Render(line)
+		return theme.DiffRemoveStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleDiffHeader:
-		return theme.DiffHeaderStyle().Render(line)
+		return theme.DiffHeaderStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	case LineStyleDiffHunk:
-		return theme.DiffHunkStyle().Render(line)
+		return theme.DiffHunkStyle().Render(LinkifyText(line, theme.LinkStyle()))
 	default:
-		return line
+		return LinkifyText(line, theme.LinkStyle())
 	}
 }
 
 func colorizeAssistantLine(line string, theme Theme) string {
 	if strings.HasPrefix(line, "* ") {
 		prefix := theme.AssistantStyle().Render("* ")
-		return prefix + line[len("* "):]
+		return prefix + LinkifyText(line[len("* "):], theme.LinkStyle())
 	}
-	return theme.AssistantStyle().Render(line)
+	return theme.AssistantStyle().Render(LinkifyText(line, theme.LinkStyle()))
 }
 
 func colorizeUserLine(line string, theme Theme) string {
@@ -189,7 +189,7 @@ func colorizeUserLine(line string, theme Theme) string {
 	if content == "" {
 		return theme.UserPrefixStyle().Render("> ")
 	}
-	styledBody := styleUserMentions(content, theme)
+	styledBody := styleUserMentions(LinkifyText(content, theme.LinkStyle()), theme)
 	return theme.UserPrefixStyle().Render("> ") + styledBody
 }
 
@@ -198,7 +198,7 @@ func colorizeWarnLine(line string, theme Theme) string {
 	if content == "" {
 		return theme.WarnStyle().Render("! ")
 	}
-	return theme.WarnStyle().Render("! ") + theme.TextStyle().Render(content)
+	return theme.WarnStyle().Render("! ") + theme.TextStyle().Render(LinkifyText(content, theme.LinkStyle()))
 }
 
 func styleUserMentions(text string, theme Theme) string {
@@ -251,7 +251,7 @@ func colorizeToolLine(line string, theme Theme) string {
 			toolName := parts[0]
 			suffix := ""
 			if len(parts) == 2 {
-				suffix = " " + lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(parts[1])
+				suffix = " " + lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(parts[1], theme.LinkStyle()))
 			}
 			return theme.ToolStyle().Render("▸ ") +
 				theme.ToolNameStyle().Render(toolName) +
@@ -268,7 +268,7 @@ func colorizeToolLine(line string, theme Theme) string {
 			toolName := parts[0]
 			suffix := ""
 			if len(parts) == 2 {
-				suffix = " " + parts[1]
+				suffix = " " + LinkifyText(parts[1], theme.LinkStyle())
 			}
 			return theme.ToolStyle().Render("✓ ") +
 				theme.AssistantStyle().Render(toolName) +
@@ -341,5 +341,5 @@ func colorizeWarnLineWithBang(line string, theme Theme) string {
 	if content == "" {
 		return theme.WarnStyle().Render("! ")
 	}
-	return theme.WarnStyle().Render("! ") + theme.TextStyle().Render(content)
+	return theme.WarnStyle().Render("! ") + theme.TextStyle().Render(LinkifyText(content, theme.LinkStyle()))
 }

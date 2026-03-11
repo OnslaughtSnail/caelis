@@ -97,7 +97,7 @@ func TestPermissionBridge_FullAccessBlocksDangerousCommands(t *testing.T) {
 	bridge := newPermissionBridge(nil, "session-1", func() string { return "full_access" })
 	allowed, err := bridge.Approve(context.Background(), toolexec.ApprovalRequest{
 		ToolName: "BASH",
-		Command:  "rm -rf /tmp/x",
+		Command:  "rm -rf /",
 	})
 	if allowed {
 		t.Fatal("expected dangerous command to be denied")

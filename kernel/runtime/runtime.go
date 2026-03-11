@@ -14,6 +14,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -97,13 +98,19 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		yieldWithStream := func(ev *session.Event, err error) bool {
+			if ev != nil {
+				sessionstream.Emit(ctx, ev.SessionID, ev)
+			}
+			return yield(ev, err)
+		}
 		if err := validateRunRequest(req); err != nil {
-			yield(nil, err)
+			yieldWithStream(nil, err)
 			return
 		}
 		leaseKey := runLeaseKey(req.AppName, req.UserID, req.SessionID)
 		if !r.acquireRunLease(leaseKey) {
-			yield(nil, &SessionBusyError{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID})
+			yieldWithStream(nil, &SessionBusyError{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID})
 			return
 		}
 		defer r.releaseRunLease(leaseKey)
@@ -113,16 +120,16 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			UserID:    req.UserID,
 			SessionID: req.SessionID,
 		}); err != nil {
-			yield(nil, err)
+			yieldWithStream(nil, err)
 			return
 		}
 
 		sess, err := r.store.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
 		if err != nil {
-			yield(nil, err)
+			yieldWithStream(nil, err)
 			return
 		}
-		if !r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusRunning, "run", nil, yield) {
+		if !r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusRunning, "run", nil, yieldWithStream) {
 			return
 		}
 		emitRunError := func(err error) bool {
@@ -130,13 +137,13 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 				return true
 			}
 			status := lifecycleStatusForError(err)
-			if !r.appendAndYieldLifecycle(ctx, sess, status, "run", err, yield) {
+			if !r.appendAndYieldLifecycle(ctx, sess, status, "run", err, yieldWithStream) {
 				return false
 			}
-			return yield(nil, err)
+			return yieldWithStream(nil, err)
 		}
 
-		allEvents, ok := r.prepareRunContext(ctx, sess, req, emitRunError, yield)
+		allEvents, ok := r.prepareRunContext(ctx, sess, req, emitRunError, yieldWithStream)
 		if !ok {
 			return
 		}
@@ -155,7 +162,7 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 			defer cancel()
 			inv.tasks.cleanupTurn(cleanupCtx)
 		}()
-		if !r.runAgentExecution(ctx, sess, req, inv, emitRunError, yield) {
+		if !r.runAgentExecution(ctx, sess, req, inv, emitRunError, yieldWithStream) {
 			return
 		}
 	}
