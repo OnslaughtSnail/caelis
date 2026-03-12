@@ -306,10 +306,11 @@ func (l *ollamaLLM) fromKernelMessage(msg model.Message) ollamaChatMessage {
 }
 
 func ollamaThinkValue(cfg model.ReasoningConfig) *bool {
-	if cfg.Enabled == nil {
+	effort := strings.ToLower(strings.TrimSpace(cfg.Effort))
+	if effort == "" {
 		return nil
 	}
-	value := *cfg.Enabled
+	value := effort != "none"
 	return &value
 }
 

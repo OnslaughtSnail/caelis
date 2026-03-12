@@ -21,7 +21,7 @@ type ModelCapabilities struct {
 	SupportsToolCalls bool
 	// SupportsReasoning indicates whether the model supports thinking/reasoning mode.
 	SupportsReasoning bool
-	// ReasoningMode describes how reasoning is controlled: none|toggle|effort.
+	// ReasoningMode describes how reasoning is controlled: none|toggle|effort|fixed.
 	ReasoningMode string
 	// ReasoningEfforts lists supported reasoning effort levels (for example:
 	// low|medium|high|xhigh). Empty means the model uses toggle/budget-only
@@ -38,6 +38,7 @@ const (
 	ReasoningModeNone   = "none"
 	ReasoningModeToggle = "toggle"
 	ReasoningModeEffort = "effort"
+	ReasoningModeFixed  = "fixed"
 )
 
 // DefaultModelCapabilities returns conservative defaults for unknown models.
@@ -96,20 +97,15 @@ type catalogEntry struct {
 // Add new SOTA models here as they become available.
 var builtinCatalog = []catalogEntry{
 	// ── DeepSeek ──────────────────────────────────────────────────────────
-	// deepseek-chat supports thinking mode via `thinking: {type: "enabled"}` in
-	// extra_body – this is identical to using deepseek-reasoner. When thinking is
-	// enabled the API defaults max_tokens to 32K (max 64K); applyThinkingReasoning
-	// bumps the request limit automatically. DefaultMaxOutputTokens stays at 8K
-	// so non-thinking requests don't over-allocate.
 	{
 		provider: "deepseek",
 		pattern:  "deepseek-chat",
 		caps: ModelCapabilities{
 			ContextWindowTokens:    128000,
-			MaxOutputTokens:        65536,
-			DefaultMaxOutputTokens: 8192,
+			MaxOutputTokens:        8192,
+			DefaultMaxOutputTokens: 4096,
 			SupportsToolCalls:      true,
-			SupportsReasoning:      true,
+			SupportsReasoning:      false,
 			SupportsJSONOutput:     true,
 			SupportsImages:         false,
 		},
@@ -119,10 +115,11 @@ var builtinCatalog = []catalogEntry{
 		pattern:  "deepseek-reasoner",
 		caps: ModelCapabilities{
 			ContextWindowTokens:    128000,
-			MaxOutputTokens:        65536,
+			MaxOutputTokens:        64000,
 			DefaultMaxOutputTokens: 32768,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
+			ReasoningMode:          ReasoningModeFixed,
 			SupportsJSONOutput:     true,
 			SupportsImages:         false,
 		},
@@ -374,7 +371,33 @@ var builtinCatalog = []catalogEntry{
 			SupportsImages:         true,
 		},
 	},
-	// ── Xiaomi ────────────────────────────────────────────────────────────
+	// ── Mimo ──────────────────────────────────────────────────────────────
+	{
+		provider: "xiaomi",
+		pattern:  "mimo-v2-flash",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+			SupportsImages:         true,
+		},
+	},
+	{
+		provider: "xiaomi",
+		pattern:  "mimo-v2-reasoner",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 32768,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+			SupportsImages:         true,
+		},
+	},
 	{
 		provider: "xiaomi",
 		pattern:  "MiMo-VL-7B-RL",
@@ -386,6 +409,103 @@ var builtinCatalog = []catalogEntry{
 			SupportsReasoning:      true,
 			SupportsJSONOutput:     true,
 			SupportsImages:         true,
+		},
+	},
+	// ── Volcengine Coding Plan ────────────────────────────────────────────
+	{
+		provider: "volcengine",
+		pattern:  "doubao-seed-2.0-code",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "doubao-seed-2.0-pro",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "doubao-seed-2.0-lite",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "doubao-seed-code",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "minimax-m2.5",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "glm-4.7",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "deepseek-v3.2",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+		},
+	},
+	{
+		provider: "volcengine",
+		pattern:  "kimi-k2.5",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        32768,
+			DefaultMaxOutputTokens: 8192,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
 		},
 	},
 }
@@ -601,13 +721,6 @@ func ReasoningModeForModel(provider, modelName string) string {
 		}
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	modelName = strings.ToLower(strings.TrimSpace(modelName))
-	if strings.Contains(provider, "deepseek") || strings.HasPrefix(modelName, "deepseek-") {
-		return ReasoningModeToggle
-	}
-	if provider == "xiaomi" || provider == "mimo" || strings.Contains(modelName, "mimo") {
-		return ReasoningModeToggle
-	}
 	if len(inferReasoningEfforts(provider, modelName)) > 0 {
 		return ReasoningModeEffort
 	}
@@ -640,6 +753,8 @@ func NormalizeReasoningMode(input string) string {
 		return ReasoningModeToggle
 	case ReasoningModeEffort, "levels":
 		return ReasoningModeEffort
+	case ReasoningModeFixed, "always_on", "always-on", "fixed_on", "fixed-on":
+		return ReasoningModeFixed
 	default:
 		return ""
 	}
@@ -667,36 +782,12 @@ func normalizeReasoningEffortList(in []string) []string {
 
 func inferReasoningEfforts(provider, modelName string) []string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	modelName = strings.ToLower(strings.TrimSpace(modelName))
-	if provider == "" && modelName == "" {
+	if provider == "" && strings.TrimSpace(modelName) == "" {
 		return nil
 	}
 
-	// DeepSeek/Xiaomi reasoning is modeled as thinking on/off toggles.
-	if strings.Contains(provider, "deepseek") || strings.HasPrefix(modelName, "deepseek-") {
-		return nil
-	}
-	if provider == "xiaomi" || provider == "mimo" || strings.Contains(modelName, "mimo") {
-		return nil
-	}
-
-	if provider == "gemini" || strings.HasPrefix(modelName, "gemini-") {
-		return []string{"low", "medium", "high"}
-	}
-
-	if strings.Contains(provider, "openai") || strings.HasPrefix(modelName, "o") {
-		switch {
-		case strings.HasPrefix(modelName, "o1"),
-			strings.HasPrefix(modelName, "o3"),
-			strings.HasPrefix(modelName, "o4"):
-			return []string{"low", "medium", "high", "xhigh"}
-		case strings.HasPrefix(modelName, "o"):
-			return []string{"low", "medium", "high"}
-		}
-	}
-
-	if provider == "anthropic" || strings.HasPrefix(modelName, "claude-") {
-		return []string{"low", "medium", "high"}
+	if provider == "openai-compatible" {
+		return []string{"none", "minimal", "low", "medium", "high", "xhigh"}
 	}
 
 	return nil
@@ -762,10 +853,7 @@ func reasoningLevelsFromCapabilities(caps ModelCapabilities) []string {
 	normalizeModelCapabilitiesReasoning(&caps)
 	switch caps.ReasoningMode {
 	case ReasoningModeEffort:
-		out := make([]string, 0, len(caps.ReasoningEfforts)+1)
-		out = append(out, "none")
-		out = append(out, caps.ReasoningEfforts...)
-		return out
+		return append([]string(nil), caps.ReasoningEfforts...)
 	case ReasoningModeToggle:
 		return []string{"none"}
 	default:

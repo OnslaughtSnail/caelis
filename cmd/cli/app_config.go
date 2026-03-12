@@ -46,7 +46,6 @@ type runtimeSettings struct {
 }
 
 type modelRuntimeSettings struct {
-	ThinkingMode    string
 	ThinkingBudget  int
 	ReasoningEffort string
 }
@@ -328,9 +327,8 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 			ReasoningMode:             normalizeCatalogReasoningMode(rec.ReasoningMode),
 			SupportedReasoningEfforts: normalizeReasoningLevels(rec.SupportedReasoningEfforts),
 			DefaultReasoningEffort:    normalizeReasoningEffort(rec.DefaultReasoningEffort),
-			ThinkingMode:              normalizeThinkingMode(rec.ThinkingMode),
 			ThinkingBudget:            normalizeThinkingBudget(rec.ThinkingBudget),
-			ReasoningEffort:           normalizeReasoningEffort(rec.ReasoningEffort),
+			ReasoningEffort:           resolvedProviderRecordReasoningEffort(rec),
 			Auth: modelproviders.AuthConfig{
 				Type:          modelproviders.AuthType(strings.TrimSpace(auth.Type)),
 				TokenEnv:      "",
@@ -350,7 +348,6 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 
 func defaultModelRuntimeSettings() modelRuntimeSettings {
 	return modelRuntimeSettings{
-		ThinkingMode:    defaultThinkingMode,
 		ThinkingBudget:  defaultThinkingBudget,
 		ReasoningEffort: defaultReasoningEffort,
 	}
@@ -371,9 +368,8 @@ func (s *appConfigStore) ModelRuntimeSettings(alias string) modelRuntimeSettings
 		if recAlias != target && recRef != target {
 			continue
 		}
-		settings.ThinkingMode = normalizeThinkingMode(rec.ThinkingMode)
 		settings.ThinkingBudget = normalizeThinkingBudget(rec.ThinkingBudget)
-		settings.ReasoningEffort = normalizeReasoningEffort(rec.ReasoningEffort)
+		settings.ReasoningEffort = resolvedProviderRecordReasoningEffort(rec)
 		return settings
 	}
 	return settings
@@ -493,7 +489,6 @@ func (s *appConfigStore) SetModelRuntimeSettings(alias string, settings modelRun
 		return nil
 	}
 	normalized := modelRuntimeSettings{
-		ThinkingMode:    normalizeThinkingMode(settings.ThinkingMode),
 		ThinkingBudget:  normalizeThinkingBudget(settings.ThinkingBudget),
 		ReasoningEffort: normalizeReasoningEffort(settings.ReasoningEffort),
 	}
@@ -506,12 +501,12 @@ func (s *appConfigStore) SetModelRuntimeSettings(alias string, settings modelRun
 		if recAlias != target && recRef != target {
 			continue
 		}
-		if rec.ThinkingMode != normalized.ThinkingMode {
-			rec.ThinkingMode = normalized.ThinkingMode
-			changed = true
-		}
 		if rec.ThinkingBudget != normalized.ThinkingBudget {
 			rec.ThinkingBudget = normalized.ThinkingBudget
+			changed = true
+		}
+		if rec.ThinkingMode != "" {
+			rec.ThinkingMode = ""
 			changed = true
 		}
 		if rec.ReasoningEffort != normalized.ReasoningEffort {
@@ -546,9 +541,8 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		ReasoningMode:             normalizeCatalogReasoningMode(cfg.ReasoningMode),
 		SupportedReasoningEfforts: normalizeReasoningLevels(cfg.SupportedReasoningEfforts),
 		DefaultReasoningEffort:    normalizeReasoningEffort(cfg.DefaultReasoningEffort),
-		ThinkingMode:              normalizeThinkingMode(cfg.ThinkingMode),
 		ThinkingBudget:            normalizeThinkingBudget(cfg.ThinkingBudget),
-		ReasoningEffort:           normalizeReasoningEffort(cfg.ReasoningEffort),
+		ReasoningEffort:           resolveProviderConfigReasoningEffort(cfg),
 		Auth: authRecord{
 			Type:          string(cfg.Auth.Type),
 			TokenEnv:      "",
@@ -726,14 +720,91 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	cfg.PermissionMode = normalizePermissionMode(cfg.PermissionMode)
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
 	for i := range cfg.Providers {
+		oldAlias := strings.TrimSpace(strings.ToLower(cfg.Providers[i].Alias))
+		normalizeLegacyProviderRecord(&cfg.Providers[i])
 		cfg.Providers[i].ReasoningLevels = normalizeReasoningLevels(cfg.Providers[i].ReasoningLevels)
 		cfg.Providers[i].ReasoningMode = normalizeCatalogReasoningMode(cfg.Providers[i].ReasoningMode)
 		cfg.Providers[i].SupportedReasoningEfforts = normalizeReasoningLevels(cfg.Providers[i].SupportedReasoningEfforts)
 		cfg.Providers[i].DefaultReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].DefaultReasoningEffort)
 		cfg.Providers[i].ThinkingMode = normalizeThinkingMode(cfg.Providers[i].ThinkingMode)
 		cfg.Providers[i].ThinkingBudget = normalizeThinkingBudget(cfg.Providers[i].ThinkingBudget)
-		cfg.Providers[i].ReasoningEffort = normalizeReasoningEffort(cfg.Providers[i].ReasoningEffort)
+		cfg.Providers[i].ReasoningEffort = resolvedProviderRecordReasoningEffort(cfg.Providers[i])
 		normalizeProviderAuthRecord(cfg.Providers[i].Provider, cfg.Providers[i].BaseURL, &cfg.Providers[i].Auth)
+		newAlias := strings.TrimSpace(strings.ToLower(cfg.Providers[i].Alias))
+		if oldAlias != "" && newAlias != "" && cfg.DefaultModel == oldAlias {
+			cfg.DefaultModel = newAlias
+		}
+	}
+}
+
+func normalizeLegacyProviderRecord(rec *providerRecord) {
+	if rec == nil {
+		return
+	}
+	provider := strings.TrimSpace(strings.ToLower(rec.Provider))
+	api := strings.TrimSpace(strings.ToLower(rec.API))
+	switch provider {
+	case "mimo":
+		rec.Provider = "xiaomi"
+		if api == string(modelproviders.APIOpenAICompatible) || api == "" || api == string(modelproviders.APIMimo) {
+			rec.API = string(modelproviders.APIMimo)
+		}
+		if alias := strings.TrimSpace(strings.ToLower(rec.Alias)); strings.HasPrefix(alias, "mimo/") {
+			rec.Alias = "xiaomi/" + strings.TrimPrefix(alias, "mimo/")
+		}
+	case "volcengine-coding-plan":
+		rec.Provider = "volcengine"
+		if api == string(modelproviders.APIOpenAICompatible) || api == "" || api == string(modelproviders.APIVolcengineCoding) {
+			rec.API = string(modelproviders.APIVolcengineCoding)
+		}
+		if alias := strings.TrimSpace(strings.ToLower(rec.Alias)); strings.HasPrefix(alias, "volcengine-coding-plan/") {
+			rec.Alias = "volcengine/" + strings.TrimPrefix(alias, "volcengine-coding-plan/")
+		}
+	}
+}
+
+func resolvedProviderRecordReasoningEffort(rec providerRecord) string {
+	cfg := modelproviders.Config{
+		Provider:                  strings.TrimSpace(rec.Provider),
+		API:                       modelproviders.APIType(strings.TrimSpace(rec.API)),
+		Model:                     strings.TrimSpace(rec.Model),
+		ReasoningMode:             normalizeCatalogReasoningMode(rec.ReasoningMode),
+		SupportedReasoningEfforts: normalizeReasoningLevels(rec.SupportedReasoningEfforts),
+		DefaultReasoningEffort:    normalizeReasoningEffort(rec.DefaultReasoningEffort),
+	}
+	raw := strings.TrimSpace(rec.ReasoningEffort)
+	if raw == "" {
+		raw = strings.TrimSpace(rec.ThinkingMode)
+	}
+	return normalizeStoredReasoningEffort(cfg, raw)
+}
+
+func resolveProviderConfigReasoningEffort(cfg modelproviders.Config) string {
+	raw := strings.TrimSpace(cfg.ReasoningEffort)
+	if raw == "" {
+		raw = strings.TrimSpace(cfg.ThinkingMode)
+	}
+	return normalizeStoredReasoningEffort(cfg, raw)
+}
+
+func normalizeStoredReasoningEffort(cfg modelproviders.Config, raw string) string {
+	opt, err := resolveModelReasoningOption(cfg, raw)
+	if err == nil {
+		return normalizeReasoningEffort(opt.ReasoningEffort)
+	}
+	switch normalizeReasoningSelection(raw) {
+	case "", "auto":
+		return ""
+	case "off":
+		return "none"
+	case "on":
+		profile := reasoningProfileForConfig(cfg)
+		if profile.Mode == reasoningModeNone {
+			return ""
+		}
+		return reasoningProfileDefaultEffort(profile)
+	default:
+		return normalizeReasoningEffort(raw)
 	}
 }
 

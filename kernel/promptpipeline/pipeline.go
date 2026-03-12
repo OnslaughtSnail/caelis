@@ -109,34 +109,10 @@ func renderPrompt(fragments []PromptFragment) string {
 		if text == "" {
 			continue
 		}
-		b.WriteString("\n\n### ")
-		b.WriteString(fragmentTitle(f))
-		if strings.TrimSpace(f.Source) != "" {
-			b.WriteString("\nsource: ")
-			b.WriteString(f.Source)
-		}
 		b.WriteString("\n\n")
 		b.WriteString(text)
 	}
 	return strings.TrimSpace(b.String())
-}
-
-func fragmentTitle(fragment PromptFragment) string {
-	if title := strings.TrimSpace(fragment.Title); title != "" {
-		return title
-	}
-	switch strings.TrimSpace(fragment.Stage) {
-	case "identity":
-		return "Identity"
-	case "global_agents":
-		return "Global Instructions"
-	case "workspace_agents":
-		return "Workspace Instructions"
-	case "skills_meta":
-		return "Skills Metadata"
-	default:
-		return "Instructions"
-	}
 }
 
 func normalizeText(input string) string {

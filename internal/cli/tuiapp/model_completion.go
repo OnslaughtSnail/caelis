@@ -203,7 +203,7 @@ func (m *Model) handleSkillKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	}
 }
 
-// renderSkillList renders the $skill candidates as an inline list.
+// renderSkillList renders the $skill candidates as an overlay list.
 func (m *Model) renderSkillList() string {
 	if len(m.skillCandidates) == 0 {
 		return ""
@@ -224,7 +224,7 @@ func (m *Model) renderSkillList() string {
 			fmt.Sprintf("  … and %d more", len(m.skillCandidates)-maxItems),
 		))
 	}
-	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+	return m.renderCompletionOverlay("Skills", lines)
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +395,7 @@ func (m *Model) renderResumeList() string {
 			fmt.Sprintf("  … and %d more", len(m.resumeCandidates)-end),
 		))
 	}
-	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+	return m.renderCompletionOverlay("Recent", lines)
 }
 
 func (m *Model) clearSlashArg() {
@@ -578,8 +578,10 @@ func (m *Model) applySlashArgCompletion() {
 	case "model":
 		m.setInputText("/model " + choice + " ")
 		switch choice {
-		case "use", "rm", "edit":
+		case "use":
 			m.activateSlashArgPickerFromInput("model " + choice)
+		case "del":
+			m.clearSlashArg()
 		default:
 			m.clearSlashArg()
 		}
@@ -617,10 +619,10 @@ func (m *Model) shouldExecuteSlashArgSelection(command string, choice string) bo
 	}
 	switch command {
 	case "model":
-		return choice == "list"
+		return false
 	case "model use":
 		return false
-	case "model rm", "model edit":
+	case "model del":
 		return true
 	}
 	if strings.HasPrefix(command, "model use ") {
@@ -640,10 +642,10 @@ func isExecutableSlashArgInput(line string) bool {
 	case "/model":
 		action := strings.ToLower(strings.TrimSpace(fields[1]))
 		switch action {
-		case "list":
-			return len(fields) == 2
-		case "use", "rm", "edit":
+		case "use":
 			return len(fields) >= 3
+		case "del":
+			return len(fields) >= 2
 		default:
 			return false
 		}
@@ -759,7 +761,11 @@ func (m *Model) renderSlashArgList() string {
 			fmt.Sprintf("  … and %d more", len(m.slashArgCandidates)-end),
 		))
 	}
-	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+	title := "/" + strings.TrimSpace(m.slashArgCommand)
+	if title == "/" {
+		title = "Options"
+	}
+	return m.renderCompletionOverlay(title, lines)
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +902,7 @@ func (m *Model) renderSlashCommandList() string {
 			fmt.Sprintf("  … and %d more", len(m.slashCandidates)-end),
 		))
 	}
-	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+	return m.renderCompletionOverlay("Commands", lines)
 }
 
 func (m *Model) clearSlashCompletion() {

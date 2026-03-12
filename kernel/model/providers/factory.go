@@ -27,7 +27,7 @@ func (f *Factory) Register(cfg Config) error {
 	if alias == "" {
 		return fmt.Errorf("providers: alias is required")
 	}
-	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIDeepSeek && cfg.API != APIOllama {
+	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIDeepSeek && cfg.API != APIMimo && cfg.API != APIVolcengine && cfg.API != APIVolcengineCoding && cfg.API != APIOllama {
 		return fmt.Errorf("providers: unsupported api type %q", cfg.API)
 	}
 	authType := strings.TrimSpace(string(cfg.Auth.Type))
@@ -67,10 +67,13 @@ func (f *Factory) NewByAlias(alias string) (model.LLM, error) {
 	switch cfg.API {
 	case APIDeepSeek:
 		return newDeepSeek(cfg, token), nil
+	case APIMimo:
+		return newMimo(cfg, token), nil
+	case APIVolcengine:
+		return newVolcengine(cfg, token), nil
+	case APIVolcengineCoding:
+		return newVolcengineCodingPlan(cfg, token), nil
 	case APIOpenAICompatible:
-		if isXiaomiProvider(cfg.Provider) {
-			return newXiaomi(cfg, token), nil
-		}
 		return newOpenAICompat(cfg, token), nil
 	case APIOpenAI:
 		return newOpenAICompat(cfg, token), nil

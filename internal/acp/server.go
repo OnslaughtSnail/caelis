@@ -49,6 +49,11 @@ type SessionConfigOptionTemplate struct {
 }
 
 type AgentFactory func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error)
+type ModelFactory func(cfg AgentSessionConfig) (model.LLM, error)
+type SessionListFactory func(context.Context, SessionListRequest) (SessionListResponse, error)
+type SessionModelStateFactory func(cfg AgentSessionConfig) *SessionModelState
+type SessionConfigStateFactory func(cfg AgentSessionConfig, templates []SessionConfigOptionTemplate) []SessionConfigOption
+type SessionConfigNormalizer func(cfg AgentSessionConfig) AgentSessionConfig
 
 type AuthValidator func(context.Context, AuthenticateRequest) error
 
@@ -57,10 +62,11 @@ type ServerConfig struct {
 	Runtime             *runtime.Runtime
 	Store               session.Store
 	Model               model.LLM
+	NewModel            ModelFactory
 	AppName             string
 	UserID              string
 	WorkspaceRoot       string
-	ProtocolVersion     string
+	ProtocolVersion     ProtocolVersion
 	AgentInfo           *Implementation
 	AuthMethods         []AuthMethod
 	Authenticate        AuthValidator
@@ -69,6 +75,10 @@ type ServerConfig struct {
 	SessionConfig       []SessionConfigOptionTemplate
 	NewSessionResources SessionResourceFactory
 	NewAgent            AgentFactory
+	ListSessions        SessionListFactory
+	SessionModels       SessionModelStateFactory
+	SessionConfigState  SessionConfigStateFactory
+	NormalizeConfig     SessionConfigNormalizer
 }
 
 type Server struct {
@@ -97,6 +107,9 @@ type serverSession struct {
 	streamMu      sync.Mutex
 	answerStream  partialContentState
 	thoughtStream partialContentState
+	toolCalls     map[string]toolCallSnapshot
+	asyncTasks    map[string]string
+	asyncSessions map[string]string
 }
 
 type partialContentState struct {
@@ -112,6 +125,11 @@ type pendingContentUpdate struct {
 	text       string
 }
 
+type toolCallSnapshot struct {
+	name string
+	args map[string]any
+}
+
 func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Conn == nil {
 		return nil, fmt.Errorf("acp: conn is required")
@@ -122,7 +140,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Store == nil {
 		return nil, fmt.Errorf("acp: store is required")
 	}
-	if cfg.Model == nil {
+	if cfg.Model == nil && cfg.NewModel == nil {
 		return nil, fmt.Errorf("acp: model is required")
 	}
 	if cfg.NewSessionResources == nil {
@@ -135,8 +153,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.WorkspaceRoot == "" {
 		return nil, fmt.Errorf("acp: workspace root is required")
 	}
-	if cfg.ProtocolVersion == "" {
-		cfg.ProtocolVersion = "0.2.0"
+	if cfg.ProtocolVersion == 0 {
+		cfg.ProtocolVersion = CurrentProtocolVersion
 	}
 	if cfg.AgentInfo == nil {
 		cfg.AgentInfo = &Implementation{Name: "caelis"}
@@ -175,8 +193,12 @@ func (s *Server) handleRequest(ctx context.Context, msg Message) (any, *RPCError
 					HTTP: true,
 					SSE:  true,
 				},
-				Prompt:  PromptCapabilities{},
-				Session: SessionCapabilities{},
+				Prompt: PromptCapabilities{
+					EmbeddedContext: true,
+				},
+				Session: SessionCapabilities{
+					List: s.sessionListCapability(),
+				},
 			},
 			AgentInfo:   s.cfg.AgentInfo,
 			AuthMethods: append([]AuthMethod(nil), s.cfg.AuthMethods...),
@@ -199,6 +221,19 @@ func (s *Server) handleRequest(ctx context.Context, msg Message) (any, *RPCError
 			return nil, invalidParamsError(err)
 		}
 		resp, err := s.newSession(ctx, req)
+		if err != nil {
+			return nil, requestFailed(err)
+		}
+		return resp, nil
+	case MethodSessionList:
+		if err := s.requireAuthenticated(); err != nil {
+			return nil, requestFailed(err)
+		}
+		var req SessionListRequest
+		if err := decodeParams(msg.Params, &req); err != nil {
+			return nil, invalidParamsError(err)
+		}
+		resp, err := s.listSessions(ctx, req)
 		if err != nil {
 			return nil, requestFailed(err)
 		}
@@ -291,6 +326,7 @@ func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSess
 		modeID:       s.initialModeID(),
 		configValues: s.initialConfigValues(),
 	}
+	s.normalizeSessionConfig(sess)
 	resources, err := s.newResources(ctx, sessionID, sess.cwd, req.MCPServers, sess.mode)
 	if err != nil {
 		return NewSessionResponse{}, err
@@ -314,7 +350,15 @@ func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSess
 		SessionID:     sessionID,
 		ConfigOptions: s.sessionConfigOptions(sess),
 		Modes:         s.sessionModeState(sess),
+		Models:        s.sessionModelState(sess),
 	}, nil
+}
+
+func (s *Server) listSessions(ctx context.Context, req SessionListRequest) (SessionListResponse, error) {
+	if s.cfg.ListSessions == nil {
+		return SessionListResponse{}, fmt.Errorf("session listing is not supported")
+	}
+	return s.cfg.ListSessions(ctx, req)
 }
 
 func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadSessionResponse, error) {
@@ -350,6 +394,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 		sess.modeID = modeID
 		sess.configValues = configValues
 		sess.stateMu.Unlock()
+		s.normalizeSessionConfig(sess)
 	} else {
 		sess = &serverSession{
 			id:           req.SessionID,
@@ -357,6 +402,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 			modeID:       modeID,
 			configValues: configValues,
 		}
+		s.normalizeSessionConfig(sess)
 		resources, err := s.newResources(ctx, req.SessionID, sess.cwd, req.MCPServers, sess.mode)
 		if err != nil {
 			return LoadSessionResponse{}, err
@@ -381,6 +427,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 	return LoadSessionResponse{
 		ConfigOptions: s.sessionConfigOptions(sess),
 		Modes:         s.sessionModeState(sess),
+		Models:        s.sessionModelState(sess),
 	}, nil
 }
 
@@ -454,6 +501,10 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 			setSessionStreamErr(err)
 		}
 	}))
+	llm, err := s.resolveModel(sess.agentConfig())
+	if err != nil {
+		return PromptResponse{}, err
+	}
 	stopReason := StopReasonEndTurn
 	for ev, runErr := range s.cfg.Runtime.Run(runCtx, runtime.RunRequest{
 		AppName:   s.cfg.AppName,
@@ -461,7 +512,7 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		SessionID: req.SessionID,
 		Input:     sessionmode.Inject(input, sess.mode()),
 		Agent:     ag,
-		Model:     s.cfg.Model,
+		Model:     llm,
 		Tools:     sess.resources.Tools,
 		CoreTools: tool.CoreToolsConfig{
 			Runtime: sess.resources.Runtime,
@@ -534,11 +585,25 @@ func (s *Server) setSessionMode(ctx context.Context, req SetSessionModeRequest) 
 	}
 	sess.stateMu.Lock()
 	sess.modeID = modeID
+	if s.hasConfigCategory("mode") {
+		if sess.configValues == nil {
+			sess.configValues = map[string]string{}
+		}
+		for _, item := range s.cfg.SessionConfig {
+			if strings.TrimSpace(item.Category) == "mode" {
+				sess.configValues[item.ID] = modeID
+			}
+		}
+	}
 	sess.stateMu.Unlock()
+	s.normalizeSessionConfig(sess)
 	if err := s.persistSessionState(ctx, s.sessionRef(sess.id), sess); err != nil {
 		return SetSessionModeResponse{}, err
 	}
 	if err := s.notifyCurrentMode(req.SessionID, modeID); err != nil {
+		return SetSessionModeResponse{}, err
+	}
+	if err := s.notifyConfigOptions(req.SessionID, s.sessionConfigOptions(sess)); err != nil {
 		return SetSessionModeResponse{}, err
 	}
 	return SetSessionModeResponse{}, nil
@@ -554,24 +619,39 @@ func (s *Server) setSessionConfigOption(ctx context.Context, req SetSessionConfi
 		return SetSessionConfigOptionResponse{}, fmt.Errorf("configId is required")
 	}
 	value := strings.TrimSpace(req.Value)
+	if !s.configOptionSupports(sess, cfgID, value) {
+		if _, ok := s.configTemplate(cfgID); !ok {
+			return SetSessionConfigOptionResponse{}, fmt.Errorf("unsupported config option %q", cfgID)
+		}
+		return SetSessionConfigOptionResponse{}, fmt.Errorf("unsupported value %q for config option %q", value, cfgID)
+	}
 	template, ok := s.configTemplate(cfgID)
 	if !ok {
 		return SetSessionConfigOptionResponse{}, fmt.Errorf("unsupported config option %q", cfgID)
-	}
-	if !template.supports(value) {
-		return SetSessionConfigOptionResponse{}, fmt.Errorf("unsupported value %q for config option %q", value, cfgID)
 	}
 	sess.stateMu.Lock()
 	if sess.configValues == nil {
 		sess.configValues = map[string]string{}
 	}
 	sess.configValues[cfgID] = value
+	if strings.TrimSpace(template.Category) == "mode" && s.modeExists(value) {
+		sess.modeID = value
+	}
 	sess.stateMu.Unlock()
+	s.normalizeSessionConfig(sess)
 	if err := s.persistSessionState(ctx, s.sessionRef(sess.id), sess); err != nil {
 		return SetSessionConfigOptionResponse{}, err
 	}
 	options := s.sessionConfigOptions(sess)
+	if strings.TrimSpace(template.Category) == "mode" {
+		if err := s.notifyCurrentMode(req.SessionID, value); err != nil {
+			return SetSessionConfigOptionResponse{}, err
+		}
+	}
 	if err := s.notifyConfigOptions(req.SessionID, options); err != nil {
+		return SetSessionConfigOptionResponse{}, err
+	}
+	if err := s.notifyModels(req.SessionID, s.sessionModelState(sess)); err != nil {
 		return SetSessionConfigOptionResponse{}, err
 	}
 	return SetSessionConfigOptionResponse{ConfigOptions: options}, nil
@@ -592,6 +672,9 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 		}
 	}
 	if eventIsPartial(ev) {
+		if err := s.flushPendingContentForChannelSwitch(sessionID, sess, eventChannel(ev)); err != nil {
+			return err
+		}
 		switch eventChannel(ev) {
 		case "answer":
 			return s.emitBufferedPartial(sessionID, sess, "answer", msg.Text)
@@ -643,6 +726,9 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 		if raw := strings.TrimSpace(call.Args); raw != "" {
 			_ = json.Unmarshal([]byte(raw), &args)
 		}
+		if sess != nil {
+			sess.rememberToolCall(call.ID, call.Name, args)
+		}
 		update := ToolCall{
 			SessionUpdate: UpdateToolCall,
 			ToolCallID:    call.ID,
@@ -657,20 +743,32 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 		}
 	}
 	if msg.ToolResponse != nil {
+		if sess != nil {
+			sess.rememberAsyncToolResult(msg.ToolResponse.Name, msg.ToolResponse.ID, msg.ToolResponse.Result)
+		}
 		status := ToolStatusCompleted
 		if hasToolError(msg.ToolResponse.Result) {
 			status = ToolStatusFailed
 		}
-		title := summarizeToolResultTitle(msg.ToolResponse.Name)
 		update := ToolCallUpdate{
 			SessionUpdate: UpdateToolCallState,
 			ToolCallID:    msg.ToolResponse.ID,
-			Title:         &title,
 			Status:        ptr(status),
 			RawOutput:     sanitizeToolResultForACP(msg.ToolResponse.Result),
 			Locations:     toolLocations(nil, msg.ToolResponse.Result),
 		}
-		return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: update})
+		if content := toolCallContentForResult(msg.ToolResponse.Name, msg.ToolResponse.Result); len(content) > 0 {
+			update.Content = content
+		}
+		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: update}); err != nil {
+			return err
+		}
+		for _, extra := range supplementalToolCallUpdates(sess, msg.ToolResponse) {
+			if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: extra}); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	return nil
 }
@@ -744,6 +842,18 @@ func (s *Server) flushPendingContent(sessionID string, sess *serverSession) erro
 		return nil
 	}
 	for _, update := range sess.flushPendingContent() {
+		if err := s.emitContentUpdate(sessionID, update.updateType, update.text); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) flushPendingContentForChannelSwitch(sessionID string, sess *serverSession, nextChannel string) error {
+	if sess == nil {
+		return nil
+	}
+	for _, update := range sess.flushPendingContentForChannelSwitch(nextChannel) {
 		if err := s.emitContentUpdate(sessionID, update.updateType, update.text); err != nil {
 			return err
 		}
@@ -894,6 +1004,19 @@ func (s *Server) initialModeID() string {
 	return ""
 }
 
+func (s *Server) hasConfigCategory(category string) bool {
+	category = strings.TrimSpace(category)
+	if category == "" {
+		return false
+	}
+	for _, item := range s.cfg.SessionConfig {
+		if strings.TrimSpace(item.Category) == category {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) modeExists(modeID string) bool {
 	modeID = strings.TrimSpace(modeID)
 	if modeID == "" {
@@ -1009,9 +1132,19 @@ func (s *Server) sessionModeState(sess *serverSession) *SessionModeState {
 	}
 }
 
+func (s *Server) sessionModelState(sess *serverSession) *SessionModelState {
+	if sess == nil || s.cfg.SessionModels == nil {
+		return nil
+	}
+	return s.cfg.SessionModels(sess.agentConfig())
+}
+
 func (s *Server) sessionConfigOptions(sess *serverSession) []SessionConfigOption {
 	if sess == nil || len(s.cfg.SessionConfig) == 0 {
 		return nil
+	}
+	if s.cfg.SessionConfigState != nil {
+		return s.cfg.SessionConfigState(sess.agentConfig(), append([]SessionConfigOptionTemplate(nil), s.cfg.SessionConfig...))
 	}
 	values := sess.configSnapshot()
 	out := make([]SessionConfigOption, 0, len(s.cfg.SessionConfig))
@@ -1031,6 +1164,29 @@ func (s *Server) sessionConfigOptions(sess *serverSession) []SessionConfigOption
 		})
 	}
 	return out
+}
+
+func (s *Server) configOptionSupports(sess *serverSession, id string, value string) bool {
+	id = strings.TrimSpace(id)
+	value = strings.TrimSpace(value)
+	if id == "" || value == "" {
+		return false
+	}
+	for _, item := range s.sessionConfigOptions(sess) {
+		if strings.TrimSpace(item.ID) != id {
+			continue
+		}
+		for _, option := range item.Options {
+			if strings.TrimSpace(option.Value) == value {
+				return true
+			}
+		}
+		return false
+	}
+	if template, ok := s.configTemplate(id); ok {
+		return template.supports(value)
+	}
+	return false
 }
 
 func (s *Server) configTemplate(id string) (SessionConfigOptionTemplate, bool) {
@@ -1063,6 +1219,26 @@ func (s *Server) notifyConfigOptions(sessionID string, options []SessionConfigOp
 	})
 }
 
+func (s *Server) notifyModels(sessionID string, models *SessionModelState) error {
+	if models == nil {
+		return nil
+	}
+	return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+		SessionID: sessionID,
+		Update: ModelStateUpdate{
+			SessionUpdate: UpdateModels,
+			Models:        models,
+		},
+	})
+}
+
+func (s *Server) sessionListCapability() *SessionListCapability {
+	if s.cfg.ListSessions == nil {
+		return nil
+	}
+	return &SessionListCapability{}
+}
+
 func (s *Server) newResources(ctx context.Context, sessionID string, sessionCWD string, mcpServers []MCPServer, modeResolver func() string) (*SessionResources, error) {
 	s.mu.Lock()
 	caps := s.clientCaps
@@ -1083,6 +1259,40 @@ func (s *Server) ensureSessionExists(ctx context.Context, sessRef *session.Sessi
 		return session.ErrSessionNotFound
 	}
 	return nil
+}
+
+func (s *Server) resolveModel(cfg AgentSessionConfig) (model.LLM, error) {
+	if s.cfg.NewModel != nil {
+		return s.cfg.NewModel(cfg)
+	}
+	if s.cfg.Model == nil {
+		return nil, fmt.Errorf("acp: model is not configured")
+	}
+	return s.cfg.Model, nil
+}
+
+func (s *Server) normalizeSessionConfig(sess *serverSession) {
+	if sess == nil || s.cfg.NormalizeConfig == nil {
+		return
+	}
+	next := s.cfg.NormalizeConfig(sess.agentConfig())
+	sess.stateMu.Lock()
+	if strings.TrimSpace(next.ModeID) != "" && s.modeExists(next.ModeID) {
+		sess.modeID = strings.TrimSpace(next.ModeID)
+	}
+	sess.configValues = cloneStringMap(next.ConfigValues)
+	sess.stateMu.Unlock()
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func (s *Server) loadedSession(id string) *serverSession {
@@ -1214,6 +1424,23 @@ func (s *serverSession) flushPendingContent() []pendingContentUpdate {
 	}
 	if update := flushPartialState(&s.answerStream, UpdateAgentMessage); update != nil {
 		out = append(out, *update)
+	}
+	return out
+}
+
+func (s *serverSession) flushPendingContentForChannelSwitch(nextChannel string) []pendingContentUpdate {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	var out []pendingContentUpdate
+	switch strings.TrimSpace(nextChannel) {
+	case "answer":
+		if update := flushPartialState(&s.thoughtStream, UpdateAgentThought); update != nil {
+			out = append(out, *update)
+		}
+	case "reasoning":
+		if update := flushPartialState(&s.answerStream, UpdateAgentMessage); update != nil {
+			out = append(out, *update)
+		}
 	}
 	return out
 }
@@ -1387,12 +1614,49 @@ func summarizeToolCallTitle(name string, args map[string]any) string {
 		if command, _ := args["command"].(string); strings.TrimSpace(command) != "" {
 			return fmt.Sprintf("BASH %s", strings.TrimSpace(command))
 		}
+	case "TASK":
+		action := strings.TrimSpace(stringValue(args["action"]))
+		display := taskActionCallDisplayName(action)
+		switch strings.ToLower(action) {
+		case "wait":
+			if waited := friendlyWaitLabelForACP(effectiveTaskWaitMSForACP(action, args)); waited != "" {
+				return fmt.Sprintf("%s %s", display, waited)
+			}
+			return display
+		case "status", "cancel":
+			if taskID := strings.TrimSpace(stringValue(args["task_id"])); taskID != "" {
+				return fmt.Sprintf("%s %s", display, idutil.ShortDisplay(taskID))
+			}
+			return display
+		default:
+			taskID := strings.TrimSpace(stringValue(args["task_id"]))
+			if action != "" && taskID != "" {
+				return fmt.Sprintf("%s {task=%s}", display, idutil.ShortDisplay(taskID))
+			}
+			if action != "" {
+				return display
+			}
+		}
 	}
 	return name
 }
 
 func summarizeToolResultTitle(name string) string {
 	return strings.TrimSpace(name)
+}
+
+func toolCallContentForResult(toolName string, result map[string]any) []ToolCallContent {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "BASH") {
+		return nil
+	}
+	terminalID := strings.TrimSpace(stringValue(result["session_id"]))
+	if terminalID == "" {
+		return nil
+	}
+	return []ToolCallContent{{
+		Type:       "terminal",
+		TerminalID: terminalID,
+	}}
 }
 
 func toolLocations(args map[string]any, result map[string]any) []ToolCallLocation {
@@ -1420,6 +1684,224 @@ func hasToolError(result map[string]any) bool {
 
 func sanitizeToolResultForACP(result map[string]any) map[string]any {
 	return sanitizeToolResultMapForACP(result, true)
+}
+
+func (s *serverSession) rememberToolCall(callID string, name string, args map[string]any) {
+	if s == nil {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return
+	}
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if s.toolCalls == nil {
+		s.toolCalls = map[string]toolCallSnapshot{}
+	}
+	cp := make(map[string]any, len(args))
+	for key, value := range args {
+		cp[key] = value
+	}
+	s.toolCalls[callID] = toolCallSnapshot{name: strings.TrimSpace(name), args: cp}
+}
+
+func (s *serverSession) rememberAsyncToolResult(toolName string, callID string, result map[string]any) {
+	if s == nil || len(result) == 0 {
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(toolName), "BASH") {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return
+	}
+	taskID := strings.TrimSpace(stringValue(result["task_id"]))
+	sessionID := strings.TrimSpace(stringValue(result["session_id"]))
+	if taskID == "" && sessionID == "" {
+		return
+	}
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if taskID != "" {
+		if s.asyncTasks == nil {
+			s.asyncTasks = map[string]string{}
+		}
+		s.asyncTasks[taskID] = callID
+	}
+	if sessionID != "" {
+		if s.asyncSessions == nil {
+			s.asyncSessions = map[string]string{}
+		}
+		s.asyncSessions[sessionID] = callID
+	}
+}
+
+func (s *serverSession) toolCall(callID string) (toolCallSnapshot, bool) {
+	if s == nil {
+		return toolCallSnapshot{}, false
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return toolCallSnapshot{}, false
+	}
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	snap, ok := s.toolCalls[callID]
+	return snap, ok
+}
+
+func (s *serverSession) asyncOriginCallID(result map[string]any) string {
+	if s == nil || len(result) == 0 {
+		return ""
+	}
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if taskID := strings.TrimSpace(stringValue(result["task_id"])); taskID != "" && s.asyncTasks != nil {
+		if callID := strings.TrimSpace(s.asyncTasks[taskID]); callID != "" {
+			return callID
+		}
+	}
+	if sessionID := strings.TrimSpace(stringValue(result["session_id"])); sessionID != "" && s.asyncSessions != nil {
+		if callID := strings.TrimSpace(s.asyncSessions[sessionID]); callID != "" {
+			return callID
+		}
+	}
+	return ""
+}
+
+func taskActionCallDisplayName(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "wait":
+		return "WAIT"
+	case "status":
+		return "CHECK"
+	case "write":
+		return "WRITE"
+	case "cancel":
+		return "CANCEL"
+	case "list":
+		return "LIST"
+	default:
+		return "TASK"
+	}
+}
+
+func friendlyWaitLabelForACP(waitMS int) string {
+	switch {
+	case waitMS < 0:
+		return ""
+	case waitMS == 0:
+		return "0s"
+	case waitMS%1000 == 0:
+		return fmt.Sprintf("%d s", waitMS/1000)
+	case waitMS < 1000:
+		return fmt.Sprintf("%dms", waitMS)
+	default:
+		return fmt.Sprintf("%.1f s", float64(waitMS)/1000.0)
+	}
+}
+
+func effectiveTaskWaitMSForACP(action string, args map[string]any) int {
+	if !strings.EqualFold(strings.TrimSpace(action), "wait") {
+		return -1
+	}
+	if len(args) == 0 {
+		return 5000
+	}
+	rawWaitMS, ok := args["yield_time_ms"]
+	if !ok || rawWaitMS == nil {
+		return 5000
+	}
+	waitMS, ok := intValue(rawWaitMS)
+	if !ok {
+		return 5000
+	}
+	if waitMS <= 0 {
+		return 5000
+	}
+	return waitMS
+}
+
+func stringValue(value any) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
+}
+
+func intValue(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		v, err := typed.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func supplementalToolCallUpdates(sess *serverSession, resp *model.ToolResponse) []ToolCallUpdate {
+	if sess == nil || resp == nil || len(resp.Result) == 0 {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(resp.Name), "TASK") || hasToolError(resp.Result) {
+		return nil
+	}
+	call, ok := sess.toolCall(resp.ID)
+	if !ok || !strings.EqualFold(strings.TrimSpace(call.name), "TASK") {
+		return nil
+	}
+	action := strings.TrimSpace(stringValue(call.args["action"]))
+	if !strings.EqualFold(action, "cancel") {
+		return nil
+	}
+	state := strings.TrimSpace(stringValue(resp.Result["state"]))
+	if !strings.EqualFold(state, "cancelled") {
+		return nil
+	}
+	originCallID := strings.TrimSpace(sess.asyncOriginCallID(resp.Result))
+	if originCallID == "" || originCallID == strings.TrimSpace(resp.ID) {
+		return nil
+	}
+	status := ToolStatusCompleted
+	return []ToolCallUpdate{{
+		SessionUpdate: UpdateToolCallState,
+		ToolCallID:    originCallID,
+		Status:        ptr(status),
+		RawOutput:     sanitizeToolResultForACP(cancelledOriginResult(resp.Result)),
+	}}
+}
+
+func cancelledOriginResult(result map[string]any) map[string]any {
+	if len(result) == 0 {
+		return map[string]any{"state": "cancelled", "cancelled": true}
+	}
+	out := map[string]any{
+		"state":     "cancelled",
+		"cancelled": true,
+	}
+	for _, key := range []string{"task_id", "session_id", "command", "workdir", "route", "tty", "latest_output"} {
+		if value, ok := result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			out[key] = value
+		}
+	}
+	if output, ok := result["output"]; ok && output != nil {
+		out["output"] = sanitizeToolResultValueForACP(output)
+	}
+	return out
 }
 
 func sanitizeToolResultMapForACP(result map[string]any, topLevel bool) map[string]any {

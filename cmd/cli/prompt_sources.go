@@ -12,20 +12,9 @@ import (
 )
 
 const (
-	promptDirName       = "prompts"
-	identityFileName    = "IDENTITY.md"
-	globalAgentsFile    = "AGENTS.md"
-	userFileName        = "USER.md"
-	workspaceAgentsFile = "AGENTS.md"
+	globalAgentsFilePath = "~/.agents/AGENTS.md"
+	workspaceAgentsFile  = "AGENTS.md"
 )
-
-type promptFiles struct {
-	ConfigDir           string
-	IdentityPath        string
-	GlobalAgentsPath    string
-	UserPath            string
-	WorkspaceAgentsPath string
-}
 
 type promptSpecResult struct {
 	Spec     promptpipeline.AssembleSpec
@@ -37,106 +26,61 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	if err != nil {
 		return promptSpecResult{}, err
 	}
-	files, err := ensurePromptFiles(in.AppName, in.PromptConfigDir, workspaceDir)
+	globalAgentsPath, err := resolvePromptPath(globalAgentsFilePath)
 	if err != nil {
 		return promptSpecResult{}, err
 	}
-	identity, err := readRequiredPromptFile(files.IdentityPath)
-	if err != nil {
-		return promptSpecResult{}, err
-	}
-	global, err := readRequiredPromptFile(files.GlobalAgentsPath)
-	if err != nil {
-		return promptSpecResult{}, err
-	}
-	user, err := readRequiredPromptFile(files.UserPath)
-	if err != nil {
-		return promptSpecResult{}, err
-	}
-	workspaceAgents, workspaceWarn := readOptionalPromptFile(files.WorkspaceAgentsPath)
+	workspaceAgentsPath := filepath.Join(workspaceDir, workspaceAgentsFile)
+	globalAgents, globalWarn := readOptionalPromptFile(globalAgentsPath)
+	workspaceAgents, workspaceWarn := readOptionalPromptFile(workspaceAgentsPath)
 
 	discovered := skills.DiscoverMeta(in.SkillDirs)
 	sort.Slice(discovered.Metas, func(i, j int) bool {
 		return discovered.Metas[i].Path < discovered.Metas[j].Path
 	})
 
-	warnings := make([]error, 0, len(discovered.Warnings)+1)
+	warnings := make([]error, 0, len(discovered.Warnings)+2)
+	if globalWarn != nil {
+		warnings = append(warnings, globalWarn)
+	}
 	if workspaceWarn != nil {
 		warnings = append(warnings, workspaceWarn)
 	}
 	warnings = append(warnings, discovered.Warnings...)
 
-	additional := make([]promptpipeline.PromptFragment, 0, 2)
-	if userPrompt := buildUserPromptFragment(in.BasePrompt, user); userPrompt != "" {
+	additional := make([]promptpipeline.PromptFragment, 0, 3)
+	if activePolicies := buildActiveAgentPoliciesPrompt(globalAgents, workspaceAgents, workspaceAgentsPath); activePolicies != "" {
 		additional = append(additional, promptpipeline.PromptFragment{
-			Stage:   "user_custom",
-			Title:   "User Custom Instructions",
-			Source:  files.UserPath,
-			Content: userPrompt,
+			Stage:   "active_agent_policies",
+			Source:  "cli:active-agent-policies",
+			Content: activePolicies,
+		})
+	}
+	if sessionOverrides := buildSessionOverridePrompt(in.BasePrompt); sessionOverrides != "" {
+		additional = append(additional, promptpipeline.PromptFragment{
+			Stage:   "session_overrides",
+			Source:  "cli:session-overrides",
+			Content: sessionOverrides,
 		})
 	}
 	if in.EnableExperimentalLSPPrompt {
 		additional = append(additional, promptpipeline.PromptFragment{
 			Stage:   "experimental_lsp",
-			Title:   "Experimental LSP Routing",
 			Source:  "cli:experimental-lsp-routing",
-			Content: defaultExperimentalLSPRoutingPrompt,
+			Content: "## Experimental LSP Routing\n\n" + defaultExperimentalLSPRoutingPrompt,
 		})
 	}
 
 	return promptSpecResult{
 		Spec: promptpipeline.AssembleSpec{
-			IdentityPrompt:        identity,
-			IdentitySource:        files.IdentityPath,
-			GlobalAgentsPrompt:    global,
-			GlobalAgentsSource:    files.GlobalAgentsPath,
-			WorkspaceAgentsPrompt: workspaceAgents,
-			WorkspaceAgentsSource: files.WorkspaceAgentsPath,
-			SkillsMetaPrompt:      skills.BuildMetaPrompt(discovered.Metas),
-			SkillsMetaSource:      "skills metadata",
-			Additional:            additional,
+			IdentityPrompt:   builtInIdentityPrompt(in.AppName),
+			IdentitySource:   "cli:built-in-identity",
+			SkillsMetaPrompt: skills.BuildMetaPrompt(discovered.Metas),
+			SkillsMetaSource: "skills metadata",
+			Additional:       additional,
 		},
 		Warnings: warnings,
 	}, nil
-}
-
-func ensurePromptFiles(appName string, configDir string, workspaceDir string) (promptFiles, error) {
-	resolvedConfigDir, err := resolvePromptConfigDir(appName, configDir)
-	if err != nil {
-		return promptFiles{}, err
-	}
-	files := promptFiles{
-		ConfigDir:           resolvedConfigDir,
-		IdentityPath:        filepath.Join(resolvedConfigDir, identityFileName),
-		GlobalAgentsPath:    filepath.Join(resolvedConfigDir, globalAgentsFile),
-		UserPath:            filepath.Join(resolvedConfigDir, userFileName),
-		WorkspaceAgentsPath: filepath.Join(workspaceDir, workspaceAgentsFile),
-	}
-	if err := os.MkdirAll(resolvedConfigDir, 0o700); err != nil {
-		return promptFiles{}, fmt.Errorf("cli prompt: create config dir: %w", err)
-	}
-	defaults := defaultPromptTemplateSet()
-	if err := writePromptFileIfMissing(files.IdentityPath, defaults.Identity); err != nil {
-		return promptFiles{}, err
-	}
-	if err := writePromptFileIfMissing(files.GlobalAgentsPath, defaults.GlobalAgents); err != nil {
-		return promptFiles{}, err
-	}
-	if err := writePromptFileIfMissing(files.UserPath, defaults.User); err != nil {
-		return promptFiles{}, err
-	}
-	return files, nil
-}
-
-func resolvePromptConfigDir(appName string, configDir string) (string, error) {
-	if text := strings.TrimSpace(configDir); text != "" {
-		return resolvePromptPath(text)
-	}
-	root, err := appDataDir(appName)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(root, promptDirName), nil
 }
 
 func resolveWorkspaceDir(workspaceDir string) (string, error) {
@@ -172,30 +116,6 @@ func resolvePromptPath(path string) (string, error) {
 	return filepath.Clean(value), nil
 }
 
-func writePromptFileIfMissing(path string, content string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("cli prompt: stat %q: %w", path, err)
-	}
-	normalized := strings.TrimSpace(content)
-	if normalized != "" {
-		normalized += "\n"
-	}
-	if err := os.WriteFile(path, []byte(normalized), 0o600); err != nil {
-		return fmt.Errorf("cli prompt: write default file %q: %w", path, err)
-	}
-	return nil
-}
-
-func readRequiredPromptFile(path string) (string, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("cli prompt: read %q: %w", path, err)
-	}
-	return normalizePromptText(string(raw)), nil
-}
-
 func readOptionalPromptFile(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -214,13 +134,34 @@ func normalizePromptText(input string) string {
 	return strings.TrimSpace(input)
 }
 
-func buildUserPromptFragment(basePrompt string, userPrompt string) string {
-	parts := make([]string, 0, 2)
-	if text := normalizePromptText(userPrompt); text != "" {
-		parts = append(parts, text)
+func buildActiveAgentPoliciesPrompt(globalAgents string, workspaceAgents string, workspaceAgentsPath string) string {
+	_ = workspaceAgentsPath
+	sections := make([]string, 0, 2)
+	if text := normalizePromptText(globalAgents); text != "" {
+		sections = append(sections, strings.Join([]string{
+			"## Global User Policy",
+			"",
+			text,
+		}, "\n"))
 	}
-	if value := normalizePromptText(basePrompt); value != "" {
-		parts = append(parts, "## Session Overrides\n\n"+value)
+	if text := normalizePromptText(workspaceAgents); text != "" {
+		sections = append(sections, strings.Join([]string{
+			"## Project Policy",
+			"Overrides conflicting global instructions.",
+			"",
+			text,
+		}, "\n"))
 	}
-	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+	if len(sections) == 0 {
+		return ""
+	}
+	return "# Active Agent Policies\n\n" + strings.Join(sections, "\n\n")
+}
+
+func buildSessionOverridePrompt(basePrompt string) string {
+	value := normalizePromptText(basePrompt)
+	if value == "" {
+		return ""
+	}
+	return "## Session Overrides\n\n" + value
 }

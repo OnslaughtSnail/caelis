@@ -21,6 +21,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -79,9 +80,9 @@ type capSnapshot map[string]capEntry
 
 var (
 	dynamicMu       sync.RWMutex
-	remoteCatalog   capSnapshot // loaded from models.dev
-	embeddedCatalog capSnapshot // loaded from embedded snapshot
-	localOverrides  capSnapshot // loaded from the user's override file
+	remoteCatalog   capSnapshot                                   // loaded from models.dev
+	embeddedCatalog = parseSnapshotBytes(embeddedCatalogSnapshot) // loaded from embedded snapshot
+	localOverrides  capSnapshot                                   // loaded from the user's override file
 )
 
 // CatalogInitStatus describes the result of one dynamic catalog refresh.
@@ -262,11 +263,11 @@ func entryToCaps(e capEntry) ModelCapabilities {
 		SupportsJSONOutput:     e.JSONOutput,
 	}
 	normalizeModelCapabilitiesReasoning(&caps)
-		if caps.DefaultMaxOutputTokens <= 0 {
-			caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.ContextWindowTokens, caps.SupportsReasoning)
-		}
-		return caps
+	if caps.DefaultMaxOutputTokens <= 0 {
+		caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.ContextWindowTokens, caps.SupportsReasoning)
 	}
+	return caps
+}
 
 // defaultMaxOutputHeuristic applies a conservative default when
 // DefaultMaxOutputTokens is not explicitly specified in the source data.
@@ -371,7 +372,13 @@ func parseModelsDevJSON(data []byte) (capSnapshot, error) {
 	}
 
 	snap := make(capSnapshot, len(raw)*8)
-	for providerID, prov := range raw {
+	providerIDs := make([]string, 0, len(raw))
+	for providerID := range raw {
+		providerIDs = append(providerIDs, providerID)
+	}
+	sort.Strings(providerIDs)
+	for _, providerID := range providerIDs {
+		prov := raw[providerID]
 		if len(prov.Models) == 0 {
 			continue
 		}
@@ -381,12 +388,17 @@ func parseModelsDevJSON(data []byte) (capSnapshot, error) {
 			internalProvider = alias
 		}
 
-		for modelID, m := range prov.Models {
+		modelIDs := make([]string, 0, len(prov.Models))
+		for modelID := range prov.Models {
+			modelIDs = append(modelIDs, modelID)
+		}
+		sort.Strings(modelIDs)
+		for _, modelID := range modelIDs {
+			m := prov.Models[modelID]
 			if m.Limit.Context <= 0 && m.Limit.Output <= 0 {
 				continue // skip incomplete entries
 			}
-			key := internalProvider + ":" + strings.ToLower(modelID)
-			snap[key] = capEntry{
+			entry := capEntry{
 				ContextWindow: m.Limit.Context,
 				MaxOutput:     m.Limit.Output,
 				// DefaultMaxOutput left 0; heuristic applied in entryToCaps.
@@ -395,9 +407,46 @@ func parseModelsDevJSON(data []byte) (capSnapshot, error) {
 				Images:     m.Attachment,
 				JSONOutput: m.StructuredOutput,
 			}
+			insertCapEntry(snap, internalProvider+":"+strings.ToLower(modelID), entry)
+			if derivedProvider, derivedModel, ok := splitVendorModelID(modelID); ok {
+				insertCapEntry(snap, derivedProvider+":"+derivedModel, entry)
+			}
 		}
 	}
 	return snap, nil
+}
+
+func insertCapEntry(snap capSnapshot, key string, entry capEntry) {
+	if snap == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	if existing, ok := snap[key]; ok {
+		snap[key] = mergeCapEntry(existing, entry)
+		return
+	}
+	snap[key] = entry
+}
+
+func mergeCapEntry(existing, next capEntry) capEntry {
+	if next.ContextWindow > existing.ContextWindow {
+		existing.ContextWindow = next.ContextWindow
+	}
+	if next.MaxOutput > existing.MaxOutput {
+		existing.MaxOutput = next.MaxOutput
+	}
+	existing.ToolCalls = existing.ToolCalls || next.ToolCalls
+	existing.Reasoning = existing.Reasoning || next.Reasoning
+	existing.Images = existing.Images || next.Images
+	existing.JSONOutput = existing.JSONOutput || next.JSONOutput
+	return existing
+}
+
+func splitVendorModelID(modelID string) (provider string, model string, ok bool) {
+	parts := strings.SplitN(strings.ToLower(strings.TrimSpace(modelID)), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 // ---------------------------------------------------------------------------
@@ -407,11 +456,26 @@ func parseModelsDevJSON(data []byte) (capSnapshot, error) {
 // parseSnapshotBytes parses the embedded JSON snapshot into a capSnapshot.
 // Errors are swallowed (the embedded data is trusted).
 func parseSnapshotBytes(data []byte) capSnapshot {
-	// Strip "_comment" key before parsing as capEntry map.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil
 	}
+	looksCompact := false
+	for key := range raw {
+		if key == "_comment" {
+			continue
+		}
+		if strings.Contains(key, ":") {
+			looksCompact = true
+			break
+		}
+	}
+	if !looksCompact {
+		if parsed, err := parseModelsDevJSON(data); err == nil {
+			return parsed
+		}
+	}
+
 	snap := make(capSnapshot, len(raw))
 	for k, v := range raw {
 		if k == "_comment" {

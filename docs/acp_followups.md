@@ -12,6 +12,7 @@ stdio-first baseline.
   - Can validate a client-injected credential against a separate env var when
     `caelis acp` is started with `-auth-method-id` and `-auth-token-env`
 - `session/new`
+- `session/list`
 - `session/load`
 - `session/set_mode`
 - `session/set_config_option`
@@ -59,19 +60,7 @@ Recommended scope:
 - Record clearer termination reasons for cancelled vs exited sessions
 - Surface better task/session diagnostics in ACP updates
 
-### 3. Server-side `session/list`
-
-`acpx` can work today using its own local session metadata, so this is not a
-blocking gap. It is still worth implementing for ACP completeness and for
-future non-`acpx` clients.
-
-Recommended scope:
-
-- Enumerate sessions from the configured store
-- Return session metadata scoped to the current workspace/app/user
-- Keep the initial implementation read-only
-
-### 4. Non-`file://` resource links
+### 3. Non-`file://` resource links
 
 Only `ResourceLink(file://...)` is supported today. This is enough for coding
 workflows, but richer client-provided resources still fall back to unsupported.
@@ -83,7 +72,7 @@ Recommended scope:
 - Be explicit about sandbox and trust boundaries for any remote/resource-backed
   scheme
 
-### 5. Multimodal prompt blocks
+### 4. Multimodal prompt blocks
 
 Image/audio prompt blocks are still unsupported. This is not a coding-path
 priority, but it is the main protocol-surface gap once text/resource-link
@@ -95,7 +84,7 @@ Recommended scope:
   the modality
 - Avoid ACPX-specific behavior; stay inside ACP prompt block semantics
 
-### 6. Stronger authentication if remote transports ever appear
+### 5. Stronger authentication if remote transports ever appear
 
 The current auth flow is deliberately local-first. If ACP grows beyond local
 `stdio`, this needs a stronger model.
@@ -107,7 +96,7 @@ Recommended scope:
   handshake
 - Do not couple provider credentials to ACP client authentication
 
-### 7. Multi-workspace / multi-cwd session hosting
+### 6. Multi-workspace / multi-cwd session hosting
 
 The current one-process-one-workspace model keeps behavior predictable and is a
 good fit for `acpx` today. If a long-lived ACP daemon becomes desirable, this

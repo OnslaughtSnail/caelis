@@ -42,13 +42,12 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 	text := result.Prompt
 	for _, required := range []string{
 		"Priority rule: earlier sections override later sections.",
-		"### Identity",
-		"### Global Instructions",
-		"### Workspace Instructions",
-		"### Runtime Context",
-		"### User Custom Instructions",
-		"### Experimental LSP Routing",
-		"### Skills Metadata",
+		"# Identity",
+		"# Global",
+		"# Workspace",
+		"## Runtime Execution",
+		"# User",
+		"Use LSP_SYMBOLS first.",
 		"Session says: be concise.",
 		"Skills Metadata (auto-loaded, all active):",
 	} {
@@ -57,13 +56,17 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 		}
 	}
 
-	idxIdentity := strings.Index(text, "### Identity")
-	idxGlobal := strings.Index(text, "### Global Instructions")
-	idxWorkspace := strings.Index(text, "### Workspace Instructions")
-	idxRuntime := strings.Index(text, "### Runtime Context")
-	idxUser := strings.Index(text, "### User Custom Instructions")
-	idxLSP := strings.Index(text, "### Experimental LSP Routing")
-	idxSkills := strings.Index(text, "### Skills Metadata")
+	if strings.Contains(text, "source: ") {
+		t.Fatalf("did not expect source metadata in assembled prompt:\n%s", text)
+	}
+
+	idxIdentity := strings.Index(text, "# Identity")
+	idxGlobal := strings.Index(text, "# Global")
+	idxWorkspace := strings.Index(text, "# Workspace")
+	idxRuntime := strings.Index(text, "## Runtime Execution")
+	idxUser := strings.Index(text, "# User")
+	idxLSP := strings.Index(text, "Use LSP_SYMBOLS first.")
+	idxSkills := strings.Index(text, "Skills Metadata (auto-loaded, all active):")
 	if !(idxIdentity < idxGlobal &&
 		idxGlobal < idxWorkspace &&
 		idxWorkspace < idxRuntime &&
@@ -83,7 +86,7 @@ func TestAssembleSkipsOptionalAdditionalFragmentsWhenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
 	}
-	if strings.Contains(result.Prompt, "### Experimental LSP Routing") {
+	if strings.Contains(result.Prompt, "Experimental LSP Routing") {
 		t.Fatalf("did not expect optional fragment section:\n%s", result.Prompt)
 	}
 }
@@ -92,9 +95,6 @@ func TestAssembleHandlesEmptyInputs(t *testing.T) {
 	result, err := Assemble(AssembleSpec{})
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
-	}
-	if strings.Contains(result.Prompt, "### ") {
-		t.Fatalf("expected no content sections for empty input, got:\n%s", result.Prompt)
 	}
 	if !strings.Contains(result.Prompt, "Priority rule: earlier sections override later sections.") {
 		t.Fatalf("expected prompt header in empty assemble output, got:\n%s", result.Prompt)

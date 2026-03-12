@@ -43,7 +43,7 @@ func newOpenAICompat(cfg Config, token string) *openAICompatLLM {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-	return &openAICompatLLM{
+	llm := &openAICompatLLM{
 		name:                cfg.Model,
 		provider:            cfg.Provider,
 		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
@@ -54,6 +54,7 @@ func newOpenAICompat(cfg Config, token string) *openAICompatLLM {
 		contextWindowTokens: cfg.ContextWindowTokens,
 		options:             defaultOpenAICompatOptions(),
 	}
+	return llm
 }
 
 func (l *openAICompatLLM) Name() string {
@@ -491,6 +492,23 @@ func (l *openAICompatLLM) reasoningContentField(reasoning string, hasToolCalls b
 		return &empty
 	}
 	return nil
+}
+
+func applyToggleThinkingReasoning(payload *openAICompatRequest, cfg model.ReasoningConfig) {
+	if payload == nil {
+		return
+	}
+	effort := strings.ToLower(strings.TrimSpace(cfg.Effort))
+	if effort == "" {
+		return
+	}
+	state := "enabled"
+	if effort == "none" {
+		state = "disabled"
+	}
+	payload.Thinking = &openAIThinking{Type: state}
+	payload.Reasoning = nil
+	payload.ReasoningEffort = ""
 }
 
 func applyOpenAIReasoning(payload *openAICompatRequest, cfg model.ReasoningConfig) {

@@ -417,23 +417,24 @@ func (c *cliConsole) statusReasoningLevelLabel() string {
 		return ""
 	}
 	profile := c.currentReasoningProfile()
-	thinking := normalizeReasoningSelection(c.thinkingMode)
+	effort := normalizeReasoningLevel(c.reasoningEffort)
 	switch profile.Mode {
 	case reasoningModeEffort:
-		if thinking == "off" {
-			return "reasoning off"
+		if effort == "none" {
+			return ""
 		}
-		level := normalizeReasoningLevel(c.reasoningEffort)
-		if level == "" || level == "none" {
+		if effort == "" {
 			if profile.DefaultEffort == "" {
 				return "reasoning on"
 			}
 			return profile.DefaultEffort
 		}
-		return level
+		return effort
+	case reasoningModeFixed:
+		return "reasoning on"
 	case reasoningModeToggle:
-		if thinking == "off" {
-			return "reasoning off"
+		if effort == "none" {
+			return ""
 		}
 		return "reasoning on"
 	default:
@@ -477,10 +478,7 @@ func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp
 		if sid == "" || sid == c.sessionID {
 			continue
 		}
-		prompt := strings.TrimSpace(rec.LastUserMessage)
-		if prompt == "" {
-			prompt = "-"
-		}
+		prompt := sessionIndexPreview(rec, 100)
 		age := "-"
 		if !rec.LastEventAt.IsZero() {
 			age = now.Sub(rec.LastEventAt).Round(time.Second).String()
@@ -762,14 +760,12 @@ func (c *cliConsole) completeModelCommandCandidates(query string, limit int) []t
 	action := strings.ToLower(strings.TrimSpace(fields[0]))
 	if !hasTrailingSpace && len(fields) == 1 {
 		switch action {
-		case "list", "use", "rm", "edit":
+		case "use", "del":
 		default:
 			return completeModelActionCandidates(action, limit)
 		}
 	}
 	switch action {
-	case "list":
-		return nil
 	case "use":
 		if len(fields) == 1 {
 			return c.completeModelCandidates("", limit)
@@ -783,11 +779,8 @@ func (c *cliConsole) completeModelCommandCandidates(query string, limit int) []t
 			reasoningQuery = fields[len(fields)-1]
 		}
 		return c.completeModelReasoningCandidates(alias, reasoningQuery, limit)
-	case "rm", "edit":
-		if len(fields) == 1 {
-			return c.completeModelCandidates("", limit)
-		}
-		return c.completeModelCandidates(fields[len(fields)-1], limit)
+	case "del":
+		return nil
 	default:
 		return completeModelActionCandidates(action, limit)
 	}
@@ -798,10 +791,8 @@ func completeModelActionCandidates(query string, limit int) []tuiapp.SlashArgCan
 		limit = 20
 	}
 	actions := []tuiapp.SlashArgCandidate{
-		{Value: "list", Display: "list"},
 		{Value: "use", Display: "use"},
-		{Value: "rm", Display: "rm"},
-		{Value: "edit", Display: "edit"},
+		{Value: "del", Display: "del"},
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
 	out := make([]tuiapp.SlashArgCandidate, 0, len(actions))

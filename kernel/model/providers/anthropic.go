@@ -68,7 +68,7 @@ func (l *anthropicLLM) Generate(ctx context.Context, req *model.Request) iter.Se
 			MaxTokens: l.maxOutputTok,
 			Stream:    false,
 		}
-		if req.Reasoning.Enabled != nil && *req.Reasoning.Enabled {
+		if effort := strings.ToLower(strings.TrimSpace(req.Reasoning.Effort)); effort != "" && effort != "none" {
 			budget := req.Reasoning.BudgetTokens
 			if budget <= 0 {
 				budget = 512

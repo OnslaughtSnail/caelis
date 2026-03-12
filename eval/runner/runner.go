@@ -260,8 +260,6 @@ func resolveReasoning(alias, mode string, budget int, effort string) (string, mo
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
 	case "on":
-		enabled := true
-		cfg.Enabled = &enabled
 		if budget > 0 {
 			cfg.BudgetTokens = budget
 		}
@@ -269,8 +267,7 @@ func resolveReasoning(alias, mode string, budget int, effort string) (string, mo
 			cfg.Effort = "high"
 		}
 	case "off":
-		enabled := false
-		cfg.Enabled = &enabled
+		cfg.Effort = "none"
 		cfg.BudgetTokens = 0
 		if strings.EqualFold(alias, "deepseek-reasoner") {
 			alias = "deepseek-chat"

@@ -9,8 +9,8 @@ It is designed to be extracted as a standalone repository.
 - Experimental delegated child-run prototype via core `DELEGATE`.
 - Compile-time plugin registration + provider-based assembly.
 - Built-in mandatory `READ` tool with line/token caps.
-- Modular system prompt pipeline with auto-seeded templates (`IDENTITY.md`, `AGENTS.md`, `USER.md`).
-- Skills metadata auto-discovery (`~/.agents/skills`, `.agents/skills`) and prompt injection.
+- Modular system prompt pipeline with built-in identity and `AGENTS.md` policy assembly.
+- Skills metadata auto-discovery from `~/.agents/skills` and prompt injection.
 - Policy hooks (egress/audit/output) with default allow behavior.
 - Unified model provider layer with API types: `openai`, `openai_compatible`, `gemini`, `anthropic`, `deepseek`.
 - CLI shell and real-model eval runner.
@@ -46,8 +46,7 @@ go run ./cmd/cli \
   -compact-watermark=0.7 \
   -context-window=65536 \
   -thinking-budget=1024 \
-  -prompt-config-dir "" \
-  -skills-dirs "~/.agents/skills,.agents/skills" \
+  -skills-dirs "~/.agents/skills" \
   -session demo \
   -input "hello"
 ```
@@ -79,7 +78,6 @@ Tool execution runtime flags:
   - built-in: `landlock` (Linux default backend; uses `PR_SET_NO_NEW_PRIVS`, seccomp network filtering, and Landlock filesystem rules; prefers a sibling `caelis-sandbox-helper` binary when present, otherwise falls back to the current CLI executable as helper; avoids Linux user-namespace dependencies but cannot enforce read-only subpaths such as `.git` inside a writable workspace)
   - built-in: `bwrap` (Linux optional backend; uses bubblewrap for stronger namespace-based filesystem and network isolation; requires both the `bwrap` binary and a working Linux user-namespace setup, or a setuid-root `bwrap`; install via `apt install bubblewrap` or equivalent)
 - `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
-- `-prompt-config-dir`: override prompt config directory; empty means `~/.{app}/prompts`
 - `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
 
 Fallback behavior:

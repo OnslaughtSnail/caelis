@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -49,6 +51,38 @@ func (s *stubChoiceEditor) RequestChoicePrompt(prompt string, choices []tuievent
 	s.lastChoices = append([]tuievents.PromptChoice(nil), choices...)
 	s.lastDefaultChoice = defaultChoice
 	return s.response, nil
+}
+
+type blockingLineEditor struct {
+	mu      sync.Mutex
+	lines   []string
+	idx     int
+	reads   int
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingLineEditor) ReadLine(prompt string) (string, error) {
+	_ = prompt
+	s.mu.Lock()
+	s.reads++
+	readIdx := s.idx
+	s.idx++
+	started := s.started
+	release := s.release
+	s.mu.Unlock()
+	if readIdx == 0 {
+		close(started)
+		<-release
+	}
+	if readIdx >= len(s.lines) {
+		return "", errInputEOF
+	}
+	return s.lines[readIdx], nil
+}
+
+func (s *blockingLineEditor) ReadSecret(prompt string) (string, error) {
+	return s.ReadLine(prompt)
 }
 
 func TestTerminalApprover_RequiresExplicitApprovalByDefault(t *testing.T) {
@@ -427,6 +461,59 @@ func TestTerminalApprover_AuthorizeToolPromptShowsExternalMCPContext(t *testing.
 	}
 	if !strings.Contains(rendered, "You approved this session for tool requests under \"example.com\".") {
 		t.Fatalf("expected session approval transcript, got %q", rendered)
+	}
+}
+
+func TestTerminalApprover_QueuedApprovalRechecksSessionAllow(t *testing.T) {
+	editor := &blockingLineEditor{
+		lines:   []string{"a", "n"},
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	approver := newTerminalApprover(editor, io.Discard, nil)
+	req := toolexec.ApprovalRequest{Command: "go test ./..."}
+
+	resultCh := make(chan struct {
+		allowed bool
+		err     error
+	}, 2)
+	go func() {
+		allowed, err := approver.Approve(context.Background(), req)
+		resultCh <- struct {
+			allowed bool
+			err     error
+		}{allowed: allowed, err: err}
+	}()
+
+	<-editor.started
+
+	go func() {
+		allowed, err := approver.Approve(context.Background(), req)
+		resultCh <- struct {
+			allowed bool
+			err     error
+		}{allowed: allowed, err: err}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	close(editor.release)
+
+	first := <-resultCh
+	second := <-resultCh
+	if first.err != nil {
+		t.Fatalf("expected first approval to succeed, got %v", first.err)
+	}
+	if !first.allowed {
+		t.Fatal("expected first approval to allow")
+	}
+	if second.err != nil {
+		t.Fatalf("expected queued approval to reuse session allow, got %v", second.err)
+	}
+	if !second.allowed {
+		t.Fatal("expected queued approval to allow")
+	}
+	if editor.reads != 1 {
+		t.Fatalf("expected queued duplicate to skip second prompt, got reads=%d", editor.reads)
 	}
 }
 

@@ -46,6 +46,8 @@ func TestNewRuntime_UsesACPAsyncRunnerForTerminalCapability(t *testing.T) {
 				}, nil
 			case MethodTerminalWaitForExit:
 				return WaitForTerminalExitResponse{ExitCode: ptr(0)}, nil
+			case MethodTerminalKill:
+				return map[string]any{}, nil
 			case MethodTerminalRelease:
 				return map[string]any{}, nil
 			default:
@@ -218,6 +220,8 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 				return TerminalOutputResponse{Output: "ok", ExitStatus: &TerminalExitStatus{ExitCode: ptr(0)}}, nil
 			case MethodTerminalWaitForExit:
 				return WaitForTerminalExitResponse{ExitCode: ptr(0)}, nil
+			case MethodTerminalKill:
+				return map[string]any{}, nil
 			case MethodTerminalRelease:
 				return map[string]any{}, nil
 			default:
@@ -241,6 +245,60 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 	}
 	if rt.SandboxRunner() != rt.HostRunner() {
 		t.Fatal("expected sandbox runner to collapse to host route runner in full_access mode")
+	}
+}
+
+func TestAsyncRunner_TerminateSessionUsesTerminalKill(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	clientConn := NewConn(s2cR, c2sW)
+	serverConn := NewConn(c2sR, s2cW)
+
+	killCalls := 0
+	releaseCalls := 0
+	go func() {
+		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+			switch msg.Method {
+			case MethodTerminalCreate:
+				return CreateTerminalResponse{TerminalID: "term-kill-1"}, nil
+			case MethodTerminalKill:
+				killCalls++
+				return map[string]any{}, nil
+			case MethodTerminalRelease:
+				releaseCalls++
+				return map[string]any{}, nil
+			case MethodTerminalOutput:
+				return TerminalOutputResponse{Output: "", Truncated: false}, nil
+			default:
+				return nil, &RPCError{Code: -32601, Message: "unexpected method"}
+			}
+		}, func(context.Context, Message) {})
+	}()
+	go func() {
+		_ = clientConn.Serve(ctx, func(context.Context, Message) (any, *RPCError) {
+			return nil, &RPCError{Code: -32601, Message: "method not found"}
+		}, func(context.Context, Message) {})
+	}()
+
+	runner := NewAsyncCommandRunner(clientConn, "session-1")
+	sessionID, err := runner.StartAsync(context.Background(), toolexec.CommandRequest{
+		Command: "sleep 10",
+		Dir:     "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("start async: %v", err)
+	}
+	if err := runner.TerminateSession(sessionID); err != nil {
+		t.Fatalf("terminate session: %v", err)
+	}
+	if killCalls != 1 {
+		t.Fatalf("expected one terminal/kill call, got %d", killCalls)
+	}
+	if releaseCalls != 0 {
+		t.Fatalf("expected no terminal/release call on terminate, got %d", releaseCalls)
 	}
 }
 

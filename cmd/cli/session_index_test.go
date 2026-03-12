@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -108,6 +109,69 @@ func TestIndexedSessionStore_AppendEventUpdatesIndex(t *testing.T) {
 	}
 	if items[0].LastUserMessage != "first prompt" {
 		t.Fatalf("unexpected last_user_message %q", items[0].LastUserMessage)
+	}
+}
+
+func TestSessionIndex_SyncWorkspaceFromStoreDir_BackfillsLastUserMessage(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+
+	storeDir := t.TempDir()
+	sessionID := "s-hydrate"
+	sessionDir := filepath.Join(storeDir, sessionID)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	events := []*session.Event{
+		{
+			ID:   "e1",
+			Time: time.Date(2026, 3, 12, 4, 10, 0, 0, time.UTC),
+			Message: model.Message{
+				Role: model.RoleUser,
+				Text: "first request",
+			},
+		},
+		{
+			ID:   "e2",
+			Time: time.Date(2026, 3, 12, 4, 11, 0, 0, time.UTC),
+			Message: model.Message{
+				Role: model.RoleAssistant,
+				Text: "done",
+			},
+		},
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	for _, ev := range events {
+		if err := enc.Encode(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := workspaceContext{CWD: "/tmp/workspace", Key: "ws-key"}
+	if err := idx.SyncWorkspaceFromStoreDir(workspace, "app", "u", storeDir); err != nil {
+		t.Fatal(err)
+	}
+	items, err := idx.ListWorkspaceSessions(workspace.Key, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(items))
+	}
+	if items[0].LastUserMessage != "first request" {
+		t.Fatalf("unexpected last user message %q", items[0].LastUserMessage)
+	}
+	if items[0].LastEventAt.IsZero() {
+		t.Fatal("expected last_event_at to be populated")
 	}
 }
 

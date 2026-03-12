@@ -11,6 +11,9 @@ const (
 	APIGemini           APIType = "gemini"
 	APIAnthropic        APIType = "anthropic"
 	APIDeepSeek         APIType = "deepseek"
+	APIVolcengine       APIType = "volcengine"
+	APIMimo             APIType = "mimo"
+	APIVolcengineCoding APIType = "volcengine_coding_plan"
 	APIOllama           APIType = "ollama"
 )
 

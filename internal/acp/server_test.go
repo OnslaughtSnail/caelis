@@ -39,12 +39,15 @@ func TestServer_InitializeNewPromptAndLoad(t *testing.T) {
 
 	var initResp InitializeResponse
 	if err := h.client.Call(context.Background(), MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 		ClientCapabilities: ClientCapabilities{
 			FS: FileSystemCapabilities{},
 		},
 	}, &initResp); err != nil {
 		t.Fatalf("initialize: %v", err)
+	}
+	if initResp.ProtocolVersion != CurrentProtocolVersion {
+		t.Fatalf("expected protocolVersion %d, got %d", CurrentProtocolVersion, initResp.ProtocolVersion)
 	}
 	if !initResp.AgentCapabilities.LoadSession {
 		t.Fatal("expected loadSession capability")
@@ -95,7 +98,7 @@ func TestServer_InitializeNewPromptAndLoad(t *testing.T) {
 	}
 }
 
-func TestServer_InitializeAcceptsNumericProtocolVersion(t *testing.T) {
+func TestServer_InitializeRejectsLegacyProtocolVersion(t *testing.T) {
 	h := newHarness(t, harnessConfig{})
 	defer h.close()
 
@@ -106,11 +109,153 @@ func TestServer_InitializeAcceptsNumericProtocolVersion(t *testing.T) {
 			"fs": map[string]any{},
 		},
 	}, &initResp)
-	if err != nil {
-		t.Fatalf("initialize with numeric protocolVersion: %v", err)
+	if err == nil {
+		t.Fatal("expected legacy protocolVersion to be rejected")
 	}
-	if !initResp.AgentCapabilities.LoadSession {
-		t.Fatal("expected loadSession capability")
+}
+
+func TestServer_InitializeSerializesSchemaFields(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	defer h.close()
+
+	var initResp map[string]any
+	err := h.client.Call(context.Background(), MethodInitialize, map[string]any{
+		"protocolVersion": 1,
+		"clientCapabilities": map[string]any{
+			"fs":       map[string]any{},
+			"terminal": true,
+		},
+	}, &initResp)
+	if err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	if got, ok := initResp["protocolVersion"].(float64); !ok || got != float64(CurrentProtocolVersion) {
+		t.Fatalf("expected numeric protocolVersion %d, got %#v", CurrentProtocolVersion, initResp["protocolVersion"])
+	}
+	rawCaps, ok := initResp["agentCapabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected agentCapabilities object, got %#v", initResp["agentCapabilities"])
+	}
+	value, exists := rawCaps["mcpCapabilities"]
+	if !exists {
+		t.Fatalf("expected %q in agentCapabilities, got %#v", "mcpCapabilities", rawCaps)
+	}
+	item, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("expected mcpCapabilities object, got %#v", value)
+	}
+	if item["http"] != true || item["sse"] != true {
+		t.Fatalf("expected mcpCapabilities to advertise http/sse, got %#v", item)
+	}
+	if _, exists := rawCaps["mcp"]; exists {
+		t.Fatalf("did not expect legacy mcp field, got %#v", rawCaps)
+	}
+}
+
+func TestServer_InitializeAdvertisesSessionListAndListsSessions(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		listSessions: func(ctx context.Context, req SessionListRequest) (SessionListResponse, error) {
+			_ = ctx
+			if req.Cursor != "" {
+				t.Fatalf("unexpected cursor %q", req.Cursor)
+			}
+			return SessionListResponse{
+				Sessions: []SessionSummary{{
+					SessionID: "s-1",
+					CWD:       "/workspace",
+					Title:     "recent session",
+					UpdatedAt: "2026-03-12T04:15:05Z",
+				}},
+			}, nil
+		},
+	})
+	defer h.close()
+
+	var initResp InitializeResponse
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &initResp)
+	if initResp.AgentCapabilities.Session.List == nil {
+		t.Fatalf("expected session list capability, got %+v", initResp.AgentCapabilities.Session)
+	}
+
+	var listResp SessionListResponse
+	mustCall(t, h.client, MethodSessionList, SessionListRequest{}, &listResp)
+	if len(listResp.Sessions) != 1 || listResp.Sessions[0].SessionID != "s-1" {
+		t.Fatalf("unexpected session list response %+v", listResp)
+	}
+}
+
+func TestServer_NewSessionAndPromptUseDynamicModelState(t *testing.T) {
+	var captured AgentSessionConfig
+	h := newHarness(t, harnessConfig{
+		newModel: func(cfg AgentSessionConfig) (model.LLM, error) {
+			captured = cfg
+			return &scriptedLLM{
+				calls: [][]*model.Response{
+					{{Message: model.Message{Role: model.RoleAssistant, Text: "hello from selected model"}}},
+				},
+			}, nil
+		},
+		sessionConfig: []SessionConfigOptionTemplate{
+			{
+				ID:           "model",
+				Name:         "Model",
+				Category:     "model",
+				DefaultValue: "model-a",
+				Options: []SessionConfigSelectOption{
+					{Value: "model-a", Name: "model-a"},
+					{Value: "model-b", Name: "model-b"},
+				},
+			},
+		},
+		sessionModels: func(cfg AgentSessionConfig) *SessionModelState {
+			return &SessionModelState{
+				CurrentModelID: cfg.ConfigValues["model"],
+				AvailableModels: []SessionModel{
+					{ModelID: "model-a", Name: "model-a"},
+					{ModelID: "model-b", Name: "model-b"},
+				},
+			}
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	if newResp.Models == nil || newResp.Models.CurrentModelID != "model-a" {
+		t.Fatalf("unexpected initial model state %+v", newResp.Models)
+	}
+
+	mustCall(t, h.client, MethodSessionSetConfig, SetSessionConfigOptionRequest{
+		SessionID: newResp.SessionID,
+		ConfigID:  "model",
+		Value:     "model-b",
+	}, &SetSessionConfigOptionResponse{})
+
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "use selected model"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+	if captured.ConfigValues["model"] != "model-b" {
+		t.Fatalf("expected selected model to reach dynamic model factory, got %+v", captured)
+	}
+
+	var loadResp LoadSessionResponse
+	mustCall(t, h.client, MethodSessionLoad, LoadSessionRequest{
+		SessionID: newResp.SessionID,
+		CWD:       h.workspace,
+	}, &loadResp)
+	if loadResp.Models == nil || loadResp.Models.CurrentModelID != "model-b" {
+		t.Fatalf("expected persisted model state, got %+v", loadResp.Models)
 	}
 }
 
@@ -137,7 +282,7 @@ func TestServer_PromptForwardsDelegatedChildSessionUpdates(t *testing.T) {
 
 	var initResp InitializeResponse
 	if err := h.client.Call(context.Background(), MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 		ClientCapabilities: ClientCapabilities{
 			FS: FileSystemCapabilities{},
 		},
@@ -198,7 +343,7 @@ func TestServer_AuthenticateRequiredBeforeSessionMethods(t *testing.T) {
 
 	var initResp InitializeResponse
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &initResp)
 	if len(initResp.AuthMethods) != 1 || initResp.AuthMethods[0].ID != "local_test" {
 		t.Fatalf("unexpected auth methods %+v", initResp.AuthMethods)
@@ -250,7 +395,7 @@ func TestServer_SessionModeAndConfigPersistAcrossLoad(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 
 	var newResp NewSessionResponse
@@ -338,7 +483,7 @@ func TestServer_Prompt_UsesACPFileSystemRead(t *testing.T) {
 	h.files["/workspace/app.txt"] = "remote file"
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion:    "0.2.0",
+		ProtocolVersion:    CurrentProtocolVersion,
 		ClientCapabilities: h.clientCaps,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
@@ -356,6 +501,7 @@ func TestServer_Prompt_UsesACPFileSystemRead(t *testing.T) {
 	if h.readRequests != 1 {
 		t.Fatalf("expected ACP fs read, got %d requests", h.readRequests)
 	}
+	h.waitNotifications(t, 3)
 	if !containsAll(h.notificationTypes(), UpdateToolCall, UpdateToolCallState, UpdateAgentMessage) {
 		t.Fatalf("expected tool updates and final message, got %v", h.notificationTypes())
 	}
@@ -386,7 +532,7 @@ func TestServer_Prompt_UsesACPTerminalForBash(t *testing.T) {
 	h.termOutput = "hi\n"
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion:    "0.2.0",
+		ProtocolVersion:    CurrentProtocolVersion,
 		ClientCapabilities: h.clientCaps,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
@@ -444,7 +590,7 @@ func TestServer_Prompt_FiltersInternalToolMetadataFromACPUpdates(t *testing.T) {
 	})
 	defer h.close()
 
-	mustCall(t, h.client, MethodInitialize, InitializeRequest{ProtocolVersion: "0.2.0"}, &InitializeResponse{})
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{ProtocolVersion: CurrentProtocolVersion}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
 
@@ -517,7 +663,7 @@ func TestServer_Prompt_CoalescesAssistantPartialsIntoFinalMessage(t *testing.T) 
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
@@ -555,7 +701,7 @@ func TestServer_Prompt_FinalMessageOnlyEmitsUnsentSuffixAfterFlush(t *testing.T)
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
@@ -576,13 +722,53 @@ func TestServer_Prompt_FinalMessageOnlyEmitsUnsentSuffixAfterFlush(t *testing.T)
 	}
 }
 
+func TestServer_Prompt_FlushesReasoningBeforeAnswerOnChannelSwitch(t *testing.T) {
+	answer := strings.Repeat("a", partialFlushHardLimit)
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{
+					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Reasoning: "reasoning first"}},
+					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: answer}},
+					{Message: model.Message{Role: model.RoleAssistant, Reasoning: "reasoning first", Text: answer}},
+				},
+			},
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "stream"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+
+	h.waitNotifications(t, 2)
+	got := h.notificationTypes()
+	if len(got) < 2 {
+		t.Fatalf("expected thought/message notifications, got %#v", got)
+	}
+	if got[0] != UpdateAgentThought || got[1] != UpdateAgentMessage {
+		t.Fatalf("expected reasoning to flush before answer on channel switch, got %#v", got)
+	}
+}
+
 func TestServer_LoadSessionSuppressesPersistedPartialChunks(t *testing.T) {
 	store := sessionmem.New()
 	h := newHarness(t, harnessConfig{store: store})
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 
 	sess := &session.Session{AppName: "caelis", UserID: "tester", ID: "persisted-session"}
@@ -644,7 +830,7 @@ func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 	}
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
@@ -662,6 +848,93 @@ func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolCallTitle_TaskUsesFriendlyActionSummary(t *testing.T) {
+	if got := summarizeToolCallTitle("TASK", map[string]any{
+		"action": "wait",
+	}); got != "WAIT 5 s" {
+		t.Fatalf("expected WAIT summary, got %q", got)
+	}
+	if got := summarizeToolCallTitle("TASK", map[string]any{
+		"action":  "cancel",
+		"task_id": "t-1234567890ab",
+	}); got != "CANCEL t-12345678" {
+		t.Fatalf("expected cancel summary with short task id, got %q", got)
+	}
+	if got := summarizeToolCallTitle("TASK", map[string]any{
+		"action":  "write",
+		"task_id": "t-1234567890ab",
+	}); got != "WRITE {task=t-12345678}" {
+		t.Fatalf("expected write summary with short task id, got %q", got)
+	}
+}
+
+func TestToolCallContentForResult_UsesTerminalSessionID(t *testing.T) {
+	got := toolCallContentForResult("BASH", map[string]any{
+		"session_id": "term-123",
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected one terminal content item, got %#v", got)
+	}
+	if got[0].Type != "terminal" || got[0].TerminalID != "term-123" {
+		t.Fatalf("unexpected terminal content %#v", got[0])
+	}
+}
+
+func TestToolCallContentForResult_TaskDoesNotAttachTerminal(t *testing.T) {
+	got := toolCallContentForResult("TASK", map[string]any{
+		"session_id": "term-123",
+	})
+	if len(got) != 0 {
+		t.Fatalf("expected TASK result not to attach terminal content, got %#v", got)
+	}
+}
+
+func TestSupplementalToolCallUpdates_TaskCancelCompletesOriginBash(t *testing.T) {
+	sess := &serverSession{}
+	sess.rememberToolCall("call-bash", "BASH", map[string]any{
+		"command": "sleep 30",
+	})
+	sess.rememberAsyncToolResult("BASH", "call-bash", map[string]any{
+		"task_id":    "t-1234567890ab",
+		"session_id": "term-123",
+	})
+	sess.rememberToolCall("call-task-cancel", "TASK", map[string]any{
+		"action":  "cancel",
+		"task_id": "t-1234567890ab",
+	})
+
+	updates := supplementalToolCallUpdates(sess, &model.ToolResponse{
+		ID:   "call-task-cancel",
+		Name: "TASK",
+		Result: map[string]any{
+			"task_id":       "t-1234567890ab",
+			"session_id":    "term-123",
+			"state":         "cancelled",
+			"latest_output": "5\n6\n",
+		},
+	})
+	if len(updates) != 1 {
+		t.Fatalf("expected one supplemental update, got %#v", updates)
+	}
+	update := updates[0]
+	if update.ToolCallID != "call-bash" {
+		t.Fatalf("expected supplemental update for original bash call, got %q", update.ToolCallID)
+	}
+	if update.Status == nil || *update.Status != ToolStatusCompleted {
+		t.Fatalf("expected completed status, got %#v", update.Status)
+	}
+	raw, ok := update.RawOutput.(map[string]any)
+	if !ok {
+		t.Fatalf("expected rawOutput map, got %#v", update.RawOutput)
+	}
+	if raw["state"] != "cancelled" || raw["cancelled"] != true {
+		t.Fatalf("expected cancelled markers, got %#v", raw)
+	}
+	if raw["task_id"] != "t-1234567890ab" || raw["session_id"] != "term-123" {
+		t.Fatalf("expected task/session linkage preserved, got %#v", raw)
+	}
+}
+
 func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
@@ -674,7 +947,7 @@ func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
@@ -716,7 +989,7 @@ func TestServer_SessionLoadKeepsCancelForActiveRun(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
@@ -760,7 +1033,7 @@ func TestServer_SessionLoadUnknownIDReturnsNotFound(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 
 	var loadResp LoadSessionResponse
@@ -782,7 +1055,7 @@ func TestServer_SessionNewAllowsWorkspaceRootSubdir(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 
 	var newResp NewSessionResponse
@@ -802,7 +1075,7 @@ func TestServer_SessionRejectsCWDOutsideWorkspaceRoot(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 
 	var newResp NewSessionResponse
@@ -840,7 +1113,7 @@ func TestServer_SessionLoadRejectsPersistedCWDMismatch(t *testing.T) {
 	defer h.close()
 
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
-		ProtocolVersion: "0.2.0",
+		ProtocolVersion: CurrentProtocolVersion,
 	}, &InitializeResponse{})
 
 	var newResp NewSessionResponse
@@ -862,12 +1135,15 @@ type harnessConfig struct {
 	clientCaps    ClientCapabilities
 	llm           model.LLM
 	newAgent      AgentFactory
+	newModel      ModelFactory
 	store         session.Store
 	authMethods   []AuthMethod
 	authenticate  AuthValidator
 	sessionModes  []SessionMode
 	defaultModeID string
 	sessionConfig []SessionConfigOptionTemplate
+	listSessions  SessionListFactory
+	sessionModels SessionModelStateFactory
 	workspaceRoot string
 	workspace     string
 }
@@ -952,6 +1228,7 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		Runtime:       rt,
 		Store:         store,
 		Model:         modelImpl,
+		NewModel:      cfg.newModel,
 		AppName:       "caelis",
 		UserID:        "tester",
 		WorkspaceRoot: workspaceRoot,
@@ -961,6 +1238,8 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		DefaultModeID: cfg.defaultModeID,
 		SessionConfig: cfg.sessionConfig,
 		NewAgent:      agentFactory,
+		ListSessions:  cfg.listSessions,
+		SessionModels: cfg.sessionModels,
 		NewSessionResources: func(ctx context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
 			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, workspaceRoot, sessionCWD, caps, modeResolver)
 			tools := make([]tool.Tool, 0, 1)
@@ -1174,7 +1453,7 @@ func TestServer_PlanModeInjectsHiddenPromptButLoadReplaysVisibleText(t *testing.
 	})
 	defer h.close()
 
-	mustCall(t, h.client, MethodInitialize, InitializeRequest{ProtocolVersion: "0.2.0"}, &InitializeResponse{})
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{ProtocolVersion: CurrentProtocolVersion}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
 	mustCall(t, h.client, MethodSessionSetMode, SetSessionModeRequest{

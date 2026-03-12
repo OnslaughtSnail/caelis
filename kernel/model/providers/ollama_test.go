@@ -364,14 +364,12 @@ func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
 		BaseURL:  server.URL,
 		Timeout:  2 * time.Second,
 	}, "")
-	enabled := true
-
 	var gotResp *model.Response
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
 		Stream:   false,
 		Reasoning: model.ReasoningConfig{
-			Enabled: &enabled,
+			Effort: "medium",
 		},
 	}) {
 		if err != nil {

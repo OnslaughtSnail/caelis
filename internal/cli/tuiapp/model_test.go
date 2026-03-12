@@ -51,25 +51,22 @@ func TestSlashArgQueryAtCursor(t *testing.T) {
 	if cmd != "model" || query != "gpt" {
 		t.Fatalf("unexpected partial model subcommand parse: cmd=%q query=%q", cmd, query)
 	}
-	cmd, query, ok = slashArgQueryAtCursor([]rune("/model rm"), len([]rune("/model rm")))
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/model del"), len([]rune("/model del")))
 	if !ok {
 		t.Fatal("expected model subcommand query")
 	}
-	if cmd != "model" || query != "rm" {
+	if cmd != "model" || query != "del" {
 		t.Fatalf("unexpected model subcommand parse: cmd=%q query=%q", cmd, query)
 	}
-	cmd, query, ok = slashArgQueryAtCursor([]rune("/model rm "), len([]rune("/model rm ")))
-	if !ok {
-		t.Fatal("expected model alias picker parse")
+	_, _, ok = slashArgQueryAtCursor([]rune("/model del "), len([]rune("/model del ")))
+	if ok {
+		t.Fatal("did not expect picker parse for /model del")
 	}
-	if cmd != "model rm" || query != "" {
-		t.Fatalf("unexpected model alias parse: cmd=%q query=%q", cmd, query)
-	}
-	cmd, query, ok = slashArgQueryAtCursor([]rune("/model use mimo "), len([]rune("/model use mimo ")))
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/model use xiaomi "), len([]rune("/model use xiaomi ")))
 	if !ok {
 		t.Fatal("expected model reasoning picker parse")
 	}
-	if cmd != "model use mimo" || query != "" {
+	if cmd != "model use xiaomi" || query != "" {
 		t.Fatalf("unexpected model reasoning parse: cmd=%q query=%q", cmd, query)
 	}
 	_, _, ok = slashArgQueryAtCursor([]rune("/model"), len([]rune("/model")))
@@ -123,8 +120,8 @@ func TestCurrentInputGhostHint_ForModelAlias(t *testing.T) {
 		},
 	})
 	resizeModel(m)
-	typeRunes(m, "/model use xia")
-	if got := m.currentInputGhostHint(); got != "omi/mimo-v2-flash" {
+	typeRunes(m, "/model use xiao")
+	if got := m.currentInputGhostHint(); got != "mi/mimo-v2-flash" {
 		t.Fatalf("expected model alias ghost hint, got %q", got)
 	}
 }
@@ -136,12 +133,12 @@ func TestCurrentInputGhostHint_ForModelActionPrefix(t *testing.T) {
 			if command != "model" {
 				return nil, nil
 			}
-			return []SlashArgCandidate{{Value: "list", Display: "list"}}, nil
+			return []SlashArgCandidate{{Value: "use", Display: "use"}}, nil
 		},
 	})
 	resizeModel(m)
-	typeRunes(m, "/model l")
-	if got := m.currentInputGhostHint(); got != "ist" {
+	typeRunes(m, "/model u")
+	if got := m.currentInputGhostHint(); got != "se" {
 		t.Fatalf("expected model action ghost hint, got %q", got)
 	}
 }
@@ -469,10 +466,8 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 			switch {
 			case command == "model":
 				return []SlashArgCandidate{
-					{Value: "list", Display: "list"},
 					{Value: "use", Display: "use"},
-					{Value: "rm", Display: "rm"},
-					{Value: "edit", Display: "edit"},
+					{Value: "del", Display: "del"},
 				}, nil
 			case command == "model use":
 				return []SlashArgCandidate{
@@ -492,10 +487,9 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 	resizeModel(m)
 	typeRunes(m, "/model")
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if len(m.slashArgCandidates) != 4 {
-		t.Fatalf("expected 4 model action candidates, got %d", len(m.slashArgCandidates))
+	if len(m.slashArgCandidates) != 2 {
+		t.Fatalf("expected 2 model action candidates, got %d", len(m.slashArgCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
 		t.Fatalf("expected model alias step, got %q", got)
@@ -549,10 +543,8 @@ func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
 			switch {
 			case command == "model":
 				return []SlashArgCandidate{
-					{Value: "list", Display: "list"},
 					{Value: "use", Display: "use"},
-					{Value: "rm", Display: "rm"},
-					{Value: "edit", Display: "edit"},
+					{Value: "del", Display: "del"},
 				}, nil
 			case command == "model use":
 				return []SlashArgCandidate{
@@ -569,10 +561,9 @@ func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
 	if !m.slashArgActive {
 		t.Fatal("expected slash-arg wizard active after trailing space")
 	}
-	if len(m.slashArgCandidates) != 4 {
+	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected model action candidates, got %d", len(m.slashArgCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
 		t.Fatalf("expected alias step command 'model use', got %q", got)
@@ -589,10 +580,8 @@ func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
 			switch command {
 			case "model":
 				return []SlashArgCandidate{
-					{Value: "list", Display: "list"},
 					{Value: "use", Display: "use"},
-					{Value: "rm", Display: "rm"},
-					{Value: "edit", Display: "edit"},
+					{Value: "del", Display: "del"},
 				}, nil
 			case "model use":
 				return []SlashArgCandidate{
@@ -617,7 +606,7 @@ func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
 	}
 }
 
-func TestModelListExecutesOnSingleEnterWhenAlreadyComplete(t *testing.T) {
+func TestModelDelExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
 		ExecuteLine: func(line string) tuievents.TaskResultMsg {
@@ -625,148 +614,47 @@ func TestModelListExecutesOnSingleEnterWhenAlreadyComplete(t *testing.T) {
 			return tuievents.TaskResultMsg{}
 		},
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			if command != "model" {
-				return nil, nil
-			}
-			return []SlashArgCandidate{
-				{Value: "list", Display: "list"},
-				{Value: "use", Display: "use"},
-			}, nil
-		},
-	})
-	resizeModel(m)
-	typeRunes(m, "/model list")
-
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("expected command for exact /model list")
-	}
-	if !findAndRunTaskResult(cmd(), m) {
-		t.Fatal("expected TaskResultMsg in submit command")
-	}
-	if called != "/model list" {
-		t.Fatalf("expected '/model list', got %q", called)
-	}
-}
-
-func TestModelListExecutesOnSingleEnterWhenExactQueryHasNoCandidates(t *testing.T) {
-	called := ""
-	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = strings.TrimSpace(line)
-			return tuievents.TaskResultMsg{}
-		},
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			if command != "model" {
-				return nil, nil
-			}
-			switch strings.TrimSpace(query) {
-			case "":
-				return []SlashArgCandidate{
-					{Value: "list", Display: "list"},
-					{Value: "use", Display: "use"},
-				}, nil
-			case "l":
-				return []SlashArgCandidate{{Value: "list", Display: "list"}}, nil
-			case "list":
-				return nil, nil
-			default:
-				return nil, nil
-			}
-		},
-	})
-	resizeModel(m)
-	typeRunes(m, "/model list")
-
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("expected command for exact /model list without candidates")
-	}
-	if !findAndRunTaskResult(cmd(), m) {
-		t.Fatal("expected TaskResultMsg in submit command")
-	}
-	if called != "/model list" {
-		t.Fatalf("expected '/model list', got %q", called)
-	}
-}
-
-func TestModelListExecutesAfterRemovingTrailingSpaceFromCompletion(t *testing.T) {
-	called := ""
-	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = strings.TrimSpace(line)
-			return tuievents.TaskResultMsg{}
-		},
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			if command != "model" {
-				return nil, nil
-			}
-			switch strings.TrimSpace(query) {
-			case "":
-				return []SlashArgCandidate{
-					{Value: "list", Display: "list"},
-					{Value: "use", Display: "use"},
-				}, nil
-			case "l":
-				return []SlashArgCandidate{{Value: "list", Display: "list"}}, nil
-			case "list":
-				return nil, nil
-			default:
-				return nil, nil
-			}
-		},
-	})
-	resizeModel(m)
-	typeRunes(m, "/model l")
-
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if got := m.textarea.Value(); got != "/model list " {
-		t.Fatalf("expected '/model list ' after tab completion, got %q", got)
-	}
-
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	if got := m.textarea.Value(); got != "/model list" {
-		t.Fatalf("expected '/model list' after removing trailing space, got %q", got)
-	}
-
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd == nil {
-		t.Fatal("expected command after removing trailing completion space")
-	}
-	if !findAndRunTaskResult(cmd(), m) {
-		t.Fatal("expected TaskResultMsg in submit command")
-	}
-	if called != "/model list" {
-		t.Fatalf("expected '/model list', got %q", called)
-	}
-}
-
-func TestModelRmExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
-	called := ""
-	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = strings.TrimSpace(line)
-			return tuievents.TaskResultMsg{}
-		},
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			if command != "model rm" {
+			if command != "model del" {
 				return nil, nil
 			}
 			return []SlashArgCandidate{{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"}}, nil
 		},
 	})
 	resizeModel(m)
-	typeRunes(m, "/model rm xiaomi/mimo-v2-flash")
+	typeRunes(m, "/model del xiaomi/mimo-v2-flash")
 
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
-		t.Fatal("expected command for exact /model rm alias")
+		t.Fatal("expected command for exact /model del alias")
 	}
 	if !findAndRunTaskResult(cmd(), m) {
 		t.Fatal("expected TaskResultMsg in submit command")
 	}
-	if called != "/model rm xiaomi/mimo-v2-flash" {
-		t.Fatalf("expected '/model rm xiaomi/mimo-v2-flash', got %q", called)
+	if called != "/model del xiaomi/mimo-v2-flash" {
+		t.Fatalf("expected '/model del xiaomi/mimo-v2-flash', got %q", called)
+	}
+}
+
+func TestModelDelExecutesWithoutAlias(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(line string) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(line)
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/model del")
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected command for /model del")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/model del" {
+		t.Fatalf("expected '/model del', got %q", called)
 	}
 }
 
@@ -1353,7 +1241,6 @@ func TestSlashCommandEnterOpensModelPicker(t *testing.T) {
 				return nil, nil
 			}
 			return []SlashArgCandidate{
-				{Value: "list", Display: "list"},
 				{Value: "use", Display: "use"},
 			}, nil
 		},

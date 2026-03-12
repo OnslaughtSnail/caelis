@@ -84,9 +84,8 @@ func runCLI(ctx context.Context, args []string) error {
 		outputFormat     = fs.String("format", string(headlessFormatText), "Output format for headless mode: text|json")
 		storeDir         = fs.String("store-dir", defaultStoreDir, "Local event store directory")
 		sessionIndexFile = fs.String("session-index", defaultSessionIndexPath, "Session index sqlite file path")
-		systemPrompt     = fs.String("system-prompt", "You are a helpful assistant.", "Base system prompt")
-		promptConfigDir  = fs.String("prompt-config-dir", "", "Prompt config directory (default ~/.{app}/prompts)")
-		skillsDirs       = fs.String("skills-dirs", "~/.agents/skills,.agents/skills", "Comma-separated skill directories")
+		systemPrompt     = fs.String("system-prompt", "", "Base system prompt")
+		skillsDirs       = fs.String("skills-dirs", "~/.agents/skills", "Ignored; skills are loaded from ~/.agents/skills")
 		compactWatermark = fs.Float64("compact-watermark", 0.7, "Auto compaction watermark ratio (0.5-0.9)")
 		contextWindow    = fs.Int("context-window", 0, "Model context window tokens override")
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
@@ -140,7 +139,8 @@ func runCLI(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	skillDirList := splitCSV(*skillsDirs)
+	_ = skillsDirs
+	skillDirList := activeSkillDirs()
 	inputRefs, inputRefWarnings, err := newInputReferenceResolver(workspace.CWD, skillDirList)
 	if err != nil {
 		return err
@@ -328,16 +328,21 @@ func runCLI(ctx context.Context, args []string) error {
 		ag, err := buildAgent(buildAgentInput{
 			AppName:                     *appName,
 			WorkspaceDir:                workspace.CWD,
-			PromptConfigDir:             *promptConfigDir,
 			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 			BasePrompt:                  *systemPrompt,
 			SkillDirs:                   skillDirList,
 			StreamModel:                 false,
-			ThinkingMode:                modelRuntime.ThinkingMode,
 			ThinkingBudget:              modelRuntime.ThinkingBudget,
 			ReasoningEffort:             modelRuntime.ReasoningEffort,
 			ModelProvider:               resolveProviderName(factory, alias),
 			ModelName:                   resolveModelName(factory, alias),
+			ModelConfig: func() modelproviders.Config {
+				if factory == nil {
+					return modelproviders.Config{}
+				}
+				cfg, _ := factory.ConfigForAlias(alias)
+				return cfg
+			}(),
 		})
 		if err != nil {
 			return err
@@ -409,10 +414,8 @@ func runCLI(ctx context.Context, args []string) error {
 		CredentialStore:       credentials,
 		SessionIndex:          index,
 		SystemPrompt:          *systemPrompt,
-		PromptConfigDir:       *promptConfigDir,
 		EnableExperimentalLSP: hasLSPTools(resolved.Tools),
 		SkillDirs:             skillDirList,
-		ThinkingMode:          modelRuntime.ThinkingMode,
 		ThinkingBudget:        modelRuntime.ThinkingBudget,
 		ReasoningEffort:       modelRuntime.ReasoningEffort,
 		InputRefs:             inputRefs,
@@ -429,16 +432,15 @@ func runCLI(ctx context.Context, args []string) error {
 type buildAgentInput struct {
 	AppName                     string
 	WorkspaceDir                string
-	PromptConfigDir             string
 	EnableExperimentalLSPPrompt bool
 	BasePrompt                  string
 	SkillDirs                   []string
 	StreamModel                 bool
-	ThinkingMode                string
 	ThinkingBudget              int
 	ReasoningEffort             string
 	ModelProvider               string
 	ModelName                   string
+	ModelConfig                 modelproviders.Config
 }
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
@@ -454,7 +456,7 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
 	}
 
-	reasoning, err := parseReasoning(in.ThinkingMode, in.ThinkingBudget, in.ReasoningEffort, in.ModelProvider, in.ModelName)
+	reasoning, err := parseReasoningEffortForConfig(in.ReasoningEffort, in.ThinkingBudget, in.ModelProvider, in.ModelName, in.ModelConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -650,48 +652,76 @@ func hasLSPTools(tools []tool.Tool) bool {
 }
 
 func parseReasoning(mode string, budget int, effort string, provider string, modelName string) (model.ReasoningConfig, error) {
-	cfg := model.ReasoningConfig{Effort: normalizeReasoningLevel(effort)}
-	switch normalizeReasoningSelection(mode) {
+	return parseReasoningForConfig(mode, budget, effort, provider, modelName, modelproviders.Config{})
+}
+
+func parseReasoningForConfig(mode string, budget int, effort string, provider string, modelName string, providerCfg modelproviders.Config) (model.ReasoningConfig, error) {
+	rawEffort := normalizeReasoningLevel(effort)
+	selection := normalizeReasoningSelection(mode)
+	selectionCfg := providerCfg
+	if strings.TrimSpace(selectionCfg.Provider) == "" {
+		selectionCfg.Provider = provider
+	}
+	if strings.TrimSpace(selectionCfg.Model) == "" {
+		selectionCfg.Model = modelName
+	}
+	switch selection {
 	case "", "auto":
-		if cfg.Effort != "" && cfg.Effort != "none" {
-			enabled := true
-			cfg.Enabled = &enabled
-		}
 	case "on":
-		enabled := true
-		cfg.Enabled = &enabled
+		if rawEffort == "" {
+			if opt, err := resolveModelReasoningOption(selectionCfg, "on"); err == nil {
+				rawEffort = opt.ReasoningEffort
+			}
+		}
 	case "off":
-		enabled := false
-		cfg.Enabled = &enabled
+		rawEffort = "none"
 	default:
 		return model.ReasoningConfig{}, fmt.Errorf("invalid thinking-mode %q, expected auto|on|off", mode)
 	}
+	return parseReasoningEffortForConfig(rawEffort, budget, provider, modelName, providerCfg)
+}
+
+func parseReasoningEffortForConfig(effort string, budget int, provider string, modelName string, providerCfg modelproviders.Config) (model.ReasoningConfig, error) {
+	cfg := model.ReasoningConfig{Effort: normalizeReasoningLevel(effort)}
 	if budget > 0 {
 		cfg.BudgetTokens = budget
 	}
-	if cfg.Effort == "none" {
-		disabled := false
-		cfg.Enabled = &disabled
-		cfg.Effort = ""
-		cfg.BudgetTokens = 0
+	profile := reasoningProfileForConfig(providerCfg)
+	if profile.Mode == reasoningModeNone {
+		profile = reasoningProfileForModel(provider, modelName)
 	}
-	if cfg.Enabled != nil && !*cfg.Enabled {
-		cfg.Effort = ""
-		cfg.BudgetTokens = 0
-	}
-	profile := reasoningProfileForModel(provider, modelName)
 	switch profile.Mode {
 	case reasoningModeNone:
-		cfg.Enabled = nil
+		cfg.Effort = ""
+		cfg.BudgetTokens = 0
+	case reasoningModeFixed:
 		cfg.Effort = ""
 		cfg.BudgetTokens = 0
 	case reasoningModeToggle:
-		cfg.Effort = ""
-	case reasoningModeEffort:
-		if cfg.Effort != "" && !catalogSupportsReasoningEffortList(profile.SupportedEfforts, cfg.Effort) {
-			cfg.Effort = profile.DefaultEffort
+		switch cfg.Effort {
+		case "":
+			if cfg.Effort == "" {
+				cfg.BudgetTokens = 0
+			}
+		case "none":
+			cfg.BudgetTokens = 0
+		default:
+			if profile.DefaultEffort != "" {
+				cfg.Effort = profile.DefaultEffort
+			} else {
+				cfg.Effort = "medium"
+			}
 		}
-		if cfg.Enabled != nil && *cfg.Enabled && cfg.Effort == "" {
+	case reasoningModeEffort:
+		if cfg.Effort == "none" {
+			if len(profile.SupportedEfforts) > 0 && !catalogSupportsReasoningEffortList(profile.SupportedEfforts, "none") {
+				cfg.Effort = profile.DefaultEffort
+			} else {
+				cfg.BudgetTokens = 0
+				break
+			}
+		}
+		if cfg.Effort != "" && !catalogSupportsReasoningEffortList(profile.SupportedEfforts, cfg.Effort) {
 			cfg.Effort = profile.DefaultEffort
 		}
 	}

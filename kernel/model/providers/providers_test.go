@@ -396,8 +396,7 @@ func TestGeminiStream_EmitsReasoningChunks(t *testing.T) {
 		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
 		Stream:   true,
 		Reasoning: model.ReasoningConfig{
-			Enabled: func() *bool { v := true; return &v }(),
-			Effort:  "high",
+			Effort: "high",
 		},
 	}) {
 		if err != nil {
@@ -568,13 +567,11 @@ func TestGeminiRequest_Pre3DisableReasoningUsesZeroBudget(t *testing.T) {
 		Timeout:  2 * time.Second,
 	}, "token")
 
-	disabled := false
 	for _, err := range llm.Generate(context.Background(), &model.Request{
 		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
 		Stream:   false,
 		Reasoning: model.ReasoningConfig{
-			Enabled: &disabled,
-			Effort:  "none",
+			Effort: "none",
 		},
 	}) {
 		if err != nil {
@@ -733,11 +730,10 @@ func TestToKernelMessage_OpenAICompatKeepsRawToolArgsOnDecodeFailure(t *testing.
 func TestDeepSeekThinkingPayload(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider: "deepseek",
-		Model:    "deepseek-chat",
+		Model:    "deepseek-reasoner",
 		BaseURL:  "https://api.deepseek.com/v1",
 		Timeout:  time.Second,
 	}, "token").(*openAICompatLLM)
-	enabled := true
 	req := &model.Request{
 		Messages: []model.Message{
 			{
@@ -749,10 +745,10 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 				}},
 			},
 		},
-		Reasoning: model.ReasoningConfig{Enabled: &enabled, Effort: "high"},
+		Reasoning: model.ReasoningConfig{Effort: "high"},
 	}
 	payload := openAICompatRequest{
-		Model:    "deepseek-chat",
+		Model:    "deepseek-reasoner",
 		Messages: llm.fromKernelMessages(req.Messages),
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
@@ -779,18 +775,17 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider:     "deepseek",
-		Model:        "deepseek-chat",
+		Model:        "deepseek-reasoner",
 		BaseURL:      "https://api.deepseek.com/v1",
 		Timeout:      time.Second,
 		MaxOutputTok: 8192, // smaller than thinking min – must be bumped
 	}, "token").(*openAICompatLLM)
-	enabled := true
 	req := &model.Request{
 		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
-		Reasoning: model.ReasoningConfig{Enabled: &enabled},
+		Reasoning: model.ReasoningConfig{Effort: "medium"},
 	}
 	payload := openAICompatRequest{
-		Model:     "deepseek-chat",
+		Model:     "deepseek-reasoner",
 		Messages:  llm.fromKernelMessages(req.Messages),
 		MaxTokens: llm.maxOutputTok, // 8192 from config
 	}
@@ -804,53 +799,147 @@ func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
 	}
 }
 
-func TestDeepSeekThinkingPayload_DisabledDoesNotBumpMaxTokens(t *testing.T) {
+func TestDeepSeekThinkingPayload_AdaptiveUsesReasonerRange(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider:     "deepseek",
-		Model:        "deepseek-chat",
+		Model:        "deepseek-reasoner",
 		BaseURL:      "https://api.deepseek.com/v1",
 		Timeout:      time.Second,
-		MaxOutputTok: 8192,
+		MaxOutputTok: 70000,
 	}, "token").(*openAICompatLLM)
-	disabled := false
 	req := &model.Request{
 		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
-		Reasoning: model.ReasoningConfig{Enabled: &disabled},
+		Reasoning: model.ReasoningConfig{},
 	}
 	payload := openAICompatRequest{
-		Model:     "deepseek-chat",
+		Model:     "deepseek-reasoner",
 		Messages:  llm.fromKernelMessages(req.Messages),
-		MaxTokens: llm.maxOutputTok, // 8192
+		MaxTokens: llm.maxOutputTok,
+	}
+	llm.options.ApplyReasoning(&payload, req.Reasoning)
+	if payload.Thinking == nil || payload.Thinking.Type != deepSeekAdaptiveThinkingType {
+		t.Fatalf("expected thinking adaptive")
+	}
+	if payload.MaxTokens != deepSeekReasonerMaxTokens {
+		t.Fatalf("expected MaxTokens capped to %d for adaptive thinking, got %d", deepSeekReasonerMaxTokens, payload.MaxTokens)
+	}
+}
+
+func TestDeepSeekThinkingPayload_DisabledCapsToChatRange(t *testing.T) {
+	llm := newDeepSeek(Config{
+		Provider:     "deepseek",
+		Model:        "deepseek-reasoner",
+		BaseURL:      "https://api.deepseek.com/v1",
+		Timeout:      time.Second,
+		MaxOutputTok: 32768,
+	}, "token").(*openAICompatLLM)
+	req := &model.Request{
+		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Reasoning: model.ReasoningConfig{Effort: "none"},
+	}
+	payload := openAICompatRequest{
+		Model:     "deepseek-reasoner",
+		Messages:  llm.fromKernelMessages(req.Messages),
+		MaxTokens: llm.maxOutputTok,
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
 	if payload.Thinking == nil || payload.Thinking.Type != "disabled" {
 		t.Fatalf("expected thinking disabled")
 	}
-	if payload.MaxTokens != 8192 {
-		t.Fatalf("MaxTokens should not be changed when thinking is disabled, got %d", payload.MaxTokens)
+	if payload.MaxTokens != deepSeekChatMaxTokens {
+		t.Fatalf("expected MaxTokens capped to %d when thinking is disabled, got %d", deepSeekChatMaxTokens, payload.MaxTokens)
 	}
 }
 
-func TestXiaomiProviderUsesThinkingPayload(t *testing.T) {
-	llm := newXiaomi(Config{
+func TestDeepSeekChatIgnoresReasoningAndCapsTokens(t *testing.T) {
+	llm := newDeepSeek(Config{
+		Provider:     "deepseek",
+		Model:        "deepseek-chat",
+		BaseURL:      "https://api.deepseek.com/v1",
+		Timeout:      time.Second,
+		MaxOutputTok: 64000,
+	}, "token").(*openAICompatLLM)
+	payload := openAICompatRequest{
+		Model:     "deepseek-chat",
+		Messages:  llm.fromKernelMessages([]model.Message{{Role: model.RoleUser, Text: "hi"}}),
+		MaxTokens: llm.maxOutputTok,
+	}
+	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
+	if payload.Thinking != nil {
+		t.Fatalf("did not expect thinking payload for deepseek-chat, got %#v", payload.Thinking)
+	}
+	if payload.MaxTokens != deepSeekChatMaxTokens {
+		t.Fatalf("expected MaxTokens capped to %d for deepseek-chat, got %d", deepSeekChatMaxTokens, payload.MaxTokens)
+	}
+}
+
+func TestMimoProviderUsesThinkingPayload(t *testing.T) {
+	llm := newMimo(Config{
 		Provider: "xiaomi",
 		Model:    "mimo",
 		BaseURL:  "https://api.xiaomimimo.com/v1",
 		Timeout:  time.Second,
 	}, "token").(*openAICompatLLM)
-	enabled := true
 	payload := openAICompatRequest{
 		Model: "mimo",
 		Messages: llm.fromKernelMessages([]model.Message{
 			{Role: model.RoleUser, Text: "hello"},
 		}),
 	}
-	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Enabled: &enabled, Effort: "high"})
+	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
 	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
-		t.Fatalf("expected xiaomi thinking payload, got %#v", payload.Thinking)
+		t.Fatalf("expected mimo thinking payload, got %#v", payload.Thinking)
 	}
 	if payload.Reasoning != nil || payload.ReasoningEffort != "" {
-		t.Fatalf("did not expect openai reasoning fields for xiaomi payload")
+		t.Fatalf("did not expect openai reasoning fields for mimo payload")
+	}
+}
+
+func TestVolcengineCodingPlanReasoningDisabledSendsThinkingDisabled(t *testing.T) {
+	llm := newVolcengineCodingPlan(Config{
+		Provider: "volcengine",
+		Model:    "doubao-seed-2.0-pro",
+		BaseURL:  "https://ark.cn-beijing.volces.com/api/coding/v3",
+		Timeout:  time.Second,
+	}, "token").(*openAICompatLLM)
+	payload := openAICompatRequest{
+		Model: "doubao-seed-2.0-pro",
+		Messages: llm.fromKernelMessages([]model.Message{
+			{Role: model.RoleUser, Text: "hello"},
+		}),
+	}
+	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "none"})
+	if payload.Thinking == nil || payload.Thinking.Type != "disabled" {
+		t.Fatalf("expected volcengine coding plan payload to disable thinking explicitly, got %#v", payload.Thinking)
+	}
+	if payload.Reasoning != nil || payload.ReasoningEffort != "" {
+		t.Fatalf("did not expect openai reasoning fields for volcengine coding plan payload")
+	}
+}
+
+func TestOpenAICompatEffortReasoningUsesOpenAIReasoningPayload(t *testing.T) {
+	llm := newOpenAICompat(Config{
+		Provider:      "openai-compatible",
+		Model:         "gpt-5",
+		BaseURL:       "https://example.com/v1",
+		Timeout:       time.Second,
+		ReasoningMode: "effort",
+	}, "token")
+	payload := openAICompatRequest{
+		Model: "gpt-5",
+		Messages: llm.fromKernelMessages([]model.Message{
+			{Role: model.RoleUser, Text: "hello"},
+		}),
+	}
+	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
+	if payload.Reasoning == nil || payload.Reasoning.Effort != "high" {
+		t.Fatalf("expected effort openai-compatible payload to carry reasoning effort, got %#v", payload.Reasoning)
+	}
+	if payload.ReasoningEffort != "high" {
+		t.Fatalf("expected compatibility reasoning_effort=high, got %q", payload.ReasoningEffort)
+	}
+	if payload.Thinking != nil {
+		t.Fatalf("did not expect thinking payload for effort openai-compatible request")
 	}
 }
 

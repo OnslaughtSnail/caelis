@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -106,21 +109,7 @@ func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, s
 	}
 	lastUser := ""
 	if ev != nil && ev.Message.Role == model.RoleUser && !isCompactionEventForIndex(ev) {
-		lastUser = sessionmode.VisibleText(strings.TrimSpace(ev.Message.Text))
-		if lastUser == "" && len(ev.Message.ContentParts) > 0 {
-			parts := make([]string, 0, len(ev.Message.ContentParts))
-			for _, part := range ev.Message.ContentParts {
-				if part.Type != model.ContentPartText {
-					continue
-				}
-				text := strings.TrimSpace(part.Text)
-				if text == "" {
-					continue
-				}
-				parts = append(parts, text)
-			}
-			lastUser = sessionmode.VisibleText(strings.Join(parts, "\n"))
-		}
+		lastUser = sessionIndexLastUserMessage(ev)
 	}
 	ts := at.UnixMilli()
 	s.mu.Lock()
@@ -333,11 +322,106 @@ func (s *sessionIndex) SyncWorkspaceFromStoreDir(workspace workspaceContext, app
 		if statErr != nil {
 			continue
 		}
-		if err := s.UpsertSession(workspace, appName, userID, sessionID, info.ModTime()); err != nil {
+		snapshot, snapErr := readSessionIndexSnapshot(eventsPath)
+		timestamp := info.ModTime()
+		if snapErr == nil && !snapshot.LastEventAt.IsZero() {
+			timestamp = snapshot.LastEventAt
+		}
+		if err := s.UpsertSession(workspace, appName, userID, sessionID, timestamp); err != nil {
 			return err
+		}
+		if snapErr == nil {
+			if err := s.applySessionSnapshot(workspace, sessionID, snapshot); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+type sessionIndexSnapshot struct {
+	LastEventAt     time.Time
+	EventCount      int64
+	LastUserMessage string
+}
+
+func readSessionIndexSnapshot(eventsPath string) (sessionIndexSnapshot, error) {
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		return sessionIndexSnapshot{}, err
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(f)
+	var snapshot sessionIndexSnapshot
+	for {
+		var ev session.Event
+		if err := dec.Decode(&ev); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return sessionIndexSnapshot{}, err
+		}
+		snapshot.EventCount++
+		if !ev.Time.IsZero() && ev.Time.After(snapshot.LastEventAt) {
+			snapshot.LastEventAt = ev.Time
+		}
+		if ev.Message.Role == model.RoleUser && !isCompactionEventForIndex(&ev) {
+			if text := sessionIndexLastUserMessage(&ev); text != "" {
+				snapshot.LastUserMessage = text
+			}
+		}
+	}
+	return snapshot, nil
+}
+
+func sessionIndexLastUserMessage(ev *session.Event) string {
+	if ev == nil {
+		return ""
+	}
+	lastUser := sessionmode.VisibleText(strings.TrimSpace(ev.Message.Text))
+	if lastUser == "" && len(ev.Message.ContentParts) > 0 {
+		parts := make([]string, 0, len(ev.Message.ContentParts))
+		for _, part := range ev.Message.ContentParts {
+			if part.Type != model.ContentPartText {
+				continue
+			}
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+			parts = append(parts, text)
+		}
+		lastUser = sessionmode.VisibleText(strings.Join(parts, "\n"))
+	}
+	return lastUser
+}
+
+func (s *sessionIndex) applySessionSnapshot(workspace workspaceContext, sessionID string, snapshot sessionIndexSnapshot) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	ts := snapshot.LastEventAt.UnixMilli()
+	if snapshot.LastEventAt.IsZero() {
+		ts = time.Now().UnixMilli()
+	}
+	const q = `
+UPDATE session_index SET
+	last_event_at = ?,
+	event_count = CASE WHEN ? > 0 THEN ? ELSE event_count END,
+	last_user_message = CASE WHEN ? <> '' THEN ? ELSE last_user_message END
+WHERE workspace_key = ? AND session_id = ?`
+	_, err := s.db.ExecContext(context.Background(), q, ts, snapshot.EventCount, snapshot.EventCount, snapshot.LastUserMessage, snapshot.LastUserMessage, workspace.Key, sessionID)
+	return err
+}
+
+func sessionIndexPreview(rec sessionIndexRecord, limit int) string {
+	prompt := strings.TrimSpace(rec.LastUserMessage)
+	if prompt == "" {
+		return idutil.ShortDisplay(strings.TrimSpace(rec.SessionID))
+	}
+	prompt = strings.ReplaceAll(prompt, "\n", " ")
+	return truncateInline(prompt, limit)
 }
 
 func (s *sessionIndex) migrate(ctx context.Context) error {

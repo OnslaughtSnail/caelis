@@ -7,10 +7,11 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
+var openAICompatibleStandardEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+
 type modelReasoningOption struct {
 	Value           string
 	Display         string
-	ThinkingMode    string
 	ReasoningEffort string
 }
 
@@ -18,25 +19,26 @@ func modelReasoningOptionsForConfig(cfg modelproviders.Config) []modelReasoningO
 	profile := reasoningProfileForConfig(cfg)
 	switch profile.Mode {
 	case reasoningModeToggle:
+		defaultEffort := reasoningProfileDefaultEffort(profile)
 		return []modelReasoningOption{
-			{Value: "off", Display: "off", ThinkingMode: "off"},
-			{Value: "on", Display: "on", ThinkingMode: "on"},
+			toggleReasoningOption(false),
+			toggleReasoningOptionWithEffort(defaultEffort),
 		}
 	case reasoningModeEffort:
 		if len(profile.SupportedEfforts) == 0 {
 			return nil
 		}
-		options := make([]modelReasoningOption, 0, len(profile.SupportedEfforts)+1)
-		options = append(options, modelReasoningOption{Value: "none", Display: "none", ThinkingMode: "off"})
+		options := make([]modelReasoningOption, 0, len(profile.SupportedEfforts))
 		for _, effort := range profile.SupportedEfforts {
 			options = append(options, modelReasoningOption{
 				Value:           effort,
 				Display:         effort,
-				ThinkingMode:    "on",
 				ReasoningEffort: effort,
 			})
 		}
 		return options
+	case reasoningModeFixed:
+		return nil
 	default:
 		return nil
 	}
@@ -47,41 +49,42 @@ func resolveModelReasoningOption(cfg modelproviders.Config, raw string) (modelRe
 	if normalized == "" {
 		return modelReasoningOption{}, fmt.Errorf("reasoning option cannot be empty")
 	}
-	if normalized == "auto" {
-		return modelReasoningOption{
-			Value:        "auto",
-			Display:      "auto",
-			ThinkingMode: "auto",
-		}, nil
-	}
 	profile := reasoningProfileForConfig(cfg)
 	switch profile.Mode {
+	case reasoningModeFixed:
+		return modelReasoningOption{}, fmt.Errorf("reasoning is fixed for this model")
 	case reasoningModeToggle:
-		if normalized == "off" {
-			return modelReasoningOption{Value: "off", Display: "off", ThinkingMode: "off"}, nil
+		if normalized == "auto" {
+			return modelReasoningOption{
+				Value:           "auto",
+				Display:         "auto",
+				ReasoningEffort: "",
+			}, nil
 		}
-		if normalized == "none" {
-			return modelReasoningOption{Value: "off", Display: "off", ThinkingMode: "off"}, nil
+		defaultEffort := reasoningProfileDefaultEffort(profile)
+		if normalized == "off" || normalized == "none" {
+			return toggleReasoningOption(false), nil
 		}
 		if normalized == "on" {
-			return modelReasoningOption{Value: "on", Display: "on", ThinkingMode: "on"}, nil
+			return toggleReasoningOptionWithEffort(defaultEffort), nil
 		}
-		return modelReasoningOption{}, fmt.Errorf("reasoning option %q is not supported for this model, expected one of auto|on|off", raw)
+		if normalized == defaultEffort {
+			return toggleReasoningOptionWithEffort(defaultEffort), nil
+		}
+		return modelReasoningOption{}, fmt.Errorf("reasoning option %q is not supported for this model, expected one of auto|off|on", raw)
 	case reasoningModeEffort:
-		if normalized == "off" {
-			return modelReasoningOption{Value: "off", Display: "off", ThinkingMode: "off"}, nil
+		if normalized == "auto" {
+			return modelReasoningOption{
+				Value:           "auto",
+				Display:         "auto",
+				ReasoningEffort: "",
+			}, nil
 		}
-		if normalized == "none" {
-			return modelReasoningOption{Value: "none", Display: "none", ThinkingMode: "off"}, nil
+		if normalized == "off" {
+			normalized = "none"
 		}
 		if normalized == "on" {
-			opt := modelReasoningOption{Value: "on", Display: "on", ThinkingMode: "on"}
-			if profile.DefaultEffort != "" {
-				opt.Value = profile.DefaultEffort
-				opt.Display = profile.DefaultEffort
-				opt.ReasoningEffort = profile.DefaultEffort
-			}
-			return opt, nil
+			return optionFromReasoningLevel(reasoningProfileDefaultEffort(profile)), nil
 		}
 		if len(profile.SupportedEfforts) == 0 {
 			if isSupportedReasoningLevel(normalized) {
@@ -101,17 +104,54 @@ func resolveModelReasoningOption(cfg modelproviders.Config, raw string) (modelRe
 }
 
 func optionFromReasoningLevel(level string) modelReasoningOption {
+	level = normalizeReasoningLevel(level)
+	if level == "" {
+		level = "medium"
+	}
 	opt := modelReasoningOption{
 		Value:           level,
 		Display:         level,
-		ThinkingMode:    "on",
 		ReasoningEffort: level,
 	}
 	if level == "none" {
-		opt.ThinkingMode = "off"
-		opt.ReasoningEffort = ""
+		opt.ReasoningEffort = "none"
 	}
 	return opt
+}
+
+func toggleReasoningOption(enabled bool) modelReasoningOption {
+	if enabled {
+		return toggleReasoningOptionWithEffort("medium")
+	}
+	return modelReasoningOption{
+		Value:           "off",
+		Display:         "off",
+		ReasoningEffort: "none",
+	}
+}
+
+func toggleReasoningOptionWithEffort(effort string) modelReasoningOption {
+	effort = normalizeReasoningLevel(effort)
+	if effort == "" || effort == "none" {
+		effort = "medium"
+	}
+	return modelReasoningOption{
+		Value:           "on",
+		Display:         "on",
+		ReasoningEffort: effort,
+	}
+}
+
+func reasoningProfileDefaultEffort(profile reasoningProfile) string {
+	if effort := normalizeReasoningLevel(profile.DefaultEffort); effort != "" && effort != "none" {
+		return effort
+	}
+	if len(profile.SupportedEfforts) > 0 {
+		if effort := normalizeReasoningLevel(profile.SupportedEfforts[0]); effort != "" && effort != "none" {
+			return effort
+		}
+	}
+	return "medium"
 }
 
 func normalizeReasoningSelection(raw string) string {
@@ -143,7 +183,35 @@ type reasoningProfile struct {
 	DefaultEffort    string
 }
 
+func canonicalOpenAICompatibleReasoningProfile(cfg modelproviders.Config) (reasoningProfile, bool) {
+	if cfg.API != modelproviders.APIOpenAICompatible {
+		return reasoningProfile{}, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(cfg.Provider), "openai-compatible") {
+		return reasoningProfile{}, false
+	}
+	supported := normalizeReasoningLevels(cfg.SupportedReasoningEfforts)
+	if len(supported) == 0 {
+		supported = append([]string(nil), openAICompatibleStandardEfforts...)
+	}
+	defaultEffort := normalizeReasoningEffort(cfg.DefaultReasoningEffort)
+	if defaultEffort == "none" {
+		defaultEffort = ""
+	}
+	if defaultEffort == "" {
+		defaultEffort = "medium"
+	}
+	return reasoningProfile{
+		Mode:             reasoningModeEffort,
+		SupportedEfforts: supported,
+		DefaultEffort:    defaultEffort,
+	}, true
+}
+
 func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
+	if profile, ok := canonicalOpenAICompatibleReasoningProfile(cfg); ok {
+		return profile
+	}
 	profile := reasoningProfile{
 		Mode:             normalizeCatalogReasoningMode(cfg.ReasoningMode),
 		SupportedEfforts: normalizeReasoningLevels(cfg.SupportedReasoningEfforts),
@@ -166,9 +234,7 @@ func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 		levels := normalizeReasoningLevels(cfg.ReasoningLevels)
 		efforts := make([]string, 0, len(levels))
 		for _, level := range levels {
-			if level != "none" {
-				efforts = append(efforts, level)
-			}
+			efforts = append(efforts, level)
 		}
 		switch {
 		case len(efforts) > 0:
@@ -194,12 +260,21 @@ func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 	}
 	if profile.Mode != reasoningModeEffort {
 		profile.SupportedEfforts = nil
-		profile.DefaultEffort = ""
+		if profile.Mode != reasoningModeFixed {
+			profile.DefaultEffort = ""
+		}
 	}
 	return profile
 }
 
 func reasoningProfileForModel(provider string, model string) reasoningProfile {
+	if strings.EqualFold(strings.TrimSpace(provider), "openai-compatible") {
+		return reasoningProfile{
+			Mode:             reasoningModeEffort,
+			SupportedEfforts: append([]string(nil), openAICompatibleStandardEfforts...),
+			DefaultEffort:    "medium",
+		}
+	}
 	fallback := inferredReasoningProfile(provider, model)
 	if caps, found := lookupSuggestedCatalogModelCapabilities(provider, model); found {
 		profile := reasoningProfile{
@@ -226,7 +301,9 @@ func reasoningProfileForModel(provider string, model string) reasoningProfile {
 			}
 			if profile.Mode != reasoningModeEffort {
 				profile.SupportedEfforts = nil
-				profile.DefaultEffort = ""
+				if profile.Mode != reasoningModeFixed {
+					profile.DefaultEffort = ""
+				}
 			}
 			return profile
 		}
@@ -236,22 +313,9 @@ func reasoningProfileForModel(provider string, model string) reasoningProfile {
 
 func inferredReasoningProfile(provider string, model string) reasoningProfile {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	model = strings.ToLower(strings.TrimSpace(model))
 	switch {
-	case strings.Contains(provider, "deepseek") || strings.HasPrefix(model, "deepseek-"):
-		return reasoningProfile{Mode: reasoningModeToggle}
-	case provider == "xiaomi" || provider == "mimo" || strings.Contains(model, "mimo"):
-		return reasoningProfile{Mode: reasoningModeToggle}
-	case provider == "gemini" || strings.HasPrefix(model, "gemini-"):
-		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
-	case provider == "anthropic" || strings.HasPrefix(model, "claude-"):
-		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
-	case strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"):
-		efforts := []string{"low", "medium", "high"}
-		if strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
-			efforts = append(efforts, "xhigh")
-		}
-		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: efforts, DefaultEffort: "medium"}
+	case provider == "openai-compatible":
+		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: append([]string(nil), openAICompatibleStandardEfforts...), DefaultEffort: "medium"}
 	default:
 		return reasoningProfile{Mode: reasoningModeNone}
 	}

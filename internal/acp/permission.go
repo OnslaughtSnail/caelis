@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/OnslaughtSnail/caelis/internal/approvalqueue"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -22,6 +23,7 @@ type permissionBridge struct {
 	rejected map[string]bool
 	callAuth map[string]bool
 	toolAuth map[string]int
+	queue    *approvalqueue.Queue
 }
 
 func newPermissionBridge(conn *Conn, sessionID string, modeResolver func() string) *permissionBridge {
@@ -33,6 +35,7 @@ func newPermissionBridge(conn *Conn, sessionID string, modeResolver func() strin
 		rejected:  map[string]bool{},
 		callAuth:  map[string]bool{},
 		toolAuth:  map[string]int{},
+		queue:     approvalqueue.New(),
 	}
 }
 
@@ -66,21 +69,31 @@ func (p *permissionBridge) Approve(ctx context.Context, req toolexec.ApprovalReq
 	if title == "" {
 		title = "permission"
 	}
-	outcome, err := p.request(ctx, scope, ToolCallUpdate{
-		ToolCallID: callID,
-		Title:      ptr(title),
-		Kind:       ptr(toolKindForName(req.ToolName)),
-		Status:     ptr(ToolStatusPending),
-		RawInput: map[string]any{
-			"action":  req.Action,
-			"reason":  req.Reason,
-			"command": req.Command,
-		},
+	toolCall := commandApprovalToolCall(callID, req)
+	var allowed bool
+	err := p.queue.Do(ctx, func(ctx context.Context) error {
+		if cachedAllowed, decided := p.cached(scope); decided {
+			allowed = cachedAllowed
+			return nil
+		}
+		if callAllowed, ok := p.callDecision(callID); ok {
+			allowed = callAllowed
+			return nil
+		}
+		if toolAllowed, ok := p.consumeToolDecision(req.ToolName); ok {
+			p.rememberCallDecision(callID, toolAllowed)
+			allowed = toolAllowed
+			return nil
+		}
+		outcome, err := p.request(ctx, scope, toolCall)
+		if err != nil {
+			return err
+		}
+		var applyErr error
+		allowed, applyErr = p.applyOutcome(scope, outcome)
+		return applyErr
 	})
-	if err != nil {
-		return false, err
-	}
-	return p.applyOutcome(scope, outcome)
+	return allowed, err
 }
 
 func (p *permissionBridge) AuthorizeTool(ctx context.Context, req policy.ToolAuthorizationRequest) (bool, error) {
@@ -106,28 +119,25 @@ func (p *permissionBridge) AuthorizeTool(ctx context.Context, req policy.ToolAut
 	if title == "" {
 		title = "tool"
 	}
-	outcome, err := p.request(ctx, scope, ToolCallUpdate{
-		ToolCallID: callID,
-		Title:      ptr(title),
-		Kind:       ptr(toolKindForName(req.ToolName)),
-		Status:     ptr(ToolStatusPending),
-		RawInput: map[string]any{
-			"permission": req.Permission,
-			"reason":     req.Reason,
-			"path":       req.Path,
-			"target":     req.Target,
-			"preview":    req.Preview,
-		},
-		Locations: toolLocations(map[string]any{"path": req.Path}, nil),
+	toolCall := authorizationToolCall(callID, req)
+	var allowed bool
+	err := p.queue.Do(ctx, func(ctx context.Context) error {
+		if cachedAllowed, decided := p.cached(scope); decided {
+			allowed = cachedAllowed
+			return nil
+		}
+		outcome, err := p.request(ctx, scope, toolCall)
+		if err != nil {
+			return err
+		}
+		var applyErr error
+		allowed, applyErr = p.applyOutcome(scope, outcome)
+		if applyErr == nil {
+			p.rememberCallDecision(callID, allowed)
+			p.rememberToolDecision(req.ToolName, allowed)
+		}
+		return applyErr
 	})
-	if err != nil {
-		return false, err
-	}
-	allowed, err := p.applyOutcome(scope, outcome)
-	if err == nil {
-		p.rememberCallDecision(callID, allowed)
-		p.rememberToolDecision(req.ToolName, allowed)
-	}
 	return allowed, err
 }
 
@@ -182,6 +192,51 @@ func (p *permissionBridge) applyOutcome(scope string, resp RequestPermissionResp
 		}
 	default:
 		return false, fmt.Errorf("unknown permission outcome %q", kind.Outcome)
+	}
+}
+
+func commandApprovalToolCall(callID string, req toolexec.ApprovalRequest) ToolCallUpdate {
+	args := map[string]any{}
+	if command := strings.TrimSpace(req.Command); command != "" {
+		args["command"] = command
+	}
+	title := summarizeToolCallTitle(req.ToolName, args)
+	if strings.TrimSpace(title) == "" {
+		title = strings.TrimSpace(req.ToolName)
+	}
+	kind := toolKindForName(req.ToolName)
+	status := ToolStatusPending
+	return ToolCallUpdate{
+		ToolCallID: callID,
+		Title:      ptr(title),
+		Kind:       ptr(kind),
+		Status:     ptr(status),
+		RawInput:   args,
+		Locations:  toolLocations(args, nil),
+	}
+}
+
+func authorizationToolCall(callID string, req policy.ToolAuthorizationRequest) ToolCallUpdate {
+	args := map[string]any{}
+	if path := strings.TrimSpace(req.Path); path != "" {
+		args["path"] = path
+	}
+	if target := strings.TrimSpace(req.Target); target != "" {
+		args["target"] = target
+	}
+	title := summarizeToolCallTitle(req.ToolName, args)
+	if strings.TrimSpace(title) == "" {
+		title = strings.TrimSpace(req.ToolName)
+	}
+	kind := toolKindForName(req.ToolName)
+	status := ToolStatusPending
+	return ToolCallUpdate{
+		ToolCallID: callID,
+		Title:      ptr(title),
+		Kind:       ptr(kind),
+		Status:     ptr(status),
+		RawInput:   args,
+		Locations:  toolLocations(args, nil),
 	}
 }
 

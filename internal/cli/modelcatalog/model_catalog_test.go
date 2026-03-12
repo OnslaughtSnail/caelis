@@ -14,12 +14,11 @@ func TestLookupModelCapabilities_ExactMatch(t *testing.T) {
 	if caps.ContextWindowTokens != 128000 {
 		t.Fatalf("expected context 128000, got %d", caps.ContextWindowTokens)
 	}
-	// deepseek-chat supports thinking via thinking:{type:enabled} so max = 64K
-	if caps.MaxOutputTokens != 65536 {
-		t.Fatalf("expected max output 65536, got %d", caps.MaxOutputTokens)
+	if caps.MaxOutputTokens != 8192 {
+		t.Fatalf("expected max output 8192, got %d", caps.MaxOutputTokens)
 	}
-	if !caps.SupportsReasoning {
-		t.Fatal("deepseek-chat should support reasoning via thinking parameter")
+	if caps.SupportsReasoning {
+		t.Fatal("deepseek-chat should not support configurable reasoning")
 	}
 	if !caps.SupportsToolCalls {
 		t.Fatal("deepseek-chat should support tool calls")
@@ -34,14 +33,17 @@ func TestLookupModelCapabilities_DeepSeekReasoner(t *testing.T) {
 	if caps.ContextWindowTokens != 128000 {
 		t.Fatalf("expected context 128000, got %d", caps.ContextWindowTokens)
 	}
-	if caps.MaxOutputTokens != 65536 {
-		t.Fatalf("expected max output 65536, got %d", caps.MaxOutputTokens)
+	if caps.MaxOutputTokens != 64000 {
+		t.Fatalf("expected max output 64000, got %d", caps.MaxOutputTokens)
 	}
 	if caps.DefaultMaxOutputTokens != 32768 {
 		t.Fatalf("expected default max output 32768, got %d", caps.DefaultMaxOutputTokens)
 	}
 	if !caps.SupportsReasoning {
 		t.Fatal("deepseek-reasoner should support reasoning")
+	}
+	if caps.ReasoningMode != ReasoningModeFixed {
+		t.Fatalf("expected deepseek-reasoner fixed reasoning mode, got %q", caps.ReasoningMode)
 	}
 }
 
@@ -143,9 +145,8 @@ func TestApplyConfigDefaults_FillsDefaults(t *testing.T) {
 	if cfg.ContextWindowTokens != 128000 {
 		t.Fatalf("expected context 128000, got %d", cfg.ContextWindowTokens)
 	}
-	// DefaultMaxOutputTokens for deepseek-chat is 8192 (non-thinking default)
-	if cfg.MaxOutputTok != 8192 {
-		t.Fatalf("expected max_output 8192 (default), got %d", cfg.MaxOutputTok)
+	if cfg.MaxOutputTok != 4096 {
+		t.Fatalf("expected max_output 4096 (default), got %d", cfg.MaxOutputTok)
 	}
 }
 
@@ -229,13 +230,16 @@ func TestSupportedReasoningEfforts_OpenAIO3IncludesXHigh(t *testing.T) {
 	}
 }
 
-func TestLookupSuggestedModelCapabilities_UsesOverlayForUnknownProviderModel(t *testing.T) {
-	got, ok := LookupSuggestedModelCapabilities("openai", "gpt-custom")
+func TestLookupSuggestedModelCapabilities_UsesOverlayForKnownReasoningPrefix(t *testing.T) {
+	got, ok := LookupSuggestedModelCapabilities("openai", "o3-custom-build")
 	if !ok {
-		t.Fatal("expected provider overlay fallback")
+		t.Fatal("expected model-specific overlay fallback")
 	}
-	if got.ContextWindowTokens != 128000 {
-		t.Fatalf("expected overlay context window, got %d", got.ContextWindowTokens)
+	if got.ReasoningMode != ReasoningModeEffort {
+		t.Fatalf("expected overlay reasoning mode effort, got %+v", got)
+	}
+	if !SupportsReasoningEffortList(got.ReasoningEfforts, "xhigh") {
+		t.Fatalf("expected overlay xhigh support, got %+v", got.ReasoningEfforts)
 	}
 }
 
@@ -256,11 +260,35 @@ func TestListCatalogModels_IncludesDynamicAndBuiltin(t *testing.T) {
 	}
 }
 
-func TestReasoningModeForToggleModel(t *testing.T) {
-	if mode := ReasoningModeForModel("deepseek", "deepseek-chat"); mode != ReasoningModeToggle {
-		t.Fatalf("expected deepseek-chat toggle reasoning mode, got %q", mode)
+func TestListCatalogModels_XiaomiIncludesDynamicEntries(t *testing.T) {
+	resetDynamicCatalog(t)
+	dynamicMu.Lock()
+	remoteCatalog = capSnapshot{
+		"xiaomi:mimo-v2-flash": {ContextWindow: 262000, MaxOutput: 64000, ToolCalls: true, Reasoning: true},
+	}
+	dynamicMu.Unlock()
+
+	got := ListCatalogModels("xiaomi")
+	found := false
+	for _, one := range got {
+		if one == "mimo-v2-flash" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected xiaomi dynamic model in catalog list, got %v", got)
+	}
+}
+
+func TestReasoningModeForDeepSeekModels(t *testing.T) {
+	if mode := ReasoningModeForModel("deepseek", "deepseek-chat"); mode != ReasoningModeNone {
+		t.Fatalf("expected deepseek-chat no reasoning mode, got %q", mode)
 	}
 	if efforts := SupportedReasoningEfforts("deepseek", "deepseek-chat"); len(efforts) != 0 {
-		t.Fatalf("expected no effort list for toggle model, got %v", efforts)
+		t.Fatalf("expected no effort list for deepseek-chat, got %v", efforts)
+	}
+	if mode := ReasoningModeForModel("deepseek", "deepseek-reasoner"); mode != ReasoningModeFixed {
+		t.Fatalf("expected deepseek-reasoner fixed reasoning mode, got %q", mode)
 	}
 }

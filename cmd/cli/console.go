@@ -25,6 +25,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
 
+	"github.com/OnslaughtSnail/caelis/internal/approvalqueue"
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
@@ -56,11 +57,9 @@ type cliConsole struct {
 	credentialStore       *credentialStore
 	sessionIndex          *sessionIndex
 	systemPrompt          string
-	promptConfigDir       string
 	enableExperimentalLSP bool
 	skillDirs             []string
 	streamModel           bool
-	thinkingMode          string
 	thinkingBudget        int
 	reasoningEffort       string
 	showReasoning         bool
@@ -152,11 +151,9 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		credentialStore:       cfg.CredentialStore,
 		sessionIndex:          cfg.SessionIndex,
 		systemPrompt:          cfg.SystemPrompt,
-		promptConfigDir:       cfg.PromptConfigDir,
 		enableExperimentalLSP: cfg.EnableExperimentalLSP,
 		skillDirs:             append([]string(nil), cfg.SkillDirs...),
 		streamModel:           true,
-		thinkingMode:          cfg.ThinkingMode,
 		thinkingBudget:        cfg.ThinkingBudget,
 		reasoningEffort:       cfg.ReasoningEffort,
 		showReasoning:         true,
@@ -195,7 +192,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type",
 			Handle:      handleSandbox,
 		},
-		"model":   {Usage: "/model list | /model use <alias> [reasoning] | /model rm <alias> | /model edit <alias>", Description: "List, switch, remove, or edit configured models", Handle: handleModel},
+		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
 		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
@@ -228,10 +225,8 @@ type cliConsoleConfig struct {
 	CredentialStore       *credentialStore
 	SessionIndex          *sessionIndex
 	SystemPrompt          string
-	PromptConfigDir       string
 	EnableExperimentalLSP bool
 	SkillDirs             []string
-	ThinkingMode          string
 	ThinkingBudget        int
 	ReasoningEffort       string
 	InputRefs             *inputReferenceResolver
@@ -338,16 +333,21 @@ func (c *cliConsole) runPrompt(input string) error {
 	ag, err := buildAgent(buildAgentInput{
 		AppName:                     c.appName,
 		WorkspaceDir:                c.workspace.CWD,
-		PromptConfigDir:             c.promptConfigDir,
 		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
 		BasePrompt:                  c.systemPrompt,
 		SkillDirs:                   c.skillDirs,
 		StreamModel:                 c.streamModel,
-		ThinkingMode:                c.thinkingMode,
 		ThinkingBudget:              c.thinkingBudget,
 		ReasoningEffort:             c.reasoningEffort,
 		ModelProvider:               resolveProviderName(c.modelFactory, c.modelAlias),
 		ModelName:                   resolveModelName(c.modelFactory, c.modelAlias),
+		ModelConfig: func() modelproviders.Config {
+			if c.modelFactory == nil {
+				return modelproviders.Config{}
+			}
+			cfg, _ := c.modelFactory.ConfigForAlias(c.modelAlias)
+			return cfg
+		}(),
 	})
 	if err != nil {
 		return err
@@ -830,7 +830,11 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 	c.ui.Section("Model")
 	c.ui.KeyValue("model", c.modelAlias)
 	c.ui.KeyValue("stream", fmt.Sprintf("%v", c.streamModel))
-	c.ui.KeyValue("thinking", fmt.Sprintf("%s (budget=%d)", c.thinkingMode, c.thinkingBudget))
+	effortLabel := strings.TrimSpace(c.reasoningEffort)
+	if effortLabel == "" {
+		effortLabel = "auto"
+	}
+	c.ui.KeyValue("reasoning", fmt.Sprintf("%s (budget=%d)", effortLabel, c.thinkingBudget))
 	c.ui.KeyValue("effort", c.reasoningEffort)
 	c.ui.KeyValue("reasoning", fmt.Sprintf("%v", c.showReasoning))
 
@@ -963,20 +967,13 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 
 func handleModel(c *cliConsole, args []string) (bool, error) {
 	if len(args) == 0 {
-		return false, fmt.Errorf("usage: /model list | /model use <alias> [reasoning] | /model rm <alias> | /model edit <alias>")
+		return false, fmt.Errorf("usage: /model use <alias> [reasoning] | /model del [alias ...]")
 	}
 	switch strings.ToLower(strings.TrimSpace(args[0])) {
-	case "list":
-		if len(args) != 1 {
-			return false, fmt.Errorf("usage: /model list")
-		}
-		return handleModelList(c)
 	case "use":
 		return handleModelUse(c, args[1:])
-	case "rm":
+	case "del":
 		return handleModelDelete(c, args[1:])
-	case "edit":
-		return handleModelEdit(c, args[1:])
 	default:
 		return handleModelUse(c, args)
 	}
@@ -1011,14 +1008,12 @@ func handleModelUse(c *cliConsole, args []string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		settings.ThinkingMode = opt.ThinkingMode
 		settings.ReasoningEffort = opt.ReasoningEffort
 	}
 
 	c.modelAlias = targetAlias
 	c.llm = llm
 	if len(args) == 2 {
-		c.thinkingMode = settings.ThinkingMode
 		c.thinkingBudget = settings.ThinkingBudget
 		c.reasoningEffort = settings.ReasoningEffort
 		if c.configStore != nil {
@@ -1035,168 +1030,157 @@ func handleModelUse(c *cliConsole, args []string) (bool, error) {
 		}
 	}
 	if len(args) == 2 {
+		displayReasoning := ""
+		if cfg, ok := c.modelFactory.ConfigForAlias(targetAlias); ok {
+			displayReasoning = selectedReasoningDisplay(cfg, c.reasoningEffort)
+		}
 		if strings.TrimSpace(c.reasoningEffort) != "" {
-			c.printf("model switched to %s (reasoning=%s effort=%s)\n", alias, c.thinkingMode, c.reasoningEffort)
+			if strings.TrimSpace(displayReasoning) == "" {
+				displayReasoning = c.reasoningEffort
+			}
+			c.printModelSwitchMessage("model switched to %s (reasoning=%s)\n", alias, displayReasoning)
 		} else {
-			c.printf("model switched to %s (reasoning=%s)\n", alias, c.thinkingMode)
+			c.printModelSwitchMessage("model switched to %s (reasoning=auto)\n", alias)
 		}
 	} else {
-		c.printf("model switched to %s\n", alias)
+		c.printModelSwitchMessage("model switched to %s\n", alias)
 	}
 	return false, nil
 }
 
 func handleModelDelete(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /model rm <alias>")
-	}
 	if c.configStore == nil {
 		return false, fmt.Errorf("config store is not configured")
 	}
-	alias := strings.TrimSpace(args[0])
-	if alias == "" {
-		return false, fmt.Errorf("model alias is required")
-	}
-	if resolved := c.configStore.ResolveModelAlias(alias); resolved != "" {
-		alias = resolved
-	}
-	removed, ok, err := c.configStore.RemoveProvider(alias)
+	aliases, err := resolveDeleteModelAliases(c, args)
 	if err != nil {
 		return false, err
 	}
-	if !ok {
-		return false, fmt.Errorf("model %q is not configured", alias)
-	}
-	credentialRef := normalizeCredentialRef(removed.Auth.CredentialRef)
-	if credentialRef == "" {
-		credentialRef = defaultCredentialRef(removed.Provider, removed.BaseURL)
-	}
-	if credentialRef != "" && c.credentialStore != nil && !c.configStore.CredentialRefInUse(credentialRef, removed.Alias) {
-		if err := c.credentialStore.Delete(credentialRef); err != nil {
-			return false, err
-		}
-	}
-	if err := c.reloadConfiguredModels(); err != nil {
-		return false, err
-	}
-	c.printf("model removed: %s\n", strings.ToLower(strings.TrimSpace(removed.Alias)))
-	return false, nil
-}
-
-func handleModelList(c *cliConsole) (bool, error) {
-	if c.modelFactory == nil {
-		return false, fmt.Errorf("model factory is not configured")
-	}
-	candidates := c.completeModelCandidates("", 1000)
-	if len(candidates) == 0 {
-		c.printf("no configured models\n")
-		return false, nil
-	}
-	c.printf("models:\n")
-	for _, candidate := range candidates {
-		marker := " "
-		if strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(c.modelAlias)) {
-			marker = "*"
-		}
-		c.printf("  %s %s", marker, candidate.Value)
-		if strings.TrimSpace(candidate.Display) != "" && candidate.Display != candidate.Value {
-			c.printf(" -> %s", candidate.Display)
-		}
-		c.printf("\n")
-	}
-	return false, nil
-}
-
-func handleModelEdit(c *cliConsole, args []string) (bool, error) {
-	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /model edit <alias>")
-	}
-	if c.configStore == nil {
-		return false, fmt.Errorf("config store is not configured")
-	}
-	if c.modelFactory == nil {
-		return false, fmt.Errorf("model factory is not configured")
-	}
-	alias := strings.TrimSpace(args[0])
-	if alias == "" {
-		return false, fmt.Errorf("model alias is required")
-	}
-	if resolved := c.configStore.ResolveModelAlias(alias); resolved != "" {
-		alias = resolved
-	}
-	currentCfg, ok := c.modelFactory.ConfigForAlias(alias)
-	if !ok {
-		return false, fmt.Errorf("model %q is not configured", alias)
-	}
-	currentCfg = hydrateProviderAuthToken(currentCfg, c.credentialStore)
-
-	baseURL, err := c.promptText("base_url", currentCfg.BaseURL, false)
-	if err != nil {
-		return false, err
-	}
-	modelName, err := c.promptText("model", currentCfg.Model, false)
-	if err != nil {
-		return false, err
-	}
-	modelName, err = normalizeConnectModelName(currentCfg.Provider, modelName)
-	if err != nil {
-		return false, err
-	}
-	token := currentCfg.Auth.Token
-	if currentCfg.Auth.Type != modelproviders.AuthNone {
-		inputToken, err := c.promptText("api_key(blank to keep current)", "", true)
+	removedAliases := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		removed, ok, err := c.configStore.RemoveProvider(alias)
 		if err != nil {
 			return false, err
 		}
-		if strings.TrimSpace(inputToken) != "" {
-			token = strings.TrimSpace(inputToken)
+		if !ok {
+			return false, fmt.Errorf("model %q is not configured", alias)
 		}
-	}
-
-	updatedCfg := currentCfg
-	updatedCfg.BaseURL = strings.TrimSpace(baseURL)
-	updatedCfg.Model = modelName
-	updatedCfg.Auth.Token = token
-	updatedCfg.Auth.CredentialRef = normalizeCredentialRef(defaultCredentialRef(updatedCfg.Provider, updatedCfg.BaseURL))
-	updatedCfg.Alias = c.configStore.ResolveOrAllocateModelAlias(updatedCfg.Provider, updatedCfg.Model, updatedCfg.BaseURL)
-	modelcatalogApplyConfigDefaults(&updatedCfg)
-
-	oldAlias := strings.ToLower(strings.TrimSpace(currentCfg.Alias))
-	oldCredentialRef := normalizeCredentialRef(currentCfg.Auth.CredentialRef)
-	if oldCredentialRef == "" {
-		oldCredentialRef = defaultCredentialRef(currentCfg.Provider, currentCfg.BaseURL)
-	}
-	if updatedCfg.Alias != oldAlias {
-		if _, _, err := c.configStore.RemoveProvider(oldAlias); err != nil {
-			return false, err
+		credentialRef := normalizeCredentialRef(removed.Auth.CredentialRef)
+		if credentialRef == "" {
+			credentialRef = defaultCredentialRef(removed.Provider, removed.BaseURL)
 		}
-	}
-	persistCfg := updatedCfg
-	persistCfg.Auth.Token = ""
-	if err := c.configStore.UpsertProvider(persistCfg); err != nil {
-		return false, err
-	}
-	if updatedCfg.Auth.CredentialRef != "" && c.credentialStore != nil && updatedCfg.Auth.Type != modelproviders.AuthNone {
-		if err := c.credentialStore.Upsert(updatedCfg.Auth.CredentialRef, credentialRecord{
-			Type:  string(updatedCfg.Auth.Type),
-			Token: token,
-		}); err != nil {
-			return false, err
+		if credentialRef != "" && c.credentialStore != nil && !c.configStore.CredentialRefInUse(credentialRef, removed.Alias) {
+			if err := c.credentialStore.Delete(credentialRef); err != nil {
+				return false, err
+			}
 		}
-	}
-	if oldCredentialRef != "" && oldCredentialRef != updatedCfg.Auth.CredentialRef && c.credentialStore != nil && !c.configStore.CredentialRefInUse(oldCredentialRef, oldAlias) {
-		if err := c.credentialStore.Delete(oldCredentialRef); err != nil {
-			return false, err
-		}
+		removedAliases = append(removedAliases, strings.ToLower(strings.TrimSpace(removed.Alias)))
 	}
 	if err := c.reloadConfiguredModels(); err != nil {
 		return false, err
 	}
-	if err := c.configStore.SetDefaultModel(updatedCfg.Alias); err != nil {
-		return false, err
+	for _, alias := range removedAliases {
+		c.printf("model removed: %s\n", alias)
 	}
-	c.printf("model updated: %s\n", updatedCfg.Alias)
 	return false, nil
+}
+
+func resolveDeleteModelAliases(c *cliConsole, args []string) ([]string, error) {
+	if c == nil || c.configStore == nil {
+		return nil, fmt.Errorf("config store is not configured")
+	}
+	normalize := func(raw string) string {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return ""
+		}
+		if resolved := c.configStore.ResolveModelAlias(value); resolved != "" {
+			value = resolved
+		}
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(args))
+	for _, raw := range args {
+		for _, part := range splitArrayInput(raw) {
+			alias := normalize(part)
+			if alias == "" {
+				continue
+			}
+			if _, ok := seen[alias]; ok {
+				continue
+			}
+			seen[alias] = struct{}{}
+			out = append(out, alias)
+		}
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	choices := configuredModelDeleteChoices(c)
+	if len(choices) == 0 {
+		return nil, fmt.Errorf("no configured models")
+	}
+	selected, err := c.promptMultiChoice("Select models to remove", choices, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, one := range selected {
+		alias := normalize(one)
+		if alias == "" {
+			continue
+		}
+		if _, ok := seen[alias]; ok {
+			continue
+		}
+		seen[alias] = struct{}{}
+		out = append(out, alias)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no model selected")
+	}
+	return out, nil
+}
+
+func configuredModelDeleteChoices(c *cliConsole) []promptChoiceItem {
+	if c == nil || c.configStore == nil {
+		return nil
+	}
+	aliases := c.configStore.ConfiguredModelAliases()
+	choices := make([]promptChoiceItem, 0, len(aliases))
+	for _, alias := range aliases {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias == "" {
+			continue
+		}
+		choices = append(choices, promptChoiceItem{
+			Label: alias,
+			Value: alias,
+		})
+	}
+	return choices
+}
+
+func selectedReasoningDisplay(cfg modelproviders.Config, effort string) string {
+	profile := reasoningProfileForConfig(cfg)
+	effort = normalizeReasoningLevel(effort)
+	switch profile.Mode {
+	case reasoningModeToggle:
+		if effort == "none" {
+			return "off"
+		}
+		return "on"
+	default:
+		return effort
+	}
+}
+
+func (c *cliConsole) printModelSwitchMessage(format string, args ...any) {
+	if c != nil && c.ui != nil {
+		c.ui.Note(format, args...)
+		return
+	}
+	c.printf("note: "+format, args...)
 }
 
 // resolveContextWindowForDisplay returns the context window token limit for the
@@ -1225,14 +1209,12 @@ func (c *cliConsole) resolveContextWindowForDisplay() int {
 
 func (c *cliConsole) applyModelRuntimeSettings(alias string) {
 	settings := modelRuntimeSettings{
-		ThinkingMode:    defaultThinkingMode,
 		ThinkingBudget:  defaultThinkingBudget,
 		ReasoningEffort: defaultReasoningEffort,
 	}
 	if c.configStore != nil {
 		settings = c.configStore.ModelRuntimeSettings(alias)
 	}
-	c.thinkingMode = settings.ThinkingMode
 	c.thinkingBudget = settings.ThinkingBudget
 	c.reasoningEffort = settings.ReasoningEffort
 }
@@ -1499,7 +1481,7 @@ type terminalApprover struct {
 	ui             *ui
 	modeResolver   func() string
 	mu             sync.RWMutex
-	promptMu       sync.Mutex
+	queue          *approvalqueue.Queue
 	sessionAllowed map[string]struct{}
 	authAllowed    map[string]struct{}
 }
@@ -1509,6 +1491,7 @@ func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalA
 		prompter:       prompter,
 		out:            out,
 		ui:             u,
+		queue:          approvalqueue.New(),
 		sessionAllowed: map[string]struct{}{},
 		authAllowed:    map[string]struct{}{},
 	}
@@ -1526,39 +1509,47 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	a.promptMu.Lock()
-	defer a.promptMu.Unlock()
 	if a.isAllowedInSession(req.Command) {
 		return true, nil
 	}
-	line, err := a.readApprovalChoice(req, key)
-	if err != nil {
-		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+	var allowed bool
+	err := a.queue.Do(ctx, func(context.Context) error {
+		if a.isAllowedInSession(req.Command) {
+			allowed = true
+			return nil
+		}
+		line, err := a.readApprovalChoice(req, key)
+		if err != nil {
+			if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+				a.emitCommandApprovalOutcome(req, key, "cancel")
+				return &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
+			}
+			return err
+		}
+		line = strings.ToLower(strings.TrimSpace(line))
+		switch line {
+		case "y", "yes", "o", "once", "proceed":
+			a.emitCommandApprovalOutcome(req, key, "once")
+			allowed = true
+			return nil
+		case "a", "always", "s", "session":
+			if key != "" {
+				a.mu.Lock()
+				a.sessionAllowed[key] = struct{}{}
+				a.mu.Unlock()
+			}
+			a.emitCommandApprovalOutcome(req, key, "session")
+			allowed = true
+			return nil
+		case "n", "no", "", "c", "cancel":
 			a.emitCommandApprovalOutcome(req, key, "cancel")
-			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
+			return &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
+		default:
+			a.emitCommandApprovalOutcome(req, key, "cancel")
+			return &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
 		}
-		return false, err
-	}
-	line = strings.ToLower(strings.TrimSpace(line))
-	switch line {
-	case "y", "yes", "o", "once", "proceed":
-		a.emitCommandApprovalOutcome(req, key, "once")
-		return true, nil
-	case "a", "always", "s", "session":
-		if key != "" {
-			a.mu.Lock()
-			a.sessionAllowed[key] = struct{}{}
-			a.mu.Unlock()
-		}
-		a.emitCommandApprovalOutcome(req, key, "session")
-		return true, nil
-	case "n", "no", "", "c", "cancel":
-		a.emitCommandApprovalOutcome(req, key, "cancel")
-		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
-	default:
-		a.emitCommandApprovalOutcome(req, key, "cancel")
-		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
-	}
+	})
+	return allowed, err
 }
 
 func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
@@ -1573,37 +1564,45 @@ func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.T
 	if a.prompter == nil {
 		return false, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
 	}
-	a.promptMu.Lock()
-	defer a.promptMu.Unlock()
 	if a.isAuthorizationAllowedInSession(scopeKey) {
 		return true, nil
 	}
-	line, err := a.readToolAuthorizationChoice(req, scopeKey)
-	if err != nil {
-		if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
-			a.emitToolApprovalOutcome(req, scopeKey, "cancel")
-			return false, &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
+	var allowed bool
+	err := a.queue.Do(ctx, func(context.Context) error {
+		if a.isAuthorizationAllowedInSession(scopeKey) {
+			allowed = true
+			return nil
 		}
-		return false, err
-	}
-	line = strings.ToLower(strings.TrimSpace(line))
-	switch line {
-	case "y", "yes", "o", "once", "proceed":
-		a.emitToolApprovalOutcome(req, scopeKey, "once")
-		return true, nil
-	case "a", "always", "s", "session":
-		a.mu.Lock()
-		a.authAllowed[scopeKey] = struct{}{}
-		a.mu.Unlock()
-		a.emitToolApprovalOutcome(req, scopeKey, "session")
-		return true, nil
-	case "n", "no", "", "c", "cancel":
-		a.emitToolApprovalOutcome(req, scopeKey, "cancel")
-		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
-	default:
-		a.emitToolApprovalOutcome(req, scopeKey, "cancel")
-		return false, &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
-	}
+		line, err := a.readToolAuthorizationChoice(req, scopeKey)
+		if err != nil {
+			if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+				a.emitToolApprovalOutcome(req, scopeKey, "cancel")
+				return &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
+			}
+			return err
+		}
+		line = strings.ToLower(strings.TrimSpace(line))
+		switch line {
+		case "y", "yes", "o", "once", "proceed":
+			a.emitToolApprovalOutcome(req, scopeKey, "once")
+			allowed = true
+			return nil
+		case "a", "always", "s", "session":
+			a.mu.Lock()
+			a.authAllowed[scopeKey] = struct{}{}
+			a.mu.Unlock()
+			a.emitToolApprovalOutcome(req, scopeKey, "session")
+			allowed = true
+			return nil
+		case "n", "no", "", "c", "cancel":
+			a.emitToolApprovalOutcome(req, scopeKey, "cancel")
+			return &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
+		default:
+			a.emitToolApprovalOutcome(req, scopeKey, "cancel")
+			return &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
+		}
+	})
+	return allowed, err
 }
 
 func (a *terminalApprover) isAllowedInSession(command string) bool {

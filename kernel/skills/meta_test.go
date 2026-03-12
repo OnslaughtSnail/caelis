@@ -60,6 +60,12 @@ func TestBuildMetaPrompt(t *testing.T) {
 	if !strings.Contains(text, "### How to use skills") {
 		t.Fatalf("missing usage rules section: %q", text)
 	}
+	if !strings.Contains(text, "installed from external sources") {
+		t.Fatalf("missing external source warning: %q", text)
+	}
+	if strings.Contains(text, "must not redefine who you are") {
+		t.Fatalf("expected shorter skill guidance, got %q", text)
+	}
 }
 
 func TestDiscoverMeta_InvalidFormat(t *testing.T) {
@@ -77,5 +83,47 @@ func TestDiscoverMeta_InvalidFormat(t *testing.T) {
 	}
 	if len(result.Warnings) == 0 {
 		t.Fatalf("expected warnings for invalid skill")
+	}
+}
+
+func TestDiscoverMeta_OnlyLoadsFirstLevelSkillDirs(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	topLevelDir := filepath.Join(skillsRoot, "top")
+	nestedDir := filepath.Join(skillsRoot, ".system", "nested")
+	if err := os.MkdirAll(topLevelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	topSkill := `---
+name: top_skill
+description: Top level skill.
+---
+# Top Skill
+`
+	nestedSkill := `---
+name: nested_skill
+description: Nested skill.
+---
+# Nested Skill
+`
+	if err := os.WriteFile(filepath.Join(topLevelDir, "SKILL.md"), []byte(topSkill), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "SKILL.md"), []byte(nestedSkill), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := DiscoverMeta([]string{skillsRoot})
+	if len(result.Warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", result.Warnings)
+	}
+	if len(result.Metas) != 1 {
+		t.Fatalf("expected only first-level skill to load, got %#v", result.Metas)
+	}
+	if result.Metas[0].Name != "top_skill" {
+		t.Fatalf("unexpected loaded skill: %#v", result.Metas[0])
 	}
 }

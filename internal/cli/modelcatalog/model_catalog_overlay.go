@@ -103,10 +103,10 @@ func mergeCapabilities(base ModelCapabilities, overlay overlayEntry) ModelCapabi
 	if overlay.ToolCalls != nil && !out.SupportsToolCalls {
 		out.SupportsToolCalls = *overlay.ToolCalls
 	}
-	if overlay.Reasoning != nil && !out.SupportsReasoning && len(out.ReasoningEfforts) == 0 {
+	if overlay.Reasoning != nil {
 		out.SupportsReasoning = *overlay.Reasoning
 	}
-	if normalized := NormalizeReasoningMode(overlay.ReasoningMode); normalized != "" && strings.TrimSpace(out.ReasoningMode) == "" {
+	if normalized := NormalizeReasoningMode(overlay.ReasoningMode); normalized != "" {
 		out.ReasoningMode = normalized
 	}
 	if overlay.Images != nil && !out.SupportsImages {
@@ -115,11 +115,11 @@ func mergeCapabilities(base ModelCapabilities, overlay overlayEntry) ModelCapabi
 	if overlay.JSONOutput != nil && !out.SupportsJSONOutput {
 		out.SupportsJSONOutput = *overlay.JSONOutput
 	}
-	if normalized := normalizeReasoningEffortList(overlay.ReasoningEfforts); len(normalized) > 0 && len(out.ReasoningEfforts) == 0 {
+	if normalized := normalizeReasoningEffortList(overlay.ReasoningEfforts); len(normalized) > 0 {
 		out.ReasoningEfforts = normalized
 		out.SupportsReasoning = true
 	}
-	if normalized := NormalizeReasoningEffort(overlay.DefaultReasoningEffort); normalized != "" && strings.TrimSpace(out.DefaultReasoningEffort) == "" {
+	if normalized := NormalizeReasoningEffort(overlay.DefaultReasoningEffort); normalized != "" {
 		out.DefaultReasoningEffort = normalized
 	}
 	normalizeModelCapabilitiesReasoning(&out)
@@ -152,6 +152,10 @@ func lookupOverlayModelCapabilities(provider, modelName string) (ModelCapabiliti
 		caps.SupportsJSONOutput = defaults.SupportsJSONOutput
 	}
 	return caps, true
+}
+
+func LookupOverlayModelCapabilities(provider, modelName string) (ModelCapabilities, bool) {
+	return lookupOverlayModelCapabilities(provider, modelName)
 }
 
 func ListCatalogModels(provider string) []string {

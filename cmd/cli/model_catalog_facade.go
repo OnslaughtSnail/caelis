@@ -9,6 +9,7 @@ const (
 	reasoningModeNone   = modelcatalog.ReasoningModeNone
 	reasoningModeToggle = modelcatalog.ReasoningModeToggle
 	reasoningModeEffort = modelcatalog.ReasoningModeEffort
+	reasoningModeFixed  = modelcatalog.ReasoningModeFixed
 )
 
 func defaultCatalogModelCapabilities() modelcatalog.ModelCapabilities {
@@ -27,12 +28,20 @@ func lookupSuggestedCatalogModelCapabilities(provider, modelName string) (modelc
 	return modelcatalog.LookupSuggestedModelCapabilities(provider, modelName)
 }
 
+func lookupOverlayCatalogCapabilities(provider, modelName string) (modelcatalog.ModelCapabilities, bool) {
+	return modelcatalog.LookupOverlayModelCapabilities(provider, modelName)
+}
+
 func defaultCatalogReasoningEffort(provider, modelName string) string {
 	return modelcatalog.DefaultReasoningEffortForModel(provider, modelName)
 }
 
 func lookupDynamicCatalogCapabilities(provider, modelName string) (modelcatalog.ModelCapabilities, bool) {
 	return modelcatalog.LookupDynamicModelCapabilities(provider, modelName)
+}
+
+func listCatalogModels(provider string) []string {
+	return modelcatalog.ListCatalogModels(provider)
 }
 
 func modelcatalogApplyConfigDefaults(cfg *modelproviders.Config) {

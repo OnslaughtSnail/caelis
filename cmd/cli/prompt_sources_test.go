@@ -7,47 +7,18 @@ import (
 	"testing"
 )
 
-func TestEnsurePromptFiles_WritesDefaultsAndPreservesExisting(t *testing.T) {
+func TestBuildPromptAssembleSpec_UsesBuiltInIdentityAndAgentPolicies(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	workspace := t.TempDir()
-
-	files, err := ensurePromptFiles("demo-app", "", workspace)
-	if err != nil {
-		t.Fatalf("ensurePromptFiles failed: %v", err)
+	globalDir := filepath.Join(home, ".agents")
+	if err := os.MkdirAll(globalDir, 0o700); err != nil {
+		t.Fatalf("mkdir global agents dir: %v", err)
 	}
-	for _, path := range []string{files.IdentityPath, files.GlobalAgentsPath, files.UserPath} {
-		raw, readErr := os.ReadFile(path)
-		if readErr != nil {
-			t.Fatalf("read default prompt %q: %v", path, readErr)
-		}
-		if !strings.Contains(string(raw), "version: v1") {
-			t.Fatalf("expected version marker in %q", path)
-		}
+	if err := os.WriteFile(filepath.Join(globalDir, "AGENTS.md"), []byte("# Global\n\nGlobal rule."), 0o600); err != nil {
+		t.Fatalf("write global AGENTS: %v", err)
 	}
-
-	custom := "custom user prompt\n"
-	if err := os.WriteFile(files.UserPath, []byte(custom), 0o600); err != nil {
-		t.Fatalf("seed custom user prompt: %v", err)
-	}
-	files2, err := ensurePromptFiles("demo-app", "", workspace)
-	if err != nil {
-		t.Fatalf("ensurePromptFiles second call failed: %v", err)
-	}
-	raw, err := os.ReadFile(files2.UserPath)
-	if err != nil {
-		t.Fatalf("read user prompt failed: %v", err)
-	}
-	if string(raw) != custom {
-		t.Fatalf("expected existing user prompt preserved, got %q", string(raw))
-	}
-}
-
-func TestBuildPromptAssembleSpec_LoadsPromptSources(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("# Workspace\n\nRule."), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workspace, "AGENTS.md"), []byte("# Workspace\n\nProject rule."), 0o600); err != nil {
 		t.Fatalf("write workspace AGENTS: %v", err)
 	}
 
@@ -62,25 +33,54 @@ func TestBuildPromptAssembleSpec_LoadsPromptSources(t *testing.T) {
 		t.Fatalf("buildPromptAssembleSpec failed: %v", err)
 	}
 	spec := result.Spec
-	if !strings.Contains(spec.IdentityPrompt, "Agent Identity") {
-		t.Fatalf("expected identity prompt content loaded, got %q", spec.IdentityPrompt)
+	if got := strings.TrimSpace(spec.IdentityPrompt); got != "# Agent Identity\n\nYou are demo-app." {
+		t.Fatalf("unexpected identity prompt: %q", got)
 	}
-	if !strings.Contains(spec.GlobalAgentsPrompt, "Global Instructions") {
-		t.Fatalf("expected global prompt content loaded, got %q", spec.GlobalAgentsPrompt)
+	if spec.IdentitySource != "cli:built-in-identity" {
+		t.Fatalf("unexpected identity source: %q", spec.IdentitySource)
 	}
-	if !strings.Contains(spec.WorkspaceAgentsPrompt, "Workspace") {
-		t.Fatalf("expected workspace AGENTS loaded, got %q", spec.WorkspaceAgentsPrompt)
+	if len(spec.Additional) != 3 {
+		t.Fatalf("expected active policies + session override + experimental lsp, got %d", len(spec.Additional))
 	}
-	if len(spec.Additional) != 2 {
-		t.Fatalf("expected user + experimental lsp fragments, got %d", len(spec.Additional))
+	if !strings.Contains(spec.Additional[0].Content, "# Active Agent Policies") {
+		t.Fatalf("expected active policy heading, got %q", spec.Additional[0].Content)
 	}
-	if !strings.Contains(spec.Additional[0].Content, "session override") {
-		t.Fatalf("expected session override in user fragment, got %q", spec.Additional[0].Content)
+	if !strings.Contains(spec.Additional[0].Content, "## Global User Policy") {
+		t.Fatalf("expected global policy section, got %q", spec.Additional[0].Content)
 	}
-	if spec.Additional[1].Title != "Experimental LSP Routing" {
-		t.Fatalf("unexpected lsp fragment: %+v", spec.Additional[1])
+	if !strings.Contains(spec.Additional[0].Content, "## Project Policy") {
+		t.Fatalf("expected project policy section, got %q", spec.Additional[0].Content)
+	}
+	if strings.Contains(spec.Additional[0].Content, "Source:") || strings.Contains(spec.Additional[0].Content, "Priority:") {
+		t.Fatalf("did not expect source/priority metadata, got %q", spec.Additional[0].Content)
+	}
+	if !strings.Contains(spec.Additional[0].Content, "Overrides conflicting global instructions.") {
+		t.Fatalf("expected workspace override note, got %q", spec.Additional[0].Content)
+	}
+	if spec.Additional[1].Content != "## Session Overrides\n\nsession override" {
+		t.Fatalf("unexpected session override fragment: %+v", spec.Additional[1])
+	}
+	if !strings.Contains(spec.Additional[2].Content, "## Experimental LSP Routing") {
+		t.Fatalf("unexpected lsp fragment: %+v", spec.Additional[2])
 	}
 	if len(result.Warnings) != 0 {
 		t.Fatalf("expected no warnings for missing skill dir, got %v", result.Warnings)
+	}
+}
+
+func TestBuildPromptAssembleSpec_SkipsMissingAgentPolicies(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := t.TempDir()
+
+	result, err := buildPromptAssembleSpec(buildAgentInput{
+		AppName:      "demo-app",
+		WorkspaceDir: workspace,
+	})
+	if err != nil {
+		t.Fatalf("buildPromptAssembleSpec failed: %v", err)
+	}
+	if len(result.Spec.Additional) != 0 {
+		t.Fatalf("expected no additional prompt fragments, got %+v", result.Spec.Additional)
 	}
 }

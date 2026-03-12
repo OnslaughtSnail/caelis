@@ -71,6 +71,18 @@ func minimalModelsDevPayload(t *testing.T) []byte {
 				},
 			},
 		},
+		"xiaomi": map[string]interface{}{
+			"id": "xiaomi",
+			"models": map[string]interface{}{
+				"mimo-v2-flash": map[string]interface{}{
+					"id":         "mimo-v2-flash",
+					"tool_call":  true,
+					"reasoning":  true,
+					"attachment": false,
+					"limit":      map[string]interface{}{"context": 262000, "output": 64000},
+				},
+			},
+		},
 		"empty-provider": map[string]interface{}{
 			"id":     "empty-provider",
 			"models": map[string]interface{}{},
@@ -174,6 +186,19 @@ func TestParseModelsDevJSON_MapsGoogleToGemini(t *testing.T) {
 	}
 }
 
+func TestParseModelsDevJSON_LeavesXiaomiUnderCanonicalProvider(t *testing.T) {
+	snap, err := parseModelsDevJSON(minimalModelsDevPayload(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := snap["xiaomi:mimo-v2-flash"]; !ok {
+		t.Fatal("expected xiaomi:mimo-v2-flash")
+	}
+	if _, ok := snap["mimo:mimo-v2-flash"]; ok {
+		t.Fatal("did not expect xiaomi models to be rewritten to mimo")
+	}
+}
+
 func TestParseModelsDevJSON_SkipsEmptyProvider(t *testing.T) {
 	snap, err := parseModelsDevJSON(minimalModelsDevPayload(t))
 	if err != nil {
@@ -261,6 +286,19 @@ func TestSearchCapSnapshot_GeminiAliasLookup(t *testing.T) {
 	}
 	if caps.ContextWindowTokens != 1000000 {
 		t.Errorf("want 1000000, got %d", caps.ContextWindowTokens)
+	}
+}
+
+func TestSearchCapSnapshot_XiaomiLookup(t *testing.T) {
+	snap := capSnapshot{
+		"xiaomi:mimo-v2-flash": {ContextWindow: 262000, MaxOutput: 64000, ToolCalls: true, Reasoning: true},
+	}
+	caps, ok := searchCapSnapshot(snap, "xiaomi", "mimo-v2-flash")
+	if !ok {
+		t.Fatal("expected xiaomi lookup to match xiaomi snapshot key")
+	}
+	if caps.ContextWindowTokens != 262000 {
+		t.Fatalf("want 262000, got %d", caps.ContextWindowTokens)
 	}
 }
 

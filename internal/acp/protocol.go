@@ -3,16 +3,17 @@ package acp
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 )
 
 const (
-	JSONRPCVersion = "2.0"
+	JSONRPCVersion                         = "2.0"
+	CurrentProtocolVersion ProtocolVersion = 1
 
 	MethodInitialize           = "initialize"
 	MethodAuthenticate         = "authenticate"
 	MethodSessionNew           = "session/new"
+	MethodSessionList          = "session/list"
 	MethodSessionLoad          = "session/load"
 	MethodSessionSetMode       = "session/set_mode"
 	MethodSessionSetConfig     = "session/set_config_option"
@@ -25,6 +26,7 @@ const (
 	MethodTerminalCreate       = "terminal/create"
 	MethodTerminalOutput       = "terminal/output"
 	MethodTerminalWaitForExit  = "terminal/wait_for_exit"
+	MethodTerminalKill         = "terminal/kill"
 	MethodTerminalRelease      = "terminal/release"
 )
 
@@ -41,6 +43,7 @@ const (
 	UpdateToolCallState = "tool_call_update"
 	UpdateCurrentMode   = "current_mode_update"
 	UpdateConfigOption  = "config_option_update"
+	UpdateModels        = "models_update"
 )
 
 const (
@@ -109,7 +112,11 @@ type PromptCapabilities struct {
 	Image           bool `json:"image"`
 }
 
-type SessionCapabilities struct{}
+type SessionListCapability struct{}
+
+type SessionCapabilities struct {
+	List *SessionListCapability `json:"list,omitempty"`
+}
 
 type McpCapabilities struct {
 	HTTP bool `json:"http"`
@@ -123,30 +130,20 @@ type AgentCapabilities struct {
 	Session     SessionCapabilities `json:"sessionCapabilities"`
 }
 
-type ProtocolVersion string
+type ProtocolVersion uint16
 
 func (p *ProtocolVersion) UnmarshalJSON(data []byte) error {
 	trimmed := strings.TrimSpace(string(data))
 	if trimmed == "" || trimmed == "null" {
-		*p = ""
+		*p = 0
 		return nil
 	}
-	var text string
-	if err := json.Unmarshal(data, &text); err == nil {
-		*p = ProtocolVersion(strings.TrimSpace(text))
-		return nil
+	var value uint16
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("unsupported protocolVersion %s", trimmed)
 	}
-	var number json.Number
-	if err := json.Unmarshal(data, &number); err == nil {
-		*p = ProtocolVersion(number.String())
-		return nil
-	}
-	var value float64
-	if err := json.Unmarshal(data, &value); err == nil {
-		*p = ProtocolVersion(strconv.FormatFloat(value, 'f', -1, 64))
-		return nil
-	}
-	return fmt.Errorf("unsupported protocolVersion %s", trimmed)
+	*p = ProtocolVersion(value)
+	return nil
 }
 
 type InitializeRequest struct {
@@ -156,7 +153,7 @@ type InitializeRequest struct {
 }
 
 type InitializeResponse struct {
-	ProtocolVersion   string            `json:"protocolVersion"`
+	ProtocolVersion   ProtocolVersion   `json:"protocolVersion"`
 	AgentCapabilities AgentCapabilities `json:"agentCapabilities"`
 	AgentInfo         *Implementation   `json:"agentInfo,omitempty"`
 	AuthMethods       []AuthMethod      `json:"authMethods,omitempty"`
@@ -197,6 +194,24 @@ type NewSessionResponse struct {
 	SessionID     string                `json:"sessionId"`
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 	Modes         *SessionModeState     `json:"modes,omitempty"`
+	Models        *SessionModelState    `json:"models,omitempty"`
+}
+
+type SessionListRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+	Limit  *int   `json:"limit,omitempty"`
+}
+
+type SessionSummary struct {
+	SessionID string `json:"sessionId"`
+	CWD       string `json:"cwd,omitempty"`
+	Title     string `json:"title,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+type SessionListResponse struct {
+	Sessions   []SessionSummary `json:"sessions"`
+	NextCursor string           `json:"nextCursor,omitempty"`
 }
 
 type LoadSessionRequest struct {
@@ -208,6 +223,7 @@ type LoadSessionRequest struct {
 type LoadSessionResponse struct {
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 	Modes         *SessionModeState     `json:"modes,omitempty"`
+	Models        *SessionModelState    `json:"models,omitempty"`
 }
 
 type TextContent struct {
@@ -256,9 +272,25 @@ type SessionModeState struct {
 	CurrentModeID  string        `json:"currentModeId"`
 }
 
+type SessionModel struct {
+	ModelID     string `json:"modelId"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type SessionModelState struct {
+	CurrentModelID  string         `json:"currentModelId"`
+	AvailableModels []SessionModel `json:"availableModels"`
+}
+
 type CurrentModeUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	CurrentModeID string `json:"currentModeId"`
+}
+
+type ModelStateUpdate struct {
+	SessionUpdate string             `json:"sessionUpdate"`
+	Models        *SessionModelState `json:"models"`
 }
 
 type SessionConfigSelectOption struct {
@@ -410,6 +442,11 @@ type WaitForTerminalExitRequest struct {
 type WaitForTerminalExitResponse struct {
 	ExitCode *int   `json:"exitCode,omitempty"`
 	Signal   string `json:"signal,omitempty"`
+}
+
+type KillTerminalRequest struct {
+	SessionID  string `json:"sessionId"`
+	TerminalID string `json:"terminalId"`
 }
 
 type ReleaseTerminalRequest struct {

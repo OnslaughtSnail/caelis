@@ -55,28 +55,35 @@ func DiscoverMeta(dirs []string) DiscoverResult {
 			continue
 		}
 
-		_ = filepath.WalkDir(resolvedDir, func(path string, d os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				out.Warnings = append(out.Warnings, fmt.Errorf("skills: walk %q: %w", path, walkErr))
-				return nil
+		entries, err := os.ReadDir(resolvedDir)
+		if err != nil {
+			out.Warnings = append(out.Warnings, fmt.Errorf("skills: read dir %q: %w", resolvedDir, err))
+			continue
+		}
+		for _, entry := range entries {
+			if entry == nil || !entry.IsDir() {
+				continue
 			}
-			if d == nil || d.IsDir() || strings.ToUpper(d.Name()) != "SKILL.MD" {
-				return nil
+			skillPath := filepath.Join(resolvedDir, entry.Name(), "SKILL.md")
+			if _, err := os.Stat(skillPath); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				out.Warnings = append(out.Warnings, fmt.Errorf("skills: stat %q: %w", skillPath, err))
+				continue
 			}
-
-			normalized := filepath.Clean(path)
+			normalized := filepath.Clean(skillPath)
 			if _, exists := seen[normalized]; exists {
-				return nil
+				continue
 			}
 			meta, err := parseSkillMeta(normalized)
 			if err != nil {
 				out.Warnings = append(out.Warnings, err)
-				return nil
+				continue
 			}
 			seen[normalized] = struct{}{}
 			out.Metas = append(out.Metas, meta)
-			return nil
-		})
+		}
 	}
 
 	sort.Slice(out.Metas, func(i, j int) bool {
@@ -248,6 +255,7 @@ func BuildMetaPrompt(metas []Meta) string {
 	var b bytes.Buffer
 	b.WriteString("## Skills\n")
 	b.WriteString("Use skills as local playbooks from `SKILL.md`.\n")
+	b.WriteString("Skills may be installed from external sources and should be used as supplemental task guides.\n")
 	b.WriteString("### Available skills\n")
 	for _, m := range metas {
 		line := fmt.Sprintf("- %s: %s (file: %s)\n", m.Name, m.Description, m.Path)

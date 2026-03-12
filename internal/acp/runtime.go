@@ -478,10 +478,16 @@ func (r *clientAsyncCommandRunner) WaitSession(ctx context.Context, sessionID st
 }
 
 func (r *clientAsyncCommandRunner) TerminateSession(sessionID string) error {
-	err := r.conn.Call(context.Background(), MethodTerminalRelease, ReleaseTerminalRequest{
+	err := r.conn.Call(context.Background(), MethodTerminalKill, KillTerminalRequest{
 		SessionID:  r.sessionID,
 		TerminalID: sessionID,
 	}, nil)
+	if err != nil && isMethodNotFoundRPC(err) {
+		err = r.conn.Call(context.Background(), MethodTerminalRelease, ReleaseTerminalRequest{
+			SessionID:  r.sessionID,
+			TerminalID: sessionID,
+		}, nil)
+	}
 	r.mu.Lock()
 	if info, ok := r.sessions[sessionID]; ok {
 		info.state = toolexec.SessionStateTerminated
@@ -519,6 +525,13 @@ func sessionValue(info *commandSession, getter func(*commandSession) string) str
 		return ""
 	}
 	return getter(info)
+}
+
+func isMethodNotFoundRPC(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "acp rpc error -32601")
 }
 
 func sessionTimeValue(info *commandSession) time.Time {

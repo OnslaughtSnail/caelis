@@ -20,9 +20,9 @@ func TestNormalizeReasoningSelection(t *testing.T) {
 
 func TestModelReasoningOptionsForConfig(t *testing.T) {
 	toggle := modelproviders.Config{
-		Provider:      "deepseek",
-		Model:         "deepseek-chat",
-		API:           modelproviders.APIDeepSeek,
+		Provider:      "xiaomi",
+		Model:         "mimo-v2-flash",
+		API:           modelproviders.APIMimo,
 		ReasoningMode: reasoningModeToggle,
 	}
 	toggleOptions := modelReasoningOptionsForConfig(toggle)
@@ -38,19 +38,29 @@ func TestModelReasoningOptionsForConfig(t *testing.T) {
 		SupportedReasoningEfforts: []string{"minimal", "low", "medium", "high", "xhigh"},
 	}
 	effortOptions := modelReasoningOptionsForConfig(effort)
-	if len(effortOptions) != 6 {
+	if len(effortOptions) != 5 {
 		t.Fatalf("expected effort options, got %+v", effortOptions)
 	}
-	if effortOptions[5].Value != "xhigh" {
+	if effortOptions[4].Value != "xhigh" {
 		t.Fatalf("expected xhigh option, got %+v", effortOptions)
+	}
+
+	fixed := modelproviders.Config{
+		Provider:      "deepseek",
+		Model:         "deepseek-reasoner",
+		API:           modelproviders.APIDeepSeek,
+		ReasoningMode: reasoningModeFixed,
+	}
+	if got := modelReasoningOptionsForConfig(fixed); len(got) != 0 {
+		t.Fatalf("expected no configurable options for fixed reasoning, got %+v", got)
 	}
 }
 
 func TestResolveModelReasoningOption_ToggleRejectsEffort(t *testing.T) {
 	cfg := modelproviders.Config{
-		Provider:      "deepseek",
-		Model:         "deepseek-chat",
-		API:           modelproviders.APIDeepSeek,
+		Provider:      "xiaomi",
+		Model:         "mimo-v2-flash",
+		API:           modelproviders.APIMimo,
 		ReasoningMode: reasoningModeToggle,
 	}
 	if _, err := resolveModelReasoningOption(cfg, "high"); err == nil {
@@ -60,8 +70,15 @@ func TestResolveModelReasoningOption_ToggleRejectsEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opt.ThinkingMode != "off" || opt.ReasoningEffort != "" {
+	if opt.ReasoningEffort != "none" {
 		t.Fatalf("unexpected option: %+v", opt)
+	}
+	opt, err = resolveModelReasoningOption(cfg, "on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.ReasoningEffort != "medium" || opt.Value != "on" {
+		t.Fatalf("unexpected toggle on option: %+v", opt)
 	}
 }
 
@@ -78,40 +95,54 @@ func TestResolveModelReasoningOption_EffortUsesDefaultForOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opt.ThinkingMode != "on" || opt.ReasoningEffort != "medium" {
+	if opt.ReasoningEffort != "medium" {
 		t.Fatalf("unexpected option: %+v", opt)
 	}
 }
 
+func TestResolveModelReasoningOption_EffortRejectsOffWhenNoneUnsupported(t *testing.T) {
+	cfg := modelproviders.Config{
+		Provider:                  "openai-compatible",
+		API:                       modelproviders.APIOpenAICompatible,
+		Model:                     "glm-5",
+		ReasoningMode:             reasoningModeToggle,
+		SupportedReasoningEfforts: []string{"low", "medium", "high"},
+		DefaultReasoningEffort:    "medium",
+	}
+	if _, err := resolveModelReasoningOption(cfg, "off"); err == nil {
+		t.Fatal("expected off to be rejected when none is unsupported")
+	}
+}
+
 func TestParseReasoning_AcceptsTrueFalse(t *testing.T) {
-	on, err := parseReasoning("true", 1024, "", "deepseek", "deepseek-chat")
+	on, err := parseReasoning("true", 1024, "", "deepseek", "deepseek-reasoner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if on.Enabled == nil || !*on.Enabled {
-		t.Fatalf("expected reasoning enabled, got %+v", on)
+	if on.Effort != "" || on.BudgetTokens != 0 {
+		t.Fatalf("expected fixed reasoning to ignore explicit enable, got %+v", on)
 	}
-	off, err := parseReasoning("false", 1024, "", "deepseek", "deepseek-chat")
+	off, err := parseReasoning("false", 1024, "", "deepseek", "deepseek-reasoner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if off.Enabled == nil || *off.Enabled {
-		t.Fatalf("expected reasoning disabled, got %+v", off)
+	if off.Effort != "" || off.BudgetTokens != 0 {
+		t.Fatalf("expected fixed reasoning to ignore explicit disable, got %+v", off)
 	}
 }
 
 func TestParseReasoning_AutoKeepsUnsetWithoutExplicitLevel(t *testing.T) {
-	cfg, err := parseReasoning("auto", 1024, "", "deepseek", "deepseek-chat")
+	cfg, err := parseReasoning("auto", 1024, "", "deepseek", "deepseek-reasoner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Enabled != nil {
+	if cfg.Effort != "" {
 		t.Fatalf("expected auto reasoning unset, got %+v", cfg)
 	}
 }
 
 func TestParseReasoning_GeminiHighDoesNotForceBudget(t *testing.T) {
-	cfg, err := parseReasoning("on", 1024, "high", "gemini", "gemini-3.1-flash-lite-preview")
+	cfg, err := parseReasoning("on", 1024, "high", "gemini", "gemini-2.5-pro")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,15 +162,12 @@ func TestParseReasoning_AcceptsXHighAsUserInput(t *testing.T) {
 }
 
 func TestParseReasoning_NoneDisablesReasoning(t *testing.T) {
-	cfg, err := parseReasoning("on", 1024, "none", "gemini", "gemini-3.1-flash-lite-preview")
+	cfg, err := parseReasoning("on", 1024, "none", "gemini", "gemini-2.5-pro")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Enabled == nil || *cfg.Enabled {
-		t.Fatalf("expected reasoning disabled for none, got %+v", cfg)
-	}
-	if cfg.Effort != "" || cfg.BudgetTokens != 0 {
-		t.Fatalf("expected none to clear effort/budget, got %+v", cfg)
+	if cfg.Effort != "medium" || cfg.BudgetTokens != 1024 {
+		t.Fatalf("expected unsupported none to fall back to default effort, got %+v", cfg)
 	}
 }
 
@@ -148,8 +176,23 @@ func TestParseReasoning_ToggleModelClearsEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Effort != "" {
-		t.Fatalf("expected toggle model to clear effort, got %+v", cfg)
+	if cfg.Effort != "" || cfg.BudgetTokens != 0 {
+		t.Fatalf("expected non-reasoning model to clear effort, got %+v", cfg)
+	}
+}
+
+func TestResolveModelReasoningOption_FixedModelRejectsSelection(t *testing.T) {
+	cfg := modelproviders.Config{
+		Provider:      "deepseek",
+		Model:         "deepseek-reasoner",
+		API:           modelproviders.APIDeepSeek,
+		ReasoningMode: reasoningModeFixed,
+	}
+	if _, err := resolveModelReasoningOption(cfg, "none"); err == nil {
+		t.Fatal("expected fixed reasoning model to reject explicit selection")
+	}
+	if _, err := resolveModelReasoningOption(cfg, "auto"); err == nil {
+		t.Fatal("expected fixed reasoning model to reject auto selection")
 	}
 }
 
@@ -160,5 +203,58 @@ func TestParseReasoning_EffortModelUsesDefaultWhenMissing(t *testing.T) {
 	}
 	if cfg.Effort != "medium" {
 		t.Fatalf("expected default effort medium, got %+v", cfg)
+	}
+}
+
+func TestParseReasoningForConfig_UsesConfiguredToggleMode(t *testing.T) {
+	disabledCfg, err := parseReasoningForConfig("off", 1024, "", "openai-compatible", "doubao-seed-2.0-pro", modelproviders.Config{
+		Provider:      "openai-compatible",
+		API:           modelproviders.APIOpenAICompatible,
+		Model:         "doubao-seed-2.0-pro",
+		ReasoningMode: reasoningModeToggle,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disabledCfg.Effort != "none" {
+		t.Fatalf("expected openai-compatible config to normalize off to none, got %+v", disabledCfg)
+	}
+}
+
+func TestModelReasoningOptionsForConfig_OpenAICompatibleUsesStandardEfforts(t *testing.T) {
+	options := modelReasoningOptionsForConfig(modelproviders.Config{
+		Provider:      "openai-compatible",
+		API:           modelproviders.APIOpenAICompatible,
+		Model:         "glm-5",
+		ReasoningMode: reasoningModeToggle,
+	})
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+	if len(options) != len(want) {
+		t.Fatalf("unexpected options: %+v", options)
+	}
+	for i, one := range want {
+		if options[i].Value != one {
+			t.Fatalf("unexpected option[%d]=%q want %q", i, options[i].Value, one)
+		}
+	}
+}
+
+func TestModelReasoningOptionsForConfig_OpenAICompatibleUsesConfiguredSubset(t *testing.T) {
+	options := modelReasoningOptionsForConfig(modelproviders.Config{
+		Provider:                  "openai-compatible",
+		API:                       modelproviders.APIOpenAICompatible,
+		Model:                     "glm-5",
+		ReasoningMode:             reasoningModeEffort,
+		SupportedReasoningEfforts: []string{"low", "medium", "high"},
+		DefaultReasoningEffort:    "medium",
+	})
+	want := []string{"low", "medium", "high"}
+	if len(options) != len(want) {
+		t.Fatalf("unexpected options: %+v", options)
+	}
+	for i, one := range want {
+		if options[i].Value != one {
+			t.Fatalf("unexpected option[%d]=%q want %q", i, options[i].Value, one)
+		}
 	}
 }

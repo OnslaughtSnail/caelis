@@ -63,7 +63,6 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		Model:               "gpt-4o-mini",
 		BaseURL:             "https://api.openai.com/v1",
 		ContextWindowTokens: 128000,
-		ThinkingMode:        "on",
 		ThinkingBudget:      2048,
 		ReasoningEffort:     "high",
 		Auth: modelproviders.AuthConfig{
@@ -105,9 +104,6 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		t.Fatalf("unexpected resolved alias: %q", got)
 	}
 	settings := store2.ModelRuntimeSettings("openai/gpt-4o-mini")
-	if settings.ThinkingMode != "on" {
-		t.Fatalf("expected provider thinking mode on, got %q", settings.ThinkingMode)
-	}
 	if settings.ThinkingBudget != 2048 {
 		t.Fatalf("expected provider thinking budget 2048, got %d", settings.ThinkingBudget)
 	}
@@ -129,11 +125,10 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		t.Fatalf("expected permission mode full_control, got %q", store3.PermissionMode())
 	}
 	settings = store3.ModelRuntimeSettings("openai/gpt-4o-mini")
-	if settings.ThinkingMode != "on" || settings.ThinkingBudget != 2048 || settings.ReasoningEffort != "high" {
+	if settings.ThinkingBudget != 2048 || settings.ReasoningEffort != "high" {
 		t.Fatalf("expected provider runtime settings persisted, got %#v", settings)
 	}
 	if err := store3.SetModelRuntimeSettings("openai/gpt-4o-mini", modelRuntimeSettings{
-		ThinkingMode:    "true",
 		ThinkingBudget:  2048,
 		ReasoningEffort: "very-high",
 	}); err != nil {
@@ -144,7 +139,7 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings = store4.ModelRuntimeSettings("openai/gpt-4o-mini")
-	if settings.ThinkingMode != "on" || settings.ReasoningEffort != "xhigh" {
+	if settings.ReasoningEffort != "xhigh" {
 		t.Fatalf("expected normalized runtime settings, got %#v", settings)
 	}
 }

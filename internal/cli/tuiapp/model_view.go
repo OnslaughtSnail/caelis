@@ -59,44 +59,19 @@ func (m *Model) View() string {
 	// 6. Input bar.
 	sections = append(sections, m.renderInputBar())
 
-	// 7. @mention candidates inline list (below input, above status).
-	if len(m.mentionCandidates) > 0 {
-		sections = append(sections, m.renderMentionList())
-	}
-
-	// 8. $skill candidates inline list.
-	if len(m.skillCandidates) > 0 {
-		sections = append(sections, m.renderSkillList())
-	}
-
-	// 9. /resume candidates inline list.
-	if len(m.resumeCandidates) > 0 {
-		sections = append(sections, m.renderResumeList())
-	}
-
-	// 10. Generic slash argument candidates inline list.
-	if len(m.slashArgCandidates) > 0 {
-		sections = append(sections, m.renderSlashArgList())
-	}
-
-	// 11. Slash command candidates inline list.
-	if len(m.slashCandidates) > 0 {
-		sections = append(sections, m.renderSlashCommandList())
-	}
-
-	// 12. Composer bottom padding before footer separator.
+	// 7. Composer bottom padding before footer separator.
 	for i := 0; i < tuikit.ComposerPadBottom; i++ {
 		sections = append(sections, "")
 	}
 
-	// 13. Lower separator + secondary status bar.
+	// 8. Lower separator + secondary status bar.
 	if m.width > 0 {
 		sep := m.theme.SeparatorStyle().Render(strings.Repeat("─", m.width))
 		sections = append(sections, sep)
 	}
 	sections = append(sections, m.renderStatusFooter())
 
-	// 14. Status bar bottom padding.
+	// 9. Status bar bottom padding.
 	for i := 0; i < tuikit.StatusBarPadBottom; i++ {
 		sections = append(sections, "")
 	}
@@ -107,6 +82,8 @@ func (m *Model) View() string {
 		if promptView := m.renderPromptModal(); promptView != "" {
 			view = overlayAboveBottomArea(view, promptView, m.width, bottomHeight, 0)
 		}
+	} else if overlayView := m.renderInputOverlay(); overlayView != "" && m.width > 0 && m.height > 0 {
+		view = overlayAboveBottomArea(view, overlayView, m.width, bottomHeight, 0)
 	}
 
 	// Overlay: command palette.
@@ -146,46 +123,6 @@ func (m *Model) bottomSectionHeight() int {
 	// Input bar (with minimum height).
 	inputH := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	lines += inputH
-
-	// Mention candidates.
-	if n := len(m.mentionCandidates); n > 0 {
-		lines += minInt(8, n)
-		if n > 8 {
-			lines++ // "... and N more"
-		}
-	}
-
-	// Skill candidates.
-	if n := len(m.skillCandidates); n > 0 {
-		lines += minInt(8, n)
-		if n > 8 {
-			lines++
-		}
-	}
-
-	// Resume candidates.
-	if n := len(m.resumeCandidates); n > 0 {
-		lines += minInt(8, n)
-		if n > 8 {
-			lines++
-		}
-	}
-
-	// Generic slash-arg candidates.
-	if n := len(m.slashArgCandidates); n > 0 {
-		lines += minInt(8, n)
-		if n > 8 {
-			lines++
-		}
-	}
-
-	// Slash command candidates.
-	if n := len(m.slashCandidates); n > 0 {
-		lines += minInt(8, n)
-		if n > 8 {
-			lines++
-		}
-	}
 
 	// Composer bottom padding.
 	lines += tuikit.ComposerPadBottom
@@ -404,36 +341,6 @@ func (m *Model) fixedRowLayout() fixedRowLayout {
 	y += 5 // spacer + hint + hint/header gap + workspace/model + separator
 	y += tuikit.ComposerPadTop
 	y += maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
-	if n := len(m.mentionCandidates); n > 0 {
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
-	}
-	if n := len(m.skillCandidates); n > 0 {
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
-	}
-	if n := len(m.resumeCandidates); n > 0 {
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
-	}
-	if n := len(m.slashArgCandidates); n > 0 {
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
-	}
-	if n := len(m.slashCandidates); n > 0 {
-		y += minInt(8, n)
-		if n > 8 {
-			y++
-		}
-	}
 	y += tuikit.ComposerPadBottom // composer bottom padding
 	y++                           // lower separator
 	layout.footerY = y
@@ -1166,6 +1073,35 @@ func (m *Model) renderPromptModalBox(lines []string) string {
 	return insetRenderedBlock(box.Render(body), inset)
 }
 
+func (m *Model) renderCompletionOverlay(title string, lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	bodyLines := make([]string, 0, len(lines)+2)
+	if title = strings.TrimSpace(title); title != "" {
+		bodyLines = append(bodyLines, m.theme.TitleStyle().Render(title), "")
+	}
+	bodyLines = append(bodyLines, lines...)
+	return m.renderPromptModalBox(bodyLines)
+}
+
+func (m *Model) renderInputOverlay() string {
+	switch {
+	case len(m.mentionCandidates) > 0:
+		return m.renderMentionList()
+	case len(m.skillCandidates) > 0:
+		return m.renderSkillList()
+	case len(m.resumeCandidates) > 0:
+		return m.renderResumeList()
+	case len(m.slashArgCandidates) > 0:
+		return m.renderSlashArgList()
+	case len(m.slashCandidates) > 0:
+		return m.renderSlashCommandList()
+	default:
+		return ""
+	}
+}
+
 func (m *Model) renderPromptInputBar() string {
 	prompt := m.theme.PromptStyle().Render("> ")
 	value, cursor := m.promptInputValue()
@@ -1277,7 +1213,7 @@ func hardWrapDisplayLine(line string, width int) string {
 	return ansi.HardwrapWc(line, width, true)
 }
 
-// renderMentionList renders the @mention candidates as an inline list.
+// renderMentionList renders the @mention candidates as an overlay list.
 func (m *Model) renderMentionList() string {
 	if len(m.mentionCandidates) == 0 {
 		return ""
@@ -1298,5 +1234,5 @@ func (m *Model) renderMentionList() string {
 			fmt.Sprintf("  … and %d more", len(m.mentionCandidates)-maxItems),
 		))
 	}
-	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+	return m.renderCompletionOverlay("Files", lines)
 }

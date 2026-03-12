@@ -99,11 +99,10 @@ func (m Message) TextContent() string {
 
 // ReasoningConfig controls provider reasoning/thinking behavior.
 type ReasoningConfig struct {
-	// Enabled toggles reasoning mode when supported by provider.
-	Enabled *bool
 	// BudgetTokens limits provider thinking tokens when supported.
 	BudgetTokens int
-	// Effort is provider-specific reasoning effort hint, e.g. low|medium|high.
+	// Effort is the canonical reasoning effort hint.
+	// Empty means provider default/auto; "none" disables reasoning.
 	Effort string
 }
 

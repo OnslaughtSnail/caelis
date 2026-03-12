@@ -170,10 +170,10 @@ func slashArgQueryAtCursor(input []rune, cursor int) (string, string, bool) {
 		if len(fields) == 2 {
 			if hasTrailingDelimiter {
 				switch action {
-				case "list":
-					return "", "", false
-				case "use", "rm", "edit":
+				case "use":
 					return "model " + action, "", true
+				case "del":
+					return "", "", false
 				default:
 					return "", "", false
 				}
@@ -182,18 +182,18 @@ func slashArgQueryAtCursor(input []rune, cursor int) (string, string, bool) {
 				return "", "", false
 			}
 			switch action {
-			case "list", "use", "rm", "edit":
+			case "use", "del":
 			default:
 				return "model", action, true
 			}
 			return "model", action, true
 		}
 		switch action {
-		case "list", "use", "rm", "edit":
+		case "use", "del":
 		default:
 			return "", "", false
 		}
-		if action != "use" {
+		if action == "del" {
 			return "model " + action, strings.TrimSpace(fields[2]), true
 		}
 		alias := strings.TrimSpace(fields[2])

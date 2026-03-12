@@ -12,9 +12,9 @@ import (
 func TestCompleteModelCandidates_GroupsByProvider(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	configs := []modelproviders.Config{
-		{Alias: "zeta", Provider: "xiaomi", API: modelproviders.APIOpenAICompatible, Model: "mimo-v2-flash", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
+		{Alias: "zeta", Provider: "xiaomi", API: modelproviders.APIMimo, Model: "mimo-v2-flash", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
 		{Alias: "alpha", Provider: "deepseek", API: modelproviders.APIDeepSeek, Model: "deepseek-chat", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
-		{Alias: "beta", Provider: "xiaomi", API: modelproviders.APIOpenAICompatible, Model: "mimo-v2-reasoner", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
+		{Alias: "beta", Provider: "xiaomi", API: modelproviders.APIMimo, Model: "mimo-v2-reasoner", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
 	}
 	for _, cfg := range configs {
 		modelcatalogApplyConfigDefaults(&cfg)
@@ -46,7 +46,7 @@ func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	configs := []modelproviders.Config{
 		{Alias: "deepseek/deepseek-chat", Provider: "deepseek", API: modelproviders.APIDeepSeek, Model: "deepseek-chat", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
-		{Alias: "xiaomi/mimo-v2-flash", Provider: "xiaomi", API: modelproviders.APIOpenAICompatible, Model: "mimo-v2-flash", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
+		{Alias: "xiaomi/mimo-v2-flash", Provider: "xiaomi", API: modelproviders.APIMimo, Model: "mimo-v2-flash", Auth: modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey}},
 	}
 	for _, cfg := range configs {
 		modelcatalogApplyConfigDefaults(&cfg)
@@ -56,7 +56,7 @@ func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 	}
 
 	c := &cliConsole{modelFactory: factory}
-	got := c.completeModelCandidates("mimo", 10)
+	got := c.completeModelCandidates("xiaomi", 10)
 	if len(got) != 1 {
 		t.Fatalf("expected 1 candidate, got %d", len(got))
 	}
@@ -132,27 +132,46 @@ func TestCompleteSlashArgCandidates_ModelUseReturnsAliasCandidates(t *testing.T)
 	}
 }
 
-func TestCompleteModelReasoningCandidates_ToggleModel(t *testing.T) {
+func TestCompleteModelReasoningCandidates_FixedModel(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{
-		Alias:           "deepseek/deepseek-chat",
-		Provider:        "deepseek",
-		API:             modelproviders.APIDeepSeek,
-		Model:           "deepseek-chat",
-		ReasoningLevels: []string{"none", "high"},
-		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+		Alias:    "deepseek/deepseek-reasoner",
+		Provider: "deepseek",
+		API:      modelproviders.APIDeepSeek,
+		Model:    "deepseek-reasoner",
+		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
 	}
 	modelcatalogApplyConfigDefaults(&cfg)
 	if err := factory.Register(cfg); err != nil {
 		t.Fatalf("register config: %v", err)
 	}
 	c := &cliConsole{modelFactory: factory}
-	got := c.completeModelReasoningCandidates("deepseek/deepseek-chat", "", 10)
+	got := c.completeModelReasoningCandidates("deepseek/deepseek-reasoner", "", 10)
+	if len(got) != 0 {
+		t.Fatalf("expected no reasoning candidates for fixed model, got %+v", got)
+	}
+}
+
+func TestCompleteModelReasoningCandidates_ToggleModelUsesOnOff(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:    "xiaomi/mimo-v2-flash",
+		Provider: "xiaomi",
+		API:      modelproviders.APIMimo,
+		Model:    "mimo-v2-flash",
+		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+	}
+	modelcatalogApplyConfigDefaults(&cfg)
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+	c := &cliConsole{modelFactory: factory}
+	got := c.completeModelReasoningCandidates("xiaomi/mimo-v2-flash", "", 10)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 reasoning candidates, got %d", len(got))
 	}
 	if got[0].Value != "off" || got[1].Value != "on" {
-		t.Fatalf("unexpected reasoning candidates: %+v", got)
+		t.Fatalf("unexpected toggle reasoning candidates: %+v", got)
 	}
 }
 
@@ -172,21 +191,21 @@ func TestCompleteModelReasoningCandidates_EffortModel(t *testing.T) {
 	}
 	c := &cliConsole{modelFactory: factory}
 	got := c.completeModelReasoningCandidates("openai/o3", "", 10)
-	if len(got) != 5 {
+	if len(got) != 4 {
 		t.Fatalf("expected effort reasoning candidates, got %d", len(got))
 	}
-	if got[0].Value != "none" || got[4].Value != "xhigh" {
+	if got[0].Value != "low" || got[3].Value != "xhigh" {
 		t.Fatalf("unexpected reasoning candidates: %+v", got)
 	}
 }
 
 func TestParseModelReasoningPayload(t *testing.T) {
-	payload := "model-reasoning:" + url.QueryEscape("deepseek/deepseek-chat")
+	payload := "model-reasoning:" + url.QueryEscape("deepseek/deepseek-reasoner")
 	alias, ok := parseModelReasoningPayload(payload)
 	if !ok {
 		t.Fatal("expected parse success")
 	}
-	if alias != "deepseek/deepseek-chat" {
+	if alias != "deepseek/deepseek-reasoner" {
 		t.Fatalf("unexpected alias %q", alias)
 	}
 }
@@ -363,10 +382,10 @@ func TestReadTUIStatus_ZeroUsageStillShowsContextWindow(t *testing.T) {
 func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{
-		Alias:               "gemini/gemini-3.1-flash-lite-preview",
+		Alias:               "gemini/gemini-2.5-pro",
 		Provider:            "gemini",
 		API:                 modelproviders.APIGemini,
-		Model:               "gemini-3.1-flash-lite-preview",
+		Model:               "gemini-2.5-pro",
 		ContextWindowTokens: 1_000_000,
 		Auth:                modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "token"},
 	}
@@ -376,14 +395,13 @@ func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) 
 	}
 
 	c := &cliConsole{
-		modelAlias:       "gemini/gemini-3.1-flash-lite-preview",
+		modelAlias:       "gemini/gemini-2.5-pro",
 		modelFactory:     factory,
 		lastPromptTokens: 5200,
-		thinkingMode:     "on",
 		reasoningEffort:  "high",
 	}
 	modelText, contextText := c.readTUIStatus()
-	if modelText != "gemini/gemini-3.1-flash-lite-preview [high]" {
+	if modelText != "gemini/gemini-2.5-pro [high]" {
 		t.Fatalf("unexpected model text %q", modelText)
 	}
 	if contextText != "5.2k/1.0m(0%)" {
@@ -391,15 +409,14 @@ func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) 
 	}
 }
 
-func TestReadTUIStatus_ShowsToggleReasoningState(t *testing.T) {
+func TestReadTUIStatus_ShowsFixedReasoningState(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{
-		Alias:           "deepseek/deepseek-chat",
-		Provider:        "deepseek",
-		API:             modelproviders.APIDeepSeek,
-		Model:           "deepseek-chat",
-		ReasoningLevels: []string{"none", "high"},
-		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "token"},
+		Alias:    "deepseek/deepseek-reasoner",
+		Provider: "deepseek",
+		API:      modelproviders.APIDeepSeek,
+		Model:    "deepseek-reasoner",
+		Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "token"},
 	}
 	modelcatalogApplyConfigDefaults(&cfg)
 	if err := factory.Register(cfg); err != nil {
@@ -407,19 +424,13 @@ func TestReadTUIStatus_ShowsToggleReasoningState(t *testing.T) {
 	}
 
 	c := &cliConsole{
-		modelAlias:    "deepseek/deepseek-chat",
-		modelFactory:  factory,
-		contextWindow: 128000,
-		thinkingMode:  "off",
+		modelAlias:      "deepseek/deepseek-reasoner",
+		modelFactory:    factory,
+		contextWindow:   128000,
+		reasoningEffort: "none",
 	}
 	modelText, _ := c.readTUIStatus()
-	if modelText != "deepseek/deepseek-chat [reasoning off]" {
-		t.Fatalf("unexpected toggle-off model text %q", modelText)
-	}
-
-	c.thinkingMode = "on"
-	modelText, _ = c.readTUIStatus()
-	if modelText != "deepseek/deepseek-chat [reasoning on]" {
-		t.Fatalf("unexpected toggle-on model text %q", modelText)
+	if modelText != "deepseek/deepseek-reasoner [reasoning on]" {
+		t.Fatalf("unexpected fixed model text %q", modelText)
 	}
 }

@@ -140,10 +140,10 @@ func TestHandleConnectRejectsPositionalArgs(t *testing.T) {
 	}
 }
 
-func TestBuildConnectModelChoicesIncludesRemoteAndCustomOnly(t *testing.T) {
+func TestBuildConnectModelChoicesIncludesRemoteAndCommonModels(t *testing.T) {
 	got := buildConnectModelChoices("deepseek", []modelproviders.RemoteModel{
 		{Name: "deepseek-chat"},
-	})
+	}, []string{"deepseek-chat", "deepseek-reasoner"})
 	foundChat := false
 	foundReasoner := false
 	foundCustom := false
@@ -157,7 +157,7 @@ func TestBuildConnectModelChoicesIncludesRemoteAndCustomOnly(t *testing.T) {
 			foundCustom = true
 		}
 	}
-	if !foundChat || foundReasoner || !foundCustom {
+	if !foundChat || !foundReasoner || !foundCustom {
 		t.Fatalf("unexpected model choices: %+v", got)
 	}
 }
@@ -217,7 +217,7 @@ func TestHandleConnect_ReinitializesReasoningDefaultsAndOmitsNotes(t *testing.T)
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
 	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
-		return []modelproviders.RemoteModel{{Name: "deepseek-chat"}}, nil
+		return []modelproviders.RemoteModel{{Name: "deepseek-reasoner"}}, nil
 	}
 	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
@@ -229,17 +229,17 @@ func TestHandleConnect_ReinitializesReasoningDefaultsAndOmitsNotes(t *testing.T)
 
 	store := &appConfigStore{path: filepath.Join(t.TempDir(), "config.json"), data: defaultAppConfig()}
 	if err := store.UpsertProvider(modelproviders.Config{
-		Alias:        "deepseek/deepseek-chat",
-		Provider:     "deepseek",
-		API:          modelproviders.APIDeepSeek,
-		BaseURL:      "https://api.deepseek.com/v1",
-		Model:        "deepseek-chat",
-		ThinkingMode: "off",
+		Alias:           "deepseek/deepseek-reasoner",
+		Provider:        "deepseek",
+		API:             modelproviders.APIDeepSeek,
+		BaseURL:         "https://api.deepseek.com/v1",
+		Model:           "deepseek-reasoner",
+		ReasoningEffort: "none",
 	}); err != nil {
 		t.Fatalf("seed config failed: %v", err)
 	}
 	prompter := &stubChoicePrompter{
-		choices: []string{"deepseek", "deepseek-chat"},
+		choices: []string{"deepseek", "deepseek-reasoner"},
 		lines:   []string{"sk-test"},
 	}
 	var out bytes.Buffer
@@ -256,22 +256,69 @@ func TestHandleConnect_ReinitializesReasoningDefaultsAndOmitsNotes(t *testing.T)
 	if err != nil {
 		t.Fatalf("handleConnect failed: %v", err)
 	}
-	if c.thinkingMode != "on" {
-		t.Fatalf("expected connect to initialize reasoning on, got %q", c.thinkingMode)
+	if c.reasoningEffort != "" {
+		t.Fatalf("expected connect to clear configurable reasoning for fixed model, got %q", c.reasoningEffort)
 	}
-	settings := store.ModelRuntimeSettings("deepseek/deepseek-chat")
-	if settings.ThinkingMode != "on" {
-		t.Fatalf("expected persisted thinking mode on, got %q", settings.ThinkingMode)
+	settings := store.ModelRuntimeSettings("deepseek/deepseek-reasoner")
+	if settings.ReasoningEffort != "" {
+		t.Fatalf("expected persisted reasoning effort cleared, got %q", settings.ReasoningEffort)
 	}
-	cfg, ok := c.modelFactory.ConfigForAlias("deepseek/deepseek-chat")
+	cfg, ok := c.modelFactory.ConfigForAlias("deepseek/deepseek-reasoner")
 	if !ok {
 		t.Fatal("expected connected model config")
 	}
-	if cfg.ThinkingMode != "on" {
-		t.Fatalf("expected registered config thinking mode on, got %q", cfg.ThinkingMode)
+	if cfg.ReasoningEffort != "" {
+		t.Fatalf("expected registered config reasoning effort cleared, got %q", cfg.ReasoningEffort)
 	}
 	if strings.Contains(out.String(), "credential_ref") {
 		t.Fatalf("expected credential note removed, got %q", out.String())
+	}
+}
+
+func TestHandleConnect_VolcengineStandardUsesManualModelWithoutDiscovery(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevRefresh := connectModelCatalogRefreshFn
+	discoverCalled := false
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		discoverCalled = true
+		return nil, errors.New("should not discover volcengine models")
+	}
+	connectModelCatalogRefreshFn = func(baseCtx context.Context) (modelcatalog.CatalogInitStatus, bool) {
+		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, io.EOF
+			}),
+		}, ""), true
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		connectModelCatalogRefreshFn = prevRefresh
+	})
+
+	store := &appConfigStore{path: filepath.Join(t.TempDir(), "config.json"), data: defaultAppConfig()}
+	prompter := &stubChoicePrompter{
+		choices: []string{"volcengine", connectVolcengineStandardValue},
+		lines:   []string{"sk-test", "doubao-seed-2.0-pro"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		configStore:  store,
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	if discoverCalled {
+		t.Fatal("expected standard volcengine connect to skip list_models discovery")
+	}
+	if c.modelAlias != "volcengine/doubao-seed-2.0-pro" {
+		t.Fatalf("unexpected current model %q", c.modelAlias)
 	}
 }
 
@@ -353,8 +400,8 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	})
 
 	prompter := &stubChoicePrompter{
-		choices: []string{"openai", reasoningModeEffort, "low,high"},
-		lines:   []string{"sk-test", "gpt-custom", "", "", "minimal,xhigh"},
+		choices: []string{"openai", connectCustomModelValue, "yes", "low,high,minimal,xhigh"},
+		lines:   []string{"sk-test", "gpt-custom", "", ""},
 	}
 	var out bytes.Buffer
 	c := &cliConsole{
@@ -393,7 +440,7 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	if cfg.DefaultReasoningEffort != "low" {
 		t.Fatalf("expected default reasoning effort low, got %q", cfg.DefaultReasoningEffort)
 	}
-	wantLevels := []string{"none", "low", "high", "minimal", "xhigh"}
+	wantLevels := []string{"low", "high", "minimal", "xhigh"}
 	if len(cfg.ReasoningLevels) != len(wantLevels) {
 		t.Fatalf("unexpected reasoning levels %+v", cfg.ReasoningLevels)
 	}
@@ -423,7 +470,7 @@ func TestHandleConnect_NoDiscoveredModelsPromptsManualInputAndStripsProviderPref
 	})
 
 	prompter := &stubChoicePrompter{
-		choices: []string{"openai-compatible"},
+		choices: []string{"openai-compatible", connectCustomModelValue},
 		lines:   []string{"https://example.invalid/v1", "sk-test", "openai-compatible/gpt-4o-mini"},
 	}
 	var out bytes.Buffer
@@ -484,6 +531,19 @@ func TestParseReasoningLevelsInput_Invalid(t *testing.T) {
 	_, err := parseReasoningLevelsInput("minimal,unknown")
 	if err == nil {
 		t.Fatal("expected invalid reasoning level error")
+	}
+}
+
+func TestConnectReasoningCapabilityChoices_UsesUserFacingLabels(t *testing.T) {
+	choices := connectReasoningCapabilityChoices()
+	if len(choices) != 3 {
+		t.Fatalf("unexpected choices: %+v", choices)
+	}
+	if choices[0].Label != "None" || choices[1].Label != "Toggle" || choices[2].Label != "Effort levels" {
+		t.Fatalf("unexpected labels: %+v", choices)
+	}
+	if choices[0].Value != reasoningModeNone || choices[1].Value != reasoningModeToggle || choices[2].Value != reasoningModeEffort {
+		t.Fatalf("unexpected values: %+v", choices)
 	}
 }
 

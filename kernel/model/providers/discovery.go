@@ -36,7 +36,7 @@ func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 	}
 	client := &http.Client{Timeout: timeout}
 	switch cfg.API {
-	case APIOpenAI, APIOpenAICompatible, APIDeepSeek:
+	case APIOpenAI, APIOpenAICompatible, APIDeepSeek, APIMimo, APIVolcengine, APIVolcengineCoding:
 		return discoverOpenAIModels(ctx, client, cfg, token)
 	case APIGemini:
 		return discoverGeminiModels(ctx, client, cfg, token)

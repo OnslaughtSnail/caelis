@@ -296,11 +296,8 @@ func looksLikeAPIVersion(v string) bool {
 
 func toGeminiThinkingConfig(modelName string, reasoning model.ReasoningConfig) *genai.ThinkingConfig {
 	effort := strings.ToLower(strings.TrimSpace(reasoning.Effort))
-	disabled := reasoning.Enabled != nil && !*reasoning.Enabled
-	if effort == "none" {
-		disabled = true
-	}
-	explicit := reasoning.Enabled != nil || effort != ""
+	disabled := effort == "none"
+	explicit := effort != "" || reasoning.BudgetTokens > 0
 	if !explicit {
 		return nil
 	}
@@ -378,9 +375,6 @@ func geminiThinkingBudgetForReasoning(level string, explicitBudget int) int {
 }
 
 func resolveGeminiThinkingLevel(reasoning model.ReasoningConfig) genai.ThinkingLevel {
-	if reasoning.Enabled != nil && !*reasoning.Enabled {
-		return genai.ThinkingLevelMinimal
-	}
 	switch strings.ToLower(strings.TrimSpace(reasoning.Effort)) {
 	case "none", "minimal":
 		return genai.ThinkingLevelMinimal
@@ -390,9 +384,6 @@ func resolveGeminiThinkingLevel(reasoning model.ReasoningConfig) genai.ThinkingL
 		return genai.ThinkingLevelMedium
 	case "high", "xhigh":
 		return genai.ThinkingLevelHigh
-	}
-	if reasoning.Enabled != nil && *reasoning.Enabled {
-		return genai.ThinkingLevelMedium
 	}
 	return genai.ThinkingLevelUnspecified
 }

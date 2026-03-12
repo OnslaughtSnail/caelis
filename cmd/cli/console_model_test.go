@@ -3,12 +3,13 @@ package main
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
-func TestHandleModel_UpdatesReasoningAndPersists(t *testing.T) {
+func TestHandleModel_FixedReasoningRejectsOverrides(t *testing.T) {
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
 	if err := os.Setenv("HOME", home); err != nil {
@@ -23,10 +24,10 @@ func TestHandleModel_UpdatesReasoningAndPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := modelproviders.Config{
-		Alias:    "deepseek/deepseek-chat",
+		Alias:    "deepseek/deepseek-reasoner",
 		Provider: "deepseek",
 		API:      modelproviders.APIDeepSeek,
-		Model:    "deepseek-chat",
+		Model:    "deepseek-reasoner",
 		Auth: modelproviders.AuthConfig{
 			Type:  modelproviders.AuthAPIKey,
 			Token: "test-token",
@@ -48,26 +49,12 @@ func TestHandleModel_UpdatesReasoningAndPersists(t *testing.T) {
 		configStore:  store,
 		out:          &out,
 	}
-	if _, err := handleModel(console, []string{"deepseek/deepseek-chat", "on"}); err != nil {
-		t.Fatal(err)
+	if _, err := handleModel(console, []string{"deepseek/deepseek-reasoner", "on"}); err == nil {
+		t.Fatal("expected fixed reasoning model to reject explicit overrides")
 	}
-	if console.thinkingMode != "on" {
-		t.Fatalf("expected thinking mode on, got %q", console.thinkingMode)
-	}
-	settings := store.ModelRuntimeSettings("deepseek/deepseek-chat")
-	if settings.ThinkingMode != "on" {
-		t.Fatalf("expected persisted thinking mode on, got %q", settings.ThinkingMode)
-	}
-
-	if _, err := handleModel(console, []string{"deepseek/deepseek-chat", "false"}); err != nil {
-		t.Fatal(err)
-	}
-	if console.thinkingMode != "off" {
-		t.Fatalf("expected thinking mode off, got %q", console.thinkingMode)
-	}
-	settings = store.ModelRuntimeSettings("deepseek/deepseek-chat")
-	if settings.ThinkingMode != "off" {
-		t.Fatalf("expected persisted thinking mode off, got %q", settings.ThinkingMode)
+	settings := store.ModelRuntimeSettings("deepseek/deepseek-reasoner")
+	if settings.ReasoningEffort != "" {
+		t.Fatalf("expected no persisted reasoning effort for fixed model, got %q", settings.ReasoningEffort)
 	}
 }
 
@@ -96,10 +83,10 @@ func TestHandleModel_InvalidReasoningDoesNotSwitchModel(t *testing.T) {
 		},
 	}
 	deepseekCfg := modelproviders.Config{
-		Alias:           "deepseek/deepseek-chat",
+		Alias:           "deepseek/deepseek-reasoner",
 		Provider:        "deepseek",
 		API:             modelproviders.APIDeepSeek,
-		Model:           "deepseek-chat",
+		Model:           "deepseek-reasoner",
 		ReasoningLevels: []string{"none", "low"},
 		Auth: modelproviders.AuthConfig{
 			Type:  modelproviders.AuthAPIKey,
@@ -136,7 +123,7 @@ func TestHandleModel_InvalidReasoningDoesNotSwitchModel(t *testing.T) {
 		t.Fatalf("expected model alias openai/o3, got %q", console.modelAlias)
 	}
 
-	if _, err := handleModel(console, []string{"deepseek/deepseek-chat", "high"}); err == nil {
+	if _, err := handleModel(console, []string{"deepseek/deepseek-reasoner", "high"}); err == nil {
 		t.Fatal("expected invalid reasoning option error")
 	}
 	if console.modelAlias != "openai/o3" {
@@ -147,7 +134,7 @@ func TestHandleModel_InvalidReasoningDoesNotSwitchModel(t *testing.T) {
 	}
 }
 
-func TestHandleModel_RmDeletesConfigAndCredential(t *testing.T) {
+func TestHandleModel_DelDeletesConfigAndCredential(t *testing.T) {
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
 	if err := os.Setenv("HOME", home); err != nil {
@@ -198,7 +185,7 @@ func TestHandleModel_RmDeletesConfigAndCredential(t *testing.T) {
 		modelAlias:      cfg.Alias,
 		out:             &out,
 	}
-	if _, err := handleModel(console, []string{"rm", cfg.Alias}); err != nil {
+	if _, err := handleModel(console, []string{"del", cfg.Alias}); err != nil {
 		t.Fatal(err)
 	}
 	if refs := store.ConfiguredModelAliases(); len(refs) != 0 {
@@ -209,5 +196,67 @@ func TestHandleModel_RmDeletesConfigAndCredential(t *testing.T) {
 	}
 	if console.llm != nil || console.modelAlias != "" {
 		t.Fatalf("expected current model cleared, got alias=%q llm=%v", console.modelAlias, console.llm != nil)
+	}
+}
+
+func TestHandleModel_DelPromptsForMultipleRemovals(t *testing.T) {
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("HOME", oldHome)
+	})
+
+	store, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configs := []modelproviders.Config{
+		{
+			Alias:    "xiaomi/mimo-v2-flash",
+			Provider: "xiaomi",
+			API:      modelproviders.APIMimo,
+			Model:    "mimo-v2-flash",
+			Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "t1"},
+		},
+		{
+			Alias:    "openai/o3",
+			Provider: "openai",
+			API:      modelproviders.APIOpenAI,
+			Model:    "o3",
+			Auth:     modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey, Token: "t2"},
+		},
+	}
+	factory := modelproviders.NewFactory()
+	for _, cfg := range configs {
+		if err := store.UpsertProvider(cfg); err != nil {
+			t.Fatal(err)
+		}
+		modelcatalogApplyConfigDefaults(&cfg)
+		if err := factory.Register(cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out bytes.Buffer
+	console := &cliConsole{
+		modelFactory: factory,
+		configStore:  store,
+		out:          &out,
+		prompter: &stubChoicePrompter{
+			choices: []string{"xiaomi/mimo-v2-flash openai/o3"},
+		},
+	}
+	if _, err := handleModel(console, []string{"del"}); err != nil {
+		t.Fatal(err)
+	}
+	if refs := store.ConfiguredModelAliases(); len(refs) != 0 {
+		t.Fatalf("expected all providers removed, got %v", refs)
+	}
+	text := out.String()
+	if !strings.Contains(text, "model removed: xiaomi/mimo-v2-flash") || !strings.Contains(text, "model removed: openai/o3") {
+		t.Fatalf("expected both removal notes, got %q", text)
 	}
 }
