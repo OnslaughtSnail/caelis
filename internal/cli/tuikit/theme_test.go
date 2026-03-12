@@ -2,7 +2,10 @@ package tuikit
 
 import (
 	"fmt"
+	"image/color"
 	"testing"
+
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 func TestComposeFooter(t *testing.T) {
@@ -46,6 +49,16 @@ func TestResolveThemeFromEnv_FallsBackTo256Palette(t *testing.T) {
 	}
 }
 
-func stringifyColor(color interface{}) string {
-	return fmt.Sprint(color)
+func stringifyColor(value interface{}) string {
+	switch c := value.(type) {
+	case xansi.BasicColor:
+		return fmt.Sprintf("%d", c)
+	case xansi.IndexedColor:
+		return fmt.Sprintf("%d", c)
+	case color.RGBA:
+		return fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B)
+	case color.NRGBA:
+		return fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B)
+	}
+	return fmt.Sprint(value)
 }

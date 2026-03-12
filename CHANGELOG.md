@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.0.19 - 2026-03-13
+
+### ACP, Session Config & Model Catalog
+- Reworked ACP session config flows with richer capability reporting, image-aware prompt support, and improved session/runtime handling across model selection and prompt submission.
+- Refreshed the bundled model catalog snapshot and provider capability overlays, plus updated provider discovery/factory wiring for newer catalog metadata and model capability handling.
+- Expanded ACP and provider test coverage around protocol fields, permission/runtime plumbing, prompt ordering, and multimodal request construction.
+
+### TUI, Console & Multimodal Input
+- Migrated the Bubble Tea console to the v2 stack with a split TUI app structure, richer tool-output panels, improved composer rendering, and updated key/mouse handling.
+- Added inline attachment tokens in the composer, history/queue preservation for attachments, attachment-only sends, and safer multimodal prompt assembly so text, images, and session-mode injection stay aligned.
+- Added live bash task watches, improved resumed-session rendering for interleaved image/text turns, and broadened console/TUI regression coverage for stream ordering and input flows.
+
+### Image, Clipboard & Runtime Handling
+- Expanded clipboard image extraction on macOS and Linux/WSL, including broader MIME handling and more consistent image-loading behavior across headless and interactive entry points.
+- Normalized TIFF handling through the shared image pipeline so resize/encode behavior is consistent regardless of whether images come from files, clipboard paste, or cached content parts.
+- Tightened runtime task/delegate reporting with better wait metadata and lifecycle fallback handling.
+
 ## v0.0.18 - 2026-03-11
 
 ### CLI, TUI & Interaction

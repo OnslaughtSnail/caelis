@@ -324,7 +324,7 @@ func TestForwardSessionEventToTUI_ProjectsDelegatedAssistantAndReasoning(t *test
 	}
 }
 
-func TestForwardSessionEventToTUI_IgnoresNestedChildToolEvents(t *testing.T) {
+func TestForwardSessionEventToTUI_ProjectsNestedChildToolEvents(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{
 		sessionID:         "parent-session",
@@ -367,8 +367,22 @@ func TestForwardSessionEventToTUI_IgnoresNestedChildToolEvents(t *testing.T) {
 		},
 	})
 
-	if len(sender.msgs) != 0 {
-		t.Fatalf("expected nested child tool activity to stay out of parent TUI, got %+v", sender.msgs)
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected projected child tool activity, got %+v", sender.msgs)
+	}
+	callMsg, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected first message TaskStreamMsg, got %T", sender.msgs[0])
+	}
+	resultMsg, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected second message TaskStreamMsg, got %T", sender.msgs[1])
+	}
+	if callMsg.Stream != "assistant" || !strings.Contains(callMsg.Chunk, "▸ BASH") {
+		t.Fatalf("unexpected child tool call projection: %+v", callMsg)
+	}
+	if resultMsg.Stream != "assistant" || !strings.Contains(resultMsg.Chunk, "✓ BASH") {
+		t.Fatalf("unexpected child tool response projection: %+v", resultMsg)
 	}
 }
 

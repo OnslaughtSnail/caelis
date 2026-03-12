@@ -4,8 +4,8 @@ import (
 	"errors"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // ---------------------------------------------------------------------------
@@ -95,13 +95,43 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 		m.activePrompt.cursor = 0
 		return nil
 	}
-	if len(msg.Runes) > 0 {
-		for _, r := range msg.Runes {
+	if text := msg.Key().Text; text != "" {
+		for _, r := range []rune(text) {
 			head := append([]rune(nil), m.activePrompt.input[:m.activePrompt.cursor]...)
 			head = append(head, r)
 			m.activePrompt.input = append(head, m.activePrompt.input[m.activePrompt.cursor:]...)
 			m.activePrompt.cursor++
 		}
+	}
+	return nil
+}
+
+func (m *Model) handlePromptPaste(msg tea.PasteMsg) tea.Cmd {
+	if m.activePrompt == nil {
+		return nil
+	}
+	text := msg.String()
+	if text == "" {
+		return nil
+	}
+	if len(m.activePrompt.choices) > 0 && m.activePrompt.filterable {
+		for _, r := range []rune(text) {
+			head := append([]rune(nil), m.activePrompt.filter[:m.activePrompt.cursor]...)
+			head = append(head, r)
+			m.activePrompt.filter = append(head, m.activePrompt.filter[m.activePrompt.cursor:]...)
+			m.activePrompt.cursor++
+		}
+		m.clampPromptChoiceIndex()
+		return nil
+	}
+	if len(m.activePrompt.choices) > 0 {
+		return nil
+	}
+	for _, r := range []rune(text) {
+		head := append([]rune(nil), m.activePrompt.input[:m.activePrompt.cursor]...)
+		head = append(head, r)
+		m.activePrompt.input = append(head, m.activePrompt.input[m.activePrompt.cursor:]...)
+		m.activePrompt.cursor++
 	}
 	return nil
 }
@@ -267,7 +297,7 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 			m.syncPromptChoiceWindow()
 		}
 		return nil
-	case " ":
+	case " ", "space":
 		if !m.activePrompt.multiSelect {
 			return nil
 		}
@@ -305,9 +335,9 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 		m.finishPrompt(choice.value, nil)
 		return nil
 	}
-	if len(msg.Runes) > 0 {
+	if text := msg.Key().Text; text != "" {
 		if m.activePrompt.filterable {
-			for _, r := range msg.Runes {
+			for _, r := range []rune(text) {
 				head := append([]rune(nil), m.activePrompt.filter[:m.activePrompt.cursor]...)
 				head = append(head, r)
 				m.activePrompt.filter = append(head, m.activePrompt.filter[m.activePrompt.cursor:]...)
@@ -316,7 +346,7 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 			m.clampPromptChoiceIndex()
 			return nil
 		}
-		key := strings.ToLower(strings.TrimSpace(string(msg.Runes)))
+		key := strings.ToLower(strings.TrimSpace(text))
 		for _, choice := range visible {
 			if choice.value == key {
 				m.finishPrompt(choice.value, nil)

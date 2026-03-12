@@ -118,6 +118,7 @@ func TestSummarizeToolResponse_DelegateRunningIncludesLatestOutput(t *testing.T)
 	got := summarizeToolResponseWithCall("DELEGATE", map[string]any{
 		"task_id":       "t-1234567890ab",
 		"running":       true,
+		"waited_ms":     30000,
 		"latest_output": "line-1\nline-2",
 	}, map[string]any{
 		"task":          "inspect repo",

@@ -5,100 +5,129 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/atotto/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown ||
-		msg.Button == tea.MouseButtonWheelLeft || msg.Button == tea.MouseButtonWheelRight {
+	switch typed := msg.(type) {
+	case tea.MouseWheelMsg:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.userScrolledUp = !m.viewport.AtBottom()
 		return m, cmd
-	}
-	if handled, cmd := m.handleInputAreaMouse(msg); handled {
-		return m, cmd
-	}
-	if handled, cmd := m.handleFixedAreaMouse(msg); handled {
-		return m, cmd
-	}
-	if m.viewport.Height <= 0 || len(m.viewportPlainLines) == 0 {
+	case tea.MouseClickMsg:
+		mouse := typed.Mouse()
+		if handled, cmd := m.handleInputAreaMouse(mouse, mousePhasePress); handled {
+			return m, cmd
+		}
+		if handled, cmd := m.handleFixedAreaMouse(mouse, mousePhasePress); handled {
+			return m, cmd
+		}
+		return m, m.handleViewportMousePress(mouse)
+	case tea.MouseMotionMsg:
+		mouse := typed.Mouse()
+		if handled, cmd := m.handleInputAreaMouse(mouse, mousePhaseMotion); handled {
+			return m, cmd
+		}
+		if handled, cmd := m.handleFixedAreaMouse(mouse, mousePhaseMotion); handled {
+			return m, cmd
+		}
+		return m, m.handleViewportMouseMotion(mouse)
+	case tea.MouseReleaseMsg:
+		mouse := typed.Mouse()
+		if handled, cmd := m.handleInputAreaMouse(mouse, mousePhaseRelease); handled {
+			return m, cmd
+		}
+		if handled, cmd := m.handleFixedAreaMouse(mouse, mousePhaseRelease); handled {
+			return m, cmd
+		}
+		return m, m.handleViewportMouseRelease(mouse)
+	default:
 		return m, nil
 	}
-
-	switch msg.Action {
-	case tea.MouseActionPress:
-		if msg.Button != tea.MouseButtonLeft {
-			return m, nil
-		}
-		m.clearInputSelection()
-		m.clearFixedSelection()
-		point, ok := m.mousePointToContentPoint(msg.X, msg.Y, false)
-		if !ok {
-			return m, nil
-		}
-		m.selecting = true
-		m.selectionStart = point
-		m.selectionEnd = point
-		m.renderViewportContent()
-		return m, nil
-
-	case tea.MouseActionMotion:
-		if !m.selecting {
-			return m, nil
-		}
-		point, ok := m.mousePointToContentPoint(msg.X, msg.Y, true)
-		if !ok {
-			return m, nil
-		}
-		m.selectionEnd = point
-		m.renderViewportContent()
-		return m, nil
-
-	case tea.MouseActionRelease:
-		if !m.selecting {
-			return m, nil
-		}
-		point, ok := m.mousePointToContentPoint(msg.X, msg.Y, true)
-		if ok {
-			m.selectionEnd = point
-		}
-		m.selecting = false
-		text := m.selectionText()
-		if text == "" {
-			m.clearSelection()
-			m.renderViewportContent()
-			return m, nil
-		}
-		m.renderViewportContent()
-		const copyHint = "selected text copied to clipboard"
-		m.hint = copyHint
-		clipCmd := func() tea.Msg {
-			_ = clipboard.WriteAll(text)
-			return nil
-		}
-		return m, tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
-	}
-	return m, nil
 }
 
-func (m *Model) handleInputAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
+type mousePhase int
+
+const (
+	mousePhasePress mousePhase = iota
+	mousePhaseMotion
+	mousePhaseRelease
+)
+
+func (m *Model) handleViewportMousePress(mouse tea.Mouse) tea.Cmd {
+	if mouse.Button != tea.MouseLeft {
+		return nil
+	}
+	m.clearInputSelection()
+	m.clearFixedSelection()
+	point, ok := m.mousePointToContentPoint(mouse.X, mouse.Y, false)
+	if !ok {
+		return nil
+	}
+	m.selecting = true
+	m.selectionStart = point
+	m.selectionEnd = point
+	m.renderViewportContent()
+	return nil
+}
+
+func (m *Model) handleViewportMouseMotion(mouse tea.Mouse) tea.Cmd {
+	if !m.selecting {
+		return nil
+	}
+	point, ok := m.mousePointToContentPoint(mouse.X, mouse.Y, true)
+	if !ok {
+		return nil
+	}
+	m.selectionEnd = point
+	m.renderViewportContent()
+	return nil
+}
+
+func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
+	if !m.selecting {
+		return nil
+	}
+	point, ok := m.mousePointToContentPoint(mouse.X, mouse.Y, true)
+	if ok {
+		m.selectionEnd = point
+	}
+	m.selecting = false
+	text := m.selectionText()
+	if text == "" {
+		m.clearSelection()
+		m.renderViewportContent()
+		return nil
+	}
+	m.renderViewportContent()
+	const copyHint = "selected text copied to clipboard"
+	m.hint = copyHint
+	clipCmd := func() tea.Msg {
+		_ = clipboard.WriteAll(text)
+		return nil
+	}
+	return tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
+}
+
+func (m *Model) handleInputAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, tea.Cmd) {
 	if m.activePrompt != nil {
 		return false, nil
 	}
-	if msg.Button != tea.MouseButtonLeft && msg.Action != tea.MouseActionMotion && msg.Action != tea.MouseActionRelease {
+	if mouse.Button != tea.MouseLeft && phase == mousePhasePress {
 		return false, nil
 	}
 	lines := m.inputPlainLines()
 	if len(lines) == 0 {
 		return false, nil
 	}
-	point, ok := m.mousePointToInputPoint(msg.X, msg.Y, msg.Action != tea.MouseActionPress, lines)
-	switch msg.Action {
-	case tea.MouseActionPress:
-		if !ok || msg.Button != tea.MouseButtonLeft {
+	point, ok := m.mousePointToInputPoint(mouse.X, mouse.Y, phase != mousePhasePress, lines)
+	switch phase {
+	case mousePhasePress:
+		if !ok || mouse.Button != tea.MouseLeft {
 			return false, nil
 		}
 		m.clearSelection()
@@ -107,15 +136,13 @@ func (m *Model) handleInputAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 		m.inputSelectionStart = point
 		m.inputSelectionEnd = point
 		return true, nil
-
-	case tea.MouseActionMotion:
+	case mousePhaseMotion:
 		if !m.inputSelecting || !ok {
 			return false, nil
 		}
 		m.inputSelectionEnd = point
 		return true, nil
-
-	case tea.MouseActionRelease:
+	case mousePhaseRelease:
 		if !m.inputSelecting {
 			return false, nil
 		}
@@ -144,17 +171,17 @@ func (m *Model) handleInputAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 	return false, nil
 }
 
-func (m *Model) handleFixedAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
-	if msg.Button != tea.MouseButtonLeft && msg.Action != tea.MouseActionMotion && msg.Action != tea.MouseActionRelease {
+func (m *Model) handleFixedAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, tea.Cmd) {
+	if mouse.Button != tea.MouseLeft && phase == mousePhasePress {
 		return false, nil
 	}
-	switch msg.Action {
-	case tea.MouseActionPress:
-		region, ok := m.fixedRegionAt(msg.Y)
-		if !ok || msg.Button != tea.MouseButtonLeft {
+	switch phase {
+	case mousePhasePress:
+		region, ok := m.fixedRegionAt(mouse.Y)
+		if !ok || mouse.Button != tea.MouseLeft {
 			return false, nil
 		}
-		point, ok := m.fixedRowPoint(region, msg.X, false)
+		point, ok := m.fixedRowPoint(region, mouse.X, false)
 		if !ok {
 			return false, nil
 		}
@@ -165,28 +192,26 @@ func (m *Model) handleFixedAreaMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
 		m.fixedSelectionStart = point
 		m.fixedSelectionEnd = point
 		return true, nil
-
-	case tea.MouseActionMotion:
+	case mousePhaseMotion:
 		if !m.fixedSelecting || m.fixedSelectionArea == fixedSelectionNone {
 			return false, nil
 		}
-		region, ok := m.fixedRegionAt(msg.Y)
+		region, ok := m.fixedRegionAt(mouse.Y)
 		if !ok || region.area != m.fixedSelectionArea {
 			return false, nil
 		}
-		point, ok := m.fixedRowPoint(region, msg.X, true)
+		point, ok := m.fixedRowPoint(region, mouse.X, true)
 		if !ok {
 			return false, nil
 		}
 		m.fixedSelectionEnd = point
 		return true, nil
-
-	case tea.MouseActionRelease:
-		if !m.fixedSelecting || m.fixedSelectionArea == fixedSelectionNone {
+	case mousePhaseRelease:
+		if !m.fixedSelecting {
 			return false, nil
 		}
-		if region, ok := m.fixedRegionAt(msg.Y); ok && region.area == m.fixedSelectionArea {
-			if point, ok := m.fixedRowPoint(region, msg.X, true); ok {
+		if region, ok := m.fixedRegionAt(mouse.Y); ok && region.area == m.fixedSelectionArea {
+			if point, ok := m.fixedRowPoint(region, mouse.X, true); ok {
 				m.fixedSelectionEnd = point
 			}
 		}
@@ -252,11 +277,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.clearInputSelection()
-	if msg.String() != "ctrl+c" {
+	if !key.Matches(msg, m.keys.Quit) {
 		m.ctrlCArmed = false
 		m.lastCtrlCAt = time.Time{}
 	}
-	if msg.String() == "shift+tab" && !m.running && m.cfg.ToggleMode != nil {
+	if key.Matches(msg, m.keys.Mode) && !m.running && m.cfg.ToggleMode != nil {
 		hint, err := m.cfg.ToggleMode()
 		if err != nil {
 			m.hint = err.Error()
@@ -272,17 +297,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, clearHintLaterCmd(m.hint, copyHintDuration)
 	}
 
-	switch msg.String() {
-	case "pgup":
+	switch {
+	case key.Matches(msg, m.keys.PageUp):
 		m.viewport.PageUp()
 		m.userScrolledUp = !m.viewport.AtBottom()
 		return m, nil
-	case "pgdown":
+	case key.Matches(msg, m.keys.PageDown):
 		m.viewport.PageDown()
 		m.userScrolledUp = !m.viewport.AtBottom()
 		return m, nil
 
-	case "ctrl+c":
+	case key.Matches(msg, m.keys.Quit):
 		if m.running {
 			m.hint = "press Esc to interrupt running task"
 			return m, nil
@@ -293,36 +318,42 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		current := strings.TrimSpace(m.textarea.Value())
-		if current != "" {
-			m.recordHistoryEntry(current)
+		if current != "" || len(m.inputAttachments) > 0 {
+			m.recordHistoryEntry(current, m.inputAttachments)
 		}
 		m.textarea.SetValue("")
 		m.textarea.CursorStart()
 		m.adjustTextareaHeight()
 		m.input = m.input[:0]
 		m.cursor = 0
+		m.clearInputAttachments()
+		if m.cfg.ClearAttachments != nil {
+			m.cfg.ClearAttachments()
+		}
 		m.historyIndex = -1
 		m.historyDraft = ""
+		m.historyDraftAttachments = nil
 		m.ctrlCArmed = true
+		m.ctrlCArmSeq++
 		m.lastCtrlCAt = now
 		m.hint = "press Ctrl+C again to quit"
-		return m, expireCtrlCCmd(now)
+		return m, expireCtrlCCmd(now, m.ctrlCArmSeq)
 
-	case "ctrl+d":
+	case msg.String() == "ctrl+d":
 		if !m.running && len(m.input) == 0 && m.textarea.Value() == "" {
 			m.quit = true
 			return m, tea.Quit
 		}
 		return m, nil
 
-	case "ctrl+p":
+	case msg.String() == "ctrl+p":
 		if m.running {
 			return m, nil
 		}
 		m.togglePalette()
 		return m, animatePaletteCmd()
 
-	case "esc":
+	case key.Matches(msg, m.keys.Back):
 		if m.running {
 			m.clearInputOverlays()
 			if _, ok := m.popPendingPrompt(); ok {
@@ -337,7 +368,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clearInputOverlays()
 		return m, nil
 
-	case "up":
+	case key.Matches(msg, m.keys.HistoryPrev):
 		if m.shouldUseTextareaVerticalNavigation(-1) {
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
@@ -348,19 +379,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			val := m.textarea.Value()
 			if m.historyIndex == -1 {
 				m.historyDraft = val
+				m.historyDraftAttachments = cloneInputAttachments(m.inputAttachments)
 				m.historyIndex = len(m.history) - 1
 			} else if m.historyIndex > 0 {
 				m.historyIndex--
 			}
 			if m.historyIndex >= 0 && m.historyIndex < len(m.history) {
-				m.textarea.SetValue(m.history[m.historyIndex])
-				m.textarea.CursorEnd()
-				m.adjustTextareaHeight()
+				m.restoreHistoryEntry(m.history[m.historyIndex], m.historyAttachments[m.historyIndex])
 			}
 		}
 		return m, nil
 
-	case "down":
+	case key.Matches(msg, m.keys.HistoryNext):
 		if m.shouldUseTextareaVerticalNavigation(1) {
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
@@ -370,20 +400,18 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.running && m.historyIndex != -1 {
 			if m.historyIndex < len(m.history)-1 {
 				m.historyIndex++
-				m.textarea.SetValue(m.history[m.historyIndex])
-				m.textarea.CursorEnd()
-				m.adjustTextareaHeight()
+				m.restoreHistoryEntry(m.history[m.historyIndex], m.historyAttachments[m.historyIndex])
 			} else {
 				m.historyIndex = -1
-				m.textarea.SetValue(m.historyDraft)
-				m.textarea.CursorEnd()
+				m.restoreHistoryEntry(m.historyDraft, m.historyDraftAttachments)
 				m.historyDraft = ""
+				m.historyDraftAttachments = nil
 				m.adjustTextareaHeight()
 			}
 		}
 		return m, nil
 
-	case "tab":
+	case key.Matches(msg, m.keys.Complete):
 		val := m.textarea.Value()
 		m.syncInputFromTextarea()
 		if len(m.mentionCandidates) > 0 {
@@ -402,14 +430,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.applySlashCommandCompletion()
 			m.syncTextareaFromInput()
 		} else if strings.HasPrefix(strings.TrimSpace(val), "/") && !strings.Contains(strings.TrimSpace(val), " ") {
-			m.handleSlashTab()
+			m.applySlashCommandCompletion()
 			m.syncTextareaFromInput()
 		}
 		return m, nil
 
-	case "enter":
-		line := strings.TrimSpace(m.textarea.Value())
-		if line == "" {
+	case key.Matches(msg, m.keys.Send):
+		line, attachments := submissionInput(m.textarea.Value(), m.inputAttachments)
+		if line == "" && len(attachments) == 0 {
 			return m, nil
 		}
 		if m.running {
@@ -417,9 +445,10 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.hint = "slash commands are unavailable while running"
 				return m, nil
 			}
-			m.enqueuePendingPrompt(line, line)
+			m.enqueuePendingPrompt(line, m.displayLineWithInputAttachments(line, attachments), attachments)
 			return m, nil
 		}
+		m.setInputAttachments(attachments)
 		if (line == "/connect" || strings.HasPrefix(line, "/connect ")) && m.findWizard("connect") == nil {
 			return m.submitLine("/connect")
 		}
@@ -428,21 +457,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.submitLine(line)
 
-	case "ctrl+u":
+	case key.Matches(msg, m.keys.Clear):
 		m.textarea.SetValue("")
 		m.textarea.CursorStart()
 		m.adjustTextareaHeight()
 		m.input = m.input[:0]
 		m.cursor = 0
+		m.clearInputAttachments()
+		if m.cfg.ClearAttachments != nil {
+			m.cfg.ClearAttachments()
+		}
 		m.clearInputOverlays()
 		return m, nil
 
-	case "ctrl+v":
+	case key.Matches(msg, m.keys.ImagePaste):
 		if m.running {
 			return m, nil
 		}
+		oldAttachmentCount := len(m.inputAttachments)
 		if m.cfg.PasteClipboardImage != nil {
-			count, _, err := m.cfg.PasteClipboardImage()
+			names, _, err := m.cfg.PasteClipboardImage()
 			if err != nil {
 				errLine := "paste: " + err.Error()
 				colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
@@ -450,37 +484,47 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.syncViewportContent()
 				return m, nil
 			}
-			if count > 0 {
-				m.attachmentCount = count
+			if len(names) > 0 {
+				added := names
+				if oldAttachmentCount < len(names) {
+					added = names[oldAttachmentCount:]
+				}
+				m.insertAttachmentsAtCursor(added)
 				m.hint = ""
+				m.syncTextareaChrome()
 				return m, nil
 			}
 		}
-		// No image in clipboard — forward to textarea.
-		var cmd tea.Cmd
-		m.textarea, cmd = m.textarea.Update(msg)
-		m.syncInputFromTextarea()
-		return m, cmd
+		if m.pasteClipboardText() {
+			return m, nil
+		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.TextPaste):
+		if m.pasteClipboardText() {
+			return m, nil
+		}
+		return m, nil
 
 	default:
-		// If input is empty, backspace clears pending attachments as one token.
+		// Backspace should remove an attachment token when the visual cursor is
+		// sitting right after that token, before it edits surrounding text.
 		if !m.running && m.attachmentCount > 0 &&
 			(msg.String() == "backspace" || msg.String() == "ctrl+h") &&
-			strings.TrimSpace(m.textarea.Value()) == "" {
-			m.attachmentCount = 0
-			if m.cfg.ClearAttachments != nil {
-				m.attachmentCount = m.cfg.ClearAttachments()
-			}
+			m.removeAttachmentAtCursor() {
 			m.hint = ""
 			return m, nil
 		}
 		// Forward to textarea for general text input.
+		before := m.textarea.Value()
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
+		m.inputAttachments = adjustAttachmentOffsetsForTextEdit(m.inputAttachments, before, m.textarea.Value())
+		m.syncAttachmentSummary()
 		m.syncInputFromTextarea()
 
 		// Trigger @mention / $skill / /resume after text changes.
-		if len(msg.Runes) > 0 || msg.String() == "backspace" || msg.String() == "delete" {
+		if msg.Key().Text != "" || msg.String() == "backspace" || msg.String() == "delete" {
 			m.refreshMention()
 			m.refreshSkill()
 			if m.isWizardActive() {
@@ -499,11 +543,42 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *Model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
+	if m.activePrompt != nil {
+		return m, m.handlePromptPaste(msg)
+	}
+	before := m.textarea.Value()
+	var cmd tea.Cmd
+	m.textarea, cmd = m.textarea.Update(msg)
+	m.inputAttachments = adjustAttachmentOffsetsForTextEdit(m.inputAttachments, before, m.textarea.Value())
+	m.syncAttachmentSummary()
+	m.syncInputFromTextarea()
+	m.refreshMention()
+	m.refreshSkill()
+	if m.isWizardActive() {
+		if m.resumeActive {
+			m.updateResumeCandidates()
+		}
+		if m.slashArgActive {
+			m.updateSlashArgCandidates()
+		}
+	} else {
+		m.syncSlashInputOverlays()
+	}
+	m.refreshSlashCommands()
+	return m, cmd
+}
+
 func (m *Model) submitLine(line string) (tea.Model, tea.Cmd) {
-	return m.submitLineWithDisplay(line, line)
+	return m.submitLineWithDisplayAndAttachments(line, m.displayLineWithAttachments(line), inputAttachmentsToSubmission(m.inputAttachments))
 }
 
 func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.Model, tea.Cmd) {
+	return m.submitLineWithDisplayAndAttachments(execLine, displayLine, inputAttachmentsToSubmission(m.inputAttachments))
+}
+
+func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine string, attachments []Attachment) (tea.Model, tea.Cmd) {
+	attachments = cloneAttachments(attachments)
 	// Commit user input line to history buffer.
 	userLine := "> " + strings.TrimSpace(displayLine)
 	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
@@ -514,10 +589,14 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 	m.lastFinalAnswer = ""
 
 	// Push to history.
-	displayTrimmed := strings.TrimSpace(displayLine)
-	m.recordHistoryEntry(displayTrimmed)
+	m.recordHistoryEntry(strings.TrimSpace(execLine), attachmentsToInputAttachments(attachments))
 	m.historyIndex = -1
 	m.historyDraft = ""
+	m.historyDraftAttachments = nil
+	submission := Submission{
+		Text:        strings.TrimSpace(execLine),
+		Attachments: attachments,
+	}
 
 	// Clear input.
 	m.textarea.SetValue("")
@@ -525,6 +604,7 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 	m.adjustTextareaHeight()
 	m.input = m.input[:0]
 	m.cursor = 0
+	m.clearInputAttachments()
 	m.clearInputOverlays()
 
 	m.running = true
@@ -540,10 +620,26 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 		return m, nil
 	}
 	cmds := []tea.Cmd{
-		func() tea.Msg { return m.cfg.ExecuteLine(strings.TrimSpace(execLine)) },
+		func() tea.Msg {
+			return m.cfg.ExecuteLine(submission)
+		},
 		m.spinner.Tick,
 	}
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) displayLineWithAttachments(line string) string {
+	return m.displayLineWithInputAttachments(line, m.inputAttachments)
+}
+
+func (m *Model) displayLineWithInputAttachments(line string, attachments []inputAttachment) string {
+	return composeDisplayWithToken(line, attachments, func(name string) string {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return ""
+		}
+		return "[image: " + name + "] "
+	})
 }
 
 func (m *Model) shouldUseTextareaVerticalNavigation(direction int) bool {
@@ -572,7 +668,7 @@ func (m *Model) userTurnDividerLine() string {
 	if m.hasLastRunDuration {
 		label = formatTurnDuration(m.lastRunDuration)
 	}
-	contentWidth := maxInt(12, m.viewport.Width)
+	contentWidth := maxInt(12, m.viewport.Width())
 	return m.theme.HelpHintTextStyle().Render(centeredDivider(contentWidth, label))
 }
 
@@ -616,18 +712,21 @@ func centeredDivider(width int, label string) string {
 	return strings.Repeat("─", left) + label + strings.Repeat("─", right)
 }
 
-func (m *Model) enqueuePendingPrompt(execLine string, displayLine string) {
+func (m *Model) enqueuePendingPrompt(execLine string, displayLine string, attachments []inputAttachment) {
 	m.pendingQueue = append(m.pendingQueue, pendingPrompt{
 		execLine:    strings.TrimSpace(execLine),
 		displayLine: strings.TrimSpace(displayLine),
+		attachments: inputAttachmentsToSubmission(attachments),
 	})
 	m.textarea.SetValue("")
 	m.textarea.CursorStart()
 	m.adjustTextareaHeight()
 	m.input = m.input[:0]
 	m.cursor = 0
+	m.clearInputAttachments()
 	m.historyIndex = -1
 	m.historyDraft = ""
+	m.historyDraftAttachments = nil
 	m.clearInputOverlays()
 }
 

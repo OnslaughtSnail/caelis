@@ -6,7 +6,8 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ---------------------------------------------------------------------------
@@ -25,12 +26,12 @@ func (m *Model) togglePalette() {
 }
 
 func (m *Model) handlePaletteKey(msg tea.KeyMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		m.showPalette = false
 		m.paletteAnimating = true
 		return animatePaletteCmd()
-	case "enter":
+	case key.Matches(msg, m.keys.Accept):
 		item, ok := m.palette.SelectedItem().(commandItem)
 		if ok {
 			m.textarea.SetValue("/" + item.name)
@@ -102,21 +103,21 @@ func (m *Model) applyMentionCompletion() {
 }
 
 func (m *Model) handleMentionKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		m.clearMention()
 		return true, nil
-	case "up":
+	case key.Matches(msg, m.keys.ChoosePrev):
 		if m.mentionIndex > 0 {
 			m.mentionIndex--
 		}
 		return true, nil
-	case "down":
+	case key.Matches(msg, m.keys.ChooseNext):
 		if m.mentionIndex < len(m.mentionCandidates)-1 {
 			m.mentionIndex++
 		}
 		return true, nil
-	case "enter", "tab":
+	case key.Matches(msg, m.keys.Accept), key.Matches(msg, m.keys.Complete):
 		m.applyMentionCompletion()
 		m.syncTextareaFromInput()
 		return true, nil
@@ -180,21 +181,21 @@ func (m *Model) applySkillCompletion() {
 }
 
 func (m *Model) handleSkillKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		m.clearSkill()
 		return true, nil
-	case "up":
+	case key.Matches(msg, m.keys.ChoosePrev):
 		if m.skillIndex > 0 {
 			m.skillIndex--
 		}
 		return true, nil
-	case "down":
+	case key.Matches(msg, m.keys.ChooseNext):
 		if m.skillIndex < len(m.skillCandidates)-1 {
 			m.skillIndex++
 		}
 		return true, nil
-	case "enter", "tab":
+	case key.Matches(msg, m.keys.Accept), key.Matches(msg, m.keys.Complete):
 		m.applySkillCompletion()
 		m.syncTextareaFromInput()
 		return true, nil
@@ -314,29 +315,29 @@ func (m *Model) applyResumeCompletion() {
 }
 
 func (m *Model) handleResumeKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		if _, ok := resumeQueryAtCursor(m.input, m.cursor); ok {
 			m.setInputText("")
 			m.syncTextareaFromInput()
 		}
 		m.clearResume()
 		return true, nil
-	case "up":
+	case key.Matches(msg, m.keys.ChoosePrev):
 		if m.resumeIndex > 0 {
 			m.resumeIndex--
 		}
 		return true, nil
-	case "down":
+	case key.Matches(msg, m.keys.ChooseNext):
 		if m.resumeIndex < len(m.resumeCandidates)-1 {
 			m.resumeIndex++
 		}
 		return true, nil
-	case "tab":
+	case key.Matches(msg, m.keys.Complete):
 		m.applyResumeCompletion()
 		m.syncTextareaFromInput()
 		return true, nil
-	case "enter":
+	case key.Matches(msg, m.keys.Accept):
 		if m.running || len(m.resumeCandidates) == 0 {
 			return true, nil
 		}
@@ -659,29 +660,29 @@ func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.clearSlashArg()
 		return false, nil
 	}
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		if m.slashArgActive {
 			m.setInputText("")
 			m.syncTextareaFromInput()
 		}
 		m.clearSlashArg()
 		return true, nil
-	case "up":
+	case key.Matches(msg, m.keys.ChoosePrev):
 		if m.slashArgIndex > 0 {
 			m.slashArgIndex--
 		}
 		return true, nil
-	case "down":
+	case key.Matches(msg, m.keys.ChooseNext):
 		if m.slashArgIndex < len(m.slashArgCandidates)-1 {
 			m.slashArgIndex++
 		}
 		return true, nil
-	case "tab":
+	case key.Matches(msg, m.keys.Complete):
 		m.applySlashArgCompletion()
 		m.syncTextareaFromInput()
 		return true, nil
-	case "enter":
+	case key.Matches(msg, m.keys.Accept):
 		if m.running || strings.TrimSpace(m.slashArgCommand) == "" {
 			return true, nil
 		}
@@ -815,38 +816,30 @@ func (m *Model) applySlashCommandCompletion() {
 	m.clearSlashCompletion()
 }
 
-func (m *Model) handleSlashTab() {
-	// Keep compatibility for tab on slash command prefix.
-	if len(m.slashCandidates) == 0 {
-		m.refreshSlashCommands()
-	}
-	m.applySlashCommandCompletion()
-}
-
 func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, m.keys.Back):
 		if _, ok := slashCommandQueryAtCursor(m.input, m.cursor); ok {
 			m.setInputText("")
 			m.syncTextareaFromInput()
 		}
 		m.clearSlashCompletion()
 		return true, nil
-	case "up":
+	case key.Matches(msg, m.keys.ChoosePrev):
 		if m.slashIndex > 0 {
 			m.slashIndex--
 		}
 		return true, nil
-	case "down":
+	case key.Matches(msg, m.keys.ChooseNext):
 		if m.slashIndex < len(m.slashCandidates)-1 {
 			m.slashIndex++
 		}
 		return true, nil
-	case "tab":
+	case key.Matches(msg, m.keys.Complete):
 		m.applySlashCommandCompletion()
 		m.syncTextareaFromInput()
 		return true, nil
-	case "enter":
+	case key.Matches(msg, m.keys.Accept):
 		if m.running || len(m.slashCandidates) == 0 {
 			return true, nil
 		}
@@ -925,9 +918,13 @@ func (m *Model) clearInputOverlays() {
 func (m *Model) setInputText(text string) {
 	m.input = []rune(text)
 	m.cursor = len(m.input)
+	m.clearInputAttachments()
+	if m.cfg.ClearAttachments != nil {
+		m.cfg.ClearAttachments()
+	}
 }
 
-func (m *Model) recordHistoryEntry(value string) {
+func (m *Model) recordHistoryEntry(value string, attachments []inputAttachment) {
 	entry := strings.TrimSpace(value)
 	if entry == "" {
 		return
@@ -936,7 +933,21 @@ func (m *Model) recordHistoryEntry(value string) {
 	if strings.HasPrefix(entry, "/") {
 		return
 	}
-	if len(m.history) == 0 || m.history[len(m.history)-1] != entry {
+	clonedAttachments := cloneInputAttachments(attachments)
+	if len(m.history) == 0 || m.history[len(m.history)-1] != entry || !inputAttachmentsEqual(m.historyAttachments[len(m.historyAttachments)-1], clonedAttachments) {
 		m.history = append(m.history, entry)
+		m.historyAttachments = append(m.historyAttachments, clonedAttachments)
 	}
+}
+
+func inputAttachmentsEqual(left []inputAttachment, right []inputAttachment) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }

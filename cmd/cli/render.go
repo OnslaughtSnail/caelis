@@ -190,22 +190,6 @@ func printEvent(ev *session.Event, state *renderState) {
 			}
 			fmt.Fprintf(state.out, "> %s\n", userText)
 		}
-		// Show image attachment indicators for user messages.
-		if msg.HasImages() {
-			for _, part := range msg.ContentParts {
-				if part.Type == model.ContentPartImage {
-					name := strings.TrimSpace(part.FileName)
-					if name == "" {
-						name = "image"
-					}
-					if state.ui != nil {
-						fmt.Fprintf(state.out, "%s[image: %s]\n", state.ui.SystemPrefix(), name)
-					} else {
-						fmt.Fprintf(state.out, "📎 [image: %s]\n", name)
-					}
-				}
-			}
-		}
 		return
 	}
 	if msg.Role == model.RoleAssistant {
@@ -317,11 +301,36 @@ func userTextFromContentParts(parts []model.ContentPart) string {
 }
 
 func visibleUserText(msg model.Message) string {
-	text := sessionmode.VisibleText(strings.TrimSpace(msg.Text))
+	return sessionmode.VisibleText(strings.TrimSpace(userMessageDisplayText(msg)))
+}
+
+func userMessageDisplayText(msg model.Message) string {
+	segments := make([]string, 0, max(1, len(msg.ContentParts)))
+	if len(msg.ContentParts) > 0 {
+		for _, part := range msg.ContentParts {
+			switch part.Type {
+			case model.ContentPartText:
+				text := strings.TrimSpace(part.Text)
+				if text != "" {
+					segments = append(segments, text)
+				}
+			case model.ContentPartImage:
+				name := strings.TrimSpace(part.FileName)
+				if name == "" {
+					name = "image"
+				}
+				segments = append(segments, "[image: "+name+"]")
+			}
+		}
+		if len(segments) > 0 {
+			return strings.Join(segments, " ")
+		}
+	}
+	text := strings.TrimSpace(msg.Text)
 	if text != "" {
 		return text
 	}
-	return sessionmode.VisibleText(userTextFromContentParts(msg.ContentParts))
+	return userTextFromContentParts(msg.ContentParts)
 }
 
 func summarizeToolArgs(toolName string, args map[string]any) string {
@@ -512,7 +521,10 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	case "DELEGATE":
 		summary := strings.TrimSpace(firstNonEmpty(result, "assistant", "summary", "output"))
 		if fmt.Sprint(result["running"]) == "true" {
-			headline := friendlyYieldLabel(effectiveDelegateYieldMS(callArgs))
+			headline := ""
+			if waitMS, ok := taskActualWaitMS(result); ok && waitMS > 0 {
+				headline = friendlyYieldLabel(waitMS)
+			}
 			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
 				if headline == "" {
 					return preview
@@ -697,18 +709,6 @@ func taskActualWaitMS(result map[string]any) (int, bool) {
 		return 0, false
 	}
 	return waitMS, true
-}
-
-func effectiveDelegateYieldMS(callArgs map[string]any) int {
-	if len(callArgs) == 0 {
-		return defaultFriendlyDelegateWaitMS
-	}
-	if rawWaitMS, ok := callArgs["yield_time_ms"]; ok && rawWaitMS != nil {
-		if waitMS, ok := asInt(rawWaitMS); ok && waitMS > 0 {
-			return waitMS
-		}
-	}
-	return defaultFriendlyDelegateWaitMS
 }
 
 func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {

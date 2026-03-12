@@ -1,9 +1,13 @@
 package acp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"iter"
 	"os"
@@ -112,6 +116,191 @@ func TestServer_InitializeRejectsLegacyProtocolVersion(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected legacy protocolVersion to be rejected")
 	}
+}
+
+func TestServer_InitializeAdvertisesImagePromptCapability(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		promptImageEnabled: func() bool { return true },
+	})
+	defer h.close()
+
+	var initResp InitializeResponse
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &initResp)
+	if !initResp.AgentCapabilities.Prompt.Image {
+		t.Fatal("expected image prompt capability")
+	}
+}
+
+func TestServer_PromptWithImageBlockForwardsImageContentParts(t *testing.T) {
+	llm := &scriptedLLM{
+		calls: [][]*model.Response{
+			{{Message: model.Message{Role: model.RoleAssistant, Text: "seen"}}},
+		},
+	}
+	h := newHarness(t, harnessConfig{
+		llm:                llm,
+		promptImageEnabled: func() bool { return true },
+		supportsPromptImage: func(AgentSessionConfig) bool {
+			return true
+		},
+	})
+	defer h.close()
+
+	imagePath := filepath.Join(t.TempDir(), "clipboard.png")
+	if err := os.WriteFile(imagePath, makeACPTestPNG(), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt: []json.RawMessage{
+			mustRaw(t, ResourceLink{Type: "resource_link", Name: "clipboard.png", URI: "file://" + imagePath, MimeType: "image/png"}),
+			mustRaw(t, TextContent{Type: "text", Text: "guess the app"}),
+		},
+	}, &PromptResponse{})
+
+	if len(llm.reqs) == 0 {
+		t.Fatal("expected model request")
+	}
+	found := false
+	for _, msg := range llm.reqs[0].Messages {
+		if msg.Role != model.RoleUser {
+			continue
+		}
+		if len(msg.ContentParts) != 2 {
+			continue
+		}
+		if msg.ContentParts[0].Type != model.ContentPartImage || strings.TrimSpace(msg.ContentParts[0].Data) == "" {
+			continue
+		}
+		if msg.ContentParts[1].Type != model.ContentPartText || !strings.Contains(msg.ContentParts[1].Text, "guess the app") {
+			continue
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("expected user message with text+image content parts, got %+v", llm.reqs[0].Messages)
+	}
+}
+
+func TestServer_PromptSilentlyDropsImagesWhenModelDoesNotSupportIt(t *testing.T) {
+	llm := &scriptedLLM{
+		calls: [][]*model.Response{
+			{{Message: model.Message{Role: model.RoleAssistant, Text: "text only"}}},
+		},
+	}
+	h := newHarness(t, harnessConfig{
+		llm:                llm,
+		promptImageEnabled: func() bool { return true },
+		supportsPromptImage: func(AgentSessionConfig) bool {
+			return false
+		},
+	})
+	defer h.close()
+
+	imagePath := filepath.Join(t.TempDir(), "clipboard.png")
+	if err := os.WriteFile(imagePath, makeACPTestPNG(), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt: []json.RawMessage{
+			mustRaw(t, ResourceLink{Type: "resource_link", Name: "clipboard.png", URI: "file://" + imagePath, MimeType: "image/png"}),
+			mustRaw(t, TextContent{Type: "text", Text: "only keep this"}),
+		},
+	}, &PromptResponse{})
+
+	if len(llm.reqs) == 0 {
+		t.Fatal("expected model request")
+	}
+	found := false
+	for _, msg := range llm.reqs[0].Messages {
+		if msg.Role != model.RoleUser {
+			continue
+		}
+		if len(msg.ContentParts) != 1 || msg.ContentParts[0].Type != model.ContentPartText {
+			t.Fatalf("expected text-only content parts for unsupported model, got %+v", msg.ContentParts)
+		}
+		if !strings.Contains(msg.TextContent(), "only keep this") {
+			t.Fatalf("expected prompt text to survive image filtering, got %+v", msg)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("expected user message after filtering, got %+v", llm.reqs[0].Messages)
+	}
+}
+
+func TestServer_PromptPreservesInterleavedTextImageOrder(t *testing.T) {
+	llm := &scriptedLLM{
+		calls: [][]*model.Response{
+			{{Message: model.Message{Role: model.RoleAssistant, Text: "ordered"}}},
+		},
+	}
+	h := newHarness(t, harnessConfig{
+		llm:                llm,
+		promptImageEnabled: func() bool { return true },
+		supportsPromptImage: func(AgentSessionConfig) bool {
+			return true
+		},
+	})
+	defer h.close()
+
+	imagePath := filepath.Join(t.TempDir(), "ordered.png")
+	if err := os.WriteFile(imagePath, makeACPTestPNG(), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt: []json.RawMessage{
+			mustRaw(t, TextContent{Type: "text", Text: "before"}),
+			mustRaw(t, ResourceLink{Type: "resource_link", Name: "ordered.png", URI: "file://" + imagePath, MimeType: "image/png"}),
+			mustRaw(t, TextContent{Type: "text", Text: "after"}),
+		},
+	}, &PromptResponse{})
+
+	if len(llm.reqs) == 0 {
+		t.Fatal("expected model request")
+	}
+	for _, msg := range llm.reqs[0].Messages {
+		if msg.Role != model.RoleUser {
+			continue
+		}
+		if len(msg.ContentParts) != 3 {
+			t.Fatalf("expected 3 ordered content parts, got %+v", msg.ContentParts)
+		}
+		if msg.ContentParts[0].Type != model.ContentPartText || msg.ContentParts[0].Text != "before" {
+			t.Fatalf("expected first text part preserved, got %+v", msg.ContentParts[0])
+		}
+		if msg.ContentParts[1].Type != model.ContentPartImage {
+			t.Fatalf("expected image to remain in the middle, got %+v", msg.ContentParts[1])
+		}
+		if msg.ContentParts[2].Type != model.ContentPartText || msg.ContentParts[2].Text != "after" {
+			t.Fatalf("expected trailing text part preserved, got %+v", msg.ContentParts[2])
+		}
+		return
+	}
+	t.Fatalf("expected user message with ordered content parts, got %+v", llm.reqs[0].Messages)
 }
 
 func TestServer_InitializeSerializesSchemaFields(t *testing.T) {
@@ -1132,20 +1321,22 @@ func TestServer_SessionLoadRejectsPersistedCWDMismatch(t *testing.T) {
 }
 
 type harnessConfig struct {
-	clientCaps    ClientCapabilities
-	llm           model.LLM
-	newAgent      AgentFactory
-	newModel      ModelFactory
-	store         session.Store
-	authMethods   []AuthMethod
-	authenticate  AuthValidator
-	sessionModes  []SessionMode
-	defaultModeID string
-	sessionConfig []SessionConfigOptionTemplate
-	listSessions  SessionListFactory
-	sessionModels SessionModelStateFactory
-	workspaceRoot string
-	workspace     string
+	clientCaps          ClientCapabilities
+	llm                 model.LLM
+	newAgent            AgentFactory
+	newModel            ModelFactory
+	store               session.Store
+	authMethods         []AuthMethod
+	authenticate        AuthValidator
+	sessionModes        []SessionMode
+	defaultModeID       string
+	sessionConfig       []SessionConfigOptionTemplate
+	listSessions        SessionListFactory
+	sessionModels       SessionModelStateFactory
+	promptImageEnabled  func() bool
+	supportsPromptImage func(AgentSessionConfig) bool
+	workspaceRoot       string
+	workspace           string
 }
 
 type harness struct {
@@ -1224,22 +1415,24 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		modelImpl = &scriptedLLM{}
 	}
 	server, err := NewServer(ServerConfig{
-		Conn:          serverConn,
-		Runtime:       rt,
-		Store:         store,
-		Model:         modelImpl,
-		NewModel:      cfg.newModel,
-		AppName:       "caelis",
-		UserID:        "tester",
-		WorkspaceRoot: workspaceRoot,
-		AuthMethods:   cfg.authMethods,
-		Authenticate:  cfg.authenticate,
-		SessionModes:  cfg.sessionModes,
-		DefaultModeID: cfg.defaultModeID,
-		SessionConfig: cfg.sessionConfig,
-		NewAgent:      agentFactory,
-		ListSessions:  cfg.listSessions,
-		SessionModels: cfg.sessionModels,
+		Conn:                serverConn,
+		Runtime:             rt,
+		Store:               store,
+		Model:               modelImpl,
+		NewModel:            cfg.newModel,
+		AppName:             "caelis",
+		UserID:              "tester",
+		WorkspaceRoot:       workspaceRoot,
+		AuthMethods:         cfg.authMethods,
+		Authenticate:        cfg.authenticate,
+		SessionModes:        cfg.sessionModes,
+		DefaultModeID:       cfg.defaultModeID,
+		SessionConfig:       cfg.sessionConfig,
+		NewAgent:            agentFactory,
+		ListSessions:        cfg.listSessions,
+		SessionModels:       cfg.sessionModels,
+		PromptImageEnabled:  cfg.promptImageEnabled,
+		SupportsPromptImage: cfg.supportsPromptImage,
 		NewSessionResources: func(ctx context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
 			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, workspaceRoot, sessionCWD, caps, modeResolver)
 			tools := make([]tool.Tool, 0, 1)
@@ -1398,6 +1591,20 @@ func (h *harness) notificationTexts(updateType string) []string {
 		}
 	}
 	return out
+}
+
+func makeACPTestPNG() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic(err)
+	}
+	return buf.Bytes()
 }
 
 type scriptedLLM struct {

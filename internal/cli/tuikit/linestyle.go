@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // LineStyle identifies the semantic role of a log line for coloring.
@@ -115,25 +115,6 @@ func isBlockContinuable(s LineStyle) bool {
 	default:
 		return false
 	}
-}
-
-// IsConversationStyle returns true for styles that represent chat turns.
-func IsConversationStyle(s LineStyle) bool {
-	switch s {
-	case LineStyleUser, LineStyleAssistant, LineStyleReasoning:
-		return true
-	default:
-		return false
-	}
-}
-
-// ShouldInsertGap returns true when a visual gap should be inserted before
-// the current line (between conversation turns / blocks).
-func ShouldInsertGap(hasLast bool, lastStyle LineStyle, currentStyle LineStyle) bool {
-	if !hasLast {
-		return false
-	}
-	return IsConversationStyle(currentStyle)
 }
 
 // ColorizeLogLine applies lipgloss coloring to a log line based on its style.

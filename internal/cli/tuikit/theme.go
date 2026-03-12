@@ -1,78 +1,79 @@
 package tuikit
 
 import (
+	"image/color"
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 type Theme struct {
-	AppBg          lipgloss.TerminalColor
-	PanelBorder    lipgloss.TerminalColor
-	PanelTitle     lipgloss.TerminalColor
-	TextPrimary    lipgloss.TerminalColor
-	TextSecondary  lipgloss.TerminalColor
-	Info           lipgloss.TerminalColor
-	Success        lipgloss.TerminalColor
-	Warning        lipgloss.TerminalColor
-	Error          lipgloss.TerminalColor
-	Accent         lipgloss.TerminalColor
-	Focus          lipgloss.TerminalColor
-	ModalBg        lipgloss.TerminalColor
-	StatusBg       lipgloss.TerminalColor
-	StatusText     lipgloss.TerminalColor
-	CommandBg      lipgloss.TerminalColor
-	CommandActive  lipgloss.TerminalColor
-	CommandText    lipgloss.TerminalColor
-	CommandSubText lipgloss.TerminalColor
+	AppBg          color.Color
+	PanelBorder    color.Color
+	PanelTitle     color.Color
+	TextPrimary    color.Color
+	TextSecondary  color.Color
+	Info           color.Color
+	Success        color.Color
+	Warning        color.Color
+	Error          color.Color
+	Accent         color.Color
+	Focus          color.Color
+	ModalBg        color.Color
+	StatusBg       color.Color
+	StatusText     color.Color
+	CommandBg      color.Color
+	CommandActive  color.Color
+	CommandText    color.Color
+	CommandSubText color.Color
 
 	// Line-level semantic colors (conversation / tool / diff).
-	AssistantFg        lipgloss.TerminalColor
-	ReasoningFg        lipgloss.TerminalColor
-	UserFg             lipgloss.TerminalColor
-	UserBg             lipgloss.TerminalColor
-	UserPrefixFg       lipgloss.TerminalColor
-	UserMentionFg      lipgloss.TerminalColor
-	ToolFg             lipgloss.TerminalColor
-	DiffAddFg          lipgloss.TerminalColor
-	DiffRemoveFg       lipgloss.TerminalColor
-	DiffHeaderFg       lipgloss.TerminalColor
-	DiffHunkFg         lipgloss.TerminalColor
-	DiffAddBg          lipgloss.TerminalColor
-	DiffAddStrongBg    lipgloss.TerminalColor
-	DiffRemoveBg       lipgloss.TerminalColor
-	DiffRemoveStrongBg lipgloss.TerminalColor
-	DiffLineNoFg       lipgloss.TerminalColor
-	DiffGutterFg       lipgloss.TerminalColor
-	DiffPanelBorder    lipgloss.TerminalColor
-	SectionFg          lipgloss.TerminalColor
-	KeyLabelFg         lipgloss.TerminalColor
-	NoteFg             lipgloss.TerminalColor
+	AssistantFg        color.Color
+	ReasoningFg        color.Color
+	UserFg             color.Color
+	UserBg             color.Color
+	UserPrefixFg       color.Color
+	UserMentionFg      color.Color
+	ToolFg             color.Color
+	DiffAddFg          color.Color
+	DiffRemoveFg       color.Color
+	DiffHeaderFg       color.Color
+	DiffHunkFg         color.Color
+	DiffAddBg          color.Color
+	DiffAddStrongBg    color.Color
+	DiffRemoveBg       color.Color
+	DiffRemoveStrongBg color.Color
+	DiffLineNoFg       color.Color
+	DiffGutterFg       color.Color
+	DiffPanelBorder    color.Color
+	SectionFg          color.Color
+	KeyLabelFg         color.Color
+	NoteFg             color.Color
 
 	// Input area
-	PromptFg     lipgloss.TerminalColor
-	CursorFg     lipgloss.TerminalColor
-	ScrollHintFg lipgloss.TerminalColor
+	PromptFg     color.Color
+	CursorFg     color.Color
+	ScrollHintFg color.Color
 
 	// Inline layout
-	InputBarBg          lipgloss.TerminalColor
-	InputBarFg          lipgloss.TerminalColor
-	ToolOutputBg        lipgloss.TerminalColor
-	HelpHintFg          lipgloss.TerminalColor
-	SpinnerFg           lipgloss.TerminalColor
-	SeparatorFg         lipgloss.TerminalColor
-	RoleBorderFg        lipgloss.TerminalColor // left border for role sections
-	NewMsgBg            lipgloss.TerminalColor // "new messages" indicator
-	ComposerBorder      lipgloss.TerminalColor
-	ComposerBorderFocus lipgloss.TerminalColor
-	ScrollbarTrack      lipgloss.TerminalColor
-	ScrollbarThumb      lipgloss.TerminalColor
-	LinkFg              lipgloss.TerminalColor
-	CodeFg              lipgloss.TerminalColor
-	CodeBg              lipgloss.TerminalColor
-	CodeBlockFg         lipgloss.TerminalColor
-	CodeBlockBg         lipgloss.TerminalColor
+	InputBarBg          color.Color
+	InputBarFg          color.Color
+	ToolOutputBg        color.Color
+	HelpHintFg          color.Color
+	SpinnerFg           color.Color
+	SeparatorFg         color.Color
+	RoleBorderFg        color.Color // left border for role sections
+	NewMsgBg            color.Color // "new messages" indicator
+	ComposerBorder      color.Color
+	ComposerBorderFocus color.Color
+	ScrollbarTrack      color.Color
+	ScrollbarThumb      color.Color
+	LinkFg              color.Color
+	CodeFg              color.Color
+	CodeBg              color.Color
+	CodeBlockFg         color.Color
+	CodeBlockBg         color.Color
 }
 
 func DefaultTheme() Theme {
@@ -114,7 +115,7 @@ func namedTheme(name string, trueColor bool) Theme {
 	}
 }
 
-func color(trueColor bool, rich string, fallback string) lipgloss.TerminalColor {
+func themeColor(trueColor bool, rich string, fallback string) color.Color {
 	if trueColor || fallback == "" {
 		return lipgloss.Color(rich)
 	}
@@ -123,167 +124,167 @@ func color(trueColor bool, rich string, fallback string) lipgloss.TerminalColor 
 
 func defaultThemeVariant(trueColor bool) Theme {
 	return Theme{
-		AppBg:          color(trueColor, "#111315", "233"),
-		PanelBorder:    color(trueColor, "#3f4652", "240"),
-		PanelTitle:     color(trueColor, "#f3f4f6", "255"),
-		TextPrimary:    color(trueColor, "#f5f5f5", "255"),
-		TextSecondary:  color(trueColor, "#a1a1aa", "248"),
-		Info:           color(trueColor, "#d4d4d8", "252"),
-		Success:        color(trueColor, "#56d364", "77"),
-		Warning:        color(trueColor, "#f5c451", "221"),
-		Error:          color(trueColor, "#ff7b72", "210"),
-		Accent:         color(trueColor, "#e5e7eb", "254"),
-		Focus:          color(trueColor, "#f3f4f6", "255"),
-		ModalBg:        color(trueColor, "#15181d", "234"),
-		StatusBg:       color(trueColor, "#111315", "233"),
-		StatusText:     color(trueColor, "#d4d4d8", "252"),
-		CommandBg:      color(trueColor, "#111315", "233"),
-		CommandActive:  color(trueColor, "#111315", "233"),
-		CommandText:    color(trueColor, "#f5f5f5", "255"),
-		CommandSubText: color(trueColor, "#a1a1aa", "248"),
+		AppBg:          themeColor(trueColor, "#111315", "233"),
+		PanelBorder:    themeColor(trueColor, "#3f4652", "240"),
+		PanelTitle:     themeColor(trueColor, "#f3f4f6", "255"),
+		TextPrimary:    themeColor(trueColor, "#f5f5f5", "255"),
+		TextSecondary:  themeColor(trueColor, "#a1a1aa", "248"),
+		Info:           themeColor(trueColor, "#d4d4d8", "252"),
+		Success:        themeColor(trueColor, "#56d364", "77"),
+		Warning:        themeColor(trueColor, "#f5c451", "221"),
+		Error:          themeColor(trueColor, "#ff7b72", "210"),
+		Accent:         themeColor(trueColor, "#e5e7eb", "254"),
+		Focus:          themeColor(trueColor, "#f3f4f6", "255"),
+		ModalBg:        themeColor(trueColor, "#15181d", "234"),
+		StatusBg:       themeColor(trueColor, "#111315", "233"),
+		StatusText:     themeColor(trueColor, "#d4d4d8", "252"),
+		CommandBg:      themeColor(trueColor, "#111315", "233"),
+		CommandActive:  themeColor(trueColor, "#111315", "233"),
+		CommandText:    themeColor(trueColor, "#f5f5f5", "255"),
+		CommandSubText: themeColor(trueColor, "#a1a1aa", "248"),
 
-		AssistantFg:        color(trueColor, "#56d364", "77"),
-		ReasoningFg:        color(trueColor, "#8d96a5", "246"),
-		UserFg:             color(trueColor, "#f5f5f5", "255"),
-		UserBg:             color(trueColor, "#111315", "233"),
-		UserPrefixFg:       color(trueColor, "#ffffff", "255"),
-		UserMentionFg:      color(trueColor, "#f5f5f5", "255"),
-		ToolFg:             color(trueColor, "#e5e7eb", "254"),
-		DiffAddFg:          color(trueColor, "#56d364", "77"),
-		DiffRemoveFg:       color(trueColor, "#ff7b72", "210"),
-		DiffHeaderFg:       color(trueColor, "#8d96a5", "246"),
-		DiffHunkFg:         color(trueColor, "#d4d4d8", "252"),
-		DiffAddBg:          color(trueColor, "#1d3328", "22"),
-		DiffAddStrongBg:    color(trueColor, "#285f3a", "29"),
-		DiffRemoveBg:       color(trueColor, "#3a2329", "52"),
-		DiffRemoveStrongBg: color(trueColor, "#6e2b34", "88"),
-		DiffLineNoFg:       color(trueColor, "#758195", "245"),
-		DiffGutterFg:       color(trueColor, "#8d96a5", "246"),
-		DiffPanelBorder:    color(trueColor, "#3f4652", "240"),
-		SectionFg:          color(trueColor, "#f5f5f5", "255"),
-		KeyLabelFg:         color(trueColor, "#e5e7eb", "254"),
-		NoteFg:             color(trueColor, "#a1a1aa", "248"),
-		PromptFg:           color(trueColor, "#f5f5f5", "255"),
-		CursorFg:           color(trueColor, "#ffffff", "255"),
-		ScrollHintFg:       color(trueColor, "#f5c451", "221"),
+		AssistantFg:        themeColor(trueColor, "#56d364", "77"),
+		ReasoningFg:        themeColor(trueColor, "#8d96a5", "246"),
+		UserFg:             themeColor(trueColor, "#f5f5f5", "255"),
+		UserBg:             themeColor(trueColor, "#111315", "233"),
+		UserPrefixFg:       themeColor(trueColor, "#ffffff", "255"),
+		UserMentionFg:      themeColor(trueColor, "#f5f5f5", "255"),
+		ToolFg:             themeColor(trueColor, "#e5e7eb", "254"),
+		DiffAddFg:          themeColor(trueColor, "#56d364", "77"),
+		DiffRemoveFg:       themeColor(trueColor, "#ff7b72", "210"),
+		DiffHeaderFg:       themeColor(trueColor, "#8d96a5", "246"),
+		DiffHunkFg:         themeColor(trueColor, "#d4d4d8", "252"),
+		DiffAddBg:          themeColor(trueColor, "#1d3328", "22"),
+		DiffAddStrongBg:    themeColor(trueColor, "#285f3a", "29"),
+		DiffRemoveBg:       themeColor(trueColor, "#3a2329", "52"),
+		DiffRemoveStrongBg: themeColor(trueColor, "#6e2b34", "88"),
+		DiffLineNoFg:       themeColor(trueColor, "#758195", "245"),
+		DiffGutterFg:       themeColor(trueColor, "#8d96a5", "246"),
+		DiffPanelBorder:    themeColor(trueColor, "#3f4652", "240"),
+		SectionFg:          themeColor(trueColor, "#f5f5f5", "255"),
+		KeyLabelFg:         themeColor(trueColor, "#e5e7eb", "254"),
+		NoteFg:             themeColor(trueColor, "#a1a1aa", "248"),
+		PromptFg:           themeColor(trueColor, "#f5f5f5", "255"),
+		CursorFg:           themeColor(trueColor, "#ffffff", "255"),
+		ScrollHintFg:       themeColor(trueColor, "#f5c451", "221"),
 
-		InputBarBg:          color(trueColor, "#111315", "233"),
-		InputBarFg:          color(trueColor, "#f5f5f5", "255"),
-		ToolOutputBg:        color(trueColor, "#111315", "233"),
-		HelpHintFg:          color(trueColor, "#a1a1aa", "248"),
-		SpinnerFg:           color(trueColor, "#e5e7eb", "254"),
-		SeparatorFg:         color(trueColor, "#3f4652", "240"),
-		RoleBorderFg:        color(trueColor, "#3f4652", "240"),
-		NewMsgBg:            color(trueColor, "#111315", "233"),
-		ComposerBorder:      color(trueColor, "#3f4652", "240"),
-		ComposerBorderFocus: color(trueColor, "#f3f4f6", "255"),
-		ScrollbarTrack:      color(trueColor, "#1d2128", "234"),
-		ScrollbarThumb:      color(trueColor, "#8d96a5", "246"),
-		LinkFg:              color(trueColor, "#8ab4f8", "117"),
-		CodeFg:              color(trueColor, "#f5c451", "221"),
-		CodeBg:              color(trueColor, "#1b1f27", "234"),
-		CodeBlockFg:         color(trueColor, "#d4d4d8", "252"),
-		CodeBlockBg:         color(trueColor, "#171a20", "234"),
+		InputBarBg:          themeColor(trueColor, "#111315", "233"),
+		InputBarFg:          themeColor(trueColor, "#f5f5f5", "255"),
+		ToolOutputBg:        themeColor(trueColor, "#111315", "233"),
+		HelpHintFg:          themeColor(trueColor, "#a1a1aa", "248"),
+		SpinnerFg:           themeColor(trueColor, "#e5e7eb", "254"),
+		SeparatorFg:         themeColor(trueColor, "#3f4652", "240"),
+		RoleBorderFg:        themeColor(trueColor, "#3f4652", "240"),
+		NewMsgBg:            themeColor(trueColor, "#111315", "233"),
+		ComposerBorder:      themeColor(trueColor, "#3f4652", "240"),
+		ComposerBorderFocus: themeColor(trueColor, "#f3f4f6", "255"),
+		ScrollbarTrack:      themeColor(trueColor, "#1d2128", "234"),
+		ScrollbarThumb:      themeColor(trueColor, "#8d96a5", "246"),
+		LinkFg:              themeColor(trueColor, "#8ab4f8", "117"),
+		CodeFg:              themeColor(trueColor, "#f5c451", "221"),
+		CodeBg:              themeColor(trueColor, "#1b1f27", "234"),
+		CodeBlockFg:         themeColor(trueColor, "#d4d4d8", "252"),
+		CodeBlockBg:         themeColor(trueColor, "#171a20", "234"),
 	}
 }
 
 func nordTheme(trueColor bool) Theme {
 	theme := defaultThemeVariant(trueColor)
-	theme.AppBg = color(trueColor, "#2e3440", "236")
-	theme.PanelBorder = color(trueColor, "#4c566a", "240")
-	theme.PanelTitle = color(trueColor, "#eceff4", "255")
-	theme.TextPrimary = color(trueColor, "#eceff4", "255")
-	theme.TextSecondary = color(trueColor, "#d8dee9", "252")
-	theme.Info = color(trueColor, "#d8dee9", "252")
-	theme.Success = color(trueColor, "#a3be8c", "108")
-	theme.Warning = color(trueColor, "#ebcb8b", "223")
-	theme.Error = color(trueColor, "#bf616a", "131")
-	theme.Accent = color(trueColor, "#88c0d0", "110")
-	theme.Focus = color(trueColor, "#81a1c1", "110")
-	theme.ModalBg = color(trueColor, "#3b4252", "237")
-	theme.StatusBg = color(trueColor, "#2e3440", "236")
-	theme.StatusText = color(trueColor, "#d8dee9", "252")
-	theme.AssistantFg = color(trueColor, "#a3be8c", "108")
-	theme.ReasoningFg = color(trueColor, "#81a1c1", "110")
-	theme.ToolFg = color(trueColor, "#88c0d0", "110")
-	theme.DiffAddBg = color(trueColor, "#314236", "23")
-	theme.DiffAddStrongBg = color(trueColor, "#45604e", "59")
-	theme.DiffRemoveBg = color(trueColor, "#4a3037", "52")
-	theme.DiffRemoveStrongBg = color(trueColor, "#6a3f4a", "95")
-	theme.ComposerBorder = color(trueColor, "#4c566a", "240")
-	theme.ComposerBorderFocus = color(trueColor, "#81a1c1", "110")
-	theme.ScrollbarTrack = color(trueColor, "#3b4252", "237")
-	theme.ScrollbarThumb = color(trueColor, "#81a1c1", "110")
-	theme.LinkFg = color(trueColor, "#88c0d0", "110")
-	theme.CodeBg = color(trueColor, "#3b4252", "237")
-	theme.CodeBlockBg = color(trueColor, "#2b303b", "236")
+	theme.AppBg = themeColor(trueColor, "#2e3440", "236")
+	theme.PanelBorder = themeColor(trueColor, "#4c566a", "240")
+	theme.PanelTitle = themeColor(trueColor, "#eceff4", "255")
+	theme.TextPrimary = themeColor(trueColor, "#eceff4", "255")
+	theme.TextSecondary = themeColor(trueColor, "#d8dee9", "252")
+	theme.Info = themeColor(trueColor, "#d8dee9", "252")
+	theme.Success = themeColor(trueColor, "#a3be8c", "108")
+	theme.Warning = themeColor(trueColor, "#ebcb8b", "223")
+	theme.Error = themeColor(trueColor, "#bf616a", "131")
+	theme.Accent = themeColor(trueColor, "#88c0d0", "110")
+	theme.Focus = themeColor(trueColor, "#81a1c1", "110")
+	theme.ModalBg = themeColor(trueColor, "#3b4252", "237")
+	theme.StatusBg = themeColor(trueColor, "#2e3440", "236")
+	theme.StatusText = themeColor(trueColor, "#d8dee9", "252")
+	theme.AssistantFg = themeColor(trueColor, "#a3be8c", "108")
+	theme.ReasoningFg = themeColor(trueColor, "#81a1c1", "110")
+	theme.ToolFg = themeColor(trueColor, "#88c0d0", "110")
+	theme.DiffAddBg = themeColor(trueColor, "#314236", "23")
+	theme.DiffAddStrongBg = themeColor(trueColor, "#45604e", "59")
+	theme.DiffRemoveBg = themeColor(trueColor, "#4a3037", "52")
+	theme.DiffRemoveStrongBg = themeColor(trueColor, "#6a3f4a", "95")
+	theme.ComposerBorder = themeColor(trueColor, "#4c566a", "240")
+	theme.ComposerBorderFocus = themeColor(trueColor, "#81a1c1", "110")
+	theme.ScrollbarTrack = themeColor(trueColor, "#3b4252", "237")
+	theme.ScrollbarThumb = themeColor(trueColor, "#81a1c1", "110")
+	theme.LinkFg = themeColor(trueColor, "#88c0d0", "110")
+	theme.CodeBg = themeColor(trueColor, "#3b4252", "237")
+	theme.CodeBlockBg = themeColor(trueColor, "#2b303b", "236")
 	return theme
 }
 
 func solarizedTheme(trueColor bool) Theme {
 	theme := defaultThemeVariant(trueColor)
-	theme.AppBg = color(trueColor, "#002b36", "235")
-	theme.PanelBorder = color(trueColor, "#586e75", "242")
-	theme.PanelTitle = color(trueColor, "#fdf6e3", "230")
-	theme.TextPrimary = color(trueColor, "#eee8d5", "254")
-	theme.TextSecondary = color(trueColor, "#93a1a1", "245")
-	theme.Info = color(trueColor, "#93a1a1", "245")
-	theme.Success = color(trueColor, "#859900", "100")
-	theme.Warning = color(trueColor, "#b58900", "136")
-	theme.Error = color(trueColor, "#dc322f", "160")
-	theme.Accent = color(trueColor, "#2aa198", "36")
-	theme.Focus = color(trueColor, "#268bd2", "32")
-	theme.ModalBg = color(trueColor, "#073642", "236")
-	theme.StatusBg = color(trueColor, "#002b36", "235")
-	theme.StatusText = color(trueColor, "#93a1a1", "245")
-	theme.AssistantFg = color(trueColor, "#859900", "100")
-	theme.ReasoningFg = color(trueColor, "#6c71c4", "61")
-	theme.ToolFg = color(trueColor, "#2aa198", "36")
-	theme.DiffAddBg = color(trueColor, "#173d1c", "22")
-	theme.DiffAddStrongBg = color(trueColor, "#2f5f2f", "29")
-	theme.DiffRemoveBg = color(trueColor, "#4a1f1c", "52")
-	theme.DiffRemoveStrongBg = color(trueColor, "#7a2d24", "88")
-	theme.ComposerBorder = color(trueColor, "#586e75", "242")
-	theme.ComposerBorderFocus = color(trueColor, "#268bd2", "32")
-	theme.ScrollbarTrack = color(trueColor, "#073642", "236")
-	theme.ScrollbarThumb = color(trueColor, "#586e75", "242")
-	theme.LinkFg = color(trueColor, "#268bd2", "32")
-	theme.CodeFg = color(trueColor, "#cb4b16", "166")
-	theme.CodeBg = color(trueColor, "#073642", "236")
-	theme.CodeBlockBg = color(trueColor, "#062f3a", "236")
+	theme.AppBg = themeColor(trueColor, "#002b36", "235")
+	theme.PanelBorder = themeColor(trueColor, "#586e75", "242")
+	theme.PanelTitle = themeColor(trueColor, "#fdf6e3", "230")
+	theme.TextPrimary = themeColor(trueColor, "#eee8d5", "254")
+	theme.TextSecondary = themeColor(trueColor, "#93a1a1", "245")
+	theme.Info = themeColor(trueColor, "#93a1a1", "245")
+	theme.Success = themeColor(trueColor, "#859900", "100")
+	theme.Warning = themeColor(trueColor, "#b58900", "136")
+	theme.Error = themeColor(trueColor, "#dc322f", "160")
+	theme.Accent = themeColor(trueColor, "#2aa198", "36")
+	theme.Focus = themeColor(trueColor, "#268bd2", "32")
+	theme.ModalBg = themeColor(trueColor, "#073642", "236")
+	theme.StatusBg = themeColor(trueColor, "#002b36", "235")
+	theme.StatusText = themeColor(trueColor, "#93a1a1", "245")
+	theme.AssistantFg = themeColor(trueColor, "#859900", "100")
+	theme.ReasoningFg = themeColor(trueColor, "#6c71c4", "61")
+	theme.ToolFg = themeColor(trueColor, "#2aa198", "36")
+	theme.DiffAddBg = themeColor(trueColor, "#173d1c", "22")
+	theme.DiffAddStrongBg = themeColor(trueColor, "#2f5f2f", "29")
+	theme.DiffRemoveBg = themeColor(trueColor, "#4a1f1c", "52")
+	theme.DiffRemoveStrongBg = themeColor(trueColor, "#7a2d24", "88")
+	theme.ComposerBorder = themeColor(trueColor, "#586e75", "242")
+	theme.ComposerBorderFocus = themeColor(trueColor, "#268bd2", "32")
+	theme.ScrollbarTrack = themeColor(trueColor, "#073642", "236")
+	theme.ScrollbarThumb = themeColor(trueColor, "#586e75", "242")
+	theme.LinkFg = themeColor(trueColor, "#268bd2", "32")
+	theme.CodeFg = themeColor(trueColor, "#cb4b16", "166")
+	theme.CodeBg = themeColor(trueColor, "#073642", "236")
+	theme.CodeBlockBg = themeColor(trueColor, "#062f3a", "236")
 	return theme
 }
 
 func draculaTheme(trueColor bool) Theme {
 	theme := defaultThemeVariant(trueColor)
-	theme.AppBg = color(trueColor, "#282a36", "236")
-	theme.PanelBorder = color(trueColor, "#6272a4", "61")
-	theme.PanelTitle = color(trueColor, "#f8f8f2", "255")
-	theme.TextPrimary = color(trueColor, "#f8f8f2", "255")
-	theme.TextSecondary = color(trueColor, "#bd93f9", "141")
-	theme.Info = color(trueColor, "#8be9fd", "123")
-	theme.Success = color(trueColor, "#50fa7b", "84")
-	theme.Warning = color(trueColor, "#ffb86c", "215")
-	theme.Error = color(trueColor, "#ff5555", "203")
-	theme.Accent = color(trueColor, "#ff79c6", "212")
-	theme.Focus = color(trueColor, "#8be9fd", "123")
-	theme.ModalBg = color(trueColor, "#1f2130", "235")
-	theme.StatusBg = color(trueColor, "#282a36", "236")
-	theme.StatusText = color(trueColor, "#f8f8f2", "255")
-	theme.AssistantFg = color(trueColor, "#50fa7b", "84")
-	theme.ReasoningFg = color(trueColor, "#bd93f9", "141")
-	theme.ToolFg = color(trueColor, "#8be9fd", "123")
-	theme.DiffAddBg = color(trueColor, "#21392a", "22")
-	theme.DiffAddStrongBg = color(trueColor, "#2f5f43", "29")
-	theme.DiffRemoveBg = color(trueColor, "#4a232d", "52")
-	theme.DiffRemoveStrongBg = color(trueColor, "#7d3243", "89")
-	theme.ComposerBorder = color(trueColor, "#6272a4", "61")
-	theme.ComposerBorderFocus = color(trueColor, "#ff79c6", "212")
-	theme.ScrollbarTrack = color(trueColor, "#1f2130", "235")
-	theme.ScrollbarThumb = color(trueColor, "#6272a4", "61")
-	theme.LinkFg = color(trueColor, "#8be9fd", "123")
-	theme.CodeBg = color(trueColor, "#343746", "237")
-	theme.CodeBlockBg = color(trueColor, "#21222c", "235")
+	theme.AppBg = themeColor(trueColor, "#282a36", "236")
+	theme.PanelBorder = themeColor(trueColor, "#6272a4", "61")
+	theme.PanelTitle = themeColor(trueColor, "#f8f8f2", "255")
+	theme.TextPrimary = themeColor(trueColor, "#f8f8f2", "255")
+	theme.TextSecondary = themeColor(trueColor, "#bd93f9", "141")
+	theme.Info = themeColor(trueColor, "#8be9fd", "123")
+	theme.Success = themeColor(trueColor, "#50fa7b", "84")
+	theme.Warning = themeColor(trueColor, "#ffb86c", "215")
+	theme.Error = themeColor(trueColor, "#ff5555", "203")
+	theme.Accent = themeColor(trueColor, "#ff79c6", "212")
+	theme.Focus = themeColor(trueColor, "#8be9fd", "123")
+	theme.ModalBg = themeColor(trueColor, "#1f2130", "235")
+	theme.StatusBg = themeColor(trueColor, "#282a36", "236")
+	theme.StatusText = themeColor(trueColor, "#f8f8f2", "255")
+	theme.AssistantFg = themeColor(trueColor, "#50fa7b", "84")
+	theme.ReasoningFg = themeColor(trueColor, "#bd93f9", "141")
+	theme.ToolFg = themeColor(trueColor, "#8be9fd", "123")
+	theme.DiffAddBg = themeColor(trueColor, "#21392a", "22")
+	theme.DiffAddStrongBg = themeColor(trueColor, "#2f5f43", "29")
+	theme.DiffRemoveBg = themeColor(trueColor, "#4a232d", "52")
+	theme.DiffRemoveStrongBg = themeColor(trueColor, "#7d3243", "89")
+	theme.ComposerBorder = themeColor(trueColor, "#6272a4", "61")
+	theme.ComposerBorderFocus = themeColor(trueColor, "#ff79c6", "212")
+	theme.ScrollbarTrack = themeColor(trueColor, "#1f2130", "235")
+	theme.ScrollbarThumb = themeColor(trueColor, "#6272a4", "61")
+	theme.LinkFg = themeColor(trueColor, "#8be9fd", "123")
+	theme.CodeBg = themeColor(trueColor, "#343746", "237")
+	theme.CodeBlockBg = themeColor(trueColor, "#21222c", "235")
 	return theme
 }
 

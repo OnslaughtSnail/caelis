@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -226,12 +226,13 @@ func (c *cliConsole) loopTUITea() error {
 		ShowWelcomeCard: true,
 		Commands:        commandNames(c.commands),
 		Wizards:         buildWizardDefs(),
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			if strings.HasPrefix(strings.TrimSpace(line), "/") {
-				exitNow, err := c.handleSlash(strings.TrimSpace(line))
+		ExecuteLine: func(submission tuiapp.Submission) tuievents.TaskResultMsg {
+			line := strings.TrimSpace(submission.Text)
+			if strings.HasPrefix(line, "/") {
+				exitNow, err := c.handleSlash(line)
 				return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}
 			}
-			err := c.runPrompt(line)
+			err := c.runPromptWithAttachments(line, submission.Attachments)
 			if errors.Is(err, context.Canceled) {
 				return tuievents.TaskResultMsg{Interrupted: true}
 			}
@@ -284,11 +285,14 @@ func (c *cliConsole) loopTUITea() error {
 		SlashArgComplete: func(command string, query string, limit int) ([]tuiapp.SlashArgCandidate, error) {
 			return c.completeSlashArgCandidates(command, query, limit)
 		},
-		PasteClipboardImage: func() (int, string, error) {
+		PasteClipboardImage: func() ([]string, string, error) {
 			return c.pasteClipboardImage()
 		},
-		ClearAttachments: func() int {
+		ClearAttachments: func() []string {
 			return c.clearPendingAttachments()
+		},
+		SetAttachments: func(names []string) []string {
+			return c.setPendingAttachments(names)
 		},
 		OnDiagnostics: func(d tuiapp.Diagnostics) {
 			if c.tuiDiag == nil {
@@ -315,11 +319,7 @@ func (c *cliConsole) loopTUITea() error {
 		},
 	})
 
-	options := []tea.ProgramOption{
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	}
-	program := tea.NewProgram(model, options...)
+	program := tea.NewProgram(model)
 	sender.set(func(msg any) { program.Send(msg) })
 
 	sigCh := make(chan os.Signal, 1)
@@ -331,7 +331,7 @@ func (c *cliConsole) loopTUITea() error {
 				sender.Send(tuievents.SetHintMsg{Hint: "interrupt requested"})
 				continue
 			}
-			sender.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+			sender.Send(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
 		}
 	}()
 

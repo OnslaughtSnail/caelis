@@ -12,6 +12,7 @@ import (
 	_ "image/gif"
 
 	"golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )
 
@@ -48,8 +49,9 @@ func ResizeIfNeeded(data []byte, srcMime string) (ResizeResult, error) {
 	h := bounds.Dy()
 
 	outMime := normalizeMime(srcMime, format)
+	needsPNGReencode := outMime == "image/tiff"
 
-	if w <= MaxResizeWidth && h <= MaxResizeHeight {
+	if w <= MaxResizeWidth && h <= MaxResizeHeight && !needsPNGReencode {
 		return ResizeResult{Data: data, MimeType: outMime, Width: w, Height: h}, nil
 	}
 
@@ -105,6 +107,8 @@ func normalizeMime(srcMime string, decodedFormat string) string {
 		return "image/png"
 	case "image/gif":
 		return "image/gif"
+	case "image/tiff":
+		return "image/tiff"
 	case "image/webp":
 		return "image/webp"
 	}

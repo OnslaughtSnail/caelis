@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
@@ -17,8 +18,9 @@ type delegatePreviewProjector struct {
 }
 
 type delegatePreviewState struct {
-	assistant string
-	reasoning string
+	assistant        string
+	reasoning        string
+	pendingToolCalls map[string]toolCallSnapshot
 }
 
 func newDelegatePreviewProjector() *delegatePreviewProjector {
@@ -68,19 +70,21 @@ func (p *delegatePreviewProjector) Project(update sessionstream.Update) []tuieve
 		}
 		return nil
 	}
-	if update.Event.Message.Role != model.RoleAssistant {
-		return nil
-	}
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	state := p.states[key]
 	if state == nil {
-		state = &delegatePreviewState{}
+		state = &delegatePreviewState{pendingToolCalls: map[string]toolCallSnapshot{}}
 		p.states[key] = state
 	}
 
-	msgs := make([]tuievents.TaskStreamMsg, 0, 2)
+	msgs := make([]tuievents.TaskStreamMsg, 0, 4)
+	if toolMsgs := projectDelegateToolActivity(state, meta.ParentToolCall, update.Event); len(toolMsgs) > 0 {
+		msgs = append(msgs, toolMsgs...)
+	}
+	if update.Event.Message.Role != model.RoleAssistant {
+		return msgs
+	}
 	partial := eventIsPartial(update.Event)
 	if chunk := projectDelegateReasoning(state, update.Event, partial); chunk != "" {
 		msgs = append(msgs, tuievents.TaskStreamMsg{
@@ -144,6 +148,59 @@ func projectDelegateAssistant(state *delegatePreviewState, ev *session.Event, pa
 		return ""
 	}
 	return chunk + "\n"
+}
+
+func projectDelegateToolActivity(state *delegatePreviewState, parentCallID string, ev *session.Event) []tuievents.TaskStreamMsg {
+	if state == nil || ev == nil {
+		return nil
+	}
+	msgs := make([]tuievents.TaskStreamMsg, 0, len(ev.Message.ToolCalls)+1)
+	for _, call := range ev.Message.ToolCalls {
+		args := parseToolArgsForDisplay(call.Args)
+		if state.pendingToolCalls == nil {
+			state.pendingToolCalls = map[string]toolCallSnapshot{}
+		}
+		if strings.TrimSpace(call.ID) != "" {
+			state.pendingToolCalls[strings.TrimSpace(call.ID)] = toolCallSnapshot{Args: args}
+		}
+		line := strings.TrimSpace(fmt.Sprintf("▸ %s %s", displayToolCallName(call.Name, args), summarizeToolArgs(call.Name, args)))
+		if line == "" {
+			continue
+		}
+		msgs = append(msgs, tuievents.TaskStreamMsg{
+			Label:  toolDisplayDelegate,
+			CallID: parentCallID,
+			Stream: "assistant",
+			Chunk:  line + "\n",
+		})
+	}
+	if resp := ev.Message.ToolResponse; resp != nil {
+		var callArgs map[string]any
+		if state.pendingToolCalls != nil && strings.TrimSpace(resp.ID) != "" {
+			if snapshot, ok := state.pendingToolCalls[strings.TrimSpace(resp.ID)]; ok {
+				callArgs = snapshot.Args
+				delete(state.pendingToolCalls, strings.TrimSpace(resp.ID))
+			}
+		}
+		displayName := displayToolResponseName(resp.Name, callArgs, resp.Result)
+		summary := summarizeToolResponseWithCall(resp.Name, resp.Result, callArgs)
+		if summary == "" && !hasToolError(resp.Result) {
+			return msgs
+		}
+		prefix := "✓ "
+		stream := "assistant"
+		if hasToolError(resp.Result) {
+			prefix = "! "
+			stream = "stderr"
+		}
+		msgs = append(msgs, tuievents.TaskStreamMsg{
+			Label:  toolDisplayDelegate,
+			CallID: parentCallID,
+			Stream: stream,
+			Chunk:  formatToolResultLine(prefix, displayName, summary),
+		})
+	}
+	return msgs
 }
 
 func delegatePreviewDelta(existing string, incoming string) string {

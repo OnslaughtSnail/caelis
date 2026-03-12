@@ -215,6 +215,13 @@ func runACP(ctx context.Context, args []string) error {
 			selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
 			return factory.NewByAlias(selectedAlias)
 		},
+		PromptImageEnabled: func() bool {
+			return true
+		},
+		SupportsPromptImage: func(sessionCfg internalacp.AgentSessionConfig) bool {
+			selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
+			return acpModelSupportsImages(factory, selectedAlias)
+		},
 		SessionModels: func(sessionCfg internalacp.AgentSessionConfig) *internalacp.SessionModelState {
 			selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
 			return buildACPSessionModelState(factory, configStore, selectedAlias)
@@ -772,6 +779,18 @@ func buildACPSessionModelState(factory *modelproviders.Factory, configStore *app
 		CurrentModelID:  selectedAlias,
 		AvailableModels: models,
 	}
+}
+
+func acpModelSupportsImages(factory *modelproviders.Factory, alias string) bool {
+	if factory == nil {
+		return false
+	}
+	cfg, ok := factory.ConfigForAlias(strings.TrimSpace(alias))
+	if !ok {
+		return false
+	}
+	caps, found := lookupCatalogModelCapabilities(cfg.Provider, cfg.Model)
+	return found && caps.SupportsImages
 }
 
 func formatACPModelDescription(cfg modelproviders.Config) string {

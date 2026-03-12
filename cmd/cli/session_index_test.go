@@ -443,6 +443,73 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	}
 }
 
+func TestHandleResume_TUIReplaysInterleavedUserAttachmentsInStoredOrder(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetOrCreate(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-order"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-order"}, &session.Event{
+		ID:   "ev-user-order",
+		Time: time.Now(),
+		Message: model.Message{
+			Role: model.RoleUser,
+			Text: "Hi豆包这两个是什么APP?",
+			ContentParts: []model.ContentPart{
+				{Type: model.ContentPartImage, FileName: "first.png", Data: "a"},
+				{Type: model.ContentPartText, Text: "Hi豆包"},
+				{Type: model.ContentPartImage, FileName: "second.png", Data: "b"},
+				{Type: model.ContentPartText, Text: "这两个是什么APP?"},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "resume-order", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		baseCtx:       context.Background(),
+		rt:            rt,
+		appName:       "app",
+		userID:        "u",
+		workspace:     workspace,
+		sessionIndex:  idx,
+		sessionID:     "default",
+		out:           &bytes.Buffer{},
+		ui:            newUI(&bytes.Buffer{}, true, false),
+		showReasoning: true,
+		tuiSender:     sender,
+	}
+	if _, err := handleResume(c, []string{"resume-order"}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := "> [image: first.png] Hi豆包 [image: second.png] 这两个是什么APP?"
+	for _, raw := range sender.msgs {
+		msg, ok := raw.(tuievents.LogChunkMsg)
+		if !ok {
+			continue
+		}
+		if strings.Contains(msg.Chunk, want) {
+			return
+		}
+	}
+	t.Fatalf("expected replayed user message %q, got %#v", want, sender.msgs)
+}
+
 func TestHandleResume_WithPatchResponse_DoesNotReplayDiffBlockMsg(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {

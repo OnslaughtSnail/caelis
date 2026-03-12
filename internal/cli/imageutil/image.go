@@ -16,6 +16,8 @@ var SupportedExtensions = map[string]string{
 	".jpg":  "image/jpeg",
 	".jpeg": "image/jpeg",
 	".gif":  "image/gif",
+	".tif":  "image/tiff",
+	".tiff": "image/tiff",
 	".webp": "image/webp",
 }
 
@@ -37,7 +39,7 @@ func MimeTypeForPath(path string) (string, bool) {
 }
 
 // LoadAsContentPart reads an image file from disk and returns it as a ContentPart.
-// No caching or resizing is applied.
+// The bytes are normalized the same way as other image entry points.
 func LoadAsContentPart(absPath string) (model.ContentPart, error) {
 	mime, ok := MimeTypeForPath(absPath)
 	if !ok {
@@ -47,12 +49,7 @@ func LoadAsContentPart(absPath string) (model.ContentPart, error) {
 	if err != nil {
 		return model.ContentPart{}, err
 	}
-	return model.ContentPart{
-		Type:     model.ContentPartImage,
-		MimeType: mime,
-		Data:     base64.StdEncoding.EncodeToString(data),
-		FileName: filepath.Base(absPath),
-	}, nil
+	return contentPartFromBytes(data, mime, filepath.Base(absPath), nil)
 }
 
 // LoadAsContentPartCached reads an image file, resizes if needed, and returns

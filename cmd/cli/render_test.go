@@ -192,3 +192,16 @@ func TestPrintEvent_SystemWarningRenders(t *testing.T) {
 		t.Fatalf("expected warning output, got %q", got)
 	}
 }
+
+func TestVisibleUserTextCombinesImagesAndText(t *testing.T) {
+	msg := model.Message{
+		Role: model.RoleUser,
+		ContentParts: []model.ContentPart{
+			{Type: model.ContentPartImage, FileName: "clipboard.png"},
+			{Type: model.ContentPartText, Text: "猜猜这是什么 APP"},
+		},
+	}
+	if got := visibleUserText(msg); got != "[image: clipboard.png] 猜猜这是什么 APP" {
+		t.Fatalf("unexpected visible user text %q", got)
+	}
+}

@@ -3,18 +3,13 @@ package tuikit
 import (
 	"regexp"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 var (
 	osc8ResidueOpen  = regexp.MustCompile(`(?:\x1b)?]8;;[^\x07]*\x07`)
 	osc8ResidueClose = regexp.MustCompile(`(?:\x1b)?]8;;\x07`)
 )
-
-func Hyperlink(label string, target string) string {
-	_ = target
-	return label
-}
 
 func LinkifyText(text string, style lipgloss.Style) string {
 	_ = style

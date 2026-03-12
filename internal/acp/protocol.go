@@ -231,6 +231,14 @@ type TextContent struct {
 	Text string `json:"text"`
 }
 
+type ImageContent struct {
+	Type     string `json:"type"`
+	MimeType string `json:"mimeType,omitempty"`
+	Data     string `json:"data,omitempty"`
+	Name     string `json:"name,omitempty"`
+	URI      string `json:"uri,omitempty"`
+}
+
 type ResourceLink struct {
 	Type        string `json:"type"`
 	Name        string `json:"name"`
@@ -244,6 +252,7 @@ type EmbeddedResourceData struct {
 	URI      string `json:"uri"`
 	Name     string `json:"name,omitempty"`
 	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
 	MimeType string `json:"mimeType,omitempty"`
 }
 

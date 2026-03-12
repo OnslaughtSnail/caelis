@@ -1,14 +1,16 @@
 package tuiapp
 
 import (
+	"image/color"
+	"strconv"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuidiff"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -44,14 +46,6 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 			m.lastFinalAnswer = ""
 		}
 		m.commitLine(line)
-	}
-
-	// Detect running hint from tool call lines.
-	if strings.HasPrefix(strings.TrimSpace(m.streamLine), "▸ ") {
-		parts := strings.SplitN(strings.TrimSpace(m.streamLine), " ", 3)
-		if len(parts) >= 2 {
-			m.runningHint = parts[1]
-		}
 	}
 
 	m.syncViewportContent()
@@ -251,21 +245,18 @@ func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea
 	if panel == nil {
 		return m, nil
 	}
+	m.applyToolOutputState(panel, msg.State, msg.Final)
 	if msg.Final {
-		if strings.EqualFold(strings.TrimSpace(panel.tool), "BASH") {
-			cmd := m.beginFinalizeBashToolOutputBlock(panel)
-			if cmd == nil {
-				cmd = m.maybeStartClosingToolOutputFades()
-			}
-			return m, cmd
+		cmd := m.beginFinalizeToolOutputBlock(panel)
+		if cmd == nil {
+			cmd = m.maybeStartClosingToolOutputFades()
 		}
-		panel.active = false
-		return m, nil
+		return m, cmd
 	}
 	if strings.TrimSpace(msg.Chunk) == "" {
+		m.syncAnchoredToolOutputBlock(panel)
 		return m, nil
 	}
-	panel.active = true
 	m.appendToolOutputChunk(panel, strings.TrimSpace(msg.Stream), msg.Chunk)
 	m.syncAnchoredToolOutputBlock(panel)
 	return m, nil
@@ -295,12 +286,15 @@ func (m *Model) ensureToolOutputPanel(key, toolName, callID string, reset bool) 
 	}
 	panel, ok := m.toolOutputs[key]
 	if !ok || reset {
+		now := time.Now()
 		panel = &toolOutputState{
-			key:    key,
-			tool:   strings.TrimSpace(toolName),
-			callID: strings.TrimSpace(callID),
-			start:  len(m.historyLines),
-			end:    len(m.historyLines),
+			key:       key,
+			tool:      strings.TrimSpace(toolName),
+			callID:    strings.TrimSpace(callID),
+			start:     len(m.historyLines),
+			end:       len(m.historyLines),
+			startedAt: now,
+			updatedAt: now,
 		}
 		m.toolOutputs[key] = panel
 	} else {
@@ -313,7 +307,27 @@ func (m *Model) ensureToolOutputPanel(key, toolName, callID string, reset bool) 
 	}
 	panel.closing = false
 	panel.fadeStep = 0
+	panel.finalizedAt = time.Time{}
 	return panel
+}
+
+func (m *Model) applyToolOutputState(panel *toolOutputState, state string, final bool) {
+	if panel == nil {
+		return
+	}
+	normalized := normalizeToolOutputState(state)
+	if normalized != "" {
+		panel.state = normalized
+	}
+	switch panel.state {
+	case "running", "waiting_approval", "waiting_input":
+		panel.active = true
+	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+		panel.active = false
+	}
+	if final {
+		panel.active = false
+	}
 }
 
 func (m *Model) clearToolOutputPanels() {
@@ -336,6 +350,8 @@ func (m *Model) appendToolOutputChunk(panel *toolOutputState, stream, chunk stri
 	default:
 		panel.stdoutPartial = m.consumeToolOutputChunk(panel, panel.stdoutPartial, normalized, stream)
 	}
+	panel.lastStream = stream
+	panel.updatedAt = time.Now()
 }
 
 func (m *Model) consumeToolOutputChunk(panel *toolOutputState, partial, chunk, stream string) string {
@@ -430,8 +446,11 @@ func (m *Model) renderToolOutputBlockLines(panel *toolOutputState, content []too
 	if len(content) == 0 {
 		return nil
 	}
-	lines := make([]string, 0, len(content))
-	panelInnerWidth := maxInt(1, m.viewport.Width-4)
+	lines := make([]string, 0, len(content)+1)
+	panelInnerWidth := maxInt(1, m.viewport.Width()-4)
+	if header := m.renderToolOutputHeaderLine(panel, panelInnerWidth); header != "" {
+		lines = append(lines, header)
+	}
 	for _, line := range content {
 		text, prefix, style := m.renderToolOutputLine(panel, line)
 		availableTextWidth := maxInt(1, panelInnerWidth-displayColumns(prefix))
@@ -469,13 +488,13 @@ func (m *Model) syncAnchoredToolOutputBlock(panel *toolOutputState) {
 	m.syncViewportContent()
 }
 
-func (m *Model) beginFinalizeBashToolOutputBlock(panel *toolOutputState) tea.Cmd {
+func (m *Model) beginFinalizeToolOutputBlock(panel *toolOutputState) tea.Cmd {
 	if panel == nil {
 		return nil
 	}
 	content := m.currentToolOutputLines(panel)
 	if len(content) == 0 {
-		m.finalizeBashToolOutputBlock(panel)
+		m.finalizeToolOutputBlock(panel)
 		return nil
 	}
 	panel.active = false
@@ -483,11 +502,12 @@ func (m *Model) beginFinalizeBashToolOutputBlock(panel *toolOutputState) tea.Cmd
 	panel.fadeStep = 0
 	panel.fadeQueued = false
 	panel.fadeLineCount = len(content)
+	panel.finalizedAt = time.Now()
 	m.syncAnchoredToolOutputBlock(panel)
 	return nil
 }
 
-func (m *Model) finalizeBashToolOutputBlock(panel *toolOutputState) {
+func (m *Model) finalizeToolOutputBlock(panel *toolOutputState) {
 	if panel == nil {
 		return
 	}
@@ -525,7 +545,7 @@ func (m *Model) handleToolOutputFadeMsg(msg toolOutputFadeMsg) (tea.Model, tea.C
 		panel.fadeLineCount = len(m.currentToolOutputLines(panel))
 	}
 	if msg.step >= panel.fadeLineCount {
-		m.finalizeBashToolOutputBlock(panel)
+		m.finalizeToolOutputBlock(panel)
 		return m, nil
 	}
 	panel.fadeStep = msg.step
@@ -554,6 +574,133 @@ func (m *Model) renderToolOutputLine(panel *toolOutputState, line toolOutputLine
 	return text, prefix, style
 }
 
+func (m *Model) renderToolOutputHeaderLine(panel *toolOutputState, width int) string {
+	if panel == nil || width <= 0 {
+		return ""
+	}
+	tool := strings.ToUpper(strings.TrimSpace(panel.tool))
+	if tool == "" {
+		tool = "TASK"
+	}
+	labelStyle := m.theme.KeyLabelStyle().Bold(true)
+	statusText, statusStyle := m.toolOutputStatus(panel)
+	left := labelStyle.Render(tool)
+	if statusText != "" {
+		left += "  " + statusStyle.Render(statusText)
+	}
+	right := m.theme.HelpHintTextStyle().Render(m.toolOutputMeta(panel))
+	return composeStyledFooter(width, left, right)
+}
+
+func (m *Model) toolOutputStatus(panel *toolOutputState) (string, lipgloss.Style) {
+	if panel == nil {
+		return "", m.theme.HelpHintTextStyle()
+	}
+	switch panel.state {
+	case "running":
+		return "running", m.theme.AssistantStyle().Bold(true)
+	case "waiting_approval":
+		return "approval", m.theme.WarnStyle().Bold(true)
+	case "waiting_input":
+		return "input", m.theme.HelpHintTextStyle().Bold(true)
+	case "completed":
+		return "done", m.theme.HelpHintTextStyle()
+	case "failed":
+		return "failed", m.theme.ErrorStyle().Bold(true)
+	case "interrupted":
+		return "interrupted", m.theme.WarnStyle().Bold(true)
+	case "cancelled", "canceled":
+		return "cancelled", m.theme.WarnStyle().Bold(true)
+	case "terminated":
+		return "terminated", m.theme.WarnStyle().Bold(true)
+	}
+	switch {
+	case panel.closing:
+		return "", m.theme.HelpHintTextStyle()
+	default:
+		return "", m.theme.HelpHintTextStyle()
+	}
+}
+
+func (m *Model) toolOutputMeta(panel *toolOutputState) string {
+	if panel == nil {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	if age := formatToolOutputAge(time.Since(panel.startedAt)); age != "" {
+		parts = append(parts, age)
+	}
+	if panel.active && !panel.updatedAt.IsZero() {
+		idleFor := time.Since(panel.updatedAt)
+		if idleFor > 3*time.Second {
+			parts = append(parts, "quiet "+formatToolOutputAge(idleFor))
+		}
+	}
+	switch strings.ToUpper(strings.TrimSpace(panel.tool)) {
+	case "DELEGATE":
+		if summary := delegateToolSummary(panel); summary != "" {
+			parts = append(parts, summary)
+		}
+	default:
+		stream := strings.TrimSpace(panel.lastStream)
+		if stream != "" {
+			parts = append(parts, stream)
+		}
+	}
+	return strings.Join(parts, "  ")
+}
+
+func normalizeToolOutputState(state string) string {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	switch normalized {
+	case "running", "waiting_approval", "waiting_input", "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+		return normalized
+	default:
+		return ""
+	}
+}
+
+func delegateToolSummary(panel *toolOutputState) string {
+	if panel == nil {
+		return ""
+	}
+	hasReasoning := false
+	hasAssistant := false
+	for _, line := range panel.lines {
+		switch strings.ToLower(strings.TrimSpace(line.stream)) {
+		case "reasoning":
+			hasReasoning = true
+		case "assistant":
+			hasAssistant = true
+		}
+	}
+	switch {
+	case hasReasoning && hasAssistant:
+		return "reasoning + answer"
+	case hasAssistant:
+		return "answer"
+	case hasReasoning:
+		return "reasoning"
+	default:
+		return "delegate"
+	}
+}
+
+func formatToolOutputAge(d time.Duration) string {
+	if d <= 0 {
+		return "now"
+	}
+	if d < time.Second {
+		return "<1s"
+	}
+	if d < time.Minute {
+		return strconv.Itoa(int(d/time.Second)) + "s"
+	}
+	minutes := int(d / time.Minute)
+	seconds := int((d % time.Minute) / time.Second)
+	return strconv.Itoa(minutes) + "m" + strconv.Itoa(seconds) + "s"
+}
+
 func (m *Model) applyToolOutputFadeStyle(panel *toolOutputState, style lipgloss.Style) lipgloss.Style {
 	if panel == nil || !panel.closing {
 		return style
@@ -565,7 +712,7 @@ func (m *Model) applyToolOutputFadeStyle(panel *toolOutputState, style lipgloss.
 	return style
 }
 
-func (m *Model) toolOutputBorderColor(panel *toolOutputState) lipgloss.TerminalColor {
+func (m *Model) toolOutputBorderColor(panel *toolOutputState) color.Color {
 	if panel == nil || !panel.closing {
 		return m.theme.PanelBorder
 	}
@@ -702,7 +849,7 @@ func (m *Model) shiftAnchoredBlocks(threshold, delta int, skipKey string) {
 func (m *Model) renderAssistantBlockLines(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
 	isMarkdown := looksLikeMarkdown(trimmed)
-	rendered := renderAssistantMarkdown(trimmed, maxInt(20, m.viewport.Width), m.theme)
+	rendered := renderAssistantMarkdown(trimmed, maxInt(20, m.viewport.Width()), m.theme)
 	if rendered == "" {
 		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
 	}
@@ -761,7 +908,7 @@ func (m *Model) renderDiffBlockLines(msg tuievents.DiffBlockMsg) []string {
 		Preview:   msg.Preview,
 		Truncated: msg.Truncated,
 	})
-	wrapWidth := maxInt(40, m.viewport.Width)
+	wrapWidth := maxInt(40, m.viewport.Width())
 	return tuidiff.Render(model, wrapWidth, m.theme)
 }
 
@@ -805,7 +952,7 @@ func (m *Model) resetConversationView() {
 	m.clearInputSelection()
 	m.userScrolledUp = false
 	if m.cfg.ShowWelcomeCard {
-		if m.viewport.Width > 0 {
+		if m.viewport.Width() > 0 {
 			m.appendWelcomeCard()
 			m.welcomeCardPending = false
 		} else {

@@ -6,7 +6,11 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"golang.org/x/image/tiff"
 )
 
 func makePNG(w, h int) []byte {
@@ -99,6 +103,58 @@ func TestResizeIfNeeded_WebP(t *testing.T) {
 	}
 	if result.MimeType != "image/webp" {
 		t.Fatalf("unexpected mime: %s", result.MimeType)
+	}
+}
+
+func TestResizeIfNeeded_TIFFReencodesToPNG(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := tiff.Encode(&buf, img, nil); err != nil {
+		t.Fatalf("encode tiff: %v", err)
+	}
+	result, err := ResizeIfNeeded(buf.Bytes(), "image/tiff")
+	if err != nil {
+		t.Fatalf("tiff decode should be supported: %v", err)
+	}
+	if result.MimeType != "image/png" {
+		t.Fatalf("expected TIFF to normalize to image/png, got %s", result.MimeType)
+	}
+	if result.Width != 8 || result.Height != 4 {
+		t.Fatalf("expected 8x4, got %dx%d", result.Width, result.Height)
+	}
+	if bytes.Equal(result.Data, buf.Bytes()) {
+		t.Fatal("expected TIFF input to be re-encoded")
+	}
+}
+
+func TestLoadAsContentPart_TIFFNormalizesToPNG(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := tiff.Encode(&buf, img, nil); err != nil {
+		t.Fatalf("encode tiff: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "frame.tiff")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write tiff: %v", err)
+	}
+
+	part, err := LoadAsContentPart(path)
+	if err != nil {
+		t.Fatalf("load content part: %v", err)
+	}
+	if part.MimeType != "image/png" {
+		t.Fatalf("expected TIFF to normalize to image/png, got %s", part.MimeType)
 	}
 }
 

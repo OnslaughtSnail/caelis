@@ -7,23 +7,28 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
-func (m *Model) View() string {
+func (m *Model) View() tea.View {
 	start := time.Now()
 
 	if !m.ready {
-		return "loading..."
+		view := tea.NewView("loading...")
+		view.AltScreen = true
+		view.MouseMode = tea.MouseModeCellMotion
+		return view
 	}
 
 	// Recalculate layout in case bottom section height changed.
 	vpHeight, bottomHeight := m.computeLayout()
-	if m.viewport.Height != vpHeight {
-		m.viewport.Height = vpHeight
+	if m.viewport.Height() != vpHeight {
+		m.viewport.SetHeight(vpHeight)
 		m.syncViewportContent()
 	}
 
@@ -96,7 +101,16 @@ func (m *Model) View() string {
 
 	duration := time.Since(start)
 	m.observeRender(duration, len(view), "fullscreen")
-	return view
+	frame := tea.NewView(view)
+	frame.AltScreen = true
+	frame.MouseMode = tea.MouseModeCellMotion
+	frame.ReportFocus = true
+	frame.WindowTitle = m.windowTitle()
+	if cursor := m.regularInputCursor(); cursor != nil {
+		cursor.Position.Y += m.viewport.Height() + 5 + tuikit.ComposerPadTop
+		frame.Cursor = cursor
+	}
+	return frame
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +154,7 @@ func (m *Model) bottomSectionHeight() int {
 // plus any in-progress streaming content, then sets it on the
 // viewport. Handles auto-scroll when the user hasn't manually scrolled up.
 func (m *Model) syncViewportContent() {
-	wrapWidth := maxInt(1, m.viewport.Width)
+	wrapWidth := maxInt(1, m.viewport.Width())
 	lines := make([]string, 0, len(m.historyLines)+8)
 
 	// 1. All committed history lines.
@@ -221,7 +235,7 @@ func (m *Model) hasSelectionRange() bool {
 }
 
 func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectionPoint, bool) {
-	if len(m.viewportPlainLines) == 0 || m.viewport.Height <= 0 {
+	if len(m.viewportPlainLines) == 0 || m.viewport.Height() <= 0 {
 		return textSelectionPoint{}, false
 	}
 	vy := y
@@ -229,14 +243,14 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 		if vy < 0 {
 			vy = 0
 		}
-		if vy >= m.viewport.Height {
-			vy = m.viewport.Height - 1
+		if vy >= m.viewport.Height() {
+			vy = m.viewport.Height() - 1
 		}
-	} else if vy < 0 || vy >= m.viewport.Height {
+	} else if vy < 0 || vy >= m.viewport.Height() {
 		return textSelectionPoint{}, false
 	}
 
-	line := m.viewport.YOffset + vy
+	line := m.viewport.YOffset() + vy
 	if line < 0 {
 		line = 0
 	}
@@ -256,7 +270,7 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 }
 
 func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
-	y := m.viewport.Height
+	y := m.viewport.Height()
 	// spacer + hint + hint/header gap + workspace/model + separator = 5 lines above padding
 	y += 5
 	// composer top padding
@@ -333,7 +347,7 @@ type fixedRowLayout struct {
 }
 
 func (m *Model) fixedRowLayout() fixedRowLayout {
-	y := m.viewport.Height
+	y := m.viewport.Height()
 	layout := fixedRowLayout{
 		hintY:   y + 1,
 		headerY: y + 3,
@@ -392,23 +406,34 @@ func (m *Model) fixedSelectionText() string {
 	return ""
 }
 
-func (m *Model) renderFixedRow(area fixedSelectionArea, text string, style lipgloss.Style) string {
-	line := text
+func (m *Model) renderFixedRow(area fixedSelectionArea, plain string, rendered string, style lipgloss.Style) string {
+	line := plain
 	if m.fixedSelectionArea == area {
 		start, end, ok := normalizedSelectionRange(m.fixedSelectionStart, m.fixedSelectionEnd, 1)
 		if ok && (start.line != end.line || start.col != end.col) {
-			line = renderSelectionOnLines([]string{text}, start, end)[0]
+			line = renderSelectionOnLines([]string{plain}, start, end)[0]
+			return style.Render(line)
 		}
 	}
-	return style.Render(line)
+	if rendered == "" {
+		rendered = line
+	}
+	return style.Render(rendered)
 }
 
 // ---------------------------------------------------------------------------
 // View sub-components
 // ---------------------------------------------------------------------------
 
-func (m *Model) buildHintLine() string {
-	return m.renderHintRow()
+func (m *Model) windowTitle() string {
+	title := "CAELIS"
+	if alias := strings.TrimSpace(m.statusModel); alias != "" {
+		title += " • " + alias
+	}
+	if m.running {
+		title += " • running"
+	}
+	return title
 }
 
 // indentBlock adds a fixed left margin to every line of a multi-line block.
@@ -440,7 +465,7 @@ func (m *Model) buildHintText() string {
 	}
 	// Show /resume guidance.
 	if len(m.resumeCandidates) > 0 {
-		return "/resume: ↑/↓ select │ enter: resume │ tab: fill id"
+		return m.overlayHintText("/resume")
 	}
 	// Show generic slash-arg guidance.
 	if m.slashArgActive && m.slashArgCommand != "" {
@@ -453,18 +478,17 @@ func (m *Model) buildHintText() string {
 		if len(m.slashArgCandidates) == 0 {
 			return ""
 		}
-		return label + ": ↑/↓ select │ enter: apply │ tab: fill"
+		return m.overlayHintText(label)
 	}
 	// Show slash command guidance.
 	if len(m.slashCandidates) > 0 {
-		return "/: ↑/↓ select │ enter: run │ tab: fill"
+		return m.overlayHintText("/")
 	}
 	return ""
 }
 
 func (m *Model) startRunningAnimation() {
 	m.runningTick = 0
-	m.runningBeat = 0
 	if len(runningCarouselLines) > 0 {
 		seed := int(time.Now().UnixNano() % int64(len(runningCarouselLines)))
 		if seed < 0 {
@@ -478,14 +502,10 @@ func (m *Model) startRunningAnimation() {
 
 func (m *Model) stopRunningAnimation() {
 	m.runningTick = 0
-	m.runningBeat = 0
 	m.runningTip = 0
 }
 
 func (m *Model) advanceRunningAnimation() {
-	if len(runningBreathFrames) > 0 {
-		m.runningBeat = (m.runningBeat + 1) % len(runningBreathFrames)
-	}
 	if len(runningCarouselLines) > 0 {
 		m.runningTick++
 		if m.runningTick%runningHintRotateEveryTicks == 0 {
@@ -592,22 +612,53 @@ func (m *Model) renderInputBar() string {
 		lines := m.inputPlainLines()
 		return insetRenderedBlock(strings.Join(renderSelectionOnLines(lines, start, end), "\n"), inputHorizontalInset)
 	}
+
 	prompt := m.theme.PromptStyle().Render("> ")
 	if m.isWizardActive() && m.wizard.hideInput() {
 		query, _ := wizardQueryAtCursor(m.wizard.def.Command, m.input, m.cursor)
-		inputVal := "/" + m.wizard.def.Command + " " + strings.Repeat("*", utf8.RuneCountInString(strings.TrimSpace(query)))
+		inputVal := strings.TrimSpace("> /" + m.wizard.def.Command + " " + strings.Repeat("*", utf8.RuneCountInString(strings.TrimSpace(query))))
 		return insetRenderedBlock(renderMultilineInput(prompt, inputVal), inputHorizontalInset)
 	}
-	if ghost := m.currentInputGhostHint(); ghost == "" {
-		rendered, _ := m.visibleTextareaLines()
-		return insetRenderedBlock(strings.Join(rendered, "\n"), inputHorizontalInset)
+	return m.renderRegularInputBar()
+}
+
+func (m *Model) syncTextareaChrome() {
+	ta := m.textarea
+	m.applyTextareaChrome(&ta)
+	m.textarea = ta
+}
+
+func (m *Model) applyTextareaChrome(ta *textarea.Model) {
+	if ta == nil {
+		return
 	}
-	ghost := m.currentInputGhostHint()
-	inputVal := m.textarea.Value()
-	if inputVal == "" {
-		return insetRenderedBlock(prompt+m.theme.HelpHintTextStyle().Render(ghost), inputHorizontalInset)
+	if m == nil {
+		return
 	}
-	return insetRenderedBlock(prompt+inputVal+m.theme.HelpHintTextStyle().Render(ghost), inputHorizontalInset)
+	first := m.inputPromptPrefix()
+	width := displayColumns(first)
+	if width <= 0 {
+		first = "> "
+		width = displayColumns(first)
+	}
+	continuation := strings.Repeat(" ", width)
+	ta.SetPromptFunc(width, func(info textarea.PromptInfo) string {
+		if info.LineNumber == 0 {
+			return first
+		}
+		return continuation
+	})
+	ta.SetWidth(m.composerContentWidth())
+	displayValue, _ := composeInputDisplay(ta.Value(), len([]rune(ta.Value())), m.inputAttachments)
+	height := desiredComposerRows(displayValue, "", ta.Width(), maxInputBarRows)
+	if height < tuikit.ComposerMinHeight {
+		height = tuikit.ComposerMinHeight
+	}
+	ta.SetHeight(height)
+}
+
+func (m *Model) inputPromptPrefix() string {
+	return "> "
 }
 
 func (m *Model) currentInputGhostHint() string {
@@ -663,101 +714,7 @@ func (m *Model) suggestedSlashArgInput(choice string) string {
 }
 
 func (m *Model) inputPlainLines() []string {
-	_, plain := m.visibleTextareaLines()
-	return plain
-}
-
-func inputWrappedRowCount(value string, width int) int {
-	if width <= 0 {
-		width = 1
-	}
-	if value == "" {
-		return 1
-	}
-	rows := 0
-	for _, line := range strings.Split(value, "\n") {
-		wrapped := ansi.HardwrapWc(line, width, true)
-		if wrapped == "" {
-			rows++
-			continue
-		}
-		rows += strings.Count(wrapped, "\n") + 1
-	}
-	if rows <= 0 {
-		return 1
-	}
-	return rows
-}
-
-func (m *Model) visibleTextareaLines() ([]string, []string) {
-	targetHeight := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
-	totalRows := inputWrappedRowCount(m.textarea.Value(), m.textarea.Width())
-	cursorRow := m.inputCursorVisualRow()
-	start := 0
-	if totalRows > targetHeight {
-		start = cursorRow - targetHeight + 1
-		if start < 0 {
-			start = 0
-		}
-		maxStart := totalRows - targetHeight
-		if start > maxStart {
-			start = maxStart
-		}
-	}
-
-	ta := m.textarea
-	ta.MaxHeight = 0
-	ta.SetHeight(maxInt(targetHeight, totalRows))
-	ta.SetPromptFunc(2, func(lineIdx int) string {
-		if lineIdx == start {
-			return "> "
-		}
-		return "  "
-	})
-	ta, _ = ta.Update(nil)
-
-	rawView := strings.TrimRight(ta.View(), "\n")
-	if rawView == "" {
-		return []string{"> "}, []string{"> "}
-	}
-	rawLines := strings.Split(rawView, "\n")
-	plainLines := make([]string, len(rawLines))
-	for i, line := range rawLines {
-		plainLines[i] = ansi.Strip(line)
-	}
-	end := minInt(len(rawLines), start+targetHeight)
-	return rawLines[start:end], plainLines[start:end]
-}
-
-func (m *Model) inputCursorVisualRow() int {
-	value := m.textarea.Value()
-	if value == "" {
-		return 0
-	}
-	width := maxInt(1, m.textarea.Width())
-	lines := strings.Split(value, "\n")
-	cursorLine := m.textarea.Line()
-	lineInfo := m.textarea.LineInfo()
-	row := 0
-	for idx, line := range lines {
-		wrapped := ansi.HardwrapWc(line, width, true)
-		count := 1
-		if wrapped != "" {
-			count = strings.Count(wrapped, "\n") + 1
-		}
-		if idx == cursorLine {
-			offset := lineInfo.RowOffset
-			if offset < 0 {
-				offset = 0
-			}
-			if offset >= count {
-				offset = count - 1
-			}
-			return row + offset
-		}
-		row += count
-	}
-	return row
+	return m.regularInputPlainLines()
 }
 
 func insetRenderedBlock(text string, inset int) string {
@@ -787,17 +744,29 @@ func renderMultilineInput(prompt string, input string) string {
 
 func (m *Model) renderStatusHeader() string {
 	style := m.theme.StatusStyle().Width(maxInt(20, m.width))
-	return m.renderFixedRow(fixedSelectionHeader, m.headerRowText(), style)
+	return m.renderFixedRow(fixedSelectionHeader, m.headerRowText(), m.headerRowText(), style)
 }
 
 func (m *Model) renderHintRow() string {
 	style := m.theme.HintRowStyle().Width(maxInt(20, m.width))
-	return m.renderFixedRow(fixedSelectionHint, m.hintRowText(), style)
+	return m.renderFixedRow(fixedSelectionHint, m.hintRowText(), m.renderHintRowStyledText(), style)
 }
 
 func (m *Model) hintRowText() string {
 	w := maxInt(20, m.width)
 	return composeStyledFooter(w-(tuikit.StatusInset*2), m.buildHintText(), "")
+}
+
+func (m *Model) renderHintRowStyledText() string {
+	w := maxInt(20, m.width) - (tuikit.StatusInset * 2)
+	if w <= 0 {
+		return ""
+	}
+	text := m.buildHintText()
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	return composeStyledFooter(w, text, "")
 }
 
 func (m *Model) headerRowText() string {
@@ -810,7 +779,7 @@ func (m *Model) headerRowText() string {
 func (m *Model) renderStatusFooter() string {
 	style := m.theme.StatusStyle().Width(maxInt(20, m.width))
 	if m.fixedSelectionArea == fixedSelectionFooter {
-		return m.renderFixedRow(fixedSelectionFooter, m.footerRowText(), style)
+		return m.renderFixedRow(fixedSelectionFooter, m.footerRowText(), m.renderFooterRowStyledText(), style)
 	}
 	contentWidth := maxInt(1, maxInt(20, m.width)-(tuikit.StatusInset*2))
 	left := m.renderFooterLeft()
@@ -854,7 +823,7 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 		return vpView
 	}
 	total := m.viewport.TotalLineCount()
-	visible := maxInt(1, m.viewport.Height)
+	visible := maxInt(1, m.viewport.Height())
 	if total <= visible {
 		return vpView
 	}
@@ -866,14 +835,14 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 	maxStart := maxInt(0, visible-thumbHeight)
 	thumbStart := 0
 	if total > visible && maxStart > 0 {
-		thumbStart = (m.viewport.YOffset * maxStart) / maxInt(1, total-visible)
+		thumbStart = (m.viewport.YOffset() * maxStart) / maxInt(1, total-visible)
 	}
 	for i := range lines {
 		glyph := m.theme.ScrollbarTrackStyle().Render("│")
 		if i >= thumbStart && i < thumbStart+thumbHeight {
 			glyph = m.theme.ScrollbarThumbStyle().Render("█")
 		}
-		if pad := m.viewport.Width - lipgloss.Width(lines[i]); pad > 0 {
+		if pad := m.viewport.Width() - lipgloss.Width(lines[i]); pad > 0 {
 			lines[i] += strings.Repeat(" ", pad)
 		}
 		lines[i] += glyph
@@ -889,31 +858,51 @@ func (m *Model) footerRowText() string {
 }
 
 func (m *Model) footerLeftText() string {
-	if m.cfg.ModeLabel == nil {
-		return ""
+	mode := strings.TrimSpace(m.modeLabel())
+	helpText := m.footerHelpText()
+	switch {
+	case mode == "":
+		return helpText
+	case helpText == "":
+		return mode
+	default:
+		return mode + "  " + helpText
 	}
-	mode := strings.TrimSpace(m.cfg.ModeLabel())
-	if mode == "" {
-		return ""
-	}
-	return mode + "  shift+tab switch mode"
 }
 
 func (m *Model) renderFooterLeft() string {
-	if m.cfg.ModeLabel == nil {
-		return ""
-	}
-	mode := strings.TrimSpace(m.cfg.ModeLabel())
+	mode := strings.TrimSpace(m.modeLabel())
 	if mode == "" {
-		return ""
+		return m.renderHelp(m.currentFooterHelp())
 	}
 	modeStyle := m.theme.TextStyle().Bold(true)
 	if mode == "full_access" {
 		modeStyle = m.theme.WarnStyle().Bold(true)
 	}
 	modeText := modeStyle.Render(mode)
-	hintText := m.theme.HelpHintTextStyle().Render("shift+tab switch mode")
-	return modeText + "  " + hintText
+	helpText := m.renderHelp(m.currentFooterHelp())
+	if helpText == "" {
+		return modeText
+	}
+	return modeText + "  " + helpText
+}
+
+func (m *Model) renderFooterRowStyledText() string {
+	w := maxInt(20, m.width)
+	left := m.renderFooterLeft()
+	right := m.theme.TextStyle().Render(strings.TrimSpace(m.statusContext))
+	return composeStyledFooter(w-(tuikit.StatusInset*2), left, right)
+}
+
+func (m *Model) footerHelpText() string {
+	return ansi.Strip(m.renderHelp(m.currentFooterHelp()))
+}
+
+func (m *Model) modeLabel() string {
+	if m.cfg.ModeLabel == nil {
+		return ""
+	}
+	return strings.TrimSpace(m.cfg.ModeLabel())
 }
 
 func composeStyledFooter(width int, left string, right string) string {
@@ -1169,7 +1158,8 @@ func (m *Model) promptHintText() string {
 }
 
 func (m *Model) adjustTextareaHeight() {
-	height := desiredInputRows(m.textarea.Value(), m.textarea.Width(), maxInputBarRows)
+	displayValue, _ := composeInputDisplay(m.textarea.Value(), len([]rune(m.textarea.Value())), m.inputAttachments)
+	height := desiredComposerRows(displayValue, "", m.textarea.Width(), maxInputBarRows)
 	if height < tuikit.ComposerMinHeight {
 		height = tuikit.ComposerMinHeight
 	}

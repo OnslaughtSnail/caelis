@@ -185,6 +185,97 @@ func TestRuntime_Run(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunPreservesProvidedContentPartOrder(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	reqParts := []model.ContentPart{
+		{Type: model.ContentPartImage, FileName: "first.png", Data: "a"},
+		{Type: model.ContentPartText, Text: "Hi豆包"},
+		{Type: model.ContentPartImage, FileName: "second.png", Data: "b"},
+		{Type: model.ContentPartText, Text: "这两个是什么APP?"},
+	}
+
+	for _, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:      "app",
+		UserID:       "u",
+		SessionID:    "s-order",
+		Input:        "Hi豆包这两个是什么APP?",
+		ContentParts: reqParts,
+		Agent:        fixedAgent{},
+		Model:        llm,
+		CoreTools:    tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+
+	listed, err := store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "s-order"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) == 0 || listed[0] == nil {
+		t.Fatal("expected persisted user event")
+	}
+	if got := listed[0].Message.ContentParts; len(got) != len(reqParts) {
+		t.Fatalf("expected %d content parts, got %+v", len(reqParts), got)
+	}
+	for i := range reqParts {
+		if listed[0].Message.ContentParts[i] != reqParts[i] {
+			t.Fatalf("expected content part %d to remain in place, want %+v got %+v", i, reqParts[i], listed[0].Message.ContentParts[i])
+		}
+	}
+}
+
+func TestRuntimeRunPrependsInputWhenContentPartsHaveNoText(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	reqParts := []model.ContentPart{
+		{Type: model.ContentPartImage, FileName: "only.png", Data: "a"},
+	}
+
+	for _, runErr := range rt.Run(context.Background(), RunRequest{
+		AppName:      "app",
+		UserID:       "u",
+		SessionID:    "s-input-prefix",
+		Input:        "what is in this image?",
+		ContentParts: reqParts,
+		Agent:        fixedAgent{},
+		Model:        llm,
+		CoreTools:    tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+
+	listed, err := store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "s-input-prefix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) == 0 || listed[0] == nil {
+		t.Fatal("expected persisted user event")
+	}
+	got := listed[0].Message.ContentParts
+	if len(got) != 2 {
+		t.Fatalf("expected text+image content parts, got %+v", got)
+	}
+	if got[0].Type != model.ContentPartText || got[0].Text != "what is in this image?" {
+		t.Fatalf("expected input text prepended, got %+v", got[0])
+	}
+	if got[1] != reqParts[0] {
+		t.Fatalf("expected original image preserved, got %+v", got[1])
+	}
+}
+
 func TestRuntime_RunState_UsesInMemoryLifecycle(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})

@@ -294,10 +294,15 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 		Reset:  true,
 	})
 	go m.subagents.runDetachedSubagent(baseCtx, childReq, lineage)
+	startedAt := time.Now()
 	snapshot, err := controller.Wait(ctx, record, req.Yield)
 	if err != nil {
 		return task.Snapshot{}, err
 	}
+	if snapshot.Result == nil {
+		snapshot.Result = map[string]any{}
+	}
+	snapshot.Result["waited_ms"] = int(time.Since(startedAt).Milliseconds())
 	snapshot.Yielded = snapshot.Running
 	return snapshot, nil
 }
@@ -758,8 +763,13 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 			}
 			one.EventCursor = len(events)
 		}
-		one.State = runtimeTaskState(state.Status)
-		one.Running = state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval
+		if !state.HasLifecycle {
+			one.State = task.StateRunning
+			one.Running = true
+		} else {
+			one.State = runtimeTaskState(state.Status)
+			one.Running = state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval
+		}
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
 			"child_session_id": c.sessionID,

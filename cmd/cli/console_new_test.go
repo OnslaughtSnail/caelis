@@ -122,3 +122,20 @@ func TestHandleFork_KeepTokenUsageAndNoSessionIDInHint(t *testing.T) {
 		t.Fatalf("expected concise fork hint, got %q", hint)
 	}
 }
+
+func TestClipboardImageExtension(t *testing.T) {
+	tests := map[string]string{
+		"image/png":    ".png",
+		"image/jpeg":   ".jpg",
+		"image/gif":    ".gif",
+		"image/tiff":   ".tiff",
+		"image/webp":   ".webp",
+		"unknown/type": ".png",
+		"":             ".png",
+	}
+	for mime, want := range tests {
+		if got := clipboardImageExtension(mime); got != want {
+			t.Fatalf("clipboardImageExtension(%q) = %q, want %q", mime, got, want)
+		}
+	}
+}

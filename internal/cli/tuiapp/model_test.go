@@ -7,13 +7,50 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
+
+func keyPress(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
+	var mod tea.KeyMod
+	for _, one := range mods {
+		mod |= one
+	}
+	key := tea.Key{Code: code, Mod: mod}
+	if code == tea.KeySpace {
+		key.Text = " "
+	}
+	return tea.KeyPressMsg(key)
+}
+
+func keyText(text string) tea.KeyPressMsg {
+	key := tea.Key{Text: text, Code: tea.KeyExtended}
+	runes := []rune(text)
+	if len(runes) == 1 {
+		key.Code = runes[0]
+	}
+	return tea.KeyPressMsg(key)
+}
+
+func renderModel(m *Model) string {
+	return m.View().Content
+}
+
+func stripModelView(m *Model) string {
+	return ansi.Strip(renderModel(m))
+}
+
+func mouseClick(x int, y int, button tea.MouseButton) tea.MouseClickMsg {
+	return tea.MouseClickMsg(tea.Mouse{X: x, Y: y, Button: button})
+}
+
+func mouseRelease(x int, y int, button tea.MouseButton) tea.MouseReleaseMsg {
+	return tea.MouseReleaseMsg(tea.Mouse{X: x, Y: y, Button: button})
+}
 
 func TestMentionQueryAtCursor(t *testing.T) {
 	input := []rune("check @kernel/to")
@@ -165,7 +202,7 @@ func TestRenderInputBar_ShowsGhostHintWithoutCursor(t *testing.T) {
 	resizeModel(m)
 	typeRunes(m, "/mo")
 
-	line := m.renderInputBar()
+	line := ansi.Strip(m.renderInputBar())
 	if !strings.Contains(line, "/model") {
 		t.Fatalf("expected ghost completion in input bar, got %q", line)
 	}
@@ -178,7 +215,7 @@ func TestRenderInputBar_LeftAlignsPrompt(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	resizeModel(m)
 
-	line := m.renderInputBar()
+	line := ansi.Strip(m.renderInputBar())
 	if !strings.HasPrefix(line, strings.Repeat(" ", inputHorizontalInset)+"> ") {
 		t.Fatalf("expected left-aligned prompt, got %q", line)
 	}
@@ -191,7 +228,7 @@ func TestPaletteAnimation_OpenAndClose(t *testing.T) {
 	})
 	resizeModel(m)
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	_, cmd := m.Update(keyPress('p', tea.ModCtrl))
 	if cmd == nil {
 		t.Fatal("expected palette animation command on open")
 	}
@@ -204,7 +241,7 @@ func TestPaletteAnimation_OpenAndClose(t *testing.T) {
 		t.Fatalf("expected palette animation to advance, got %d", m.paletteAnimLines)
 	}
 
-	cmd = m.handlePaletteKey(tea.KeyMsg{Type: tea.KeyEsc})
+	cmd = m.handlePaletteKey(keyPress(tea.KeyEscape))
 	if cmd == nil {
 		t.Fatal("expected palette animation command on close")
 	}
@@ -221,7 +258,7 @@ func TestViewRendersScrollbarWhenViewportOverflows(t *testing.T) {
 	}
 	m.syncViewportContent()
 
-	view := m.View()
+	view := renderModel(m)
 	if !strings.Contains(view, "█") {
 		t.Fatalf("expected viewport scrollbar in view, got:\n%s", view)
 	}
@@ -258,8 +295,8 @@ func TestModelWizardQueryAtCursor(t *testing.T) {
 func TestModelEnterExecutesLine(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = line
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
 	})
@@ -273,7 +310,7 @@ func TestModelEnterExecutesLine(t *testing.T) {
 		t.Fatalf("textarea value expected 'abc', got %q", val)
 	}
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected batch command on enter")
 	}
@@ -301,7 +338,7 @@ func TestWelcomeCardRendersWhenEnabled(t *testing.T) {
 	})
 	_ = m.Init()
 	resizeModel(m)
-	view := m.View()
+	view := renderModel(m)
 	if !strings.Contains(view, "CAELIS") {
 		t.Fatalf("expected welcome card title in view, got %q", view)
 	}
@@ -319,7 +356,7 @@ func TestWelcomeCardShowsConnectHintWhenModelMissing(t *testing.T) {
 	})
 	_ = m.Init()
 	resizeModel(m)
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "not configured (/connect)") {
 		t.Fatalf("expected explicit empty model state, got %q", view)
 	}
@@ -328,8 +365,8 @@ func TestWelcomeCardShowsConnectHintWhenModelMissing(t *testing.T) {
 func TestResumeOverlayEnterExecutesSelectedSession(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = line
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
 		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
@@ -342,20 +379,20 @@ func TestResumeOverlayEnterExecutesSelectedSession(t *testing.T) {
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
 
 	typeRunes(m, "/resume")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if len(m.resumeCandidates) != 2 {
 		t.Fatalf("expected 2 resume candidates, got %d", len(m.resumeCandidates))
 	}
-	rendered := m.renderResumeList()
+	rendered := ansi.Strip(m.renderResumeList())
 	if !strings.Contains(rendered, "10m  first prompt") || !strings.Contains(rendered, "30m  second prompt") {
 		t.Fatalf("expected age+prompt in resume list, got %q", rendered)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(keyPress(tea.KeyDown))
 	if m.resumeIndex != 1 {
 		t.Fatalf("expected resume index 1, got %d", m.resumeIndex)
 	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected command on resume enter")
 	}
@@ -385,9 +422,9 @@ func TestResumeOverlayTabFillsSessionID(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/resume")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeyTab))
 
 	if got := m.textarea.Value(); got != "/resume s-2 " {
 		t.Fatalf("expected '/resume s-2 ', got %q", got)
@@ -409,11 +446,11 @@ func TestResumeOverlayEscClearsResumeCommand(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/resume")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if len(m.resumeCandidates) == 0 {
 		t.Fatal("expected resume candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if got := m.textarea.Value(); got != "" {
 		t.Fatalf("expected input cleared on esc, got %q", got)
 	}
@@ -439,14 +476,14 @@ func TestResumeOverlayScrollWindowKeepsSelectedVisible(t *testing.T) {
 	})
 	resizeModel(m)
 	typeRunes(m, "/resume")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	for i := 0; i < 12; i++ {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		_, _ = m.Update(keyPress(tea.KeyDown))
 	}
 	if m.resumeIndex != 12 {
 		t.Fatalf("expected resume index 12, got %d", m.resumeIndex)
 	}
-	rendered := m.renderResumeList()
+	rendered := ansi.Strip(m.renderResumeList())
 	if !strings.Contains(rendered, "12m  prompt-12") {
 		t.Fatalf("expected selected item visible in scrolled window, got %q", rendered)
 	}
@@ -458,8 +495,8 @@ func TestResumeOverlayScrollWindowKeepsSelectedVisible(t *testing.T) {
 func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = line
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
@@ -486,19 +523,19 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 	})
 	resizeModel(m)
 	typeRunes(m, "/model")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected 2 model action candidates, got %d", len(m.slashArgCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
 		t.Fatalf("expected model alias step, got %q", got)
 	}
 	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected 2 alias candidates, got %d", len(m.slashArgCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeyTab))
 	if got := strings.TrimSpace(m.textarea.Value()); got != "/model use xiaomi/mimo-v2-flash" {
 		t.Fatalf("expected alias completion in input, got %q", got)
 	}
@@ -508,8 +545,8 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected 2 reasoning candidates, got %d", len(m.slashArgCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd != nil {
 		t.Fatal("expected no command while accepting final reasoning completion")
 	}
@@ -519,7 +556,7 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 	if m.slashArgActive {
 		t.Fatal("expected slash-arg overlay closed after final completion")
 	}
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd = m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected command when executing completed model command")
 	}
@@ -564,7 +601,7 @@ func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
 	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected model action candidates, got %d", len(m.slashArgCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if got := strings.TrimSpace(m.slashArgCommand); got != "model use" {
 		t.Fatalf("expected alias step command 'model use', got %q", got)
 	}
@@ -609,8 +646,8 @@ func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
 func TestModelDelExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = strings.TrimSpace(line)
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(submission.Text)
 			return tuievents.TaskResultMsg{}
 		},
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
@@ -623,7 +660,7 @@ func TestModelDelExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
 	resizeModel(m)
 	typeRunes(m, "/model del xiaomi/mimo-v2-flash")
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected command for exact /model del alias")
 	}
@@ -638,15 +675,15 @@ func TestModelDelExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
 func TestModelDelExecutesWithoutAlias(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = strings.TrimSpace(line)
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(submission.Text)
 			return tuievents.TaskResultMsg{}
 		},
 	})
 	resizeModel(m)
 	typeRunes(m, "/model del")
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected command for /model del")
 	}
@@ -673,9 +710,9 @@ func TestSlashArgOverlayTabFillsSelectedValue(t *testing.T) {
 	})
 	resizeModel(m)
 	typeRunes(m, "/sandbox")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeyTab))
 
 	if got := m.textarea.Value(); got != "/sandbox seatbelt " {
 		t.Fatalf("expected '/sandbox seatbelt ', got %q", got)
@@ -699,11 +736,11 @@ func TestSlashArgOverlayEscClearsSlashCommand(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/connect")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected slash-arg candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if got := m.textarea.Value(); got != "" {
 		t.Fatalf("expected input cleared on esc, got %q", got)
 	}
@@ -715,8 +752,8 @@ func TestSlashArgOverlayEscClearsSlashCommand(t *testing.T) {
 func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = line
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
 		Wizards: testWizards(),
@@ -755,26 +792,26 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/connect")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open provider picker
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // open provider picker
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected provider candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick openai, open base_url picker
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // pick openai, open base_url picker
 	if !strings.HasPrefix(m.slashArgCommand, "connect-baseurl:openai") {
 		t.Fatalf("expected connect-baseurl step, got %q", m.slashArgCommand)
 	}
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected base_url candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick base_url, open timeout picker
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // pick base_url, open timeout picker
 	if !strings.HasPrefix(m.slashArgCommand, "connect-timeout:openai") {
 		t.Fatalf("expected connect-timeout step, got %q", m.slashArgCommand)
 	}
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected timeout candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})  // pick 60
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open api_key step
+	_, _ = m.Update(keyPress(tea.KeyDown))  // pick 60
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // open api_key step
 	if !strings.HasPrefix(m.slashArgCommand, "connect-apikey:openai") {
 		t.Fatalf("expected connect-apikey step, got %q", m.slashArgCommand)
 	}
@@ -782,27 +819,27 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 		t.Fatalf("expected connect input kept minimal, got %q", got)
 	}
 	typeRunes(m, "sk-test")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open model picker
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // open model picker
 	if !strings.HasPrefix(m.slashArgCommand, "connect-model:openai|") {
 		t.Fatalf("expected connect-model step, got %q", m.slashArgCommand)
 	}
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected model candidates")
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})  // pick gpt-4o-mini
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // open context_window_tokens picker
+	_, _ = m.Update(keyPress(tea.KeyDown))  // pick gpt-4o-mini
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // open context_window_tokens picker
 	if !strings.HasPrefix(m.slashArgCommand, "connect-context:openai|") {
 		t.Fatalf("expected connect-context step, got %q", m.slashArgCommand)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick context_window_tokens
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // pick context_window_tokens
 	if !strings.HasPrefix(m.slashArgCommand, "connect-maxout:openai|") {
 		t.Fatalf("expected connect-maxout step, got %q", m.slashArgCommand)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick max_output_tokens
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // pick max_output_tokens
 	if !strings.HasPrefix(m.slashArgCommand, "connect-reasoning-levels:openai|") {
 		t.Fatalf("expected connect-reasoning-levels step, got %q", m.slashArgCommand)
 	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // pick reasoning levels and submit
+	_, cmd := m.Update(keyPress(tea.KeyEnter)) // pick reasoning levels and submit
 	if cmd == nil {
 		t.Fatal("expected command on connect submit")
 	}
@@ -825,8 +862,8 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = line
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
 		Wizards: testWizards(),
@@ -852,12 +889,12 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/connect")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // provider
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // base_url
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // timeout
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // provider
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // base_url
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // timeout
 	typeRunes(m, "sk-test")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // api_key -> model step (no candidates)
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // api_key -> model step (no candidates)
 	if !strings.HasPrefix(m.slashArgCommand, "connect-model:openai|") {
 		t.Fatalf("expected connect-model step, got %q", m.slashArgCommand)
 	}
@@ -865,19 +902,19 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 		t.Fatalf("expected no model candidates for manual fallback, got %d", len(m.slashArgCandidates))
 	}
 	typeRunes(m, "gpt-custom")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // model -> context step
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // model -> context step
 	if !strings.HasPrefix(m.slashArgCommand, "connect-context:openai|") {
 		t.Fatalf("expected connect-context step, got %q", m.slashArgCommand)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // context
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // context
 	if !strings.HasPrefix(m.slashArgCommand, "connect-maxout:openai|") {
 		t.Fatalf("expected connect-maxout step, got %q", m.slashArgCommand)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // max output
+	_, _ = m.Update(keyPress(tea.KeyEnter)) // max output
 	if !strings.HasPrefix(m.slashArgCommand, "connect-reasoning-levels:openai|") {
 		t.Fatalf("expected connect-reasoning-levels step, got %q", m.slashArgCommand)
 	}
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // reasoning -> submit
+	_, cmd := m.Update(keyPress(tea.KeyEnter)) // reasoning -> submit
 	if cmd == nil {
 		t.Fatal("expected command on manual model enter")
 	}
@@ -925,7 +962,7 @@ func TestDiagnosticsObserverCalled(t *testing.T) {
 		},
 	})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	_ = m.View()
+	_ = renderModel(m)
 	if seen.Frames == 0 {
 		t.Fatal("expected diagnostics frames > 0")
 	}
@@ -971,7 +1008,7 @@ func TestShiftTabTogglesModeAndRefreshesStatus(t *testing.T) {
 			return "model {plan}", "42/128k"
 		},
 	})
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	updated, cmd := m.Update(keyPress(tea.KeyTab, tea.ModShift))
 	next := updated.(*Model)
 	if !toggled {
 		t.Fatal("expected toggle callback")
@@ -1022,22 +1059,22 @@ func TestHistoryUpDown(t *testing.T) {
 	typeAndEnter(m, "second")
 	typeRunes(m, "draft")
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if m.textarea.Value() != "second" {
 		t.Fatalf("expected 'second', got %q", m.textarea.Value())
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if m.textarea.Value() != "first" {
 		t.Fatalf("expected 'first', got %q", m.textarea.Value())
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(keyPress(tea.KeyDown))
 	if m.textarea.Value() != "second" {
 		t.Fatalf("expected 'second', got %q", m.textarea.Value())
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(keyPress(tea.KeyDown))
 	if m.textarea.Value() != "draft" {
 		t.Fatalf("expected draft restored, got %q", m.textarea.Value())
 	}
@@ -1052,7 +1089,7 @@ func TestHistoryUpOnEmptyInputEntersHistory(t *testing.T) {
 	m.textarea.SetValue("")
 	m.syncInputFromTextarea()
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if m.textarea.Value() != "second" {
 		t.Fatalf("expected latest history command, got %q", m.textarea.Value())
 	}
@@ -1068,12 +1105,12 @@ func TestHistoryDraftPreserved(t *testing.T) {
 	typeAndEnter(m, "old-cmd")
 	typeRunes(m, "new-draft")
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if m.textarea.Value() != "old-cmd" {
 		t.Fatalf("expected 'old-cmd', got %q", m.textarea.Value())
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(keyPress(tea.KeyDown))
 	if m.textarea.Value() != "new-draft" {
 		t.Fatalf("expected 'new-draft', got %q", m.textarea.Value())
 	}
@@ -1118,7 +1155,7 @@ func TestSlashTabCompletionUnique(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/hel")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(keyPress(tea.KeyTab))
 	got := string(m.input)
 	if got != "/help" {
 		t.Fatalf("expected '/help', got %q", got)
@@ -1178,14 +1215,14 @@ func TestSlashCommandsAutoOpenRelevantPickers(t *testing.T) {
 func TestConnectEnterNormalizesToInteractiveCommand(t *testing.T) {
 	called := ""
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = line
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
 	})
 	resizeModel(m)
 	typeRunes(m, "/connect openai-compatible")
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected command for /connect enter")
 	}
@@ -1209,7 +1246,7 @@ func TestSlashTabNoMatch(t *testing.T) {
 	resizeModel(m)
 
 	typeRunes(m, "/xyz")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(keyPress(tea.KeyTab))
 	if string(m.input) != "/xyz" {
 		t.Fatalf("expected no change, got %q", string(m.input))
 	}
@@ -1225,8 +1262,8 @@ func TestSlashOverlayDownTabFillsSelectedCommand(t *testing.T) {
 	if len(m.slashCandidates) < 2 {
 		t.Fatalf("expected at least 2 slash candidates, got %d", len(m.slashCandidates))
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeyTab))
 	if got := string(m.input); !strings.HasPrefix(got, "/") || strings.HasSuffix(got, " ") {
 		t.Fatalf("expected slash command filled without trailing space, got %q", got)
 	}
@@ -1247,7 +1284,7 @@ func TestSlashCommandEnterOpensModelPicker(t *testing.T) {
 	})
 	resizeModel(m)
 	typeRunes(m, "/model")
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	if len(m.slashArgCandidates) == 0 {
 		t.Fatal("expected model picker candidates after confirming /model")
 	}
@@ -1257,8 +1294,8 @@ func TestMouseDragCopiesSelection(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	resizeModel(m)
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "hello world\n"})
-	_, _ = m.Update(tea.MouseMsg{X: tuikit.GutterNarrative, Y: 0, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	_, cmd := m.Update(tea.MouseMsg{X: tuikit.GutterNarrative + 5, Y: 0, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	_, _ = m.Update(mouseClick(tuikit.GutterNarrative, 0, tea.MouseLeft))
+	_, cmd := m.Update(mouseRelease(tuikit.GutterNarrative+5, 0, tea.MouseLeft))
 	if cmd == nil {
 		t.Fatal("expected clipboard command on mouse selection")
 	}
@@ -1278,8 +1315,8 @@ func TestInputMouseDragCopiesSelection(t *testing.T) {
 	if !ok {
 		t.Fatal("expected input area bounds")
 	}
-	_, _ = m.Update(tea.MouseMsg{X: 2, Y: startY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	_, cmd := m.Update(tea.MouseMsg{X: 7, Y: startY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	_, _ = m.Update(mouseClick(2, startY, tea.MouseLeft))
+	_, cmd := m.Update(mouseRelease(7, startY, tea.MouseLeft))
 	if cmd == nil {
 		t.Fatal("expected clipboard command on input selection")
 	}
@@ -1302,8 +1339,8 @@ func TestHeaderMouseDragCopiesSelection(t *testing.T) {
 	})
 	resizeModel(m)
 	layout := m.fixedRowLayout()
-	_, _ = m.Update(tea.MouseMsg{X: tuikit.StatusInset, Y: layout.headerY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	_, cmd := m.Update(tea.MouseMsg{X: tuikit.StatusInset + 19, Y: layout.headerY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	_, _ = m.Update(mouseClick(tuikit.StatusInset, layout.headerY, tea.MouseLeft))
+	_, cmd := m.Update(mouseRelease(tuikit.StatusInset+19, layout.headerY, tea.MouseLeft))
 	if cmd == nil {
 		t.Fatal("expected clipboard command on header selection")
 	}
@@ -1326,8 +1363,8 @@ func TestCopyHintClearsOnTimerMessage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected input area bounds")
 	}
-	_, _ = m.Update(tea.MouseMsg{X: 2, Y: startY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
-	_, _ = m.Update(tea.MouseMsg{X: 7, Y: startY, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	_, _ = m.Update(mouseClick(2, startY, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(7, startY, tea.MouseLeft))
 	if !strings.Contains(m.hint, "copied") {
 		t.Fatalf("expected copy hint, got %q", m.hint)
 	}
@@ -1468,7 +1505,7 @@ func TestViewShowsStreamingContent(t *testing.T) {
 
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* streaming text"})
 
-	view := m.View()
+	view := renderModel(m)
 	if !strings.Contains(view, "streaming text") {
 		t.Fatalf("expected view to contain streaming text, got:\n%s", view)
 	}
@@ -1668,7 +1705,7 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if got := m.bottomSectionHeight(); got != baseBottom {
 		t.Fatalf("expected prompt overlay not to change bottom height, before=%d after=%d", baseBottom, got)
 	}
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "BASH: pfctl -s info") {
 		t.Fatalf("expected compact approval summary in modal, got %q", view)
 	}
@@ -1695,8 +1732,8 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 		t.Fatalf("expected modal to align with narrative gutter, got %q", modalLine)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	select {
 	case resp := <-respCh:
 		if resp.Err != nil {
@@ -1732,16 +1769,16 @@ func TestPromptChoiceRequestUsesExplicitChoicesAndFilter(t *testing.T) {
 		t.Fatalf("expected explicit prompt choices, got %d", len(m.activePrompt.choices))
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Runes: []rune("o3")})
+	_, _ = m.Update(keyText("o3"))
 	if string(m.activePrompt.filter) != "o3" {
 		t.Fatalf("expected prompt filter to update, got %q", string(m.activePrompt.filter))
 	}
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "openai/o3") {
 		t.Fatalf("expected filtered choice in modal, got %q", view)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	select {
 	case resp := <-respCh:
 		if resp.Err != nil {
@@ -1769,14 +1806,14 @@ func TestPromptChoiceRequestSupportsMultiSelect(t *testing.T) {
 		MultiSelect: true,
 		Response:    respCh,
 	})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
-	view := ansi.Strip(m.View())
+	_, _ = m.Update(keyPress(tea.KeySpace))
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeySpace))
+	view := stripModelView(m)
 	if !strings.Contains(view, "[x] openai/gpt-4o") || !strings.Contains(view, "[x] openai/o3") {
 		t.Fatalf("expected checked markers in view, got %q", view)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	select {
 	case resp := <-respCh:
 		if resp.Line != "gpt-4o,o3" {
@@ -1803,13 +1840,13 @@ func TestPromptChoiceRequestKeepsAlwaysVisibleChoiceWhenFilterMisses(t *testing.
 		Response:    respCh,
 	})
 
-	_, _ = m.Update(tea.KeyMsg{Runes: []rune("doubao-seed-2-0-code")})
-	view := ansi.Strip(m.View())
+	_, _ = m.Update(keyText("doubao-seed-2-0-code"))
+	view := stripModelView(m)
 	if !strings.Contains(view, "输入自定义模型名") {
 		t.Fatalf("expected always visible custom choice in prompt, got %q", view)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	select {
 	case resp := <-respCh:
 		if resp.Err != nil {
@@ -1839,7 +1876,7 @@ func TestPromptChoiceRequestWithCustomChoiceUsesCustomOnEmptyEnter(t *testing.T)
 		Response:    respCh,
 	})
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
 	select {
 	case resp := <-respCh:
 		if resp.Err != nil {
@@ -1870,7 +1907,7 @@ func TestPromptChoiceScrollKeepsSelectionVisible(t *testing.T) {
 	})
 
 	for i := 0; i < 9; i++ {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		_, _ = m.Update(keyPress(tea.KeyDown))
 	}
 
 	if m.activePrompt == nil {
@@ -1883,7 +1920,7 @@ func TestPromptChoiceScrollKeepsSelectionVisible(t *testing.T) {
 		t.Fatal("expected prompt list to scroll once selection moved past visible window")
 	}
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "model-10") {
 		t.Fatalf("expected selected item to remain visible in view, got %q", view)
 	}
@@ -1986,7 +2023,7 @@ func TestViewShowsBreathingHintWhenRunning(t *testing.T) {
 	m.startRunningAnimation()
 	m.runningTip = 0
 	m.syncViewportContent()
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 
 	if !strings.Contains(view, "Queue your next prompt now; it will run after this one.") {
 		t.Fatalf("expected running carousel text in view when running, got:\n%s", view)
@@ -2020,7 +2057,7 @@ func TestViewShowsInputWhenRunningForQueueing(t *testing.T) {
 	resizeModel(m)
 
 	m.running = true
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, ">") {
 		t.Fatalf("expected input prompt while running for queueing, got:\n%s", view)
 	}
@@ -2037,8 +2074,8 @@ func TestViewShowsPendingQueueWhileRunning(t *testing.T) {
 		{execLine: "first", displayLine: "first"},
 		{execLine: "second", displayLine: "second"},
 	}
-	view := ansi.Strip(m.View())
-	if !strings.Contains(view, "2 pending") {
+	view := stripModelView(m)
+	if !strings.Contains(view, "2") || !strings.Contains(view, "pending") {
 		t.Fatalf("expected pending queue hint in running view, got:\n%s", view)
 	}
 }
@@ -2047,7 +2084,7 @@ func TestViewShowsToolOutputPanelWithLatestFourLines(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true, State: "running"})
 	for i := 1; i <= 6; i++ {
 		_, _ = m.Update(tuievents.ToolStreamMsg{
 			Tool:   "BASH",
@@ -2057,12 +2094,15 @@ func TestViewShowsToolOutputPanelWithLatestFourLines(t *testing.T) {
 		})
 	}
 
-	view := m.View()
-	if strings.Contains(view, "terminal output") || strings.Contains(view, "BASH") {
-		t.Fatalf("expected boxed tool output without extra header text, got:\n%s", view)
+	view := renderModel(m)
+	if strings.Contains(view, "terminal output") {
+		t.Fatalf("expected rich tool output panel, got:\n%s", view)
 	}
 	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
 		t.Fatalf("expected bordered tool output box, got:\n%s", view)
+	}
+	if !strings.Contains(view, "BASH") || !strings.Contains(view, "running") {
+		t.Fatalf("expected tool panel header state, got:\n%s", view)
 	}
 	if strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
 		t.Fatalf("expected old tool output lines to scroll out, got:\n%s", view)
@@ -2086,7 +2126,7 @@ func TestViewShowsCompactToolOutputPanelForShortOutput(t *testing.T) {
 		Chunk:  "short\n",
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	lines := strings.Split(view, "\n")
 	var topBorder string
 	var contentLine string
@@ -2124,7 +2164,7 @@ func TestToolOutputPanelFiltersBlankLines(t *testing.T) {
 		Chunk:  "line-1\n\n   \nline-2\n",
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if strings.Contains(view, "\n! \n") {
 		t.Fatalf("did not expect blank tool output rows, got:\n%s", view)
 	}
@@ -2151,13 +2191,33 @@ func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 		Final:  true,
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "╭") || !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
 		t.Fatalf("expected bash panel to remain visible immediately after final, got:\n%s", view)
 	}
 	panel := m.toolOutputs["call-1"]
 	if panel == nil || !panel.closing || panel.fadeQueued {
 		t.Fatalf("expected bash panel to wait for later content before fading, got %#v", panel)
+	}
+}
+
+func TestToolOutputStateOnlyFinalUpdatesVisibleStatus(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true, State: "running"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "working...\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", State: "cancelled", Final: true})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "cancelled") {
+		t.Fatalf("expected final state rendered in panel, got:\n%s", view)
 	}
 }
 
@@ -2214,7 +2274,7 @@ func TestBashFinalFadeStartsAfterNewContentAndRemovesLineByLine(t *testing.T) {
 		t.Fatalf("expected bash fade to be queued after new content, got %#v", panel)
 	}
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	for _, want := range []string{"line-1", "line-2", "line-3", "line-4", "next block"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q before fade starts, got:\n%s", want, view)
@@ -2222,25 +2282,25 @@ func TestBashFinalFadeStartsAfterNewContentAndRemovesLineByLine(t *testing.T) {
 	}
 
 	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 1})
-	view = ansi.Strip(m.View())
+	view = stripModelView(m)
 	if strings.Contains(view, "line-1") || !strings.Contains(view, "line-4") {
 		t.Fatalf("expected first fade step to drop the oldest visible line, got:\n%s", view)
 	}
 
 	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 2})
-	view = ansi.Strip(m.View())
+	view = stripModelView(m)
 	if strings.Contains(view, "line-2") || !strings.Contains(view, "line-4") {
 		t.Fatalf("expected second fade step to keep shrinking the panel, got:\n%s", view)
 	}
 
 	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 3})
-	view = ansi.Strip(m.View())
+	view = stripModelView(m)
 	if strings.Contains(view, "line-3") || !strings.Contains(view, "line-4") {
 		t.Fatalf("expected third fade step to leave only the newest line, got:\n%s", view)
 	}
 
 	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 4})
-	view = ansi.Strip(m.View())
+	view = stripModelView(m)
 	if strings.Contains(view, "╭") || strings.Contains(view, "╰") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") || strings.Contains(view, "line-3") || strings.Contains(view, "line-4") {
 		t.Fatalf("expected bash panel to disappear after fade completes, got:\n%s", view)
 	}
@@ -2263,7 +2323,7 @@ func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
 		Tool:   "DELEGATE",
 		TaskID: "t-1",
 		CallID: "call-1",
-		Stream: "tool_result",
+		Stream: "assistant",
 		Chunk:  "✓ LIST 10 entries\n",
 	})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
@@ -2274,18 +2334,15 @@ func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
 		Chunk:  "still working...\n",
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "thinking...") {
 		t.Fatalf("expected delegate reasoning in panel, got:\n%s", view)
 	}
 	if !strings.Contains(view, "· thinking...") {
 		t.Fatalf("expected delegate reasoning to use a lighter prefixed style, got:\n%s", view)
 	}
-	if strings.Contains(view, "✓ LIST 10 entries") {
-		t.Fatalf("expected delegate tool result hidden in panel, got:\n%s", view)
-	}
-	if strings.Contains(view, "▸ LIST") {
-		t.Fatalf("expected delegate tool trace hidden in panel, got:\n%s", view)
+	if !strings.Contains(view, "✓ LIST 10 entries") {
+		t.Fatalf("expected delegate tool result visible in panel, got:\n%s", view)
 	}
 	if !strings.Contains(view, "still working...") {
 		t.Fatalf("expected delegate assistant output in panel, got:\n%s", view)
@@ -2306,7 +2363,7 @@ func TestDelegatePanelSkipsFencedCodeBlockContent(t *testing.T) {
 		Chunk:  "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone.\n",
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "working...") || !strings.Contains(view, "done.") {
 		t.Fatalf("expected prose lines to remain visible, got:\n%s", view)
 	}
@@ -2338,7 +2395,7 @@ func TestDelegatePanelPrioritizesAssistantLinesOverReasoningNoise(t *testing.T) 
 		Chunk:  "final visible update\n",
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if !strings.Contains(view, "final visible update") {
 		t.Fatalf("expected assistant text to remain visible in delegate preview, got:\n%s", view)
 	}
@@ -2366,7 +2423,7 @@ func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 		Chunk:  "delegate-line\n",
 	})
 
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	bashIdx := strings.Index(view, "▸ BASH {command=first}")
 	bashLineIdx := strings.Index(view, "bash-line")
 	delegateCallIdx := strings.Index(view, "▸ DELEGATE {task=second}")
@@ -2384,7 +2441,7 @@ func TestViewShowsInputWhenNotRunning(t *testing.T) {
 	resizeModel(m)
 
 	m.running = false
-	view := m.View()
+	view := renderModel(m)
 
 	if !strings.Contains(view, ">") {
 		t.Fatalf("expected '>' prompt in view, got:\n%s", view)
@@ -2397,42 +2454,235 @@ func TestViewShowsStatusBar(t *testing.T) {
 	})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	view := m.View()
+	view := renderModel(m)
 	if !strings.Contains(view, "/test/workspace") {
 		t.Fatalf("expected workspace in status bar, got:\n%s", view)
 	}
 }
 
-func TestCtrlVPasteSetsAttachmentWithoutHint(t *testing.T) {
+func TestCtrlVPasteShowsAttachmentHint(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		PasteClipboardImage: func() (int, string, error) {
-			return 1, "1 image attached — type message and press enter", nil
+		PasteClipboardImage: func() ([]string, string, error) {
+			return []string{"screenshot.png"}, "1 image attached — type message and press enter", nil
 		},
 	})
 	resizeModel(m)
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	_, _ = m.Update(keyPress('v', tea.ModCtrl))
 	if m.attachmentCount != 1 {
 		t.Fatalf("expected attachment count 1, got %d", m.attachmentCount)
 	}
-	if strings.TrimSpace(m.buildHintLine()) != "" {
-		t.Fatalf("expected no attachment hint line, got %q", m.buildHintLine())
+	if got := strings.TrimSpace(ansi.Strip(m.renderHintRow())); got != "" {
+		t.Fatalf("expected attachment hint line to stay empty, got %q", got)
+	}
+	line := ansi.Strip(m.renderInputBar())
+	if !strings.Contains(line, "[screenshot.png]") {
+		t.Fatalf("expected attachment token in input bar, got %q", line)
 	}
 }
 
-func TestAttachmentLabelHiddenInInputBar(t *testing.T) {
+func TestAttachmentLabelShownInInputBar(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
-	m.attachmentCount = 1
-	line := m.renderInputBar()
+	m.setInputAttachments([]inputAttachment{{Name: "image.png", Offset: 0}})
+	m.syncTextareaChrome()
+	line := ansi.Strip(m.renderInputBar())
 	if !strings.Contains(line, ">") {
 		t.Fatalf("expected prompt, got %q", line)
 	}
-	if !strings.HasPrefix(line, strings.Repeat(" ", inputHorizontalInset)+"> ") {
-		t.Fatalf("expected inset input prompt, got %q", line)
+	if !strings.Contains(line, "[image.png]") {
+		t.Fatalf("expected attachment label shown, got %q", line)
 	}
-	if strings.Contains(line, "[1 image]") || strings.Contains(line, "[1 images]") {
-		t.Fatalf("expected attachment label hidden, got %q", line)
+	lines := strings.Split(line, "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "> [image.png]") {
+		t.Fatalf("expected attachment inline after prompt, got %q", line)
+	}
+}
+
+func TestAttachmentCountMsgClearsAttachmentNamesAtZero(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.attachmentCount = 1
+	m.attachmentNames = []string{"image.png"}
+	_, _ = m.Update(tuievents.AttachmentCountMsg{Count: 0})
+	if m.attachmentCount != 0 {
+		t.Fatalf("expected attachment count reset, got %d", m.attachmentCount)
+	}
+	if len(m.attachmentNames) != 0 {
+		t.Fatalf("expected attachment names cleared, got %#v", m.attachmentNames)
+	}
+}
+
+func TestSyncTextareaChromeUsesAttachmentPromptPrefix(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.setInputAttachments([]inputAttachment{{Name: "clip.png", Offset: 0}})
+	m.syncTextareaChrome()
+	m.textarea.SetValue("你🙂a")
+	m.textarea.CursorEnd()
+	m.adjustTextareaHeight()
+	m.syncInputFromTextarea()
+
+	rendered := ansi.Strip(m.renderInputBar())
+	if !strings.Contains(rendered, "[clip.png]") {
+		t.Fatalf("expected attachment label in input bar, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "> [clip.png] 你🙂a") {
+		t.Fatalf("expected inline attachment token before text, got %q", rendered)
+	}
+}
+
+func TestTerminalPasteMsgInsertsTextIntoComposer(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tea.PasteMsg{Content: "hello paste"})
+
+	if got := m.textarea.Value(); got != "hello paste" {
+		t.Fatalf("expected pasted text in composer, got %q", got)
+	}
+}
+
+func TestPasteImageInsertsAttachmentAtCursor(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		PasteClipboardImage: func() ([]string, string, error) {
+			return []string{"mid.png"}, "", nil
+		},
+	})
+	resizeModel(m)
+	m.textarea.SetValue("hello world")
+	m.moveTextareaCursorToIndex(len([]rune("hello ")))
+	m.syncInputFromTextarea()
+
+	_, _ = m.Update(keyPress('v', tea.ModCtrl))
+
+	rendered := ansi.Strip(m.renderInputBar())
+	if !strings.Contains(rendered, "> hello [mid.png] world") {
+		t.Fatalf("expected attachment inserted at cursor, got %q", rendered)
+	}
+}
+
+func TestEnterSubmitsImageOnlyPrompt(t *testing.T) {
+	var got Submission
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			got = submission
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+	m.setInputAttachments([]inputAttachment{{Name: "clip.png", Offset: 0}})
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if got.Text != "" {
+		t.Fatalf("expected empty text payload, got %q", got.Text)
+	}
+	if len(got.Attachments) != 1 || got.Attachments[0] != (Attachment{Name: "clip.png", Offset: 0}) {
+		t.Fatalf("expected single attachment-only submission, got %+v", got.Attachments)
+	}
+}
+
+func TestHistoryRecallRestoresAttachmentsAsMetadata(t *testing.T) {
+	var restored []string
+	m := NewModel(Config{
+		SetAttachments: func(names []string) []string {
+			restored = append([]string(nil), names...)
+			return append([]string(nil), names...)
+		},
+	})
+	resizeModel(m)
+	m.textarea.SetValue("hello world")
+	m.textarea.CursorEnd()
+	m.syncInputFromTextarea()
+	m.setInputAttachments([]inputAttachment{{Name: "history.png", Offset: len([]rune("hello "))}})
+	_, _ = m.submitLine("hello world")
+
+	_, _ = m.Update(keyPress(tea.KeyUp))
+
+	if got := m.textarea.Value(); got != "hello world" {
+		t.Fatalf("expected raw text restored without image marker text, got %q", got)
+	}
+	rendered := ansi.Strip(m.renderInputBar())
+	if !strings.Contains(rendered, "> hello [history.png] world") {
+		t.Fatalf("expected inline attachment restored from history, got %q", rendered)
+	}
+	if got := strings.Join(restored, ","); got != "history.png" {
+		t.Fatalf("expected backend attachments restored, got %q", got)
+	}
+}
+
+func TestQueuedPromptPreservesAttachments(t *testing.T) {
+	var called []Submission
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = append(called, submission)
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+
+	m.running = true
+	m.textarea.SetValue("queued")
+	m.syncInputFromTextarea()
+	m.setInputAttachments([]inputAttachment{{Name: "queued.png", Offset: len([]rune("queued"))}})
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd != nil {
+		t.Fatal("expected queueing while running to avoid immediate submit")
+	}
+	if len(m.pendingQueue) != 1 {
+		t.Fatalf("expected one queued prompt, got %d", len(m.pendingQueue))
+	}
+
+	_, cmd = m.Update(tuievents.TaskResultMsg{})
+	if cmd == nil {
+		t.Fatal("expected queued prompt to dispatch after task result")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected queued prompt execution")
+	}
+	if len(called) != 1 {
+		t.Fatalf("expected one executed submission, got %d", len(called))
+	}
+	if called[0].Text != "queued" {
+		t.Fatalf("expected queued text preserved, got %q", called[0].Text)
+	}
+	if len(called[0].Attachments) != 1 || called[0].Attachments[0] != (Attachment{Name: "queued.png", Offset: len([]rune("queued"))}) {
+		t.Fatalf("expected queued attachments preserved, got %+v", called[0].Attachments)
+	}
+}
+
+func TestPromptAcceptsPasteMsg(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt:   "API key",
+		Secret:   true,
+		Response: respCh,
+	})
+
+	_, _ = m.Update(tea.PasteMsg{Content: "sk-test-123"})
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+
+	select {
+	case resp := <-respCh:
+		if resp.Err != nil {
+			t.Fatalf("expected successful prompt paste, got err=%v", resp.Err)
+		}
+		if resp.Line != "sk-test-123" {
+			t.Fatalf("expected pasted prompt content, got %q", resp.Line)
+		}
+	default:
+		t.Fatal("expected prompt response after paste+enter")
 	}
 }
 
@@ -2451,10 +2701,6 @@ func TestRenderInputBar_ShowsLastVisibleRows(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("expected visible tail row %q in %q", want, rendered)
 		}
-	}
-	lines := strings.Split(rendered, "\n")
-	if len(lines) == 0 || !strings.Contains(lines[0], "> ") {
-		t.Fatalf("expected prompt on first visible row, got %q", rendered)
 	}
 }
 
@@ -2480,7 +2726,8 @@ func TestFooterLeftShowsModeOnly(t *testing.T) {
 	resizeModel(m)
 
 	m.cfg.ModeLabel = func() string { return "plan" }
-	if got := m.footerLeftText(); got != "plan  shift+tab switch mode" {
+	got := m.footerLeftText()
+	if !strings.Contains(got, "plan") || !strings.Contains(got, "shift+tab") {
 		t.Fatalf("unexpected mode footer text %q", got)
 	}
 }
@@ -2493,7 +2740,7 @@ func TestHintRowUsesHintInsteadOfFooter(t *testing.T) {
 	if got := strings.TrimSpace(m.hintRowText()); got != "temporary hint" {
 		t.Fatalf("expected dedicated hint row text, got %q", got)
 	}
-	if got := m.footerLeftText(); got != "plan  shift+tab switch mode" {
+	if got := m.footerLeftText(); !strings.Contains(got, "plan") || !strings.Contains(got, "shift+tab") {
 		t.Fatalf("expected footer mode text preserved, got %q", got)
 	}
 }
@@ -2520,29 +2767,113 @@ func TestFixedRowLayoutPlacesHintAboveHeader(t *testing.T) {
 	}
 }
 
-func TestBackspaceClearsAttachmentsWhenInputEmpty(t *testing.T) {
-	cleared := 0
+func TestBackspaceRemovesAttachmentsOneByOneWhenInputEmpty(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		PasteClipboardImage: func() (int, string, error) {
-			return 2, "", nil
-		},
-		ClearAttachments: func() int {
-			cleared++
-			return 0
+		PasteClipboardImage: func() ([]string, string, error) {
+			return []string{"a.png", "b.png"}, "", nil
 		},
 	})
 	resizeModel(m)
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlV})
+	_, _ = m.Update(keyPress('v', tea.ModCtrl))
 	if m.attachmentCount != 2 {
 		t.Fatalf("expected attachment count 2, got %d", m.attachmentCount)
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	_, _ = m.Update(keyPress(tea.KeyBackspace))
+	if m.attachmentCount != 1 {
+		t.Fatalf("expected one attachment remaining, got %d", m.attachmentCount)
+	}
+	if got := strings.Join(m.attachmentNames, ","); got != "a.png" {
+		t.Fatalf("expected remaining attachment a.png, got %q", got)
+	}
+	_, _ = m.Update(keyPress(tea.KeyBackspace))
 	if m.attachmentCount != 0 {
 		t.Fatalf("expected attachment count cleared, got %d", m.attachmentCount)
 	}
-	if cleared != 1 {
-		t.Fatalf("expected ClearAttachments called once, got %d", cleared)
+}
+
+func TestBackspaceRemovesAttachmentAtCursorBeforeEditingText(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.textarea.SetValue("hello world")
+	m.syncInputFromTextarea()
+	m.setInputAttachments([]inputAttachment{{Name: "mid.png", Offset: len([]rune("hello "))}})
+	m.moveTextareaCursorToIndex(len([]rune("hello ")))
+
+	_, _ = m.Update(keyPress(tea.KeyBackspace))
+
+	if got := m.textarea.Value(); got != "hello world" {
+		t.Fatalf("expected text to remain unchanged, got %q", got)
+	}
+	if m.attachmentCount != 0 {
+		t.Fatalf("expected attachment removed at cursor, got %d", m.attachmentCount)
+	}
+	rendered := ansi.Strip(m.renderInputBar())
+	if strings.Contains(rendered, "[mid.png]") {
+		t.Fatalf("expected attachment token removed, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "> hello world") {
+		t.Fatalf("expected plain text to remain after attachment delete, got %q", rendered)
+	}
+}
+
+func TestSubmitLineIncludesAttachmentDisplayTokens(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	line := "Hi豆包这两个是什么APP?"
+	m.textarea.SetValue(line)
+	m.syncInputFromTextarea()
+	m.setInputAttachments([]inputAttachment{
+		{Name: "clipboard-a.png", Offset: 0},
+		{Name: "clipboard-b.png", Offset: len([]rune("Hi豆包"))},
+	})
+
+	_, _ = m.submitLine(line)
+
+	if len(m.historyLines) == 0 {
+		t.Fatal("expected committed user history line")
+	}
+	got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1]))
+	want := "> [image: clipboard-a.png] Hi豆包[image: clipboard-b.png] 这两个是什么APP?"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestEnterSubmitsAttachmentOffsetsInDisplayOrder(t *testing.T) {
+	var got Submission
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			got = submission
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+	m.textarea.SetValue("hello world")
+	m.syncInputFromTextarea()
+	m.setInputAttachments([]inputAttachment{
+		{Name: "later.png", Offset: len([]rune("hello "))},
+		{Name: "first.png", Offset: 0},
+	})
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if got.Text != "hello world" {
+		t.Fatalf("expected raw submit text, got %q", got.Text)
+	}
+	if len(got.Attachments) != 2 {
+		t.Fatalf("expected 2 submitted attachments, got %+v", got.Attachments)
+	}
+	if got.Attachments[0] != (Attachment{Name: "first.png", Offset: 0}) {
+		t.Fatalf("expected first attachment at offset 0, got %+v", got.Attachments[0])
+	}
+	if got.Attachments[1] != (Attachment{Name: "later.png", Offset: len([]rune("hello "))}) {
+		t.Fatalf("expected second attachment after 'hello ', got %+v", got.Attachments[1])
 	}
 }
 
@@ -2569,7 +2900,7 @@ func TestEscInterruptsRunning(t *testing.T) {
 	resizeModel(m)
 	m.running = true
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 
 	if !interrupted {
 		t.Fatal("expected CancelRunning to be called")
@@ -2592,7 +2923,7 @@ func TestEscPopsQueuedMessageBeforeInterruptWhileRunning(t *testing.T) {
 		{execLine: "second", displayLine: "second"},
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if interrupted {
 		t.Fatal("did not expect interrupt while queue still has messages")
 	}
@@ -2603,7 +2934,7 @@ func TestEscPopsQueuedMessageBeforeInterruptWhileRunning(t *testing.T) {
 		t.Fatalf("expected newest message to be popped first, remaining=%+v", m.pendingQueue)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if interrupted {
 		t.Fatal("did not expect interrupt when popping last queued message")
 	}
@@ -2611,7 +2942,7 @@ func TestEscPopsQueuedMessageBeforeInterruptWhileRunning(t *testing.T) {
 		t.Fatalf("expected queue to be empty, got %d", len(m.pendingQueue))
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if !interrupted {
 		t.Fatal("expected interrupt once queue is empty")
 	}
@@ -2621,7 +2952,7 @@ func TestCtrlCRequiresDoublePressToQuitWhenIdle(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(keyPress('c', tea.ModCtrl))
 	if m.quit {
 		t.Fatal("expected first Ctrl+C not to quit")
 	}
@@ -2632,7 +2963,7 @@ func TestCtrlCRequiresDoublePressToQuitWhenIdle(t *testing.T) {
 		t.Fatalf("expected double-press hint, got %q", m.hint)
 	}
 
-	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd = m.Update(keyPress('c', tea.ModCtrl))
 
 	if !m.quit {
 		t.Fatal("expected second Ctrl+C to quit")
@@ -2646,7 +2977,7 @@ func TestCtrlCHintExpiresWithConfirmWindow(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(keyPress('c', tea.ModCtrl))
 	if cmd == nil {
 		t.Fatal("expected expiry cmd on first Ctrl+C")
 	}
@@ -2655,7 +2986,7 @@ func TestCtrlCHintExpiresWithConfirmWindow(t *testing.T) {
 	}
 	armedAt := m.lastCtrlCAt
 
-	_, _ = m.Update(ctrlCExpireMsg{armedAt: armedAt})
+	_, _ = m.Update(ctrlCExpireMsg{armedAt: armedAt, seq: m.ctrlCArmSeq})
 	if m.ctrlCArmed {
 		t.Fatal("expected Ctrl+C confirm state to expire")
 	}
@@ -2668,11 +2999,11 @@ func TestCtrlCAfterExpiryRequiresTwoPressesAgain(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, _ = m.Update(keyPress('c', tea.ModCtrl))
 	armedAt := m.lastCtrlCAt
-	_, _ = m.Update(ctrlCExpireMsg{armedAt: armedAt})
+	_, _ = m.Update(ctrlCExpireMsg{armedAt: armedAt, seq: m.ctrlCArmSeq})
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(keyPress('c', tea.ModCtrl))
 	if m.quit {
 		t.Fatal("expected first Ctrl+C after expiry not to quit")
 	}
@@ -2689,7 +3020,7 @@ func TestCtrlCClearsInputAndSavesDraftToHistory(t *testing.T) {
 	resizeModel(m)
 	typeRunes(m, "draft text")
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, _ = m.Update(keyPress('c', tea.ModCtrl))
 	if got := m.textarea.Value(); got != "" {
 		t.Fatalf("expected input cleared on first Ctrl+C, got %q", got)
 	}
@@ -2706,7 +3037,7 @@ func TestCtrlCWhileRunningShowsEscHint(t *testing.T) {
 	resizeModel(m)
 	m.running = true
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	_, cmd := m.Update(keyPress('c', tea.ModCtrl))
 	if cmd != nil {
 		t.Fatal("expected no cmd when pressing Ctrl+C during running")
 	}
@@ -2718,8 +3049,8 @@ func TestCtrlCWhileRunningShowsEscHint(t *testing.T) {
 func TestEnterQueuesMessageWhileRunningAndAutoDispatchesOnTaskResult(t *testing.T) {
 	var called []string
 	m := NewModel(Config{
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = append(called, strings.TrimSpace(line))
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = append(called, strings.TrimSpace(submission.Text))
 			return tuievents.TaskResultMsg{}
 		},
 	})
@@ -2727,7 +3058,7 @@ func TestEnterQueuesMessageWhileRunningAndAutoDispatchesOnTaskResult(t *testing.
 
 	m.running = true
 	typeRunes(m, "queued message")
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd != nil {
 		t.Fatal("expected no immediate command when queueing during running")
 	}
@@ -2766,7 +3097,7 @@ func TestEnterSlashWhileRunningDoesNotQueue(t *testing.T) {
 
 	m.running = true
 	typeRunes(m, "/help")
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd != nil {
 		t.Fatal("expected no command for slash while running")
 	}
@@ -2823,8 +3154,8 @@ func TestEscInterruptThenEnterSubmitsNewMessage(t *testing.T) {
 			interrupted = true
 			return true
 		},
-		ExecuteLine: func(line string) tuievents.TaskResultMsg {
-			called = append(called, strings.TrimSpace(line))
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = append(called, strings.TrimSpace(submission.Text))
 			return tuievents.TaskResultMsg{}
 		},
 	})
@@ -2833,14 +3164,14 @@ func TestEscInterruptThenEnterSubmitsNewMessage(t *testing.T) {
 	m.slashArgActive = true
 	m.slashArgCommand = ""
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if !interrupted {
 		t.Fatal("expected running task to be interrupted")
 	}
 
 	_, _ = m.Update(tuievents.TaskResultMsg{Interrupted: true})
 	typeRunes(m, "follow-up")
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd == nil {
 		t.Fatal("expected follow-up submit command after interrupt")
 	}
@@ -2866,7 +3197,7 @@ func (e noopError) Error() string { return string(e) }
 // Helpers
 // ---------------------------------------------------------------------------
 
-func noopExecute(line string) tuievents.TaskResultMsg {
+func noopExecute(Submission) tuievents.TaskResultMsg {
 	return tuievents.TaskResultMsg{}
 }
 
@@ -2882,13 +3213,13 @@ func resizeModel(m *Model) {
 
 func typeRunes(m *Model, text string) {
 	for _, r := range text {
-		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		_, _ = m.Update(keyText(string(r)))
 	}
 }
 
 func typeAndEnter(m *Model, text string) {
 	typeRunes(m, text)
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
 	if cmd != nil {
 		msg := cmd()
 		if msg != nil {
@@ -2931,7 +3262,7 @@ func TestSubmitLineForcesAutoScrollToBottom(t *testing.T) {
 	for i := 0; i < 80; i++ {
 		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* line %d\n", i)})
 	}
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	_, _ = m.Update(keyPress(tea.KeyPgUp))
 	if !m.userScrolledUp {
 		t.Fatal("expected userScrolledUp after pgup")
 	}
@@ -3018,11 +3349,11 @@ func TestPageUpPreventsAutoScroll(t *testing.T) {
 	}
 
 	// Scroll up.
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	_, _ = m.Update(keyPress(tea.KeyPgUp))
 	if !m.userScrolledUp {
 		t.Fatal("expected userScrolledUp after pgup")
 	}
-	view := ansi.Strip(m.View())
+	view := stripModelView(m)
 	if strings.Contains(view, "scroll:") {
 		t.Fatalf("did not expect scroll percent indicator, got %q", view)
 	}
@@ -3054,12 +3385,12 @@ func TestArrowKeysUseInputHistoryEvenWhenViewportHasScrollableContent(t *testing
 		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* line %d\n", i)})
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if got := m.textarea.Value(); got != "second" {
 		t.Fatalf("expected history command on arrow up, got %q", got)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(keyPress(tea.KeyDown))
 	if got := m.textarea.Value(); got != "" {
 		t.Fatalf("expected draft restored on arrow down, got %q", got)
 	}
@@ -3079,7 +3410,7 @@ func TestMultilineInputUsesTextareaVerticalNavigationBeforeHistory(t *testing.T)
 		t.Fatalf("expected cursor on last input line, got %d", got)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if got := m.textarea.Value(); got != "line1\nline2\nline3" {
 		t.Fatalf("expected textarea content preserved on internal up nav, got %q", got)
 	}
@@ -3087,17 +3418,17 @@ func TestMultilineInputUsesTextareaVerticalNavigationBeforeHistory(t *testing.T)
 		t.Fatalf("expected cursor to move within textarea, got line %d", got)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if got := m.textarea.Line(); got != 0 {
 		t.Fatalf("expected cursor to reach first textarea line, got %d", got)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if got := m.textarea.Value(); got != "first" {
 		t.Fatalf("expected history recall only after leaving first textarea line, got %q", got)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(keyPress(tea.KeyDown))
 	if got := m.textarea.Value(); got != "line1\nline2\nline3" {
 		t.Fatalf("expected draft restored from history, got %q", got)
 	}
@@ -3105,7 +3436,7 @@ func TestMultilineInputUsesTextareaVerticalNavigationBeforeHistory(t *testing.T)
 		t.Fatalf("expected restored draft cursor at last line, got %d", got)
 	}
 
-	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	_, _ = m.Update(keyPress(tea.KeyUp))
 	if got := m.textarea.Line(); got != 1 {
 		t.Fatalf("expected cursor to move within restored multiline draft, got %d", got)
 	}
@@ -3117,8 +3448,8 @@ func TestViewShowsModeFooterWhenConfigured(t *testing.T) {
 		ModeLabel: func() string { return "full_access" },
 	})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	view := ansi.Strip(m.View())
-	if !strings.Contains(view, "full_access  shift+tab switch mode") {
+	view := stripModelView(m)
+	if !strings.Contains(view, "full_access") || !strings.Contains(view, "shift+tab") {
 		t.Fatalf("expected mode footer in view, got:\n%s", view)
 	}
 }

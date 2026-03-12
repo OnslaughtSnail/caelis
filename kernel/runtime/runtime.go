@@ -196,15 +196,7 @@ func (r *Runtime) prepareRunContext(
 	}
 	userMsg := model.Message{Role: model.RoleUser, Text: req.Input}
 	if len(req.ContentParts) > 0 {
-		parts := make([]model.ContentPart, 0, 1+len(req.ContentParts))
-		if strings.TrimSpace(req.Input) != "" {
-			parts = append(parts, model.ContentPart{
-				Type: model.ContentPartText,
-				Text: req.Input,
-			})
-		}
-		parts = append(parts, req.ContentParts...)
-		userMsg.ContentParts = parts
+		userMsg.ContentParts = prepareUserContentParts(req.Input, req.ContentParts)
 	}
 	userEvent := &session.Event{
 		Message: userMsg,
@@ -250,6 +242,29 @@ func (r *Runtime) prepareRunContext(
 		}
 	}
 	return allEvents, true
+}
+
+func prepareUserContentParts(input string, parts []model.ContentPart) []model.ContentPart {
+	if len(parts) == 0 {
+		return nil
+	}
+	prepared := append([]model.ContentPart(nil), parts...)
+	if strings.TrimSpace(input) == "" || contentPartsContainText(prepared) {
+		return prepared
+	}
+	return append([]model.ContentPart{{
+		Type: model.ContentPartText,
+		Text: input,
+	}}, prepared...)
+}
+
+func contentPartsContainText(parts []model.ContentPart) bool {
+	for _, part := range parts {
+		if part.Type == model.ContentPartText && strings.TrimSpace(part.Text) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runtime) buildInvocationContext(

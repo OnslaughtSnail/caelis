@@ -1,0 +1,163 @@
+package tuiapp
+
+import (
+	"strings"
+
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/lipgloss/v2"
+)
+
+type appKeyMap struct {
+	Send        key.Binding
+	Queue       key.Binding
+	Interrupt   key.Binding
+	Mode        key.Binding
+	HistoryPrev key.Binding
+	HistoryNext key.Binding
+	ChoosePrev  key.Binding
+	ChooseNext  key.Binding
+	Accept      key.Binding
+	Complete    key.Binding
+	ImagePaste  key.Binding
+	TextPaste   key.Binding
+	Clear       key.Binding
+	Back        key.Binding
+	PageUp      key.Binding
+	PageDown    key.Binding
+	Quit        key.Binding
+}
+
+type helpBindings struct {
+	short []key.Binding
+	full  [][]key.Binding
+}
+
+func (h helpBindings) ShortHelp() []key.Binding {
+	return h.short
+}
+
+func (h helpBindings) FullHelp() [][]key.Binding {
+	return h.full
+}
+
+func defaultKeyMap() appKeyMap {
+	return appKeyMap{
+		Send:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		Queue:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
+		Interrupt:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt")),
+		Mode:        key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "mode")),
+		HistoryPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history")),
+		HistoryNext: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "draft")),
+		ChoosePrev:  key.NewBinding(key.WithKeys("up"), key.WithHelp("↑/↓", "select")),
+		ChooseNext:  key.NewBinding(key.WithKeys("down"), key.WithHelp("↑/↓", "select")),
+		Accept:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")),
+		Complete:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "fill")),
+		ImagePaste:  key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "image")),
+		TextPaste:   key.NewBinding(key.WithKeys("super+v", "cmd+v", "ctrl+shift+v", "shift+insert"), key.WithHelp("paste", "text")),
+		Clear:       key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear")),
+		Back:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
+		PageUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll")),
+		PageDown:    key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll")),
+		Quit:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+	}
+}
+
+func configureHelpStyles(m *help.Model, themeColors interface {
+	KeyLabelStyle() lipgloss.Style
+	HelpHintTextStyle() lipgloss.Style
+	TextStyle() lipgloss.Style
+}) {
+	if m == nil {
+		return
+	}
+	m.ShortSeparator = "  "
+	m.FullSeparator = "   "
+	m.Ellipsis = "…"
+	styles := m.Styles
+	styles.ShortKey = themeColors.KeyLabelStyle().Bold(true)
+	styles.ShortDesc = themeColors.HelpHintTextStyle()
+	styles.ShortSeparator = themeColors.HelpHintTextStyle()
+	styles.FullKey = themeColors.KeyLabelStyle().Bold(true)
+	styles.FullDesc = themeColors.TextStyle()
+	styles.FullSeparator = themeColors.HelpHintTextStyle()
+	styles.Ellipsis = themeColors.HelpHintTextStyle()
+	m.Styles = styles
+}
+
+func enabledBindings(bindings ...key.Binding) []key.Binding {
+	out := make([]key.Binding, 0, len(bindings))
+	for _, binding := range bindings {
+		if binding.Enabled() {
+			out = append(out, binding)
+		}
+	}
+	return out
+}
+
+func (m *Model) currentFooterHelp() helpBindings {
+	if m.activePrompt != nil {
+		if len(m.activePrompt.choices) > 0 {
+			return helpBindings{
+				short: enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Back),
+				full: [][]key.Binding{
+					enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Back),
+				},
+			}
+		}
+		return helpBindings{
+			short: enabledBindings(m.keys.Accept, m.keys.Back),
+			full: [][]key.Binding{
+				enabledBindings(m.keys.Accept, m.keys.Clear, m.keys.Back),
+			},
+		}
+	}
+	if m.showPalette || len(m.resumeCandidates) > 0 || m.slashArgActive || len(m.slashCandidates) > 0 || len(m.mentionCandidates) > 0 || len(m.skillCandidates) > 0 {
+		return helpBindings{
+			short: enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Complete, m.keys.Back),
+			full: [][]key.Binding{
+				enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Complete, m.keys.Back),
+			},
+		}
+	}
+	if m.running {
+		return helpBindings{
+			short: enabledBindings(m.keys.Interrupt, m.keys.Queue, m.keys.PageUp, m.keys.PageDown),
+			full: [][]key.Binding{
+				enabledBindings(m.keys.Interrupt, m.keys.Queue),
+				enabledBindings(m.keys.PageUp, m.keys.PageDown),
+			},
+		}
+	}
+	return helpBindings{
+		short: enabledBindings(m.keys.Mode, m.keys.Send, m.keys.ImagePaste, m.keys.HistoryPrev),
+		full: [][]key.Binding{
+			enabledBindings(m.keys.Mode, m.keys.Send, m.keys.Clear),
+			enabledBindings(m.keys.ImagePaste, m.keys.TextPaste),
+			enabledBindings(m.keys.HistoryPrev, m.keys.HistoryNext),
+		},
+	}
+}
+
+func (m *Model) renderHelp(bindings helpBindings) string {
+	if m == nil {
+		return ""
+	}
+	if len(bindings.short) == 0 && len(bindings.full) == 0 {
+		return ""
+	}
+	return m.help.View(bindings)
+}
+
+func (m *Model) overlayHintText(label string) string {
+	label = strings.TrimSpace(label)
+	bindings := enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Complete)
+	if label == "" {
+		return m.help.ShortHelpView(bindings)
+	}
+	helpText := m.help.ShortHelpView(bindings)
+	if helpText == "" {
+		return label
+	}
+	return label + "  " + helpText
+}

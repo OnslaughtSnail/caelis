@@ -39,42 +39,6 @@ func TestDetectLineStyle(t *testing.T) {
 	}
 }
 
-func TestIsConversationStyle(t *testing.T) {
-	if !IsConversationStyle(LineStyleAssistant) {
-		t.Error("expected Assistant to be conversation style")
-	}
-	if !IsConversationStyle(LineStyleUser) {
-		t.Error("expected User to be conversation style")
-	}
-	if !IsConversationStyle(LineStyleReasoning) {
-		t.Error("expected Reasoning to be conversation style")
-	}
-	if IsConversationStyle(LineStyleTool) {
-		t.Error("expected Tool to NOT be conversation style")
-	}
-	if IsConversationStyle(LineStyleDefault) {
-		t.Error("expected Default to NOT be conversation style")
-	}
-}
-
-func TestShouldInsertGap(t *testing.T) {
-	// No previous line — no gap.
-	if ShouldInsertGap(false, LineStyleDefault, LineStyleAssistant) {
-		t.Error("no gap expected without previous")
-	}
-	// Conversation turn after something — gap.
-	if !ShouldInsertGap(true, LineStyleTool, LineStyleAssistant) {
-		t.Error("expected gap before assistant after tool")
-	}
-	if !ShouldInsertGap(true, LineStyleAssistant, LineStyleUser) {
-		t.Error("expected gap before user after assistant")
-	}
-	// Non-conversation line — no gap.
-	if ShouldInsertGap(true, LineStyleAssistant, LineStyleTool) {
-		t.Error("no gap expected before tool line")
-	}
-}
-
 func TestColorizeLogLine(t *testing.T) {
 	theme := DefaultTheme()
 	// Just verify the function doesn't panic and returns non-empty for each style.

@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ---------------------------------------------------------------------------
@@ -278,7 +278,7 @@ func (m *Model) wizardHintText() string {
 	if label == "" {
 		label = "/" + w.def.Command + " " + step.Key
 	}
-	return label + ": ↑/↓ select │ enter: apply │ tab: fill"
+	return m.overlayHintText(label)
 }
 
 // handleWizardEnter processes the enter key when a wizard is active.

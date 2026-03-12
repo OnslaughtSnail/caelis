@@ -27,6 +27,7 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/internal/approvalqueue"
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
@@ -87,9 +88,12 @@ type cliConsole struct {
 
 	imageCache          *image.Cache
 	pendingAttachments  []model.ContentPart
+	attachmentLibrary   map[string]model.ContentPart
 	pendingAttachmentMu sync.Mutex
 	tuiSender           interface{ Send(msg any) } // set in TUI mode for hint updates
 	delegatePreviewer   *delegatePreviewProjector
+	bashWatchMu         sync.Mutex
+	bashTaskWatches     map[string]context.CancelFunc
 	connectModelCacheMu sync.Mutex
 	connectModelCache   map[string]connectModelCacheEntry
 }
@@ -164,8 +168,10 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		inputRefs:             cfg.InputRefs,
 		tuiDiag:               cfg.TUIDiagnostics,
 		imageCache:            image.NewCache(32),
+		attachmentLibrary:     map[string]model.ContentPart{},
 		connectModelCache:     map[string]connectModelCacheEntry{},
 		delegatePreviewer:     newDelegatePreviewProjector(),
+		bashTaskWatches:       map[string]context.CancelFunc{},
 		editor:                editor,
 		prompter:              editor,
 		out:                   out,
@@ -289,6 +295,10 @@ func (c *cliConsole) handleSlash(line string) (bool, error) {
 }
 
 func (c *cliConsole) runPrompt(input string) error {
+	return c.runPromptWithAttachments(input, nil)
+}
+
+func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp.Attachment) error {
 	if c.llm == nil {
 		return fmt.Errorf("no model configured, use /connect to add provider and select model")
 	}
@@ -306,9 +316,11 @@ func (c *cliConsole) runPrompt(input string) error {
 			}
 		}
 	}
+	visibleInput := resolvedInput
 	resolvedInput = c.injectedPrompt(resolvedInput)
+	controlInput := strings.TrimSpace(c.injectedPrompt(""))
 	// Load image content parts from resolved file references.
-	var contentParts []model.ContentPart
+	var resolvedImageParts []model.ContentPart
 	if c.inputRefs != nil && len(resolvedPaths) > 0 {
 		for _, relPath := range resolvedPaths {
 			if !image.IsImagePath(relPath) {
@@ -320,14 +332,41 @@ func (c *cliConsole) runPrompt(input string) error {
 				c.ui.Warn("image load skipped: %s: %v\n", relPath, err)
 				continue
 			}
-			contentParts = append(contentParts, part)
+			resolvedImageParts = append(resolvedImageParts, part)
 			c.ui.Note("attached image: %s\n", relPath)
 		}
 	}
+	var contentParts []model.ContentPart
 	// Consume any pending clipboard attachments.
-	pendingParts := c.consumePendingAttachments()
-	contentParts = append(contentParts, pendingParts...)
-	if c.tuiSender != nil && len(pendingParts) > 0 {
+	var consumedPending int
+	var pendingParts []model.ContentPart
+	if len(attachments) > 0 {
+		pendingLibrary := c.pendingAttachmentLibrary()
+		contentParts = append(contentParts, buildInterleavedContentParts(visibleInput, attachments, pendingLibrary)...)
+		consumedPending = len(c.consumePendingAttachmentsByName(attachmentNames(attachments)))
+	} else {
+		pendingParts = c.consumePendingAttachments()
+		if strings.TrimSpace(visibleInput) != "" && (len(pendingParts) > 0 || len(resolvedImageParts) > 0) {
+			contentParts = append(contentParts, model.ContentPart{
+				Type: model.ContentPartText,
+				Text: visibleInput,
+			})
+		}
+		contentParts = append(contentParts, pendingParts...)
+		consumedPending = len(pendingParts)
+	}
+	contentParts = append(contentParts, resolvedImageParts...)
+	runInput := resolvedInput
+	if len(contentParts) > 0 {
+		if controlInput != "" {
+			contentParts = append([]model.ContentPart{{
+				Type: model.ContentPartText,
+				Text: controlInput,
+			}}, contentParts...)
+		}
+		runInput = ""
+	}
+	if c.tuiSender != nil && consumedPending > 0 {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 	}
 	ag, err := buildAgent(buildAgentInput{
@@ -399,7 +438,7 @@ func (c *cliConsole) runPrompt(input string) error {
 		AppName:             c.appName,
 		UserID:              c.userID,
 		SessionID:           c.sessionID,
-		Input:               resolvedInput,
+		Input:               runInput,
 		ContentParts:        contentParts,
 		Agent:               ag,
 		Model:               c.llm,
@@ -569,6 +608,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		handled = true
 	}
 	if msg.ToolResponse != nil {
+		c.syncBashTaskWatch(msg.ToolResponse.ID, msg.ToolResponse.Name, msg.ToolResponse.Result)
 		emittedTaskStream := c.emitTaskStreamFromToolResult(msg.ToolResponse)
 		toolName := strings.TrimSpace(msg.ToolResponse.Name)
 		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), toolshell.BashToolName) {
@@ -639,7 +679,7 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool
 		if callID == "" {
 			callID = resp.ID
 		}
-		c.tuiSender.Send(tuievents.TaskStreamMsg{
+		msg := tuievents.TaskStreamMsg{
 			Label:  label,
 			TaskID: ev.TaskID,
 			CallID: callID,
@@ -648,7 +688,11 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool
 			State:  ev.State,
 			Reset:  ev.Reset,
 			Final:  ev.Final,
-		})
+		}
+		if c.shouldSuppressWatchedBashTaskStream(resp.Name, msg) {
+			continue
+		}
+		c.tuiSender.Send(msg)
 	}
 	return true
 }
@@ -1386,16 +1430,6 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 			if userText != "" {
 				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("> %s\n", userText)})
 			}
-			for _, part := range msg.ContentParts {
-				if part.Type != model.ContentPartImage {
-					continue
-				}
-				name := strings.TrimSpace(part.FileName)
-				if name == "" {
-					name = "image"
-				}
-				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("! [image: %s]\n", name)})
-			}
 			continue
 		}
 		if c.forwardEventToTUIWithOptions(ev, pendingToolCalls, tuiForwardOptions{
@@ -2087,6 +2121,10 @@ func (c *cliConsole) addPendingAttachment(part model.ContentPart) {
 	c.pendingAttachmentMu.Lock()
 	defer c.pendingAttachmentMu.Unlock()
 	c.pendingAttachments = append(c.pendingAttachments, part)
+	name := strings.TrimSpace(part.FileName)
+	if name != "" {
+		c.attachmentLibrary[name] = part
+	}
 }
 
 func (c *cliConsole) consumePendingAttachments() []model.ContentPart {
@@ -2097,43 +2135,75 @@ func (c *cliConsole) consumePendingAttachments() []model.ContentPart {
 	return parts
 }
 
-func (c *cliConsole) clearPendingAttachments() int {
+func (c *cliConsole) clearPendingAttachments() []string {
 	c.pendingAttachmentMu.Lock()
 	defer c.pendingAttachmentMu.Unlock()
 	c.pendingAttachments = nil
-	return 0
+	return nil
+}
+
+func (c *cliConsole) setPendingAttachments(names []string) []string {
+	c.pendingAttachmentMu.Lock()
+	defer c.pendingAttachmentMu.Unlock()
+	if len(names) == 0 {
+		c.pendingAttachments = nil
+		return nil
+	}
+	parts := make([]model.ContentPart, 0, len(names))
+	restored := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		part, ok := c.attachmentLibrary[name]
+		if !ok {
+			continue
+		}
+		parts = append(parts, part)
+		restored = append(restored, name)
+	}
+	c.pendingAttachments = parts
+	return restored
 }
 
 // pasteClipboardImage extracts an image from the system clipboard, saves it to
 // a temp directory, and adds it as a pending attachment. Returns the current
-// pending attachment count, a legacy hint string (always empty), and any error.
-func (c *cliConsole) pasteClipboardImage() (int, string, error) {
+// pending attachment count, a UI hint string, and any error.
+func (c *cliConsole) pasteClipboardImage() ([]string, string, error) {
 	raw, mime, err := image.ExtractClipboardImage()
 	if err != nil {
-		return 0, "", fmt.Errorf("clipboard: %w", err)
+		return nil, "", fmt.Errorf("clipboard: %w", err)
 	}
 	if raw == nil {
-		return 0, "", nil // no image in clipboard
+		return nil, "", nil // no image in clipboard
 	}
 	if len(raw) > image.MaxImageBytes {
-		return 0, "", fmt.Errorf("clipboard image too large: %d bytes (max %d)", len(raw), image.MaxImageBytes)
+		return nil, "", fmt.Errorf("clipboard image too large: %d bytes (max %d)", len(raw), image.MaxImageBytes)
 	}
 	// Save to temp directory for inspection.
 	tmpDir := filepath.Join(os.TempDir(), "caelis-clipboard")
 	_ = os.MkdirAll(tmpDir, 0o755)
-	tmpName := fmt.Sprintf("clipboard-%d.png", time.Now().UnixNano())
+	tmpName := fmt.Sprintf("clipboard-%d%s", time.Now().UnixNano(), clipboardImageExtension(mime))
 	tmpPath := filepath.Join(tmpDir, tmpName)
 	_ = os.WriteFile(tmpPath, raw, 0o644)
 
 	part, err := image.ContentPartFromBytes(raw, mime, tmpName, c.imageCache)
 	if err != nil {
-		return 0, "", fmt.Errorf("clipboard image: %w", err)
+		return nil, "", fmt.Errorf("clipboard image: %w", err)
 	}
 	c.addPendingAttachment(part)
 	c.pendingAttachmentMu.Lock()
-	count := len(c.pendingAttachments)
+	names := make([]string, 0, len(c.pendingAttachments))
+	for _, one := range c.pendingAttachments {
+		name := strings.TrimSpace(one.FileName)
+		if name == "" {
+			name = "image"
+		}
+		names = append(names, name)
+	}
 	c.pendingAttachmentMu.Unlock()
-	return count, "", nil
+	return names, "", nil
 }
 
 func (c *cliConsole) printf(format string, args ...any) {
@@ -2144,6 +2214,21 @@ func (c *cliConsole) printf(format string, args ...any) {
 	c.outMu.Lock()
 	defer c.outMu.Unlock()
 	fmt.Fprintf(out, format, args...)
+}
+
+func clipboardImageExtension(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/tiff":
+		return ".tiff"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 func formatUsage(usage runtime.ContextUsage) string {
