@@ -7,6 +7,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/atotto/clipboard"
 )
@@ -105,12 +106,15 @@ func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
 	}
 	m.renderViewportContent()
 	const copyHint = "selected text copied to clipboard"
-	m.hint = copyHint
 	clipCmd := func() tea.Msg {
 		_ = clipboard.WriteAll(text)
 		return nil
 	}
-	return tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
+	return tea.Batch(clipCmd, m.showHint(copyHint, hintOptions{
+		priority:       tuievents.HintPriorityNormal,
+		clearOnMessage: true,
+		clearAfter:     copyHintDuration,
+	}))
 }
 
 func (m *Model) handleInputAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, tea.Cmd) {
@@ -161,12 +165,15 @@ func (m *Model) handleInputAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, t
 			return true, nil
 		}
 		const copyHint = "selected text copied to clipboard"
-		m.hint = copyHint
 		clipCmd := func() tea.Msg {
 			_ = clipboard.WriteAll(text)
 			return nil
 		}
-		return true, tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
+		return true, tea.Batch(clipCmd, m.showHint(copyHint, hintOptions{
+			priority:       tuievents.HintPriorityNormal,
+			clearOnMessage: true,
+			clearAfter:     copyHintDuration,
+		}))
 	}
 	return false, nil
 }
@@ -222,12 +229,15 @@ func (m *Model) handleFixedAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, t
 			return true, nil
 		}
 		const copyHint = "selected text copied to clipboard"
-		m.hint = copyHint
 		clipCmd := func() tea.Msg {
 			_ = clipboard.WriteAll(text)
 			return nil
 		}
-		return true, tea.Batch(clipCmd, clearHintLaterCmd(copyHint, copyHintDuration))
+		return true, tea.Batch(clipCmd, m.showHint(copyHint, hintOptions{
+			priority:       tuievents.HintPriorityNormal,
+			clearOnMessage: true,
+			clearAfter:     copyHintDuration,
+		}))
 	}
 	return false, nil
 }
@@ -284,8 +294,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(msg, m.keys.Mode) && !m.running && m.cfg.ToggleMode != nil {
 		hint, err := m.cfg.ToggleMode()
 		if err != nil {
-			m.hint = err.Error()
-			return m, nil
+			return m, m.showHint(err.Error(), hintOptions{
+				priority:       tuievents.HintPriorityHigh,
+				clearOnMessage: true,
+				clearAfter:     copyHintDuration,
+			})
 		}
 		if strings.TrimSpace(hint) == "" {
 			hint = "mode updated"
@@ -293,8 +306,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cfg.RefreshStatus != nil {
 			m.statusModel, m.statusContext = m.cfg.RefreshStatus()
 		}
-		m.hint = strings.TrimSpace(hint)
-		return m, clearHintLaterCmd(m.hint, copyHintDuration)
+		return m, m.showHint(hint, hintOptions{
+			priority:       tuievents.HintPriorityNormal,
+			clearOnMessage: true,
+			clearAfter:     copyHintDuration,
+		})
 	}
 
 	switch {
@@ -309,8 +325,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Quit):
 		if m.running {
-			m.hint = "press Esc to interrupt running task"
-			return m, nil
+			return m, m.showHint("press Esc to interrupt running task", hintOptions{
+				priority:       tuievents.HintPriorityHigh,
+				clearOnMessage: true,
+				clearAfter:     copyHintDuration,
+			})
 		}
 		now := time.Now()
 		if m.ctrlCArmed && now.Sub(m.lastCtrlCAt) <= ctrlCExitWindow {
@@ -336,8 +355,14 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ctrlCArmed = true
 		m.ctrlCArmSeq++
 		m.lastCtrlCAt = now
-		m.hint = "press Ctrl+C again to quit"
-		return m, expireCtrlCCmd(now, m.ctrlCArmSeq)
+		return m, tea.Batch(
+			expireCtrlCCmd(now, m.ctrlCArmSeq),
+			m.showHint("press Ctrl+C again to quit", hintOptions{
+				priority:       tuievents.HintPriorityCritical,
+				clearOnMessage: false,
+				clearAfter:     ctrlCExitWindow,
+			}),
+		)
 
 	case msg.String() == "ctrl+d":
 		if !m.running && len(m.input) == 0 && m.textarea.Value() == "" {
@@ -357,11 +382,15 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.running {
 			m.clearInputOverlays()
 			if _, ok := m.popPendingPrompt(); ok {
-				m.hint = ""
+				m.dismissVisibleHint()
 				return m, nil
 			}
 			if m.cfg.CancelRunning != nil && m.cfg.CancelRunning() {
-				m.hint = "interrupt requested"
+				return m, m.showHint("interrupt requested", hintOptions{
+					priority:       tuievents.HintPriorityCritical,
+					clearOnMessage: true,
+					clearAfter:     systemHintDuration,
+				})
 			}
 			return m, nil
 		}
@@ -442,8 +471,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.running {
 			if strings.HasPrefix(line, "/") {
-				m.hint = "slash commands are unavailable while running"
-				return m, nil
+				return m, m.showHint("slash commands are unavailable while running", hintOptions{
+					priority:       tuievents.HintPriorityHigh,
+					clearOnMessage: true,
+					clearAfter:     copyHintDuration,
+				})
 			}
 			m.enqueuePendingPrompt(line, m.displayLineWithInputAttachments(line, attachments), attachments)
 			return m, nil
@@ -490,7 +522,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					added = names[oldAttachmentCount:]
 				}
 				m.insertAttachmentsAtCursor(added)
-				m.hint = ""
+				m.dismissVisibleHint()
 				m.syncTextareaChrome()
 				return m, nil
 			}
@@ -512,7 +544,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !m.running && m.attachmentCount > 0 &&
 			(msg.String() == "backspace" || msg.String() == "ctrl+h") &&
 			m.removeAttachmentAtCursor() {
-			m.hint = ""
+			m.dismissVisibleHint()
 			return m, nil
 		}
 		// Forward to textarea for general text input.

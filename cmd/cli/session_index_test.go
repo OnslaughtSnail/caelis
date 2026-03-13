@@ -409,14 +409,20 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 		t.Fatal("expected TUI replay events")
 	}
 	foundClear := false
+	foundTaskResult := false
 	for _, raw := range sender.msgs {
 		if _, ok := raw.(tuievents.ClearHistoryMsg); ok {
 			foundClear = true
-			break
+		}
+		if _, ok := raw.(tuievents.TaskResultMsg); ok {
+			foundTaskResult = true
 		}
 	}
 	if !foundClear {
 		t.Fatalf("expected replay stream to clear history, got %#v", sender.msgs)
+	}
+	if !foundTaskResult {
+		t.Fatalf("expected replay stream to end with task result signal, got %#v", sender.msgs)
 	}
 	foundUser := false
 	foundAssistant := false
@@ -510,7 +516,7 @@ func TestHandleResume_TUIReplaysInterleavedUserAttachmentsInStoredOrder(t *testi
 	t.Fatalf("expected replayed user message %q, got %#v", want, sender.msgs)
 }
 
-func TestHandleResume_WithPatchResponse_DoesNotReplayDiffBlockMsg(t *testing.T) {
+func TestHandleResume_WithPatchResponse_ReplaysCompactSummaryWithoutDiffBlock(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -597,7 +603,7 @@ func TestHandleResume_WithPatchResponse_DoesNotReplayDiffBlockMsg(t *testing.T) 
 			foundDiff = true
 		}
 		msg, ok := raw.(tuievents.LogChunkMsg)
-		if ok && strings.Contains(msg.Chunk, "✓ PATCH edited a.txt") {
+		if ok && strings.Contains(msg.Chunk, "✓ PATCH +1 -1") {
 			foundSummary = true
 		}
 	}
@@ -605,7 +611,7 @@ func TestHandleResume_WithPatchResponse_DoesNotReplayDiffBlockMsg(t *testing.T) 
 		t.Fatalf("did not expect DiffBlockMsg in replay events, got %#v", sender.msgs)
 	}
 	if !foundSummary {
-		t.Fatalf("expected patch summary in replay events, got %#v", sender.msgs)
+		t.Fatalf("expected compact patch summary in replay events, got %#v", sender.msgs)
 	}
 }
 

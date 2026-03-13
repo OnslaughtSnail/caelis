@@ -85,6 +85,7 @@ type renderState struct {
 type toolCallSnapshot struct {
 	Args          map[string]any
 	RichDiffShown bool
+	ChangeCounts  mutationChangeCounts
 }
 
 func printEvent(ev *session.Event, state *renderState) {
@@ -341,7 +342,7 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "BASH":
 		command := strings.TrimSpace(asString(args["command"]))
 		if command != "" {
-			return fmt.Sprintf("{command=%s}", truncateInline(command, 120))
+			return truncateInline(command, 120)
 		}
 	case "TASK":
 		action := strings.TrimSpace(asString(args["action"]))
@@ -391,7 +392,7 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 	case "DELEGATE":
 		task := strings.TrimSpace(asString(args["task"]))
 		if task != "" {
-			return fmt.Sprintf("{task=%s}", truncateInline(task, 120))
+			return strings.Join(strings.Fields(task), " ")
 		}
 	}
 	if isMCPToolName(toolName) {
@@ -430,6 +431,44 @@ func parseToolArgsForDisplay(raw string) map[string]any {
 
 func summarizeToolResponse(toolName string, result map[string]any) string {
 	return summarizeToolResponseWithCall(toolName, result, nil)
+}
+
+func summarizeCompactToolResponseForTUI(toolName string, result map[string]any) string {
+	if len(result) == 0 {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "READ":
+		startLine, startOK := asInt(result["start_line"])
+		endLine, endOK := asInt(result["end_line"])
+		if startOK && endOK && startLine > 0 && endLine >= startLine {
+			if startLine == endLine {
+				return fmt.Sprintf("%d", startLine)
+			}
+			return fmt.Sprintf("%d-%d", startLine, endLine)
+		}
+		count, _ := asInt(result["line_count"])
+		return fmt.Sprintf("%d lines", count)
+	case "SEARCH":
+		count, _ := asInt(result["count"])
+		fileCount, _ := asInt(result["file_count"])
+		parts := []string{fmt.Sprintf("%d matches", count)}
+		if fileCount > 0 {
+			parts = append(parts, fmt.Sprintf("%d files", fileCount))
+		}
+		if fmt.Sprint(result["truncated"]) == "true" {
+			parts = append(parts, "truncated")
+		}
+		return strings.Join(parts, ", ")
+	case "LIST":
+		count, _ := asInt(result["count"])
+		return fmt.Sprintf("%d entries", count)
+	case "GLOB":
+		count, _ := asInt(result["count"])
+		return fmt.Sprintf("%d paths", count)
+	default:
+		return ""
+	}
 }
 
 func summarizeToolResponseWithCall(toolName string, result map[string]any, callArgs map[string]any) string {
@@ -713,7 +752,7 @@ func taskActualWaitMS(result map[string]any) (int, bool) {
 
 func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {
 	displayName := strings.TrimSpace(toolName)
-	if strings.EqualFold(displayName, "TASK") && !hasToolError(result) {
+	if strings.EqualFold(displayName, "TASK") {
 		return taskActionResultDisplayName(strings.TrimSpace(asString(callArgs["action"])))
 	}
 	return displayName
@@ -964,6 +1003,29 @@ func truncateInline(input string, limit int) string {
 		return string(rs[:limit])
 	}
 	return string(rs[:limit-3]) + "..."
+}
+
+func truncateInlineMiddle(input string, limit int) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
+	rs := []rune(text)
+	if limit <= 0 || len(rs) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return string(rs[:limit])
+	}
+	head := (limit - 3) * 2 / 3
+	tail := (limit - 3) - head
+	if head <= 0 {
+		head = 1
+	}
+	if tail <= 0 {
+		tail = 1
+	}
+	if head+tail >= len(rs) {
+		return text
+	}
+	return string(rs[:head]) + "..." + string(rs[len(rs)-tail:])
 }
 
 func displayFileName(path string) string {

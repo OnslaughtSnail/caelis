@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -31,7 +32,7 @@ func (l compactOnlyLLM) Generate(context.Context, *model.Request) iter.Seq2[*mod
 	return func(func(*model.Response, error) bool) {}
 }
 
-func TestHandleCompact_ShowsVisibleProgressNotice(t *testing.T) {
+func TestHandleCompact_ShowsTokenDeltaAndRefreshesStatus(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{
 		Store: store,
@@ -58,6 +59,7 @@ func TestHandleCompact_ShowsVisibleProgressNotice(t *testing.T) {
 	}
 
 	var out bytes.Buffer
+	sender := &testSender{}
 	c := &cliConsole{
 		baseCtx:       context.Background(),
 		rt:            rt,
@@ -68,16 +70,39 @@ func TestHandleCompact_ShowsVisibleProgressNotice(t *testing.T) {
 		llm:           compactOnlyLLM{},
 		out:           &out,
 		ui:            newUI(&out, true, false),
+		tuiSender:     sender,
 	}
 
 	if _, err := handleCompact(c, nil); err != nil {
 		t.Fatal(err)
 	}
 	got := out.String()
-	if !strings.Contains(got, "正在压缩上下文") {
-		t.Fatalf("expected visible compact progress notice, got %q", got)
+	if strings.Contains(got, "正在压缩上下文") {
+		t.Fatalf("expected compact progress note removed, got %q", got)
 	}
-	if !strings.Contains(got, "compact: success") {
+	if !strings.Contains(got, "compact: success, ") || !strings.Contains(got, " -> ") || !strings.Contains(got, " tokens") {
 		t.Fatalf("expected compact success output, got %q", got)
+	}
+	if strings.Contains(got, "event_id=") {
+		t.Fatalf("expected compact output without event id, got %q", got)
+	}
+	if c.lastPromptTokens <= 0 {
+		t.Fatalf("expected compact to refresh lastPromptTokens, got %d", c.lastPromptTokens)
+	}
+	var status tuievents.SetStatusMsg
+	var found bool
+	for _, raw := range sender.msgs {
+		msg, ok := raw.(tuievents.SetStatusMsg)
+		if !ok {
+			continue
+		}
+		status = msg
+		found = true
+	}
+	if !found {
+		t.Fatalf("expected compact to push updated TUI status, got %#v", sender.msgs)
+	}
+	if !strings.Contains(status.Context, "/") {
+		t.Fatalf("expected compact status context ratio, got %#v", status)
 	}
 }

@@ -1,7 +1,6 @@
 package tuiapp
 
 import (
-	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,7 +9,7 @@ import (
 )
 
 type clearHintMsg struct {
-	expected string
+	id uint64
 }
 
 type ctrlCExpireMsg struct {
@@ -31,13 +30,12 @@ func animatePaletteCmd() tea.Cmd {
 	})
 }
 
-func clearHintLaterCmd(expected string, after time.Duration) tea.Cmd {
-	expected = strings.TrimSpace(expected)
-	if expected == "" || after <= 0 {
+func clearHintLaterCmd(id uint64, after time.Duration) tea.Cmd {
+	if id == 0 || after <= 0 {
 		return nil
 	}
 	return tea.Tick(after, func(time.Time) tea.Msg {
-		return clearHintMsg{expected: expected}
+		return clearHintMsg{id: id}
 	})
 }
 

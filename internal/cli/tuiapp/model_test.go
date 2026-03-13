@@ -1368,7 +1368,10 @@ func TestCopyHintClearsOnTimerMessage(t *testing.T) {
 	if !strings.Contains(m.hint, "copied") {
 		t.Fatalf("expected copy hint, got %q", m.hint)
 	}
-	_, _ = m.Update(clearHintMsg{expected: "selected text copied to clipboard"})
+	if len(m.hintEntries) == 0 {
+		t.Fatal("expected managed copy hint entry")
+	}
+	_, _ = m.Update(clearHintMsg{id: m.hintEntries[0].id})
 	if strings.TrimSpace(m.hint) != "" {
 		t.Fatalf("expected copy hint cleared, got %q", m.hint)
 	}
@@ -1376,8 +1379,12 @@ func TestCopyHintClearsOnTimerMessage(t *testing.T) {
 
 func TestCopyHintTimerDoesNotOverrideNewHint(t *testing.T) {
 	m := newTestModel()
-	m.hint = "interrupt requested"
-	_, _ = m.Update(clearHintMsg{expected: "selected text copied to clipboard"})
+	_ = m.showHint("interrupt requested", hintOptions{
+		priority:       tuievents.HintPriorityCritical,
+		clearOnMessage: true,
+		clearAfter:     systemHintDuration,
+	})
+	_, _ = m.Update(clearHintMsg{id: 9999})
 	if m.hint != "interrupt requested" {
 		t.Fatalf("expected newer hint preserved, got %q", m.hint)
 	}
@@ -1397,12 +1404,53 @@ func TestSetHintMsgSchedulesAutoClear(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected clearHintMsg, got %T", msg)
 	}
-	if clearMsg.expected != "started new session" {
-		t.Fatalf("unexpected clear expected %q", clearMsg.expected)
+	if clearMsg.id == 0 {
+		t.Fatalf("expected managed clear id, got %#v", clearMsg)
 	}
 	_, _ = m.Update(clearMsg)
 	if strings.TrimSpace(m.hint) != "" {
 		t.Fatalf("expected hint cleared, got %q", m.hint)
+	}
+}
+
+func TestHigherPriorityHintPreemptsAndRestoresLowerHint(t *testing.T) {
+	m := newTestModel()
+
+	_ = m.showHint("started new session", hintOptions{
+		priority:       tuievents.HintPriorityNormal,
+		clearOnMessage: false,
+		clearAfter:     time.Second,
+	})
+	_ = m.showHint("interrupt requested", hintOptions{
+		priority:       tuievents.HintPriorityCritical,
+		clearOnMessage: true,
+		clearAfter:     time.Second,
+	})
+	if m.hint != "interrupt requested" {
+		t.Fatalf("expected high-priority hint visible, got %q", m.hint)
+	}
+	if len(m.hintEntries) != 2 {
+		t.Fatalf("expected both hints tracked, got %#v", m.hintEntries)
+	}
+	_, _ = m.Update(clearHintMsg{id: m.hintEntries[1].id})
+	if m.hint != "started new session" {
+		t.Fatalf("expected lower-priority hint restored, got %q", m.hint)
+	}
+}
+
+func TestMessageClearsTransientHintButPreservesSystemHint(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.SetHintMsg{Hint: "started new session", ClearAfter: time.Second})
+	_ = m.showHint("interrupt requested", hintOptions{
+		priority:       tuievents.HintPriorityCritical,
+		clearOnMessage: true,
+		clearAfter:     time.Second,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+	if m.hint != "started new session" {
+		t.Fatalf("expected transient hint dismissed and system hint restored, got %q", m.hint)
 	}
 }
 
@@ -1655,8 +1703,11 @@ func TestReasoningStreamDoesNotAccumulateAcrossToolTurns(t *testing.T) {
 	if strings.Contains(joined, "phase1phase2") {
 		t.Fatalf("expected reasoning blocks separated by tool turn, got %q", joined)
 	}
-	if !strings.Contains(joined, "· phase1") || !strings.Contains(joined, "· phase2") {
-		t.Fatalf("expected both reasoning blocks rendered, got %q", joined)
+	if strings.Contains(joined, "· phase1") {
+		t.Fatalf("expected first reasoning block removed once tool turn started, got %q", joined)
+	}
+	if !strings.Contains(joined, "▸ Exploring 1 files") || !strings.Contains(joined, "Read a.txt") || !strings.Contains(joined, "· phase2") {
+		t.Fatalf("expected tool turn and next reasoning block rendered, got %q", joined)
 	}
 }
 
@@ -2101,8 +2152,8 @@ func TestViewShowsToolOutputPanelWithLatestFourLines(t *testing.T) {
 	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
 		t.Fatalf("expected bordered tool output box, got:\n%s", view)
 	}
-	if !strings.Contains(view, "BASH") || !strings.Contains(view, "running") {
-		t.Fatalf("expected tool panel header state, got:\n%s", view)
+	if !strings.Contains(view, "BASH") || !strings.Contains(view, "<1s") {
+		t.Fatalf("expected tool panel header with elapsed time, got:\n%s", view)
 	}
 	if strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
 		t.Fatalf("expected old tool output lines to scroll out, got:\n%s", view)
@@ -2177,7 +2228,7 @@ func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH {command=date}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH date\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
@@ -2216,8 +2267,11 @@ func TestToolOutputStateOnlyFinalUpdatesVisibleStatus(t *testing.T) {
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", State: "cancelled", Final: true})
 
 	view := stripModelView(m)
-	if !strings.Contains(view, "cancelled") {
-		t.Fatalf("expected final state rendered in panel, got:\n%s", view)
+	if !strings.Contains(view, "working...") || !strings.Contains(view, "<1s") {
+		t.Fatalf("expected delegate panel content to remain visible after final update, got:\n%s", view)
+	}
+	if strings.Contains(view, "cancelled") {
+		t.Fatalf("did not expect final state label in panel header, got:\n%s", view)
 	}
 }
 
@@ -2310,7 +2364,7 @@ func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=inspect}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "DELEGATE",
@@ -2338,8 +2392,8 @@ func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
 	if !strings.Contains(view, "thinking...") {
 		t.Fatalf("expected delegate reasoning in panel, got:\n%s", view)
 	}
-	if !strings.Contains(view, "· thinking...") {
-		t.Fatalf("expected delegate reasoning to use a lighter prefixed style, got:\n%s", view)
+	if strings.Contains(view, "\nanswer\n") {
+		t.Fatalf("did not expect raw answer label in delegate panel, got:\n%s", view)
 	}
 	if !strings.Contains(view, "✓ LIST 10 entries") {
 		t.Fatalf("expected delegate tool result visible in panel, got:\n%s", view)
@@ -2349,11 +2403,55 @@ func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
 	}
 }
 
+func TestDelegatePanelHeaderShowsOnlyElapsedTime(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true, State: "running"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "working...\n",
+	})
+	view := stripModelView(m)
+	if !strings.Contains(view, "<1s") {
+		t.Fatalf("expected delegate panel header to show elapsed time, got:\n%s", view)
+	}
+	if strings.Contains(view, "╭ DELEGATE") || strings.Contains(view, "│ DELEGATE") {
+		t.Fatalf("did not expect duplicate delegate label in panel header, got:\n%s", view)
+	}
+}
+
+func TestDelegatePanelMergesParagraphWrappedPreviewLines(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "First sentence wraps here and stops\nthen continues on the next line.\n",
+	})
+
+	view := stripModelView(m)
+	if strings.Contains(view, "stops\nthen continues") {
+		t.Fatalf("expected delegate preview prose lines merged into one paragraph, got:\n%s", view)
+	}
+	if !strings.Contains(view, "stops then continues on the next") {
+		t.Fatalf("expected merged delegate preview paragraph, got:\n%s", view)
+	}
+}
+
 func TestDelegatePanelSkipsFencedCodeBlockContent(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=inspect}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "DELEGATE",
@@ -2376,7 +2474,7 @@ func TestDelegatePanelPrioritizesAssistantLinesOverReasoningNoise(t *testing.T) 
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=inspect}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
 	for i := 1; i <= 5; i++ {
 		_, _ = m.Update(tuievents.ToolStreamMsg{
@@ -2401,11 +2499,31 @@ func TestDelegatePanelPrioritizesAssistantLinesOverReasoningNoise(t *testing.T) 
 	}
 }
 
+func TestDelegatePanelShowsPartialAssistantChunkWithoutTrailingNewline(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "DELEGATE",
+		TaskID: "t-1",
+		CallID: "call-1",
+		Stream: "assistant",
+		Chunk:  "Streaming partial delegate answer without newline yet",
+	})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Streaming partial delegate") {
+		t.Fatalf("expected delegate partial assistant chunk visible immediately, got:\n%s", view)
+	}
+}
+
 func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH {command=first}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH first\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
@@ -2413,7 +2531,7 @@ func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 		Stream: "stdout",
 		Chunk:  "bash-line\n",
 	})
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE {task=second}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE second\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "task-2", CallID: "call-2", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "DELEGATE",
@@ -2424,9 +2542,9 @@ func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 	})
 
 	view := stripModelView(m)
-	bashIdx := strings.Index(view, "▸ BASH {command=first}")
+	bashIdx := strings.Index(view, "▸ BASH first")
 	bashLineIdx := strings.Index(view, "bash-line")
-	delegateCallIdx := strings.Index(view, "▸ DELEGATE {task=second}")
+	delegateCallIdx := strings.Index(view, "▸ DELEGATE second")
 	delegateLineIdx := strings.Index(view, "delegate-line")
 	if bashIdx < 0 || bashLineIdx < 0 || delegateCallIdx < 0 || delegateLineIdx < 0 {
 		t.Fatalf("expected call lines and anchored outputs, got:\n%s", view)
@@ -3038,8 +3156,8 @@ func TestCtrlCWhileRunningShowsEscHint(t *testing.T) {
 	m.running = true
 
 	_, cmd := m.Update(keyPress('c', tea.ModCtrl))
-	if cmd != nil {
-		t.Fatal("expected no cmd when pressing Ctrl+C during running")
+	if cmd == nil {
+		t.Fatal("expected auto-clear cmd when pressing Ctrl+C during running")
 	}
 	if !strings.Contains(strings.ToLower(m.hint), "esc") {
 		t.Fatalf("expected hint to use esc, got %q", m.hint)
@@ -3098,8 +3216,8 @@ func TestEnterSlashWhileRunningDoesNotQueue(t *testing.T) {
 	m.running = true
 	typeRunes(m, "/help")
 	_, cmd := m.Update(keyPress(tea.KeyEnter))
-	if cmd != nil {
-		t.Fatal("expected no command for slash while running")
+	if cmd == nil {
+		t.Fatal("expected hint auto-clear cmd for slash while running")
 	}
 	if len(m.pendingQueue) != 0 {
 		t.Fatalf("expected no queued message for slash command, got %d", len(m.pendingQueue))
@@ -3277,16 +3395,32 @@ func TestToolCallSpacing_GapBetweenCalls_NoGapBeforeResult(t *testing.T) {
 	resizeModel(m)
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ build.sh\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ PATCH build.sh\n"})
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ PATCH edited build.sh\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ PATCH +1 -1\n"})
 	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
 	if strings.Contains(joined, "\n·\n") {
 		t.Fatalf("did not expect synthetic dot spacer between tool calls, got %q", joined)
 	}
-	if !strings.Contains(joined, "▸ READ build.sh\n") || !strings.Contains(joined, "▸ PATCH build.sh") {
-		t.Fatalf("expected both tool calls preserved, got %q", joined)
+	if !strings.Contains(joined, "▸ Explored 1 files") || !strings.Contains(joined, "▸ PATCH build.sh +1 -1") {
+		t.Fatalf("expected exploration summary followed by merged patch call, got %q", joined)
 	}
-	if strings.Contains(joined, "PATCH build.sh\n\n✓ PATCH edited") {
-		t.Fatalf("did not expect blank line between PATCH call and result, got %q", joined)
+	if strings.Contains(joined, "✓ PATCH +1 -1") {
+		t.Fatalf("expected patch result merged into call line, got %q", joined)
+	}
+}
+
+func TestWriteResultMergesIntoPriorCallLine(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WRITE build.sh\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WRITE +3 -0\n"})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "▸ WRITE build.sh +3 -0") {
+		t.Fatalf("expected write result merged into call line, got %q", joined)
+	}
+	if strings.Contains(joined, "✓ WRITE +3 -0") {
+		t.Fatalf("did not expect standalone write result line, got %q", joined)
 	}
 }
 
@@ -3307,6 +3441,20 @@ func TestViewportHardWrapLongLine(t *testing.T) {
 
 	if m.viewport.TotalLineCount() < 2 {
 		t.Fatalf("expected wrapped viewport lines, got %d", m.viewport.TotalLineCount())
+	}
+}
+
+func TestViewportCompactsDelegateCallLineByWidth(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"All done.\"\n"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "▸ DELEGATE") {
+		t.Fatalf("expected delegate line visible, got:\n%s", view)
+	}
+	if !strings.Contains(view, "......") {
+		t.Fatalf("expected delegate line compacted with six-dot middle marker, got:\n%s", view)
 	}
 }
 
@@ -3512,14 +3660,17 @@ func TestLogChunkKeepsAssistantAndToolBlocksContiguous(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* drafted a plan\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ SKILL.md\n"})
 
-	if len(m.historyLines) < 2 {
-		t.Fatalf("expected assistant and tool lines; got %d lines", len(m.historyLines))
+	if len(m.historyLines) < 3 {
+		t.Fatalf("expected assistant and exploration block lines; got %d lines", len(m.historyLines))
 	}
 	if got := strings.TrimSpace(ansi.Strip(m.historyLines[0])); got != "* drafted a plan" {
 		t.Fatalf("unexpected first line %q", got)
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[1])); got != "▸ READ SKILL.md" {
-		t.Fatalf("unexpected tool line %q", got)
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[1])); got != "▸ Exploring 1 files" {
+		t.Fatalf("unexpected exploration title %q", got)
+	}
+	if got := strings.TrimSpace(ansi.Strip(m.historyLines[2])); got != "│ Read SKILL.md" {
+		t.Fatalf("unexpected exploration child line %q", got)
 	}
 }
 
@@ -3592,16 +3743,50 @@ func TestRetryThenNonRetryBreaksTransient(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! retrying request (3/3)\n"})
 
 	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
-	// The second retry (2/3) should be visible (was the last before break).
-	if !strings.Contains(joined, "2/3") {
-		t.Fatalf("expected last retry before break visible, got %q", joined)
-	}
-	// The tool line and the new retry (3/3) should both be present.
-	if !strings.Contains(joined, "READ file.txt") {
-		t.Fatalf("expected tool line preserved, got %q", joined)
+	if !strings.Contains(joined, "▸ Explored 1 files") {
+		t.Fatalf("expected read turn collapsed before next retry, got %q", joined)
 	}
 	if !strings.Contains(joined, "3/3") {
 		t.Fatalf("expected new retry after break visible, got %q", joined)
+	}
+}
+
+func TestRateLimitWarningDisappearsBeforeNextMessage(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ sfs.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=GetSfsListReq}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! llm request hit rate limits (HTTP 429 / Too Many Requests), retrying in 5s (1/7). Waiting longer before retrying.\n"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Too Many Requests") {
+		t.Fatalf("expected transient rate-limit warning to render, got:\n%s", view)
+	}
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ sfs.go\n"})
+	view = stripModelView(m)
+	if strings.Contains(view, "Too Many Requests") {
+		t.Fatalf("expected transient rate-limit warning removed before next message, got:\n%s", view)
+	}
+}
+
+func TestActiveExplorationBlockReRendersOnSpinnerTick(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	m.running = true
+	m.startRunningAnimation()
+
+	before := m.historyLines[0]
+	for i := 0; i < 3; i++ {
+		_, _ = m.Update(spinner.TickMsg{})
+	}
+	after := m.historyLines[0]
+	if before == after {
+		t.Fatalf("expected active exploration header to animate on spinner ticks")
 	}
 }
 
@@ -3616,8 +3801,263 @@ func TestLogBlockGapBetweenNarrativeAndTool(t *testing.T) {
 	if strings.Contains(joined, "\n·\n") {
 		t.Fatalf("did not expect synthetic dot spacer between assistant and tool, got %q", joined)
 	}
-	if !strings.Contains(joined, "* hello world\n") || !strings.Contains(joined, "▸ READ file.txt") {
-		t.Fatalf("expected assistant and tool lines preserved, got %q", joined)
+	if !strings.Contains(joined, "* hello world\n") || !strings.Contains(joined, "▸ Exploring 1 files") || !strings.Contains(joined, "Read file.txt") {
+		t.Fatalf("expected assistant and exploration block preserved, got %q", joined)
+	}
+}
+
+func TestExplorationBlockGroupsConsecutiveReadOnlyTools(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Exploring") {
+		t.Fatalf("expected exploration title, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Read state.go") {
+		t.Fatalf("expected read child line, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Searched for enter") {
+		t.Fatalf("expected search child line, got:\n%s", view)
+	}
+	if strings.Contains(view, "▸ READ state.go") || strings.Contains(view, "▸ SEARCH . {query=enter}") {
+		t.Fatalf("expected raw tool lines replaced by block, got:\n%s", view)
+	}
+}
+
+func TestExplorationBlockStartsOnFirstReadTool(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "▸ Exploring") {
+		t.Fatalf("expected exploration block to start immediately on first read, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Read state.go") {
+		t.Fatalf("expected read entry rendered inside exploration block, got:\n%s", view)
+	}
+	if strings.Contains(view, "\n▸ READ state.go") {
+		t.Fatalf("expected raw read line not rendered before exploration block, got:\n%s", view)
+	}
+}
+
+func TestExplorationBlockMergesReadAndSearchResultSummaries(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ READ 1-120\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ SEARCH 12 matches, 1 files\n"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Read state.go 1-120") {
+		t.Fatalf("expected merged read summary inside exploration block, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Searched for enter 12 matches, 1 files") {
+		t.Fatalf("expected merged search summary inside exploration block, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ READ 1-120") || strings.Contains(view, "✓ SEARCH 12 matches, 1 files") {
+		t.Fatalf("expected result lines absorbed by exploration block, got:\n%s", view)
+	}
+}
+
+func TestExplorationBlockCollapsesBeforeAssistantAnswer(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "▸ Explored 1 files, 1 searches") {
+		t.Fatalf("expected collapsed exploration summary, got:\n%s", view)
+	}
+	if !strings.Contains(view, "* done") {
+		t.Fatalf("expected assistant answer after collapsed summary, got:\n%s", view)
+	}
+	if strings.Contains(view, "Exploring") || strings.Contains(view, "Read state.go") {
+		t.Fatalf("expected expanded exploration block removed, got:\n%s", view)
+	}
+}
+
+func TestTaskMonitorBlockCollapsesToSummary(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WAIT 5 s\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WAITED 5 s\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CHECK\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CANCEL\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Waited 5 s") || !strings.Contains(view, "Checked 1 tasks") || !strings.Contains(view, "Cancelled 1 tasks") {
+		t.Fatalf("expected task monitor summary, got:\n%s", view)
+	}
+	if strings.Contains(view, "Standby") || strings.Contains(view, "Checking task status") {
+		t.Fatalf("expected task monitor rendered as compact single line, got:\n%s", view)
+	}
+}
+
+func TestExplorationBlockIncludesStatInSummary(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ STAT task3_result.txt\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "▸ Explored 1 files") {
+		t.Fatalf("expected stat activity included in exploration summary, got:\n%s", view)
+	}
+}
+
+func TestExplorationBlockAvoidsEmptyExploredSummary(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ GLOB {pattern=**/*.go}\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	view := stripModelView(m)
+	if strings.Contains(view, "▸ Explored\n") {
+		t.Fatalf("did not expect empty explored summary, got:\n%s", view)
+	}
+	if !strings.Contains(view, "patterns") && !strings.Contains(view, "actions") {
+		t.Fatalf("expected explored fallback summary detail, got:\n%s", view)
+	}
+}
+
+func TestTaskMonitorStatusCollapsesWithoutStandbyLabel(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CHECK\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Checked 1 tasks") {
+		t.Fatalf("expected checked summary, got:\n%s", view)
+	}
+	if strings.Contains(view, "Standby") {
+		t.Fatalf("did not expect standby summary, got:\n%s", view)
+	}
+}
+
+func TestTaskMonitorCancelCollapsesWithoutStandbyLabel(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CANCEL\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Cancelled 1 tasks") {
+		t.Fatalf("expected cancelled summary, got:\n%s", view)
+	}
+	if strings.Contains(view, "Standby") {
+		t.Fatalf("did not expect standby summary, got:\n%s", view)
+	}
+}
+
+func TestAdjacentTaskMonitorSummariesMergeIntoOneLine(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CHECK\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CHECK\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CHECK\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ CHECK\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if len(m.historyLines) != 1 {
+		t.Fatalf("expected adjacent task summaries merged into one line, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Checked 1 tasks, Checked 1 tasks, Checked 2 tasks") {
+		t.Fatalf("expected merged adjacent task summary content, got:\n%s", view)
+	}
+}
+
+func TestTaskMonitorBlockAbsorbsTaskErrorResultLines(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WAIT 5 s\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! WAITED 5 s\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Waited 5 s") {
+		t.Fatalf("expected task error line to collapse into standby summary, got:\n%s", view)
+	}
+	if strings.Contains(view, "! WAITED 5 s") {
+		t.Fatalf("expected raw task error line absorbed by standby block, got:\n%s", view)
+	}
+}
+
+func TestTaskMonitorWaitSummaryPreservesTerminalState(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WAIT 10 s\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WAITED Completed\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Waited 10 s (Completed)") {
+		t.Fatalf("expected wait summary to keep terminal state, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ WAITED Completed") {
+		t.Fatalf("expected raw task wait result absorbed into summary, got:\n%s", view)
+	}
+}
+
+func TestReasoningTransitionsIntoExplorationBlock(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "reasoning", Text: "think first", Final: false})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+
+	view := stripModelView(m)
+	if strings.Contains(view, "think first") {
+		t.Fatalf("expected transient reasoning removed once exploration starts, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Exploring") {
+		t.Fatalf("expected exploration block after reasoning, got:\n%s", view)
+	}
+}
+
+func TestReasoningDoesNotSplitActiveExplorationBlock(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "reasoning", Text: "transient thinking", Final: false})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ model_view.go\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	view := stripModelView(m)
+	if strings.Contains(view, "transient thinking") {
+		t.Fatalf("expected reasoning hidden while exploration block is active, got:\n%s", view)
+	}
+	if strings.Count(view, "Explored") != 1 {
+		t.Fatalf("expected one collapsed exploration summary, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ Explored 2 files, 1 searches") {
+		t.Fatalf("expected merged exploration summary, got:\n%s", view)
 	}
 }
 

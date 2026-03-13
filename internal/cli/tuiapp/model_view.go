@@ -159,6 +159,7 @@ func (m *Model) syncViewportContent() {
 
 	// 1. All committed history lines.
 	for _, line := range m.historyLines {
+		line = m.adaptHistoryLineForViewport(line, wrapWidth)
 		wrapped := hardWrapDisplayLine(line, wrapWidth)
 		if wrapped == "" {
 			lines = append(lines, "")
@@ -190,6 +191,51 @@ func (m *Model) syncViewportContent() {
 		m.viewportPlainLines = append(m.viewportPlainLines, ansi.Strip(line))
 	}
 	m.renderViewportContent()
+}
+
+func (m *Model) adaptHistoryLineForViewport(line string, wrapWidth int) string {
+	plain := strings.TrimSpace(ansi.Strip(line))
+	if !strings.HasPrefix(plain, "▸ DELEGATE ") {
+		return line
+	}
+	taskText := strings.TrimSpace(strings.TrimPrefix(plain, "▸ DELEGATE "))
+	if taskText == "" {
+		return line
+	}
+	style := tuikit.LineStyleTool
+	gutter := tuikit.LineExtraGutter(style)
+	available := wrapWidth - displayColumns(gutter) - displayColumns("▸ DELEGATE ")
+	if available < 16 {
+		available = 16
+	}
+	targetWidth := minInt(available, maxInt(24, wrapWidth*2/3))
+	adapted := "▸ DELEGATE " + truncateMiddleDisplay(taskText, targetWidth)
+	colored := tuikit.ColorizeLogLine(adapted, style, m.theme)
+	return gutter + colored
+}
+
+func truncateMiddleDisplay(text string, width int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if text == "" || width <= 0 || displayColumns(text) <= width {
+		return text
+	}
+	ellipsis := "......"
+	ellipsisWidth := displayColumns(ellipsis)
+	if width <= ellipsisWidth {
+		return sliceByDisplayColumns(text, 0, width)
+	}
+	head := (width - ellipsisWidth) * 2 / 3
+	tail := (width - ellipsisWidth) - head
+	if head <= 0 {
+		head = 1
+	}
+	if tail <= 0 {
+		tail = 1
+	}
+	total := displayColumns(text)
+	prefix := sliceByDisplayColumns(text, 0, head)
+	suffix := sliceByDisplayColumns(text, total-tail, total)
+	return prefix + ellipsis + suffix
 }
 
 func (m *Model) renderViewportContent() {

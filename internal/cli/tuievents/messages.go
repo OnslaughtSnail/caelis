@@ -2,6 +2,16 @@ package tuievents
 
 import "time"
 
+type HintPriority int
+
+const (
+	HintPriorityUnspecified HintPriority = iota
+	HintPriorityLow
+	HintPriorityNormal
+	HintPriorityHigh
+	HintPriorityCritical
+)
+
 type LogChunkMsg struct {
 	Chunk string
 }
@@ -12,8 +22,10 @@ type SetStatusMsg struct {
 }
 
 type SetHintMsg struct {
-	Hint       string
-	ClearAfter time.Duration
+	Hint           string
+	ClearAfter     time.Duration
+	Priority       HintPriority
+	ClearOnMessage bool
 }
 
 type SetRunningMsg struct {

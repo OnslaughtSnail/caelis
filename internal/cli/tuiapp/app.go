@@ -235,37 +235,45 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuievents.LogChunkMsg:
+		m.dismissMessageHints()
 		return m.handleLogChunk(typed.Chunk)
 
 	case tuievents.AssistantStreamMsg:
+		m.dismissMessageHints()
 		return m.handleStreamBlock(typed.Kind, typed.Text, typed.Final)
 
 	case tuievents.ReasoningStreamMsg:
+		m.dismissMessageHints()
 		return m.handleStreamBlock("reasoning", typed.Text, typed.Final)
 
 	case tuievents.DiffBlockMsg:
+		m.dismissMessageHints()
 		return m.handleDiffBlock(typed)
 
 	case tuievents.TaskStreamMsg:
+		m.dismissMessageHints()
 		return m.handleToolStreamMsg(typed)
 
 	case tuievents.SetHintMsg:
-		m.hint = strings.TrimSpace(typed.Hint)
-		return m, clearHintLaterCmd(m.hint, typed.ClearAfter)
+		after := typed.ClearAfter
+		if after <= 0 {
+			after = systemHintDuration
+		}
+		return m, m.showHint(typed.Hint, hintOptions{
+			priority:       typed.Priority,
+			clearOnMessage: typed.ClearOnMessage,
+			clearAfter:     after,
+		})
 
 	case clearHintMsg:
-		if strings.TrimSpace(m.hint) == strings.TrimSpace(typed.expected) {
-			m.hint = ""
-		}
+		m.removeHintByID(typed.id)
 		return m, nil
 
 	case ctrlCExpireMsg:
 		if m.ctrlCArmSeq == typed.seq && m.lastCtrlCAt.Equal(typed.armedAt) {
 			m.ctrlCArmed = false
 			m.lastCtrlCAt = time.Time{}
-			if strings.TrimSpace(m.hint) == "press Ctrl+C again to quit" {
-				m.hint = ""
-			}
+			m.removeHintsByText("press Ctrl+C again to quit")
 		}
 		return m, nil
 
@@ -316,7 +324,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuievents.AttachmentCountMsg:
 		if typed.Count <= 0 {
 			m.clearInputAttachments()
-			m.hint = ""
+			m.dismissVisibleHint()
 		} else {
 			m.syncAttachmentSummary()
 		}
@@ -328,6 +336,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuievents.TaskResultMsg:
+		m.dismissMessageHints()
 		if typed.Interrupted {
 			m.discardActiveAssistantStream()
 		} else {
@@ -335,6 +344,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.finalizeAssistantBlock()
 			m.finalizeReasoningBlock()
 		}
+		m.finalizeActivityBlock()
 		if !m.runStartedAt.IsZero() {
 			m.lastRunDuration = time.Since(m.runStartedAt)
 			m.hasLastRunDuration = true
@@ -395,6 +405,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			if m.activePrompt == nil {
 				m.advanceRunningAnimation()
+				if m.activityBlock != nil && m.activityBlock.active {
+					m.syncActivityBlock()
+				}
 			}
 			return m, cmd
 		}

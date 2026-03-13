@@ -306,7 +306,13 @@ func runCLI(ctx context.Context, args []string) error {
 		}
 		if strings.HasPrefix(strings.TrimSpace(singleInput), "/compact") {
 			note := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(singleInput), "/compact"))
-			fmt.Println("note: 正在压缩上下文...")
+			beforeUsage, _ := rt.ContextUsage(ctx, runtime.UsageRequest{
+				AppName:             *appName,
+				UserID:              *userID,
+				SessionID:           *sessionID,
+				Model:               llm,
+				ContextWindowTokens: *contextWindow,
+			})
 			ev, compactErr := rt.Compact(ctx, runtime.CompactRequest{
 				AppName:             *appName,
 				UserID:              *userID,
@@ -321,7 +327,14 @@ func runCLI(ctx context.Context, args []string) error {
 			if ev == nil {
 				fmt.Println("compact: skipped (not enough history to compact)")
 			} else {
-				fmt.Printf("compact: success, event_id=%s\n", ev.ID)
+				afterUsage, _ := rt.ContextUsage(ctx, runtime.UsageRequest{
+					AppName:             *appName,
+					UserID:              *userID,
+					SessionID:           *sessionID,
+					Model:               llm,
+					ContextWindowTokens: *contextWindow,
+				})
+				fmt.Printf("compact: success, %s -> %s tokens\n", formatCompactTokenUsage(beforeUsage.CurrentTokens), formatCompactTokenUsage(afterUsage.CurrentTokens))
 			}
 			return nil
 		}

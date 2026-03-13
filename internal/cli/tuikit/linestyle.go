@@ -232,7 +232,7 @@ func colorizeToolLine(line string, theme Theme) string {
 			toolName := parts[0]
 			suffix := ""
 			if len(parts) == 2 {
-				suffix = " " + lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(parts[1], theme.LinkStyle()))
+				suffix = " " + renderToolCallSuffix(toolName, parts[1], theme)
 			}
 			return theme.ToolStyle().Render("▸ ") +
 				theme.ToolNameStyle().Render(toolName) +
@@ -249,7 +249,7 @@ func colorizeToolLine(line string, theme Theme) string {
 			toolName := parts[0]
 			suffix := ""
 			if len(parts) == 2 {
-				suffix = " " + LinkifyText(parts[1], theme.LinkStyle())
+				suffix = " " + renderToolResultSuffix(toolName, parts[1], theme)
 			}
 			return theme.ToolStyle().Render("✓ ") +
 				theme.AssistantStyle().Render(toolName) +
@@ -264,6 +264,42 @@ func colorizeToolLine(line string, theme Theme) string {
 	}
 
 	return theme.ReasoningStyle().Render(line)
+}
+
+func renderToolCallSuffix(toolName string, suffix string, theme Theme) string {
+	if !strings.EqualFold(toolName, "PATCH") && !strings.EqualFold(toolName, "WRITE") {
+		return lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(suffix, theme.LinkStyle()))
+	}
+	fields := strings.Fields(strings.TrimSpace(suffix))
+	if len(fields) < 3 {
+		return lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(suffix, theme.LinkStyle()))
+	}
+	added := fields[len(fields)-2]
+	removed := fields[len(fields)-1]
+	if !strings.HasPrefix(added, "+") || !strings.HasPrefix(removed, "-") {
+		return lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(suffix, theme.LinkStyle()))
+	}
+	target := strings.TrimSpace(strings.Join(fields[:len(fields)-2], " "))
+	if target == "" {
+		return lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(suffix, theme.LinkStyle()))
+	}
+	targetText := lipgloss.NewStyle().Foreground(theme.ReasoningFg).Render(LinkifyText(target, theme.LinkStyle()))
+	addedText := lipgloss.NewStyle().Foreground(theme.DiffAddFg).Render(added)
+	removedText := lipgloss.NewStyle().Foreground(theme.DiffRemoveFg).Render(removed)
+	return targetText + " " + addedText + " " + removedText
+}
+
+func renderToolResultSuffix(toolName string, suffix string, theme Theme) string {
+	if !strings.EqualFold(toolName, "PATCH") && !strings.EqualFold(toolName, "WRITE") {
+		return LinkifyText(suffix, theme.LinkStyle())
+	}
+	fields := strings.Fields(strings.TrimSpace(suffix))
+	if len(fields) != 2 || !strings.HasPrefix(fields[0], "+") || !strings.HasPrefix(fields[1], "-") {
+		return LinkifyText(suffix, theme.LinkStyle())
+	}
+	added := lipgloss.NewStyle().Foreground(theme.DiffAddFg).Render(fields[0])
+	removed := lipgloss.NewStyle().Foreground(theme.DiffRemoveFg).Render(fields[1])
+	return added + " " + removed
 }
 
 func colorizeKeyValueLine(line string, theme Theme) string {

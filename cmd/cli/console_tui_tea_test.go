@@ -42,6 +42,27 @@ func TestCompleteModelCandidates_GroupsByProvider(t *testing.T) {
 	}
 }
 
+func TestShouldHandleAsSlashCommand_AllowsKnownAndTyposButNotPathQuestions(t *testing.T) {
+	c := &cliConsole{
+		commands: map[string]slashCommand{
+			"help":   {Usage: "/help"},
+			"status": {Usage: "/status"},
+		},
+	}
+	if !c.shouldHandleAsSlashCommand("/help") {
+		t.Fatal("expected known slash command to be handled")
+	}
+	if !c.shouldHandleAsSlashCommand("/sttaus") {
+		t.Fatal("expected command-like typo to still be treated as slash command")
+	}
+	if c.shouldHandleAsSlashCommand("/v4/ebs/list这个接口的入参都有哪些？") {
+		t.Fatal("expected path-like question to bypass slash command handling")
+	}
+	if c.shouldHandleAsSlashCommand("/v4/ebs/list") {
+		t.Fatal("expected path-like endpoint token to bypass slash command handling")
+	}
+}
+
 func TestCompleteModelCandidates_FiltersByQuery(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	configs := []modelproviders.Config{

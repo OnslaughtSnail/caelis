@@ -228,7 +228,7 @@ func (c *cliConsole) loopTUITea() error {
 		Wizards:         buildWizardDefs(),
 		ExecuteLine: func(submission tuiapp.Submission) tuievents.TaskResultMsg {
 			line := strings.TrimSpace(submission.Text)
-			if strings.HasPrefix(line, "/") {
+			if c.shouldHandleAsSlashCommand(line) {
 				exitNow, err := c.handleSlash(line)
 				return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}
 			}
@@ -328,7 +328,12 @@ func (c *cliConsole) loopTUITea() error {
 	go func() {
 		for range sigCh {
 			if c.cancelActiveRun() {
-				sender.Send(tuievents.SetHintMsg{Hint: "interrupt requested"})
+				sender.Send(tuievents.SetHintMsg{
+					Hint:           "interrupt requested",
+					ClearAfter:     transientHintDuration,
+					Priority:       tuievents.HintPriorityCritical,
+					ClearOnMessage: true,
+				})
 				continue
 			}
 			sender.Send(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))

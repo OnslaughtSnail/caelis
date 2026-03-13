@@ -241,6 +241,58 @@ func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 	}
 }
 
+func TestTaskManager_ListFiltersRegistryBySession(t *testing.T) {
+	store := taskinmemory.New()
+	registry := task.NewRegistry(task.RegistryConfig{})
+
+	current := registry.Create(task.KindDelegate, "current", nil, false, true)
+	current.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"}
+
+	other := registry.Create(task.KindBash, "other", nil, true, true)
+	other.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "child"}
+
+	persisted := &task.Entry{
+		TaskID:         "t-persisted-parent",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "persisted parent",
+		State:          task.StateCompleted,
+		Running:        false,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Result: map[string]any{
+			"state": string(task.StateCompleted),
+		},
+	}
+	if err := store.Upsert(context.Background(), persisted); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTaskManager(nil, nil, registry, store, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	items, err := manager.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 tasks for current session, got %d: %#v", len(items), items)
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		seen[item.TaskID] = true
+	}
+	if !seen[current.ID] {
+		t.Fatalf("expected current session registry task %q in list, got %#v", current.ID, items)
+	}
+	if !seen[persisted.TaskID] {
+		t.Fatalf("expected persisted current session task %q in list, got %#v", persisted.TaskID, items)
+	}
+	if seen[other.ID] {
+		t.Fatalf("did not expect other session task %q in list, got %#v", other.ID, items)
+	}
+}
+
 type taskTestRuntime struct {
 	host toolexec.AsyncCommandRunner
 }

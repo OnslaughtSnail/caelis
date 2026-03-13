@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -294,6 +295,41 @@ func (c *cliConsole) handleSlash(line string) (bool, error) {
 	return handler.Handle(c, parts[1:])
 }
 
+func (c *cliConsole) shouldHandleAsSlashCommand(line string) bool {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "/") {
+		return false
+	}
+	parts := strings.Fields(strings.TrimPrefix(line, "/"))
+	if len(parts) == 0 {
+		return false
+	}
+	cmd := strings.ToLower(strings.TrimSpace(parts[0]))
+	if cmd == "" {
+		return false
+	}
+	if _, ok := c.commands[cmd]; ok {
+		return true
+	}
+	return looksLikeSlashCommandToken(cmd)
+}
+
+func looksLikeSlashCommandToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	for i, r := range token {
+		if unicode.IsLetter(r) {
+			continue
+		}
+		if i > 0 && (unicode.IsDigit(r) || r == '-' || r == '_') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (c *cliConsole) runPrompt(input string) error {
 	return c.runPromptWithAttachments(input, nil)
 }
@@ -575,20 +611,17 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 	if len(msg.ToolCalls) > 0 {
 		for _, call := range msg.ToolCalls {
 			parsedArgs := parseToolArgsForDisplay(call.Args)
-			var diffMsg tuievents.DiffBlockMsg
-			diffShown := false
-			if opts.ShowMutationDiff {
-				var tooLarge bool
-				var ok bool
-				diffMsg, tooLarge, ok = buildToolCallDiffBlockMsg(c.execRuntime, call.Name, parsedArgs)
-				if ok && !tooLarge {
-					diffShown = true
-				}
+			visuals := toolCallMutationVisuals{}
+			visualsOK := false
+			if isFileMutationTool(call.Name) {
+				visuals, visualsOK = buildToolCallMutationVisuals(c.execRuntime, call.Name, parsedArgs)
 			}
 			if pendingToolCalls != nil && call.ID != "" {
+				diffShown := opts.ShowMutationDiff && visualsOK && visuals.DiffShown
 				pendingToolCalls[call.ID] = toolCallSnapshot{
 					Args:          cloneAnyMap(parsedArgs),
 					RichDiffShown: diffShown,
+					ChangeCounts:  visuals.ChangeCounts,
 				}
 			}
 			c.tuiSender.Send(tuievents.LogChunkMsg{
@@ -601,8 +634,8 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 					Reset:  true,
 				})
 			}
-			if diffShown {
-				c.tuiSender.Send(diffMsg)
+			if opts.ShowMutationDiff && visualsOK && visuals.DiffShown {
+				c.tuiSender.Send(visuals.DiffMsg)
 			}
 		}
 		handled = true
@@ -630,15 +663,37 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		var (
 			callArgs      map[string]any
 			richDiffShown bool
+			changeCounts  mutationChangeCounts
 		)
 		if pendingToolCalls != nil && msg.ToolResponse.ID != "" {
 			if snapshot, ok := pendingToolCalls[msg.ToolResponse.ID]; ok {
 				callArgs = snapshot.Args
 				richDiffShown = snapshot.RichDiffShown
+				changeCounts = snapshot.ChangeCounts
 				delete(pendingToolCalls, msg.ToolResponse.ID)
 			}
 		}
-		if isFileMutationTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) && richDiffShown {
+		if isFileMutationTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
+			if richDiffShown {
+				return true
+			}
+			if changeCounts == (mutationChangeCounts{}) {
+				changeCounts = mutationChangeCountsFromResult(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+			}
+			summary := formatMutationChangeSummary(changeCounts)
+			if changeCounts == (mutationChangeCounts{}) {
+				summary = summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+			}
+			displayName := displayToolResponseName(toolName, callArgs, msg.ToolResponse.Result)
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", displayName, summary)})
+			return true
+		}
+		if compact := summarizeCompactToolResponseForTUI(msg.ToolResponse.Name, msg.ToolResponse.Result); compact != "" && !hasToolError(msg.ToolResponse.Result) {
+			displayName := displayToolResponseName(toolName, callArgs, msg.ToolResponse.Result)
+			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", displayName, compact)})
+			return true
+		}
+		if strings.EqualFold(toolName, tool.DelegateTaskToolName) && !hasToolError(msg.ToolResponse.Result) {
 			return true
 		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).
@@ -646,6 +701,12 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			return true
 		}
 		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		if strings.EqualFold(toolName, tool.TaskToolName) && emittedTaskStream {
+			summary = ""
+		}
+		if strings.EqualFold(toolName, tool.DelegateTaskToolName) && emittedTaskStream {
+			summary = ""
+		}
 		if strings.TrimSpace(summary) != "" {
 			prefix := "✓ "
 			if hasToolError(msg.ToolResponse.Result) && !strings.EqualFold(toolName, toolshell.BashToolName) {
@@ -832,11 +893,6 @@ func handleCompact(c *cliConsole, args []string) (bool, error) {
 		Model:               c.llm,
 		ContextWindowTokens: c.contextWindow,
 	})
-	if c.ui != nil {
-		c.ui.Note("正在压缩上下文...\n")
-	} else {
-		c.printf("note: 正在压缩上下文...\n")
-	}
 	ev, err := c.rt.Compact(c.baseCtx, runtime.CompactRequest{
 		AppName:             c.appName,
 		UserID:              c.userID,
@@ -849,8 +905,10 @@ func handleCompact(c *cliConsole, args []string) (bool, error) {
 		return false, err
 	}
 	if ev == nil {
+		c.refreshContextUsageEstimate(beforeUsage.CurrentTokens)
+		c.syncTUIStatus()
 		if beforeUsage.WindowTokens > 0 {
-			c.printf("compact: skipped (%s)\n", formatUsage(beforeUsage))
+			c.printf("compact: skipped (%s tokens)\n", formatCompactTokenUsage(beforeUsage.CurrentTokens))
 		}
 	} else {
 		afterUsage, _ := c.rt.ContextUsage(c.baseCtx, runtime.UsageRequest{
@@ -860,13 +918,19 @@ func handleCompact(c *cliConsole, args []string) (bool, error) {
 			Model:               c.llm,
 			ContextWindowTokens: c.contextWindow,
 		})
-		if afterUsage.WindowTokens > 0 {
-			c.printf("compact: success, event_id=%s, %s -> %s\n", ev.ID, formatUsage(beforeUsage), formatUsage(afterUsage))
-		} else {
-			c.printf("compact: success, event_id=%s\n", ev.ID)
-		}
+		c.refreshContextUsageEstimate(afterUsage.CurrentTokens)
+		c.syncTUIStatus()
+		c.printf("compact: success, %s -> %s tokens\n", formatCompactTokenUsage(beforeUsage.CurrentTokens), formatCompactTokenUsage(afterUsage.CurrentTokens))
 	}
 	return false, nil
+}
+
+func (c *cliConsole) syncTUIStatus() {
+	if c == nil || c.tuiSender == nil {
+		return
+	}
+	modelText, contextText := c.readTUIStatus()
+	c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
 }
 
 func handleStatus(c *cliConsole, args []string) (bool, error) {
@@ -1448,6 +1512,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("- %s\n", text)})
 		}
 	}
+	c.tuiSender.Send(tuievents.TaskResultMsg{})
 	return nil
 }
 
@@ -2236,6 +2301,16 @@ func formatUsage(usage runtime.ContextUsage) string {
 		return "0/0"
 	}
 	return fmt.Sprintf("%d/%d (%.1f%%)", usage.CurrentTokens, usage.WindowTokens, usage.Ratio*100)
+}
+
+func formatCompactTokenUsage(tokens int) string {
+	if tokens <= 0 {
+		return "0"
+	}
+	if formatted := formatTokenCount(tokens); formatted != "" {
+		return formatted
+	}
+	return strconv.Itoa(tokens)
 }
 
 func stringOrDash(value string) string {

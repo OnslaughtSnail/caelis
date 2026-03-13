@@ -148,6 +148,30 @@ func TestSummarizeToolResponse_BashYieldIsFriendly(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolArgs_BashOmitsCommandWrapper(t *testing.T) {
+	got := summarizeToolArgs("BASH", map[string]any{
+		"command": "go test ./internal/cli/tuiapp",
+	})
+	if got != "go test ./internal/cli/tuiapp" {
+		t.Fatalf("unexpected bash arg summary: %q", got)
+	}
+	if strings.Contains(got, "{command=") {
+		t.Fatalf("expected raw bash command without wrapper, got %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_DelegateOmitsTaskWrapper(t *testing.T) {
+	got := summarizeToolArgs("DELEGATE", map[string]any{
+		"task": "sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"This task simulated a long-running delegate with a deliberately verbose payload for summary truncation\"; python3 -c \"print('tail marker')\"",
+	})
+	if strings.Contains(got, "{task=") {
+		t.Fatalf("expected raw delegate task text without wrapper, got %q", got)
+	}
+	if !strings.Contains(got, "sleep 8;") || !strings.Contains(got, "tail marker") || !strings.Contains(got, "deliberately verbose payload") {
+		t.Fatalf("expected delegate summary to keep full normalized text for display-layer truncation, got %q", got)
+	}
+}
+
 func TestSummarizeToolResponse_TaskWaitRendersFriendlySummary(t *testing.T) {
 	got := summarizeToolResponseWithCall("TASK", map[string]any{
 		"task_id":       "t-1234567890ab",

@@ -409,19 +409,26 @@ func (m *runtimeTaskManager) List(ctx context.Context) ([]task.Snapshot, error) 
 	records := m.registry.List()
 	out := make([]task.Snapshot, 0, len(records))
 	seen := map[string]struct{}{}
+	current := task.SessionRef{}
+	if m != nil && m.parent != nil {
+		current = task.SessionRef{
+			AppName:   m.parent.appName,
+			UserID:    m.parent.userID,
+			SessionID: m.parent.sessionID,
+		}
+	}
 	for _, record := range records {
 		if record == nil {
+			continue
+		}
+		if !sameTaskSession(record.Session, current) {
 			continue
 		}
 		seen[record.ID] = struct{}{}
 		out = append(out, record.Snapshot(task.Output{}))
 	}
 	if m.store != nil && m.parent != nil {
-		entries, err := m.store.ListSession(ctx, task.SessionRef{
-			AppName:   m.parent.appName,
-			UserID:    m.parent.userID,
-			SessionID: m.parent.sessionID,
-		})
+		entries, err := m.store.ListSession(ctx, current)
 		if err != nil {
 			return nil, err
 		}
@@ -436,6 +443,12 @@ func (m *runtimeTaskManager) List(ctx context.Context) ([]task.Snapshot, error) 
 		}
 	}
 	return out, nil
+}
+
+func sameTaskSession(a task.SessionRef, b task.SessionRef) bool {
+	return strings.TrimSpace(a.AppName) == strings.TrimSpace(b.AppName) &&
+		strings.TrimSpace(a.UserID) == strings.TrimSpace(b.UserID) &&
+		strings.TrimSpace(a.SessionID) == strings.TrimSpace(b.SessionID)
 }
 
 type bashTaskController struct {

@@ -21,11 +21,20 @@ const runningLightBandRadius = 5.5
 const runningLightLead = 4.0
 const copyHintDuration = 1600 * time.Millisecond
 const toolOutputPreviewLines = 4
+const activityBlockPreviewLines = 8
 const toolOutputFadeHold = 650 * time.Millisecond
 const toolOutputFadeInterval = 110 * time.Millisecond
 const inputHorizontalInset = tuikit.InputInset
 const paletteAnimationInterval = 16 * time.Millisecond
 const paletteAnimationStep = 3
+const systemHintDuration = 1800 * time.Millisecond
+
+type hintEntry struct {
+	id             uint64
+	text           string
+	priority       tuievents.HintPriority
+	clearOnMessage bool
+}
 
 var runningSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
@@ -161,6 +170,33 @@ type diffBlockState struct {
 	msg   tuievents.DiffBlockMsg
 }
 
+type activityBlockKind string
+
+const (
+	activityBlockExploration activityBlockKind = "exploration"
+	activityBlockTaskMonitor activityBlockKind = "task_monitor"
+)
+
+type activityEntry struct {
+	tool   string
+	action string
+	path   string
+	query  string
+	raw    string
+	waitMS int
+	result bool
+}
+
+type foldedActivityBlockState struct {
+	kind      activityBlockKind
+	start     int
+	end       int
+	active    bool
+	finalized bool
+	entries   []activityEntry
+	summary   string
+}
+
 type toolOutputLine struct {
 	text   string
 	stream string
@@ -180,6 +216,8 @@ type toolOutputState struct {
 	lines         []toolOutputLine
 	stdoutPartial string
 	stderrPartial string
+	assistantPartial string
+	reasoningPartial string
 	delegateFence bool
 	active        bool
 	closing       bool
@@ -206,6 +244,7 @@ type Model struct {
 	reasoningBlock     *assistantBlockState
 	lastFinalAnswer    string
 	diffBlocks         []diffBlockState
+	activityBlock      *foldedActivityBlockState
 	toolOutputs        map[string]*toolOutputState
 	welcomeCardPending bool
 	runStartedAt       time.Time
@@ -215,6 +254,7 @@ type Model struct {
 
 	transientLogIdx  int
 	transientIsRetry bool
+	transientRemove  bool
 
 	historyLines        []string
 	viewportStyledLines []string
@@ -250,6 +290,8 @@ type Model struct {
 	statusModel   string
 	statusContext string
 	hint          string
+	hintEntries   []hintEntry
+	nextHintID    uint64
 
 	showPalette      bool
 	palette          list.Model

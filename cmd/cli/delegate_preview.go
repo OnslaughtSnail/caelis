@@ -111,8 +111,8 @@ func projectDelegateReasoning(state *delegatePreviewState, ev *session.Event, pa
 	if state == nil || ev == nil {
 		return ""
 	}
-	text := strings.TrimSpace(ev.Message.Reasoning)
-	if text == "" {
+	text := ev.Message.Reasoning
+	if strings.TrimSpace(text) == "" {
 		return ""
 	}
 	if partial {
@@ -120,9 +120,13 @@ func projectDelegateReasoning(state *delegatePreviewState, ev *session.Event, pa
 		state.reasoning = text
 		return delta
 	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
 	chunk := delegatePreviewDelta(state.reasoning, text)
 	state.reasoning = text
-	if chunk == "" {
+	if strings.TrimSpace(chunk) == "" {
 		return ""
 	}
 	return chunk + "\n"
