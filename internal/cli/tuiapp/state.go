@@ -226,6 +226,11 @@ type toolOutputState struct {
 	fadeLineCount    int
 }
 
+type planEntryState struct {
+	Content string
+	Status  string
+}
+
 type Model struct {
 	cfg       Config
 	theme     tuikit.Theme
@@ -247,6 +252,7 @@ type Model struct {
 	diffBlocks         []diffBlockState
 	activityBlock      *foldedActivityBlockState
 	toolOutputs        map[string]*toolOutputState
+	planEntries        []planEntryState
 	welcomeCardPending bool
 	runStartedAt       time.Time
 	lastRunDuration    time.Duration

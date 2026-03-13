@@ -41,9 +41,10 @@ const (
 	UpdateAgentThought  = "agent_thought_chunk"
 	UpdateToolCall      = "tool_call"
 	UpdateToolCallState = "tool_call_update"
+	UpdateAvailableCmds = "available_commands_update"
+	UpdatePlan          = "plan"
 	UpdateCurrentMode   = "current_mode_update"
 	UpdateConfigOption  = "config_option_update"
-	UpdateModels        = "models_update"
 )
 
 const (
@@ -194,7 +195,6 @@ type NewSessionResponse struct {
 	SessionID     string                `json:"sessionId"`
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 	Modes         *SessionModeState     `json:"modes,omitempty"`
-	Models        *SessionModelState    `json:"models,omitempty"`
 }
 
 type SessionListRequest struct {
@@ -223,7 +223,6 @@ type LoadSessionRequest struct {
 type LoadSessionResponse struct {
 	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
 	Modes         *SessionModeState     `json:"modes,omitempty"`
-	Models        *SessionModelState    `json:"models,omitempty"`
 }
 
 type TextContent struct {
@@ -281,25 +280,9 @@ type SessionModeState struct {
 	CurrentModeID  string        `json:"currentModeId"`
 }
 
-type SessionModel struct {
-	ModelID     string `json:"modelId"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-}
-
-type SessionModelState struct {
-	CurrentModelID  string         `json:"currentModelId"`
-	AvailableModels []SessionModel `json:"availableModels"`
-}
-
 type CurrentModeUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
 	CurrentModeID string `json:"currentModeId"`
-}
-
-type ModelStateUpdate struct {
-	SessionUpdate string             `json:"sessionUpdate"`
-	Models        *SessionModelState `json:"models"`
 }
 
 type SessionConfigSelectOption struct {
@@ -316,6 +299,31 @@ type SessionConfigOption struct {
 	Category     string                      `json:"category,omitempty"`
 	CurrentValue string                      `json:"currentValue"`
 	Options      []SessionConfigSelectOption `json:"options"`
+}
+
+type AvailableCommandInput struct {
+	Hint string `json:"hint,omitempty"`
+}
+
+type AvailableCommand struct {
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
+	Input       AvailableCommandInput `json:"input,omitempty"`
+}
+
+type AvailableCommandsUpdate struct {
+	SessionUpdate     string             `json:"sessionUpdate"`
+	AvailableCommands []AvailableCommand `json:"availableCommands"`
+}
+
+type PlanEntry struct {
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+type PlanUpdate struct {
+	SessionUpdate string      `json:"sessionUpdate"`
+	Entries       []PlanEntry `json:"entries"`
 }
 
 type ConfigOptionUpdate struct {

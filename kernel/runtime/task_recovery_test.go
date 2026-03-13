@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	sessionstore "github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
@@ -140,6 +141,74 @@ func TestRuntime_ReconcileSession_InterruptsStaleDelegateChild(t *testing.T) {
 	}
 	if childState.Status != RunLifecycleStatusInterrupted {
 		t.Fatalf("expected child run state interrupted, got %q", childState.Status)
+	}
+}
+
+func TestRuntime_ReconcileSession_ReattachesRecoverableBashTask(t *testing.T) {
+	sessions := sessionstore.New()
+	tasks := taskstore.New()
+	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := sessions.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-bash-recover",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "sleep 30",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecCommand:       "sleep 30",
+			taskSpecWorkdir:       "/workspace",
+			taskSpecRoute:         string(toolexec.ExecutionRouteHost),
+			taskSpecExecSessionID: "proc-1",
+		},
+		Result: map[string]any{
+			"session_id": "proc-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	execRuntime := taskTestRuntime{host: &stubAsyncTaskRunner{
+		status: toolexec.SessionStatus{
+			ID:        "proc-1",
+			Command:   "sleep 30",
+			Dir:       "/workspace",
+			State:     toolexec.SessionStateRunning,
+			StartTime: time.Now(),
+		},
+	}}
+	entries, err := rt.ReconcileSession(context.Background(), ReconcileSessionRequest{
+		AppName:     "app",
+		UserID:      "u",
+		SessionID:   "parent",
+		ExecRuntime: execRuntime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 task entry, got %d", len(entries))
+	}
+	got, err := tasks.Get(context.Background(), "t-bash-recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != task.StateRunning || !got.Running {
+		t.Fatalf("expected recovered bash task to remain running, got state=%q running=%v", got.State, got.Running)
+	}
+	if got.Result["session_id"] != "proc-1" || got.Result["interrupted"] != nil {
+		t.Fatalf("unexpected recovered result payload: %#v", got.Result)
 	}
 }
 

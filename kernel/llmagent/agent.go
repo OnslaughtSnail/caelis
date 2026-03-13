@@ -350,7 +350,8 @@ func (a *Agent) executeToolCall(
 	if toolForCap, exists := ctx.Tool(call.Name); exists {
 		capability = toolcap.Of(toolForCap)
 	}
-	beforeIn, err := policy.ApplyBeforeTool(ctx, state.hooks, policy.ToolInput{
+	toolCtx := toolexec.WithToolCallInfo(context.Context(ctx), call.Name, call.ID)
+	beforeIn, err := policy.ApplyBeforeTool(toolCtx, state.hooks, policy.ToolInput{
 		Call:       call,
 		Args:       cloneArgs(args),
 		Capability: capability,
@@ -364,6 +365,8 @@ func (a *Agent) executeToolCall(
 		args = map[string]any{}
 	}
 	decision := policy.NormalizeDecision(beforeIn.Decision)
+	toolCtx = toolexec.WithToolCallInfo(context.Context(ctx), call.Name, call.ID)
+	toolCtx = policy.WithToolDecision(toolCtx, decision)
 
 	execOut := policy.ToolOutput{
 		Call:       call,
@@ -384,9 +387,6 @@ func (a *Agent) executeToolCall(
 		execOut.Result = map[string]any{"error": execOut.Err.Error()}
 	} else {
 		execOut.Capability = toolcap.Of(t)
-		toolCtx := context.Context(ctx)
-		toolCtx = policy.WithToolDecision(toolCtx, decision)
-		toolCtx = toolexec.WithToolCallInfo(toolCtx, call.Name, call.ID)
 		result, runErr := t.Run(toolCtx, args)
 		execOut.Err = runErr
 		if runErr != nil {
@@ -405,7 +405,7 @@ func (a *Agent) executeToolCall(
 		execOut.Capability = beforeIn.Capability
 	}
 
-	afterOut, err := policy.ApplyAfterTool(ctx, state.hooks, execOut)
+	afterOut, err := policy.ApplyAfterTool(toolCtx, state.hooks, execOut)
 	if err != nil {
 		return err
 	}

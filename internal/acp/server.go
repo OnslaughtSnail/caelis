@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	imageutil "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
+	"github.com/OnslaughtSnail/caelis/internal/slashcmd"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -53,9 +55,9 @@ type SessionConfigOptionTemplate struct {
 type AgentFactory func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error)
 type ModelFactory func(cfg AgentSessionConfig) (model.LLM, error)
 type SessionListFactory func(context.Context, SessionListRequest) (SessionListResponse, error)
-type SessionModelStateFactory func(cfg AgentSessionConfig) *SessionModelState
 type SessionConfigStateFactory func(cfg AgentSessionConfig, templates []SessionConfigOptionTemplate) []SessionConfigOption
 type SessionConfigNormalizer func(cfg AgentSessionConfig) AgentSessionConfig
+type AvailableCommandsFactory func(cfg AgentSessionConfig) []AvailableCommand
 
 type AuthValidator func(context.Context, AuthenticateRequest) error
 
@@ -78,7 +80,7 @@ type ServerConfig struct {
 	NewSessionResources SessionResourceFactory
 	NewAgent            AgentFactory
 	ListSessions        SessionListFactory
-	SessionModels       SessionModelStateFactory
+	AvailableCommands   AvailableCommandsFactory
 	SessionConfigState  SessionConfigStateFactory
 	NormalizeConfig     SessionConfigNormalizer
 	SupportsPromptImage func(AgentSessionConfig) bool
@@ -103,6 +105,7 @@ type serverSession struct {
 	stateMu      sync.Mutex
 	modeID       string
 	configValues map[string]string
+	planEntries  []PlanEntry
 
 	runMu     sync.Mutex
 	runCancel context.CancelFunc
@@ -134,6 +137,24 @@ type promptInputResult struct {
 	contentParts []model.ContentPart
 	hasImages    bool
 }
+
+var defaultACPCommands = slashcmd.New(
+	slashcmd.Definition{
+		Name:        "help",
+		Description: "Show the slash commands available in this ACP session.",
+		InputHint:   "/help",
+	},
+	slashcmd.Definition{
+		Name:        "status",
+		Description: "Summarize the current ACP session state, model, and mode.",
+		InputHint:   "/status",
+	},
+	slashcmd.Definition{
+		Name:        "compact",
+		Description: "Manually compact session history. Optionally include a short note.",
+		InputHint:   "/compact [note]",
+	},
+)
 
 type toolCallSnapshot struct {
 	name string
@@ -301,16 +322,6 @@ func (s *Server) handleRequest(ctx context.Context, msg Message) (any, *RPCError
 			return nil, requestFailed(err)
 		}
 		return resp, nil
-	case MethodSessionCancel:
-		if err := s.requireAuthenticated(); err != nil {
-			return nil, requestFailed(err)
-		}
-		var req CancelNotification
-		if err := decodeParams(msg.Params, &req); err != nil {
-			return nil, invalidParamsError(err)
-		}
-		s.cancelSession(req.SessionID)
-		return map[string]any{}, nil
 	default:
 		return nil, &RPCError{Code: -32601, Message: "method not found"}
 	}
@@ -357,11 +368,16 @@ func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSess
 	if err := s.persistSessionState(ctx, sessRef, sess); err != nil {
 		return NewSessionResponse{}, err
 	}
+	if err := s.notifyAvailableCommands(sessionID, sess); err != nil {
+		return NewSessionResponse{}, err
+	}
+	if err := s.notifyPlan(sessionID, sess.planSnapshot()); err != nil {
+		return NewSessionResponse{}, err
+	}
 	return NewSessionResponse{
 		SessionID:     sessionID,
 		ConfigOptions: s.sessionConfigOptions(sess),
 		Modes:         s.sessionModeState(sess),
-		Models:        s.sessionModelState(sess),
 	}, nil
 }
 
@@ -388,7 +404,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 	if err != nil {
 		return LoadSessionResponse{}, err
 	}
-	modeID, configValues, storedCWD := s.restoreSessionState(state)
+	modeID, configValues, storedCWD, planEntries := s.restoreSessionState(state)
 	resolvedCWD := filepath.Clean(req.CWD)
 	if storedCWD != "" && storedCWD != resolvedCWD {
 		return LoadSessionResponse{}, fmt.Errorf("cwd %q does not match persisted session cwd %q", resolvedCWD, storedCWD)
@@ -404,6 +420,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 		sess.stateMu.Lock()
 		sess.modeID = modeID
 		sess.configValues = configValues
+		sess.planEntries = planEntries
 		sess.stateMu.Unlock()
 		s.normalizeSessionConfig(sess)
 	} else {
@@ -412,6 +429,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 			cwd:          resolvedCWD,
 			modeID:       modeID,
 			configValues: configValues,
+			planEntries:  planEntries,
 		}
 		s.normalizeSessionConfig(sess)
 		resources, err := s.newResources(ctx, req.SessionID, sess.cwd, req.MCPServers, sess.mode)
@@ -435,10 +453,15 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 			return LoadSessionResponse{}, err
 		}
 	}
+	if err := s.notifyAvailableCommands(req.SessionID, sess); err != nil {
+		return LoadSessionResponse{}, err
+	}
+	if err := s.notifyPlan(req.SessionID, sess.planSnapshot()); err != nil {
+		return LoadSessionResponse{}, err
+	}
 	return LoadSessionResponse{
 		ConfigOptions: s.sessionConfigOptions(sess),
 		Modes:         s.sessionModeState(sess),
-		Models:        s.sessionModelState(sess),
 	}, nil
 }
 
@@ -451,6 +474,12 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 	input, err := s.promptInput(req.SessionID, req.Prompt)
 	if err != nil {
 		return PromptResponse{}, err
+	}
+	if handled, stopReason, err := s.handleSlashCommand(ctx, req.SessionID, sess, input); handled {
+		if err != nil {
+			return PromptResponse{}, err
+		}
+		return PromptResponse{StopReason: stopReason}, nil
 	}
 	ag, err := s.cfg.NewAgent(true, sess.cwd, sess.agentConfig())
 	if err != nil {
@@ -677,9 +706,6 @@ func (s *Server) setSessionConfigOption(ctx context.Context, req SetSessionConfi
 	if err := s.notifyConfigOptions(req.SessionID, options); err != nil {
 		return SetSessionConfigOptionResponse{}, err
 	}
-	if err := s.notifyModels(req.SessionID, s.sessionModelState(sess)); err != nil {
-		return SetSessionConfigOptionResponse{}, err
-	}
 	return SetSessionConfigOptionResponse{ConfigOptions: options}, nil
 }
 
@@ -788,6 +814,15 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 		}
 		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: update}); err != nil {
 			return err
+		}
+		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), tool.PlanToolName) && !hasToolError(msg.ToolResponse.Result) {
+			entries := planEntriesFromResult(msg.ToolResponse.Result)
+			if sess != nil {
+				sess.setPlan(entries)
+			}
+			if err := s.notifyPlan(sessionID, entries); err != nil {
+				return err
+			}
 		}
 		for _, extra := range supplementalToolCallUpdates(sess, msg.ToolResponse) {
 			if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: extra}); err != nil {
@@ -1281,7 +1316,7 @@ func (s *Server) initialConfigValues() map[string]string {
 	return values
 }
 
-func (s *Server) restoreSessionState(state map[string]any) (string, map[string]string, string) {
+func (s *Server) restoreSessionState(state map[string]any) (string, map[string]string, string, []PlanEntry) {
 	modeID := sessionmode.LoadSnapshot(state)
 	if !s.modeExists(modeID) {
 		modeID = s.initialModeID()
@@ -1289,7 +1324,7 @@ func (s *Server) restoreSessionState(state map[string]any) (string, map[string]s
 	values := s.initialConfigValues()
 	raw := anyMap(state["acp"])
 	if raw == nil {
-		return modeID, values, ""
+		return modeID, values, "", loadPlanEntries(state["plan"])
 	}
 	cwd, _ := raw["cwd"].(string)
 	cwd = filepath.Clean(strings.TrimSpace(cwd))
@@ -1312,7 +1347,7 @@ func (s *Server) restoreSessionState(state map[string]any) (string, map[string]s
 			values[template.ID] = strings.TrimSpace(rawValue)
 		}
 	}
-	return modeID, values, cwd
+	return modeID, values, cwd, loadPlanEntries(state["plan"])
 }
 
 func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Session, sess *serverSession) error {
@@ -1321,6 +1356,7 @@ func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Sessi
 	}
 	modeID := sess.mode()
 	configValues := sess.configSnapshot()
+	planEntries := sess.planSnapshot()
 	if updater, ok := s.cfg.Store.(session.StateUpdateStore); ok {
 		return updater.UpdateState(ctx, sessRef, func(values map[string]any) (map[string]any, error) {
 			if values == nil {
@@ -1331,6 +1367,10 @@ func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Sessi
 				"cwd":          sess.cwd,
 				"modeId":       modeID,
 				"configValues": configValues,
+			}
+			values["plan"] = map[string]any{
+				"version": 1,
+				"entries": planEntries,
 			}
 			return values, nil
 		})
@@ -1347,6 +1387,10 @@ func (s *Server) persistSessionState(ctx context.Context, sessRef *session.Sessi
 		"cwd":          sess.cwd,
 		"modeId":       modeID,
 		"configValues": configValues,
+	}
+	values["plan"] = map[string]any{
+		"version": 1,
+		"entries": planEntries,
 	}
 	return s.cfg.Store.ReplaceState(ctx, sessRef, values)
 }
@@ -1367,13 +1411,6 @@ func (s *Server) sessionModeState(sess *serverSession) *SessionModeState {
 		AvailableModes: append([]SessionMode(nil), s.cfg.SessionModes...),
 		CurrentModeID:  sess.mode(),
 	}
-}
-
-func (s *Server) sessionModelState(sess *serverSession) *SessionModelState {
-	if sess == nil || s.cfg.SessionModels == nil {
-		return nil
-	}
-	return s.cfg.SessionModels(sess.agentConfig())
 }
 
 func (s *Server) sessionConfigOptions(sess *serverSession) []SessionConfigOption {
@@ -1446,6 +1483,26 @@ func (s *Server) notifyCurrentMode(sessionID string, modeID string) error {
 	})
 }
 
+func (s *Server) notifyAvailableCommands(sessionID string, sess *serverSession) error {
+	return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+		SessionID: sessionID,
+		Update: AvailableCommandsUpdate{
+			SessionUpdate:     UpdateAvailableCmds,
+			AvailableCommands: s.availableCommands(sess),
+		},
+	})
+}
+
+func (s *Server) notifyPlan(sessionID string, entries []PlanEntry) error {
+	return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+		SessionID: sessionID,
+		Update: PlanUpdate{
+			SessionUpdate: UpdatePlan,
+			Entries:       append([]PlanEntry(nil), entries...),
+		},
+	})
+}
+
 func (s *Server) notifyConfigOptions(sessionID string, options []SessionConfigOption) error {
 	return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
 		SessionID: sessionID,
@@ -1456,17 +1513,223 @@ func (s *Server) notifyConfigOptions(sessionID string, options []SessionConfigOp
 	})
 }
 
-func (s *Server) notifyModels(sessionID string, models *SessionModelState) error {
-	if models == nil {
+func (s *Server) availableCommands(sess *serverSession) []AvailableCommand {
+	if s.cfg.AvailableCommands != nil {
+		if cmds := s.cfg.AvailableCommands(sess.agentConfig()); len(cmds) > 0 {
+			return cmds
+		}
+	}
+	defs := defaultACPCommands.Definitions()
+	out := make([]AvailableCommand, 0, len(defs))
+	for _, item := range defs {
+		out = append(out, AvailableCommand{
+			Name:        item.Name,
+			Description: item.Description,
+			Input:       AvailableCommandInput{Hint: item.InputHint},
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func (s *serverSession) planSnapshot() []PlanEntry {
+	if s == nil {
 		return nil
 	}
-	return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	out := make([]PlanEntry, 0, len(s.planEntries))
+	out = append(out, s.planEntries...)
+	return out
+}
+
+func (s *serverSession) setPlan(entries []PlanEntry) {
+	if s == nil {
+		return
+	}
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	s.planEntries = append([]PlanEntry(nil), entries...)
+}
+
+func loadPlanEntries(raw any) []PlanEntry {
+	payload := anyMap(raw)
+	if payload == nil {
+		return nil
+	}
+	return normalizePlanEntries(payload["entries"])
+}
+
+func planEntriesFromResult(result map[string]any) []PlanEntry {
+	if len(result) == 0 {
+		return nil
+	}
+	return normalizePlanEntries(result["entries"])
+}
+
+func normalizePlanEntries(raw any) []PlanEntry {
+	var decoded []PlanEntry
+	if err := decodeACPViaJSON(raw, &decoded); err != nil {
+		return nil
+	}
+	out := make([]PlanEntry, 0, len(decoded))
+	for _, item := range decoded {
+		content := strings.TrimSpace(item.Content)
+		status := strings.TrimSpace(item.Status)
+		if content == "" || status == "" {
+			continue
+		}
+		out = append(out, PlanEntry{Content: content, Status: status})
+	}
+	return out
+}
+
+func decodeACPViaJSON(in any, out any) error {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func (s *Server) advertisedSlashCommands(sess *serverSession) slashcmd.Registry {
+	cmds := s.availableCommands(sess)
+	defs := make([]slashcmd.Definition, 0, len(cmds))
+	for _, item := range cmds {
+		name := strings.ToLower(strings.TrimSpace(item.Name))
+		if name == "" {
+			continue
+		}
+		hint := strings.TrimSpace(item.Input.Hint)
+		if hint == "" {
+			hint = "/" + name
+		}
+		defs = append(defs, slashcmd.Definition{
+			Name:        name,
+			Description: strings.TrimSpace(item.Description),
+			InputHint:   hint,
+		})
+	}
+	if len(defs) == 0 {
+		return defaultACPCommands
+	}
+	return slashcmd.New(defs...)
+}
+
+func (s *Server) handleSlashCommand(ctx context.Context, sessionID string, sess *serverSession, input promptInputResult) (bool, string, error) {
+	if input.hasImages || len(input.contentParts) > 0 {
+		return false, "", nil
+	}
+	inv, ok := slashcmd.Parse(input.text)
+	registry := s.advertisedSlashCommands(sess)
+	if !ok || !registry.Has(inv.Name) {
+		return false, "", nil
+	}
+	sess.resetPartialStreams()
+	switch inv.Name {
+	case "help":
+		lines := make([]string, 0, 1+len(s.availableCommands(sess)))
+		lines = append(lines, "Available commands:")
+		for _, item := range s.availableCommands(sess) {
+			line := "/" + item.Name
+			if hint := strings.TrimSpace(item.Input.Hint); hint != "" {
+				line = hint
+			}
+			if desc := strings.TrimSpace(item.Description); desc != "" {
+				line += " - " + desc
+			}
+			lines = append(lines, line)
+		}
+		return true, StopReasonEndTurn, s.appendAssistantText(ctx, sessionID, strings.Join(lines, "\n"))
+	case "status":
+		return true, StopReasonEndTurn, s.appendAssistantText(ctx, sessionID, s.formatSlashStatus(sess))
+	case "compact":
+		return true, StopReasonEndTurn, s.handleSlashCompact(ctx, sessionID, sess, strings.TrimSpace(strings.Join(inv.Args, " ")))
+	default:
+		return true, StopReasonEndTurn, s.appendAssistantText(ctx, sessionID, fmt.Sprintf("Command /%s is not supported in this session.", inv.Name))
+	}
+}
+
+func (s *Server) appendAssistantText(ctx context.Context, sessionID string, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	sessRef := s.sessionRef(sessionID)
+	ev := &session.Event{
+		ID:        fmt.Sprintf("ev_%d", time.Now().UnixNano()),
 		SessionID: sessionID,
-		Update: ModelStateUpdate{
-			SessionUpdate: UpdateModels,
-			Models:        models,
+		Time:      time.Now(),
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			Text: text,
 		},
+	}
+	if err := s.cfg.Store.AppendEvent(ctx, sessRef, ev); err != nil {
+		return err
+	}
+	return s.notifyEvent(sessionID, ev, nil)
+}
+
+func (s *Server) formatSlashStatus(sess *serverSession) string {
+	mode := ""
+	if sess != nil {
+		mode = strings.TrimSpace(sess.mode())
+	}
+	if mode == "" {
+		mode = "default"
+	}
+	lines := []string{
+		"Session status:",
+		"mode: " + mode,
+	}
+	if sess != nil && strings.TrimSpace(sess.cwd) != "" {
+		lines = append(lines, "cwd: "+sess.cwd)
+	}
+	if modelID := s.currentModelID(sess); modelID != "" {
+		lines = append(lines, "model: "+modelID)
+	}
+	if entries := sess.planSnapshot(); len(entries) > 0 {
+		lines = append(lines, fmt.Sprintf("plan items: %d", len(entries)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (s *Server) currentModelID(sess *serverSession) string {
+	if sess == nil {
+		return ""
+	}
+	for _, item := range s.sessionConfigOptions(sess) {
+		if strings.TrimSpace(item.Category) != "model" {
+			continue
+		}
+		return strings.TrimSpace(item.CurrentValue)
+	}
+	return ""
+}
+
+func (s *Server) handleSlashCompact(ctx context.Context, sessionID string, sess *serverSession, note string) error {
+	if s.cfg.Runtime == nil {
+		return fmt.Errorf("runtime compaction is unavailable")
+	}
+	modelValue, err := s.cfg.NewModel(sess.agentConfig())
+	if err != nil {
+		return err
+	}
+	ev, err := s.cfg.Runtime.Compact(ctx, runtime.CompactRequest{
+		AppName:   s.cfg.AppName,
+		UserID:    s.cfg.UserID,
+		SessionID: sessionID,
+		Model:     modelValue,
+		Note:      note,
 	})
+	if err != nil {
+		return err
+	}
+	if ev == nil {
+		return s.appendAssistantText(ctx, sessionID, "Compact skipped.")
+	}
+	return s.appendAssistantText(ctx, sessionID, "Compact completed.")
 }
 
 func (s *Server) sessionListCapability() *SessionListCapability {
@@ -1828,6 +2091,8 @@ func toolKindForName(name string) string {
 		return ToolKindEdit
 	case "SEARCH", "GLOB", "LIST":
 		return ToolKindSearch
+	case "PLAN":
+		return ToolKindOther
 	case "BASH", "TASK":
 		return ToolKindExecute
 	case "DELEGATE":

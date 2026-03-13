@@ -28,8 +28,26 @@ import (
 	sessionfile "github.com/OnslaughtSnail/caelis/kernel/session/filestore"
 	sessionmem "github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	toolfs "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/filesystem"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
 )
+
+type stubACPTool struct {
+	name string
+	run  func(context.Context, map[string]any) (map[string]any, error)
+}
+
+func (t stubACPTool) Name() string        { return t.name }
+func (t stubACPTool) Description() string { return t.name }
+func (t stubACPTool) Declaration() model.ToolDefinition {
+	return model.ToolDefinition{Name: t.name, Description: t.name, Parameters: map[string]any{"type": "object"}}
+}
+func (t stubACPTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {
+	if t.run == nil {
+		return map[string]any{"ok": true}, nil
+	}
+	return t.run(ctx, args)
+}
 
 func TestServer_InitializeNewPromptAndLoad(t *testing.T) {
 	h := newHarness(t, harnessConfig{
@@ -398,15 +416,6 @@ func TestServer_NewSessionAndPromptUseDynamicModelState(t *testing.T) {
 				},
 			},
 		},
-		sessionModels: func(cfg AgentSessionConfig) *SessionModelState {
-			return &SessionModelState{
-				CurrentModelID: cfg.ConfigValues["model"],
-				AvailableModels: []SessionModel{
-					{ModelID: "model-a", Name: "model-a"},
-					{ModelID: "model-b", Name: "model-b"},
-				},
-			}
-		},
 	})
 	defer h.close()
 
@@ -416,10 +425,13 @@ func TestServer_NewSessionAndPromptUseDynamicModelState(t *testing.T) {
 
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
-	if newResp.Models == nil || newResp.Models.CurrentModelID != "model-a" {
-		t.Fatalf("unexpected initial model state %+v", newResp.Models)
+	newPayload, err := json.Marshal(newResp)
+	if err != nil {
+		t.Fatal(err)
 	}
-
+	if strings.Contains(string(newPayload), "\"models\"") {
+		t.Fatalf("expected session/new response to omit non-standard models field, got %s", string(newPayload))
+	}
 	mustCall(t, h.client, MethodSessionSetConfig, SetSessionConfigOptionRequest{
 		SessionID: newResp.SessionID,
 		ConfigID:  "model",
@@ -443,8 +455,15 @@ func TestServer_NewSessionAndPromptUseDynamicModelState(t *testing.T) {
 		SessionID: newResp.SessionID,
 		CWD:       h.workspace,
 	}, &loadResp)
-	if loadResp.Models == nil || loadResp.Models.CurrentModelID != "model-b" {
-		t.Fatalf("expected persisted model state, got %+v", loadResp.Models)
+	loadPayload, err := json.Marshal(loadResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(loadPayload), "\"models\"") {
+		t.Fatalf("expected session/load response to omit non-standard models field, got %s", string(loadPayload))
+	}
+	if len(loadResp.ConfigOptions) != 1 || loadResp.ConfigOptions[0].CurrentValue != "model-b" {
+		t.Fatalf("expected persisted model config option, got %+v", loadResp.ConfigOptions)
 	}
 }
 
@@ -939,12 +958,14 @@ func TestServer_Prompt_FlushesReasoningBeforeAnswerOnChannelSwitch(t *testing.T)
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
 
-	h.waitNotifications(t, 2)
+	h.waitNotifications(t, 4)
 	got := h.notificationTypes()
-	if len(got) < 2 {
+	if len(got) < 4 {
 		t.Fatalf("expected thought/message notifications, got %#v", got)
 	}
-	if got[0] != UpdateAgentThought || got[1] != UpdateAgentMessage {
+	thoughtIdx := indexOfString(got, UpdateAgentThought)
+	answerIdx := indexOfString(got, UpdateAgentMessage)
+	if thoughtIdx < 0 || answerIdx < 0 || thoughtIdx > answerIdx {
 		t.Fatalf("expected reasoning to flush before answer on channel switch, got %#v", got)
 	}
 }
@@ -991,6 +1012,65 @@ func TestServer_LoadSessionSuppressesPersistedPartialChunks(t *testing.T) {
 	}
 }
 
+func TestServer_NewSessionEmitsAvailableCommandsAndEmptyPlan(t *testing.T) {
+	h := newHarness(t, harnessConfig{})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	h.waitNotifications(t, 2)
+	types := h.notificationTypes()
+	if !containsAll(types, UpdateAvailableCmds, UpdatePlan) {
+		t.Fatalf("expected available commands and empty plan updates, got %#v", types)
+	}
+}
+
+func TestServer_PlanToolEmitsPlanUpdate(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.Message{
+						Role: model.RoleAssistant,
+						ToolCalls: []model.ToolCall{{
+							ID:   "call-plan",
+							Name: tool.PlanToolName,
+							Args: `{"entries":[{"content":"Inspect repo","status":"completed"},{"content":"Implement fix","status":"in_progress"},{"content":"Run tests","status":"pending"}]}`,
+						}},
+					},
+				}},
+				{{Message: model.Message{Role: model.RoleAssistant, Text: "planned"}}},
+			},
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	h.resetNotifications()
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "make a plan"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+
+	h.waitNotifications(t, 4)
+	if !containsAll(h.notificationTypes(), UpdateToolCall, UpdateToolCallState, UpdatePlan, UpdateAgentMessage) {
+		t.Fatalf("expected plan update in notifications, got %#v", h.notificationTypes())
+	}
+}
+
 func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		llm: &scriptedLLM{
@@ -1032,6 +1112,166 @@ func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 	}
 	if h.permissionRequests != 1 {
 		t.Fatalf("expected one permission request, got %d", h.permissionRequests)
+	}
+}
+
+func TestServer_Prompt_UnknownToolAuthorizationUsesOriginalToolCallID(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.Message{
+						Role: model.RoleAssistant,
+						ToolCalls: []model.ToolCall{{
+							ID:   "call-custom-auth",
+							Name: "CUSTOM_MUTATE",
+							Args: `{"path":"/tmp/custom.txt"}`,
+						}},
+					},
+				}},
+			},
+		},
+		customizeResources: func(res *SessionResources) error {
+			res.Tools = append(res.Tools, stubACPTool{name: "CUSTOM_MUTATE"})
+			return nil
+		},
+	})
+	defer h.close()
+	h.permissionResponse = RequestPermissionResponse{
+		Outcome: mustRaw(t, SelectedPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: "reject_once",
+		}),
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "run custom tool"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonCancelled {
+		t.Fatalf("expected cancelled, got %q", promptResp.StopReason)
+	}
+	if h.permissionRequests != 1 {
+		t.Fatalf("expected one permission request, got %d", h.permissionRequests)
+	}
+	if h.lastPermissionRequest == nil {
+		t.Fatal("expected captured permission request")
+	}
+	if h.lastPermissionRequest.ToolCall.ToolCallID != "call-custom-auth" {
+		t.Fatalf("expected permission request to reuse original tool call id, got %q", h.lastPermissionRequest.ToolCall.ToolCallID)
+	}
+}
+
+func TestServer_Prompt_WorkspaceBoundaryAuthorizationUsesOriginalToolCallID(t *testing.T) {
+	h := newHarness(t, harnessConfig{
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.Message{
+						Role: model.RoleAssistant,
+						ToolCalls: []model.ToolCall{{
+							ID:   "call-write-boundary",
+							Name: toolfs.WriteToolName,
+							Args: `{"path":"/outside/workspace.txt","content":"hello"}`,
+						}},
+					},
+				}},
+			},
+		},
+		customizeResources: func(res *SessionResources) error {
+			writeTool, err := toolfs.NewWriteWithRuntime(res.Runtime)
+			if err != nil {
+				return err
+			}
+			res.Tools = append(res.Tools, writeTool)
+			res.Policies = append(res.Policies, policy.WorkspaceBoundary(policy.WorkspaceBoundaryConfig{
+				Runtime: res.Runtime,
+			}))
+			return nil
+		},
+	})
+	defer h.close()
+	h.permissionResponse = RequestPermissionResponse{
+		Outcome: mustRaw(t, SelectedPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: "reject_once",
+		}),
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "write outside workspace"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonCancelled {
+		t.Fatalf("expected cancelled, got %q", promptResp.StopReason)
+	}
+	if h.permissionRequests != 1 {
+		t.Fatalf("expected one permission request, got %d", h.permissionRequests)
+	}
+	if h.lastPermissionRequest == nil {
+		t.Fatal("expected captured permission request")
+	}
+	if h.lastPermissionRequest.ToolCall.ToolCallID != "call-write-boundary" {
+		t.Fatalf("expected permission request to reuse original tool call id, got %q", h.lastPermissionRequest.ToolCall.ToolCallID)
+	}
+}
+
+func TestServer_Prompt_AdvertisedCustomSlashCommandHandledWithoutModelFallback(t *testing.T) {
+	llm := &scriptedLLM{
+		calls: [][]*model.Response{
+			{{Message: model.Message{Role: model.RoleAssistant, Text: "model should not run"}}},
+		},
+	}
+	h := newHarness(t, harnessConfig{
+		llm: llm,
+		availableCommands: func(cfg AgentSessionConfig) []AvailableCommand {
+			_ = cfg
+			return []AvailableCommand{
+				{Name: "foo", Description: "custom command", Input: AvailableCommandInput{Hint: "/foo"}},
+			}
+		},
+	})
+	defer h.close()
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	h.resetNotifications()
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "/foo"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+	h.waitNotifications(t, 1)
+	texts := h.notificationTexts(UpdateAgentMessage)
+	if !containsText(texts, "Command /foo is not supported in this session.") {
+		t.Fatalf("expected local unsupported command response, got %#v", texts)
+	}
+	llm.mu.Lock()
+	reqCount := len(llm.reqs)
+	llm.mu.Unlock()
+	if reqCount != 0 {
+		t.Fatalf("expected slash command to skip model fallback, got %d model requests", reqCount)
 	}
 }
 
@@ -1330,11 +1570,12 @@ type harnessConfig struct {
 	defaultModeID       string
 	sessionConfig       []SessionConfigOptionTemplate
 	listSessions        SessionListFactory
-	sessionModels       SessionModelStateFactory
+	availableCommands   AvailableCommandsFactory
 	promptImageEnabled  func() bool
 	supportsPromptImage func(AgentSessionConfig) bool
 	workspaceRoot       string
 	workspace           string
+	customizeResources  func(*SessionResources) error
 }
 
 type harness struct {
@@ -1345,14 +1586,15 @@ type harness struct {
 	workspace  string
 	clientCaps ClientCapabilities
 
-	mu                 sync.Mutex
-	notifications      []SessionNotification
-	files              map[string]string
-	readRequests       int
-	terminalCreates    int
-	termOutput         string
-	permissionRequests int
-	permissionResponse RequestPermissionResponse
+	mu                    sync.Mutex
+	notifications         []SessionNotification
+	files                 map[string]string
+	readRequests          int
+	terminalCreates       int
+	termOutput            string
+	permissionRequests    int
+	permissionResponse    RequestPermissionResponse
+	lastPermissionRequest *RequestPermissionRequest
 }
 
 func newHarness(t *testing.T, cfg harnessConfig) *harness {
@@ -1428,7 +1670,7 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		SessionConfig:       cfg.sessionConfig,
 		NewAgent:            agentFactory,
 		ListSessions:        cfg.listSessions,
-		SessionModels:       cfg.sessionModels,
+		AvailableCommands:   cfg.availableCommands,
 		PromptImageEnabled:  cfg.promptImageEnabled,
 		SupportsPromptImage: cfg.supportsPromptImage,
 		NewSessionResources: func(ctx context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
@@ -1439,13 +1681,19 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 				return nil, err
 			}
 			tools = append(tools, bashTool)
-			return &SessionResources{
+			res := &SessionResources{
 				Runtime: execRuntime,
 				Tools:   tools,
 				Policies: []policy.Hook{
 					policy.DefaultSecurityBaseline(),
 				},
-			}, nil
+			}
+			if cfg.customizeResources != nil {
+				if err := cfg.customizeResources(res); err != nil {
+					return nil, err
+				}
+			}
+			return res, nil
 		},
 	})
 	if err != nil {
@@ -1504,8 +1752,14 @@ func (h *harness) handleRequest(ctx context.Context, msg Message) (any, *RPCErro
 	case MethodTerminalRelease:
 		return map[string]any{}, nil
 	case MethodSessionReqPermission:
+		var req RequestPermissionRequest
+		if err := decodeParams(msg.Params, &req); err != nil {
+			return nil, invalidParamsError(err)
+		}
 		h.mu.Lock()
 		h.permissionRequests++
+		reqCopy := req
+		h.lastPermissionRequest = &reqCopy
 		resp := h.permissionResponse
 		h.mu.Unlock()
 		return resp, nil
@@ -1803,6 +2057,15 @@ func containsAll(items []string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+func indexOfString(items []string, target string) int {
+	for i, item := range items {
+		if item == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func containsText(items []string, want string) bool {

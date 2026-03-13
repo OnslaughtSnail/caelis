@@ -2,18 +2,21 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
 type ReconcileSessionRequest struct {
-	AppName   string
-	UserID    string
-	SessionID string
+	AppName     string
+	UserID      string
+	SessionID   string
+	ExecRuntime toolexec.Runtime
 }
 
 func (r *Runtime) ReconcileSession(ctx context.Context, req ReconcileSessionRequest) ([]*task.Entry, error) {
@@ -40,7 +43,7 @@ func (r *Runtime) ReconcileSession(ctx context.Context, req ReconcileSessionRequ
 		if entry == nil {
 			continue
 		}
-		next, err := r.reconcileTaskEntry(ctx, entry)
+		next, err := r.reconcileTaskEntry(ctx, entry, req.ExecRuntime)
 		if err != nil {
 			return nil, err
 		}
@@ -49,7 +52,7 @@ func (r *Runtime) ReconcileSession(ctx context.Context, req ReconcileSessionRequ
 	return out, nil
 }
 
-func (r *Runtime) reconcileTaskEntry(ctx context.Context, entry *task.Entry) (*task.Entry, error) {
+func (r *Runtime) reconcileTaskEntry(ctx context.Context, entry *task.Entry, execRuntime toolexec.Runtime) (*task.Entry, error) {
 	if entry == nil {
 		return nil, nil
 	}
@@ -69,14 +72,54 @@ func (r *Runtime) reconcileTaskEntry(ctx context.Context, entry *task.Entry) (*t
 	case task.KindDelegate:
 		return r.reconcileDelegateTask(ctx, entry)
 	case task.KindBash:
-		return r.reconcileBashTask(ctx, entry)
+		return r.reconcileBashTask(ctx, entry, execRuntime)
 	default:
 		return r.markTaskInterrupted(ctx, entry, "task kind is not recoverable")
 	}
 }
 
-func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry) (*task.Entry, error) {
-	return r.markTaskInterrupted(ctx, entry, "async bash session was interrupted and is not resumed automatically")
+func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, execRuntime toolexec.Runtime) (*task.Entry, error) {
+	sessionID := strings.TrimSpace(stringValue(entry.Spec, taskSpecExecSessionID))
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(stringValue(entry.Result, "session_id"))
+	}
+	if sessionID == "" {
+		return r.markTaskInterrupted(ctx, entry, "async bash session reference is missing")
+	}
+	if execRuntime == nil {
+		return r.markTaskInterrupted(ctx, entry, "async bash runtime is unavailable for recovery")
+	}
+	runner, ok := asyncBashRunnerForRoute(execRuntime, stringValue(entry.Spec, taskSpecRoute))
+	if !ok || runner == nil {
+		return r.markTaskInterrupted(ctx, entry, "async bash runner is unavailable for recovery")
+	}
+	status, err := runner.GetSessionStatus(sessionID)
+	if err != nil {
+		if errors.Is(err, toolexec.ErrSessionNotFound) {
+			return r.markTaskInterrupted(ctx, entry, "async bash session no longer exists")
+		}
+		return nil, err
+	}
+	entry.State = bashTaskState(status.State)
+	entry.Running = status.State == toolexec.SessionStateRunning
+	entry.UpdatedAt = time.Now()
+	entry.HeartbeatAt = time.Now()
+	if entry.Result == nil {
+		entry.Result = map[string]any{}
+	}
+	entry.Result["command"] = stringValue(entry.Spec, taskSpecCommand)
+	entry.Result["workdir"] = stringValue(entry.Spec, taskSpecWorkdir)
+	entry.Result["tty"] = boolValue(entry.Spec, taskSpecTTY)
+	entry.Result["route"] = stringValue(entry.Spec, taskSpecRoute)
+	entry.Result["state"] = string(entry.State)
+	entry.Result["exit_code"] = status.ExitCode
+	entry.Result["session_id"] = sessionID
+	delete(entry.Result, "interrupted")
+	delete(entry.Result, "error")
+	if err := r.taskStore.Upsert(ctx, task.CloneEntry(entry)); err != nil {
+		return nil, err
+	}
+	return entry, nil
 }
 
 func (r *Runtime) reconcileDelegateTask(ctx context.Context, entry *task.Entry) (*task.Entry, error) {

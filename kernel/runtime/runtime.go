@@ -116,9 +116,10 @@ func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Ev
 		defer r.releaseRunLease(leaseKey)
 
 		if _, err := r.ReconcileSession(ctx, ReconcileSessionRequest{
-			AppName:   req.AppName,
-			UserID:    req.UserID,
-			SessionID: req.SessionID,
+			AppName:     req.AppName,
+			UserID:      req.UserID,
+			SessionID:   req.SessionID,
+			ExecRuntime: req.CoreTools.Runtime,
 		}); err != nil {
 			yieldWithStream(nil, err)
 			return
@@ -289,6 +290,7 @@ func (r *Runtime) buildInvocationContext(
 		runnerImpl,
 	)
 	ctx = task.WithManager(ctx, taskManager)
+	ctx = session.WithStateContext(ctx, sess, r.store)
 	allTools, err := tool.EnsureCoreTools(req.Tools, coreTools)
 	if err != nil {
 		return nil, err

@@ -29,8 +29,8 @@ func TestEnsureCoreTools_AddRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 4 {
-		t.Fatalf("expected 4 tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(tools))
 	}
 	if tools[0].Name() != ReadToolName {
 		t.Fatalf("expected first tool %q, got %q", ReadToolName, tools[0].Name())
@@ -40,6 +40,9 @@ func TestEnsureCoreTools_AddRead(t *testing.T) {
 	}
 	if tools[2].Name() != TaskToolName {
 		t.Fatalf("expected third tool %q, got %q", TaskToolName, tools[2].Name())
+	}
+	if tools[3].Name() != PlanToolName {
+		t.Fatalf("expected fourth tool %q, got %q", PlanToolName, tools[3].Name())
 	}
 }
 
@@ -59,14 +62,17 @@ func TestEnsureCoreTools_AddDelegateAndTaskTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 3 {
-		t.Fatalf("expected READ + DELEGATE + TASK, got %d tools", len(tools))
+	if len(tools) != 4 {
+		t.Fatalf("expected READ + DELEGATE + TASK + PLAN, got %d tools", len(tools))
 	}
 	if tools[1].Name() != DelegateTaskToolName {
 		t.Fatalf("expected second tool %q, got %q", DelegateTaskToolName, tools[1].Name())
 	}
 	if tools[2].Name() != TaskToolName {
 		t.Fatalf("expected third tool %q, got %q", TaskToolName, tools[2].Name())
+	}
+	if tools[3].Name() != PlanToolName {
+		t.Fatalf("expected fourth tool %q, got %q", PlanToolName, tools[3].Name())
 	}
 }
 
@@ -87,13 +93,16 @@ func TestEnsureCoreTools_DisableDelegate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 2 {
-		t.Fatalf("expected READ + TASK, got %d tools", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("expected READ + TASK + PLAN, got %d tools", len(tools))
 	}
 	if tools[0].Name() != ReadToolName {
 		t.Fatalf("expected first tool %q, got %q", ReadToolName, tools[0].Name())
 	}
 	if tools[1].Name() != TaskToolName {
 		t.Fatalf("expected second tool %q, got %q", TaskToolName, tools[1].Name())
+	}
+	if tools[2].Name() != PlanToolName {
+		t.Fatalf("expected third tool %q, got %q", PlanToolName, tools[2].Name())
 	}
 }

@@ -278,6 +278,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dismissMessageHints()
 		return m.handleToolStreamMsg(typed)
 
+	case tuievents.PlanUpdateMsg:
+		m.planEntries = m.planEntries[:0]
+		hasIncomplete := false
+		for _, item := range typed.Entries {
+			content := strings.TrimSpace(item.Content)
+			status := strings.TrimSpace(item.Status)
+			if content == "" || status == "" {
+				continue
+			}
+			if status != "completed" {
+				hasIncomplete = true
+			}
+			m.planEntries = append(m.planEntries, planEntryState{
+				Content: content,
+				Status:  status,
+			})
+		}
+		if !hasIncomplete {
+			m.planEntries = m.planEntries[:0]
+		}
+		return m, nil
+
 	case tuievents.SetHintMsg:
 		after := typed.ClearAfter
 		if after <= 0 {
@@ -376,6 +398,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.running = false
 		m.stopRunningAnimation()
+		m.planEntries = m.planEntries[:0]
 		m.clearInputAttachments()
 		m.syncTextareaChrome()
 		m.clearInputOverlays()

@@ -222,6 +222,116 @@ func TestRenderInputBar_LeftAlignsPrompt(t *testing.T) {
 	}
 }
 
+func TestPlanUpdateRendersPlanDrawer(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+	if _, cmd := m.Update(tuievents.PlanUpdateMsg{
+		Entries: []tuievents.PlanEntry{
+			{Content: "Inspect repo", Status: "completed"},
+			{Content: "Implement fix", Status: "in_progress"},
+			{Content: "Run tests", Status: "pending"},
+		},
+	}); cmd != nil {
+		_ = cmd
+	}
+	got := stripModelView(m)
+	if !strings.Contains(got, "✔ Inspect repo") || !strings.Contains(got, "☐ Implement fix") {
+		t.Fatalf("expected plan drawer in view, got %q", got)
+	}
+	if strings.Contains(got, "1. ") || strings.Contains(got, "2. ") {
+		t.Fatalf("expected plan drawer without numeric prefixes, got %q", got)
+	}
+	if !strings.Contains(got, "────") {
+		t.Fatalf("expected drawer top boundary in view, got %q", got)
+	}
+}
+
+func TestPlanUpdateHidesDrawerWhenAllCompleted(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+	_, _ = m.Update(tuievents.PlanUpdateMsg{
+		Entries: []tuievents.PlanEntry{
+			{Content: "Inspect repo", Status: "in_progress"},
+			{Content: "Run tests", Status: "pending"},
+		},
+	})
+	before := stripModelView(m)
+	if !strings.Contains(before, "☐ Inspect repo") {
+		t.Fatalf("expected active plan drawer before completion, got %q", before)
+	}
+	_, _ = m.Update(tuievents.PlanUpdateMsg{
+		Entries: []tuievents.PlanEntry{
+			{Content: "Inspect repo", Status: "completed"},
+			{Content: "Run tests", Status: "completed"},
+		},
+	})
+	after := stripModelView(m)
+	if strings.Contains(after, "✔ Inspect repo") || strings.Contains(after, "☐ Inspect repo") {
+		t.Fatalf("expected completed plan drawer to collapse, got %q", after)
+	}
+}
+
+func TestPlanDrawerKeepsPlanOrderAndShowsWindowAroundActiveItem(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+	_, _ = m.Update(tuievents.PlanUpdateMsg{
+		Entries: []tuievents.PlanEntry{
+			{Content: "Done one", Status: "completed"},
+			{Content: "Pending one", Status: "pending"},
+			{Content: "In progress", Status: "in_progress"},
+			{Content: "Pending two", Status: "pending"},
+			{Content: "Pending three", Status: "pending"},
+			{Content: "Done two", Status: "completed"},
+		},
+	})
+	got := stripModelView(m)
+	if !strings.Contains(got, "☐ Pending one") || !strings.Contains(got, "☐ In progress") || !strings.Contains(got, "☐ Pending two") {
+		t.Fatalf("expected ordered plan window in view, got %q", got)
+	}
+	if strings.Contains(got, "✔ Done one") || strings.Contains(got, "☐ Pending three") || strings.Contains(got, "✔ Done two") {
+		t.Fatalf("expected out-of-window entries to be omitted from ordered drawer, got %q", got)
+	}
+}
+
+func TestPlanDrawerBudgetShrinksOnSmallTerminal(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 18})
+	_, _ = m.Update(tuievents.PlanUpdateMsg{
+		Entries: []tuievents.PlanEntry{
+			{Content: "Step one", Status: "pending"},
+			{Content: "Step two", Status: "in_progress"},
+			{Content: "Step three", Status: "pending"},
+		},
+	})
+	got := stripModelView(m)
+	if !strings.Contains(got, "☐ Step two") {
+		t.Fatalf("expected active item to remain visible on small terminal, got %q", got)
+	}
+	if strings.Contains(got, "☐ Step one") || strings.Contains(got, "☐ Step three") {
+		t.Fatalf("expected small terminal budget to show a single item window, got %q", got)
+	}
+}
+
+func TestPlanDrawerHidesAfterTurnCompletes(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+	_, _ = m.Update(tuievents.PlanUpdateMsg{
+		Entries: []tuievents.PlanEntry{
+			{Content: "Inspect repo", Status: "in_progress"},
+			{Content: "Run tests", Status: "pending"},
+		},
+	})
+	before := stripModelView(m)
+	if !strings.Contains(before, "☐ Inspect repo") {
+		t.Fatalf("expected plan drawer before task result, got %q", before)
+	}
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+	after := stripModelView(m)
+	if strings.Contains(after, "☐ Inspect repo") || strings.Contains(after, "☐ Run tests") {
+		t.Fatalf("expected plan drawer to hide after turn completion, got %q", after)
+	}
+}
+
 func TestPaletteAnimation_OpenAndClose(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"help", "status"},

@@ -69,6 +69,7 @@ func NewSecurityBaseline(cfg SecurityBaselineConfig) Hook {
 	defaultAutoAllow := []string{
 		"READ", "LIST", "GLOB", "STAT", "SEARCH",
 		"WRITE", "PATCH",
+		"PLAN",
 		"DELEGATE", "TASK",
 		"ECHO", "NOW",
 		"BASH", // BASH host escalation is gated by execution runtime approval flow.

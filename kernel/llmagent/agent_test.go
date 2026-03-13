@@ -103,6 +103,31 @@ func (h *captureCapabilityHook) BeforeOutput(ctx context.Context, out policy.Out
 	return out, nil
 }
 
+type captureToolCallInfoHook struct {
+	before []toolexec.ToolCallInfo
+	after  []toolexec.ToolCallInfo
+}
+
+func (h *captureToolCallInfoHook) Name() string { return "capture_tool_call_info" }
+func (h *captureToolCallInfoHook) BeforeModel(ctx context.Context, in policy.ModelInput) (policy.ModelInput, error) {
+	_ = ctx
+	return in, nil
+}
+func (h *captureToolCallInfoHook) BeforeTool(ctx context.Context, in policy.ToolInput) (policy.ToolInput, error) {
+	info, _ := toolexec.ToolCallInfoFromContext(ctx)
+	h.before = append(h.before, info)
+	return in, nil
+}
+func (h *captureToolCallInfoHook) AfterTool(ctx context.Context, out policy.ToolOutput) (policy.ToolOutput, error) {
+	info, _ := toolexec.ToolCallInfoFromContext(ctx)
+	h.after = append(h.after, info)
+	return out, nil
+}
+func (h *captureToolCallInfoHook) BeforeOutput(ctx context.Context, out policy.Output) (policy.Output, error) {
+	_ = ctx
+	return out, nil
+}
+
 type requireApprovalHook struct{}
 
 func (h requireApprovalHook) Name() string { return "require_approval_hook" }
@@ -285,6 +310,68 @@ func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
 	}
 	if !hook.after[0].HasOperation(toolcap.OperationExec) || hook.after[0].Risk != toolcap.RiskHigh {
 		t.Fatalf("unexpected after capability: %#v", hook.after[0])
+	}
+}
+
+func TestLLMAgent_ExposesToolCallInfoAcrossPolicyLifecycle(t *testing.T) {
+	hook := &captureToolCallInfoHook{}
+	toolSeen := toolexec.ToolCallInfo{}
+	infoTool := namedTool{
+		name: "info_tool",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = args
+			toolSeen, _ = toolexec.ToolCallInfoFromContext(ctx)
+			return map[string]any{"ok": true}, nil
+		},
+	}
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "call-info-1",
+					Name: "info_tool",
+					Args: "{}",
+				}},
+			}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{infoTool},
+		toolMap: map[string]tool.Tool{"info_tool": infoTool},
+		policies: []policy.Hook{
+			hook,
+		},
+	}
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	if len(hook.before) != 1 {
+		t.Fatalf("expected one before-tool capture, got %d", len(hook.before))
+	}
+	if hook.before[0].ID != "call-info-1" || hook.before[0].Name != "info_tool" {
+		t.Fatalf("unexpected before-tool call info: %#v", hook.before[0])
+	}
+	if toolSeen.ID != "call-info-1" || toolSeen.Name != "info_tool" {
+		t.Fatalf("unexpected tool-run call info: %#v", toolSeen)
+	}
+	if len(hook.after) != 1 {
+		t.Fatalf("expected one after-tool capture, got %d", len(hook.after))
+	}
+	if hook.after[0].ID != "call-info-1" || hook.after[0].Name != "info_tool" {
+		t.Fatalf("unexpected after-tool call info: %#v", hook.after[0])
 	}
 }
 

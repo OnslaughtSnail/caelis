@@ -12,6 +12,10 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
+func fullTerminalCapabilities() bool {
+	return true
+}
+
 func TestNewRuntime_TerminalCapabilityKeepsSandboxRunnerIsolated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -63,7 +67,7 @@ func TestNewRuntime_TerminalCapabilityKeepsSandboxRunnerIsolated(t *testing.T) {
 	}()
 
 	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace", ClientCapabilities{
-		Terminal: true,
+		Terminal: fullTerminalCapabilities(),
 	}, nil)
 	asyncRunner, ok := rt.HostRunner().(toolexec.AsyncCommandRunner)
 	if !ok {
@@ -185,7 +189,7 @@ func TestNewRuntime_TerminalCapabilityPreservesAsyncSandboxRunner(t *testing.T) 
 	}()
 
 	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace/subdir", ClientCapabilities{
-		Terminal: true,
+		Terminal: fullTerminalCapabilities(),
 	}, nil)
 
 	hostRunner, ok := rt.HostRunner().(*sessionAsyncCommandRunner)
@@ -414,7 +418,7 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 	}()
 
 	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace", ClientCapabilities{
-		Terminal: true,
+		Terminal: fullTerminalCapabilities(),
 	}, func() string {
 		return "full_access"
 	})
@@ -573,7 +577,7 @@ func TestNewRuntime_BaseFullControlOverridesDefaultSessionMode(t *testing.T) {
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace", ClientCapabilities{
-		Terminal: true,
+		Terminal: fullTerminalCapabilities(),
 	}, func() string {
 		return "default"
 	})

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -603,6 +604,10 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 	}
 	if len(msg.ToolCalls) > 0 {
 		for _, call := range msg.ToolCalls {
+			if isPlanToolName(call.Name) {
+				handled = true
+				continue
+			}
 			parsedArgs := parseToolArgsForDisplay(call.Args)
 			visuals := toolCallMutationVisuals{}
 			visualsOK := false
@@ -686,6 +691,10 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", displayName, compact)})
 			return true
 		}
+		if strings.EqualFold(toolName, tool.PlanToolName) && !hasToolError(msg.ToolResponse.Result) {
+			c.tuiSender.Send(planUpdateMsgFromToolResult(msg.ToolResponse.Result))
+			return true
+		}
 		if strings.EqualFold(toolName, tool.DelegateTaskToolName) && !hasToolError(msg.ToolResponse.Result) {
 			return true
 		}
@@ -749,6 +758,35 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool
 		c.tuiSender.Send(msg)
 	}
 	return true
+}
+
+func planUpdateMsgFromToolResult(result map[string]any) tuievents.PlanUpdateMsg {
+	var msg tuievents.PlanUpdateMsg
+	var entries []tuievents.PlanEntry
+	if err := decodePlanEntries(result["entries"], &entries); err != nil {
+		return msg
+	}
+	for _, item := range entries {
+		content := strings.TrimSpace(item.Content)
+		status := strings.TrimSpace(item.Status)
+		if content == "" || status == "" {
+			continue
+		}
+		msg.Entries = append(msg.Entries, tuievents.PlanEntry{Content: content, Status: status})
+	}
+	return msg
+}
+
+func isPlanToolName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), tool.PlanToolName)
+}
+
+func decodePlanEntries(in any, out any) error {
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
 }
 
 func (c *cliConsole) setActiveRunCancel(cancel context.CancelFunc) {
@@ -842,6 +880,7 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 	}
 	if c.tuiSender != nil {
 		c.tuiSender.Send(tuievents.ClearHistoryMsg{})
+		c.tuiSender.Send(tuievents.PlanUpdateMsg{})
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 		modelText, contextText := c.readTUIStatus()
 		c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
@@ -867,6 +906,7 @@ func handleFork(c *cliConsole, args []string) (bool, error) {
 	}
 	if c.tuiSender != nil {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
+		c.tuiSender.Send(tuievents.PlanUpdateMsg{})
 		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "fork succeeded", ClearAfter: transientHintDuration})
 		return false, nil
 	}
@@ -1437,9 +1477,10 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 	}
 	c.sessionID = target
 	if _, err := c.rt.ReconcileSession(c.baseCtx, runtime.ReconcileSessionRequest{
-		AppName:   c.appName,
-		UserID:    c.userID,
-		SessionID: c.sessionID,
+		AppName:     c.appName,
+		UserID:      c.userID,
+		SessionID:   c.sessionID,
+		ExecRuntime: c.execRuntime,
 	}); err != nil {
 		return false, err
 	}
@@ -1474,6 +1515,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 	// Markdown is rendered by the same block renderer as live streaming,
 	// avoiding mixed prefix-coloring and formatting artifacts.
 	c.tuiSender.Send(tuievents.ClearHistoryMsg{})
+	c.tuiSender.Send(tuievents.PlanUpdateMsg{})
 	modelText, contextText := c.readTUIStatus()
 	c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
 	pendingToolCalls := map[string]toolCallSnapshot{}

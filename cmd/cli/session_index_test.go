@@ -12,11 +12,58 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
+	taskmem "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 )
+
+type resumeAsyncRunnerStub struct {
+	status toolexec.SessionStatus
+}
+
+func (s *resumeAsyncRunnerStub) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+func (s *resumeAsyncRunnerStub) StartAsync(context.Context, toolexec.CommandRequest) (string, error) {
+	return s.status.ID, nil
+}
+func (s *resumeAsyncRunnerStub) WriteInput(string, []byte) error { return nil }
+func (s *resumeAsyncRunnerStub) ReadOutput(string, int64, int64) ([]byte, []byte, int64, int64, error) {
+	return nil, nil, 0, 0, nil
+}
+func (s *resumeAsyncRunnerStub) GetSessionStatus(string) (toolexec.SessionStatus, error) {
+	return s.status, nil
+}
+func (s *resumeAsyncRunnerStub) WaitSession(context.Context, string, time.Duration) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+func (s *resumeAsyncRunnerStub) TerminateSession(string) error { return nil }
+func (s *resumeAsyncRunnerStub) ListSessions() []toolexec.SessionInfo {
+	return nil
+}
+
+type resumeExecRuntime struct {
+	cwd  string
+	host toolexec.AsyncCommandRunner
+}
+
+func (r resumeExecRuntime) PermissionMode() toolexec.PermissionMode {
+	return toolexec.PermissionModeDefault
+}
+func (r resumeExecRuntime) SandboxType() string                   { return "test" }
+func (r resumeExecRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
+func (r resumeExecRuntime) FallbackToHost() bool                  { return false }
+func (r resumeExecRuntime) FallbackReason() string                { return "" }
+func (r resumeExecRuntime) FileSystem() toolexec.FileSystem       { return previewTestFS{cwd: r.cwd} }
+func (r resumeExecRuntime) HostRunner() toolexec.CommandRunner    { return r.host }
+func (r resumeExecRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
+func (r resumeExecRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
+	return toolexec.CommandDecision{}
+}
 
 func TestSessionIndex_ListByWorkspace(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
@@ -302,6 +349,88 @@ func TestHandleResume_WithSessionID_NonTUIStaysSilent(t *testing.T) {
 	text := out.String()
 	if strings.TrimSpace(text) != "" {
 		t.Fatalf("expected /resume to be silent, got %q", text)
+	}
+}
+
+func TestHandleResume_PassesExecRuntimeForBashRecovery(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	store := inmemory.New()
+	tasks := taskmem.New()
+	rt, err := runtime.New(runtime.Config{Store: store, TaskStore: tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "resume-bash"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "resume-bash", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-bash",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "resume-bash"},
+		Title:          "sleep 30",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			"command":         "sleep 30",
+			"workdir":         workspace.CWD,
+			"route":           string(toolexec.ExecutionRouteHost),
+			"exec_session_id": "proc-1",
+		},
+		Result: map[string]any{
+			"session_id": "proc-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		rt:           rt,
+		appName:      "app",
+		userID:       "u",
+		workspace:    workspace,
+		sessionIndex: idx,
+		sessionID:    "default",
+		execRuntime: resumeExecRuntime{
+			cwd: workspace.CWD,
+			host: &resumeAsyncRunnerStub{
+				status: toolexec.SessionStatus{
+					ID:        "proc-1",
+					Command:   "sleep 30",
+					Dir:       workspace.CWD,
+					State:     toolexec.SessionStateRunning,
+					StartTime: time.Now(),
+				},
+			},
+		},
+		out: &out,
+		ui:  newUI(&out, true, false),
+	}
+	if _, err := handleResume(c, []string{"resume-bash"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := tasks.Get(context.Background(), "t-bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != task.StateRunning || !got.Running {
+		t.Fatalf("expected running bash task to be reattached, got state=%q running=%v result=%#v", got.State, got.Running, got.Result)
 	}
 }
 

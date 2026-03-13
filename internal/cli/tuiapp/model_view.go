@@ -43,6 +43,11 @@ func (m *Model) View() tea.View {
 	sections = append(sections, vpView)
 	sections = append(sections, "")
 
+	if planView := m.renderPlanDrawer(); planView != "" {
+		sections = append(sections, planView)
+		sections = append(sections, "")
+	}
+
 	// 2. Hint row (contextual guidance).
 	sections = append(sections, m.renderHintRow())
 	sections = append(sections, "")
@@ -107,7 +112,7 @@ func (m *Model) View() tea.View {
 	frame.ReportFocus = true
 	frame.WindowTitle = m.windowTitle()
 	if cursor := m.regularInputCursor(); cursor != nil {
-		cursor.Position.Y += m.viewport.Height() + 5 + tuikit.ComposerPadTop
+		cursor.Position.Y += m.viewport.Height() + 5 + m.planSectionHeight() + tuikit.ComposerPadTop
 		frame.Cursor = cursor
 	}
 	return frame
@@ -130,6 +135,7 @@ func (m *Model) bottomSectionHeight() int {
 
 	// Spacer + hint row + hint/header gap + workspace/model row + composer top separator.
 	lines += 5
+	lines += m.planSectionHeight()
 
 	// Composer top padding between workspace/model row and input.
 	lines += tuikit.ComposerPadTop
@@ -317,8 +323,8 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 
 func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 	y := m.viewport.Height()
-	// spacer + hint + hint/header gap + workspace/model + separator = 5 lines above padding
-	y += 5
+	// spacer + optional plan + hint + hint/header gap + workspace/model + separator
+	y += 5 + m.planSectionHeight()
 	// composer top padding
 	y += tuikit.ComposerPadTop
 	h := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
@@ -395,10 +401,10 @@ type fixedRowLayout struct {
 func (m *Model) fixedRowLayout() fixedRowLayout {
 	y := m.viewport.Height()
 	layout := fixedRowLayout{
-		hintY:   y + 1,
-		headerY: y + 3,
+		hintY:   y + 1 + m.planSectionHeight(),
+		headerY: y + 3 + m.planSectionHeight(),
 	}
-	y += 5 // spacer + hint + hint/header gap + workspace/model + separator
+	y += 5 + m.planSectionHeight() // spacer + optional plan + hint + hint/header gap + workspace/model + separator
 	y += tuikit.ComposerPadTop
 	y += maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	y += tuikit.ComposerPadBottom // composer bottom padding
@@ -531,6 +537,112 @@ func (m *Model) buildHintText() string {
 		return m.overlayHintText("/")
 	}
 	return ""
+}
+
+func (m *Model) planSectionHeight() int {
+	if len(m.planEntries) == 0 {
+		return 0
+	}
+	drawer := m.renderPlanDrawer()
+	if drawer == "" {
+		return 0
+	}
+	return strings.Count(drawer, "\n") + 1
+}
+
+func (m *Model) renderPlanDrawer() string {
+	if len(m.planEntries) == 0 || m.width <= 0 {
+		return ""
+	}
+	visible, _, _ := visiblePlanEntries(m.planEntries, m.planVisibleBudget())
+	if len(visible) == 0 {
+		return ""
+	}
+	contentWidth := maxInt(1, m.width-(inputHorizontalInset*2))
+	lines := []string{m.theme.SeparatorStyle().Render(strings.Repeat("─", contentWidth))}
+	for _, item := range visible {
+		lines = append(lines, renderPlanLine(m, item))
+	}
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+}
+
+func renderPlanLine(m *Model, item planEntryState) string {
+	icon := "☐"
+	iconStyle := m.theme.HelpHintTextStyle()
+	textStyle := m.theme.HelpHintTextStyle()
+	switch strings.TrimSpace(item.Status) {
+	case "completed":
+		icon = "✔"
+		iconStyle = m.theme.NoteStyle()
+		textStyle = m.theme.NoteStyle().Strikethrough(true)
+	case "in_progress":
+		iconStyle = lipgloss.NewStyle().Foreground(m.theme.Focus).Bold(true)
+		textStyle = lipgloss.NewStyle().Foreground(m.theme.Focus).Bold(true)
+	}
+	return iconStyle.Render(icon) + " " + textStyle.Render(item.Content)
+}
+
+func (m *Model) planVisibleBudget() int {
+	switch {
+	case m.height <= 18:
+		return 1
+	case m.height <= 22:
+		return 2
+	case m.height <= 27:
+		return 3
+	case m.height <= 33:
+		return 4
+	case m.height <= 40:
+		return 5
+	default:
+		return 6
+	}
+}
+
+func visiblePlanEntries(entries []planEntryState, limit int) ([]planEntryState, int, int) {
+	if limit <= 0 || len(entries) == 0 {
+		return nil, len(entries), 0
+	}
+	if limit >= len(entries) {
+		out := append([]planEntryState(nil), entries...)
+		return out, 0, 0
+	}
+	anchor := 0
+	found := false
+	for idx, item := range entries {
+		if strings.TrimSpace(item.Status) == "in_progress" {
+			anchor = idx
+			found = true
+			break
+		}
+	}
+	if !found {
+		for idx, item := range entries {
+			if strings.TrimSpace(item.Status) != "completed" {
+				anchor = idx
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		anchor = len(entries) - 1
+	}
+	beforeContext := 0
+	if limit >= 3 {
+		beforeContext = 1
+	}
+	start := anchor - beforeContext
+	if start < 0 {
+		start = 0
+	}
+	maxStart := len(entries) - limit
+	if start > maxStart {
+		start = maxStart
+	}
+	end := minInt(len(entries), start+limit)
+	visible := append([]planEntryState(nil), entries[start:end]...)
+	return visible, len(entries) - len(visible), start
 }
 
 func (m *Model) startRunningAnimation() {

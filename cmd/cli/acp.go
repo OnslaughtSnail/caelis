@@ -221,10 +221,6 @@ func runACP(ctx context.Context, args []string) error {
 			selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
 			return acpModelSupportsImages(factory, selectedAlias)
 		},
-		SessionModels: func(sessionCfg internalacp.AgentSessionConfig) *internalacp.SessionModelState {
-			selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
-			return buildACPSessionModelState(factory, configStore, selectedAlias)
-		},
 		ListSessions: func(ctx context.Context, req internalacp.SessionListRequest) (internalacp.SessionListResponse, error) {
 			_ = ctx
 			return buildACPSessionList(index, workspace, req), nil
@@ -754,26 +750,6 @@ func acpReasoningOptionDescription(option modelReasoningOption) string {
 		return "Extra high reasoning depth for complex problems."
 	default:
 		return ""
-	}
-}
-
-func buildACPSessionModelState(factory *modelproviders.Factory, configStore *appConfigStore, selectedAlias string) *internalacp.SessionModelState {
-	aliases := configuredACPModelAliases(factory, configStore)
-	if len(aliases) == 0 {
-		return nil
-	}
-	models := make([]internalacp.SessionModel, 0, len(aliases))
-	for _, alias := range aliases {
-		cfg, _ := factory.ConfigForAlias(alias)
-		models = append(models, internalacp.SessionModel{
-			ModelID:     alias,
-			Name:        alias,
-			Description: formatACPModelDescription(cfg),
-		})
-	}
-	return &internalacp.SessionModelState{
-		CurrentModelID:  selectedAlias,
-		AvailableModels: models,
 	}
 }
 

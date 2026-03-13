@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.0.22 - 2026-03-14
+
+### Planning, Slash Commands & Session Recovery
+- Added a new core `PLAN` tool that persists structured execution plans in session state, surfaced in ACP updates and rendered in the TUI plan drawer during active turns.
+- Added ACP `available_commands_update` + `plan` session updates, plus built-in `/help`, `/status`, and `/compact` slash command handling for ACP sessions.
+- Fixed resumed-session task reconciliation so runtime-level reattachment for async `BASH` tasks works reliably and preserves running task continuity.
+- Aligned advertised ACP slash-command behavior with runtime handling to avoid command-list/protocol mismatches.
+- Expanded regression coverage across ACP protocol/session updates, plan rendering, authorization metadata propagation, and resumed-session reconciliation paths.
+
 ## v0.0.21 - 2026-03-13
 
 ### Release Follow-up

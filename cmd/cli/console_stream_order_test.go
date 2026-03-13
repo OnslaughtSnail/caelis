@@ -12,6 +12,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 func TestEmitAssistantEventToTUI_FinalReasoningThenText(t *testing.T) {
@@ -648,6 +649,57 @@ func TestForwardEventToTUI_BashErrorWithoutOutputEmitsToolResultSummary(t *testi
 	}
 	if !strings.Contains(logMsg.Chunk, "sandbox runner is unavailable") {
 		t.Fatalf("expected bash error details in summary, got %q", logMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "call_plan",
+				Name: tool.PlanToolName,
+				Args: `{"entries":[{"content":"Inspect repo","status":"pending"}]}`,
+			}},
+		},
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected plan tool call to be handled")
+	}
+	if len(sender.msgs) != 0 {
+		t.Fatalf("expected plan tool call to avoid transcript output, got %#v", sender.msgs)
+	}
+
+	handled = c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_plan",
+				Name: tool.PlanToolName,
+				Result: map[string]any{
+					"entries": []any{
+						map[string]any{"content": "Inspect repo", "status": "in_progress"},
+						map[string]any{"content": "Run tests", "status": "pending"},
+					},
+				},
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected plan tool response to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected only one plan update message, got %#v", sender.msgs)
+	}
+	msg, ok := sender.msgs[0].(tuievents.PlanUpdateMsg)
+	if !ok {
+		t.Fatalf("expected PlanUpdateMsg, got %T", sender.msgs[0])
+	}
+	if len(msg.Entries) != 2 || msg.Entries[0].Status != "in_progress" {
+		t.Fatalf("unexpected plan update payload: %+v", msg)
 	}
 }
 

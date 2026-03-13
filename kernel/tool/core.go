@@ -36,19 +36,26 @@ func EnsureCoreTools(userTools []Tool, cfg CoreToolsConfig) ([]Tool, error) {
 		if t.Name() == TaskToolName {
 			return nil, fmt.Errorf("tool: %q is reserved as kernel core tool", TaskToolName)
 		}
+		if t.Name() == PlanToolName {
+			return nil, fmt.Errorf("tool: %q is reserved as kernel core tool", PlanToolName)
+		}
 	}
 	readTool, err := filesystem.NewReadWithRuntime(cfg.Read, cfg.Runtime)
 	if err != nil {
 		return nil, err
 	}
 
-	extra := 2
+	extra := 3
 	if !cfg.DisableDelegate {
 		extra++
 	}
 	out := make([]Tool, 0, len(userTools)+extra)
 	out = append(out, readTool)
 	taskTool, err := NewTaskTool()
+	if err != nil {
+		return nil, err
+	}
+	planTool, err := NewPlanTool()
 	if err != nil {
 		return nil, err
 	}
@@ -60,6 +67,7 @@ func EnsureCoreTools(userTools []Tool, cfg CoreToolsConfig) ([]Tool, error) {
 		out = append(out, delegateTool)
 	}
 	out = append(out, taskTool)
+	out = append(out, planTool)
 	out = append(out, userTools...)
 	return out, nil
 }

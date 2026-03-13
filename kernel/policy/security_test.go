@@ -114,3 +114,11 @@ func TestSecurityBaseline_TaskBypassesToolAuthorization(t *testing.T) {
 		t.Fatalf("expected TASK to bypass tool-level authorization, got %v", err)
 	}
 }
+
+func TestSecurityBaseline_PlanBypassesToolAuthorization(t *testing.T) {
+	hook := DefaultSecurityBaseline()
+	_, err := hook.BeforeTool(context.Background(), ToolInput{Call: model.ToolCall{Name: "PLAN"}})
+	if err != nil {
+		t.Fatalf("expected PLAN to bypass tool-level authorization, got %v", err)
+	}
+}

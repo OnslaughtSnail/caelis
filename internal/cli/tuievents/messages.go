@@ -130,3 +130,12 @@ type TaskStreamMsg struct {
 }
 
 type ToolStreamMsg = TaskStreamMsg
+
+type PlanEntry struct {
+	Content string
+	Status  string
+}
+
+type PlanUpdateMsg struct {
+	Entries []PlanEntry
+}
