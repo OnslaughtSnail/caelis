@@ -95,6 +95,10 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	matcher, err := newGitignoreMatcher(t.runtime.FileSystem(), target)
+	if err != nil {
+		return nil, err
+	}
 	info, err := t.runtime.FileSystem().Stat(target)
 	if err != nil {
 		return nil, err
@@ -126,6 +130,18 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 		walkErr := walkDir(t.runtime.FileSystem(), target, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return nil
+			}
+			if path != target && matcher != nil {
+				ignored, err := matcher.Match(path, d != nil && d.IsDir())
+				if err != nil {
+					return err
+				}
+				if ignored {
+					if d != nil && d.IsDir() {
+						return fs.SkipDir
+					}
+					return nil
+				}
 			}
 			if d == nil || d.IsDir() {
 				return nil

@@ -61,6 +61,32 @@ func TestDetectPrimaryLanguage_RequiresWorkspaceEvidence(t *testing.T) {
 	}
 }
 
+func TestDetectPrimaryLanguage_RespectsGitignore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("generated/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "generated"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "generated", "main.py"), []byte("print('hidden')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	specs := []lspLanguageSpec{
+		{Language: "go", Priority: 100, Extensions: []string{".go"}},
+		{Language: "python", Priority: 90, Extensions: []string{".py"}},
+	}
+	if got := detectPrimaryLanguage(root, specs); got != "go" {
+		t.Fatalf("expected go after ignoring gitignored python files, got %q", got)
+	}
+}
+
 func TestResolveLSPServerCommand_PrefersWorkspaceNodeBin(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "node_modules", ".bin")

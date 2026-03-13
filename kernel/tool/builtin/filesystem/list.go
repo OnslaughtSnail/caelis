@@ -73,19 +73,33 @@ func (t *ListTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
+	matcher, err := newGitignoreMatcher(t.runtime.FileSystem(), target)
+	if err != nil {
+		return nil, err
+	}
 	items, err := t.runtime.FileSystem().ReadDir(target)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]map[string]any, 0, len(items))
 	for _, item := range items {
+		itemPath := filepath.Join(target, item.Name())
+		if matcher != nil {
+			ignored, err := matcher.Match(itemPath, item.IsDir())
+			if err != nil {
+				return nil, err
+			}
+			if ignored {
+				continue
+			}
+		}
 		info, infoErr := item.Info()
 		if infoErr != nil {
 			continue
 		}
 		out = append(out, map[string]any{
 			"name":     item.Name(),
-			"path":     filepath.Join(target, item.Name()),
+			"path":     itemPath,
 			"is_dir":   item.IsDir(),
 			"size":     info.Size(),
 			"mode":     info.Mode().String(),

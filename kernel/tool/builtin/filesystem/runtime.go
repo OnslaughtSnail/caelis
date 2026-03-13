@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/internal/gitignorefilter"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
@@ -45,4 +46,23 @@ func walkDir(fsys toolexec.FileSystem, root string, fn fs.WalkDirFunc) error {
 		return fmt.Errorf("tool: filesystem runtime is nil")
 	}
 	return fsys.WalkDir(root, fn)
+}
+
+type toolFileSystemAdapter struct {
+	fsys toolexec.FileSystem
+}
+
+func (a toolFileSystemAdapter) ReadFile(path string) ([]byte, error) {
+	return a.fsys.ReadFile(path)
+}
+
+func (a toolFileSystemAdapter) Stat(path string) (fs.FileInfo, error) {
+	return a.fsys.Stat(path)
+}
+
+func newGitignoreMatcher(fsys toolexec.FileSystem, target string) (*gitignorefilter.Matcher, error) {
+	if fsys == nil {
+		return nil, nil
+	}
+	return gitignorefilter.NewForPath(toolFileSystemAdapter{fsys: fsys}, target)
 }

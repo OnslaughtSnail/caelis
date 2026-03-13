@@ -11,6 +11,7 @@ import (
 	"sync"
 	"unicode"
 
+	"github.com/OnslaughtSnail/caelis/internal/gitignorefilter"
 	"github.com/OnslaughtSnail/caelis/kernel/skills"
 )
 
@@ -300,8 +301,12 @@ func (r *inputReferenceResolver) ensureFilesLoaded() error {
 }
 
 func collectWorkspaceFiles(root string) ([]string, error) {
+	matcher, err := gitignorefilter.NewForPath(osFileSystemAdapter{}, root)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, 2048)
-	err := filepath.WalkDir(root, func(pathText string, d os.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(root, func(pathText string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -310,10 +315,28 @@ func collectWorkspaceFiles(root string) ([]string, error) {
 			if skipMentionDir(name) {
 				return filepath.SkipDir
 			}
+			if pathText != root && matcher != nil {
+				ignored, err := matcher.Match(pathText, true)
+				if err != nil {
+					return err
+				}
+				if ignored {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !d.Type().IsRegular() {
 			return nil
+		}
+		if matcher != nil {
+			ignored, err := matcher.Match(pathText, false)
+			if err != nil {
+				return err
+			}
+			if ignored {
+				return nil
+			}
 		}
 		rel, err := filepath.Rel(root, pathText)
 		if err != nil {
@@ -328,6 +351,11 @@ func collectWorkspaceFiles(root string) ([]string, error) {
 	sort.Strings(out)
 	return out, nil
 }
+
+type osFileSystemAdapter struct{}
+
+func (osFileSystemAdapter) ReadFile(path string) ([]byte, error)  { return os.ReadFile(path) }
+func (osFileSystemAdapter) Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
 
 func skipMentionDir(name string) bool {
 	switch name {

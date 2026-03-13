@@ -81,7 +81,10 @@ func markdownRendererKey(width int, theme tuikit.Theme) string {
 }
 
 func markdownStyleConfig(theme tuikit.Theme) ansi.StyleConfig {
-	style := styles.DarkStyleConfig
+	style := styles.LightStyleConfig
+	if theme.IsDark {
+		style = styles.DarkStyleConfig
+	}
 	// Keep headings readable, but hide Markdown heading markers.
 	style.H1.Prefix = ""
 	style.H2.Prefix = ""

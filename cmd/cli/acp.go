@@ -19,7 +19,6 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
 	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
-	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session/filestore"
 	taskfilestore "github.com/OnslaughtSnail/caelis/kernel/task/filestore"
@@ -303,9 +302,6 @@ func runACP(ctx context.Context, args []string) error {
 				}
 				return nil, err
 			}
-			resolved.Policies = append(resolved.Policies, policy.NewSecurityBaseline(policy.SecurityBaselineConfig{
-				GuardedTools: []string{"WRITE", "PATCH"},
-			}))
 			return &internalacp.SessionResources{
 				Runtime:  execRuntime,
 				Tools:    resolved.Tools,

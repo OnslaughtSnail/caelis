@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"fmt"
+	"image/color"
 	"net/url"
 	"strings"
 	"testing"
@@ -3787,6 +3788,39 @@ func TestActiveExplorationBlockReRendersOnSpinnerTick(t *testing.T) {
 	after := m.historyLines[0]
 	if before == after {
 		t.Fatalf("expected active exploration header to animate on spinner ticks")
+	}
+}
+
+func TestBackgroundColorMsgSwitchesAutoThemeToLight(t *testing.T) {
+	t.Setenv("CAELIS_THEME", "")
+
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+
+	if !m.theme.IsDark {
+		t.Fatal("expected default auto theme to start on dark fallback")
+	}
+
+	_, _ = m.Update(tea.BackgroundColorMsg{color.White})
+
+	if m.theme.IsDark {
+		t.Fatal("expected background color message to switch model to light theme")
+	}
+	if got := ansi.Strip(m.renderStatusHeader()); strings.TrimSpace(got) == "" {
+		t.Fatal("expected status header to remain renderable after theme switch")
+	}
+}
+
+func TestBackgroundColorMsgDoesNotOverrideExplicitTheme(t *testing.T) {
+	t.Setenv("CAELIS_THEME", "dark")
+
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+
+	_, _ = m.Update(tea.BackgroundColorMsg{color.White})
+
+	if !m.theme.IsDark {
+		t.Fatal("expected explicit dark theme to ignore terminal background auto-switch")
 	}
 }
 

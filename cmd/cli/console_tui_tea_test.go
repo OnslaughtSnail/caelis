@@ -240,6 +240,45 @@ func TestCompleteSandboxCandidates_PrioritizesCurrent(t *testing.T) {
 	if got[0].Value != "seatbelt" {
 		t.Fatalf("expected current sandbox first, got %q", got[0].Value)
 	}
+	if got[0].Display != "seatbelt" {
+		t.Fatalf("expected seatbelt display, got %q", got[0].Display)
+	}
+}
+
+func TestAvailableSandboxTypesForPlatform(t *testing.T) {
+	tests := []struct {
+		goos string
+		want []string
+	}{
+		{goos: "darwin", want: []string{"seatbelt"}},
+		{goos: "linux", want: []string{"landlock", "bwrap"}},
+		{goos: "windows", want: []string{"bwrap"}},
+	}
+	for _, tc := range tests {
+		got := availableSandboxTypesForPlatform(tc.goos)
+		if len(got) != len(tc.want) {
+			t.Fatalf("%s: expected %d sandbox types, got %d (%v)", tc.goos, len(tc.want), len(got), got)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Fatalf("%s: expected %v, got %v", tc.goos, tc.want, got)
+			}
+		}
+	}
+}
+
+func TestCompleteSandboxCandidates_UsesExperimentalDisplayLabel(t *testing.T) {
+	c := &cliConsole{sandboxType: "landlock"}
+	got := c.completeSandboxCandidates("land", 10)
+	if len(got) == 0 {
+		t.Fatal("expected sandbox candidates")
+	}
+	if got[0].Value != "landlock" {
+		t.Fatalf("expected landlock value, got %q", got[0].Value)
+	}
+	if got[0].Display != "landlock (experimental)" {
+		t.Fatalf("expected experimental display label, got %q", got[0].Display)
+	}
 }
 
 func TestCompleteConnectCandidates_FiltersByQuery(t *testing.T) {
@@ -250,17 +289,6 @@ func TestCompleteConnectCandidates_FiltersByQuery(t *testing.T) {
 	}
 	if got[0].Value != "xiaomi" {
 		t.Fatalf("unexpected connect candidate: %+v", got[0])
-	}
-}
-
-func TestCompletePermissionCandidates(t *testing.T) {
-	c := &cliConsole{}
-	got := c.completePermissionCandidates("", 10)
-	if len(got) != 2 {
-		t.Fatalf("expected 2 permission candidates, got %d", len(got))
-	}
-	if got[0].Value != "default" || got[1].Value != "full_control" {
-		t.Fatalf("unexpected permission candidates: %+v", got)
 	}
 }
 

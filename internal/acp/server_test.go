@@ -696,7 +696,7 @@ func TestServer_Prompt_UsesACPFileSystemRead(t *testing.T) {
 	}
 }
 
-func TestServer_Prompt_UsesACPTerminalForBash(t *testing.T) {
+func TestServer_Prompt_DefaultSandboxBashDoesNotUseACPTerminal(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		clientCaps: ClientCapabilities{
 			Terminal: true,
@@ -718,8 +718,6 @@ func TestServer_Prompt_UsesACPTerminalForBash(t *testing.T) {
 		},
 	})
 	defer h.close()
-	h.termOutput = "hi\n"
-
 	mustCall(t, h.client, MethodInitialize, InitializeRequest{
 		ProtocolVersion:    CurrentProtocolVersion,
 		ClientCapabilities: h.clientCaps,
@@ -735,8 +733,8 @@ func TestServer_Prompt_UsesACPTerminalForBash(t *testing.T) {
 	if promptResp.StopReason != StopReasonEndTurn {
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
-	if h.terminalCreates != 1 {
-		t.Fatalf("expected terminal/create call, got %d", h.terminalCreates)
+	if h.terminalCreates != 0 {
+		t.Fatalf("did not expect terminal/create call for sandboxed bash, got %d", h.terminalCreates)
 	}
 }
 

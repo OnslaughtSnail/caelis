@@ -9,6 +9,9 @@ import (
 )
 
 type Theme struct {
+	Name   string
+	IsDark bool
+
 	AppBg          color.Color
 	PanelBorder    color.Color
 	PanelTitle     color.Color
@@ -81,9 +84,30 @@ func DefaultTheme() Theme {
 }
 
 func ResolveThemeFromEnv() Theme {
+	return resolveTheme(themeResolveOptions{})
+}
+
+func ResolveThemeForBackground(isDark bool) Theme {
+	return resolveTheme(themeResolveOptions{
+		backgroundKnown: true,
+		backgroundDark:  isDark,
+	})
+}
+
+func ThemeUsesAutoBackground() bool {
+	name := strings.ToLower(strings.TrimSpace(os.Getenv("CAELIS_THEME")))
+	return name == "" || name == "auto" || name == "default"
+}
+
+type themeResolveOptions struct {
+	backgroundKnown bool
+	backgroundDark  bool
+}
+
+func resolveTheme(opts themeResolveOptions) Theme {
 	useTrueColor := supportsTrueColor()
 	name := strings.ToLower(strings.TrimSpace(os.Getenv("CAELIS_THEME")))
-	theme := namedTheme(name, useTrueColor)
+	theme := namedTheme(name, useTrueColor, resolvedDarkBackground(opts))
 	if accent := strings.TrimSpace(os.Getenv("CAELIS_ACCENT")); accent != "" {
 		theme.Accent = lipgloss.Color(accent)
 		theme.Focus = lipgloss.Color(accent)
@@ -91,6 +115,13 @@ func ResolveThemeFromEnv() Theme {
 		theme.LinkFg = lipgloss.Color(accent)
 	}
 	return theme
+}
+
+func resolvedDarkBackground(opts themeResolveOptions) bool {
+	if opts.backgroundKnown {
+		return opts.backgroundDark
+	}
+	return lipgloss.HasDarkBackground(os.Stdin, os.Stdout)
 }
 
 func supportsTrueColor() bool {
@@ -102,8 +133,17 @@ func supportsTrueColor() bool {
 	return strings.Contains(term, "truecolor") || strings.Contains(term, "24bit") || strings.Contains(term, "direct")
 }
 
-func namedTheme(name string, trueColor bool) Theme {
+func namedTheme(name string, trueColor bool, darkBackground bool) Theme {
 	switch name {
+	case "", "auto", "default":
+		if darkBackground {
+			return defaultThemeVariant(trueColor)
+		}
+		return defaultLightThemeVariant(trueColor)
+	case "dark":
+		return defaultThemeVariant(trueColor)
+	case "light":
+		return defaultLightThemeVariant(trueColor)
 	case "nord":
 		return nordTheme(trueColor)
 	case "solarized":
@@ -111,7 +151,10 @@ func namedTheme(name string, trueColor bool) Theme {
 	case "dracula":
 		return draculaTheme(trueColor)
 	default:
-		return defaultThemeVariant(trueColor)
+		if darkBackground {
+			return defaultThemeVariant(trueColor)
+		}
+		return defaultLightThemeVariant(trueColor)
 	}
 }
 
@@ -124,6 +167,8 @@ func themeColor(trueColor bool, rich string, fallback string) color.Color {
 
 func defaultThemeVariant(trueColor bool) Theme {
 	return Theme{
+		Name:           "dark",
+		IsDark:         true,
 		AppBg:          themeColor(trueColor, "#111315", "233"),
 		PanelBorder:    themeColor(trueColor, "#3f4652", "240"),
 		PanelTitle:     themeColor(trueColor, "#f3f4f6", "255"),
@@ -188,8 +233,77 @@ func defaultThemeVariant(trueColor bool) Theme {
 	}
 }
 
+func defaultLightThemeVariant(trueColor bool) Theme {
+	return Theme{
+		Name:           "light",
+		IsDark:         false,
+		AppBg:          themeColor(trueColor, "#f8fafc", "255"),
+		PanelBorder:    themeColor(trueColor, "#64748b", "243"),
+		PanelTitle:     themeColor(trueColor, "#0f172a", "235"),
+		TextPrimary:    themeColor(trueColor, "#111827", "235"),
+		TextSecondary:  themeColor(trueColor, "#4b5563", "240"),
+		Info:           themeColor(trueColor, "#334155", "239"),
+		Success:        themeColor(trueColor, "#15803d", "28"),
+		Warning:        themeColor(trueColor, "#b45309", "130"),
+		Error:          themeColor(trueColor, "#b91c1c", "124"),
+		Accent:         themeColor(trueColor, "#1d4ed8", "25"),
+		Focus:          themeColor(trueColor, "#1d4ed8", "25"),
+		ModalBg:        themeColor(trueColor, "#ffffff", "231"),
+		StatusBg:       themeColor(trueColor, "#f8fafc", "255"),
+		StatusText:     themeColor(trueColor, "#0f172a", "235"),
+		CommandBg:      themeColor(trueColor, "#f8fafc", "255"),
+		CommandActive:  themeColor(trueColor, "#f8fafc", "255"),
+		CommandText:    themeColor(trueColor, "#111827", "235"),
+		CommandSubText: themeColor(trueColor, "#4b5563", "240"),
+
+		AssistantFg:        themeColor(trueColor, "#15803d", "28"),
+		ReasoningFg:        themeColor(trueColor, "#6b7280", "242"),
+		UserFg:             themeColor(trueColor, "#111827", "235"),
+		UserBg:             themeColor(trueColor, "#f8fafc", "255"),
+		UserPrefixFg:       themeColor(trueColor, "#0f172a", "235"),
+		UserMentionFg:      themeColor(trueColor, "#111827", "235"),
+		ToolFg:             themeColor(trueColor, "#0f172a", "235"),
+		DiffAddFg:          themeColor(trueColor, "#15803d", "28"),
+		DiffRemoveFg:       themeColor(trueColor, "#b91c1c", "124"),
+		DiffHeaderFg:       themeColor(trueColor, "#475569", "239"),
+		DiffHunkFg:         themeColor(trueColor, "#0f172a", "235"),
+		DiffAddBg:          themeColor(trueColor, "#e8f5e9", "194"),
+		DiffAddStrongBg:    themeColor(trueColor, "#cce9d2", "151"),
+		DiffRemoveBg:       themeColor(trueColor, "#fdecec", "224"),
+		DiffRemoveStrongBg: themeColor(trueColor, "#f7d0d0", "217"),
+		DiffLineNoFg:       themeColor(trueColor, "#64748b", "243"),
+		DiffGutterFg:       themeColor(trueColor, "#64748b", "243"),
+		DiffPanelBorder:    themeColor(trueColor, "#94a3b8", "249"),
+		SectionFg:          themeColor(trueColor, "#111827", "235"),
+		KeyLabelFg:         themeColor(trueColor, "#0f172a", "235"),
+		NoteFg:             themeColor(trueColor, "#6b7280", "242"),
+		PromptFg:           themeColor(trueColor, "#0f172a", "235"),
+		CursorFg:           themeColor(trueColor, "#0f172a", "235"),
+		ScrollHintFg:       themeColor(trueColor, "#b45309", "130"),
+
+		InputBarBg:          themeColor(trueColor, "#f8fafc", "255"),
+		InputBarFg:          themeColor(trueColor, "#111827", "235"),
+		ToolOutputBg:        themeColor(trueColor, "#ffffff", "231"),
+		HelpHintFg:          themeColor(trueColor, "#6b7280", "242"),
+		SpinnerFg:           themeColor(trueColor, "#334155", "239"),
+		SeparatorFg:         themeColor(trueColor, "#64748b", "243"),
+		RoleBorderFg:        themeColor(trueColor, "#94a3b8", "249"),
+		NewMsgBg:            themeColor(trueColor, "#e2e8f0", "254"),
+		ComposerBorder:      themeColor(trueColor, "#64748b", "243"),
+		ComposerBorderFocus: themeColor(trueColor, "#1d4ed8", "25"),
+		ScrollbarTrack:      themeColor(trueColor, "#cbd5e1", "252"),
+		ScrollbarThumb:      themeColor(trueColor, "#64748b", "243"),
+		LinkFg:              themeColor(trueColor, "#1d4ed8", "25"),
+		CodeFg:              themeColor(trueColor, "#92400e", "130"),
+		CodeBg:              themeColor(trueColor, "#eef2ff", "189"),
+		CodeBlockFg:         themeColor(trueColor, "#1f2937", "236"),
+		CodeBlockBg:         themeColor(trueColor, "#f1f5f9", "255"),
+	}
+}
+
 func nordTheme(trueColor bool) Theme {
 	theme := defaultThemeVariant(trueColor)
+	theme.Name = "nord"
 	theme.AppBg = themeColor(trueColor, "#2e3440", "236")
 	theme.PanelBorder = themeColor(trueColor, "#4c566a", "240")
 	theme.PanelTitle = themeColor(trueColor, "#eceff4", "255")
@@ -223,6 +337,7 @@ func nordTheme(trueColor bool) Theme {
 
 func solarizedTheme(trueColor bool) Theme {
 	theme := defaultThemeVariant(trueColor)
+	theme.Name = "solarized"
 	theme.AppBg = themeColor(trueColor, "#002b36", "235")
 	theme.PanelBorder = themeColor(trueColor, "#586e75", "242")
 	theme.PanelTitle = themeColor(trueColor, "#fdf6e3", "230")
@@ -257,6 +372,7 @@ func solarizedTheme(trueColor bool) Theme {
 
 func draculaTheme(trueColor bool) Theme {
 	theme := defaultThemeVariant(trueColor)
+	theme.Name = "dracula"
 	theme.AppBg = themeColor(trueColor, "#282a36", "236")
 	theme.PanelBorder = themeColor(trueColor, "#6272a4", "61")
 	theme.PanelTitle = themeColor(trueColor, "#f8f8f2", "255")

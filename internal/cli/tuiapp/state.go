@@ -203,34 +203,35 @@ type toolOutputLine struct {
 }
 
 type toolOutputState struct {
-	key           string
-	tool          string
-	callID        string
-	state         string
-	start         int
-	end           int
-	startedAt     time.Time
-	updatedAt     time.Time
-	finalizedAt   time.Time
-	lastStream    string
-	lines         []toolOutputLine
-	stdoutPartial string
-	stderrPartial string
+	key              string
+	tool             string
+	callID           string
+	state            string
+	start            int
+	end              int
+	startedAt        time.Time
+	updatedAt        time.Time
+	finalizedAt      time.Time
+	lastStream       string
+	lines            []toolOutputLine
+	stdoutPartial    string
+	stderrPartial    string
 	assistantPartial string
 	reasoningPartial string
-	delegateFence bool
-	active        bool
-	closing       bool
-	fadeStep      int
-	fadeQueued    bool
-	fadeLineCount int
+	delegateFence    bool
+	active           bool
+	closing          bool
+	fadeStep         int
+	fadeQueued       bool
+	fadeLineCount    int
 }
 
 type Model struct {
-	cfg   Config
-	theme tuikit.Theme
-	keys  appKeyMap
-	help  help.Model
+	cfg       Config
+	theme     tuikit.Theme
+	themeAuto bool
+	keys      appKeyMap
+	help      help.Model
 
 	width   int
 	height  int

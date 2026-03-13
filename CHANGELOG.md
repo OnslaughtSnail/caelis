@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.0.20 - 2026-03-13
+
+### Console, Theme & Runtime UX
+- Added terminal-background aware light/dark theme resolution for the Bubble Tea UI, including full re-theming of existing transcript, markdown, diff, and tool-output blocks when auto theme is enabled.
+- Simplified the interactive command surface by removing legacy `/permission`, `/tools`, and `/skills` slash commands while surfacing platform-aware sandbox choices with clearer experimental labels.
+- Updated runtime and status messaging so sandbox labels, fallback hints, and README guidance reflect the current default/experimental backend behavior more accurately.
+
+### Gitignore-Aware Workspace Discovery
+- Added a shared gitignore matcher and applied it across filesystem tools, workspace file mention completion, and LSP language detection so ignored/generated content is excluded consistently.
+- Added regression coverage for root and nested `.gitignore` handling in filesystem search, input reference completion, and language detection.
+
+### ACP, Sandbox & Policy Handling
+- Kept ACP default-mode `BASH` sandbox execution on the real sandbox runner instead of the ACP terminal bridge, so reported sandbox routes match actual enforcement and sandbox policy continues to apply.
+- Removed `.codex` from the default workspace-write read-only subpath list, leaving `.git` as the built-in protected path in the derived sandbox policy.
+- Expanded ACP/runtime coverage around terminal capability handling and async sandbox preservation under session-scoped runtimes.
+
 ## v0.0.19 - 2026-03-13
 
 ### ACP, Session Config & Model Catalog

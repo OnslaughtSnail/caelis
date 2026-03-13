@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,8 +20,15 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
 
+func requestBackgroundColorCmd() tea.Cmd {
+	return func() tea.Msg {
+		return tea.RequestBackgroundColor()
+	}
+}
+
 func NewModel(cfg Config) *Model {
 	theme := tuikit.ResolveThemeFromEnv()
+	themeAuto := tuikit.ThemeUsesAutoBackground()
 
 	items := make([]list.Item, 0, len(cfg.Commands))
 	for _, one := range cfg.Commands {
@@ -92,6 +100,7 @@ func NewModel(cfg Config) *Model {
 	m := &Model{
 		cfg:                 cfg,
 		theme:               theme,
+		themeAuto:           themeAuto,
 		keys:                defaultKeyMap(),
 		textarea:            ta,
 		spinner:             sp,
@@ -114,7 +123,7 @@ func NewModel(cfg Config) *Model {
 		welcomeCardPending: cfg.ShowWelcomeCard,
 	}
 	m.help = help.New()
-	configureHelpStyles(&m.help, theme)
+	m.applyTheme(theme)
 
 	if cfg.RefreshStatus != nil {
 		m.statusModel, m.statusContext = cfg.RefreshStatus()
@@ -136,7 +145,11 @@ func (m *Model) Init() tea.Cmd {
 	}
 	m.hasCommittedLine = len(m.historyLines) > 0
 	m.syncViewportContent()
-	return tea.Batch(tickStatusCmd(), m.spinner.Tick)
+	cmds := []tea.Cmd{tickStatusCmd(), m.spinner.Tick}
+	if m.themeAuto {
+		cmds = append(cmds, requestBackgroundColorCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) appendWelcomeCard() {
@@ -221,6 +234,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ready = true
 			m.viewport.GotoBottom()
 		}
+		return m, nil
+
+	case tea.BackgroundColorMsg:
+		if !m.themeAuto {
+			return m, nil
+		}
+		nextTheme := tuikit.ResolveThemeForBackground(typed.IsDark())
+		if nextTheme.Name == m.theme.Name && nextTheme.IsDark == m.theme.IsDark {
+			return m, nil
+		}
+		m.applyTheme(nextTheme)
 		return m, nil
 
 	case tea.MouseMsg:
@@ -426,6 +450,76 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(typed)
 	}
 	return m, nil
+}
+
+func (m *Model) applyTheme(theme tuikit.Theme) {
+	if m == nil {
+		return
+	}
+	m.theme = theme
+	configureHelpStyles(&m.help, theme)
+	m.applyPaletteTheme(theme)
+	m.applyTextareaStyles(theme)
+	m.spinner.Style = theme.SpinnerStyle()
+	m.rethemeHistory()
+	m.syncTextareaChrome()
+	m.syncViewportContent()
+}
+
+func (m *Model) applyPaletteTheme(theme tuikit.Theme) {
+	styles := m.palette.Styles
+	styles.Title = lipgloss.NewStyle().Foreground(theme.PanelTitle).Bold(true)
+	styles.PaginationStyle = lipgloss.NewStyle().Foreground(theme.TextSecondary)
+	styles.HelpStyle = lipgloss.NewStyle().Foreground(theme.TextSecondary)
+	m.palette.Styles = styles
+}
+
+func (m *Model) applyTextareaStyles(theme tuikit.Theme) {
+	styles := m.textarea.Styles()
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	styles.Focused.Base = lipgloss.NewStyle()
+	styles.Focused.Prompt = theme.PromptStyle()
+	styles.Focused.Text = theme.TextStyle()
+	styles.Focused.Placeholder = theme.HelpHintTextStyle()
+	styles.Blurred.CursorLine = lipgloss.NewStyle()
+	styles.Blurred.Base = lipgloss.NewStyle()
+	styles.Blurred.Prompt = theme.PromptStyle()
+	styles.Blurred.Text = theme.TextStyle()
+	styles.Blurred.Placeholder = theme.HelpHintTextStyle()
+	styles.Cursor.Color = theme.CursorFg
+	styles.Cursor.Shape = tea.CursorBlock
+	styles.Cursor.Blink = true
+	m.textarea.SetStyles(styles)
+}
+
+func (m *Model) rethemeHistory() {
+	if m == nil {
+		return
+	}
+	m.recolorCommittedHistory()
+	if m.assistantBlock != nil {
+		m.rerenderStreamBlock(m.assistantBlock, "answer")
+	}
+	if m.reasoningBlock != nil {
+		m.rerenderStreamBlock(m.reasoningBlock, "reasoning")
+	}
+	m.rerenderDiffBlocks()
+	if m.activityBlock != nil {
+		m.syncActivityBlock()
+	}
+	panels := make([]*toolOutputState, 0, len(m.toolOutputs))
+	for _, panel := range m.toolOutputs {
+		if panel != nil {
+			panels = append(panels, panel)
+		}
+	}
+	sort.Slice(panels, func(i, j int) bool {
+		return panels[i].start < panels[j].start
+	})
+	for _, panel := range panels {
+		m.syncAnchoredToolOutputBlock(panel)
+	}
+	m.refreshHistoryTailState()
 }
 
 func (m *Model) syncInputFromTextarea() {

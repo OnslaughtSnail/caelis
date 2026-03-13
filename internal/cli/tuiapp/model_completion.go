@@ -638,7 +638,7 @@ func isExecutableSlashArgInput(line string) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(fields[0])) {
-	case "/sandbox", "/permission":
+	case "/sandbox":
 		return len(fields) >= 2
 	case "/model":
 		action := strings.ToLower(strings.TrimSpace(fields[1]))
@@ -847,7 +847,7 @@ func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		if selected == "" {
 			return true, nil
 		}
-		if selected == "/model" || selected == "/sandbox" || selected == "/permission" || selected == "/resume" {
+		if selected == "/model" || selected == "/sandbox" || selected == "/resume" {
 			m.setInputText(selected)
 			m.syncTextareaFromInput()
 			m.clearSlashCompletion()

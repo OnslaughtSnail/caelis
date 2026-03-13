@@ -78,6 +78,28 @@ func (t *GlobTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
+	matcher, err := newGitignoreMatcher(t.runtime.FileSystem(), pattern)
+	if err != nil {
+		return nil, err
+	}
+	filtered := matches[:0]
+	for _, match := range matches {
+		info, statErr := t.runtime.FileSystem().Stat(match)
+		if statErr != nil {
+			continue
+		}
+		if matcher != nil {
+			ignored, err := matcher.Match(match, info.IsDir())
+			if err != nil {
+				return nil, err
+			}
+			if ignored {
+				continue
+			}
+		}
+		filtered = append(filtered, match)
+	}
+	matches = filtered
 	sort.Strings(matches)
 	return map[string]any{
 		"pattern": pattern,

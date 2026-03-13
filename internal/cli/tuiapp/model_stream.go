@@ -1169,6 +1169,51 @@ func (m *Model) rerenderDiffBlocks() {
 	}
 }
 
+func (m *Model) recolorCommittedHistory() {
+	if m == nil {
+		return
+	}
+	prevStyle := tuikit.LineStyleDefault
+	hasCommitted := false
+	for i, line := range m.historyLines {
+		raw := ansi.Strip(line)
+		if strings.TrimSpace(raw) == "" {
+			m.historyLines[i] = ""
+			continue
+		}
+		style := tuikit.DetectLineStyleWithContext(raw, prevStyle)
+		colored := tuikit.ColorizeLogLine(raw, style, m.theme)
+		colored = tuikit.LineExtraGutter(style) + colored
+		m.historyLines[i] = colored
+		prevStyle = style
+		hasCommitted = true
+	}
+	m.hasCommittedLine = hasCommitted
+	if !hasCommitted {
+		m.lastCommittedStyle = tuikit.LineStyleDefault
+		m.lastCommittedRaw = ""
+		return
+	}
+	m.refreshHistoryTailState()
+}
+
+func (m *Model) rerenderStreamBlock(block *assistantBlockState, kind string) {
+	if m == nil || block == nil {
+		return
+	}
+	lines := m.renderReasoningBlockLines(block.raw)
+	if normalizeStreamKind(kind) == "answer" {
+		lines = m.renderAssistantBlockLines(block.raw)
+	}
+	oldLen := block.end - block.start
+	m.replaceHistoryRange(block.start, block.end, lines)
+	block.end = block.start + len(lines)
+	delta := len(lines) - oldLen
+	if delta != 0 {
+		m.shiftAnchoredBlocks(block.end-delta, delta, "")
+	}
+}
+
 func (m *Model) resetConversationView() {
 	m.flushStream()
 	m.assistantBlock = nil

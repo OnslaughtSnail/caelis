@@ -77,3 +77,47 @@ func TestSearchTool_ReturnsColumn(t *testing.T) {
 		t.Fatalf("expected column=3, got %v", hits[0]["column"])
 	}
 }
+
+func TestSearchTool_RespectsGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(tmpDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("ignored.txt\nignored/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "visible.txt"), []byte("hello visible\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "ignored.txt"), []byte("hello hidden\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(tmpDir, "ignored"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "ignored", "nested.txt"), []byte("hello nested\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := NewSearchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), map[string]any{
+		"path":  tmpDir,
+		"query": "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["count"] != 1 {
+		t.Fatalf("expected only visible match, got %v", out["count"])
+	}
+	hits, ok := out["hits"].([]map[string]any)
+	if !ok || len(hits) != 1 {
+		t.Fatalf("expected 1 hit, got %v", out["hits"])
+	}
+	if hits[0]["path"] != filepath.Join(tmpDir, "visible.txt") {
+		t.Fatalf("expected visible file only, got %v", hits[0]["path"])
+	}
+}

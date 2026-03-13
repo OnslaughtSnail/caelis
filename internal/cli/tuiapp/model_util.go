@@ -207,7 +207,7 @@ func slashArgQueryAtCursor(input []rune, cursor int) (string, string, bool) {
 			return "model use", alias, true
 		}
 		return "model use " + alias, strings.TrimSpace(strings.Join(fields[3:], " ")), true
-	case "sandbox", "permission":
+	case "sandbox":
 		if len(fields) == 1 {
 			if !hasTrailingDelimiter {
 				return "", "", false

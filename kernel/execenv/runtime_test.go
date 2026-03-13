@@ -239,6 +239,9 @@ func TestNew_DefaultDerivesWorkspaceWritePolicy(t *testing.T) {
 	if len(policy.WritableRoots) == 0 || policy.WritableRoots[0] != "." {
 		t.Fatalf("expected default writable root '.', got %v", policy.WritableRoots)
 	}
+	if !reflect.DeepEqual(policy.ReadOnlySubpaths, []string{".git"}) {
+		t.Fatalf("expected default readonly subpaths [.git], got %v", policy.ReadOnlySubpaths)
+	}
 }
 
 func TestSandboxTypeCandidatesForPlatform_LinuxDefaultUsesLandlockOnly(t *testing.T) {

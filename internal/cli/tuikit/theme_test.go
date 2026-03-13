@@ -49,6 +49,39 @@ func TestResolveThemeFromEnv_FallsBackTo256Palette(t *testing.T) {
 	}
 }
 
+func TestResolveThemeForBackground_SelectsLightTheme(t *testing.T) {
+	t.Setenv("CAELIS_THEME", "")
+	t.Setenv("COLORTERM", "truecolor")
+
+	theme := ResolveThemeForBackground(false)
+	if theme.IsDark {
+		t.Fatal("expected light theme for light terminal background")
+	}
+	if got := stringifyColor(theme.TextPrimary); got != "#111827" {
+		t.Fatalf("expected readable light-theme text, got %q", got)
+	}
+	if got := stringifyColor(theme.PanelBorder); got != "#64748b" {
+		t.Fatalf("expected light-theme border, got %q", got)
+	}
+}
+
+func TestThemeUsesAutoBackground(t *testing.T) {
+	t.Setenv("CAELIS_THEME", "")
+	if !ThemeUsesAutoBackground() {
+		t.Fatal("expected empty theme to use auto background detection")
+	}
+
+	t.Setenv("CAELIS_THEME", "auto")
+	if !ThemeUsesAutoBackground() {
+		t.Fatal("expected auto theme to use background detection")
+	}
+
+	t.Setenv("CAELIS_THEME", "light")
+	if ThemeUsesAutoBackground() {
+		t.Fatal("expected explicit light theme to disable auto background detection")
+	}
+}
+
 func stringifyColor(value interface{}) string {
 	switch c := value.(type) {
 	case xansi.BasicColor:

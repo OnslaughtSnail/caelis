@@ -918,6 +918,41 @@ func platformDefaultSandboxType() string {
 	return "bwrap"
 }
 
+func availableSandboxTypesForPlatform(goos string) []string {
+	switch strings.ToLower(strings.TrimSpace(goos)) {
+	case "darwin":
+		return []string{"seatbelt"}
+	case "linux":
+		return []string{"landlock", "bwrap"}
+	default:
+		return []string{"bwrap"}
+	}
+}
+
+func availableSandboxTypes() []string {
+	return availableSandboxTypesForPlatform(stdruntime.GOOS)
+}
+
+func sandboxTypeDisplayLabel(sandboxType string) string {
+	value := strings.TrimSpace(strings.ToLower(sandboxType))
+	if value == "" {
+		return ""
+	}
+	if sandboxTypeIsExperimental(value) {
+		return value + " (experimental)"
+	}
+	return value
+}
+
+func sandboxTypeIsExperimental(sandboxType string) bool {
+	switch strings.TrimSpace(strings.ToLower(sandboxType)) {
+	case "landlock", "bwrap":
+		return true
+	default:
+		return false
+	}
+}
+
 func configPath(appName string) (string, error) {
 	root, err := appDataDir(appName)
 	if err != nil {

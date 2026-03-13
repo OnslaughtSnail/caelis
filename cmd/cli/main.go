@@ -558,7 +558,7 @@ func buildRuntimePromptHint(execRuntime toolexec.Runtime) string {
 		lines = append(lines, "- permission_mode=full_control route=host")
 		lines = append(lines, "- Rule: BASH commands run on host directly with no approval gate.")
 	default:
-		lines = append(lines, fmt.Sprintf("- permission_mode=default sandbox_type=%s", execRuntime.SandboxType()))
+		lines = append(lines, fmt.Sprintf("- permission_mode=default sandbox_type=%s", sandboxTypeDisplayLabel(execRuntime.SandboxType())))
 		if execRuntime.FallbackToHost() {
 			lines = append(lines, "- Rule: sandbox is unavailable; all BASH commands require approval then run on host.")
 			if reason := strings.TrimSpace(execRuntime.FallbackReason()); reason != "" {

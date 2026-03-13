@@ -662,7 +662,7 @@ func deriveSandboxPolicy(mode PermissionMode, policy SandboxPolicy) SandboxPolic
 	case SandboxPolicyWorkspaceWrite:
 		policy.Type = SandboxPolicyWorkspaceWrite
 		if len(policy.ReadOnlySubpaths) == 0 {
-			policy.ReadOnlySubpaths = []string{".git", ".codex"}
+			policy.ReadOnlySubpaths = []string{".git"}
 		}
 		if len(policy.WritableRoots) == 0 {
 			policy.WritableRoots = []string{"."}

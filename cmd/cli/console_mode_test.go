@@ -64,6 +64,15 @@ func TestNewCLIConsole_CommandSetRemovesLegacyUIAndModels(t *testing.T) {
 	if _, ok := console.commands["sandbox"]; !ok {
 		t.Fatal("expected /sandbox command to exist")
 	}
+	if _, ok := console.commands["permission"]; ok {
+		t.Fatal("expected /permission command to be removed")
+	}
+	if _, ok := console.commands["skills"]; ok {
+		t.Fatal("expected /skills command to be removed")
+	}
+	if _, ok := console.commands["tools"]; ok {
+		t.Fatal("expected /tools command to be removed")
+	}
 	if _, ok := console.commands["mouse"]; ok {
 		t.Fatal("expected /mouse command to be removed")
 	}

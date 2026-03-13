@@ -189,20 +189,13 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		"fork":    {Usage: "/fork", Description: "Fork current conversation into a new session", Handle: handleFork},
 		"compact": {Usage: "/compact [note]", Description: "Compact context history", Handle: handleCompact},
 		"status":  {Usage: "/status", Description: "Show current session status", Handle: handleStatus},
-		"permission": {
-			Usage:       "/permission [default|full_control]",
-			Description: "View or switch permission mode",
-			Handle:      handlePermission,
-		},
 		"sandbox": {
 			Usage:       "/sandbox [<type>]",
-			Description: "View or switch sandbox type",
+			Description: "View or switch sandbox type (landlock/bwrap experimental)",
 			Handle:      handleSandbox,
 		},
 		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
-		"tools":   {Usage: "/tools", Description: "List available tools", Handle: handleTools},
-		"skills":  {Usage: "/skills", Description: "List discovered skills", Handle: handleSkills},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
 	}
 	console.applyModelRuntimeSettings(console.modelAlias)
@@ -816,8 +809,8 @@ func handleHelp(c *cliConsole, args []string) (bool, error) {
 	}
 	helpSection("Session", []string{"new", "fork", "resume", "compact", "status"})
 	helpSection("Model", []string{"model", "connect"})
-	helpSection("Security", []string{"permission", "sandbox"})
-	helpSection("Other", []string{"tools", "skills", "help", "version", "exit", "quit"})
+	helpSection("Security", []string{"sandbox"})
+	helpSection("Other", []string{"help", "version", "exit", "quit"})
 	return false, nil
 }
 
@@ -959,10 +952,10 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 	default:
 		if c.execRuntime.FallbackToHost() {
 			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=host (fallback, reason=%s)",
-				mode, c.execRuntime.SandboxType(), c.execRuntime.FallbackReason()))
+				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType()), c.execRuntime.FallbackReason()))
 		} else {
 			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=sandbox",
-				mode, c.execRuntime.SandboxType()))
+				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType())))
 		}
 	}
 	c.ui.KeyValue("sandbox_policy", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
@@ -1011,7 +1004,7 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 
 func handlePermission(c *cliConsole, args []string) (bool, error) {
 	if len(args) == 0 {
-		c.printf("permission_mode=%s session_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), c.sandboxType)
+		c.printf("permission_mode=%s session_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), sandboxTypeDisplayLabel(c.sandboxType))
 		return false, nil
 	}
 	if len(args) != 1 {
@@ -1031,16 +1024,16 @@ func handlePermission(c *cliConsole, args []string) (bool, error) {
 		return false, err
 	}
 	if c.execRuntime.FallbackToHost() {
-		c.printf("permission updated: permission_mode=%s session_mode=%s sandbox_type=%s (fallback: host+approval, reason=%s)\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), c.sandboxType, c.execRuntime.FallbackReason())
+		c.printf("permission updated: permission_mode=%s session_mode=%s sandbox_type=%s (fallback: host+approval, reason=%s)\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), sandboxTypeDisplayLabel(c.sandboxType), c.execRuntime.FallbackReason())
 	} else {
-		c.printf("permission updated: permission_mode=%s session_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), c.sandboxType)
+		c.printf("permission updated: permission_mode=%s session_mode=%s sandbox_type=%s\n", c.execRuntime.PermissionMode(), sessionmode.Normalize(c.sessionMode), sandboxTypeDisplayLabel(c.sandboxType))
 	}
 	return false, nil
 }
 
 func handleSandbox(c *cliConsole, args []string) (bool, error) {
 	if len(args) == 0 {
-		c.printf("sandbox_type=%s permission_mode=%s\n", c.sandboxType, c.execRuntime.PermissionMode())
+		c.printf("sandbox_type=%s permission_mode=%s\n", sandboxTypeDisplayLabel(c.sandboxType), c.execRuntime.PermissionMode())
 		return false, nil
 	}
 	if len(args) != 1 {
@@ -1058,7 +1051,7 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 	mode := c.execRuntime.PermissionMode()
 	if mode == toolexec.PermissionModeFullControl {
 		c.persistRuntimeSettings()
-		c.printf("sandbox updated: sandbox_type=%s (will apply when permission_mode=default)\n", c.sandboxType)
+		c.printf("sandbox updated: sandbox_type=%s (will apply when permission_mode=default)\n", sandboxTypeDisplayLabel(c.sandboxType))
 		return false, nil
 	}
 	if err := c.updateExecutionRuntime(mode, c.sandboxType); err != nil {
@@ -1066,9 +1059,9 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 	}
 	c.persistRuntimeSettings()
 	if c.execRuntime.FallbackToHost() {
-		c.printf("sandbox updated: sandbox_type=%s (fallback: host+approval, reason=%s)\n", c.sandboxType, c.execRuntime.FallbackReason())
+		c.printf("sandbox updated: sandbox_type=%s (fallback: host+approval, reason=%s)\n", sandboxTypeDisplayLabel(c.sandboxType), c.execRuntime.FallbackReason())
 	} else {
-		c.printf("sandbox updated: sandbox_type=%s\n", c.sandboxType)
+		c.printf("sandbox updated: sandbox_type=%s\n", sandboxTypeDisplayLabel(c.sandboxType))
 	}
 	return false, nil
 }

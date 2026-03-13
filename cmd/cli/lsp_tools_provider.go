@@ -11,6 +11,7 @@ import (
 
 	clilspadapter "github.com/OnslaughtSnail/caelis/internal/cli/lspadapter/gopls"
 	"github.com/OnslaughtSnail/caelis/internal/cli/lspbroker"
+	"github.com/OnslaughtSnail/caelis/internal/gitignorefilter"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
@@ -316,6 +317,10 @@ func countWorkspaceExtensionMatches(workspaceDir string, extensions []string, ma
 	matches := 0
 	scanned := 0
 	root := workspaceRoot(workspaceDir)
+	matcher, err := gitignorefilter.NewForPath(osFileSystemAdapter{}, root)
+	if err != nil {
+		return 0
+	}
 	walkErr := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil || d == nil {
 			return nil
@@ -324,7 +329,25 @@ func countWorkspaceExtensionMatches(workspaceDir string, extensions []string, ma
 			if shouldSkipLSPScanDir(root, path, d.Name()) {
 				return filepath.SkipDir
 			}
+			if path != root && matcher != nil {
+				ignored, err := matcher.Match(path, true)
+				if err != nil {
+					return nil
+				}
+				if ignored {
+					return filepath.SkipDir
+				}
+			}
 			return nil
+		}
+		if matcher != nil {
+			ignored, err := matcher.Match(path, false)
+			if err != nil {
+				return nil
+			}
+			if ignored {
+				return nil
+			}
 		}
 		scanned++
 		if scanned > maxFiles {

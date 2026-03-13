@@ -144,6 +144,25 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	}
 }
 
+func TestSandboxTypeDisplayLabel(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "seatbelt", value: "seatbelt", want: "seatbelt"},
+		{name: "landlock", value: "landlock", want: "landlock (experimental)"},
+		{name: "bwrap", value: "bwrap", want: "bwrap (experimental)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sandboxTypeDisplayLabel(tc.value); got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
 func TestNormalizeProviderAuthRecord_PrefersCredentialRefAndKeepsLegacyTokenFallback(t *testing.T) {
 	auth := authRecord{
 		Type:          string(modelproviders.AuthAPIKey),

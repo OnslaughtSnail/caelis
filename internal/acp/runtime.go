@@ -106,9 +106,6 @@ func (r *runtimeBridge) SandboxRunner() toolexec.CommandRunner {
 	if r.PermissionMode() == toolexec.PermissionModeFullControl {
 		return r.HostRunner()
 	}
-	if r.terminalRunner != nil {
-		return r.terminalRunner
-	}
 	return r.sandboxRunner
 }
 

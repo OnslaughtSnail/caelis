@@ -5,13 +5,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
-func TestNewRuntime_UsesACPAsyncRunnerForTerminalCapability(t *testing.T) {
+func TestNewRuntime_TerminalCapabilityKeepsSandboxRunnerIsolated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -68,8 +69,11 @@ func TestNewRuntime_UsesACPAsyncRunnerForTerminalCapability(t *testing.T) {
 	if !ok {
 		t.Fatal("expected host runner to implement AsyncCommandRunner")
 	}
-	if _, ok := rt.SandboxRunner().(toolexec.AsyncCommandRunner); !ok {
-		t.Fatal("expected sandbox runner to use ACP async runner")
+	if _, ok := rt.SandboxRunner().(*sessionAsyncCommandRunner); ok {
+		t.Fatal("did not expect sandbox runner to be replaced by ACP terminal runner")
+	}
+	if _, ok := rt.SandboxRunner().(toolexec.AsyncCommandRunner); ok {
+		t.Fatal("did not expect sandbox runner to use ACP async runner")
 	}
 
 	sessionID, err := asyncRunner.StartAsync(context.Background(), toolexec.CommandRequest{
@@ -127,6 +131,102 @@ func TestNewRuntime_UsesACPAsyncRunnerForTerminalCapability(t *testing.T) {
 	cancel()
 }
 
+func TestNewRuntime_TerminalCapabilityPreservesAsyncSandboxRunner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	clientConn := NewConn(s2cR, c2sW)
+	serverConn := NewConn(c2sR, s2cW)
+
+	sandboxRunner := newAsyncSandboxStubRunner()
+	baseRuntime, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    testSandboxType(),
+		HostRunner:     stubRunner{},
+		SandboxRunner:  sandboxRunner,
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer func() { _ = toolexec.Close(baseRuntime) }()
+
+	terminalCreates := 0
+	go func() {
+		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+			switch msg.Method {
+			case MethodTerminalCreate:
+				terminalCreates++
+				return CreateTerminalResponse{TerminalID: "term-should-not-be-used"}, nil
+			case MethodTerminalOutput:
+				return TerminalOutputResponse{
+					Output:    "terminal-output\n",
+					Truncated: false,
+					ExitStatus: &TerminalExitStatus{
+						ExitCode: ptr(0),
+					},
+				}, nil
+			case MethodTerminalWaitForExit:
+				return WaitForTerminalExitResponse{ExitCode: ptr(0)}, nil
+			case MethodTerminalKill:
+				return map[string]any{}, nil
+			case MethodTerminalRelease:
+				return map[string]any{}, nil
+			default:
+				return nil, &RPCError{Code: -32601, Message: "unexpected method"}
+			}
+		}, func(context.Context, Message) {})
+	}()
+	go func() {
+		_ = clientConn.Serve(ctx, func(context.Context, Message) (any, *RPCError) {
+			return nil, &RPCError{Code: -32601, Message: "method not found"}
+		}, func(context.Context, Message) {})
+	}()
+
+	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace/subdir", ClientCapabilities{
+		Terminal: true,
+	}, nil)
+
+	hostRunner, ok := rt.HostRunner().(*sessionAsyncCommandRunner)
+	if !ok {
+		t.Fatalf("expected async host runner wrapper, got %T", rt.HostRunner())
+	}
+	if _, ok := hostRunner.AsyncCommandRunner.(*clientAsyncCommandRunner); !ok {
+		t.Fatalf("expected host runner to use ACP terminal bridge, got %T", hostRunner.AsyncCommandRunner)
+	}
+
+	sandboxAsync, ok := rt.SandboxRunner().(*sessionAsyncCommandRunner)
+	if !ok {
+		t.Fatalf("expected async sandbox runner wrapper, got %T", rt.SandboxRunner())
+	}
+	if _, ok := sandboxAsync.AsyncCommandRunner.(*clientAsyncCommandRunner); ok {
+		t.Fatal("did not expect sandbox runner to use ACP terminal bridge")
+	}
+	if _, ok := sandboxAsync.AsyncCommandRunner.(*asyncSandboxStubRunner); !ok {
+		t.Fatalf("expected sandbox runner to preserve base async runner, got %T", sandboxAsync.AsyncCommandRunner)
+	}
+
+	sessionID, err := sandboxAsync.StartAsync(context.Background(), toolexec.CommandRequest{
+		Command: "echo from sandbox",
+	})
+	if err != nil {
+		t.Fatalf("start async on sandbox runner: %v", err)
+	}
+	if sessionID != "sandbox-session-1" {
+		t.Fatalf("unexpected sandbox session id %q", sessionID)
+	}
+	if terminalCreates != 0 {
+		t.Fatalf("did not expect terminal/create for sandbox async, got %d", terminalCreates)
+	}
+	if sandboxRunner.startCalls != 1 {
+		t.Fatalf("expected one sandbox async start, got %d", sandboxRunner.startCalls)
+	}
+	if sandboxRunner.lastReq.Dir != "/workspace/subdir" {
+		t.Fatalf("expected sandbox async dir to default to session cwd, got %q", sandboxRunner.lastReq.Dir)
+	}
+}
+
 func TestNewRuntime_FallsBackWithoutTerminalCapability(t *testing.T) {
 	baseHost := stubRunner{}
 	baseSandbox := stubRunner{}
@@ -151,6 +251,84 @@ func TestNewRuntime_FallsBackWithoutTerminalCapability(t *testing.T) {
 	if rt.SandboxRunner() == nil {
 		t.Fatal("expected sandbox runner fallback to stay available")
 	}
+}
+
+type asyncSandboxStubRunner struct {
+	mu         sync.Mutex
+	startCalls int
+	lastReq    toolexec.CommandRequest
+	state      toolexec.SessionState
+}
+
+func newAsyncSandboxStubRunner() *asyncSandboxStubRunner {
+	return &asyncSandboxStubRunner{state: toolexec.SessionStateCompleted}
+}
+
+func (r *asyncSandboxStubRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	_ = ctx
+	r.mu.Lock()
+	r.lastReq = req
+	r.mu.Unlock()
+	return toolexec.CommandResult{Stdout: "sandbox-run\n"}, nil
+}
+
+func (r *asyncSandboxStubRunner) StartAsync(ctx context.Context, req toolexec.CommandRequest) (string, error) {
+	_ = ctx
+	r.mu.Lock()
+	r.startCalls++
+	r.lastReq = req
+	r.mu.Unlock()
+	return "sandbox-session-1", nil
+}
+
+func (r *asyncSandboxStubRunner) WriteInput(sessionID string, input []byte) error {
+	_ = sessionID
+	_ = input
+	return nil
+}
+
+func (r *asyncSandboxStubRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	_ = sessionID
+	return []byte("sandbox-output\n"), nil, stdoutMarker + 15, stderrMarker, nil
+}
+
+func (r *asyncSandboxStubRunner) GetSessionStatus(sessionID string) (toolexec.SessionStatus, error) {
+	_ = sessionID
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return toolexec.SessionStatus{
+		ID:        "sandbox-session-1",
+		Command:   r.lastReq.Command,
+		Dir:       r.lastReq.Dir,
+		State:     r.state,
+		StartTime: time.Now(),
+	}, nil
+}
+
+func (r *asyncSandboxStubRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (toolexec.CommandResult, error) {
+	_ = ctx
+	_ = sessionID
+	_ = timeout
+	return toolexec.CommandResult{Stdout: "sandbox-output\n", ExitCode: 0}, nil
+}
+
+func (r *asyncSandboxStubRunner) TerminateSession(sessionID string) error {
+	_ = sessionID
+	r.mu.Lock()
+	r.state = toolexec.SessionStateTerminated
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *asyncSandboxStubRunner) ListSessions() []toolexec.SessionInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return []toolexec.SessionInfo{{
+		ID:        "sandbox-session-1",
+		Command:   r.lastReq.Command,
+		State:     r.state,
+		StartTime: time.Now(),
+	}}
 }
 
 func TestNewRuntime_FullAccessModeBypassesSandbox(t *testing.T) {

@@ -566,8 +566,6 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 		return c.completeSandboxCandidates(query, limit), nil
 	case "connect":
 		return c.completeConnectCandidates(query, limit), nil
-	case "permission":
-		return c.completePermissionCandidates(query, limit), nil
 	default:
 		return nil, nil
 	}
@@ -888,7 +886,7 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 		limit = 20
 	}
 	seen := map[string]struct{}{}
-	order := make([]string, 0, 4)
+	order := make([]string, 0, len(availableSandboxTypes())+1)
 	appendType := func(value string) {
 		value = strings.ToLower(strings.TrimSpace(value))
 		if value == "" {
@@ -901,10 +899,9 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 		order = append(order, value)
 	}
 	appendType(c.sandboxType)
-	appendType(platformDefaultSandboxType())
-	appendType("landlock")
-	appendType("bwrap")
-	appendType("seatbelt")
+	for _, one := range availableSandboxTypes() {
+		appendType(one)
+	}
 
 	q := strings.ToLower(strings.TrimSpace(query))
 	out := make([]tuiapp.SlashArgCandidate, 0, minInt(limit, len(order)))
@@ -912,7 +909,7 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 		if q != "" && !strings.Contains(one, q) {
 			continue
 		}
-		out = append(out, tuiapp.SlashArgCandidate{Value: one, Display: one})
+		out = append(out, tuiapp.SlashArgCandidate{Value: one, Display: sandboxTypeDisplayLabel(one)})
 		if len(out) >= limit {
 			break
 		}
@@ -935,25 +932,6 @@ func (c *cliConsole) completeConnectCandidates(query string, limit int) []tuiapp
 			continue
 		}
 		out = append(out, tuiapp.SlashArgCandidate{Value: label, Display: label, NoAuth: tpl.noAuthRequired})
-		if len(out) >= limit {
-			break
-		}
-	}
-	return out
-}
-
-func (c *cliConsole) completePermissionCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
-	if limit <= 0 {
-		limit = 20
-	}
-	candidates := []string{"default", "full_control"}
-	q := strings.ToLower(strings.TrimSpace(query))
-	out := make([]tuiapp.SlashArgCandidate, 0, len(candidates))
-	for _, one := range candidates {
-		if q != "" && !strings.Contains(one, q) {
-			continue
-		}
-		out = append(out, tuiapp.SlashArgCandidate{Value: one, Display: one})
 		if len(out) >= limit {
 			break
 		}

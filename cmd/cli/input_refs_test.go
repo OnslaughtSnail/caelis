@@ -148,6 +148,33 @@ func TestInputReferenceResolver_CompleteFiles(t *testing.T) {
 	}
 }
 
+func TestInputReferenceResolver_CompleteFiles_RespectsGitignore(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(workspace, ".gitignore"), "ignored/\nsecret.txt\n")
+	mustWriteFile(t, filepath.Join(workspace, "visible.txt"), "visible\n")
+	mustWriteFile(t, filepath.Join(workspace, "secret.txt"), "secret\n")
+	mustWriteFile(t, filepath.Join(workspace, "ignored", "hidden.go"), "package ignored\n")
+
+	resolver, _, err := newInputReferenceResolver(workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := resolver.CompleteFiles("", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(candidates, ",")
+	if strings.Contains(joined, "secret.txt") || strings.Contains(joined, "ignored/hidden.go") {
+		t.Fatalf("expected gitignored files excluded, got %v", candidates)
+	}
+	if !strings.Contains(joined, "visible.txt") {
+		t.Fatalf("expected visible file present, got %v", candidates)
+	}
+}
+
 func TestFormatResolvedMentionPrompt_UsesAbsolutePath(t *testing.T) {
 	got := formatResolvedMentionPrompt("/tmp/workspace/build.sh")
 	if got != "请阅读文件: /tmp/workspace/build.sh" {
