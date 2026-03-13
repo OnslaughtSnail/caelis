@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.0.21 - 2026-03-13
+
+### Release Follow-up
+- Fixed CI `go vet` failures in TUI theme tests by switching Bubble Tea background-color test messages to keyed struct literals.
+- Hardened async host-runner coverage to avoid timing-sensitive output assertions that flaked in GoReleaser's `go test ./...` hook.
+- Refreshed `README.md` so the documented CLI flags, slash commands, runtime behavior, and current release version match the shipped code.
+
 ## v0.0.20 - 2026-03-13
 
 ### Console, Theme & Runtime UX

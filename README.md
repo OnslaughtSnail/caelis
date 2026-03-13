@@ -38,15 +38,12 @@ go run ./cmd/cli \
   -tool-providers workspace_tools,shell_tools,mcp_tools \
   -policy-providers default_allow \
   -model deepseek/deepseek-chat \
+  -ui=tui \
   -permission-mode default \
   -experimental-lsp \
   -mcp-config ~/.agents/mcp_servers.json \
-  -stream=true \
-  -thinking-mode=off \
   -compact-watermark=0.7 \
   -context-window=65536 \
-  -thinking-budget=1024 \
-  -skills-dirs "~/.agents/skills" \
   -session demo \
   -input "hello"
 ```
@@ -62,10 +59,9 @@ Launcher modes:
 - reserved placeholders: `go run ./cmd/cli api ...`, `go run ./cmd/cli web ...`
 
 Tool execution runtime flags:
-- `-ui`: interactive UI mode `auto|tui|line`
-  - default `auto`: use `tui` when stdin/stdout are TTY, otherwise fallback to `line`
+- `-ui`: interactive UI mode `auto|tui`
+  - default `auto`: use `tui` when stdin/stdout are TTY
   - `tui`: force terminal UI mode (requires TTY)
-  - `line`: force line-editor mode
   - TUI input shortcuts (MVP): `↑/↓` history, `←/→` cursor move, `Home/End`, `Ctrl+A/E` line start/end, `Ctrl+U/W` delete, `Ctrl+C` interrupt/quit
 - `-permission-mode`: `default|full_control`
   - `full_control`: run commands on host directly, no approval required
@@ -142,18 +138,14 @@ MCP Web tools guidance:
 Interactive slash commands:
 - `/help`: show command help
 - `/version`: show version info
-- `/status`: show current model/thinking/stream/execution status
+- `/status`: show current model and execution runtime status
 - `/new`: start a fresh conversation session
 - `/fork`: fork current conversation into a new named session
-- `/permission [default|full_control]`: show or switch permission mode
+- `/resume [session-id]`: resume the latest or specified session
 - `/sandbox [<type>]`: show or switch sandbox backend type
-- `/models`: list available model aliases
-- `/model <alias> [reasoning]`: switch model; optionally set reasoning level (`off|on|low|medium|high|very_high`)
-- `/thinking <auto|on|off> [budget]`: switch thinking mode
-- `/effort <low|medium|high|off>`: set reasoning effort
-- `/stream <on|off>`: switch stream mode
-- `/reasoning <on|off>`: toggle reasoning content rendering
-- `/tools`: show current assembled tool list
+- `/model use <alias> [reasoning]`: switch model and optional reasoning effort
+- `/model del [alias ...]`: remove configured model aliases
+- `/connect`: interactive provider/model setup
 - `/compact [note]`: trigger one manual compaction
 - `/exit` / `/quit`: quit
 
@@ -162,7 +154,7 @@ Session behavior:
 - Pass `-session <id>` to resume or continue an existing session.
 - Sessions with no conversation events are not persisted.
 
-CLI runtime preferences (`stream`, `thinking-mode`, `thinking-budget`, `reasoning-effort`, `reasoning display`, `permission-mode`, `sandbox-type`) are persisted in app config and reused on next start.
+CLI runtime preferences such as default model alias, `permission-mode`, and `sandbox-type` are persisted in app config and reused on next start.
 
 Config env placeholder behavior:
 - Provider config (`~/.{app}/{app}_config.json`) supports `${ENV_NAME}` placeholders in string fields (for example `"token": "${DEEPSEEK_API_KEY}"`).
@@ -211,7 +203,7 @@ go run ./eval/cmd \
 - `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
 
 ## Release
-- Current release: `v0.0.15` (see `VERSION` and `CHANGELOG.md`).
+- Current release: `v0.0.21` (see `VERSION` and `CHANGELOG.md`).
 - Local dry-run package:
 ```bash
 make release-dry-run
@@ -234,5 +226,5 @@ npm i -g @onslaughtsnail/caelis
    - Repository: `OnslaughtSnail/caelis`
    - Workflow file: `release.yml`
 3. In GitHub repo settings, ensure Actions are allowed and workflow permissions are not blocking OIDC.
-4. Push a tag like `v0.0.3` to trigger release + npm publish.
+4. Push a tag like `v0.0.21` to trigger release + npm publish.
 5. Detailed checklist: `docs/npm-release.md`.

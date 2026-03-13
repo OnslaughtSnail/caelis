@@ -207,14 +207,26 @@ func TestHostRunner_Async(t *testing.T) {
 		t.Fatalf("StartAsync failed: %v", err)
 	}
 
-	// Wait for it
+	var stdout []byte
+	waitForCondition(t, 5*time.Second, func() bool {
+		var readErr error
+		stdout, _, _, _, readErr = runner.ReadOutput(sessionID, 0, 0)
+		if readErr != nil {
+			t.Fatalf("ReadOutput failed: %v", readErr)
+		}
+		return strings.Contains(string(stdout), "async-test")
+	})
+
 	result, err := runner.WaitSession(context.Background(), sessionID, 5*time.Second)
 	if err != nil {
 		t.Fatalf("WaitSession failed: %v", err)
 	}
 
-	if !strings.Contains(result.Stdout, "async-test") {
-		t.Fatalf("Expected 'async-test' in output, got %q", result.Stdout)
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if !strings.Contains(string(stdout), "async-test") && !strings.Contains(result.Stdout, "async-test") {
+		t.Fatalf("expected 'async-test' in async output, read=%q wait=%q", string(stdout), result.Stdout)
 	}
 }
 

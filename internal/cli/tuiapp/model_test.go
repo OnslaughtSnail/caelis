@@ -3801,7 +3801,7 @@ func TestBackgroundColorMsgSwitchesAutoThemeToLight(t *testing.T) {
 		t.Fatal("expected default auto theme to start on dark fallback")
 	}
 
-	_, _ = m.Update(tea.BackgroundColorMsg{color.White})
+	_, _ = m.Update(tea.BackgroundColorMsg{Color: color.White})
 
 	if m.theme.IsDark {
 		t.Fatal("expected background color message to switch model to light theme")
@@ -3817,7 +3817,7 @@ func TestBackgroundColorMsgDoesNotOverrideExplicitTheme(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	resizeModel(m)
 
-	_, _ = m.Update(tea.BackgroundColorMsg{color.White})
+	_, _ = m.Update(tea.BackgroundColorMsg{Color: color.White})
 
 	if !m.theme.IsDark {
 		t.Fatal("expected explicit dark theme to ignore terminal background auto-switch")
