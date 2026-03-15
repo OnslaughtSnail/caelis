@@ -16,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/OnslaughtSnail/caelis/internal/cli/cliputil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
@@ -101,7 +102,7 @@ func NewModel(cfg Config) *Model {
 		cfg:                 cfg,
 		theme:               theme,
 		themeAuto:           themeAuto,
-		keys:                defaultKeyMap(),
+		keys:                defaultKeyMap(cliputil.IsWSL()),
 		textarea:            ta,
 		spinner:             sp,
 		palette:             palette,

@@ -9,7 +9,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
-	"github.com/atotto/clipboard"
 )
 
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -105,16 +104,7 @@ func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
 		return nil
 	}
 	m.renderViewportContent()
-	const copyHint = "selected text copied to clipboard"
-	clipCmd := func() tea.Msg {
-		_ = clipboard.WriteAll(text)
-		return nil
-	}
-	return tea.Batch(clipCmd, m.showHint(copyHint, hintOptions{
-		priority:       tuievents.HintPriorityNormal,
-		clearOnMessage: true,
-		clearAfter:     copyHintDuration,
-	}))
+	return m.copySelectionToClipboard(text)
 }
 
 func (m *Model) handleInputAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, tea.Cmd) {
@@ -164,16 +154,7 @@ func (m *Model) handleInputAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, t
 			m.clearInputSelection()
 			return true, nil
 		}
-		const copyHint = "selected text copied to clipboard"
-		clipCmd := func() tea.Msg {
-			_ = clipboard.WriteAll(text)
-			return nil
-		}
-		return true, tea.Batch(clipCmd, m.showHint(copyHint, hintOptions{
-			priority:       tuievents.HintPriorityNormal,
-			clearOnMessage: true,
-			clearAfter:     copyHintDuration,
-		}))
+		return true, m.copySelectionToClipboard(text)
 	}
 	return false, nil
 }
@@ -228,18 +209,36 @@ func (m *Model) handleFixedAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, t
 			m.clearFixedSelection()
 			return true, nil
 		}
-		const copyHint = "selected text copied to clipboard"
-		clipCmd := func() tea.Msg {
-			_ = clipboard.WriteAll(text)
-			return nil
-		}
-		return true, tea.Batch(clipCmd, m.showHint(copyHint, hintOptions{
-			priority:       tuievents.HintPriorityNormal,
-			clearOnMessage: true,
-			clearAfter:     copyHintDuration,
-		}))
+		return true, m.copySelectionToClipboard(text)
 	}
 	return false, nil
+}
+
+func (m *Model) copySelectionToClipboard(text string) tea.Cmd {
+	const copyHint = "selected text copied to clipboard"
+	if err := m.writeClipboardText(text); err != nil {
+		return m.reportClipboardError("copy", err)
+	}
+	return m.showHint(copyHint, hintOptions{
+		priority:       tuievents.HintPriorityNormal,
+		clearOnMessage: true,
+		clearAfter:     copyHintDuration,
+	})
+}
+
+func (m *Model) reportClipboardError(action string, err error) tea.Cmd {
+	errLine := strings.TrimSpace(action + ": " + err.Error())
+	if errLine == "" {
+		errLine = "clipboard operation failed"
+	}
+	colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
+	m.historyLines = append(m.historyLines, colored)
+	m.syncViewportContent()
+	return m.showHint(errLine, hintOptions{
+		priority:       tuievents.HintPriorityHigh,
+		clearOnMessage: true,
+		clearAfter:     copyHintDuration,
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -527,13 +526,21 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-		if m.pasteClipboardText() {
+		pasted, err := m.pasteClipboardText()
+		if err != nil {
+			return m, m.reportClipboardError("paste", err)
+		}
+		if pasted {
 			return m, nil
 		}
 		return m, nil
 
 	case key.Matches(msg, m.keys.TextPaste):
-		if m.pasteClipboardText() {
+		pasted, err := m.pasteClipboardText()
+		if err != nil {
+			return m, m.reportClipboardError("paste", err)
+		}
+		if pasted {
 			return m, nil
 		}
 		return m, nil

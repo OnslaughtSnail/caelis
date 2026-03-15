@@ -6,9 +6,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/OnslaughtSnail/caelis/internal/cli/cliputil"
 )
 
 // ExtractClipboardImage checks the Linux clipboard for image data.
@@ -93,7 +94,7 @@ func extractXclipClipboardImage() ([]byte, string, bool, bool, error) {
 }
 
 func extractWSLClipboardImage() ([]byte, string, bool, bool, error) {
-	if !runningInWSL() {
+	if !cliputil.IsWSL() {
 		return nil, "", false, false, nil
 	}
 	powershellPath, err := lookPathAny("powershell.exe", "pwsh.exe")
@@ -149,18 +150,6 @@ func chooseClipboardImageMime(targets []string) string {
 		}
 	}
 	return ""
-}
-
-func runningInWSL() bool {
-	if strings.TrimSpace(os.Getenv("WSL_DISTRO_NAME")) != "" || strings.TrimSpace(os.Getenv("WSL_INTEROP")) != "" {
-		return true
-	}
-	version, err := os.ReadFile("/proc/version")
-	if err != nil {
-		return false
-	}
-	text := strings.ToLower(string(version))
-	return strings.Contains(text, "microsoft") || strings.Contains(text, "wsl")
 }
 
 func lookPathAny(names ...string) (string, error) {

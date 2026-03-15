@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/atotto/clipboard"
+	"github.com/OnslaughtSnail/caelis/internal/cli/cliputil"
 )
 
 func cloneInputAttachments(items []inputAttachment) []inputAttachment {
@@ -363,15 +363,38 @@ func attachmentsAtZeroOffset(names []string) []inputAttachment {
 	return out
 }
 
-func (m *Model) pasteClipboardText() bool {
-	text, err := clipboard.ReadAll()
-	if err != nil || text == "" {
-		return false
+func (m *Model) readClipboardText() (string, error) {
+	if m.cfg.ReadClipboardText != nil {
+		return m.cfg.ReadClipboardText()
+	}
+	return cliputil.ReadText()
+}
+
+func (m *Model) writeClipboardText(text string) error {
+	if m.cfg.WriteClipboardText != nil {
+		return m.cfg.WriteClipboardText(text)
+	}
+	return cliputil.WriteText(text)
+}
+
+func normalizeClipboardText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
+}
+
+func (m *Model) pasteClipboardText() (bool, error) {
+	text, err := m.readClipboardText()
+	if err != nil {
+		return false, err
+	}
+	text = normalizeClipboardText(text)
+	if text == "" {
+		return false, nil
 	}
 	before := m.textarea.Value()
 	m.textarea.InsertString(text)
 	m.inputAttachments = adjustAttachmentOffsetsForTextEdit(m.inputAttachments, before, m.textarea.Value())
 	m.syncAttachmentSummary()
 	m.syncInputFromTextarea()
-	return true
+	return true, nil
 }

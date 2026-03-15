@@ -82,6 +82,8 @@ type Config struct {
 	SkillComplete       func(string, int) ([]string, error)
 	ResumeComplete      func(string, int) ([]ResumeCandidate, error)
 	SlashArgComplete    func(command string, query string, limit int) ([]SlashArgCandidate, error)
+	ReadClipboardText   func() (string, error)
+	WriteClipboardText  func(string) error
 	PasteClipboardImage func() ([]string, string, error)
 	ClearAttachments    func() []string
 	SetAttachments      func([]string) []string

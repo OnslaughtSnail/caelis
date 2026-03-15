@@ -41,7 +41,17 @@ func (h helpBindings) FullHelp() [][]key.Binding {
 	return h.full
 }
 
-func defaultKeyMap() appKeyMap {
+func defaultKeyMap(isWSL bool) appKeyMap {
+	imagePasteKeys := []string{"ctrl+v"}
+	imagePasteHelp := "ctrl+v"
+	textPasteKeys := []string{"super+v", "cmd+v", "ctrl+shift+v", "shift+insert"}
+	textPasteHelp := "paste"
+	if isWSL {
+		imagePasteKeys = []string{"ctrl+alt+v"}
+		imagePasteHelp = "ctrl+alt+v"
+		textPasteKeys = []string{"ctrl+v", "ctrl+shift+v", "shift+insert"}
+		textPasteHelp = "ctrl+v"
+	}
 	return appKeyMap{
 		Send:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		Queue:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
@@ -53,8 +63,8 @@ func defaultKeyMap() appKeyMap {
 		ChooseNext:  key.NewBinding(key.WithKeys("down"), key.WithHelp("↑/↓", "select")),
 		Accept:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")),
 		Complete:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "fill")),
-		ImagePaste:  key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "image")),
-		TextPaste:   key.NewBinding(key.WithKeys("super+v", "cmd+v", "ctrl+shift+v", "shift+insert"), key.WithHelp("paste", "text")),
+		ImagePaste:  key.NewBinding(key.WithKeys(imagePasteKeys...), key.WithHelp(imagePasteHelp, "image")),
+		TextPaste:   key.NewBinding(key.WithKeys(textPasteKeys...), key.WithHelp(textPasteHelp, "text")),
 		Clear:       key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear")),
 		Back:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
 		PageUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll")),

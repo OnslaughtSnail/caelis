@@ -195,6 +195,31 @@ func TestCurrentInputGhostHint_ForResume(t *testing.T) {
 	}
 }
 
+func TestDefaultKeyMapUsesWSLImagePasteShortcut(t *testing.T) {
+	keyMap := defaultKeyMap(true)
+	if got := keyMap.ImagePaste.Keys(); len(got) != 1 || got[0] != "ctrl+alt+v" {
+		t.Fatalf("expected WSL image paste shortcut ctrl+alt+v, got %#v", got)
+	}
+	if got := keyMap.TextPaste.Keys(); len(got) != 3 || got[0] != "ctrl+v" {
+		t.Fatalf("expected WSL text paste fallbacks to start with ctrl+v, got %#v", got)
+	}
+}
+
+func TestRenderHelpShowsWSLPasteShortcuts(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.keys = defaultKeyMap(true)
+
+	bindings := m.currentFooterHelp()
+	help := ansi.Strip(m.help.FullHelpView(bindings.FullHelp()))
+	if !strings.Contains(help, "ctrl+alt+v") {
+		t.Fatalf("expected WSL image paste shortcut in help, got %q", help)
+	}
+	if !strings.Contains(help, "ctrl+v") {
+		t.Fatalf("expected WSL text paste shortcut in help, got %q", help)
+	}
+}
+
 func TestRenderInputBar_ShowsGhostHintWithoutCursor(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"model", "status"},
@@ -1402,7 +1427,14 @@ func TestSlashCommandEnterOpensModelPicker(t *testing.T) {
 }
 
 func TestMouseDragCopiesSelection(t *testing.T) {
-	m := NewModel(Config{ExecuteLine: noopExecute})
+	var copied string
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		WriteClipboardText: func(text string) error {
+			copied = text
+			return nil
+		},
+	})
 	resizeModel(m)
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "hello world\n"})
 	_, _ = m.Update(mouseClick(tuikit.GutterNarrative, 0, tea.MouseLeft))
@@ -1413,13 +1445,23 @@ func TestMouseDragCopiesSelection(t *testing.T) {
 	if !strings.Contains(m.hint, "copied") {
 		t.Fatalf("expected copy hint, got %q", m.hint)
 	}
+	if copied != "hello" {
+		t.Fatalf("expected selected text copied, got %q", copied)
+	}
 	if !m.hasSelectionRange() {
 		t.Fatal("expected viewport selection to remain after mouse release")
 	}
 }
 
 func TestInputMouseDragCopiesSelection(t *testing.T) {
-	m := NewModel(Config{ExecuteLine: noopExecute})
+	var copied string
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		WriteClipboardText: func(text string) error {
+			copied = text
+			return nil
+		},
+	})
 	resizeModel(m)
 	typeRunes(m, "hello world")
 	startY, _, ok := m.inputAreaBounds()
@@ -1434,6 +1476,9 @@ func TestInputMouseDragCopiesSelection(t *testing.T) {
 	if !strings.Contains(m.hint, "copied") {
 		t.Fatalf("expected copy hint, got %q", m.hint)
 	}
+	if copied != "> he" {
+		t.Fatalf("expected selected input copied, got %q", copied)
+	}
 	start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines()))
 	if !ok || (start.line == end.line && start.col == end.col) {
 		t.Fatal("expected input selection to remain after mouse release")
@@ -1441,9 +1486,14 @@ func TestInputMouseDragCopiesSelection(t *testing.T) {
 }
 
 func TestHeaderMouseDragCopiesSelection(t *testing.T) {
+	var copied string
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
 		Workspace:   "~/WorkDir/xueyongzhi/caelis [main]",
+		WriteClipboardText: func(text string) error {
+			copied = text
+			return nil
+		},
 		RefreshStatus: func() (string, string) {
 			return "claude-opus-4.6 [reasoning on]", "0/200.0k(0%)"
 		},
@@ -1464,10 +1514,38 @@ func TestHeaderMouseDragCopiesSelection(t *testing.T) {
 	if got := m.fixedSelectionText(); strings.TrimSpace(got) == "" {
 		t.Fatal("expected copied header text")
 	}
+	if strings.TrimSpace(copied) == "" {
+		t.Fatal("expected header selection written to clipboard")
+	}
+}
+
+func TestMouseDragCopyFailureShowsHintAndLog(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		WriteClipboardText: func(string) error {
+			return fmt.Errorf("clipboard offline")
+		},
+	})
+	resizeModel(m)
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "hello world\n"})
+	_, _ = m.Update(mouseClick(tuikit.GutterNarrative, 0, tea.MouseLeft))
+	_, cmd := m.Update(mouseRelease(tuikit.GutterNarrative+5, 0, tea.MouseLeft))
+	if cmd == nil {
+		t.Fatal("expected hint command on clipboard copy failure")
+	}
+	if got := m.hint; got != "copy: clipboard offline" {
+		t.Fatalf("expected explicit copy error hint, got %q", got)
+	}
+	if len(m.historyLines) == 0 || !strings.Contains(ansi.Strip(m.historyLines[len(m.historyLines)-1]), "copy: clipboard offline") {
+		t.Fatalf("expected clipboard failure logged in history, got %#v", m.historyLines)
+	}
 }
 
 func TestCopyHintClearsOnTimerMessage(t *testing.T) {
-	m := NewModel(Config{ExecuteLine: noopExecute})
+	m := NewModel(Config{
+		ExecuteLine:        noopExecute,
+		WriteClipboardText: func(string) error { return nil },
+	})
 	resizeModel(m)
 	typeRunes(m, "hello world")
 	startY, _, ok := m.inputAreaBounds()
@@ -2697,6 +2775,7 @@ func TestCtrlVPasteShowsAttachmentHint(t *testing.T) {
 		},
 	})
 	resizeModel(m)
+	m.keys = defaultKeyMap(false)
 	_, _ = m.Update(keyPress('v', tea.ModCtrl))
 	if m.attachmentCount != 1 {
 		t.Fatalf("expected attachment count 1, got %d", m.attachmentCount)
@@ -2772,6 +2851,77 @@ func TestTerminalPasteMsgInsertsTextIntoComposer(t *testing.T) {
 	}
 }
 
+func TestWSLProfileCtrlAltVPastesImage(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		PasteClipboardImage: func() ([]string, string, error) {
+			return []string{"wsl-shot.png"}, "", nil
+		},
+	})
+	resizeModel(m)
+	m.keys = defaultKeyMap(true)
+
+	_, _ = m.Update(keyPress('v', tea.ModCtrl, tea.ModAlt))
+
+	if m.attachmentCount != 1 {
+		t.Fatalf("expected WSL image paste to attach one image, got %d", m.attachmentCount)
+	}
+	if got := ansi.Strip(m.renderInputBar()); !strings.Contains(got, "[wsl-shot.png]") {
+		t.Fatalf("expected WSL image attachment token, got %q", got)
+	}
+}
+
+func TestWSLProfileCtrlVPastesClipboardTextFallback(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		ReadClipboardText: func() (string, error) {
+			return "hello from WSL", nil
+		},
+	})
+	resizeModel(m)
+	m.keys = defaultKeyMap(true)
+
+	_, _ = m.Update(keyPress('v', tea.ModCtrl))
+
+	if got := m.textarea.Value(); got != "hello from WSL" {
+		t.Fatalf("expected WSL ctrl+v text fallback, got %q", got)
+	}
+}
+
+func TestWSLProfilePasteMsgStillInsertsText(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.keys = defaultKeyMap(true)
+
+	_, _ = m.Update(tea.PasteMsg{Content: "paste event text"})
+
+	if got := m.textarea.Value(); got != "paste event text" {
+		t.Fatalf("expected paste event text under WSL profile, got %q", got)
+	}
+}
+
+func TestTextPasteFallbackShowsErrorHint(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		ReadClipboardText: func() (string, error) {
+			return "", fmt.Errorf("clipboard unavailable")
+		},
+	})
+	resizeModel(m)
+	m.keys = defaultKeyMap(true)
+
+	_, cmd := m.Update(keyPress('v', tea.ModCtrl))
+	if cmd == nil {
+		t.Fatal("expected hint command when text paste fallback fails")
+	}
+	if got := m.hint; got != "paste: clipboard unavailable" {
+		t.Fatalf("expected explicit paste error hint, got %q", got)
+	}
+	if len(m.historyLines) == 0 || !strings.Contains(ansi.Strip(m.historyLines[len(m.historyLines)-1]), "paste: clipboard unavailable") {
+		t.Fatalf("expected paste error logged in history, got %#v", m.historyLines)
+	}
+}
+
 func TestPasteImageInsertsAttachmentAtCursor(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
@@ -2780,6 +2930,7 @@ func TestPasteImageInsertsAttachmentAtCursor(t *testing.T) {
 		},
 	})
 	resizeModel(m)
+	m.keys = defaultKeyMap(false)
 	m.textarea.SetValue("hello world")
 	m.moveTextareaCursorToIndex(len([]rune("hello ")))
 	m.syncInputFromTextarea()
