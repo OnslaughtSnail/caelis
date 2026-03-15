@@ -258,3 +258,21 @@ func TestModelReasoningOptionsForConfig_OpenAICompatibleUsesConfiguredSubset(t *
 		}
 	}
 }
+
+func TestModelReasoningOptionsForConfig_OpenRouterUsesStandardEfforts(t *testing.T) {
+	options := modelReasoningOptionsForConfig(modelproviders.Config{
+		Provider:      "openrouter",
+		API:           modelproviders.APIOpenRouter,
+		Model:         "openai/gpt-4o-mini",
+		ReasoningMode: reasoningModeToggle,
+	})
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+	if len(options) != len(want) {
+		t.Fatalf("unexpected options: %+v", options)
+	}
+	for i, one := range want {
+		if options[i].Value != one {
+			t.Fatalf("unexpected option[%d]=%q want %q", i, options[i].Value, one)
+		}
+	}
+}

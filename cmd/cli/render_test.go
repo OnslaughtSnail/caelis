@@ -174,18 +174,13 @@ func TestPrintEvent_AssistantReasoningRendersBeforeToolCall(t *testing.T) {
 	}
 }
 
-func TestPrintEvent_SystemWarningRenders(t *testing.T) {
+func TestPrintEvent_NoticeWarningRenders(t *testing.T) {
 	var out bytes.Buffer
 	state := &renderState{
 		out:              &out,
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
-	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleSystem,
-			Text: "warn: llm request failed, retrying in 2s (1/5)",
-		},
-	}, state)
+	printEvent(session.MarkNotice(&session.Event{}, session.NoticeLevelWarn, "llm request failed, retrying in 2s (1/5)"), state)
 
 	got := ansi.Strip(out.String())
 	if !strings.Contains(got, "! llm request failed, retrying in 2s (1/5)") {

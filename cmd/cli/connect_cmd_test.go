@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -16,14 +17,17 @@ import (
 )
 
 type stubChoicePrompter struct {
-	choices []string
-	lines   []string
-	choiceI int
-	lineI   int
+	choices       []string
+	lines         []string
+	choiceI       int
+	lineI         int
+	readPrompts   []string
+	choicePrompts []string
+	multiPrompts  []string
 }
 
 func (s *stubChoicePrompter) ReadLine(prompt string) (string, error) {
-	_ = prompt
+	s.readPrompts = append(s.readPrompts, prompt)
 	if s.lineI >= len(s.lines) {
 		return "", errInputEOF
 	}
@@ -37,7 +41,7 @@ func (s *stubChoicePrompter) ReadSecret(prompt string) (string, error) {
 }
 
 func (s *stubChoicePrompter) RequestChoicePrompt(prompt string, choices []tuievents.PromptChoice, defaultChoice string, filterable bool) (string, error) {
-	_ = prompt
+	s.choicePrompts = append(s.choicePrompts, prompt)
 	_ = defaultChoice
 	_ = filterable
 	if s.choiceI >= len(s.choices) {
@@ -50,11 +54,15 @@ func (s *stubChoicePrompter) RequestChoicePrompt(prompt string, choices []tuieve
 			return value, nil
 		}
 	}
-	return "", io.EOF
+	allowed := make([]string, 0, len(choices))
+	for _, choice := range choices {
+		allowed = append(allowed, choice.Value)
+	}
+	return "", fmt.Errorf("invalid choice %q for prompt %q (allowed=%v)", value, prompt, allowed)
 }
 
 func (s *stubChoicePrompter) RequestMultiChoicePrompt(prompt string, choices []tuievents.PromptChoice, selectedChoices []string, filterable bool) (string, error) {
-	_ = prompt
+	s.multiPrompts = append(s.multiPrompts, prompt)
 	_ = selectedChoices
 	_ = filterable
 	if s.choiceI >= len(s.choices) {
@@ -72,7 +80,7 @@ func (s *stubChoicePrompter) RequestMultiChoicePrompt(prompt string, choices []t
 	}
 	for _, part := range parts {
 		if _, ok := allowed[part]; !ok {
-			return "", io.EOF
+			return "", fmt.Errorf("invalid multi choice %q for prompt %q", part, prompt)
 		}
 	}
 	return raw, nil
@@ -109,6 +117,13 @@ func TestDescribeRemoteModelWithoutMetadata(t *testing.T) {
 	}
 	if strings.Contains(got, "(") {
 		t.Fatalf("did not expect metadata suffix when fields are empty, got %q", got)
+	}
+}
+
+func TestDescribeRemoteModel_OpenRouterUsesRawModelID(t *testing.T) {
+	got := describeRemoteModel("openrouter", modelproviders.RemoteModel{Name: "openai/gpt-4o-mini"})
+	if got != "openai/gpt-4o-mini" {
+		t.Fatalf("expected raw openrouter model id, got %q", got)
 	}
 }
 
@@ -162,6 +177,43 @@ func TestBuildConnectModelChoicesIncludesRemoteAndCommonModels(t *testing.T) {
 	}
 }
 
+func TestBuildConnectModelChoices_OpenRouterDisplaysRawModelID(t *testing.T) {
+	got := buildConnectModelChoices("openrouter", []modelproviders.RemoteModel{
+		{Name: "openai/gpt-4o-mini"},
+		{Name: "openrouter/healer-alpha"},
+	}, nil)
+	for _, item := range got {
+		switch item.Name {
+		case "openai/gpt-4o-mini":
+			if item.Display != "openai/gpt-4o-mini" {
+				t.Fatalf("expected raw routed model id, got %+v", item)
+			}
+		case "openrouter/healer-alpha":
+			if item.Display != "openrouter/healer-alpha" {
+				t.Fatalf("expected raw native model id, got %+v", item)
+			}
+		}
+	}
+}
+
+func TestNormalizeConnectModelName_OpenRouter(t *testing.T) {
+	got, err := normalizeConnectModelName("openrouter", "openrouter/openai/gpt-4o-mini")
+	if err != nil {
+		t.Fatalf("normalizeConnectModelName failed: %v", err)
+	}
+	if got != "openai/gpt-4o-mini" {
+		t.Fatalf("expected display prefix stripped for routed model, got %q", got)
+	}
+
+	got, err = normalizeConnectModelName("openrouter", "openrouter/healer-alpha")
+	if err != nil {
+		t.Fatalf("normalizeConnectModelName failed: %v", err)
+	}
+	if got != "openrouter/healer-alpha" {
+		t.Fatalf("expected native openrouter prefix preserved, got %q", got)
+	}
+}
+
 func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
@@ -199,7 +251,7 @@ func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 	}
 	_, err := handleConnect(c, nil)
 	if err != nil {
-		t.Fatalf("handleConnect failed: %v", err)
+		t.Fatalf("handleConnect failed: %v (choiceI=%d lineI=%d choicePrompts=%q multiPrompts=%q readPrompts=%q)", err, prompter.choiceI, prompter.lineI, prompter.choicePrompts, prompter.multiPrompts, prompter.readPrompts)
 	}
 	if c.modelAlias != "deepseek/deepseek-chat" {
 		t.Fatalf("unexpected current model %q", c.modelAlias)
@@ -254,7 +306,7 @@ func TestHandleConnect_ReinitializesReasoningDefaultsAndOmitsNotes(t *testing.T)
 
 	_, err := handleConnect(c, nil)
 	if err != nil {
-		t.Fatalf("handleConnect failed: %v", err)
+		t.Fatalf("handleConnect failed: %v (choiceI=%d lineI=%d choicePrompts=%q multiPrompts=%q readPrompts=%q)", err, prompter.choiceI, prompter.lineI, prompter.choicePrompts, prompter.multiPrompts, prompter.readPrompts)
 	}
 	if c.reasoningEffort != "" {
 		t.Fatalf("expected connect to clear configurable reasoning for fixed model, got %q", c.reasoningEffort)
@@ -312,7 +364,7 @@ func TestHandleConnect_VolcengineStandardUsesManualModelWithoutDiscovery(t *test
 
 	_, err := handleConnect(c, nil)
 	if err != nil {
-		t.Fatalf("handleConnect failed: %v", err)
+		t.Fatalf("handleConnect failed: %v (choiceI=%d lineI=%d choicePrompts=%q multiPrompts=%q readPrompts=%q)", err, prompter.choiceI, prompter.lineI, prompter.choicePrompts, prompter.multiPrompts, prompter.readPrompts)
 	}
 	if discoverCalled {
 		t.Fatal("expected standard volcengine connect to skip list_models discovery")
@@ -492,6 +544,204 @@ func TestHandleConnect_NoDiscoveredModelsPromptsManualInputAndStripsProviderPref
 	}
 	if cfg.Model != "gpt-4o-mini" {
 		t.Fatalf("expected stripped model name, got %q", cfg.Model)
+	}
+}
+
+func TestHandleConnect_OpenRouterUsesDefaultBaseURL(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return nil, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"openrouter", connectCustomModelValue},
+		lines:   []string{"sk-test", "openai/gpt-4o-mini"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("openrouter/openai/gpt-4o-mini")
+	if !ok {
+		t.Fatal("expected openrouter model to be registered")
+	}
+	if cfg.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Fatalf("expected default openrouter base url, got %q", cfg.BaseURL)
+	}
+	if cfg.API != modelproviders.APIOpenRouter {
+		t.Fatalf("expected openrouter api type, got %q", cfg.API)
+	}
+	if cfg.Model != "openai/gpt-4o-mini" {
+		t.Fatalf("unexpected openrouter model name %q", cfg.Model)
+	}
+}
+
+func TestHandleConnect_OpenRouterDiscoveredNativeModelPreservesModelID(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return []modelproviders.RemoteModel{{
+			Name:                "openrouter/healer-alpha",
+			ContextWindowTokens: 262144,
+			MaxOutputTokens:     65536,
+			Capabilities:        []string{"reasoning", "tools", "response_format"},
+		}}, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"openrouter", "openrouter/healer-alpha", "none,minimal,low,medium,high,xhigh"},
+		lines:   []string{"sk-test"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v (choiceI=%d lineI=%d choicePrompts=%q multiPrompts=%q readPrompts=%q)", err, prompter.choiceI, prompter.lineI, prompter.choicePrompts, prompter.multiPrompts, prompter.readPrompts)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("openrouter/healer-alpha")
+	if !ok {
+		t.Fatal("expected native openrouter model to be registered")
+	}
+	if cfg.Model != "openrouter/healer-alpha" {
+		t.Fatalf("expected native openrouter model id preserved, got %q", cfg.Model)
+	}
+	if cfg.ContextWindowTokens != 262144 || cfg.MaxOutputTok != 65536 {
+		t.Fatalf("expected remote limits used as first-hand metadata, got ctx=%d out=%d", cfg.ContextWindowTokens, cfg.MaxOutputTok)
+	}
+	if len(prompter.readPrompts) != 1 {
+		t.Fatalf("expected only api_key text prompt when remote metadata is available, got %q", prompter.readPrompts)
+	}
+}
+
+func TestHandleConnect_OpenRouterRemotePartialCapabilitiesFallsBackToManualReasoning(t *testing.T) {
+	const modelName = "codex-openrouter-partial-capability-fallback"
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return []modelproviders.RemoteModel{{
+			Name:                modelName,
+			ContextWindowTokens: 262144,
+			MaxOutputTokens:     65536,
+		}}, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"openrouter", modelName, "yes", "none,minimal,low,medium,high,xhigh"},
+		lines:   []string{"sk-test"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v (choiceI=%d lineI=%d choicePrompts=%q multiPrompts=%q readPrompts=%q)", err, prompter.choiceI, prompter.lineI, prompter.choicePrompts, prompter.multiPrompts, prompter.readPrompts)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("openrouter/" + modelName)
+	if !ok {
+		t.Fatal("expected native openrouter model to be registered")
+	}
+	if cfg.ContextWindowTokens != 262144 || cfg.MaxOutputTok != 65536 {
+		t.Fatalf("expected remote token limits preserved, got ctx=%d out=%d", cfg.ContextWindowTokens, cfg.MaxOutputTok)
+	}
+	if cfg.ReasoningMode != reasoningModeEffort {
+		t.Fatalf("expected reasoning mode from manual fallback, got %q", cfg.ReasoningMode)
+	}
+	if !strings.Contains(strings.Join(prompter.choicePrompts, "\n"), "Does this model support reasoning? for "+modelName) {
+		t.Fatalf("expected reasoning manual prompt when remote capabilities are partial, got %q", prompter.choicePrompts)
+	}
+}
+
+func TestHandleConnect_UsesModelScopedAdvancedPrompts(t *testing.T) {
+	const modelName = "codex-test-unknown-openrouter-model"
+
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return nil, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"openrouter", connectCustomModelValue, "yes", "none,minimal,low,medium,high,xhigh"},
+		lines:   []string{"sk-test", modelName, "", "", ""},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	joinedReads := strings.Join(prompter.readPrompts, "\n")
+	joinedChoices := strings.Join(prompter.choicePrompts, "\n")
+	joinedMulti := strings.Join(prompter.multiPrompts, "\n")
+	if !strings.Contains(joinedReads, "context_window_tokens for "+modelName+"(k)") {
+		t.Fatalf("expected context prompt scoped to model, got %q", joinedReads)
+	}
+	if !strings.Contains(joinedReads, "max_output_tokens for "+modelName+"(k)") {
+		t.Fatalf("expected max output prompt scoped to model, got %q", joinedReads)
+	}
+	if !strings.Contains(joinedChoices, "Does this model support reasoning? for "+modelName) {
+		t.Fatalf("expected reasoning support prompt scoped to model, got %q", joinedChoices)
+	}
+	if !strings.Contains(joinedMulti, "Select supported reasoning_effort values for "+modelName) {
+		t.Fatalf("expected effort prompt scoped to model, got %q", joinedMulti)
 	}
 }
 

@@ -588,6 +588,10 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 	if c == nil || c.tuiSender == nil || ev == nil {
 		return false
 	}
+	if notice, ok := session.EventNotice(ev); ok {
+		c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatSessionNoticeChunk(notice)})
+		return true
+	}
 	msg := ev.Message
 	handled := false
 	if msg.Role == model.RoleSystem {
@@ -723,6 +727,21 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		return true
 	}
 	return handled
+}
+
+func formatSessionNoticeChunk(notice session.Notice) string {
+	text := strings.TrimSpace(notice.Text)
+	if text == "" {
+		return ""
+	}
+	switch notice.Level {
+	case session.NoticeLevelWarn:
+		return fmt.Sprintf("! %s\n", text)
+	case session.NoticeLevelNote:
+		return fmt.Sprintf("  note: %s\n", text)
+	default:
+		return text + "\n"
+	}
 }
 
 func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool {

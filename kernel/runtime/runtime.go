@@ -503,6 +503,9 @@ func shouldPersistEvent(ev *session.Event, persistPartial bool) bool {
 	if ev == nil {
 		return false
 	}
+	if session.IsUIOnly(ev) {
+		return false
+	}
 	if isLifecycleEvent(ev) {
 		return false
 	}

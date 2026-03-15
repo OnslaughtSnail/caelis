@@ -74,6 +74,13 @@ func (a assertReadAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Eve
 	}
 }
 
+func TestShouldPersistEvent_SkipsUIOnly(t *testing.T) {
+	ev := session.MarkNotice(&session.Event{}, session.NoticeLevelWarn, "retrying in 1s")
+	if shouldPersistEvent(ev, false) {
+		t.Fatalf("expected ui-only event to be skipped from persistence")
+	}
+}
+
 type blockingAgent struct {
 	started chan struct{}
 	release <-chan struct{}

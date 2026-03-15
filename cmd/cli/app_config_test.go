@@ -65,6 +65,11 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 		ContextWindowTokens: 128000,
 		ThinkingBudget:      2048,
 		ReasoningEffort:     "high",
+		OpenRouter: modelproviders.OpenRouterConfig{
+			Models:     []string{"openai/gpt-4o-mini"},
+			Route:      "fallback",
+			Transforms: []string{"middle-out"},
+		},
 		Auth: modelproviders.AuthConfig{
 			Type:  modelproviders.AuthAPIKey,
 			Token: "secret",
@@ -93,6 +98,9 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	}
 	if providers[0].Auth.Token != "secret" {
 		t.Fatalf("unexpected provider token")
+	}
+	if providers[0].OpenRouter.Route != "fallback" {
+		t.Fatalf("expected openrouter options persisted, got %+v", providers[0].OpenRouter)
 	}
 	if providers[0].Auth.CredentialRef != "" {
 		t.Fatalf("expected credential_ref empty when token is configured, got %q", providers[0].Auth.CredentialRef)

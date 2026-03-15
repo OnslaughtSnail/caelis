@@ -786,7 +786,7 @@ func inferReasoningEfforts(provider, modelName string) []string {
 		return nil
 	}
 
-	if provider == "openai-compatible" {
+	if provider == "openai-compatible" || provider == "openrouter" {
 		return []string{"none", "minimal", "low", "medium", "high", "xhigh"}
 	}
 

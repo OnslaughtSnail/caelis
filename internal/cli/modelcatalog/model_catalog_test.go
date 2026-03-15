@@ -243,6 +243,25 @@ func TestLookupSuggestedModelCapabilities_UsesOverlayForKnownReasoningPrefix(t *
 	}
 }
 
+func TestSupportedReasoningEfforts_OpenRouterUsesCanonicalFallback(t *testing.T) {
+	got := SupportedReasoningEfforts("openrouter", "unknown-model")
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected openrouter efforts: %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected openrouter efforts: %v", got)
+		}
+	}
+	if mode := ReasoningModeForModel("openrouter", "unknown-model"); mode != ReasoningModeEffort {
+		t.Fatalf("expected openrouter reasoning mode effort, got %q", mode)
+	}
+	if def := DefaultReasoningEffortForModel("openrouter", "unknown-model"); def != "medium" {
+		t.Fatalf("expected openrouter default effort medium, got %q", def)
+	}
+}
+
 func TestListCatalogModels_IncludesDynamicAndBuiltin(t *testing.T) {
 	got := ListCatalogModels("deepseek")
 	if len(got) == 0 {

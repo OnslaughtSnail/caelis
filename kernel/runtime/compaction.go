@@ -188,13 +188,9 @@ func compactionNoticeEvent(trigger string, beforeTokens int, afterTokens int, ph
 	default:
 		return nil
 	}
-	return &session.Event{
+	return session.MarkNotice(&session.Event{
 		ID:   eventID(),
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleSystem,
-			Text: text,
-		},
 		Meta: map[string]any{
 			"kind":               "compaction_notice",
 			"compaction_phase":   phase,
@@ -202,7 +198,7 @@ func compactionNoticeEvent(trigger string, beforeTokens int, afterTokens int, ph
 			"pre_tokens":         beforeTokens,
 			"post_tokens":        afterTokens,
 		},
-	}
+	}, session.NoticeLevelNote, text)
 }
 
 func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, events []*session.Event, inputBudget int) (string, int, error) {

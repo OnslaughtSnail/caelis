@@ -152,14 +152,10 @@ func (a *Agent) generateTurnResponse(
 	resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
 		return a.emitPartialResponse(partial, yield)
 	}, func(attempt int, maxRetries int, delay time.Duration, cause error) error {
-		ev := &session.Event{
+		ev := session.MarkNotice(&session.Event{
 			ID:   newEventID(),
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleSystem,
-				Text: retryWarningText(attempt, maxRetries, delay, cause),
-			},
-		}
+		}, session.NoticeLevelWarn, retryWarningText(attempt, maxRetries, delay, cause))
 		if !yield(ev, nil) {
 			return errYieldStopped
 		}
@@ -167,14 +163,10 @@ func (a *Agent) generateTurnResponse(
 	})
 	if err != nil {
 		if interrupted := interruptedResponseError(err); interrupted != nil && !shouldSuppressInterruptedResponseWarning(interrupted) {
-			ev := &session.Event{
+			ev := session.MarkNotice(&session.Event{
 				ID:   newEventID(),
 				Time: time.Now(),
-				Message: model.Message{
-					Role: model.RoleSystem,
-					Text: interruptedResponseWarning(interrupted),
-				},
-			}
+			}, session.NoticeLevelWarn, interruptedResponseWarning(interrupted))
 			if !yield(ev, nil) {
 				return nil, errYieldStopped
 			}

@@ -8,6 +8,7 @@ type APIType string
 const (
 	APIOpenAI           APIType = "openai"
 	APIOpenAICompatible APIType = "openai_compatible"
+	APIOpenRouter       APIType = "openrouter"
 	APIGemini           APIType = "gemini"
 	APIAnthropic        APIType = "anthropic"
 	APIDeepSeek         APIType = "deepseek"
@@ -37,6 +38,16 @@ type AuthConfig struct {
 	Prefix        string
 }
 
+// OpenRouterConfig carries OpenRouter-native request options.
+// Zero values mean "use OpenRouter defaults".
+type OpenRouterConfig struct {
+	Models     []string
+	Route      string
+	Provider   map[string]any
+	Transforms []string
+	Plugins    []map[string]any
+}
+
 // Config is a provider-agnostic model alias definition.
 type Config struct {
 	Alias                     string
@@ -55,5 +66,6 @@ type Config struct {
 	ThinkingMode              string
 	ThinkingBudget            int
 	ReasoningEffort           string
+	OpenRouter                OpenRouterConfig
 	Auth                      AuthConfig
 }

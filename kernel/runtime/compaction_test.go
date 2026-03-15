@@ -93,11 +93,11 @@ func TestRuntimeRun_AutoCompaction(t *testing.T) {
 		if compactionTrigger(ev) == triggerAuto {
 			foundAutoCompaction = true
 		}
-		if ev != nil && ev.Message.Role == model.RoleSystem {
-			if strings.Contains(ev.Message.Text, "正在自动压缩") {
+		if notice, ok := session.EventNotice(ev); ok {
+			if strings.Contains(notice.Text, "正在自动压缩") {
 				foundStartNotice = true
 			}
-			if strings.Contains(ev.Message.Text, "自动上下文压缩完成") {
+			if strings.Contains(notice.Text, "自动上下文压缩完成") {
 				foundDoneNotice = true
 			}
 		}
@@ -154,7 +154,7 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 		if ev != nil && ev.Message.Role == model.RoleAssistant && ev.Message.Text == "final" {
 			foundFinalAssistant = true
 		}
-		if ev != nil && ev.Message.Role == model.RoleSystem && strings.Contains(ev.Message.Text, "压缩后重试") {
+		if notice, ok := session.EventNotice(ev); ok && strings.Contains(notice.Text, "压缩后重试") {
 			foundOverflowNotice = true
 		}
 	}

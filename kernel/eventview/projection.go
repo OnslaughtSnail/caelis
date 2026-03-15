@@ -133,6 +133,9 @@ func Messages(events session.Events, systemPrompt string, sanitizer func(map[str
 		if ev == nil {
 			continue
 		}
+		if session.IsUIOnly(ev) || session.IsNotice(ev) {
+			continue
+		}
 		msg := ev.Message
 		if msg.ToolResponse != nil {
 			resp := *msg.ToolResponse

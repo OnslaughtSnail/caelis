@@ -67,7 +67,16 @@ type providerRecord struct {
 	ThinkingMode              string            `json:"thinking_mode,omitempty"`
 	ThinkingBudget            int               `json:"thinking_budget,omitempty"`
 	ReasoningEffort           string            `json:"reasoning_effort,omitempty"`
+	OpenRouter                *openRouterRecord `json:"openrouter,omitempty"`
 	Auth                      authRecord        `json:"auth"`
+}
+
+type openRouterRecord struct {
+	Models     []string         `json:"models,omitempty"`
+	Route      string           `json:"route,omitempty"`
+	Provider   map[string]any   `json:"provider,omitempty"`
+	Transforms []string         `json:"transforms,omitempty"`
+	Plugins    []map[string]any `json:"plugins,omitempty"`
 }
 
 type authRecord struct {
@@ -329,6 +338,7 @@ func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
 			DefaultReasoningEffort:    normalizeReasoningEffort(rec.DefaultReasoningEffort),
 			ThinkingBudget:            normalizeThinkingBudget(rec.ThinkingBudget),
 			ReasoningEffort:           resolvedProviderRecordReasoningEffort(rec),
+			OpenRouter:                providerRecordOpenRouterConfig(rec.OpenRouter),
 			Auth: modelproviders.AuthConfig{
 				Type:          modelproviders.AuthType(strings.TrimSpace(auth.Type)),
 				TokenEnv:      "",
@@ -543,6 +553,7 @@ func (s *appConfigStore) UpsertProvider(cfg modelproviders.Config) error {
 		DefaultReasoningEffort:    normalizeReasoningEffort(cfg.DefaultReasoningEffort),
 		ThinkingBudget:            normalizeThinkingBudget(cfg.ThinkingBudget),
 		ReasoningEffort:           resolveProviderConfigReasoningEffort(cfg),
+		OpenRouter:                openRouterRecordForConfig(cfg.OpenRouter),
 		Auth: authRecord{
 			Type:          string(cfg.Auth.Type),
 			TokenEnv:      "",
@@ -1064,6 +1075,67 @@ func copyHeaders(in map[string]string) map[string]string {
 	return out
 }
 
+func providerRecordOpenRouterConfig(in *openRouterRecord) modelproviders.OpenRouterConfig {
+	if in == nil {
+		return modelproviders.OpenRouterConfig{}
+	}
+	return modelproviders.OpenRouterConfig{
+		Models:     dedupeStrings(in.Models),
+		Route:      strings.TrimSpace(in.Route),
+		Provider:   copyAnyMap(in.Provider),
+		Transforms: dedupeStrings(in.Transforms),
+		Plugins:    copyMapSlice(in.Plugins),
+	}
+}
+
+func openRouterRecordForConfig(in modelproviders.OpenRouterConfig) *openRouterRecord {
+	record := &openRouterRecord{
+		Models:     dedupeStrings(in.Models),
+		Route:      strings.TrimSpace(in.Route),
+		Provider:   copyAnyMap(in.Provider),
+		Transforms: dedupeStrings(in.Transforms),
+		Plugins:    copyMapSlice(in.Plugins),
+	}
+	if len(record.Models) == 0 && record.Route == "" && len(record.Provider) == 0 && len(record.Transforms) == 0 && len(record.Plugins) == 0 {
+		return nil
+	}
+	return record
+}
+
+func copyAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		kk := strings.TrimSpace(k)
+		if kk == "" {
+			continue
+		}
+		out[kk] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func copyMapSlice(in []map[string]any) []map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(in))
+	for _, item := range in {
+		if copied := copyAnyMap(item); len(copied) > 0 {
+			out = append(out, copied)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func dedupeStrings(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -1089,6 +1161,9 @@ func canonicalModelRef(provider, modelName string) string {
 	modelName = strings.ToLower(strings.TrimSpace(modelName))
 	if provider == "" || modelName == "" {
 		return ""
+	}
+	if strings.HasPrefix(modelName, provider+"/") {
+		return modelName
 	}
 	return provider + "/" + modelName
 }

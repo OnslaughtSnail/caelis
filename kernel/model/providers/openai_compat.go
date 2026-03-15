@@ -19,6 +19,7 @@ type openAICompatLLM struct {
 	provider            string
 	baseURL             string
 	token               string
+	headers             map[string]string
 	client              *http.Client
 	requestTimeout      time.Duration
 	maxOutputTok        int
@@ -48,6 +49,7 @@ func newOpenAICompat(cfg Config, token string) *openAICompatLLM {
 		provider:            cfg.Provider,
 		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
 		token:               token,
+		headers:             cloneHeaders(cfg.Headers),
 		client:              &http.Client{},
 		requestTimeout:      timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
@@ -105,7 +107,8 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+l.token)
+		applyDefaultAuthHeader(httpReq, Config{API: APIOpenAICompatible, Provider: l.provider}, l.token, false)
+		applyConfiguredHeaders(httpReq, l.headers)
 
 		resp, err := l.client.Do(httpReq)
 		if err != nil {
@@ -240,6 +243,25 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			Usage:        usage,
 		}, nil)
 	}
+}
+
+func cloneHeaders(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type openAICompatRequest struct {

@@ -66,6 +66,14 @@ var providerTemplates = []providerTemplate{
 		commonModels:        []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"},
 	},
 	{
+		label:               "openrouter",
+		api:                 modelproviders.APIOpenRouter,
+		provider:            "openrouter",
+		defaultBaseURL:      "https://openrouter.ai/api/v1",
+		defaultContextToken: 262144,
+		commonModels:        []string{"openai/gpt-4o-mini", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash"},
+	},
+	{
 		label:               "gemini",
 		api:                 modelproviders.APIGemini,
 		provider:            "gemini",
@@ -352,7 +360,7 @@ func buildConnectModelChoices(provider string, remoteModels []modelproviders.Rem
 		seen[key] = struct{}{}
 		out = append(out, connectModelChoice{
 			Name:    name,
-			Display: canonicalModelRef(provider, name),
+			Display: connectDisplayModelRef(provider, name),
 			Detail:  strings.TrimSpace(detail),
 		})
 	}
@@ -474,7 +482,11 @@ func normalizeConnectModelName(provider string, raw string) (string, error) {
 	}
 	providerPrefix := strings.ToLower(strings.TrimSpace(provider)) + "/"
 	if providerPrefix != "/" && strings.HasPrefix(strings.ToLower(value), providerPrefix) {
-		value = strings.TrimSpace(value[len(providerPrefix):])
+		remainder := strings.TrimSpace(value[len(providerPrefix):])
+		if strings.EqualFold(strings.TrimSpace(provider), "openrouter") && !strings.Contains(remainder, "/") {
+			remainder = value
+		}
+		value = remainder
 	}
 	if value == "" {
 		return "", fmt.Errorf("model is required")
@@ -494,6 +506,8 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 	if alias == "" {
 		return connectModelSelection{}, fmt.Errorf("invalid provider/model")
 	}
+	subjectCfg := baseCfg
+	subjectCfg.Model = modelName
 
 	baseCaps, baseKnown := lookupDynamicCatalogCapabilities(baseCfg.Provider, modelName)
 	if !baseKnown {
@@ -509,14 +523,28 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 		baseCaps.MaxOutputTokens = baseCaps.DefaultMaxOutputTokens
 	}
 	overlayCaps, overlayKnown := lookupOverlayCatalogCapabilities(baseCfg.Provider, modelName)
+	catalogKnown := baseKnown
 	if remote != nil {
 		if remote.ContextWindowTokens > 0 {
 			baseCaps.ContextWindowTokens = remote.ContextWindowTokens
 		}
 		if remote.MaxOutputTokens > 0 {
 			baseCaps.MaxOutputTokens = remote.MaxOutputTokens
-			if baseCaps.DefaultMaxOutputTokens <= 0 {
-				baseCaps.DefaultMaxOutputTokens = remote.MaxOutputTokens
+			baseCaps.DefaultMaxOutputTokens = remote.MaxOutputTokens
+		}
+		if supportsToolCalls, supportsReasoning, supportsImages, supportsJSON, remoteKnown := connectRemoteCapabilities(remote); remoteKnown {
+			baseKnown = true
+			if supportsToolCalls {
+				baseCaps.SupportsToolCalls = true
+			}
+			if supportsReasoning {
+				baseCaps.SupportsReasoning = true
+			}
+			if supportsImages {
+				baseCaps.SupportsImages = true
+			}
+			if supportsJSON {
+				baseCaps.SupportsJSONOutput = true
 			}
 		}
 	}
@@ -538,15 +566,21 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 	if !baseKnown {
 		maxOutput = recommendedCatalogFallbackMaxOutputTokens(contextWindow, maxOutput, baseCaps.SupportsReasoning)
 		var err error
-		contextWindow, err = promptTokenCount(c, "context_window_tokens", contextWindow)
+		contextWindow, err = promptTokenCount(c, "context_window_tokens", contextWindow, subjectCfg)
 		if err != nil {
 			return connectModelSelection{}, err
 		}
-		maxOutput, err = promptTokenCount(c, "max_output_tokens", maxOutput)
+		maxOutput, err = promptTokenCount(c, "max_output_tokens", maxOutput, subjectCfg)
 		if err != nil {
 			return connectModelSelection{}, err
 		}
-		reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptUnknownModelReasoningDefinition(c, baseCfg, reasoningMode, reasoningEfforts, defaultReasoningEffort)
+		reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptUnknownModelReasoningDefinition(c, subjectCfg, reasoningMode, reasoningEfforts, defaultReasoningEffort)
+		if err != nil {
+			return connectModelSelection{}, err
+		}
+	} else if shouldFallbackManualReasoning(baseCfg.Provider, catalogKnown, remote) {
+		var err error
+		reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptUnknownModelReasoningDefinition(c, subjectCfg, reasoningMode, reasoningEfforts, defaultReasoningEffort)
 		if err != nil {
 			return connectModelSelection{}, err
 		}
@@ -573,13 +607,13 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 			reasoningEfforts = append([]string(nil), profile.SupportedEfforts...)
 			defaultReasoningEffort = profile.DefaultEffort
 			var err error
-			reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptProviderEffortDefinition(c, profile.SupportedEfforts, reasoningEfforts, defaultReasoningEffort)
+			reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptProviderEffortDefinition(c, subjectCfg, profile.SupportedEfforts, reasoningEfforts, defaultReasoningEffort)
 			if err != nil {
 				return connectModelSelection{}, err
 			}
 		default:
 			var err error
-			reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptReasoningDefinition(c, baseCfg, reasoningModeNone, nil, "")
+			reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptReasoningDefinition(c, subjectCfg, reasoningModeNone, nil, "")
 			if err != nil {
 				return connectModelSelection{}, err
 			}
@@ -611,7 +645,7 @@ func promptUnknownModelReasoningDefinition(c *cliConsole, baseCfg modelproviders
 	profile := connectProviderReasoningProfile(baseCfg)
 	switch profile.Mode {
 	case reasoningModeToggle:
-		value, err := c.promptChoice("Select reasoning support", []promptChoiceItem{
+		value, err := c.promptChoice(connectPromptLabel("Select reasoning support", baseCfg), []promptChoiceItem{
 			{Label: "none", Value: reasoningModeNone, Detail: "This model does not expose provider reasoning controls."},
 			{Label: "toggle", Value: reasoningModeToggle, Detail: "This model supports provider thinking on/off controls."},
 		}, defaultMode, false)
@@ -624,7 +658,7 @@ func promptUnknownModelReasoningDefinition(c *cliConsole, baseCfg modelproviders
 		}
 		return reasoningModeNone, nil, "", nil
 	case reasoningModeEffort:
-		value, err := c.promptChoice("Does this model support reasoning?", []promptChoiceItem{
+		value, err := c.promptChoice(connectPromptLabel("Does this model support reasoning?", baseCfg), []promptChoiceItem{
 			{Label: "no", Value: "no", Detail: "Do not configure reasoning controls for this model."},
 			{Label: "yes", Value: "yes", Detail: "Configure supported reasoning_effort values."},
 		}, "yes", false)
@@ -634,7 +668,7 @@ func promptUnknownModelReasoningDefinition(c *cliConsole, baseCfg modelproviders
 		if value != "yes" {
 			return reasoningModeNone, nil, "", nil
 		}
-		return promptProviderEffortDefinition(c, profile.SupportedEfforts, defaultEfforts, defaultEffort)
+		return promptProviderEffortDefinition(c, baseCfg, profile.SupportedEfforts, defaultEfforts, defaultEffort)
 	default:
 		return promptReasoningDefinition(c, baseCfg, defaultMode, defaultEfforts, defaultEffort)
 	}
@@ -731,9 +765,9 @@ func promptReasoningDefinition(c *cliConsole, baseCfg modelproviders.Config, def
 		defaultMode = reasoningModeNone
 	}
 	if connectUsesCanonicalEffortSelection(baseCfg) {
-		return promptSupportedReasoningEfforts(c, openAICompatibleStandardEfforts, defaultEfforts, defaultEffort)
+		return promptSupportedReasoningEfforts(c, baseCfg, openAICompatibleStandardEfforts, defaultEfforts, defaultEffort)
 	}
-	mode, err := c.promptChoice("Select reasoning capability", connectReasoningCapabilityChoices(), defaultMode, false)
+	mode, err := c.promptChoice(connectPromptLabel("Select reasoning capability", baseCfg), connectReasoningCapabilityChoices(), defaultMode, false)
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -748,7 +782,7 @@ func promptReasoningDefinition(c *cliConsole, baseCfg modelproviders.Config, def
 		if len(selectedDefaults) == 0 {
 			selectedDefaults = []string{"low", "medium", "high"}
 		}
-		selected, selErr := c.promptMultiChoiceWithDefaults("Select reasoning efforts", []promptChoiceItem{
+		selected, selErr := c.promptMultiChoiceWithDefaults(connectPromptLabel("Select reasoning efforts", baseCfg), []promptChoiceItem{
 			{Label: "low", Value: "low"},
 			{Label: "medium", Value: "medium"},
 			{Label: "high", Value: "high"},
@@ -757,7 +791,7 @@ func promptReasoningDefinition(c *cliConsole, baseCfg modelproviders.Config, def
 			return "", nil, "", selErr
 		}
 		extraDefault := reasoningExtrasDefault(selectedDefaults)
-		extraRaw, extraErr := c.promptText("additional_reasoning_efforts(optional, comma/space/tab)", extraDefault, false)
+		extraRaw, extraErr := c.promptText(connectPromptLabel("additional_reasoning_efforts(optional, comma/space/tab)", baseCfg), extraDefault, false)
 		if extraErr != nil {
 			return "", nil, "", extraErr
 		}
@@ -787,7 +821,7 @@ func connectProviderReasoningProfile(baseCfg modelproviders.Config) reasoningPro
 	switch baseCfg.API {
 	case modelproviders.APIDeepSeek, modelproviders.APIMimo, modelproviders.APIVolcengine, modelproviders.APIVolcengineCoding:
 		return reasoningProfile{Mode: reasoningModeToggle}
-	case modelproviders.APIOpenAI, modelproviders.APIOpenAICompatible:
+	case modelproviders.APIOpenAI, modelproviders.APIOpenAICompatible, modelproviders.APIOpenRouter:
 		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: append([]string(nil), openAICompatibleStandardEfforts...), DefaultEffort: "medium"}
 	case modelproviders.APIGemini, modelproviders.APIAnthropic:
 		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "medium"}
@@ -796,24 +830,26 @@ func connectProviderReasoningProfile(baseCfg modelproviders.Config) reasoningPro
 	}
 }
 
-func promptProviderEffortDefinition(c *cliConsole, supportedEfforts []string, defaultEfforts []string, defaultEffort string) (string, []string, string, error) {
+func promptProviderEffortDefinition(c *cliConsole, baseCfg modelproviders.Config, supportedEfforts []string, defaultEfforts []string, defaultEffort string) (string, []string, string, error) {
 	if len(supportedEfforts) == 0 {
 		return reasoningModeNone, nil, "", nil
 	}
-	return promptSupportedReasoningEfforts(c, supportedEfforts, defaultEfforts, defaultEffort)
+	return promptSupportedReasoningEfforts(c, baseCfg, supportedEfforts, defaultEfforts, defaultEffort)
 }
 
 func connectUsesCanonicalEffortSelection(baseCfg modelproviders.Config) bool {
-	provider := strings.ToLower(strings.TrimSpace(baseCfg.Provider))
-	switch provider {
-	case "openai", "openai-compatible":
+	if usesCanonicalOpenAICompatibleEfforts(baseCfg.Provider) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(baseCfg.Provider)) {
+	case "openai":
 		return true
 	default:
 		return false
 	}
 }
 
-func promptSupportedReasoningEfforts(c *cliConsole, supportedEfforts []string, defaultEfforts []string, defaultEffort string) (string, []string, string, error) {
+func promptSupportedReasoningEfforts(c *cliConsole, baseCfg modelproviders.Config, supportedEfforts []string, defaultEfforts []string, defaultEffort string) (string, []string, string, error) {
 	supportedEfforts = normalizeReasoningLevels(supportedEfforts)
 	if len(supportedEfforts) == 0 {
 		return reasoningModeNone, nil, "", nil
@@ -822,7 +858,7 @@ func promptSupportedReasoningEfforts(c *cliConsole, supportedEfforts []string, d
 	if len(selectedDefaults) == 0 {
 		selectedDefaults = append([]string(nil), supportedEfforts...)
 	}
-	selected, err := c.promptMultiChoiceWithDefaults("Select supported reasoning_effort values", connectReasoningEffortChoices(supportedEfforts), selectedDefaults, false)
+	selected, err := c.promptMultiChoiceWithDefaults(connectPromptLabel("Select supported reasoning_effort values", baseCfg), connectReasoningEffortChoices(supportedEfforts), selectedDefaults, false)
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -854,6 +890,48 @@ func promptSupportedReasoningEfforts(c *cliConsole, supportedEfforts []string, d
 		}
 	}
 	return reasoningModeEffort, selected, resolvedDefault, nil
+}
+
+func connectPromptLabel(prompt string, cfg modelproviders.Config) string {
+	prompt = strings.TrimSpace(prompt)
+	ref := connectDisplayModelRef(cfg.Provider, cfg.Model)
+	if prompt == "" || ref == "" {
+		return prompt
+	}
+	return prompt + " for " + ref
+}
+
+func connectRemoteCapabilities(remote *modelproviders.RemoteModel) (supportsToolCalls bool, supportsReasoning bool, supportsImages bool, supportsJSON bool, known bool) {
+	if remote == nil {
+		return false, false, false, false, false
+	}
+	if remote.ContextWindowTokens > 0 || remote.MaxOutputTokens > 0 || len(remote.Capabilities) > 0 {
+		known = true
+	}
+	for _, one := range remote.Capabilities {
+		switch strings.ToLower(strings.TrimSpace(one)) {
+		case "tools", "tool_choice":
+			supportsToolCalls = true
+		case "reasoning", "include_reasoning":
+			supportsReasoning = true
+		case "image":
+			supportsImages = true
+		case "response_format", "structured_outputs":
+			supportsJSON = true
+		}
+	}
+	return supportsToolCalls, supportsReasoning, supportsImages, supportsJSON, known
+}
+
+func shouldFallbackManualReasoning(provider string, catalogKnown bool, remote *modelproviders.RemoteModel) bool {
+	if !strings.EqualFold(strings.TrimSpace(provider), "openrouter") {
+		return false
+	}
+	if catalogKnown || remote == nil {
+		return false
+	}
+	_, supportsReasoning, _, _, _ := connectRemoteCapabilities(remote)
+	return !supportsReasoning
 }
 
 func connectReasoningEffortChoices(supportedEfforts []string) []promptChoiceItem {
@@ -1094,11 +1172,23 @@ func dedupeOrderedStrings(items []string) []string {
 }
 
 func describeRemoteModel(provider string, item modelproviders.RemoteModel) string {
-	ref := canonicalModelRef(provider, item.Name)
+	ref := connectDisplayModelRef(provider, item.Name)
 	if detail := describeRemoteModelDetail(item); detail != "" {
 		return fmt.Sprintf("%s (%s)", ref, detail)
 	}
 	return ref
+}
+
+func connectDisplayModelRef(provider, modelName string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.TrimSpace(modelName)
+	if provider == "" || modelName == "" {
+		return ""
+	}
+	if provider == "openrouter" {
+		return modelName
+	}
+	return canonicalModelRef(provider, modelName)
 }
 
 func describeRemoteModelDetail(item modelproviders.RemoteModel) string {
@@ -1194,8 +1284,8 @@ func promptInt(c *cliConsole, name string, defaultValue int) (int, error) {
 	return value, nil
 }
 
-func promptTokenCount(c *cliConsole, name string, defaultValue int) (int, error) {
-	text, err := c.promptText(name+"(k)", formatTokenCountDefault(defaultValue), false)
+func promptTokenCount(c *cliConsole, name string, defaultValue int, cfg modelproviders.Config) (int, error) {
+	text, err := c.promptText(connectPromptLabel(name, cfg)+"(k)", formatTokenCountDefault(defaultValue), false)
 	if err != nil {
 		return 0, err
 	}

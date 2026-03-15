@@ -183,11 +183,20 @@ type reasoningProfile struct {
 	DefaultEffort    string
 }
 
+func usesCanonicalOpenAICompatibleEfforts(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai-compatible", "openrouter":
+		return true
+	default:
+		return false
+	}
+}
+
 func canonicalOpenAICompatibleReasoningProfile(cfg modelproviders.Config) (reasoningProfile, bool) {
-	if cfg.API != modelproviders.APIOpenAICompatible {
+	if cfg.API != modelproviders.APIOpenAICompatible && cfg.API != modelproviders.APIOpenRouter {
 		return reasoningProfile{}, false
 	}
-	if !strings.EqualFold(strings.TrimSpace(cfg.Provider), "openai-compatible") {
+	if !usesCanonicalOpenAICompatibleEfforts(cfg.Provider) {
 		return reasoningProfile{}, false
 	}
 	supported := normalizeReasoningLevels(cfg.SupportedReasoningEfforts)
@@ -268,7 +277,7 @@ func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 }
 
 func reasoningProfileForModel(provider string, model string) reasoningProfile {
-	if strings.EqualFold(strings.TrimSpace(provider), "openai-compatible") {
+	if usesCanonicalOpenAICompatibleEfforts(provider) {
 		return reasoningProfile{
 			Mode:             reasoningModeEffort,
 			SupportedEfforts: append([]string(nil), openAICompatibleStandardEfforts...),
@@ -314,7 +323,7 @@ func reasoningProfileForModel(provider string, model string) reasoningProfile {
 func inferredReasoningProfile(provider string, model string) reasoningProfile {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch {
-	case provider == "openai-compatible":
+	case usesCanonicalOpenAICompatibleEfforts(provider):
 		return reasoningProfile{Mode: reasoningModeEffort, SupportedEfforts: append([]string(nil), openAICompatibleStandardEfforts...), DefaultEffort: "medium"}
 	default:
 		return reasoningProfile{Mode: reasoningModeNone}

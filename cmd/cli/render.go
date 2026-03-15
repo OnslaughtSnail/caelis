@@ -150,6 +150,10 @@ func printEvent(ev *session.Event, state *renderState) {
 		fmt.Fprintln(state.out)
 		state.partialOpen = false
 	}
+	if notice, ok := session.EventNotice(ev); ok {
+		renderNotice(notice, state)
+		return
+	}
 
 	msg := ev.Message
 	if msg.Role == model.RoleSystem {
@@ -165,21 +169,9 @@ func printEvent(ev *session.Event, state *renderState) {
 			out = os.Stdout
 		}
 		if state != nil && state.ui != nil {
-			switch {
-			case strings.HasPrefix(text, "warn:"):
-				state.ui.Warn("%s\n", strings.TrimSpace(strings.TrimPrefix(text, "warn:")))
-			case strings.HasPrefix(text, "note:"):
-				state.ui.Note("%s\n", strings.TrimSpace(strings.TrimPrefix(text, "note:")))
-			default:
-				fmt.Fprintf(out, "%s%s\n", state.ui.SystemPrefix(), text)
-			}
+			fmt.Fprintf(out, "%s%s\n", state.ui.SystemPrefix(), text)
 		} else {
-			switch {
-			case strings.HasPrefix(text, "warn:"):
-				fmt.Fprintf(out, "! %s\n", strings.TrimSpace(strings.TrimPrefix(text, "warn:")))
-			default:
-				fmt.Fprintln(out, text)
-			}
+			fmt.Fprintln(out, text)
 		}
 		return
 	}
@@ -280,6 +272,39 @@ func printEvent(ev *session.Event, state *renderState) {
 		default:
 			fmt.Fprintf(state.out, "- %s\n", text)
 		}
+	}
+}
+
+func renderNotice(notice session.Notice, state *renderState) {
+	text := strings.TrimSpace(notice.Text)
+	if text == "" {
+		return
+	}
+	out := io.Writer(nil)
+	if state != nil {
+		out = state.out
+	}
+	if out == nil {
+		out = os.Stdout
+	}
+	if state != nil && state.ui != nil {
+		switch notice.Level {
+		case session.NoticeLevelWarn:
+			state.ui.Warn("%s\n", text)
+		case session.NoticeLevelNote:
+			state.ui.Note("%s\n", text)
+		default:
+			fmt.Fprintf(out, "%s%s\n", state.ui.SystemPrefix(), text)
+		}
+		return
+	}
+	switch notice.Level {
+	case session.NoticeLevelWarn:
+		fmt.Fprintf(out, "! %s\n", text)
+	case session.NoticeLevelNote:
+		fmt.Fprintf(out, "note: %s\n", text)
+	default:
+		fmt.Fprintln(out, text)
 	}
 }
 

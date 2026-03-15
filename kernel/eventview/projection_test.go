@@ -27,6 +27,35 @@ func TestAgentVisible_UsesLatestContextWindowWithoutLifecycle(t *testing.T) {
 	}
 }
 
+func TestMessages_SkipsUIOnlyAndRuntimeSystemNotices(t *testing.T) {
+	now := time.Now()
+	uiOnly := session.MarkNotice(&session.Event{
+		ID:   "ui-only",
+		Time: now,
+	}, session.NoticeLevelWarn, "retrying in 1s")
+	events := session.NewEvents([]*session.Event{
+		{ID: "user", Time: now, Message: model.Message{Role: model.RoleUser, Text: "hi"}},
+		uiOnly,
+		{ID: "warn-old", Time: now, Message: model.Message{Role: model.RoleSystem, Text: "warn: old persisted warning"}},
+		{ID: "note-old", Time: now, Message: model.Message{Role: model.RoleSystem, Text: "note: old persisted note"}},
+		{ID: "assistant", Time: now, Message: model.Message{Role: model.RoleAssistant, Text: "done"}},
+	})
+
+	got := Messages(events, "sys", nil)
+	if len(got) != 3 {
+		t.Fatalf("expected system prompt + user + assistant only, got %+v", got)
+	}
+	if got[0].Role != model.RoleSystem || got[0].Text != "sys" {
+		t.Fatalf("unexpected system prompt: %+v", got[0])
+	}
+	if got[1].Role != model.RoleUser || got[1].Text != "hi" {
+		t.Fatalf("unexpected user message: %+v", got[1])
+	}
+	if got[2].Role != model.RoleAssistant || got[2].Text != "done" {
+		t.Fatalf("unexpected assistant message: %+v", got[2])
+	}
+}
+
 func TestPendingToolCalls_ReturnsOnlyUnmatchedCallsInOrder(t *testing.T) {
 	now := time.Now()
 	events := []*session.Event{

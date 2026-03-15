@@ -12,7 +12,7 @@ It is designed to be extracted as a standalone repository.
 - Modular system prompt pipeline with built-in identity and `AGENTS.md` policy assembly.
 - Skills metadata auto-discovery from `~/.agents/skills` and prompt injection.
 - Policy hooks (egress/audit/output) with default allow behavior.
-- Unified model provider layer with API types: `openai`, `openai_compatible`, `gemini`, `anthropic`, `deepseek`.
+- Unified model provider layer with API types: `openai`, `openai_compatible`, `openrouter`, `gemini`, `anthropic`, `deepseek`.
 - CLI shell and real-model eval runner.
 - Tool execution runtime abstraction (`no_sandbox` / `sandbox` with extensible backend type).
 - Token-budget based auto compaction (append-only event strategy).

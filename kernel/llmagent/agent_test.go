@@ -424,8 +424,11 @@ func TestLLMAgent_RetriesModelRequestAndSucceeds(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.Role == model.RoleSystem {
-			retryWarnings = append(retryWarnings, ev.Message.Text)
+		if notice, ok := session.EventNotice(ev); ok {
+			if !session.IsUIOnly(ev) {
+				t.Fatalf("expected retry warning to be ui-only, got meta=%v", ev.Meta)
+			}
+			retryWarnings = append(retryWarnings, notice.Text)
 		}
 		last = ev
 	}
@@ -545,8 +548,8 @@ func TestLLMAgent_RateLimitRetriesUseDedicatedPolicy(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.Role == model.RoleSystem {
-			retryWarnings = append(retryWarnings, ev.Message.Text)
+		if notice, ok := session.EventNotice(ev); ok {
+			retryWarnings = append(retryWarnings, notice.Text)
 		}
 	}
 	if attempts != 3 {
@@ -674,8 +677,8 @@ func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
 		if ev == nil {
 			continue
 		}
-		if ev.Message.Role == model.RoleSystem {
-			warnings = append(warnings, ev.Message.Text)
+		if notice, ok := session.EventNotice(ev); ok {
+			warnings = append(warnings, notice.Text)
 		}
 		if eventIsPartialEvent(ev) {
 			partials = append(partials, ev.Message.Text)
@@ -736,8 +739,8 @@ func TestLLMAgent_PartialStreamCancellationStaysSilent(t *testing.T) {
 			gotErr = runErr
 			continue
 		}
-		if ev != nil && ev.Message.Role == model.RoleSystem {
-			warnings = append(warnings, ev.Message.Text)
+		if notice, ok := session.EventNotice(ev); ok {
+			warnings = append(warnings, notice.Text)
 		}
 	}
 	if !errors.Is(gotErr, context.Canceled) {
@@ -871,8 +874,8 @@ func TestLLMAgent_EmptyResponseRetriesWhenNothingWasShown(t *testing.T) {
 		if runErr != nil {
 			t.Fatalf("expected retry to recover empty responses, got %v", runErr)
 		}
-		if ev != nil && ev.Message.Role == model.RoleSystem {
-			warnings = append(warnings, ev.Message.Text)
+		if notice, ok := session.EventNotice(ev); ok {
+			warnings = append(warnings, notice.Text)
 		}
 	}
 	if attempts != 3 {

@@ -36,7 +36,7 @@ func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 	}
 	client := &http.Client{Timeout: timeout}
 	switch cfg.API {
-	case APIOpenAI, APIOpenAICompatible, APIDeepSeek, APIMimo, APIVolcengine, APIVolcengineCoding:
+	case APIOpenAI, APIOpenAICompatible, APIOpenRouter, APIDeepSeek, APIMimo, APIVolcengine, APIVolcengineCoding:
 		return discoverOpenAIModels(ctx, client, cfg, token)
 	case APIGemini:
 		return discoverGeminiModels(ctx, client, cfg, token)
@@ -56,6 +56,7 @@ func discoverOpenAIModels(ctx context.Context, client *http.Client, cfg Config, 
 		return nil, err
 	}
 	applyDefaultAuthHeader(req, cfg, token, false)
+	applyConfiguredHeaders(req, cfg.Headers)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -66,15 +67,26 @@ func discoverOpenAIModels(ctx context.Context, client *http.Client, cfg Config, 
 	}
 	var payload struct {
 		Data []struct {
-			ID                 string `json:"id"`
-			ContextWindow      any    `json:"context_window"`
-			MaxOutputTokens    any    `json:"max_output_tokens"`
-			InputTokenLimit    any    `json:"input_token_limit"`
-			OutputTokenLimit   any    `json:"output_token_limit"`
-			Capabilities       any    `json:"capabilities"`
-			SupportedMethods   any    `json:"supported_generation_methods"`
-			SupportsReasoning  any    `json:"supports_reasoning"`
-			ReasoningSupported any    `json:"reasoning_supported"`
+			ID                  string `json:"id"`
+			ContextWindow       any    `json:"context_window"`
+			MaxOutputTokens     any    `json:"max_output_tokens"`
+			InputTokenLimit     any    `json:"input_token_limit"`
+			OutputTokenLimit    any    `json:"output_token_limit"`
+			ContextLength       any    `json:"context_length"`
+			MaxCompletionTokens any    `json:"max_completion_tokens"`
+			Capabilities        any    `json:"capabilities"`
+			SupportedMethods    any    `json:"supported_generation_methods"`
+			SupportedParameters any    `json:"supported_parameters"`
+			SupportsReasoning   any    `json:"supports_reasoning"`
+			ReasoningSupported  any    `json:"reasoning_supported"`
+			Architecture        struct {
+				InputModalities  any `json:"input_modalities"`
+				OutputModalities any `json:"output_modalities"`
+			} `json:"architecture"`
+			TopProvider struct {
+				ContextLength       any `json:"context_length"`
+				MaxCompletionTokens any `json:"max_completion_tokens"`
+			} `json:"top_provider"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -88,15 +100,25 @@ func discoverOpenAIModels(ctx context.Context, client *http.Client, cfg Config, 
 		}
 		ctxWindow := firstPositiveInt(
 			toInt(item.ContextWindow),
+			toInt(item.ContextLength),
 			toInt(item.InputTokenLimit),
+			toInt(item.TopProvider.ContextLength),
 		)
 		maxOutput := firstPositiveInt(
 			toInt(item.MaxOutputTokens),
+			toInt(item.MaxCompletionTokens),
 			toInt(item.OutputTokenLimit),
+			toInt(item.TopProvider.MaxCompletionTokens),
 		)
 		caps := appendUniqueStrings(nil, toStringSlice(item.Capabilities)...)
 		caps = appendUniqueStrings(caps, toStringSlice(item.SupportedMethods)...)
+		caps = appendUniqueStrings(caps, toStringSlice(item.SupportedParameters)...)
+		caps = appendUniqueStrings(caps, toStringSlice(item.Architecture.InputModalities)...)
+		caps = appendUniqueStrings(caps, toStringSlice(item.Architecture.OutputModalities)...)
 		if toBool(item.SupportsReasoning) || toBool(item.ReasoningSupported) {
+			caps = appendUniqueStrings(caps, "reasoning")
+		}
+		if supportsReasoningParameter(item.SupportedParameters) {
 			caps = appendUniqueStrings(caps, "reasoning")
 		}
 		models = append(models, RemoteModel{
@@ -309,6 +331,30 @@ func applyDefaultAuthHeader(req *http.Request, cfg Config, token string, geminiB
 	default:
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+func applyConfiguredHeaders(req *http.Request, headers map[string]string) {
+	if req == nil || len(headers) == 0 {
+		return
+	}
+	for key, value := range headers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		req.Header.Set(key, value)
+	}
+}
+
+func supportsReasoningParameter(value any) bool {
+	for _, one := range toStringSlice(value) {
+		switch strings.ToLower(strings.TrimSpace(one)) {
+		case "reasoning", "reasoning_effort", "include_reasoning":
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeRemoteModels(in []RemoteModel) []RemoteModel {
