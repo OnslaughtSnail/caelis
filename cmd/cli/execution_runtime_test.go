@@ -50,3 +50,24 @@ func TestNewExecutionRuntime_PassesSandboxHelperPath(t *testing.T) {
 		t.Fatalf("expected helper path to be forwarded, got %q", captured.SandboxHelperPath)
 	}
 }
+
+func TestNewExecutionRuntime_NormalizesAutoSandboxSelection(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+
+	var captured toolexec.Config
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		captured = cfg
+		return fakeRuntime{permissionMode: cfg.PermissionMode, sandboxType: cfg.SandboxType}, nil
+	}
+
+	_, err := newExecutionRuntime(toolexec.PermissionModeDefault, "auto", "/tmp/helper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.SandboxType != normalizeSandboxType("auto") {
+		t.Fatalf("expected normalized sandbox type %q, got %q", normalizeSandboxType("auto"), captured.SandboxType)
+	}
+}

@@ -251,7 +251,7 @@ func TestAvailableSandboxTypesForPlatform(t *testing.T) {
 		want []string
 	}{
 		{goos: "darwin", want: []string{"seatbelt"}},
-		{goos: "linux", want: []string{"landlock", "bwrap"}},
+		{goos: "linux", want: []string{"bwrap", "landlock"}},
 		{goos: "windows", want: []string{"bwrap"}},
 	}
 	for _, tc := range tests {
@@ -276,8 +276,28 @@ func TestCompleteSandboxCandidates_UsesExperimentalDisplayLabel(t *testing.T) {
 	if got[0].Value != "landlock" {
 		t.Fatalf("expected landlock value, got %q", got[0].Value)
 	}
-	if got[0].Display != "landlock (experimental)" {
-		t.Fatalf("expected experimental display label, got %q", got[0].Display)
+	if got[0].Display != "landlock" {
+		t.Fatalf("expected plain display label, got %q", got[0].Display)
+	}
+	if got[0].Detail == "" {
+		t.Fatal("expected sandbox detail note")
+	}
+}
+
+func TestCompleteSandboxCandidates_DefaultsToAutoWhenUnset(t *testing.T) {
+	c := &cliConsole{}
+	got := c.completeSandboxCandidates("", 10)
+	if len(got) == 0 {
+		t.Fatal("expected sandbox candidates")
+	}
+	if got[0].Value != "auto" {
+		t.Fatalf("expected auto candidate first, got %q", got[0].Value)
+	}
+	if got[0].Display != "auto" {
+		t.Fatalf("unexpected auto display label: %q", got[0].Display)
+	}
+	if got[0].Detail == "" {
+		t.Fatal("expected auto detail note")
 	}
 }
 

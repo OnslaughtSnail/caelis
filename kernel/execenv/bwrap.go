@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	bwrapSandboxType = "bwrap"
+	bwrapSandboxType  = "bwrap"
+	bubblewrapDocsURL = "https://github.com/containers/bubblewrap"
 )
 
 type bwrapSandboxFactory struct{}
@@ -57,7 +58,7 @@ func (b *bwrapRunner) Probe(ctx context.Context) error {
 	}
 	bwrapPath, err := b.lookPath("bwrap")
 	if err != nil {
-		return fmt.Errorf("bwrap sandbox unavailable: bwrap not found: %w", err)
+		return fmt.Errorf("bwrap sandbox unavailable: bwrap not found: %w; %s", err, bubblewrapInstallHint(b.readFile))
 	}
 	if _, err := b.lookPath("bash"); err != nil {
 		return fmt.Errorf("bwrap sandbox unavailable: bash not found: %w", err)
@@ -127,7 +128,78 @@ func bwrapProbeFailureDetail(
 			parts = append(parts, "user.max_user_namespaces=0")
 		}
 	}
+	parts = append(parts, "docs="+bubblewrapDocsURL)
 	return strings.Join(parts, "; ")
+}
+
+func bubblewrapInstallHint(readFileFn func(string) ([]byte, error)) string {
+	if cmd := bubblewrapInstallCommand(readFileFn); cmd != "" {
+		return fmt.Sprintf("install bubblewrap (for example: %s); docs=%s", cmd, bubblewrapDocsURL)
+	}
+	return fmt.Sprintf("install bubblewrap from your distro packages; docs=%s", bubblewrapDocsURL)
+}
+
+func bubblewrapInstallCommand(readFileFn func(string) ([]byte, error)) string {
+	ids := linuxDistributionIDs(readFileFn)
+	switch {
+	case containsAnyString(ids, "debian", "ubuntu", "linuxmint", "pop", "elementary", "neon", "raspbian", "kali"):
+		return "sudo apt install bubblewrap"
+	case containsAnyString(ids, "fedora", "rhel", "centos", "rocky", "almalinux", "ol"):
+		return "sudo dnf install bubblewrap"
+	case containsAnyString(ids, "arch", "manjaro", "endeavouros", "artix"):
+		return "sudo pacman -S bubblewrap"
+	case containsAnyString(ids, "opensuse", "opensuse-leap", "opensuse-tumbleweed", "suse", "sles"):
+		return "sudo zypper install bubblewrap"
+	case containsAnyString(ids, "alpine"):
+		return "sudo apk add bubblewrap"
+	case containsAnyString(ids, "void"):
+		return "sudo xbps-install -S bubblewrap"
+	case containsAnyString(ids, "gentoo"):
+		return "sudo emerge bubblewrap"
+	default:
+		return ""
+	}
+}
+
+func linuxDistributionIDs(readFileFn func(string) ([]byte, error)) []string {
+	if readFileFn == nil {
+		return nil
+	}
+	data, err := readFileFn("/etc/os-release")
+	if err != nil {
+		return nil
+	}
+	values := make([]string, 0, 4)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(strings.ToUpper(key))
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		switch key {
+		case "ID", "ID_LIKE":
+			for _, one := range strings.Fields(strings.ToLower(value)) {
+				values = append(values, one)
+			}
+		}
+	}
+	return normalizeStringList(values)
+}
+
+func containsAnyString(values []string, needles ...string) bool {
+	for _, value := range values {
+		for _, needle := range needles {
+			if value == needle {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func readFirstLineInt(readFileFn func(string) ([]byte, error), path string) (int, bool) {

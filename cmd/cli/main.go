@@ -89,7 +89,7 @@ func runCLI(ctx context.Context, args []string) error {
 		compactWatermark = fs.Float64("compact-watermark", 0.7, "Auto compaction watermark ratio (0.5-0.9)")
 		contextWindow    = fs.Int("context-window", 0, "Model context window tokens override")
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
-		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default")
+		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default (Linux auto tries bwrap then landlock)")
 		experimentalLSP  = fs.Bool("experimental-lsp", false, "Enable experimental CLI LSP tools plugin")
 		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
 		showVersion      = fs.Bool("version", false, "Show version and exit")
@@ -168,8 +168,12 @@ func runCLI(ctx context.Context, args []string) error {
 	if flagProvided(args, "sandbox-type") &&
 		execRuntime.PermissionMode() == toolexec.PermissionModeDefault &&
 		execRuntime.FallbackToHost() {
+		requestedSandbox := sandboxTypeDisplayLabel(normalizeSandboxType(strings.TrimSpace(*sandboxType)))
+		if requestedSandbox == "" {
+			requestedSandbox = "auto"
+		}
 		_ = toolexec.Close(execRuntime)
-		return fmt.Errorf("sandbox type %q is unavailable: %s", strings.TrimSpace(*sandboxType), execRuntime.FallbackReason())
+		return fmt.Errorf("sandbox type %q is unavailable: %s", requestedSandbox, execRuntime.FallbackReason())
 	}
 	defer func() {
 		if closeErr := toolexec.Close(execRuntime); closeErr != nil {

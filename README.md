@@ -67,19 +67,19 @@ Tool execution runtime flags:
   - `full_control`: run commands on host directly, no approval required
   - `default`: run commands in sandbox by default; escalated host command requires approval
 - `-sandbox-type`: sandbox backend type (when `-permission-mode=default`, pluggable by runtime registry)
-  - default: macOS uses `seatbelt`; Linux uses `landlock (experimental)`
+  - default: macOS uses `seatbelt`; Linux auto-tries `bwrap`, then falls back to `landlock (experimental)`
   - on macOS, only `seatbelt` is supported in `default` mode
-  - on Linux, `landlock (experimental)` and `bwrap (experimental)` are supported in `default` mode
+  - on Linux, `bwrap` and `landlock (experimental)` are supported in `default` mode
   - built-in: `seatbelt` (macOS `sandbox-exec`)
-  - built-in: `landlock` (experimental Linux default backend; uses `PR_SET_NO_NEW_PRIVS`, seccomp network filtering, and Landlock filesystem rules; prefers a sibling `caelis-sandbox-helper` binary when present, otherwise falls back to the current CLI executable as helper; avoids Linux user-namespace dependencies but cannot enforce read-only subpaths such as `.git` inside a writable workspace)
-  - built-in: `bwrap` (experimental Linux optional backend; uses bubblewrap for stronger namespace-based filesystem and network isolation; requires both the `bwrap` binary and a working Linux user-namespace setup, or a setuid-root `bwrap`; install via `apt install bubblewrap` or equivalent)
+  - built-in: `landlock` (experimental Linux fallback backend; uses `PR_SET_NO_NEW_PRIVS`, seccomp network filtering, and Landlock filesystem rules; prefers a sibling `caelis-sandbox-helper` binary when present, otherwise falls back to the current CLI executable as helper; avoids Linux user-namespace dependencies but cannot enforce read-only subpaths such as `.git` inside a writable workspace)
+  - built-in: `bwrap` (Linux preferred backend; uses bubblewrap for stronger namespace-based filesystem and network isolation; requires both the `bwrap` binary and a working Linux user-namespace setup, or a setuid-root `bwrap`; CLI suggests distro-specific install commands such as `sudo apt install bubblewrap` on Debian/Ubuntu and links to the bubblewrap docs when unavailable)
 - `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
 - `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
 
 Fallback behavior:
 - In `default` mode on macOS, runtime only supports `seatbelt`; when unavailable it falls back to `host+approval`.
-- In `default` mode on Linux, runtime defaults to `landlock`; you can switch to `bwrap` explicitly only on machines where bubblewrap startup prerequisites are satisfied.
-- If sandbox backend is unavailable at startup (for example `sandbox-exec` missing on macOS, Landlock unsupported by the host kernel, `bwrap` missing on Linux, or Linux user namespaces are blocked so `bwrap` cannot create its sandbox), CLI falls back to `host+approval` and prints a warning.
+- In `default` mode on Linux, runtime auto-tries `bwrap` first and falls back to `landlock` when bubblewrap is unavailable or its startup prerequisites are blocked.
+- If no sandbox backend is available at startup (for example `sandbox-exec` missing on macOS, Landlock unsupported by the host kernel, or Linux neither has working bubblewrap nor Landlock support), CLI falls back to `host+approval` and prints a warning.
 - In non-interactive runs without approver context, escalated commands return `ApprovalRequiredError` with a hint to use interactive approval or `-permission-mode full_control`.
 - If a command is routed to sandbox but fails with "command not found" (`exit code 127`), BASH asks for approval and retries on host.
 

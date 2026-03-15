@@ -37,6 +37,12 @@ func TestBwrapRunner_ProbeMissingBinary(t *testing.T) {
 	r := &bwrapRunner{
 		goos:     "linux",
 		lookPath: func(string) (string, error) { return "", errors.New("not found") },
+		readFile: func(path string) ([]byte, error) {
+			if path == "/etc/os-release" {
+				return []byte("ID=ubuntu\nID_LIKE=debian\n"), nil
+			}
+			return nil, os.ErrNotExist
+		},
 	}
 	err := r.Probe(context.Background())
 	if err == nil {
@@ -44,6 +50,9 @@ func TestBwrapRunner_ProbeMissingBinary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bwrap not found") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sudo apt install bubblewrap") {
+		t.Fatalf("expected install hint in error: %v", err)
 	}
 }
 
@@ -163,10 +172,23 @@ func TestBwrapProbeFailureDetail_UserNamespaceBlocked(t *testing.T) {
 		"/usr/bin/bwrap is not setuid",
 		"kernel.unprivileged_userns_clone=0",
 		"user.max_user_namespaces=0",
+		"docs=" + bubblewrapDocsURL,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected %q in detail %q", want, got)
 		}
+	}
+}
+
+func TestBubblewrapInstallCommand_UsesDebianFamilyHint(t *testing.T) {
+	readFileFn := func(path string) ([]byte, error) {
+		if path == "/etc/os-release" {
+			return []byte("ID=ubuntu\nID_LIKE=debian\n"), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	if got := bubblewrapInstallCommand(readFileFn); got != "sudo apt install bubblewrap" {
+		t.Fatalf("unexpected install command: %q", got)
 	}
 }
 

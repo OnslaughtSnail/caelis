@@ -537,7 +537,7 @@ func (m *Model) updateSlashArgCandidates() {
 		if display == "" {
 			display = value
 		}
-		filtered = append(filtered, SlashArgCandidate{Value: value, Display: display, NoAuth: one.NoAuth})
+		filtered = append(filtered, SlashArgCandidate{Value: value, Display: display, Detail: strings.TrimSpace(one.Detail), NoAuth: one.NoAuth})
 	}
 	if len(filtered) == 0 {
 		m.slashArgCandidates = nil
@@ -749,12 +749,21 @@ func (m *Model) renderSlashArgList() string {
 		if display == "" {
 			display = strings.TrimSpace(m.slashArgCandidates[i].Value)
 		}
+		detail := strings.TrimSpace(m.slashArgCandidates[i].Detail)
 		prefix := "  "
 		if i == m.slashArgIndex {
 			prefix = m.theme.PromptStyle().Render("▸ ")
-			lines = append(lines, prefix+m.theme.CommandActiveStyle().Render(display))
+			line := prefix + m.theme.CommandActiveStyle().Render(display)
+			if detail != "" {
+				line += "  " + m.theme.HelpHintTextStyle().Render(detail)
+			}
+			lines = append(lines, line)
 		} else {
-			lines = append(lines, prefix+m.theme.HelpHintTextStyle().Render(display))
+			line := prefix + m.theme.HelpHintTextStyle().Render(display)
+			if detail != "" {
+				line += "  " + m.theme.HelpHintTextStyle().Render(detail)
+			}
+			lines = append(lines, line)
 		}
 	}
 	if end < len(m.slashArgCandidates) {

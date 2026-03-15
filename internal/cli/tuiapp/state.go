@@ -99,6 +99,7 @@ type ResumeCandidate struct {
 type SlashArgCandidate struct {
 	Value   string
 	Display string
+	Detail  string
 	NoAuth  bool
 }
 

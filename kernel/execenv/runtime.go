@@ -619,7 +619,7 @@ func defaultSandboxTypeForPlatform() string {
 		return seatbeltSandboxType
 	}
 	if runtimeGOOS == "linux" {
-		return landlockSandboxType
+		return bwrapSandboxType
 	}
 	return bwrapSandboxType
 }
@@ -638,7 +638,10 @@ func sandboxTypeCandidatesForPlatform(requested string, goos string) []string {
 		return nil
 	}
 	if normalizedGoos == "linux" {
-		if value == "" || value == landlockSandboxType {
+		if value == "" {
+			return []string{bwrapSandboxType, landlockSandboxType}
+		}
+		if value == landlockSandboxType {
 			return []string{landlockSandboxType}
 		}
 		if value == bwrapSandboxType {

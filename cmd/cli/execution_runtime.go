@@ -105,7 +105,7 @@ func (r *swappableRuntime) DecideRoute(command string, sandboxPermission toolexe
 func newExecutionRuntime(mode toolexec.PermissionMode, sandboxType string, sandboxHelperPath string) (toolexec.Runtime, error) {
 	return cliExecRuntimeBuilder(toolexec.Config{
 		PermissionMode:    mode,
-		SandboxType:       strings.TrimSpace(sandboxType),
+		SandboxType:       normalizeSandboxType(strings.TrimSpace(sandboxType)),
 		SandboxHelperPath: strings.TrimSpace(sandboxHelperPath),
 	})
 }

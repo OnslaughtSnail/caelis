@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -899,6 +900,7 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 		order = append(order, value)
 	}
 	appendType(c.sandboxType)
+	appendType("auto")
 	for _, one := range availableSandboxTypes() {
 		appendType(one)
 	}
@@ -909,12 +911,39 @@ func (c *cliConsole) completeSandboxCandidates(query string, limit int) []tuiapp
 		if q != "" && !strings.Contains(one, q) {
 			continue
 		}
-		out = append(out, tuiapp.SlashArgCandidate{Value: one, Display: sandboxTypeDisplayLabel(one)})
+		display, detail := sandboxCompletionLabel(one)
+		out = append(out, tuiapp.SlashArgCandidate{Value: one, Display: display, Detail: detail})
 		if len(out) >= limit {
 			break
 		}
 	}
 	return out
+}
+
+func sandboxCompletionLabel(value string) (display string, detail string) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "", "auto", "default":
+		if runtime.GOOS == "linux" {
+			return "auto", "try bwrap, then landlock"
+		}
+		if runtime.GOOS == "darwin" {
+			return "auto", "use seatbelt"
+		}
+		return "auto", "use platform default"
+	case "bwrap":
+		if runtime.GOOS == "linux" {
+			return "bwrap", "preferred on Linux"
+		}
+		return "bwrap", ""
+	case "landlock":
+		if runtime.GOOS == "linux" {
+			return "landlock", "fallback, reduced isolation semantics"
+		}
+		return "landlock", "reduced isolation semantics"
+	default:
+		return normalized, ""
+	}
 }
 
 func (c *cliConsole) completeConnectCandidates(query string, limit int) []tuiapp.SlashArgCandidate {

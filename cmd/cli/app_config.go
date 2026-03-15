@@ -913,10 +913,12 @@ func normalizePermissionMode(mode string) string {
 
 func normalizeSandboxType(sandboxType string) string {
 	value := strings.TrimSpace(strings.ToLower(sandboxType))
-	if value == "" {
+	switch value {
+	case "", "auto", "default":
 		return platformDefaultSandboxType()
+	default:
+		return value
 	}
-	return value
 }
 
 func platformDefaultSandboxType() string {
@@ -924,7 +926,7 @@ func platformDefaultSandboxType() string {
 		return "seatbelt"
 	}
 	if stdruntime.GOOS == "linux" {
-		return "landlock"
+		return ""
 	}
 	return "bwrap"
 }
@@ -934,7 +936,7 @@ func availableSandboxTypesForPlatform(goos string) []string {
 	case "darwin":
 		return []string{"seatbelt"}
 	case "linux":
-		return []string{"landlock", "bwrap"}
+		return []string{"bwrap", "landlock"}
 	default:
 		return []string{"bwrap"}
 	}
@@ -945,19 +947,31 @@ func availableSandboxTypes() []string {
 }
 
 func sandboxTypeDisplayLabel(sandboxType string) string {
-	value := strings.TrimSpace(strings.ToLower(sandboxType))
-	if value == "" {
-		return ""
+	raw := strings.TrimSpace(strings.ToLower(sandboxType))
+	if raw == "" || raw == "auto" || raw == "default" {
+		return autoSandboxTypeDisplayLabel(stdruntime.GOOS)
 	}
+	value := normalizeSandboxType(raw)
 	if sandboxTypeIsExperimental(value) {
 		return value + " (experimental)"
 	}
 	return value
 }
 
+func autoSandboxTypeDisplayLabel(goos string) string {
+	switch strings.ToLower(strings.TrimSpace(goos)) {
+	case "linux":
+		return "auto (bwrap -> landlock)"
+	case "darwin":
+		return "auto (seatbelt)"
+	default:
+		return "auto (bwrap)"
+	}
+}
+
 func sandboxTypeIsExperimental(sandboxType string) bool {
 	switch strings.TrimSpace(strings.ToLower(sandboxType)) {
-	case "landlock", "bwrap":
+	case "landlock":
 		return true
 	default:
 		return false

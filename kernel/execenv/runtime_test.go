@@ -58,7 +58,7 @@ func platformDefaultSandboxType() string {
 		return seatbeltSandboxType
 	}
 	if strings.EqualFold(runtimeGOOS, "linux") {
-		return landlockSandboxType
+		return bwrapSandboxType
 	}
 	return bwrapSandboxType
 }
@@ -244,9 +244,9 @@ func TestNew_DefaultDerivesWorkspaceWritePolicy(t *testing.T) {
 	}
 }
 
-func TestSandboxTypeCandidatesForPlatform_LinuxDefaultUsesLandlockOnly(t *testing.T) {
+func TestSandboxTypeCandidatesForPlatform_LinuxDefaultUsesBwrapThenLandlock(t *testing.T) {
 	got := sandboxTypeCandidatesForPlatform("", "linux")
-	want := []string{landlockSandboxType}
+	want := []string{bwrapSandboxType, landlockSandboxType}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected linux default candidates: got=%v want=%v", got, want)
 	}
@@ -312,7 +312,7 @@ func TestNew_DefaultSandboxTypeFollowsPlatform(t *testing.T) {
 	if stdruntime.GOOS == "darwin" {
 		want = seatbeltSandboxType
 	} else if stdruntime.GOOS == "linux" {
-		want = landlockSandboxType
+		want = bwrapSandboxType
 	}
 	if rt.SandboxType() != want {
 		t.Fatalf("expected default sandbox type %q, got %q", want, rt.SandboxType())
@@ -367,7 +367,7 @@ func TestSandboxTypeCandidatesForPlatform(t *testing.T) {
 		expected []string
 	}{
 		{name: "darwin default", request: "", goos: "darwin", expected: []string{"seatbelt"}},
-		{name: "linux default", request: "", goos: "linux", expected: []string{"landlock"}},
+		{name: "linux default", request: "", goos: "linux", expected: []string{"bwrap", "landlock"}},
 		{name: "darwin explicit seatbelt", request: "seatbelt", goos: "darwin", expected: []string{"seatbelt"}},
 		{name: "darwin explicit bwrap", request: "bwrap", goos: "darwin", expected: nil},
 		{name: "linux explicit landlock", request: "landlock", goos: "linux", expected: []string{"landlock"}},

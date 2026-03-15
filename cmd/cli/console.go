@@ -191,8 +191,8 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		"compact": {Usage: "/compact [note]", Description: "Compact context history", Handle: handleCompact},
 		"status":  {Usage: "/status", Description: "Show current session status", Handle: handleStatus},
 		"sandbox": {
-			Usage:       "/sandbox [<type>]",
-			Description: "View or switch sandbox type (landlock/bwrap experimental)",
+			Usage:       "/sandbox [auto|<type>]",
+			Description: "View or switch sandbox type (auto/bwrap/landlock experimental)",
 			Handle:      handleSandbox,
 		},
 		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
@@ -1096,15 +1096,21 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 		return false, nil
 	}
 	if len(args) != 1 {
-		return false, fmt.Errorf("usage: /sandbox [<type>]")
+		return false, fmt.Errorf("usage: /sandbox [auto|<type>]")
 	}
-	sandboxType := strings.TrimSpace(args[0])
-	if sandboxType == "" {
+	rawSandboxType := strings.TrimSpace(args[0])
+	if rawSandboxType == "" {
 		return false, fmt.Errorf("sandbox type cannot be empty")
 	}
-	// Validate type by constructing a default-mode runtime.
-	if err := validateExplicitSandboxType(sandboxType, c.sandboxHelperPath); err != nil {
-		return false, err
+	sandboxType := normalizeSandboxType(rawSandboxType)
+	if sandboxType == "" && !strings.EqualFold(rawSandboxType, "auto") && !strings.EqualFold(rawSandboxType, "default") {
+		return false, fmt.Errorf("invalid sandbox type %q, expected auto|bwrap|landlock", args[0])
+	}
+	if sandboxType != "" {
+		// Validate type by constructing a default-mode runtime.
+		if err := validateExplicitSandboxType(sandboxType, c.sandboxHelperPath); err != nil {
+			return false, err
+		}
 	}
 	c.sandboxType = sandboxType
 	mode := c.execRuntime.PermissionMode()

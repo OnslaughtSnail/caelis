@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -158,9 +159,10 @@ func TestSandboxTypeDisplayLabel(t *testing.T) {
 		value string
 		want  string
 	}{
+		{name: "auto", value: "", want: autoSandboxTypeDisplayLabel(runtime.GOOS)},
 		{name: "seatbelt", value: "seatbelt", want: "seatbelt"},
 		{name: "landlock", value: "landlock", want: "landlock (experimental)"},
-		{name: "bwrap", value: "bwrap", want: "bwrap (experimental)"},
+		{name: "bwrap", value: "bwrap", want: "bwrap"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
