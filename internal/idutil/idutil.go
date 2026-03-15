@@ -8,9 +8,11 @@ import (
 
 const (
 	sessionPrefix         = "s-"
+	runPrefix             = "r-"
 	taskPrefix            = "t-"
 	delegationPrefix      = "dlg_"
 	sessionTokenLength    = 12
+	runTokenLength        = 12
 	taskTokenLength       = 12
 	delegationTokenLength = 12
 	DisplayPrefixLength   = 10
@@ -22,6 +24,10 @@ func NewSessionID() string {
 
 func NewDelegationID() string {
 	return delegationPrefix + compactUUID(delegationTokenLength)
+}
+
+func NewRunID() string {
+	return runPrefix + compactUUID(runTokenLength)
 }
 
 func NewTaskID() string {

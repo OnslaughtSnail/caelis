@@ -2265,13 +2265,13 @@ func TestViewShowsBreathingHintWhenRunning(t *testing.T) {
 	m.syncViewportContent()
 	view := stripModelView(m)
 
-	if !strings.Contains(view, "Queue your next prompt now; it will run after this one.") {
+	if !strings.Contains(view, "Send follow-up guidance while the current run is still active.") {
 		t.Fatalf("expected running carousel text in view when running, got:\n%s", view)
 	}
 	if strings.Contains(view, "thinking") || strings.Contains(view, "Tip:") {
 		t.Fatalf("did not expect thinking/tip prefix in running hint, got:\n%s", view)
 	}
-	if strings.Contains(strings.Join(m.viewportPlainLines, "\n"), "Queue your next prompt now; it will run after this one.") {
+	if strings.Contains(strings.Join(m.viewportPlainLines, "\n"), "Send follow-up guidance while the current run is still active.") {
 		t.Fatalf("did not expect running hint to be rendered inside viewport history, got: %q", strings.Join(m.viewportPlainLines, "\n"))
 	}
 }
@@ -2303,20 +2303,17 @@ func TestViewShowsInputWhenRunningForQueueing(t *testing.T) {
 	}
 }
 
-func TestViewShowsPendingQueueWhileRunning(t *testing.T) {
+func TestViewHidesPendingQueueWhileRunning(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
 	m.running = true
 	m.startRunningAnimation()
 	m.runningTip = 0
-	m.pendingQueue = []pendingPrompt{
-		{execLine: "first", displayLine: "first"},
-		{execLine: "second", displayLine: "second"},
-	}
+	m.pendingQueue = &pendingPrompt{execLine: "first", displayLine: "first"}
 	view := stripModelView(m)
-	if !strings.Contains(view, "2") || !strings.Contains(view, "pending") {
-		t.Fatalf("expected pending queue hint in running view, got:\n%s", view)
+	if !strings.Contains(view, "◌ first") {
+		t.Fatalf("expected pending queue drawer in running view, got:\n%s", view)
 	}
 }
 
@@ -2998,12 +2995,12 @@ func TestHistoryRecallRestoresAttachmentsAsMetadata(t *testing.T) {
 	}
 }
 
-func TestQueuedPromptPreservesAttachments(t *testing.T) {
+func TestRunningSubmitPreservesAttachments(t *testing.T) {
 	var called []Submission
 	m := NewModel(Config{
 		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
 			called = append(called, submission)
-			return tuievents.TaskResultMsg{}
+			return tuievents.TaskResultMsg{ContinueRunning: true}
 		},
 	})
 	resizeModel(m)
@@ -3014,28 +3011,23 @@ func TestQueuedPromptPreservesAttachments(t *testing.T) {
 	m.setInputAttachments([]inputAttachment{{Name: "queued.png", Offset: len([]rune("queued"))}})
 
 	_, cmd := m.Update(keyPress(tea.KeyEnter))
-	if cmd != nil {
-		t.Fatal("expected queueing while running to avoid immediate submit")
-	}
-	if len(m.pendingQueue) != 1 {
-		t.Fatalf("expected one queued prompt, got %d", len(m.pendingQueue))
-	}
-
-	_, cmd = m.Update(tuievents.TaskResultMsg{})
 	if cmd == nil {
-		t.Fatal("expected queued prompt to dispatch after task result")
+		t.Fatal("expected immediate submit command while running")
 	}
 	if !findAndRunTaskResult(cmd(), m) {
-		t.Fatal("expected queued prompt execution")
+		t.Fatal("expected running prompt execution")
 	}
 	if len(called) != 1 {
 		t.Fatalf("expected one executed submission, got %d", len(called))
 	}
 	if called[0].Text != "queued" {
-		t.Fatalf("expected queued text preserved, got %q", called[0].Text)
+		t.Fatalf("expected submitted text preserved, got %q", called[0].Text)
 	}
 	if len(called[0].Attachments) != 1 || called[0].Attachments[0] != (Attachment{Name: "queued.png", Offset: len([]rune("queued"))}) {
-		t.Fatalf("expected queued attachments preserved, got %+v", called[0].Attachments)
+		t.Fatalf("expected submitted attachments preserved, got %+v", called[0].Attachments)
+	}
+	if !m.running {
+		t.Fatal("expected model to remain running after inline submit")
 	}
 }
 
@@ -3287,7 +3279,7 @@ func TestEscInterruptsRunning(t *testing.T) {
 	}
 }
 
-func TestEscPopsQueuedMessageBeforeInterruptWhileRunning(t *testing.T) {
+func TestEscInterruptsRunningEvenIfPendingQueueExists(t *testing.T) {
 	interrupted := false
 	m := NewModel(Config{
 		CancelRunning: func() bool {
@@ -3298,33 +3290,11 @@ func TestEscPopsQueuedMessageBeforeInterruptWhileRunning(t *testing.T) {
 	})
 	resizeModel(m)
 	m.running = true
-	m.pendingQueue = []pendingPrompt{
-		{execLine: "first", displayLine: "first"},
-		{execLine: "second", displayLine: "second"},
-	}
-
-	_, _ = m.Update(keyPress(tea.KeyEscape))
-	if interrupted {
-		t.Fatal("did not expect interrupt while queue still has messages")
-	}
-	if len(m.pendingQueue) != 1 {
-		t.Fatalf("expected one queued message after pop, got %d", len(m.pendingQueue))
-	}
-	if m.pendingQueue[0].execLine != "first" {
-		t.Fatalf("expected newest message to be popped first, remaining=%+v", m.pendingQueue)
-	}
-
-	_, _ = m.Update(keyPress(tea.KeyEscape))
-	if interrupted {
-		t.Fatal("did not expect interrupt when popping last queued message")
-	}
-	if len(m.pendingQueue) != 0 {
-		t.Fatalf("expected queue to be empty, got %d", len(m.pendingQueue))
-	}
+	m.pendingQueue = &pendingPrompt{execLine: "first", displayLine: "first"}
 
 	_, _ = m.Update(keyPress(tea.KeyEscape))
 	if !interrupted {
-		t.Fatal("expected interrupt once queue is empty")
+		t.Fatal("expected interrupt even when stale pending queue state exists")
 	}
 }
 
@@ -3426,12 +3396,12 @@ func TestCtrlCWhileRunningShowsEscHint(t *testing.T) {
 	}
 }
 
-func TestEnterQueuesMessageWhileRunningAndAutoDispatchesOnTaskResult(t *testing.T) {
+func TestEnterSubmitsMessageWhileRunning(t *testing.T) {
 	var called []string
 	m := NewModel(Config{
 		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
 			called = append(called, strings.TrimSpace(submission.Text))
-			return tuievents.TaskResultMsg{}
+			return tuievents.TaskResultMsg{ContinueRunning: true}
 		},
 	})
 	resizeModel(m)
@@ -3439,35 +3409,143 @@ func TestEnterQueuesMessageWhileRunningAndAutoDispatchesOnTaskResult(t *testing.
 	m.running = true
 	typeRunes(m, "queued message")
 	_, cmd := m.Update(keyPress(tea.KeyEnter))
-	if cmd != nil {
-		t.Fatal("expected no immediate command when queueing during running")
-	}
-	if len(m.pendingQueue) != 1 {
-		t.Fatalf("expected 1 queued message, got %d", len(m.pendingQueue))
+	if cmd == nil {
+		t.Fatal("expected immediate submit command while running")
 	}
 	if got := m.textarea.Value(); got != "" {
-		t.Fatalf("expected input cleared after queueing, got %q", got)
+		t.Fatalf("expected input cleared after submit, got %q", got)
 	}
 	if !m.running {
 		t.Fatal("expected model to remain running after queueing")
 	}
 
-	_, cmd = m.Update(tuievents.TaskResultMsg{})
-	if cmd == nil {
-		t.Fatal("expected auto-dispatch command after task result")
-	}
 	msg := cmd()
 	if msg == nil {
 		t.Fatal("expected non-nil command message")
 	}
 	if !findAndRunTaskResult(msg, m) {
-		t.Fatal("expected TaskResultMsg in auto-dispatch command")
+		t.Fatal("expected TaskResultMsg in running submit command")
 	}
 	if len(called) != 1 || called[0] != "queued message" {
-		t.Fatalf("expected queued message to be executed, got %+v", called)
+		t.Fatalf("expected running message to be executed, got %+v", called)
 	}
-	if len(m.pendingQueue) != 0 {
-		t.Fatalf("expected pending queue drained, got %d", len(m.pendingQueue))
+	if len(m.historyLines) != 0 {
+		t.Fatalf("expected running submit not to commit user line before runtime ack, got %+v", m.historyLines)
+	}
+	if m.pendingQueue == nil || m.pendingQueue.displayLine != "queued message" {
+		t.Fatalf("expected pending queue to show queued message, got %+v", m.pendingQueue)
+	}
+}
+
+func TestEnterWhileRunningShowsHintWhenReplacingPendingMessage(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		},
+	})
+	resizeModel(m)
+
+	m.running = true
+	m.pendingQueue = &pendingPrompt{execLine: "old message", displayLine: "old message"}
+	typeRunes(m, "new message")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected immediate submit command while running")
+	}
+	if !strings.Contains(strings.ToLower(m.hint), "replaced pending") {
+		t.Fatalf("expected replacement hint, got %q", m.hint)
+	}
+	if m.pendingQueue == nil || m.pendingQueue.displayLine != "new message" {
+		t.Fatalf("expected pending queue to keep latest message, got %+v", m.pendingQueue)
+	}
+}
+
+func TestUserMessageMsgCommitsPendingUserLine(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		},
+	})
+	resizeModel(m)
+
+	m.running = true
+	typeRunes(m, "queued message")
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected submit command")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected running task result")
+	}
+	if m.pendingQueue == nil {
+		t.Fatalf("expected pending queue entry, got nil")
+	}
+
+	_, _ = m.Update(tuievents.UserMessageMsg{Text: "queued message"})
+
+	if m.pendingQueue != nil {
+		t.Fatalf("expected pending queue cleared after commit, got %+v", m.pendingQueue)
+	}
+	if len(m.historyLines) == 0 {
+		t.Fatal("expected committed user line after runtime ack")
+	}
+	got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1]))
+	if got != "> queued message" {
+		t.Fatalf("expected committed user line, got %q", got)
+	}
+}
+
+func TestInputAreaBoundsAccountsForPlanDrawer(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.planEntries = []planEntryState{
+		{Content: "step 1", Status: "pending"},
+		{Content: "step 2", Status: "pending"},
+	}
+	startY, _, ok := m.inputAreaBounds()
+	if !ok {
+		t.Fatal("expected input area bounds")
+	}
+	layout := m.fixedRowLayout()
+	if startY <= layout.headerY {
+		t.Fatalf("expected input area below header when plan drawer visible, got input=%d header=%d", startY, layout.headerY)
+	}
+	if got, want := layout.hintY, m.viewport.Height()+2+m.planSectionHeight(); got != want {
+		t.Fatalf("unexpected hint row position with plan drawer, got=%d want=%d", got, want)
+	}
+}
+
+func TestCursorPositionAccountsForPendingQueueDrawer(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.pendingQueue = &pendingPrompt{execLine: "queued", displayLine: "queued"}
+
+	view := m.View()
+	if view.Cursor == nil {
+		t.Fatal("expected visible input cursor")
+	}
+
+	lines := strings.Split(ansi.Strip(view.Content), "\n")
+	inputLine := strings.TrimSpace(m.inputPlainLines()[0])
+	if inputLine == "" {
+		t.Fatal("expected non-empty input line")
+	}
+	expectedY := -1
+	for idx, line := range lines {
+		if strings.TrimSpace(line) == inputLine {
+			expectedY = idx
+			break
+		}
+	}
+	if expectedY < 0 {
+		t.Fatalf("failed to locate input line %q in rendered view", inputLine)
+	}
+	if got := view.Cursor.Position.Y; got != expectedY {
+		start := maxInt(0, expectedY-4)
+		end := minInt(len(lines), expectedY+3)
+		t.Fatalf("expected cursor Y to match input line with pending drawer, got %d want %d; lines=%q", got, expectedY, lines[start:end])
 	}
 }
 
@@ -3481,8 +3559,8 @@ func TestEnterSlashWhileRunningDoesNotQueue(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected hint auto-clear cmd for slash while running")
 	}
-	if len(m.pendingQueue) != 0 {
-		t.Fatalf("expected no queued message for slash command, got %d", len(m.pendingQueue))
+	if m.pendingQueue != nil {
+		t.Fatalf("expected no queued message for slash command, got %+v", m.pendingQueue)
 	}
 	if got := m.textarea.Value(); got != "/help" {
 		t.Fatalf("expected slash input kept for user edit, got %q", got)

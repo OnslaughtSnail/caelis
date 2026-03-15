@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"strings"
 	"sync"
@@ -105,6 +106,10 @@ type scriptedRuntimeLLM struct {
 	run  func(*model.Request) (*model.Response, error)
 }
 
+type manyAssistantEventsAgent struct {
+	count int
+}
+
 func (a *blockingAgent) Name() string { return "blocking" }
 func (a *blockingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
@@ -149,6 +154,41 @@ func (l *scriptedRuntimeLLM) Generate(ctx context.Context, req *model.Request) i
 	}
 }
 
+func (a manyAssistantEventsAgent) Name() string { return "many-assistant-events" }
+func (a manyAssistantEventsAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	_ = ctx
+	return func(yield func(*session.Event, error) bool) {
+		for i := 0; i < a.count; i++ {
+			if !yield(&session.Event{
+				Message: model.Message{
+					Role: model.RoleAssistant,
+					Text: fmt.Sprintf("msg-%04d", i),
+				},
+			}, nil) {
+				return
+			}
+		}
+	}
+}
+
+func runEvents(t *testing.T, rt *Runtime, ctx context.Context, req RunRequest) iter.Seq2[*session.Event, error] {
+	t.Helper()
+	runner, err := rt.Run(ctx, req)
+	if err != nil {
+		return func(yield func(*session.Event, error) bool) {
+			yield(nil, err)
+		}
+	}
+	return func(yield func(*session.Event, error) bool) {
+		defer runner.Close()
+		for ev, runErr := range runner.Events() {
+			if !yield(ev, runErr) {
+				return
+			}
+		}
+	}
+}
+
 func TestRuntime_Run(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})
@@ -157,7 +197,7 @@ func TestRuntime_Run(t *testing.T) {
 	}
 	llm := newRuntimeTestLLM("fake")
 	var events []*session.Event
-	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s",
@@ -192,6 +232,62 @@ func TestRuntime_Run(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunnerEvents_ReplaysAllDroppedDurablePages(t *testing.T) {
+	const assistantCount = replayFetchLimit + 300
+
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-replay-pages"}
+
+	runner, err := rt.Run(context.Background(), RunRequest{
+		AppName:   sess.AppName,
+		UserID:    sess.UserID,
+		SessionID: sess.ID,
+		Input:     "hello",
+		Agent: manyAssistantEventsAgent{
+			count: assistantCount,
+		},
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		events, listErr := store.ListEvents(context.Background(), sess)
+		if listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(events) >= assistantCount+1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for persisted events, got %d", len(events))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	gotAssistant := 0
+	for ev, runErr := range runner.Events() {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.Role == model.RoleAssistant && strings.HasPrefix(ev.Message.Text, "msg-") {
+			gotAssistant++
+		}
+	}
+	if gotAssistant != assistantCount {
+		t.Fatalf("expected %d assistant messages from replay, got %d", assistantCount, gotAssistant)
+	}
+}
+
 func TestRuntimeRunPreservesProvidedContentPartOrder(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})
@@ -206,7 +302,7 @@ func TestRuntimeRunPreservesProvidedContentPartOrder(t *testing.T) {
 		{Type: model.ContentPartText, Text: "这两个是什么APP?"},
 	}
 
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:      "app",
 		UserID:       "u",
 		SessionID:    "s-order",
@@ -249,7 +345,7 @@ func TestRuntimeRunPrependsInputWhenContentPartsHaveNoText(t *testing.T) {
 		{Type: model.ContentPartImage, FileName: "only.png", Data: "a"},
 	}
 
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:      "app",
 		UserID:       "u",
 		SessionID:    "s-input-prefix",
@@ -290,7 +386,7 @@ func TestRuntime_RunState_UsesInMemoryLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := newRuntimeTestLLM("fake")
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-state",
@@ -328,7 +424,7 @@ func TestRuntime_Run_ApprovalRequiredLifecycle(t *testing.T) {
 	llm := newRuntimeTestLLM("fake")
 	var events []*session.Event
 	var gotErr error
-	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-approval-required",
@@ -364,7 +460,7 @@ func TestRuntime_Run_ApprovalAbortedLifecycle(t *testing.T) {
 	llm := newRuntimeTestLLM("fake")
 	var events []*session.Event
 	var gotErr error
-	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-approval-aborted",
@@ -449,7 +545,7 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 	runCtx := sessionstream.WithStreamer(context.Background(), sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
 		liveUpdates = append(liveUpdates, update)
 	}))
-	for ev, runErr := range rt.Run(runCtx, RunRequest{
+	for ev, runErr := range runEvents(t, rt, runCtx, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "parent-session",
@@ -732,7 +828,7 @@ func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
 
 	var events []*session.Event
 	var gotErr error
-	for ev, runErr := range rt.Run(context.Background(), RunRequest{
+	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-setup-failed",
@@ -764,7 +860,7 @@ func TestRuntime_InjectsCoreReadTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := newRuntimeTestLLM("fake")
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-read",
@@ -786,7 +882,7 @@ func TestRuntime_ContextUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := newRuntimeTestLLM("fake")
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-usage",
@@ -870,6 +966,56 @@ func TestDetachedSubagentPanicPersistsFailedLifecycle(t *testing.T) {
 	}
 }
 
+func TestDetachedSubagentStartupFailurePersistsFailedLifecycle(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &runtimeSubagentRunner{
+		runtime: rt,
+		parent:  &session.Session{AppName: "app", UserID: "u", ID: "parent"},
+		req: RunRequest{
+			AppName:   "app",
+			UserID:    "u",
+			Model:     newRuntimeTestLLM("fake"),
+			CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+		},
+	}
+	childReq := RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "child-startup-failure",
+		Input:     "hello",
+		Model:     newRuntimeTestLLM("fake"),
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}
+
+	runner.runDetachedSubagent(context.Background(), childReq, delegationLineage{
+		ParentSessionID: "parent",
+		ChildSessionID:  "child-startup-failure",
+		DelegationID:    "dlg-startup-failure",
+	})
+
+	state, err := rt.RunState(context.Background(), RunStateRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "child-startup-failure",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.HasLifecycle || state.Status != RunLifecycleStatusFailed {
+		t.Fatalf("expected failed lifecycle after detached startup failure, got %+v", state)
+	}
+	if state.Phase != "delegate_panic" {
+		t.Fatalf("expected delegate_panic phase for detached startup failure, got %+v", state)
+	}
+	if !strings.Contains(state.Error, "runtime: agent is nil") {
+		t.Fatalf("expected startup failure recorded, got %+v", state)
+	}
+}
+
 func TestRuntime_ContextUsage_MissingSessionReturnsEmpty(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})
@@ -925,7 +1071,7 @@ func TestRuntime_Run_SessionSingleFlight(t *testing.T) {
 	firstRunDone := make(chan struct{})
 	go func() {
 		defer close(firstRunDone)
-		for _, runErr := range rt.Run(context.Background(), RunRequest{
+		for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 			AppName:   "app",
 			UserID:    "u",
 			SessionID: "s-single-flight",
@@ -942,7 +1088,7 @@ func TestRuntime_Run_SessionSingleFlight(t *testing.T) {
 	<-agent1.started
 
 	var gotErr error
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-single-flight",
@@ -976,7 +1122,7 @@ func TestRuntime_Run_CleansUpTurnScopedBackgroundTasks(t *testing.T) {
 	}
 	llm := newRuntimeTestLLM("fake")
 	agent := &backgroundBashAgent{}
-	for _, runErr := range rt.Run(context.Background(), RunRequest{
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-cleanup",

@@ -36,6 +36,12 @@ type Store interface {
 	ReplaceState(context.Context, *Session, map[string]any) error
 }
 
+// CursorStore optionally exposes cursor-based event replay for efficient
+// durable stream recovery.
+type CursorStore interface {
+	ListEventsAfter(context.Context, *Session, string, int) ([]*Event, string, error)
+}
+
 // StateUpdateStore optionally exposes an atomic read-modify-write state update.
 // Implementations should ensure the updater observes a consistent snapshot and
 // that unrelated keys are preserved across concurrent updates.

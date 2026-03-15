@@ -30,6 +30,18 @@ type runRenderConfig struct {
 
 func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, renderCfg runRenderConfig) error {
 	invokeCtx := ctx
+	runner, err := rt.Run(invokeCtx, req)
+	if err != nil {
+		return err
+	}
+	defer runner.Close()
+	return runRunner(runner, renderCfg)
+}
+
+func runRunner(runner runtime.Runner, renderCfg runRenderConfig) error {
+	if runner == nil {
+		return fmt.Errorf("runtime: runner is nil")
+	}
 	out := renderCfg.Writer
 	if out == nil {
 		out = os.Stdout
@@ -41,7 +53,7 @@ func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, r
 		ui:               renderCfg.UI,
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
-	for ev, err := range rt.Run(invokeCtx, req) {
+	for ev, err := range runner.Events() {
 		if err != nil {
 			return err
 		}

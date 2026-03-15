@@ -84,6 +84,7 @@ type cliConsole struct {
 
 	runMu           sync.Mutex
 	activeRunCancel context.CancelFunc
+	activeRunner    runtime.Runner
 	interruptMu     sync.Mutex
 	lastInterruptAt time.Time
 	outMu           sync.Mutex
@@ -421,6 +422,18 @@ func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp
 	if err != nil {
 		return err
 	}
+	submission := runtime.Submission{
+		Text:         runInput,
+		ContentParts: append([]model.ContentPart(nil), contentParts...),
+		Mode:         runtime.SubmissionConversation,
+	}
+	if runner := c.getActiveRunner(); runner != nil {
+		// Submit to the existing runner for prompt queue-jumping. The runner
+		// is still active, so we must not close it on error — the owner
+		// goroutine is responsible for its lifecycle.
+		return runner.Submit(submission)
+	}
+
 	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
 	if c.tuiSender != nil {
@@ -458,13 +471,8 @@ func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp
 		}))
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	c.setActiveRunCancel(cancel)
-	defer func() {
-		c.clearActiveRunCancel()
-		cancel()
-	}()
 	pendingTUIToolCalls := map[string]toolCallSnapshot{}
-	return runOnce(runCtx, c.rt, runtime.RunRequest{
+	runner, err := c.rt.Run(runCtx, runtime.RunRequest{
 		AppName:             c.appName,
 		UserID:              c.userID,
 		SessionID:           c.sessionID,
@@ -476,7 +484,18 @@ func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp
 		CoreTools:           tool.CoreToolsConfig{Runtime: c.execRuntime},
 		Policies:            c.resolved.Policies,
 		ContextWindowTokens: c.contextWindow,
-	}, runRenderConfig{
+	})
+	if err != nil {
+		cancel()
+		return err
+	}
+	c.setActiveRun(cancel, runner)
+	defer func() {
+		c.clearActiveRun()
+		cancel()
+		_ = runner.Close() // Close always returns nil; safe to ignore.
+	}()
+	return runRunner(runner, runRenderConfig{
 		ShowReasoning: c.showReasoning,
 		Verbose:       c.ui.verbose,
 		Writer:        c.out,
@@ -605,6 +624,13 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		// Keep assistant rendering deterministic, even for mixed assistant+toolcall events.
 		c.emitAssistantEventToTUI(ev)
 		handled = true
+	}
+	if msg.Role == model.RoleUser {
+		userText := visibleUserText(msg)
+		if userText != "" {
+			c.tuiSender.Send(tuievents.UserMessageMsg{Text: userText})
+			return true
+		}
 	}
 	if len(msg.ToolCalls) > 0 {
 		for _, call := range msg.ToolCalls {
@@ -808,16 +834,32 @@ func decodePlanEntries(in any, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-func (c *cliConsole) setActiveRunCancel(cancel context.CancelFunc) {
+func (c *cliConsole) setActiveRun(cancel context.CancelFunc, runner runtime.Runner) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	c.activeRunCancel = cancel
+	c.activeRunner = runner
 }
 
-func (c *cliConsole) clearActiveRunCancel() {
+func (c *cliConsole) clearActiveRun() {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	c.activeRunCancel = nil
+	c.activeRunner = nil
+}
+
+func (c *cliConsole) setActiveRunCancel(cancel context.CancelFunc) {
+	c.setActiveRun(cancel, nil)
+}
+
+func (c *cliConsole) clearActiveRunCancel() {
+	c.clearActiveRun()
+}
+
+func (c *cliConsole) getActiveRunner() runtime.Runner {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return c.activeRunner
 }
 
 func (c *cliConsole) cancelActiveRun() bool {
@@ -1552,7 +1594,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 		if msg.Role == model.RoleUser {
 			userText := visibleUserText(msg)
 			if userText != "" {
-				c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("> %s\n", userText)})
+				c.tuiSender.Send(tuievents.UserMessageMsg{Text: userText})
 			}
 			continue
 		}

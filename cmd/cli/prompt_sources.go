@@ -48,7 +48,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 	warnings = append(warnings, discovered.Warnings...)
 
-	additional := make([]promptpipeline.PromptFragment, 0, 3)
+	additional := make([]promptpipeline.PromptFragment, 0, 4)
 	if activePolicies := buildActiveAgentPoliciesPrompt(globalAgents, workspaceAgents, workspaceAgentsPath); activePolicies != "" {
 		additional = append(additional, promptpipeline.PromptFragment{
 			Stage:   "active_agent_policies",
@@ -61,6 +61,13 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Stage:   "session_overrides",
 			Source:  "cli:session-overrides",
 			Content: sessionOverrides,
+		})
+	}
+	if workspaceContext := builtInWorkspaceContextPrompt(workspaceDir); workspaceContext != "" {
+		additional = append(additional, promptpipeline.PromptFragment{
+			Stage:   "workspace_context",
+			Source:  "cli:workspace-context",
+			Content: workspaceContext,
 		})
 	}
 	if in.EnableExperimentalLSPPrompt {

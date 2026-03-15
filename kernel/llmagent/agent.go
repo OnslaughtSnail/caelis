@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"sort"
 	"strings"
 	"time"
 
@@ -64,13 +63,46 @@ func (a *Agent) Name() string {
 }
 
 type agentRunState struct {
-	hooks             []policy.Hook
-	lastCallSig       string
-	consecutiveDupCnt int
+	hooks []policy.Hook
 }
 
-type eventRecorder interface {
-	recordVisibleEvent(*session.Event)
+type legacyRunContext struct {
+	agent.InvocationContext
+	recorded []*session.Event
+}
+
+func (c *legacyRunContext) Events() session.Events {
+	base := make([]*session.Event, 0, c.InvocationContext.Events().Len()+len(c.recorded))
+	seen := make(map[string]struct{}, c.InvocationContext.Events().Len()+len(c.recorded))
+	for ev := range c.InvocationContext.Events().All() {
+		if ev != nil {
+			base = append(base, ev)
+			if id := strings.TrimSpace(ev.ID); id != "" {
+				seen[id] = struct{}{}
+			}
+		}
+	}
+	for _, ev := range c.recorded {
+		if ev == nil {
+			continue
+		}
+		if id := strings.TrimSpace(ev.ID); id != "" {
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+		}
+		base = append(base, ev)
+	}
+	return session.NewEvents(base)
+}
+
+func (c *legacyRunContext) appendRecordedEvent(ev *session.Event) {
+	if ev == nil {
+		return
+	}
+	cp := *ev
+	c.recorded = append(c.recorded, &cp)
 }
 
 func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -79,11 +111,18 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 			yield(nil, err)
 			return
 		}
-		state := agentRunState{
-			hooks: ctx.Policies(),
-		}
+		runCtx := &legacyRunContext{InvocationContext: ctx}
+		state := agentRunState{hooks: ctx.Policies()}
 		for {
-			done, err := a.runOneTurn(ctx, &state, yield)
+			done, nextState, err := a.step(runCtx, state, func(ev *session.Event, err error) bool {
+				if !yield(ev, err) {
+					return false
+				}
+				if err == nil && ev != nil {
+					runCtx.appendRecordedEvent(ev)
+				}
+				return true
+			})
 			if errors.Is(err, errYieldStopped) || errors.Is(err, errStopAfterYieldedError) {
 				return
 			}
@@ -91,11 +130,30 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 				yield(nil, err)
 				return
 			}
+			state = nextState
 			if done {
 				return
 			}
 		}
 	}
+}
+
+func (a *Agent) step(
+	ctx agent.InvocationContext,
+	state agentRunState,
+	yield func(*session.Event, error) bool,
+) (bool, agentRunState, error) {
+	if err := validateInvocationContext(ctx); err != nil {
+		return false, state, err
+	}
+	if len(state.hooks) == 0 {
+		state.hooks = ctx.Policies()
+	}
+	done, err := a.runOneTurn(ctx, &state, yield)
+	if err != nil {
+		return false, state, err
+	}
+	return done, state, nil
 }
 
 func validateInvocationContext(ctx agent.InvocationContext) error {
@@ -237,7 +295,6 @@ func (a *Agent) emitAssistantTurn(
 	if !yield(assistantEvent, nil) {
 		return model.Message{}, errYieldStopped
 	}
-	recordVisibleEvent(ctx, assistantEvent)
 	return assistantMsg, nil
 }
 
@@ -264,34 +321,9 @@ func (a *Agent) executeToolCall(
 	args, argErr := resolveToolCallArgs(call)
 	if argErr != nil {
 		// All arg-parse errors are fed back to the model as tool responses
-		// so the model can self-correct, unless the call ID is empty (malformed)
-		// or we detect a duplicate loop.
+		// so the model can self-correct, unless the call ID is empty (malformed).
 		if strings.TrimSpace(call.ID) == "" {
 			return fmt.Errorf("llmagent: invalid tool call %q arguments: %w", call.Name, argErr)
-		}
-		sig := toolArgParseErrorSignature(call)
-		if duplicateGuardEnabled(call.Name, nil) && sig == state.lastCallSig {
-			state.consecutiveDupCnt++
-		} else {
-			state.lastCallSig = sig
-			state.consecutiveDupCnt = 1
-		}
-		if duplicateGuardEnabled(call.Name, nil) && state.consecutiveDupCnt > 2 {
-			errMsg := fmt.Sprintf("duplicate tool call detected for %q", call.Name)
-			toolMsg := model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:     call.ID,
-					Name:   call.Name,
-					Result: map[string]any{"error": errMsg},
-				},
-			}
-			ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
-			if !yield(ev, nil) {
-				return errYieldStopped
-			}
-			recordVisibleEvent(ctx, ev)
-			return fmt.Errorf("llmagent: %s", errMsg)
 		}
 		result := toolArgParseErrorResult(call, argErr)
 		toolMsg := model.Message{
@@ -306,36 +338,7 @@ func (a *Agent) executeToolCall(
 		if !yield(ev, nil) {
 			return errYieldStopped
 		}
-		recordVisibleEvent(ctx, ev)
 		return nil
-	}
-
-	sig, sigErr := toolCallSignature(call.Name, args)
-	if sigErr != nil {
-		return sigErr
-	}
-	if duplicateGuardEnabled(call.Name, args) && sig == state.lastCallSig {
-		state.consecutiveDupCnt++
-	} else {
-		state.lastCallSig = sig
-		state.consecutiveDupCnt = 1
-	}
-	if duplicateGuardEnabled(call.Name, args) && state.consecutiveDupCnt > 2 {
-		errMsg := fmt.Sprintf("duplicate tool call detected for %q", call.Name)
-		toolMsg := model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     call.ID,
-				Name:   call.Name,
-				Result: map[string]any{"error": errMsg},
-			},
-		}
-		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
-		if !yield(ev, nil) {
-			return errYieldStopped
-		}
-		recordVisibleEvent(ctx, ev)
-		return fmt.Errorf("llmagent: %s", errMsg)
 	}
 
 	capability := toolcap.Capability{Risk: toolcap.RiskUnknown}
@@ -412,20 +415,7 @@ func (a *Agent) executeToolCall(
 	if !yield(ev, nil) {
 		return errYieldStopped
 	}
-	recordVisibleEvent(ctx, ev)
 	return nil
-}
-
-func recordVisibleEvent(ctx agent.InvocationContext, ev *session.Event) {
-	if ev == nil {
-		return
-	}
-	recorder, ok := any(ctx).(eventRecorder)
-	if !ok {
-		return
-	}
-	cp := *ev
-	recorder.recordVisibleEvent(&cp)
 }
 
 func toMessages(events []*session.Event, systemPrompt string) []model.Message {
@@ -521,10 +511,6 @@ func resolveToolCallArgs(call model.ToolCall) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	return model.ParseToolCallArgs(raw)
-}
-
-func toolArgParseErrorSignature(call model.ToolCall) string {
-	return "parse_error:" + strings.TrimSpace(call.Name) + ":" + strings.TrimSpace(call.Args)
 }
 
 func toolArgParseErrorResult(call model.ToolCall, err error) map[string]any {
@@ -662,6 +648,9 @@ func (a *Agent) generateWithRetry(
 		if errors.Is(err, errYieldStopped) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
+		if isNonRetryableHTTPError(err) {
+			return nil, err
+		}
 		policy := retryPolicyForError(err)
 		if retries >= policy.maxRetries {
 			if policy.rateLimited {
@@ -753,6 +742,49 @@ func isRateLimitError(err error) bool {
 		strings.Contains(text, "too many requests")
 }
 
+func isNonRetryableHTTPError(err error) bool {
+	status, ok := httpStatusCodeFromError(err)
+	if !ok {
+		return false
+	}
+	if status < 400 || status >= 500 {
+		return false
+	}
+	switch status {
+	case 408, 409, 429:
+		return false
+	default:
+		return true
+	}
+}
+
+func httpStatusCodeFromError(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	text := strings.TrimSpace(err.Error())
+	idx := strings.Index(strings.ToLower(text), "http status ")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := text[idx+len("http status "):]
+	if rest == "" {
+		return 0, false
+	}
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, false
+	}
+	var status int
+	if _, scanErr := fmt.Sscanf(rest[:end], "%d", &status); scanErr != nil || status <= 0 {
+		return 0, false
+	}
+	return status, true
+}
+
 func retryWarningText(attempt int, maxRetries int, delay time.Duration, cause error) string {
 	if isRateLimitError(cause) {
 		return fmt.Sprintf(
@@ -800,13 +832,7 @@ func summarizeRetryBody(body string) string {
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		return ""
 	}
-	detail := firstString(payload["detail"], payload["message"])
-	errPayload, _ := payload["error"].(map[string]any)
-	errMessage := firstString(errPayload["message"])
-	errType := firstString(errPayload["type"], errPayload["code"])
-	if detail == "" {
-		detail = errMessage
-	}
+	detail, errType := extractRetryErrorDetails(payload)
 	if detail == "" {
 		return errType
 	}
@@ -814,6 +840,44 @@ func summarizeRetryBody(body string) string {
 		return detail
 	}
 	return detail + " [" + errType + "]"
+}
+
+func extractRetryErrorDetails(payload map[string]any) (detail string, errType string) {
+	if len(payload) == 0 {
+		return "", ""
+	}
+	detail = firstString(payload["detail"], payload["message"], payload["error_description"])
+	errPayload, _ := payload["error"].(map[string]any)
+	metadata, _ := errPayload["metadata"].(map[string]any)
+	if detail == "" {
+		detail = firstString(
+			errPayload["message"],
+			metadata["reason"],
+			metadata["raw_message"],
+			metadata["raw_error"],
+		)
+	}
+	if raw := firstString(metadata["raw"]); raw != "" {
+		rawDetail := summarizeRetryBody(raw)
+		if detail == "" || strings.EqualFold(detail, "provider returned error") {
+			detail = rawDetail
+		}
+	}
+	errType = firstString(
+		errPayload["type"],
+		errPayload["code"],
+		payload["code"],
+		metadata["provider_name"],
+		metadata["upstream_provider"],
+	)
+	if provider := firstString(metadata["provider_name"], metadata["upstream_provider"]); provider != "" && detail != "" {
+		lowerDetail := strings.ToLower(detail)
+		lowerProvider := strings.ToLower(provider)
+		if !strings.Contains(lowerDetail, lowerProvider) {
+			detail += " (provider: " + provider + ")"
+		}
+	}
+	return detail, errType
 }
 
 func firstString(values ...any) string {
@@ -859,40 +923,6 @@ func shouldSuppressInterruptedResponseWarning(err *interruptedModelResponseError
 		return false
 	}
 	return errors.Is(err.cause, context.Canceled) || errors.Is(err.cause, context.DeadlineExceeded)
-}
-
-func toolCallSignature(name string, args map[string]any) (string, error) {
-	norm := normalize(args)
-	raw, err := json.Marshal(norm)
-	if err != nil {
-		return "", err
-	}
-	return name + ":" + string(raw), nil
-}
-
-func duplicateGuardEnabled(name string, args map[string]any) bool {
-	switch strings.ToUpper(strings.TrimSpace(name)) {
-	case "TASK":
-		return false
-	default:
-		return true
-	}
-}
-
-func normalize(input map[string]any) any {
-	if input == nil {
-		return nil
-	}
-	keys := make([]string, 0, len(input))
-	for k := range input {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := make([]any, 0, len(keys)*2)
-	for _, k := range keys {
-		out = append(out, k, input[k])
-	}
-	return out
 }
 
 func newEventID() string {

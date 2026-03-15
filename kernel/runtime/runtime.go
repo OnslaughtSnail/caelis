@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"iter"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -77,9 +75,6 @@ type RunRequest struct {
 	ContextWindowTokens  int
 }
 
-type runErrorEmitter func(error) bool
-type runEventYielder func(*session.Event, error) bool
-
 func validateRunRequest(req RunRequest) error {
 	if req.Agent == nil {
 		return fmt.Errorf("runtime: agent is nil")
@@ -93,156 +88,8 @@ func validateRunRequest(req RunRequest) error {
 	return nil
 }
 
-func (r *Runtime) Run(ctx context.Context, req RunRequest) iter.Seq2[*session.Event, error] {
-	return func(yield func(*session.Event, error) bool) {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		yieldWithStream := func(ev *session.Event, err error) bool {
-			if ev != nil {
-				sessionstream.Emit(ctx, ev.SessionID, ev)
-			}
-			return yield(ev, err)
-		}
-		if err := validateRunRequest(req); err != nil {
-			yieldWithStream(nil, err)
-			return
-		}
-		leaseKey := runLeaseKey(req.AppName, req.UserID, req.SessionID)
-		if !r.acquireRunLease(leaseKey) {
-			yieldWithStream(nil, &SessionBusyError{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID})
-			return
-		}
-		defer r.releaseRunLease(leaseKey)
-
-		if _, err := r.ReconcileSession(ctx, ReconcileSessionRequest{
-			AppName:     req.AppName,
-			UserID:      req.UserID,
-			SessionID:   req.SessionID,
-			ExecRuntime: req.CoreTools.Runtime,
-		}); err != nil {
-			yieldWithStream(nil, err)
-			return
-		}
-
-		sess, err := r.store.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
-		if err != nil {
-			yieldWithStream(nil, err)
-			return
-		}
-		if !r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusRunning, "run", nil, yieldWithStream) {
-			return
-		}
-		emitRunError := func(err error) bool {
-			if err == nil {
-				return true
-			}
-			status := lifecycleStatusForError(err)
-			if !r.appendAndYieldLifecycle(ctx, sess, status, "run", err, yieldWithStream) {
-				return false
-			}
-			return yieldWithStream(nil, err)
-		}
-
-		allEvents, ok := r.prepareRunContext(ctx, sess, req, emitRunError, yieldWithStream)
-		if !ok {
-			return
-		}
-		inv, err := r.buildInvocationContext(ctx, sess, req, allEvents)
-		if err != nil {
-			if !emitRunError(err) {
-				return
-			}
-			return
-		}
-		defer func() {
-			if inv == nil || inv.tasks == nil {
-				return
-			}
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			inv.tasks.cleanupTurn(cleanupCtx)
-		}()
-		if !r.runAgentExecution(ctx, sess, req, inv, emitRunError, yieldWithStream) {
-			return
-		}
-	}
-}
-
-func (r *Runtime) prepareRunContext(
-	ctx context.Context,
-	sess *session.Session,
-	req RunRequest,
-	emitRunError runErrorEmitter,
-	yield runEventYielder,
-) ([]*session.Event, bool) {
-	existing, err := r.listContextWindowEvents(ctx, sess)
-	if err != nil {
-		emitRunError(err)
-		return nil, false
-	}
-	recoveryEvents := buildRecoveryEvents(existing)
-	for _, recoveryEvent := range recoveryEvents {
-		if recoveryEvent == nil {
-			continue
-		}
-		prepareEvent(ctx, sess, recoveryEvent)
-		if err := r.store.AppendEvent(ctx, sess, recoveryEvent); err != nil {
-			emitRunError(err)
-			return nil, false
-		}
-		if !yield(recoveryEvent, nil) {
-			return nil, false
-		}
-	}
-	userMsg := model.Message{Role: model.RoleUser, Text: req.Input}
-	if len(req.ContentParts) > 0 {
-		userMsg.ContentParts = prepareUserContentParts(req.Input, req.ContentParts)
-	}
-	userEvent := &session.Event{
-		Message: userMsg,
-	}
-	prepareEvent(ctx, sess, userEvent)
-	if err := r.store.AppendEvent(ctx, sess, userEvent); err != nil {
-		emitRunError(err)
-		return nil, false
-	}
-	if !yield(userEvent, nil) {
-		return nil, false
-	}
-	allEvents, err := r.listContextWindowEvents(ctx, sess)
-	if err != nil {
-		emitRunError(err)
-		return nil, false
-	}
-	compactionEvent, compactErr := r.compactIfNeededWithNotify(ctx, compactInput{
-		Session:             sess,
-		Model:               req.Model,
-		Events:              allEvents,
-		ContextWindowTokens: req.ContextWindowTokens,
-		Trigger:             triggerAuto,
-		Force:               false,
-	}, func(ev *session.Event) bool {
-		if ev == nil {
-			return true
-		}
-		return yield(ev, nil)
-	})
-	if compactErr != nil {
-		emitRunError(compactErr)
-		return nil, false
-	}
-	if compactionEvent != nil {
-		if !yield(compactionEvent, nil) {
-			return nil, false
-		}
-		allEvents, err = r.listContextWindowEvents(ctx, sess)
-		if err != nil {
-			emitRunError(err)
-			return nil, false
-		}
-	}
-	return allEvents, true
+func (r *Runtime) Run(ctx context.Context, req RunRequest) (Runner, error) {
+	return r.newRunner(ctx, req)
 }
 
 func prepareUserContentParts(input string, parts []model.ContentPart) []model.ContentPart {
@@ -330,83 +177,6 @@ func (r *Runtime) snapshotReadonlyState(ctx context.Context, sess *session.Sessi
 		return nil, err
 	}
 	return session.NewReadonlyState(values), nil
-}
-
-func (r *Runtime) runAgentExecution(
-	ctx context.Context,
-	sess *session.Session,
-	req RunRequest,
-	inv *invocationContext,
-	emitRunError runErrorEmitter,
-	yield runEventYielder,
-) bool {
-	for attempt := 0; attempt < 2; attempt++ {
-		retry := false
-		for ev, err := range req.Agent.Run(inv) {
-			if err != nil {
-				if attempt == 0 && isContextOverflowError(err) {
-					allEvents, listErr := r.listContextWindowEvents(ctx, sess)
-					if listErr != nil {
-						emitRunError(listErr)
-						return false
-					}
-					compactionEvent, compactErr := r.compactIfNeededWithNotify(ctx, compactInput{
-						Session:             sess,
-						Model:               req.Model,
-						Events:              allEvents,
-						ContextWindowTokens: req.ContextWindowTokens,
-						Trigger:             triggerOverflowRecovery,
-						Force:               true,
-					}, func(ev *session.Event) bool {
-						if ev == nil {
-							return true
-						}
-						return yield(ev, nil)
-					})
-					if compactErr != nil {
-						emitRunError(compactErr)
-						return false
-					}
-					if compactionEvent != nil {
-						if !yield(compactionEvent, nil) {
-							return false
-						}
-					}
-					if err := r.refreshInvocationState(ctx, sess, inv); err != nil {
-						emitRunError(err)
-						return false
-					}
-					retry = true
-					break
-				}
-				emitRunError(err)
-				return false
-			}
-			if ev == nil {
-				continue
-			}
-			prepareEvent(ctx, sess, ev)
-			if shouldPersistEvent(ev, req.PersistPartialEvents) {
-				if err := r.store.AppendEvent(ctx, sess, ev); err != nil {
-					emitRunError(err)
-					return false
-				}
-				if !isLifecycleEvent(ev) {
-					if err := r.refreshInvocationState(ctx, sess, inv); err != nil {
-						emitRunError(err)
-						return false
-					}
-				}
-			}
-			if !yield(ev, nil) {
-				return false
-			}
-		}
-		if !retry {
-			return r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusCompleted, "run", nil, yield)
-		}
-	}
-	return true
 }
 
 func runLeaseKey(appName, userID, sessionID string) string {

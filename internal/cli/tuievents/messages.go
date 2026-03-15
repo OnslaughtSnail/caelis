@@ -33,9 +33,10 @@ type SetRunningMsg struct {
 }
 
 type TaskResultMsg struct {
-	ExitNow     bool
-	Err         error
-	Interrupted bool
+	ExitNow         bool
+	Err             error
+	Interrupted     bool
+	ContinueRunning bool
 }
 
 type PromptRequestMsg struct {
@@ -89,6 +90,10 @@ type AttachmentCountMsg struct {
 
 // ClearHistoryMsg clears viewport conversation history in TUI.
 type ClearHistoryMsg struct{}
+
+type UserMessageMsg struct {
+	Text string
+}
 
 // AssistantStreamMsg carries assistant answer chunks for TUI block rendering.
 // When Final is true, Text is the full finalized assistant answer.

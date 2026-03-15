@@ -620,7 +620,7 @@ func TestServer_SessionModeAndConfigPersistAcrossLoad(t *testing.T) {
 		SessionID: newResp.SessionID,
 		ModeID:    "plan",
 	}, &SetSessionModeResponse{})
-	h.waitNotifications(t, 1)
+	h.waitNotificationTypes(t, UpdateCurrentMode)
 	if got := h.notificationTypes(); !containsAll(got, UpdateCurrentMode) {
 		t.Fatalf("expected current mode update, got %v", got)
 	}
@@ -635,7 +635,7 @@ func TestServer_SessionModeAndConfigPersistAcrossLoad(t *testing.T) {
 	if len(cfgResp.ConfigOptions) != 1 || cfgResp.ConfigOptions[0].CurrentValue != "off" {
 		t.Fatalf("unexpected config response %+v", cfgResp.ConfigOptions)
 	}
-	h.waitNotifications(t, 1)
+	h.waitNotificationTypes(t, UpdateConfigOption)
 	if got := h.notificationTypes(); !containsAll(got, UpdateConfigOption) {
 		t.Fatalf("expected config option update, got %v", got)
 	}
@@ -873,6 +873,7 @@ func TestServer_Prompt_CoalescesAssistantPartialsIntoFinalMessage(t *testing.T) 
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	h.resetNotifications()
 
 	var promptResp PromptResponse
 	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
@@ -883,7 +884,7 @@ func TestServer_Prompt_CoalescesAssistantPartialsIntoFinalMessage(t *testing.T) 
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
 
-	h.waitNotifications(t, 1)
+	h.waitNotificationTextCount(t, UpdateAgentMessage, 1)
 	texts := h.notificationTexts(UpdateAgentMessage)
 	if len(texts) != 1 || texts[0] != "hello" {
 		t.Fatalf("expected one coalesced assistant message, got %#v", texts)
@@ -911,6 +912,7 @@ func TestServer_Prompt_FinalMessageOnlyEmitsUnsentSuffixAfterFlush(t *testing.T)
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	h.resetNotifications()
 
 	var promptResp PromptResponse
 	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
@@ -921,7 +923,7 @@ func TestServer_Prompt_FinalMessageOnlyEmitsUnsentSuffixAfterFlush(t *testing.T)
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
 
-	h.waitNotifications(t, 2)
+	h.waitNotificationTextCount(t, UpdateAgentMessage, 2)
 	texts := h.notificationTexts(UpdateAgentMessage)
 	if len(texts) != 2 || !containsText(texts, prefix) || !containsText(texts, suffix) {
 		t.Fatalf("expected flushed prefix and final suffix, got %#v", texts)
@@ -948,6 +950,7 @@ func TestServer_Prompt_FlushesReasoningBeforeAnswerOnChannelSwitch(t *testing.T)
 	}, &InitializeResponse{})
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+	h.resetNotifications()
 
 	var promptResp PromptResponse
 	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
@@ -958,9 +961,9 @@ func TestServer_Prompt_FlushesReasoningBeforeAnswerOnChannelSwitch(t *testing.T)
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
 
-	h.waitNotifications(t, 4)
+	h.waitNotificationTypes(t, UpdateAgentThought, UpdateAgentMessage)
 	got := h.notificationTypes()
-	if len(got) < 4 {
+	if len(got) < 2 {
 		t.Fatalf("expected thought/message notifications, got %#v", got)
 	}
 	thoughtIdx := indexOfString(got, UpdateAgentThought)
@@ -1065,7 +1068,7 @@ func TestServer_PlanToolEmitsPlanUpdate(t *testing.T) {
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
 
-	h.waitNotifications(t, 4)
+	h.waitNotificationTypes(t, UpdateToolCall, UpdateToolCallState, UpdatePlan, UpdateAgentMessage)
 	if !containsAll(h.notificationTypes(), UpdateToolCall, UpdateToolCallState, UpdatePlan, UpdateAgentMessage) {
 		t.Fatalf("expected plan update in notifications, got %#v", h.notificationTypes())
 	}
@@ -1803,6 +1806,30 @@ func (h *harness) waitNotifications(t *testing.T, n int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	t.Fatalf("expected at least %d notifications, got %d", n, len(h.notifications))
+}
+
+func (h *harness) waitNotificationTypes(t *testing.T, want ...string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if containsAll(h.notificationTypes(), want...) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected notification types %v, got %v", want, h.notificationTypes())
+}
+
+func (h *harness) waitNotificationTextCount(t *testing.T, updateType string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(h.notificationTexts(updateType)) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected at least %d %s notifications, got %#v", n, updateType, h.notificationTexts(updateType))
 }
 
 func (h *harness) notificationTypes() []string {

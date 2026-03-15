@@ -44,13 +44,6 @@ func (c *testCtx) Policies() []policy.Hook { return c.policies }
 func (c *testCtx) SubagentRunner() delegation.Runner {
 	return c.runner
 }
-func (c *testCtx) recordVisibleEvent(ev *session.Event) {
-	if ev == nil {
-		return
-	}
-	cp := *ev
-	c.history = append(c.history, &cp)
-}
 
 type namedTool struct {
 	name string
@@ -632,6 +625,63 @@ func TestRetryWarningText_RateLimitIsFriendly(t *testing.T) {
 	}
 	if strings.Contains(text, `body={`) || strings.Contains(text, "USER_TPM_RATELIMITING") || strings.Contains(text, "用户请求TPM超限") {
 		t.Fatalf("expected no vendor-specific body dump in warning, got %q", text)
+	}
+}
+
+func TestRetryWarningText_OpenRouterMetadataIncludesProviderDetails(t *testing.T) {
+	text := retryWarningText(
+		4,
+		5,
+		8*time.Second,
+		errors.New(`model: http status 400 body={"error":{"message":"Provider returned error","metadata":{"provider_name":"hunter-alpha","raw":"{\"error\":{\"message\":\"context length exceeded\"}}"}}}`),
+	)
+	if !strings.Contains(text, "context length exceeded") {
+		t.Fatalf("expected nested provider detail surfaced, got %q", text)
+	}
+	if !strings.Contains(text, "provider: hunter-alpha") {
+		t.Fatalf("expected provider name surfaced, got %q", text)
+	}
+}
+
+func TestLLMAgent_NonRetryableHTTP400SkipsAutomaticRetry(t *testing.T) {
+	attempts := 0
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		attempts++
+		return []seqResult{{err: errors.New(`model: http status 400 body={"error":{"message":"Stealth"}}`)}}
+	})
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+	var (
+		warnings []string
+		gotErr   error
+	)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+		if notice, ok := session.EventNotice(ev); ok {
+			warnings = append(warnings, notice.Text)
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected terminal http 400 error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected non-retryable 400 to stop after one attempt, got %d", attempts)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no retry warnings for non-retryable 400, got %+v", warnings)
 	}
 }
 
@@ -1230,234 +1280,6 @@ func TestLLMAgent_RawToolArgsCompatibilityParsing(t *testing.T) {
 	}
 	if last == nil || strings.TrimSpace(last.Message.Text) != "done" {
 		t.Fatalf("unexpected final event: %#v", last)
-	}
-}
-
-func TestLLMAgent_DuplicateToolCallFailsWithoutToolResponse(t *testing.T) {
-	toolCalled := 0
-	echoTool := namedTool{
-		name: "echo",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			_ = ctx
-			_ = args
-			toolCalled++
-			return map[string]any{"echo": "hello"}, nil
-		},
-	}
-
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
-		last := req.Messages[len(req.Messages)-1]
-		switch last.Role {
-		case model.RoleUser:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: jsonArgs(map[string]any{"text": "hello"}),
-				}},
-			}}, nil
-		case model.RoleTool:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: jsonArgs(map[string]any{"text": "hello"}),
-				}},
-			}}, nil
-		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
-		}
-	})
-
-	ag, err := New(Config{Name: "test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := &testCtx{
-		Context: context.Background(),
-		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
-		llm:     llm,
-		tools:   []tool.Tool{echoTool},
-		toolMap: map[string]tool.Tool{"echo": echoTool},
-	}
-
-	events := make([]*session.Event, 0, 8)
-	var gotErr error
-	for ev, runErr := range ag.Run(ctx) {
-		if runErr != nil {
-			gotErr = runErr
-			break
-		}
-		events = append(events, ev)
-	}
-	if gotErr == nil {
-		t.Fatal("expected duplicate tool call error")
-	}
-	if !strings.Contains(gotErr.Error(), "duplicate tool call detected") {
-		t.Fatalf("unexpected error: %v", gotErr)
-	}
-	if toolCalled != 2 {
-		t.Fatalf("expected tool to run twice before duplicate guard, got %d", toolCalled)
-	}
-	if len(events) == 0 {
-		t.Fatal("expected assistant/tool events before failure")
-	}
-	last := events[len(events)-1]
-	if last.Message.Role != model.RoleTool {
-		t.Fatalf("expected last event to be tool response for duplicate, got %#v", last.Message)
-	}
-	if last.Message.ToolResponse == nil {
-		t.Fatal("expected tool response event on duplicate failure")
-	}
-	errStr, _ := last.Message.ToolResponse.Result["error"].(string)
-	if !strings.Contains(errStr, "duplicate") {
-		t.Fatalf("expected duplicate error in tool response result, got %q", errStr)
-	}
-}
-
-func TestLLMAgent_NonConsecutiveSameToolCallIsNotDuplicate(t *testing.T) {
-	// BASH→READ→BASH with same args should NOT trigger duplicate detection.
-	bashCalled := 0
-	readCalled := 0
-	bashTool := namedTool{
-		name: "BASH",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			bashCalled++
-			return map[string]any{"output": "ok"}, nil
-		},
-	}
-	readTool := namedTool{
-		name: "READ",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			readCalled++
-			return map[string]any{"content": "file"}, nil
-		},
-	}
-
-	step := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
-		step++
-		switch step {
-		case 1: // initial: call BASH
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID: "c1", Name: "BASH",
-					Args: jsonArgs(map[string]any{"cmd": "ls"}),
-				}},
-			}}, nil
-		case 2: // after BASH result: call READ (different tool)
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID: "c2", Name: "READ",
-					Args: jsonArgs(map[string]any{"path": "/tmp/f"}),
-				}},
-			}}, nil
-		case 3: // after READ result: call BASH again with same args
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID: "c3", Name: "BASH",
-					Args: jsonArgs(map[string]any{"cmd": "ls"}),
-				}},
-			}}, nil
-		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
-		}
-	})
-
-	ag, err := New(Config{Name: "test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := &testCtx{
-		Context: context.Background(),
-		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
-		llm:     llm,
-		tools:   []tool.Tool{bashTool, readTool},
-		toolMap: map[string]tool.Tool{"BASH": bashTool, "READ": readTool},
-	}
-
-	var gotErr error
-	for _, runErr := range ag.Run(ctx) {
-		if runErr != nil {
-			gotErr = runErr
-			break
-		}
-	}
-	if gotErr != nil {
-		t.Fatalf("expected no error for non-consecutive same tool calls, got: %v", gotErr)
-	}
-	if bashCalled != 2 {
-		t.Fatalf("expected BASH to be called 2 times, got %d", bashCalled)
-	}
-	if readCalled != 1 {
-		t.Fatalf("expected READ to be called 1 time, got %d", readCalled)
-	}
-}
-
-func TestLLMAgent_TaskPollingIsNotTreatedAsDuplicate(t *testing.T) {
-	taskCalled := 0
-	taskTool := namedTool{
-		name: "TASK",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			taskCalled++
-			return map[string]any{
-				"task_id": "t-1",
-				"state":   "running",
-				"running": true,
-			}, nil
-		},
-	}
-
-	step := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
-		step++
-		switch step {
-		case 1, 2, 3:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   fmt.Sprintf("task-call-%d", step),
-					Name: "TASK",
-					Args: jsonArgs(map[string]any{"action": "wait", "task_id": "t-1", "yield_time_ms": 5000}),
-				}},
-			}}, nil
-		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
-		}
-	})
-
-	ag, err := New(Config{Name: "test"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := &testCtx{
-		Context: context.Background(),
-		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
-		llm:     llm,
-		tools:   []tool.Tool{taskTool},
-		toolMap: map[string]tool.Tool{"TASK": taskTool},
-	}
-
-	var gotErr error
-	for _, runErr := range ag.Run(ctx) {
-		if runErr != nil {
-			gotErr = runErr
-			break
-		}
-	}
-	if gotErr != nil {
-		t.Fatalf("expected no duplicate error for TASK polling, got: %v", gotErr)
-	}
-	if taskCalled != 3 {
-		t.Fatalf("expected TASK to run 3 times, got %d", taskCalled)
 	}
 }
 

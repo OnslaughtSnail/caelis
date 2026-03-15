@@ -109,6 +109,7 @@ type serverSession struct {
 
 	runMu     sync.Mutex
 	runCancel context.CancelFunc
+	runner    runtime.Runner
 	cancelled bool
 
 	streamMu      sync.Mutex
@@ -486,21 +487,6 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		return PromptResponse{}, err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	sess.runMu.Lock()
-	if sess.runCancel != nil {
-		sess.runMu.Unlock()
-		cancel()
-		return PromptResponse{}, fmt.Errorf("session %q is already running", req.SessionID)
-	}
-	sess.runCancel = cancel
-	sess.cancelled = false
-	sess.runMu.Unlock()
-	defer func() {
-		sess.runMu.Lock()
-		sess.runCancel = nil
-		sess.runMu.Unlock()
-		cancel()
-	}()
 	defer func() {
 		flushErr := s.flushPendingContent(req.SessionID, sess)
 		sess.resetPartialStreams()
@@ -511,6 +497,7 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 	}()
 
 	if sess.resources == nil {
+		cancel()
 		return PromptResponse{}, fmt.Errorf("session %q resources not initialized", req.SessionID)
 	}
 	approver := newPermissionBridge(s.cfg.Conn, req.SessionID, sess.mode)
@@ -559,8 +546,30 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 	if !s.supportsPromptImage(sess.agentConfig()) {
 		runParts = filterImageContentParts(runParts, false)
 	}
-	stopReason := StopReasonEndTurn
-	for ev, runErr := range s.cfg.Runtime.Run(runCtx, runtime.RunRequest{
+	submission := runtime.Submission{
+		Text:         runInput,
+		ContentParts: runParts,
+		Mode:         runtime.SubmissionConversation,
+	}
+	sess.runMu.Lock()
+	activeRunner := sess.runner
+	sess.runMu.Unlock()
+	if activeRunner != nil {
+		if submitErr := activeRunner.Submit(submission); submitErr != nil {
+			// If the runner was closed between our check and the Submit call,
+			// fall through to create a new runner instead of failing.
+			if !errors.Is(submitErr, runtime.ErrRunnerClosed) {
+				cancel()
+				return PromptResponse{}, submitErr
+			}
+			// Runner closed: fall through to create a new runner with the
+			// existing runCtx (cancel has not been called yet).
+		} else {
+			cancel()
+			return PromptResponse{StopReason: StopReasonEndTurn}, nil
+		}
+	}
+	runner, err := s.cfg.Runtime.Run(runCtx, runtime.RunRequest{
 		AppName:      s.cfg.AppName,
 		UserID:       s.cfg.UserID,
 		SessionID:    req.SessionID,
@@ -573,7 +582,25 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 			Runtime: sess.resources.Runtime,
 		},
 		Policies: sess.resources.Policies,
-	}) {
+	})
+	if err != nil {
+		cancel()
+		return PromptResponse{}, err
+	}
+	sess.runMu.Lock()
+	sess.runner = runner
+	sess.runCancel = cancel
+	sess.cancelled = false
+	sess.runMu.Unlock()
+	defer func() {
+		sess.runMu.Lock()
+		sess.runner = nil
+		sess.runCancel = nil
+		sess.runMu.Unlock()
+		_ = runner.Close() // Close always returns nil; safe to ignore.
+	}()
+	stopReason := StopReasonEndTurn
+	for ev, runErr := range runner.Events() {
 		if streamErr := getSessionStreamErr(); streamErr != nil {
 			return PromptResponse{}, streamErr
 		}

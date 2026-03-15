@@ -382,7 +382,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resetConversationView()
 		return m, nil
 
+	case tuievents.UserMessageMsg:
+		m.dismissMessageHints()
+		m.dequeuePendingUserMessage(typed.Text)
+		m.commitUserDisplayLine(typed.Text)
+		m.syncViewportContent()
+		return m, nil
+
 	case tuievents.TaskResultMsg:
+		if typed.ContinueRunning {
+			if typed.Err != nil {
+				m.pendingQueue = nil
+				errLine := "error: " + typed.Err.Error()
+				colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
+				m.historyLines = append(m.historyLines, colored)
+				m.syncViewportContent()
+			}
+			return m, nil
+		}
 		m.dismissMessageHints()
 		if typed.Interrupted {
 			m.discardActiveAssistantStream()
@@ -399,6 +416,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.running = false
 		m.stopRunningAnimation()
+		m.pendingQueue = nil
 		m.planEntries = m.planEntries[:0]
 		m.clearInputAttachments()
 		m.syncTextareaChrome()
@@ -427,9 +445,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if typed.ExitNow {
 			m.quit = true
 			return m, tea.Quit
-		}
-		if next, ok := m.dequeuePendingPrompt(); ok {
-			return m.submitLineWithDisplayAndAttachments(next.execLine, next.displayLine, next.attachments)
 		}
 		return m, nil
 

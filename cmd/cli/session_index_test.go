@@ -557,10 +557,11 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	foundAssistant := false
 	for _, raw := range sender.msgs {
 		switch msg := raw.(type) {
-		case tuievents.LogChunkMsg:
-			if strings.Contains(msg.Chunk, "> hello") {
+		case tuievents.UserMessageMsg:
+			if msg.Text == "hello" {
 				foundUser = true
 			}
+		case tuievents.LogChunkMsg:
 			if strings.Contains(msg.Chunk, "session resumed:") || strings.Contains(msg.Chunk, "recent events:") {
 				t.Fatalf("did not expect legacy resume headers, got %q", msg.Chunk)
 			}
@@ -634,11 +635,8 @@ func TestHandleResume_TUIReplaysInterleavedUserAttachmentsInStoredOrder(t *testi
 
 	want := "> [image: first.png] Hi豆包 [image: second.png] 这两个是什么APP?"
 	for _, raw := range sender.msgs {
-		msg, ok := raw.(tuievents.LogChunkMsg)
-		if !ok {
-			continue
-		}
-		if strings.Contains(msg.Chunk, want) {
+		msg, ok := raw.(tuievents.UserMessageMsg)
+		if ok && "> "+msg.Text == want {
 			return
 		}
 	}

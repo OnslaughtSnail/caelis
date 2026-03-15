@@ -22,6 +22,7 @@ It is designed to be extracted as a standalone repository.
 - Model catalog (static snapshot + remote refresh) with per-model reasoning capability discovery.
 - Tool-level authorization baseline with per-tool allow/deny policy evaluation.
 - Workspace boundary policy restricting filesystem tools to project root.
+- Structured prompt environment context injection (`cwd`, `shell`, `current_date`, `timezone`).
 - `@file` / `@image` input reference parsing in user prompts; clipboard image capture.
 - Headless execution mode for non-interactive single-shot runs.
 
@@ -106,7 +107,7 @@ System prompt pipeline order (high -> low):
 1. `~/.{app}/prompts/IDENTITY.md`
 2. `~/.{app}/prompts/AGENTS.md`
 3. `{workspace}/AGENTS.md` (optional)
-4. CLI-provided runtime fragments (for example runtime context, experimental LSP routing when enabled)
+4. CLI-provided runtime fragments (for example `<environment_context>` with `cwd` / `shell` / `current_date` / `timezone`, plus experimental LSP routing when enabled)
 5. `~/.{app}/prompts/USER.md` + `-system-prompt` runtime override
 6. skills metadata section (auto-discovered)
 
@@ -203,7 +204,7 @@ go run ./eval/cmd \
 - `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
 
 ## Release
-- Current release: `v0.0.22` (see `VERSION` and `CHANGELOG.md`).
+- Current release: `v0.0.23` (see `VERSION` and `CHANGELOG.md`).
 - Local dry-run package:
 ```bash
 make release-dry-run
@@ -226,5 +227,5 @@ npm i -g @onslaughtsnail/caelis
    - Repository: `OnslaughtSnail/caelis`
    - Workflow file: `release.yml`
 3. In GitHub repo settings, ensure Actions are allowed and workflow permissions are not blocking OIDC.
-4. Push a tag like `v0.0.22` to trigger release + npm publish.
+4. Push a tag like `v0.0.23` to trigger release + npm publish.
 5. Detailed checklist: `docs/npm-release.md`.

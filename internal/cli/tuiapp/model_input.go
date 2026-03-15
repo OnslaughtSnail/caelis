@@ -380,10 +380,6 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Back):
 		if m.running {
 			m.clearInputOverlays()
-			if _, ok := m.popPendingPrompt(); ok {
-				m.dismissVisibleHint()
-				return m, nil
-			}
 			if m.cfg.CancelRunning != nil && m.cfg.CancelRunning() {
 				return m, m.showHint("interrupt requested", hintOptions{
 					priority:       tuievents.HintPriorityCritical,
@@ -476,8 +472,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					clearAfter:     copyHintDuration,
 				})
 			}
-			m.enqueuePendingPrompt(line, m.displayLineWithInputAttachments(line, attachments), attachments)
-			return m, nil
+			return m.submitLineWithDisplayAndAttachments(line, m.displayLineWithInputAttachments(line, attachments), inputAttachmentsToSubmission(attachments))
 		}
 		m.setInputAttachments(attachments)
 		if (line == "/connect" || strings.HasPrefix(line, "/connect ")) && m.findWizard("connect") == nil {
@@ -617,15 +612,19 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 }
 
 func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine string, attachments []Attachment) (tea.Model, tea.Cmd) {
+	alreadyRunning := m.running
 	attachments = cloneAttachments(attachments)
-	// Commit user input line to history buffer.
-	userLine := "> " + strings.TrimSpace(displayLine)
-	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
-	m.historyLines = append(m.historyLines, colored)
-	m.hasCommittedLine = true
-	m.lastCommittedStyle = tuikit.LineStyleUser
-	m.lastCommittedRaw = userLine
-	m.lastFinalAnswer = ""
+	displayLine = strings.TrimSpace(displayLine)
+	replacedPending := alreadyRunning && m.pendingQueue != nil
+	if alreadyRunning {
+		m.pendingQueue = &pendingPrompt{
+			execLine:    strings.TrimSpace(execLine),
+			displayLine: displayLine,
+			attachments: cloneAttachments(attachments),
+		}
+	} else {
+		m.commitUserDisplayLine(displayLine)
+	}
 
 	// Push to history.
 	m.recordHistoryEntry(strings.TrimSpace(execLine), attachmentsToInputAttachments(attachments))
@@ -647,11 +646,13 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	m.clearInputOverlays()
 
 	m.running = true
-	m.runStartedAt = time.Now()
-	m.hasLastRunDuration = false
-	m.showTurnDivider = !strings.HasPrefix(strings.TrimSpace(execLine), "/")
-	m.startRunningAnimation()
-	m.userScrolledUp = false
+	if !alreadyRunning {
+		m.runStartedAt = time.Now()
+		m.hasLastRunDuration = false
+		m.showTurnDivider = !strings.HasPrefix(strings.TrimSpace(execLine), "/")
+		m.startRunningAnimation()
+		m.userScrolledUp = false
+	}
 	m.syncViewportContent()
 
 	if m.cfg.ExecuteLine == nil {
@@ -664,7 +665,35 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 		},
 		m.spinner.Tick,
 	}
+	if replacedPending {
+		cmds = append(cmds, m.showHint("replaced pending follow-up message", hintOptions{
+			priority:   tuievents.HintPriorityNormal,
+			clearAfter: 2 * time.Second,
+		}))
+	}
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) commitUserDisplayLine(displayLine string) {
+	displayLine = strings.TrimSpace(displayLine)
+	if displayLine == "" {
+		return
+	}
+	userLine := "> " + displayLine
+	if m.lastCommittedStyle == tuikit.LineStyleUser &&
+		normalizeUserDisplayLine(strings.TrimPrefix(strings.TrimSpace(m.lastCommittedRaw), ">")) == normalizeUserDisplayLine(displayLine) {
+		return
+	}
+	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
+	m.historyLines = append(m.historyLines, colored)
+	m.hasCommittedLine = true
+	m.lastCommittedStyle = tuikit.LineStyleUser
+	m.lastCommittedRaw = userLine
+	m.lastFinalAnswer = ""
+}
+
+func normalizeUserDisplayLine(text string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 }
 
 func (m *Model) displayLineWithAttachments(line string) string {
@@ -749,44 +778,6 @@ func centeredDivider(width int, label string) string {
 		right = 2
 	}
 	return strings.Repeat("─", left) + label + strings.Repeat("─", right)
-}
-
-func (m *Model) enqueuePendingPrompt(execLine string, displayLine string, attachments []inputAttachment) {
-	m.pendingQueue = append(m.pendingQueue, pendingPrompt{
-		execLine:    strings.TrimSpace(execLine),
-		displayLine: strings.TrimSpace(displayLine),
-		attachments: inputAttachmentsToSubmission(attachments),
-	})
-	m.textarea.SetValue("")
-	m.textarea.CursorStart()
-	m.adjustTextareaHeight()
-	m.input = m.input[:0]
-	m.cursor = 0
-	m.clearInputAttachments()
-	m.historyIndex = -1
-	m.historyDraft = ""
-	m.historyDraftAttachments = nil
-	m.clearInputOverlays()
-}
-
-func (m *Model) dequeuePendingPrompt() (pendingPrompt, bool) {
-	if len(m.pendingQueue) == 0 {
-		return pendingPrompt{}, false
-	}
-	next := m.pendingQueue[0]
-	copy(m.pendingQueue, m.pendingQueue[1:])
-	m.pendingQueue = m.pendingQueue[:len(m.pendingQueue)-1]
-	return next, true
-}
-
-func (m *Model) popPendingPrompt() (pendingPrompt, bool) {
-	if len(m.pendingQueue) == 0 {
-		return pendingPrompt{}, false
-	}
-	lastIdx := len(m.pendingQueue) - 1
-	out := m.pendingQueue[lastIdx]
-	m.pendingQueue = m.pendingQueue[:lastIdx]
-	return out, true
 }
 
 func (m *Model) tryOpenSlashArgPicker(line string) bool {

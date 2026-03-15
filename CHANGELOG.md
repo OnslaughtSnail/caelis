@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.0.23 - 2026-03-15
+
+### Runtime, Prompt Flow & Session Streaming
+- Reworked runtime execution around a durable `Runner` abstraction so CLI, TUI, ACP, and subagents can keep a live run open, replay persisted events, and submit follow-up prompts into the active session without starting a second run.
+- Added inline follow-up submission support for the Bubble Tea console and ACP prompt handling, including queued-message rendering/ack flows in the TUI and runner reuse on the server side.
+- Added loop-detection coverage plus replay/cursor plumbing for long event streams so resumed consumers can recover dropped durable pages more reliably.
+
+### Policy, Retry & Delegation Hardening
+- Persisted `READ` evidence into session state so read-before-write policy decisions survive stale in-memory state and can be backfilled from stored events.
+- Improved model retry handling by surfacing richer upstream provider error details and skipping automatic retries for non-retryable HTTP 4xx responses.
+- Hardened detached subagent failure handling so panic/startup failures are recorded in lifecycle state instead of silently disappearing.
+
+### Prompt Assembly & Environment Context
+- Added a structured `<environment_context>` prompt fragment that injects `cwd`, `shell`, `current_date`, and `timezone` into the assembled system prompt for both CLI/TUI and ACP sessions.
+- Kept workspace-aware prompt assembly centralized in the CLI-owned prompt pipeline, with ACP continuing to feed session-specific `cwd` from the protocol layer.
+- Refreshed prompt-assembly regression coverage to lock in fragment ordering and the new environment-context fields.
+
 ## v0.0.22 - 2026-03-14
 
 ### Planning, Slash Commands & Session Recovery

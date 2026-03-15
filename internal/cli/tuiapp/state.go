@@ -39,10 +39,10 @@ type hintEntry struct {
 var runningSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 var runningCarouselLines = []string{
-	"Queue your next prompt now; it will run after this one.",
+	"Send follow-up guidance while the current run is still active.",
 	"Use @path to anchor the model on exact files.",
 	"/model can switch both model and reasoning level.",
-	"Press Esc to interrupt, Enter to queue your next message.",
+	"Press Esc to interrupt, Enter to submit another message.",
 	"Review the latest tool output before sending follow-up guidance.",
 }
 
@@ -325,7 +325,7 @@ type Model struct {
 	historyIndex            int
 	historyDraft            string
 	historyDraftAttachments []inputAttachment
-	pendingQueue            []pendingPrompt
+	pendingQueue            *pendingPrompt
 
 	slashCandidates []string
 	slashIndex      int

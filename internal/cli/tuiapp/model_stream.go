@@ -1230,6 +1230,7 @@ func (m *Model) resetConversationView() {
 	m.lastFinalAnswer = ""
 	m.transientLogIdx = -1
 	m.transientIsRetry = false
+	m.pendingQueue = nil
 	m.hintEntries = nil
 	m.hint = ""
 	m.runStartedAt = time.Time{}

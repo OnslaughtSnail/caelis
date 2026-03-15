@@ -83,7 +83,12 @@ func runHeadlessOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRe
 		answerPartial strings.Builder
 		promptTokens  int
 	)
-	for ev, err := range rt.Run(ctx, req) {
+	runner, err := rt.Run(ctx, req)
+	if err != nil {
+		return headlessRunResult{}, err
+	}
+	defer runner.Close() // Close always returns nil; safe to ignore.
+	for ev, err := range runner.Events() {
 		if err != nil {
 			if toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalRequired) ||
 				toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalAborted) {

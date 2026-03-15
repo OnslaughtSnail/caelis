@@ -156,6 +156,35 @@ func (s *Store) ListEvents(ctx context.Context, req *session.Session) ([]*sessio
 	return out, nil
 }
 
+func (s *Store) ListEventsAfter(ctx context.Context, req *session.Session, afterCursor string, limit int) ([]*session.Event, string, error) {
+	events, err := s.ListEvents(ctx, req)
+	if err != nil {
+		return nil, "", err
+	}
+	start := 0
+	if afterCursor != "" {
+		start = len(events)
+		for i, ev := range events {
+			if ev != nil && ev.ID == afterCursor {
+				start = i + 1
+				break
+			}
+		}
+	}
+	if start > len(events) {
+		start = len(events)
+	}
+	remaining := events[start:]
+	if limit > 0 && len(remaining) > limit {
+		remaining = remaining[:limit]
+	}
+	nextCursor := afterCursor
+	if n := len(remaining); n > 0 && remaining[n-1] != nil {
+		nextCursor = remaining[n-1].ID
+	}
+	return remaining, nextCursor, nil
+}
+
 func (s *Store) ListContextWindowEvents(ctx context.Context, req *session.Session) ([]*session.Event, error) {
 	_ = ctx
 	dir, err := s.sessionDir(req)

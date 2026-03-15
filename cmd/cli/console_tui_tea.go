@@ -233,6 +233,10 @@ func (c *cliConsole) loopTUITea() error {
 				exitNow, err := c.handleSlash(line)
 				return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}
 			}
+			if c.getActiveRunner() != nil {
+				err := c.runPromptWithAttachments(line, submission.Attachments)
+				return tuievents.TaskResultMsg{Err: err, ContinueRunning: true}
+			}
 			err := c.runPromptWithAttachments(line, submission.Attachments)
 			if errors.Is(err, context.Canceled) {
 				return tuievents.TaskResultMsg{Interrupted: true}

@@ -54,7 +54,12 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req delegation.
 	if err != nil {
 		return delegation.RunResult{}, err
 	}
-	for ev, runErr := range r.runtime.Run(attachSubagentContext(ctx, lineage), childReq) {
+	runner, err := r.runtime.Run(attachSubagentContext(ctx, lineage), childReq)
+	if err != nil {
+		return delegation.RunResult{}, err
+	}
+	defer runner.Close()
+	for ev, runErr := range runner.Events() {
 		if runErr != nil {
 			return delegation.RunResult{}, runErr
 		}
@@ -244,15 +249,25 @@ func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req delegat
 	return childReq, lineage, nil
 }
 
-func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, _ delegationLineage) {
+func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, lineage delegationLineage) {
 	defer func() {
 		if p := recover(); p != nil {
 			panicErr := fmt.Errorf("subagent panic: %v", p)
 			r.persistDetachedSubagentFailure(ctx, childReq, panicErr)
 		}
 	}()
-	for ev, runErr := range r.runtime.Run(ctx, childReq) {
+	runner, err := r.runtime.Run(attachSubagentContext(ctx, lineage), childReq)
+	if err != nil {
+		r.persistDetachedSubagentFailure(ctx, childReq, err)
+		return
+	}
+	defer runner.Close()
+	for ev, runErr := range runner.Events() {
 		if runErr != nil {
+			panicPrefix := "runtime: agent panic: "
+			if strings.HasPrefix(strings.TrimSpace(runErr.Error()), panicPrefix) {
+				r.persistDetachedSubagentFailure(ctx, childReq, fmt.Errorf("subagent panic: %s", strings.TrimSpace(strings.TrimPrefix(runErr.Error(), panicPrefix))))
+			}
 			return
 		}
 		_ = ev

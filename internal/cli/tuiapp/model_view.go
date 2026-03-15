@@ -36,6 +36,7 @@ func (m *Model) View() tea.View {
 
 	// 1. Viewport (scrollable history + streaming + spinner) with left gutter.
 	vpView := m.viewport.View()
+	vpView = strings.TrimRight(vpView, "\n")
 	vpView = m.renderViewportScrollbar(vpView)
 	if tuikit.GutterNarrative > 0 {
 		vpView = indentBlock(vpView, tuikit.GutterNarrative)
@@ -45,6 +46,10 @@ func (m *Model) View() tea.View {
 
 	if planView := m.renderPlanDrawer(); planView != "" {
 		sections = append(sections, planView)
+		sections = append(sections, "")
+	}
+	if pendingView := m.renderPendingQueueDrawer(); pendingView != "" {
+		sections = append(sections, pendingView)
 		sections = append(sections, "")
 	}
 
@@ -112,7 +117,7 @@ func (m *Model) View() tea.View {
 	frame.ReportFocus = true
 	frame.WindowTitle = m.windowTitle()
 	if cursor := m.regularInputCursor(); cursor != nil {
-		cursor.Position.Y += m.viewport.Height() + 5 + m.planSectionHeight() + tuikit.ComposerPadTop
+		cursor.Position.Y += m.viewport.Height() + m.preComposerFixedHeight() + tuikit.ComposerPadTop
 		frame.Cursor = cursor
 	}
 	return frame
@@ -133,9 +138,9 @@ func (m *Model) computeLayout() (int, int) {
 func (m *Model) bottomSectionHeight() int {
 	lines := 0
 
-	// Spacer + hint row + hint/header gap + workspace/model row + composer top separator.
-	lines += 5
-	lines += m.planSectionHeight()
+	// Spacer + optional plan + optional pending queue + hint row + hint/header
+	// gap + workspace/model row + composer top separator.
+	lines += m.preComposerFixedHeight()
 
 	// Composer top padding between workspace/model row and input.
 	lines += tuikit.ComposerPadTop
@@ -323,8 +328,7 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 
 func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 	y := m.viewport.Height()
-	// spacer + optional plan + hint + hint/header gap + workspace/model + separator
-	y += 5 + m.planSectionHeight()
+	y += m.preComposerFixedHeight()
 	// composer top padding
 	y += tuikit.ComposerPadTop
 	h := maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
@@ -401,16 +405,35 @@ type fixedRowLayout struct {
 func (m *Model) fixedRowLayout() fixedRowLayout {
 	y := m.viewport.Height()
 	layout := fixedRowLayout{
-		hintY:   y + 1 + m.planSectionHeight(),
-		headerY: y + 3 + m.planSectionHeight(),
+		hintY:   y + 1 + m.planSectionOffsetHeight() + m.pendingQueueSectionHeight(),
+		headerY: y + 3 + m.planSectionOffsetHeight() + m.pendingQueueSectionHeight(),
 	}
-	y += 5 + m.planSectionHeight() // spacer + optional plan + hint + hint/header gap + workspace/model + separator
+	y += m.preComposerFixedHeight()
 	y += tuikit.ComposerPadTop
 	y += maxInt(tuikit.ComposerMinHeight, m.textarea.Height())
 	y += tuikit.ComposerPadBottom // composer bottom padding
 	y++                           // lower separator
 	layout.footerY = y
 	return layout
+}
+
+func (m *Model) preComposerFixedHeight() int {
+	return 5 + m.planSectionOffsetHeight() + m.pendingQueueSectionHeight()
+}
+
+func (m *Model) planSectionOffsetHeight() int {
+	height := m.planSectionHeight()
+	if height <= 0 {
+		return 0
+	}
+	return height + 1
+}
+
+func (m *Model) pendingQueueSectionHeight() int {
+	if m.pendingQueue == nil || m.width <= 0 {
+		return 0
+	}
+	return 3
 }
 
 func (m *Model) fixedRegionAt(y int) (fixedTextRegion, bool) {
@@ -677,23 +700,10 @@ func (m *Model) buildRunningHintText() string {
 	if frame == "" {
 		frame = "⠋"
 	}
-	queueText := m.pendingQueueHintText()
 	if len(runningCarouselLines) > 0 {
 		text := m.renderRunningTickerText(runningCarouselLines[m.runningTip%len(runningCarouselLines)])
 		prefix := m.theme.SpinnerStyle().Render(frame)
-		if queueText != "" {
-			queue := m.theme.HelpHintTextStyle().Render("│ " + queueText)
-			combined := prefix + " " + text + " " + queue
-			maxWidth := maxInt(1, m.width) - 2
-			if displayColumns(combined) > maxWidth {
-				return prefix + " " + text + " " + m.theme.HelpHintTextStyle().Render("│ "+m.pendingQueueShortText())
-			}
-			return combined
-		}
 		return prefix + " " + text
-	}
-	if queueText != "" {
-		return m.theme.SpinnerStyle().Render(frame) + " " + m.theme.HelpHintTextStyle().Render(queueText)
 	}
 	return m.theme.SpinnerStyle().Render(frame)
 }
@@ -743,22 +753,40 @@ func (m *Model) renderRunningTickerText(text string) string {
 }
 
 func (m *Model) pendingQueueHintText() string {
-	n := len(m.pendingQueue)
-	if n == 0 {
+	if m.pendingQueue == nil {
 		return ""
 	}
-	if n == 1 {
-		return "1 pending message"
-	}
-	return fmt.Sprintf("%d pending messages", n)
+	return "1 pending message"
 }
 
 func (m *Model) pendingQueueShortText() string {
-	n := len(m.pendingQueue)
-	if n == 0 {
+	if m.pendingQueue == nil {
 		return ""
 	}
-	return fmt.Sprintf("%d pending", n)
+	return "1 queued"
+}
+
+func (m *Model) renderPendingQueueDrawer() string {
+	if m.pendingQueue == nil || m.width <= 0 {
+		return ""
+	}
+	contentWidth := maxInt(1, m.width-(inputHorizontalInset*2))
+	lines := []string{m.theme.SeparatorStyle().Render(strings.Repeat("─", contentWidth))}
+	text := strings.TrimSpace(m.pendingQueue.displayLine)
+	if text == "" {
+		text = strings.TrimSpace(m.pendingQueue.execLine)
+	}
+	if text != "" {
+		lines = append(lines, m.theme.HelpHintTextStyle().Render("◌ "+text))
+	}
+	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+}
+
+func (m *Model) dequeuePendingUserMessage(displayLine string) {
+	if m.pendingQueue == nil {
+		return
+	}
+	m.pendingQueue = nil
 }
 
 func (m *Model) renderInputBar() string {

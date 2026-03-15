@@ -132,9 +132,9 @@ func (m *Model) currentFooterHelp() helpBindings {
 	}
 	if m.running {
 		return helpBindings{
-			short: enabledBindings(m.keys.Interrupt, m.keys.Queue, m.keys.PageUp, m.keys.PageDown),
+			short: enabledBindings(m.keys.Interrupt, m.keys.Send, m.keys.PageUp, m.keys.PageDown),
 			full: [][]key.Binding{
-				enabledBindings(m.keys.Interrupt, m.keys.Queue),
+				enabledBindings(m.keys.Interrupt, m.keys.Send),
 				enabledBindings(m.keys.PageUp, m.keys.PageDown),
 			},
 		}
