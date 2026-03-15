@@ -4201,16 +4201,16 @@ func TestTaskMonitorBlockCollapsesToSummary(t *testing.T) {
 	}
 }
 
-func TestExplorationBlockIncludesStatInSummary(t *testing.T) {
+func TestExplorationBlockIncludesReadInSummary(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ STAT task3_result.txt\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ task3_result.txt\n"})
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
 
 	view := stripModelView(m)
 	if !strings.Contains(view, "▸ Explored 1 files") {
-		t.Fatalf("expected stat activity included in exploration summary, got:\n%s", view)
+		t.Fatalf("expected read activity included in exploration summary, got:\n%s", view)
 	}
 }
 

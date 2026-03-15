@@ -384,7 +384,7 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		if pattern != "" {
 			return fmt.Sprintf("{pattern=%s}", pattern)
 		}
-	case "LIST", "STAT":
+	case "LIST":
 		path := strings.TrimSpace(asString(args["path"]))
 		if path != "" {
 			return displayFileName(path)
@@ -554,9 +554,6 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		path := strings.TrimSpace(asString(result["path"]))
 		count, _ := asInt(result["count"])
 		return fmt.Sprintf("listed %d entries in %s", count, displayFileName(path))
-	case "STAT":
-		// Suppressed in printEvent; return empty for read-only tools.
-		return ""
 	case "DELEGATE":
 		summary := strings.TrimSpace(firstNonEmpty(result, "assistant", "summary", "output"))
 		if fmt.Sprint(result["running"]) == "true" {
@@ -1043,7 +1040,7 @@ func displayFileName(path string) string {
 // isReadOnlyFSTool returns true for FS tools whose result line can be suppressed.
 func isReadOnlyFSTool(toolName string) bool {
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
-	case "READ", "STAT":
+	case "READ":
 		return true
 	default:
 		return false

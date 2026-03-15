@@ -6,12 +6,10 @@ on:
     branches: [main]
 
 jobs:
-  build-test-eval-light:
+  build-test:
     runs-on: ubuntu-latest
     env:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMMIN_API_KEY: ${{ secrets.GEMMIN_API_KEY }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     defaults:
       run:
         working-directory: .
@@ -26,9 +24,3 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
-      - name: Skip eval light when no model key is configured
-        if: ${{ env.DEEPSEEK_API_KEY == '' && env.GEMINI_API_KEY == '' && env.GEMMIN_API_KEY == '' }}
-        run: echo "No DEEPSEEK_API_KEY/GEMINI_API_KEY configured; skip eval light."
-      - name: Eval light
-        if: ${{ env.DEEPSEEK_API_KEY != '' || env.GEMINI_API_KEY != '' || env.GEMMIN_API_KEY != '' }}
-        run: go run ./eval/cmd -suite light -stream-modes on -thinking-modes on -thinking-budget 1024

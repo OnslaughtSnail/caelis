@@ -6,77 +6,77 @@ This document defines the runtime event and error contract consumed by upper lay
 
 All runtime events follow `session.Event`:
 
-- `id`: event id
-- `session_id`: session id
-- `time`: event timestamp
-- `message`: model message payload
-- `meta`: extensible metadata map
+| Field | Description |
+|-------|-------------|
+| `id` | Event ID |
+| `session_id` | Session ID |
+| `time` | Event timestamp |
+| `message` | Model message payload |
+| `meta` | Extensible metadata map |
 
 ## Contract Metadata Keys
 
 - `meta.kind`: event kind
 - `meta.contract_version`: contract version string (`v1`)
 
-### Lifecycle Events
+## Lifecycle Events
 
-Lifecycle events use:
+| Field | Value |
+|-------|-------|
+| `meta.kind` | `"lifecycle"` |
+| `meta.contract_version` | `"v1"` |
+| `meta.lifecycle.status` | lifecycle status (see below) |
+| `meta.lifecycle.phase` | lifecycle phase |
+| `meta.lifecycle.error` | error message _(optional)_ |
+| `meta.lifecycle.error_code` | machine-readable error code _(optional)_ |
 
-- `meta.kind = "lifecycle"`
-- `meta.contract_version = "v1"`
-- `meta.lifecycle.status`
-- `meta.lifecycle.phase`
-- optional `meta.lifecycle.error`
-- optional `meta.lifecycle.error_code`
+**Status values:** `running` · `waiting_approval` · `interrupted` · `failed` · `completed`
 
-Lifecycle statuses:
+## Delegated Child-Run Lineage
 
-- `running`
-- `waiting_approval`
-- `interrupted`
-- `failed`
-- `completed`
+Child-run session events may carry lineage metadata:
 
-### Delegated Child-Run Lineage
+| Field | Description |
+|-------|-------------|
+| `meta.parent_session_id` | Parent session ID |
+| `meta.child_session_id` | Child session ID |
+| `meta.parent_tool_call_id` | Tool call ID that triggered delegation |
+| `meta.delegation_id` | Delegation identifier |
 
-Delegated child-run session events may include:
+These fields are for orchestration and observability only — they are not forwarded into model-visible message content. CLI may display compact session/delegation prefixes, but stored lineage values remain full IDs.
 
-- `meta.parent_session_id`
-- `meta.child_session_id`
-- `meta.parent_tool_call_id`
-- `meta.delegation_id`
+## Model Visibility
 
-These fields are for orchestration and observability. They are not forwarded into model-visible message content.
-CLI may display compact session/delegation prefixes for readability, but stored lineage values remain the full IDs.
-
-### Model Visibility
-
-Runtime/tool metadata is for UI/orchestration and should not be forwarded to model context.
-`llmagent` strips `metadata` and `_ui_*` fields before sending tool responses back to model.
+Runtime and tool metadata is for UI/orchestration use only and must not be forwarded to the model context. `llmagent` strips `metadata` and `_ui_*` fields before sending tool responses back to the model.
 
 ## Error Code Contract
 
-Machine-readable error codes (from `kernel/execenv`) are stable identifiers for programmatic handling:
+Machine-readable error codes from `kernel/execenv` — use these for programmatic branching instead of string matching:
 
-- `ERR_APPROVAL_REQUIRED`
-- `ERR_APPROVAL_ABORTED`
-- `ERR_SESSION_BUSY`
-- `ERR_SANDBOX_UNSUPPORTED`
-- `ERR_SANDBOX_UNAVAILABLE`
-- `ERR_SANDBOX_COMMAND_TIMEOUT`
-- `ERR_SANDBOX_IDLE_TIMEOUT`
-- `ERR_HOST_COMMAND_TIMEOUT`
-- `ERR_HOST_IDLE_TIMEOUT`
+| Code | Meaning |
+|------|---------|
+| `ERR_APPROVAL_REQUIRED` | Human approval required |
+| `ERR_APPROVAL_ABORTED` | Approval was aborted |
+| `ERR_SESSION_BUSY` | Session is busy with another run |
+| `ERR_SANDBOX_UNSUPPORTED` | Sandbox not supported on this platform |
+| `ERR_SANDBOX_UNAVAILABLE` | Sandbox is configured but unavailable |
+| `ERR_SANDBOX_COMMAND_TIMEOUT` | Sandbox command exceeded timeout |
+| `ERR_SANDBOX_IDLE_TIMEOUT` | Sandbox exceeded idle timeout |
+| `ERR_HOST_COMMAND_TIMEOUT` | Host command exceeded timeout |
+| `ERR_HOST_IDLE_TIMEOUT` | Host exceeded idle timeout |
 
-Use `execenv.ErrorCodeOf(err)` / `execenv.IsErrorCode(err, code)` for branching instead of string matching.
+Use `execenv.ErrorCodeOf(err)` / `execenv.IsErrorCode(err, code)` for conditional handling.
 
 ## Runtime State Query
 
-`runtime.RunState(ctx, RunStateRequest)` returns latest lifecycle snapshot for a session:
+`runtime.RunState(ctx, RunStateRequest)` returns the latest lifecycle snapshot for a session:
 
-- `has_lifecycle`: whether lifecycle events are present
-- `status`: latest lifecycle status
-- `phase`: lifecycle phase
-- `error`: latest lifecycle error message (if any)
-- `error_code`: machine-readable error code (if any)
-- `event_id`: source lifecycle event id
-- `updated_at`: lifecycle event timestamp
+| Field | Description |
+|-------|-------------|
+| `has_lifecycle` | Whether lifecycle events are present |
+| `status` | Latest lifecycle status |
+| `phase` | Lifecycle phase |
+| `error` | Latest error message (if any) |
+| `error_code` | Machine-readable error code (if any) |
+| `event_id` | Source lifecycle event ID |
+| `updated_at` | Lifecycle event timestamp |

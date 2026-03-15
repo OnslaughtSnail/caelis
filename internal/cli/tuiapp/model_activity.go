@@ -568,7 +568,7 @@ func parseActivityLine(line string) (activityBlockKind, activityEntry, bool) {
 		return "", activityEntry{}, false
 	}
 	switch tool {
-	case "READ", "STAT", "SEARCH", "LIST", "GLOB":
+	case "READ", "SEARCH", "LIST", "GLOB":
 		if tool == "LIST" && looksLikeTaskList(remainder, result) {
 			return activityBlockTaskMonitor, parseTaskListEntry(remainder, result), true
 		}
@@ -616,7 +616,7 @@ func parseToolLogLine(line string) (tool string, remainder string, result bool, 
 func parseExplorationEntry(tool string, remainder string, result bool) activityEntry {
 	entry := activityEntry{tool: strings.ToUpper(strings.TrimSpace(tool)), raw: remainder, result: result}
 	switch entry.tool {
-	case "READ", "STAT":
+	case "READ":
 		entry.path = strings.TrimSpace(remainder)
 	case "SEARCH":
 		entry.path, entry.query = splitPathAndQuery(remainder)
@@ -697,7 +697,7 @@ func mergeActivityEntries(call activityEntry, result activityEntry) (activityDis
 		return activityDisplayEntry{}, false
 	}
 	switch strings.ToUpper(strings.TrimSpace(call.tool)) {
-	case "READ", "STAT", "SEARCH", "LIST", "GLOB":
+	case "READ", "SEARCH", "LIST", "GLOB":
 	default:
 		return activityDisplayEntry{}, false
 	}
@@ -769,8 +769,6 @@ func activityEntryDisplay(entry activityEntry) (verb string, detail string) {
 		return "Listing", "tasks"
 	case entry.tool == "READ":
 		return "Read", firstNonEmptyTrim(entry.path, entry.raw)
-	case entry.tool == "STAT":
-		return "Stat", firstNonEmptyTrim(entry.path, entry.raw)
 	case entry.tool == "SEARCH":
 		query := strings.TrimSpace(entry.query)
 		if query != "" {
@@ -801,7 +799,7 @@ func activityEntryDisplay(entry activityEntry) (verb string, detail string) {
 func uniqueReadPaths(entries []activityEntry) []string {
 	set := map[string]struct{}{}
 	for _, entry := range entries {
-		if entry.result || (!strings.EqualFold(entry.tool, "READ") && !strings.EqualFold(entry.tool, "STAT")) {
+		if entry.result || !strings.EqualFold(entry.tool, "READ") {
 			continue
 		}
 		path := strings.TrimSpace(entry.path)

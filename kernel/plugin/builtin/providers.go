@@ -3,7 +3,6 @@ package builtin
 import (
 	"context"
 	"fmt"
-	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
@@ -15,7 +14,6 @@ import (
 )
 
 const (
-	ProviderLocalTools     = "local_tools"
 	ProviderWorkspaceTools = "workspace_tools"
 	ProviderShellTools     = "shell_tools"
 	ProviderMCPTools       = "mcp_tools"
@@ -33,9 +31,6 @@ func RegisterAll(r *plugin.Registry, options RegisterOptions) error {
 	if r == nil {
 		return fmt.Errorf("builtin: registry is nil")
 	}
-	if err := r.RegisterToolProvider(localToolProvider{}); err != nil {
-		return err
-	}
 	if err := r.RegisterToolProvider(workspaceToolProvider{runtime: options.ExecutionRuntime}); err != nil {
 		return err
 	}
@@ -49,56 +44,6 @@ func RegisterAll(r *plugin.Registry, options RegisterOptions) error {
 		return err
 	}
 	return nil
-}
-
-type localToolProvider struct{}
-
-func (p localToolProvider) Name() string {
-	return ProviderLocalTools
-}
-
-func (p localToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
-	_ = ctx
-	echoTool, err := tool.NewFunction[struct {
-		Text string `json:"text"`
-	}, struct {
-		Echo string `json:"echo"`
-	}](
-		"echo",
-		"Echo input text.",
-		func(ctx context.Context, args struct {
-			Text string `json:"text"`
-		}) (struct {
-			Echo string `json:"echo"`
-		}, error) {
-			_ = ctx
-			return struct {
-				Echo string `json:"echo"`
-			}{Echo: args.Text}, nil
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	nowTool, err := tool.NewFunction[struct{}, struct {
-		Now string `json:"now"`
-	}](
-		"now",
-		"Return current UTC time in RFC3339 format.",
-		func(ctx context.Context, args struct{}) (struct {
-			Now string `json:"now"`
-		}, error) {
-			_ = ctx
-			_ = args
-			return struct {
-				Now string `json:"now"`
-			}{Now: time.Now().UTC().Format(time.RFC3339)}, nil
-		},
-	)
-	if err != nil {
-		return nil, err
-	}
-	return []tool.Tool{echoTool, nowTool}, nil
 }
 
 type shellToolProvider struct {
@@ -138,10 +83,6 @@ func (p workspaceToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	statTool, err := toolfs.NewStatWithRuntime(p.runtime)
-	if err != nil {
-		return nil, err
-	}
 	searchTool, err := toolfs.NewSearchWithRuntime(p.runtime)
 	if err != nil {
 		return nil, err
@@ -157,7 +98,6 @@ func (p workspaceToolProvider) Tools(ctx context.Context) ([]tool.Tool, error) {
 	return []tool.Tool{
 		listTool,
 		globTool,
-		statTool,
 		searchTool,
 		patchTool,
 		writeTool,

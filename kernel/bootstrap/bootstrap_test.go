@@ -11,10 +11,9 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
-func TestAssemble_LocalToolsAndPolicy(t *testing.T) {
+func TestAssemble_PolicyProviderOnly(t *testing.T) {
 	got, err := Assemble(context.Background(), AssembleSpec{
 		Registry:        mustBuiltinRegistry(t),
-		ToolProviders:   []string{pluginbuiltin.ProviderLocalTools},
 		PolicyProviders: []string{pluginbuiltin.ProviderDefaultPolicy},
 	})
 	if err != nil {
@@ -23,15 +22,8 @@ func TestAssemble_LocalToolsAndPolicy(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected non-nil resolved spec")
 	}
-	foundEcho := false
-	for _, one := range got.Tools {
-		if one.Name() == "echo" {
-			foundEcho = true
-			break
-		}
-	}
-	if !foundEcho {
-		t.Fatalf("expected %q tool in assembled result", "echo")
+	if len(got.Tools) != 0 {
+		t.Fatalf("expected no assembled tools, got %d", len(got.Tools))
 	}
 	if len(got.Policies) != 2 {
 		t.Fatalf("expected 2 policy hooks, got %d", len(got.Policies))
@@ -40,7 +32,6 @@ func TestAssemble_LocalToolsAndPolicy(t *testing.T) {
 
 func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
 	got, err := Assemble(context.Background(), AssembleSpec{
-		ToolProviders:   []string{pluginbuiltin.ProviderLocalTools},
 		PolicyProviders: []string{pluginbuiltin.ProviderDefaultPolicy},
 	})
 	if err != nil {
@@ -49,15 +40,8 @@ func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected non-nil resolved spec")
 	}
-	foundEcho := false
-	for _, one := range got.Tools {
-		if one.Name() == "echo" {
-			foundEcho = true
-			break
-		}
-	}
-	if !foundEcho {
-		t.Fatalf("expected %q tool in assembled result", "echo")
+	if len(got.Tools) != 0 {
+		t.Fatalf("expected no assembled tools, got %d", len(got.Tools))
 	}
 	if len(got.Policies) != 2 {
 		t.Fatalf("expected 2 policy hooks, got %d", len(got.Policies))
@@ -66,8 +50,7 @@ func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
 
 func TestAssemble_CoreReadInjectedByRuntime(t *testing.T) {
 	got, err := Assemble(context.Background(), AssembleSpec{
-		Registry:      mustBuiltinRegistry(t),
-		ToolProviders: []string{pluginbuiltin.ProviderLocalTools},
+		Registry: mustBuiltinRegistry(t),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -67,11 +67,10 @@ func NewSecurityBaseline(cfg SecurityBaselineConfig) Hook {
 	guarded := map[string]struct{}{}
 
 	defaultAutoAllow := []string{
-		"READ", "LIST", "GLOB", "STAT", "SEARCH",
+		"READ", "LIST", "GLOB", "SEARCH",
 		"WRITE", "PATCH",
 		"PLAN",
 		"DELEGATE", "TASK",
-		"ECHO", "NOW",
 		"BASH", // BASH host escalation is gated by execution runtime approval flow.
 	}
 	for _, one := range append(defaultAutoAllow, cfg.AutoAllowTools...) {

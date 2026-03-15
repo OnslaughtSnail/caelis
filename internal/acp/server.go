@@ -2085,7 +2085,7 @@ func eventChannel(ev *session.Event) string {
 
 func toolKindForName(name string) string {
 	switch strings.ToUpper(strings.TrimSpace(name)) {
-	case "READ", "STAT":
+	case "READ":
 		return ToolKindRead
 	case "WRITE", "PATCH":
 		return ToolKindEdit
@@ -2108,7 +2108,7 @@ func toolKindForName(name string) string {
 func summarizeToolCallTitle(name string, args map[string]any) string {
 	name = strings.TrimSpace(name)
 	switch strings.ToUpper(name) {
-	case "READ", "WRITE", "PATCH", "STAT", "SEARCH", "LIST", "GLOB":
+	case "READ", "WRITE", "PATCH", "SEARCH", "LIST", "GLOB":
 		if path, _ := args["path"].(string); strings.TrimSpace(path) != "" {
 			return fmt.Sprintf("%s %s", name, strings.TrimSpace(path))
 		}
