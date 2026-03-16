@@ -138,6 +138,7 @@ MCP Web tools guidance:
 
 Interactive slash commands:
 - `/help`: show command help
+- `/btw <question>`: ask one ephemeral side question using current context without adding it to session history
 - `/version`: show version info
 - `/status`: show current model and execution runtime status
 - `/new`: start a fresh conversation session

@@ -23,6 +23,7 @@ type ReadonlyContext interface {
 	Session() *session.Session
 	Events() session.Events
 	ReadonlyState() session.ReadonlyState
+	Overlay() bool
 }
 
 // ModelContext exposes model planning capabilities.

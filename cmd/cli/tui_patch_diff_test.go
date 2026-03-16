@@ -99,6 +99,26 @@ func TestBuildToolCallDiffBlockMsg_WriteUsesLiveDiskSnapshot(t *testing.T) {
 	}
 }
 
+func TestBuildToolCallDiffBlockMsg_WriteSkipsNoOpPreview(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "a.txt")
+	content := "same\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, tooLarge, ok := buildToolCallDiffBlockMsg(previewTestRuntime{cwd: ws}, "WRITE", map[string]any{
+		"path":    path,
+		"content": content,
+	})
+	if tooLarge {
+		t.Fatal("expected no-op preview to be skipped without size fallback")
+	}
+	if ok {
+		t.Fatal("expected no-op write preview to be suppressed")
+	}
+}
+
 func TestBuildToolCallDiffBlockMsg_TooLarge(t *testing.T) {
 	ws := t.TempDir()
 	path := filepath.Join(ws, "a.txt")

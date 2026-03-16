@@ -86,6 +86,9 @@ func (c *legacyRunContext) Events() session.Events {
 		if ev == nil {
 			continue
 		}
+		if session.IsOverlay(ev) {
+			continue
+		}
 		if id := strings.TrimSpace(ev.ID); id != "" {
 			if _, exists := seen[id]; exists {
 				continue

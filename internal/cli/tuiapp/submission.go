@@ -2,6 +2,13 @@ package tuiapp
 
 import "strings"
 
+type SubmissionMode string
+
+const (
+	SubmissionModeDefault SubmissionMode = ""
+	SubmissionModeOverlay SubmissionMode = "overlay"
+)
+
 // Attachment describes one inline attachment token in the composer.
 // Offset is measured in rune positions within Text.
 type Attachment struct {
@@ -13,6 +20,7 @@ type Attachment struct {
 type Submission struct {
 	Text        string
 	Attachments []Attachment
+	Mode        SubmissionMode
 }
 
 func cloneAttachments(items []Attachment) []Attachment {

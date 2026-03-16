@@ -276,24 +276,16 @@ func shouldPersistEvent(ev *session.Event, persistPartial bool) bool {
 	if session.IsUIOnly(ev) {
 		return false
 	}
+	if session.IsOverlay(ev) {
+		return false
+	}
 	if isLifecycleEvent(ev) {
 		return false
 	}
 	if persistPartial {
 		return true
 	}
-	if ev.Meta == nil {
-		return true
-	}
-	raw, exists := ev.Meta["partial"]
-	if !exists {
-		return true
-	}
-	isPartial, ok := raw.(bool)
-	if !ok {
-		return true
-	}
-	return !isPartial
+	return !session.IsPartial(ev)
 }
 
 func eventID() string {

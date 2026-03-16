@@ -21,6 +21,7 @@ type invocationContext struct {
 	policies []policy.Hook
 	runner   delegation.Runner
 	tasks    *runtimeTaskManager
+	overlay  bool
 }
 
 func (c *invocationContext) Session() *session.Session {
@@ -33,6 +34,10 @@ func (c *invocationContext) Events() session.Events {
 
 func (c *invocationContext) ReadonlyState() session.ReadonlyState {
 	return c.state
+}
+
+func (c *invocationContext) Overlay() bool {
+	return c != nil && c.overlay
 }
 
 func (c *invocationContext) Model() model.LLM {

@@ -128,7 +128,7 @@ func controlBlock(mode string) string {
 	switch mode {
 	case PlanMode:
 		return `<caelis-session-mode mode="plan" hidden="true">
-This turn is running in PLAN mode. Focus on analysis, planning, tradeoffs, and implementation strategy. Do not make changes unless the user explicitly asks you to execute them.
+This turn is running in PLAN mode. Focus on analysis, planning, tradeoffs, and implementation strategy. Do not make changes unless the user explicitly asks you to execute them. Do not call the PLAN tool in this mode.
 </caelis-session-mode>`
 	default:
 		return ""

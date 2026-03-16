@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -72,6 +73,60 @@ func (a assertReadAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Eve
 			a.t.Fatalf("expected runtime to inject READ tool")
 		}
 		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "ok"}}, nil)
+	}
+}
+
+type overlayInspectAgent struct {
+	t *testing.T
+}
+
+func (a overlayInspectAgent) Name() string { return "overlay-inspect" }
+func (a overlayInspectAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if !ctx.Overlay() {
+			a.t.Fatalf("expected overlay context")
+		}
+		if len(ctx.Tools()) == 0 {
+			a.t.Fatalf("expected overlay context to preserve tools")
+		}
+		if _, ok := ctx.Tool("FAKE_TOOL"); !ok {
+			a.t.Fatalf("expected overlay context to expose FAKE_TOOL")
+		}
+		last := ctx.Events().At(ctx.Events().Len() - 1)
+		if last == nil || last.Message.Role != model.RoleUser || strings.TrimSpace(last.Message.Text) != "side question" {
+			a.t.Fatalf("expected overlay user event appended to context, got %#v", last)
+		}
+		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "overlay answer"}}, nil)
+	}
+}
+
+type fakeTool struct {
+	name string
+}
+
+func (t fakeTool) Name() string        { return t.name }
+func (t fakeTool) Description() string { return t.name }
+func (t fakeTool) Declaration() model.ToolDefinition {
+	return model.ToolDefinition{Name: t.name, Description: t.name, Parameters: map[string]any{"type": "object"}}
+}
+func (t fakeTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {
+	_ = ctx
+	_ = args
+	return map[string]any{}, nil
+}
+
+type overlayErrorAgent struct {
+	err error
+}
+
+func (a overlayErrorAgent) Name() string { return "overlay-error" }
+func (a overlayErrorAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if !ctx.Overlay() {
+			yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "ok"}}, nil)
+			return
+		}
+		yield(nil, a.err)
 	}
 }
 
@@ -412,6 +467,174 @@ func TestRuntime_RunState_UsesInMemoryLifecycle(t *testing.T) {
 	}
 	if state.Status != RunLifecycleStatusCompleted {
 		t.Fatalf("expected completed status, got %+v", state)
+	}
+}
+
+func TestRuntime_OverlaySubmission_IsEphemeral(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-overlay",
+		Input:     "hello",
+		Agent:     fixedAgent{},
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+
+	runner, err := rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-overlay",
+		Agent:     overlayInspectAgent{t: t},
+		Model:     llm,
+		Tools:     []tool.Tool{fakeTool{name: "FAKE_TOOL"}},
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+	if err := runner.Submit(Submission{Text: "side question", Mode: SubmissionOverlay}); err != nil {
+		t.Fatal(err)
+	}
+
+	foundOverlay := false
+	for ev, runErr := range runner.Events() {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev == nil || ev.Message.Role != model.RoleAssistant {
+			continue
+		}
+		if strings.TrimSpace(ev.Message.Text) == "overlay answer" {
+			foundOverlay = true
+			if !session.IsOverlay(ev) {
+				t.Fatalf("expected assistant overlay event to be marked overlay")
+			}
+		}
+	}
+	if !foundOverlay {
+		t.Fatal("expected overlay assistant event")
+	}
+
+	listed, err := store.ListEvents(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "s-overlay"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("expected overlay submission not persisted, got %d events", len(listed))
+	}
+	for _, ev := range listed {
+		if ev != nil && strings.Contains(ev.Message.Text, "side question") {
+			t.Fatalf("did not expect overlay question to persist: %#v", ev)
+		}
+	}
+}
+
+func TestRuntime_OverlaySubmission_PropagatesStandaloneFailure(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	overlayErr := errors.New("overlay boom")
+
+	runner, err := rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-overlay-failed",
+		Agent:     overlayErrorAgent{err: overlayErr},
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+	if err := runner.Submit(Submission{Text: "side question", Mode: SubmissionOverlay}); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		events []*session.Event
+		gotErr error
+	)
+	for ev, runErr := range runner.Events() {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+		events = append(events, ev)
+	}
+	if !errors.Is(gotErr, overlayErr) {
+		t.Fatalf("expected overlay error %v, got %v", overlayErr, gotErr)
+	}
+	statuses := lifecycleStatuses(events)
+	if len(statuses) != 2 || statuses[0] != string(RunLifecycleStatusRunning) || statuses[1] != string(RunLifecycleStatusFailed) {
+		t.Fatalf("unexpected lifecycle statuses: %v", statuses)
+	}
+	for _, ev := range events {
+		if ev == nil || ev.Message.Role != model.RoleAssistant {
+			continue
+		}
+		if strings.Contains(ev.Message.Text, "overlay boom") {
+			t.Fatalf("expected standalone overlay failure to propagate as an error, got assistant event %#v", ev)
+		}
+	}
+}
+
+func TestRuntime_OverlaySubmission_PropagatesStandaloneCancellation(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+
+	runner, err := rt.Run(context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-overlay-cancelled",
+		Agent:     overlayErrorAgent{err: context.Canceled},
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.Close()
+	if err := runner.Submit(Submission{Text: "side question", Mode: SubmissionOverlay}); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		events []*session.Event
+		gotErr error
+	)
+	for ev, runErr := range runner.Events() {
+		if runErr != nil {
+			gotErr = runErr
+			break
+		}
+		events = append(events, ev)
+	}
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", gotErr)
+	}
+	statuses := lifecycleStatuses(events)
+	if len(statuses) != 2 || statuses[0] != string(RunLifecycleStatusRunning) || statuses[1] != string(RunLifecycleStatusInterrupted) {
+		t.Fatalf("unexpected lifecycle statuses: %v", statuses)
 	}
 }
 

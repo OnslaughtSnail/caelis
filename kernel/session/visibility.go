@@ -7,8 +7,9 @@ import (
 )
 
 const (
-	metaVisibilityKey    = "visibility"
-	metaVisibilityUIOnly = "ui_only"
+	metaVisibilityKey     = "visibility"
+	metaVisibilityUIOnly  = "ui_only"
+	metaVisibilityOverlay = "overlay"
 
 	metaNoticeLevelKey = "notice_level"
 	metaNoticeTextKey  = "notice_text"
@@ -36,7 +37,7 @@ func MarkUIOnly(ev *Event) *Event {
 		ev.Meta = map[string]any{}
 	}
 	ev.Meta[metaVisibilityKey] = metaVisibilityUIOnly
-	return ev
+	return SetEventType(ev, EventTypeOf(ev))
 }
 
 // IsUIOnly reports whether an event is marked as UI-only.
@@ -46,6 +47,29 @@ func IsUIOnly(ev *Event) bool {
 	}
 	value, _ := ev.Meta[metaVisibilityKey].(string)
 	return strings.TrimSpace(value) == metaVisibilityUIOnly
+}
+
+// MarkOverlay annotates one event as an ephemeral overlay event. Overlay events
+// are model-visible for the current in-flight request, but excluded from
+// persisted history and future conversation context.
+func MarkOverlay(ev *Event) *Event {
+	if ev == nil {
+		return nil
+	}
+	if ev.Meta == nil {
+		ev.Meta = map[string]any{}
+	}
+	ev.Meta[metaVisibilityKey] = metaVisibilityOverlay
+	return SetEventType(ev, EventTypeOf(ev))
+}
+
+// IsOverlay reports whether an event is marked as an ephemeral overlay event.
+func IsOverlay(ev *Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	value, _ := ev.Meta[metaVisibilityKey].(string)
+	return strings.TrimSpace(value) == metaVisibilityOverlay
 }
 
 // MarkNotice annotates one event as a transient user-visible notice. Notices
@@ -61,7 +85,7 @@ func MarkNotice(ev *Event, level string, text string) *Event {
 	text = strings.TrimSpace(text)
 	ev.Meta[metaNoticeLevelKey] = level
 	ev.Meta[metaNoticeTextKey] = text
-	return MarkUIOnly(ev)
+	return SetEventType(MarkUIOnly(ev), EventTypeOf(ev))
 }
 
 // EventNotice returns the notice carried by one event, if any. It also

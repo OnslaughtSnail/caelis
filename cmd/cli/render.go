@@ -559,6 +559,9 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		created := fmt.Sprint(result["created"]) == "true"
 		display := displayFileName(path)
 		if path != "" {
+			if !created && mutationResultHasNoChanges(result) {
+				return fmt.Sprintf("unchanged %s", display)
+			}
 			action := "edited"
 			if created {
 				action = "created"
@@ -571,6 +574,9 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		lineCount, _ := asInt(result["line_count"])
 		display := displayFileName(path)
 		if path != "" {
+			if !created && mutationResultHasNoChanges(result) {
+				return fmt.Sprintf("unchanged %s", display)
+			}
 			if created {
 				return fmt.Sprintf("created %s (%d lines)", display, lineCount)
 			}
@@ -656,6 +662,15 @@ func formatToolResultLine(prefix string, toolName string, summary string) string
 		return fmt.Sprintf("%s %s\n", prefix, toolName)
 	}
 	return fmt.Sprintf("%s %s %s\n", prefix, toolName, summary)
+}
+
+func mutationResultHasNoChanges(result map[string]any) bool {
+	if len(result) == 0 {
+		return false
+	}
+	added, addedOK := asInt(result["added_lines"])
+	removed, removedOK := asInt(result["removed_lines"])
+	return addedOK && removedOK && added == 0 && removed == 0
 }
 
 func renderDelegateSummaryPreview(summary string) string {
@@ -1149,30 +1164,11 @@ func tailLines(text string, n int) string {
 }
 
 func eventIsPartial(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	raw, ok := ev.Meta["partial"]
-	if !ok {
-		return false
-	}
-	flag, ok := raw.(bool)
-	return ok && flag
+	return session.IsPartial(ev)
 }
 
 func eventChannel(ev *session.Event) string {
-	if ev == nil || ev.Meta == nil {
-		return "answer"
-	}
-	raw, ok := ev.Meta["channel"]
-	if !ok {
-		return "answer"
-	}
-	channel, ok := raw.(string)
-	if !ok || channel == "" {
-		return "answer"
-	}
-	return channel
+	return string(session.PartialChannelOf(ev))
 }
 
 // extractLastUsage scans events in reverse to find the most recent usage

@@ -358,6 +358,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !typed.Running {
 			m.stopRunningAnimation()
+			m.runStartedAt = time.Time{}
 		}
 		return m, nil
 
@@ -446,6 +447,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quit = true
 			return m, tea.Quit
 		}
+		return m, nil
+
+	case tuievents.BTWOverlayMsg:
+		if m.btwOverlay == nil && m.btwDismissed {
+			return m, nil
+		}
+		if m.btwOverlay == nil {
+			m.btwOverlay = &btwOverlayState{}
+		}
+		if typed.Final {
+			m.btwOverlay.Answer = strings.TrimSpace(typed.Text)
+			m.btwOverlay.Loading = false
+		} else {
+			m.btwOverlay.Answer += typed.Text
+		}
+		m.clampBTWScroll(len(m.btwContentLines()))
+		return m, nil
+
+	case tuievents.BTWErrorMsg:
+		if m.btwOverlay == nil && m.btwDismissed {
+			return m, nil
+		}
+		if m.btwOverlay == nil {
+			m.btwOverlay = &btwOverlayState{}
+		}
+		m.btwOverlay.Answer = strings.TrimSpace(typed.Text)
+		m.btwOverlay.Loading = false
+		m.clampBTWScroll(len(m.btwContentLines()))
 		return m, nil
 
 	case tuievents.PromptRequestMsg:

@@ -2095,19 +2095,11 @@ func requestFailed(err error) *RPCError {
 }
 
 func eventIsPartial(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	raw, ok := ev.Meta["partial"].(bool)
-	return ok && raw
+	return session.IsPartial(ev)
 }
 
 func eventChannel(ev *session.Event) string {
-	if ev == nil || ev.Meta == nil {
-		return ""
-	}
-	value, _ := ev.Meta["channel"].(string)
-	return strings.TrimSpace(value)
+	return string(session.PartialChannelOf(ev))
 }
 
 func toolKindForName(name string) string {

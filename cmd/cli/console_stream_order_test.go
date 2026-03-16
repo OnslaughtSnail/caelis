@@ -789,6 +789,7 @@ func TestForwardEventToTUI_BashErrorWithoutOutputEmitsToolResultSummary(t *testi
 func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{tuiSender: sender}
+	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
 		Message: model.Message{
@@ -796,10 +797,10 @@ func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) 
 			ToolCalls: []model.ToolCall{{
 				ID:   "call_plan",
 				Name: tool.PlanToolName,
-				Args: `{"entries":[{"content":"Inspect repo","status":"pending"}]}`,
+				Args: `{"entries":[{"content":"Inspect repo","status":"in_progress"},{"content":"Run tests","status":"pending"}]}`,
 			}},
 		},
-	}, map[string]toolCallSnapshot{})
+	}, pending)
 	if !handled {
 		t.Fatal("expected plan tool call to be handled")
 	}
@@ -814,14 +815,11 @@ func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) 
 				ID:   "call_plan",
 				Name: tool.PlanToolName,
 				Result: map[string]any{
-					"entries": []any{
-						map[string]any{"content": "Inspect repo", "status": "in_progress"},
-						map[string]any{"content": "Run tests", "status": "pending"},
-					},
+					"message": "Plan updated",
 				},
 			},
 		},
-	}, map[string]toolCallSnapshot{})
+	}, pending)
 	if !handled {
 		t.Fatal("expected plan tool response to be handled")
 	}
@@ -834,6 +832,72 @@ func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) 
 	}
 	if len(msg.Entries) != 2 || msg.Entries[0].Status != "in_progress" {
 		t.Fatalf("unexpected plan update payload: %+v", msg)
+	}
+}
+
+func TestForwardEventToTUI_NoOpWriteSkipsRichDiffAndUsesUnchangedSummary(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "a.txt")
+	content := "same\ncontent\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+	pending := map[string]toolCallSnapshot{}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "call_write",
+				Name: "WRITE",
+				Args: fmt.Sprintf(`{"path":%q,"content":%q}`, path, content),
+			}},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected write tool call to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected only tool call log when rich diff is skipped, got %#v", sender.msgs)
+	}
+	if _, ok := sender.msgs[0].(tuievents.DiffBlockMsg); ok {
+		t.Fatalf("did not expect no-op write to emit a rich diff: %#v", sender.msgs)
+	}
+
+	handled = c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_write",
+				Name: "WRITE",
+				Result: map[string]any{
+					"path":          path,
+					"created":       false,
+					"line_count":    2,
+					"added_lines":   0,
+					"removed_lines": 0,
+				},
+			},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected write tool response to be handled")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected tool response summary after call log, got %#v", sender.msgs)
+	}
+	logMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[1])
+	}
+	if !strings.Contains(logMsg.Chunk, "✓ WRITE unchanged a.txt") {
+		t.Fatalf("unexpected no-op write summary: %q", logMsg.Chunk)
 	}
 }
 

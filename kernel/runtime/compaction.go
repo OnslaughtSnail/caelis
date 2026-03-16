@@ -257,15 +257,7 @@ func splitCompactionTarget(window []*session.Event) ([]*session.Event, []*sessio
 }
 
 func isCompactionEvent(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, ok := ev.Meta[metaKind]
-	if !ok {
-		return false
-	}
-	kindText, ok := kind.(string)
-	return ok && kindText == metaKindCompaction
+	return session.EventTypeOf(ev) == session.EventTypeCompaction
 }
 
 func heuristicFallbackSummary(events []*session.Event, inputBudget int) string {

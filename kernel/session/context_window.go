@@ -1,12 +1,5 @@
 package session
 
-import "strings"
-
-const (
-	metaKindKey             = "kind"
-	metaKindCompactionValue = "compaction"
-)
-
 // ContextWindowEvents rebuilds the model-visible context window from full
 // session history. It keeps only the latest compaction checkpoint plus newer
 // events.
@@ -28,9 +21,5 @@ func ContextWindowEvents(events []*Event) []*Event {
 }
 
 func isCompactionEvent(ev *Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, _ := ev.Meta[metaKindKey].(string)
-	return strings.TrimSpace(kind) == metaKindCompactionValue
+	return EventTypeOf(ev) == EventTypeCompaction
 }

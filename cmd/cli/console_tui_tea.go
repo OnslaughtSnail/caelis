@@ -229,6 +229,17 @@ func (c *cliConsole) loopTUITea() error {
 		Wizards:         buildWizardDefs(),
 		ExecuteLine: func(submission tuiapp.Submission) tuievents.TaskResultMsg {
 			line := strings.TrimSpace(submission.Text)
+			if submission.Mode == tuiapp.SubmissionModeOverlay {
+				err := c.runBTW(line, submission.Attachments)
+				if err != nil {
+					if c.tuiSender != nil {
+						c.tuiSender.Send(tuievents.BTWErrorMsg{Text: err.Error()})
+						c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
+					}
+					return tuievents.TaskResultMsg{ContinueRunning: true}
+				}
+				return tuievents.TaskResultMsg{ContinueRunning: true}
+			}
 			if c.shouldHandleAsSlashCommand(line) {
 				exitNow, err := c.handleSlash(line)
 				return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}

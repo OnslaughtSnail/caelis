@@ -14,6 +14,17 @@ import (
 func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch typed := msg.(type) {
 	case tea.MouseWheelMsg:
+		if m.btwOverlay != nil {
+			mouse := typed.Mouse()
+			switch {
+			case mouse.Button == tea.MouseWheelUp:
+				m.scrollBTW(-1)
+				return m, nil
+			case mouse.Button == tea.MouseWheelDown:
+				m.scrollBTW(1)
+				return m, nil
+			}
+		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.userScrolledUp = !m.viewport.AtBottom()
@@ -250,6 +261,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.activePrompt != nil {
 		return m, m.handlePromptKey(msg)
 	}
+	if m.btwOverlay != nil {
+		return m.handleBTWOverlayKey(msg)
+	}
 	// Command palette overlay.
 	if m.showPalette {
 		return m, m.handlePaletteKey(msg)
@@ -464,8 +478,9 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if line == "" && len(attachments) == 0 {
 			return m, nil
 		}
+		mode := submissionModeForLine(line)
 		if m.running {
-			if strings.HasPrefix(line, "/") {
+			if strings.HasPrefix(line, "/") && mode != SubmissionModeOverlay {
 				return m, m.showHint("slash commands are unavailable while running", hintOptions{
 					priority:       tuievents.HintPriorityHigh,
 					clearOnMessage: true,
@@ -581,6 +596,9 @@ func (m *Model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	if m.activePrompt != nil {
 		return m, m.handlePromptPaste(msg)
 	}
+	if m.btwOverlay != nil {
+		return m, nil
+	}
 	before := m.textarea.Value()
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
@@ -613,10 +631,13 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 
 func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine string, attachments []Attachment) (tea.Model, tea.Cmd) {
 	alreadyRunning := m.running
+	mode := submissionModeForLine(execLine)
 	attachments = cloneAttachments(attachments)
 	displayLine = strings.TrimSpace(displayLine)
-	replacedPending := alreadyRunning && m.pendingQueue != nil
-	if alreadyRunning {
+	replacedPending := alreadyRunning && m.pendingQueue != nil && mode != SubmissionModeOverlay
+	if mode == SubmissionModeOverlay {
+		m.openBTWOverlay(execLine)
+	} else if alreadyRunning {
 		m.pendingQueue = &pendingPrompt{
 			execLine:    strings.TrimSpace(execLine),
 			displayLine: displayLine,
@@ -627,13 +648,16 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	}
 
 	// Push to history.
-	m.recordHistoryEntry(strings.TrimSpace(execLine), attachmentsToInputAttachments(attachments))
-	m.historyIndex = -1
-	m.historyDraft = ""
-	m.historyDraftAttachments = nil
+	if mode != SubmissionModeOverlay {
+		m.recordHistoryEntry(strings.TrimSpace(execLine), attachmentsToInputAttachments(attachments))
+		m.historyIndex = -1
+		m.historyDraft = ""
+		m.historyDraftAttachments = nil
+	}
 	submission := Submission{
 		Text:        strings.TrimSpace(execLine),
 		Attachments: attachments,
+		Mode:        mode,
 	}
 
 	// Clear input.
@@ -649,7 +673,7 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	if !alreadyRunning {
 		m.runStartedAt = time.Now()
 		m.hasLastRunDuration = false
-		m.showTurnDivider = !strings.HasPrefix(strings.TrimSpace(execLine), "/")
+		m.showTurnDivider = mode == SubmissionModeDefault && !strings.HasPrefix(strings.TrimSpace(execLine), "/")
 		m.startRunningAnimation()
 		m.userScrolledUp = false
 	}
@@ -672,6 +696,53 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 		}))
 	}
 	return m, tea.Batch(cmds...)
+}
+
+func submissionModeForLine(line string) SubmissionMode {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "/btw" || strings.HasPrefix(trimmed, "/btw ") {
+		return SubmissionModeOverlay
+	}
+	return SubmissionModeDefault
+}
+
+func (m *Model) openBTWOverlay(line string) {
+	if m == nil {
+		return
+	}
+	question := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/btw"))
+	m.btwDismissed = false
+	m.btwOverlay = &btwOverlayState{
+		Question: question,
+		Loading:  true,
+		Scroll:   0,
+	}
+}
+
+func (m *Model) handleBTWOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m == nil || m.btwOverlay == nil {
+		return m, nil
+	}
+	switch {
+	case key.Matches(msg, m.keys.Back):
+		m.btwOverlay = nil
+		m.btwDismissed = true
+		return m, nil
+	case key.Matches(msg, m.keys.HistoryPrev):
+		m.scrollBTW(-1)
+		return m, nil
+	case key.Matches(msg, m.keys.HistoryNext):
+		m.scrollBTW(1)
+		return m, nil
+	case key.Matches(msg, m.keys.PageUp):
+		m.scrollBTW(-m.btwVisibleBudget())
+		return m, nil
+	case key.Matches(msg, m.keys.PageDown):
+		m.scrollBTW(m.btwVisibleBudget())
+		return m, nil
+	default:
+		return m, nil
+	}
 }
 
 func (m *Model) commitUserDisplayLine(displayLine string) {

@@ -144,3 +144,12 @@ type PlanEntry struct {
 type PlanUpdateMsg struct {
 	Entries []PlanEntry
 }
+
+type BTWOverlayMsg struct {
+	Text  string
+	Final bool
+}
+
+type BTWErrorMsg struct {
+	Text string
+}

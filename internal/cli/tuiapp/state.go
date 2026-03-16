@@ -234,6 +234,13 @@ type planEntryState struct {
 	Status  string
 }
 
+type btwOverlayState struct {
+	Question string
+	Answer   string
+	Loading  bool
+	Scroll   int
+}
+
 type Model struct {
 	cfg       Config
 	theme     tuikit.Theme
@@ -261,6 +268,8 @@ type Model struct {
 	lastRunDuration    time.Duration
 	hasLastRunDuration bool
 	showTurnDivider    bool
+	btwOverlay         *btwOverlayState
+	btwDismissed       bool
 
 	transientLogIdx  int
 	transientIsRetry bool

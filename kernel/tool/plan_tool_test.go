@@ -19,7 +19,7 @@ func TestPlanTool_UpdatesSessionState(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := session.WithStateContext(context.Background(), sess, store)
-	_, err = toolImpl.Run(ctx, map[string]any{
+	result, err := toolImpl.Run(ctx, map[string]any{
 		"entries": []map[string]any{
 			{"content": "Inspect repo", "status": "completed"},
 			{"content": "Implement fix", "status": "in_progress"},
@@ -28,6 +28,12 @@ func TestPlanTool_UpdatesSessionState(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := result["message"]; got != "Plan updated" {
+		t.Fatalf("expected minimal plan tool response, got %#v", result)
+	}
+	if _, ok := result["entries"]; ok {
+		t.Fatalf("did not expect entries in tool response: %#v", result)
 	}
 	state, err := store.SnapshotState(context.Background(), sess)
 	if err != nil {

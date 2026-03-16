@@ -127,6 +127,9 @@ func formatMutationChangeSummary(counts mutationChangeCounts) string {
 
 func shouldSkipRichDiff(preview toolfs.MutationPreview, counts mutationChangeCounts) bool {
 	const richDiffMaxTotalLines = 5000
+	if mutationHasNoChanges(preview, counts) {
+		return true
+	}
 
 	totalLines := countLines(preview.Old) + countLines(preview.New)
 	if totalLines > richDiffMaxTotalLines {
@@ -137,4 +140,8 @@ func shouldSkipRichDiff(preview toolfs.MutationPreview, counts mutationChangeCou
 		diffLines = totalLines
 	}
 	return diffLines > richDiffMaxLines
+}
+
+func mutationHasNoChanges(preview toolfs.MutationPreview, counts mutationChangeCounts) bool {
+	return !preview.Created && counts.Added == 0 && counts.Removed == 0 && preview.Old == preview.New
 }

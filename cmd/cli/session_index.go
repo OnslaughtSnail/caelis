@@ -131,11 +131,7 @@ WHERE workspace_key = ? AND session_id = ?`
 }
 
 func isCompactionEventForIndex(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, _ := ev.Meta["kind"].(string)
-	return strings.TrimSpace(kind) == "compaction"
+	return session.EventTypeOf(ev) == session.EventTypeCompaction
 }
 
 func (s *sessionIndex) ListWorkspaceSessions(workspaceKey string, limit int) ([]sessionIndexRecord, error) {

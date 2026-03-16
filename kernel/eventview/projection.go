@@ -8,11 +8,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
-const (
-	metaKindKey            = "kind"
-	metaKindLifecycleValue = "lifecycle"
-)
-
 // PendingToolCall is one tool call that has not yet been matched by a response.
 type PendingToolCall struct {
 	EventIndex int
@@ -149,9 +144,5 @@ func Messages(events session.Events, systemPrompt string, sanitizer func(map[str
 
 // IsLifecycle reports whether one event is a runtime lifecycle event.
 func IsLifecycle(ev *session.Event) bool {
-	if ev == nil || ev.Meta == nil {
-		return false
-	}
-	kind, _ := ev.Meta[metaKindKey].(string)
-	return strings.TrimSpace(kind) == metaKindLifecycleValue
+	return session.EventTypeOf(ev) == session.EventTypeLifecycle
 }

@@ -27,6 +27,7 @@ type testCtx struct {
 	toolMap  map[string]tool.Tool
 	policies []policy.Hook
 	runner   delegation.Runner
+	overlay  bool
 }
 
 func (c *testCtx) Session() *session.Session { return c.session }
@@ -34,6 +35,7 @@ func (c *testCtx) Events() session.Events    { return session.NewEvents(c.histor
 func (c *testCtx) ReadonlyState() session.ReadonlyState {
 	return session.NewReadonlyState(nil)
 }
+func (c *testCtx) Overlay() bool      { return c.overlay }
 func (c *testCtx) Model() model.LLM   { return c.llm }
 func (c *testCtx) Tools() []tool.Tool { return c.tools }
 func (c *testCtx) Tool(name string) (tool.Tool, bool) {
@@ -239,6 +241,50 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	}
 	if events[len(events)-1].Message.Text != "done" {
 		t.Fatalf("unexpected final text: %q", events[len(events)-1].Message.Text)
+	}
+}
+
+func TestLLMAgent_OverlayPreservesToolDeclarations(t *testing.T) {
+	echoTool, err := tool.NewFunction[echoArgs, echoResp]("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
+		_ = ctx
+		return echoResp{Echo: args.Text}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		if len(req.Tools) != 1 || req.Tools[0].Name != "echo" {
+			return nil, fmt.Errorf("expected overlay request to preserve tool declarations, got %+v", req.Tools)
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "side answer"}}, nil
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		tools:   []tool.Tool{echoTool},
+		toolMap: map[string]tool.Tool{"echo": echoTool},
+		overlay: true,
+	}
+
+	var events []*session.Event
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		events = append(events, ev)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected single overlay assistant event, got %#v", events)
+	}
+	if events[0].Message.Text != "side answer" {
+		t.Fatalf("unexpected overlay text %q", events[0].Message.Text)
 	}
 }
 

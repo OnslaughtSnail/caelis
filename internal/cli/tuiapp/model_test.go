@@ -2404,7 +2404,7 @@ func TestViewHidesPendingQueueWhileRunning(t *testing.T) {
 	m.runningTip = 0
 	m.pendingQueue = &pendingPrompt{execLine: "first", displayLine: "first"}
 	view := stripModelView(m)
-	if !strings.Contains(view, "◌ first") {
+	if !strings.Contains(view, "↪ first") {
 		t.Fatalf("expected pending queue drawer in running view, got:\n%s", view)
 	}
 }
@@ -3553,6 +3553,44 @@ func TestEnterWhileRunningShowsHintWhenReplacingPendingMessage(t *testing.T) {
 	}
 }
 
+func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
+	var got Submission
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			got = submission
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		},
+	})
+	resizeModel(m)
+
+	m.running = true
+	typeRunes(m, "/btw config file name?")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected btw submit command while running")
+	}
+	msg := cmd()
+	if msg == nil {
+		t.Fatal("expected non-nil command message")
+	}
+	if !findAndRunTaskResult(msg, m) {
+		t.Fatal("expected TaskResultMsg in btw submit command")
+	}
+	if got.Mode != SubmissionModeOverlay {
+		t.Fatalf("expected overlay submission mode, got %+v", got)
+	}
+	if len(m.historyLines) != 0 {
+		t.Fatalf("expected /btw not to commit history, got %+v", m.historyLines)
+	}
+	if m.pendingQueue != nil {
+		t.Fatalf("expected /btw not to use pending queue, got %+v", m.pendingQueue)
+	}
+	if m.btwOverlay == nil || m.btwOverlay.Question != "config file name?" {
+		t.Fatalf("expected btw overlay question, got %+v", m.btwOverlay)
+	}
+}
+
 func TestUserMessageMsgCommitsPendingUserLine(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
@@ -3603,7 +3641,7 @@ func TestInputAreaBoundsAccountsForPlanDrawer(t *testing.T) {
 	if startY <= layout.headerY {
 		t.Fatalf("expected input area below header when plan drawer visible, got input=%d header=%d", startY, layout.headerY)
 	}
-	if got, want := layout.hintY, m.viewport.Height()+2+m.planSectionHeight(); got != want {
+	if got, want := layout.hintY, m.viewport.Height()+2+m.primaryDrawerHeight(); got != want {
 		t.Fatalf("unexpected hint row position with plan drawer, got=%d want=%d", got, want)
 	}
 }
@@ -4144,6 +4182,143 @@ func TestTaskResultDoesNotAddDividerForSlashCommand(t *testing.T) {
 	}
 	if got := strings.TrimSpace(ansi.Strip(m.historyLines[0])); got != "> /status" {
 		t.Fatalf("unexpected slash command line %q", got)
+	}
+}
+
+func TestBTWOverlayMessageDoesNotCommitConversationHistory(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.submitLineWithDisplay("/btw config file name?", "/btw config file name?")
+	if len(m.historyLines) != 0 {
+		t.Fatalf("expected /btw submit to stay out of history, got %+v", m.historyLines)
+	}
+	if m.btwOverlay == nil {
+		t.Fatal("expected btw overlay to open")
+	}
+	loadingView := stripModelView(m)
+	if !strings.Contains(loadingView, "↪ config file name?") {
+		t.Fatalf("expected btw loading state to use pending-style line, got:\n%s", loadingView)
+	}
+	if strings.Contains(loadingView, "Thinking...") {
+		t.Fatalf("did not expect btw loading placeholder text, got:\n%s", loadingView)
+	}
+
+	_, _ = m.Update(tuievents.BTWOverlayMsg{Text: "caelis.toml", Final: true})
+	if m.btwOverlay == nil || m.btwOverlay.Answer != "caelis.toml" || m.btwOverlay.Loading {
+		t.Fatalf("expected btw overlay answer populated, got %+v", m.btwOverlay)
+	}
+	if len(m.historyLines) != 0 {
+		t.Fatalf("expected btw answer to stay out of history, got %+v", m.historyLines)
+	}
+	view := stripModelView(m)
+	if strings.Contains(view, "BTW") || strings.Contains(view, "QUESTION:") {
+		t.Fatalf("expected btw drawer without legacy headers, got:\n%s", view)
+	}
+	if !strings.Contains(view, "config file name?") || !strings.Contains(view, "caelis.toml") {
+		t.Fatalf("expected question and answer in btw drawer, got:\n%s", view)
+	}
+	if !strings.Contains(view, "esc") || !strings.Contains(view, "close") {
+		t.Fatalf("expected close help in footer area, got:\n%s", view)
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	if m.btwOverlay == nil {
+		t.Fatal("expected btw overlay to remain open on enter")
+	}
+
+	_, _ = m.Update(keyPress(tea.KeySpace))
+	if m.btwOverlay == nil {
+		t.Fatal("expected btw overlay to remain open on space")
+	}
+
+	m.openBTWOverlay("/btw config file name?")
+	_, _ = m.Update(tuievents.BTWOverlayMsg{Text: "caelis.toml", Final: true})
+	_, _ = m.Update(keyPress(tea.KeyEsc))
+	if m.btwOverlay != nil {
+		t.Fatalf("expected btw overlay closed, got %+v", m.btwOverlay)
+	}
+}
+
+func TestBTWOverlayBlocksPasteUntilClosed(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	m.textarea.SetValue("draft")
+	m.syncInputFromTextarea()
+	m.openBTWOverlay("/btw config file name?")
+
+	_, _ = m.Update(tea.PasteMsg{Content: " blocked"})
+	if got := m.textarea.Value(); got != "draft" {
+		t.Fatalf("expected btw overlay to block paste, got %q", got)
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyEsc))
+	if m.btwOverlay != nil {
+		t.Fatalf("expected btw overlay closed, got %+v", m.btwOverlay)
+	}
+
+	_, _ = m.Update(tea.PasteMsg{Content: " restored"})
+	if got := m.textarea.Value(); got != "draft restored" {
+		t.Fatalf("expected paste restored after closing btw overlay, got %q", got)
+	}
+}
+
+func TestBTWDrawerTakesPriorityOverPlanDrawer(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.planEntries = []planEntryState{
+		{Content: "step 1", Status: "pending"},
+		{Content: "step 2", Status: "in_progress"},
+	}
+	m.openBTWOverlay("/btw which file?")
+	_, _ = m.Update(tuievents.BTWOverlayMsg{Text: "caelis.toml", Final: true})
+
+	view := stripModelView(m)
+	if strings.Contains(view, "☐ step 1") || strings.Contains(view, "☐ step 2") {
+		t.Fatalf("expected btw drawer to replace plan drawer, got:\n%s", view)
+	}
+	if !strings.Contains(view, "which file?") || !strings.Contains(view, "caelis.toml") {
+		t.Fatalf("expected btw drawer content visible, got:\n%s", view)
+	}
+}
+
+func TestBTWDrawerScrollsWithinMaxHeight(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.openBTWOverlay("/btw long answer?")
+	lines := make([]string, 0, 16)
+	for i := 1; i <= 16; i++ {
+		lines = append(lines, fmt.Sprintf("line %02d", i))
+	}
+	_, _ = m.Update(tuievents.BTWOverlayMsg{Text: strings.Join(lines, "\n"), Final: true})
+
+	if got := m.primaryDrawerHeight(); got > 7 {
+		t.Fatalf("expected btw drawer height capped on 24-row terminal, got %d", got)
+	}
+
+	before := stripModelView(m)
+	if !strings.Contains(before, "line 01") {
+		t.Fatalf("expected top of btw content before scroll, got:\n%s", before)
+	}
+	if strings.Contains(before, "line 16") {
+		t.Fatalf("did not expect bottom of btw content before scroll, got:\n%s", before)
+	}
+
+	for i := 0; i < 3; i++ {
+		_, _ = m.Update(keyPress(tea.KeyPgDown))
+	}
+	afterPage := stripModelView(m)
+	if !strings.Contains(afterPage, "line 16") {
+		t.Fatalf("expected paged btw content to reveal bottom lines, got:\n%s", afterPage)
+	}
+	if strings.Contains(afterPage, "line 01") {
+		t.Fatalf("expected btw scroll to move past the first line, got:\n%s", afterPage)
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyUp))
+	if m.btwOverlay == nil || m.btwOverlay.Scroll >= m.btwMaxScroll(len(m.btwContentLines())) {
+		t.Fatalf("expected up key to scroll btw drawer, got %+v", m.btwOverlay)
 	}
 }
 

@@ -44,8 +44,8 @@ func (m *Model) View() tea.View {
 	sections = append(sections, vpView)
 	sections = append(sections, "")
 
-	if planView := m.renderPlanDrawer(); planView != "" {
-		sections = append(sections, planView)
+	if drawerView := m.renderPrimaryDrawer(); drawerView != "" {
+		sections = append(sections, drawerView)
 		sections = append(sections, "")
 	}
 	if pendingView := m.renderPendingQueueDrawer(); pendingView != "" {
@@ -405,8 +405,8 @@ type fixedRowLayout struct {
 func (m *Model) fixedRowLayout() fixedRowLayout {
 	y := m.viewport.Height()
 	layout := fixedRowLayout{
-		hintY:   y + 1 + m.planSectionOffsetHeight() + m.pendingQueueSectionHeight(),
-		headerY: y + 3 + m.planSectionOffsetHeight() + m.pendingQueueSectionHeight(),
+		hintY:   y + 1 + m.primaryDrawerOffsetHeight() + m.pendingQueueSectionHeight(),
+		headerY: y + 3 + m.primaryDrawerOffsetHeight() + m.pendingQueueSectionHeight(),
 	}
 	y += m.preComposerFixedHeight()
 	y += tuikit.ComposerPadTop
@@ -418,11 +418,11 @@ func (m *Model) fixedRowLayout() fixedRowLayout {
 }
 
 func (m *Model) preComposerFixedHeight() int {
-	return 5 + m.planSectionOffsetHeight() + m.pendingQueueSectionHeight()
+	return 5 + m.primaryDrawerOffsetHeight() + m.pendingQueueSectionHeight()
 }
 
-func (m *Model) planSectionOffsetHeight() int {
-	height := m.planSectionHeight()
+func (m *Model) primaryDrawerOffsetHeight() int {
+	height := m.primaryDrawerHeight()
 	if height <= 0 {
 		return 0
 	}
@@ -562,15 +562,19 @@ func (m *Model) buildHintText() string {
 	return ""
 }
 
-func (m *Model) planSectionHeight() int {
-	if len(m.planEntries) == 0 {
-		return 0
-	}
-	drawer := m.renderPlanDrawer()
+func (m *Model) primaryDrawerHeight() int {
+	drawer := m.renderPrimaryDrawer()
 	if drawer == "" {
 		return 0
 	}
 	return strings.Count(drawer, "\n") + 1
+}
+
+func (m *Model) renderPrimaryDrawer() string {
+	if drawer := m.renderBTWDrawer(); drawer != "" {
+		return drawer
+	}
+	return m.renderPlanDrawer()
 }
 
 func (m *Model) renderPlanDrawer() string {
@@ -587,6 +591,132 @@ func (m *Model) renderPlanDrawer() string {
 		lines = append(lines, renderPlanLine(m, item))
 	}
 	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
+}
+
+func (m *Model) btwVisibleBudget() int {
+	switch {
+	case m.height <= 18:
+		return 4
+	case m.height <= 24:
+		return 6
+	case m.height <= 32:
+		return 8
+	default:
+		return 10
+	}
+}
+
+func (m *Model) btwContentWidth() int {
+	return maxInt(1, m.width-(inputHorizontalInset*2))
+}
+
+const pendingSubmissionIcon = "↪"
+
+func (m *Model) renderPendingSubmissionLine(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	return m.theme.HelpHintTextStyle().Render(pendingSubmissionIcon + " " + text)
+}
+
+func (m *Model) btwContentLines() []string {
+	if m == nil || m.btwOverlay == nil || m.width <= 0 {
+		return nil
+	}
+	contentWidth := m.btwContentWidth()
+	rawLines := make([]string, 0, 16)
+	question := strings.TrimSpace(m.btwOverlay.Question)
+	answer := strings.TrimSpace(m.btwOverlay.Answer)
+	if answer == "" && m.btwOverlay.Loading {
+		if pendingLine := m.renderPendingSubmissionLine(question); pendingLine != "" {
+			rawLines = append(rawLines, pendingLine)
+		}
+		return wrapBTWContentLines(rawLines, contentWidth)
+	}
+	if question != "" {
+		rawLines = append(rawLines, m.theme.HelpHintTextStyle().Render(question), "")
+	}
+	if answer != "" {
+		for _, line := range strings.Split(answer, "\n") {
+			rawLines = append(rawLines, m.theme.TextStyle().Render(strings.TrimRight(line, "\r")))
+		}
+	}
+	if len(rawLines) == 0 {
+		return nil
+	}
+	return wrapBTWContentLines(rawLines, contentWidth)
+}
+
+func wrapBTWContentLines(rawLines []string, contentWidth int) []string {
+	lines := make([]string, 0, len(rawLines)*2)
+	for _, line := range rawLines {
+		wrapped := hardWrapDisplayLine(line, contentWidth)
+		if wrapped == "" {
+			lines = append(lines, "")
+			continue
+		}
+		lines = append(lines, strings.Split(wrapped, "\n")...)
+	}
+	return lines
+}
+
+func (m *Model) btwMaxScroll(total int) int {
+	visible := m.btwVisibleBudget()
+	if total <= visible {
+		return 0
+	}
+	return total - visible
+}
+
+func (m *Model) clampBTWScroll(total int) {
+	if m == nil || m.btwOverlay == nil {
+		return
+	}
+	if m.btwOverlay.Scroll < 0 {
+		m.btwOverlay.Scroll = 0
+	}
+	maxScroll := m.btwMaxScroll(total)
+	if m.btwOverlay.Scroll > maxScroll {
+		m.btwOverlay.Scroll = maxScroll
+	}
+}
+
+func (m *Model) scrollBTW(delta int) {
+	if m == nil || m.btwOverlay == nil || delta == 0 {
+		return
+	}
+	total := len(m.btwContentLines())
+	m.clampBTWScroll(total)
+	maxScroll := m.btwMaxScroll(total)
+	next := m.btwOverlay.Scroll + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > maxScroll {
+		next = maxScroll
+	}
+	m.btwOverlay.Scroll = next
+}
+
+func (m *Model) renderBTWDrawer() string {
+	if m == nil || m.btwOverlay == nil || m.width <= 0 {
+		return ""
+	}
+	lines := m.btwContentLines()
+	m.clampBTWScroll(len(lines))
+	start := m.btwOverlay.Scroll
+	if start < 0 {
+		start = 0
+	}
+	end := minInt(len(lines), start+m.btwVisibleBudget())
+	if start > end {
+		start = end
+	}
+	contentWidth := m.btwContentWidth()
+	drawerLines := []string{m.theme.SeparatorStyle().Render(strings.Repeat("─", contentWidth))}
+	drawerLines = append(drawerLines, lines[start:end]...)
+	return insetRenderedBlock(strings.Join(drawerLines, "\n"), inputHorizontalInset)
 }
 
 func renderPlanLine(m *Model, item planEntryState) string {
@@ -776,8 +906,8 @@ func (m *Model) renderPendingQueueDrawer() string {
 	if text == "" {
 		text = strings.TrimSpace(m.pendingQueue.execLine)
 	}
-	if text != "" {
-		lines = append(lines, m.theme.HelpHintTextStyle().Render("◌ "+text))
+	if pendingLine := m.renderPendingSubmissionLine(text); pendingLine != "" {
+		lines = append(lines, pendingLine)
 	}
 	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }

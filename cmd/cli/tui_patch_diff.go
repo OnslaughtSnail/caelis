@@ -17,6 +17,9 @@ func buildToolCallDiffBlockMsg(runtime toolexec.Runtime, toolName string, callAr
 		return tuievents.DiffBlockMsg{}, false, false
 	}
 	counts := mutationChangeCountsForTool(strings.ToUpper(strings.TrimSpace(toolName)), preview, callArgs)
+	if mutationHasNoChanges(preview, counts) {
+		return tuievents.DiffBlockMsg{}, false, false
+	}
 	if shouldSkipRichDiff(preview, counts) {
 		return tuievents.DiffBlockMsg{}, true, true
 	}

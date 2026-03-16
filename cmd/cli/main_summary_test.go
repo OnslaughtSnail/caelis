@@ -98,6 +98,22 @@ func TestSummarizeToolResponse_PatchIgnoresCallPreviewArgs(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolResponse_WriteUnchangedUsesCompactSummary(t *testing.T) {
+	got := summarizeToolResponseWithCall("WRITE", map[string]any{
+		"path":          "a.txt",
+		"created":       false,
+		"line_count":    2,
+		"added_lines":   0,
+		"removed_lines": 0,
+	}, map[string]any{
+		"path":    "a.txt",
+		"content": "same\n",
+	})
+	if got != "unchanged a.txt" {
+		t.Fatalf("unexpected unchanged write summary: %q", got)
+	}
+}
+
 func TestSummarizeToolResponse_DelegateRendersAssistantWithoutChildID(t *testing.T) {
 	got := summarizeToolResponse("DELEGATE", map[string]any{
 		"child_session_id": "s-1234567890ab",

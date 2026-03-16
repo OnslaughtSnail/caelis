@@ -17,7 +17,30 @@ All runtime events follow `session.Event`:
 ## Contract Metadata Keys
 
 - `meta.kind`: event kind
+- `meta.event_type`: normalized event category enum
 - `meta.contract_version`: contract version string (`v1`)
+
+## Event Type Enum
+
+`meta.event_type` is the stable machine-readable event classification upper layers should branch on. Runtime will write it for new events, and legacy events can still be interpreted by inference rules.
+
+| Value | Meaning |
+|-------|---------|
+| `conversation` | Normal persisted user / assistant / tool conversation event |
+| `system_message` | Persisted system-role message that is not lifecycle / notice |
+| `partial_answer` | Non-overlay assistant answer chunk |
+| `partial_reasoning` | Non-overlay assistant reasoning chunk |
+| `lifecycle` | Runtime lifecycle event |
+| `notice` | Transient runtime notice |
+| `overlay` | Ephemeral overlay event such as `/btw` request/response |
+| `overlay_partial_answer` | Overlay assistant answer chunk |
+| `overlay_partial_reasoning` | Overlay assistant reasoning chunk |
+| `compaction` | Compaction checkpoint event kept in persisted history |
+| `compaction_notice` | UI-only compaction progress notice |
+| `stream_resync` | UI-only replay/resync boundary event |
+| `ui_only` | Generic non-persisted UI event with no more specific subtype |
+
+For backward compatibility, older metadata such as `meta.kind`, `meta.partial`, `meta.channel`, notice metadata, and overlay visibility are still recognized when `meta.event_type` is absent.
 
 ## Lifecycle Events
 

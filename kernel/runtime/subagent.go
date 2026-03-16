@@ -223,7 +223,7 @@ func prepareEvent(ctx context.Context, sess *session.Session, ev *session.Event)
 		ev.SessionID = sess.ID
 	}
 	annotateDelegationMeta(ctx, ev, ev.SessionID)
-	return ev
+	return session.EnsureEventType(ev)
 }
 
 func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req delegation.RunRequest) (RunRequest, delegationLineage, error) {

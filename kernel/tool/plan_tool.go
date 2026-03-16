@@ -26,11 +26,12 @@ type PlanEntry struct {
 }
 
 type PlanArgs struct {
-	Entries []PlanEntry `json:"entries"`
+	Explanation string      `json:"explanation"`
+	Entries     []PlanEntry `json:"entries"`
 }
 
 type PlanResult struct {
-	Entries []PlanEntry `json:"entries"`
+	Message string `json:"message"`
 }
 
 func NewPlanTool() (Tool, error) {
@@ -44,7 +45,7 @@ func (t *planTool) Name() string {
 }
 
 func (t *planTool) Description() string {
-	return "Replace the current structured execution plan with the latest complete todo list. Use concise step text and statuses pending, in_progress, or completed."
+	return "Replace the current execution todo list for non-trivial multi-step work. Keep steps concise, update the full list only when progress changes, and avoid repeating the same plan without completing work."
 }
 
 func (t *planTool) Declaration() model.ToolDefinition {
@@ -54,19 +55,23 @@ func (t *planTool) Declaration() model.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
+				"explanation": map[string]any{
+					"type":        "string",
+					"description": "Optional brief note explaining why the plan changed.",
+				},
 				"entries": map[string]any{
 					"type":        "array",
-					"description": "The complete current plan. Replace the full list each time.",
+					"description": "The complete current plan. Replace the full list only when progress changes.",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"content": map[string]any{
 								"type":        "string",
-								"description": "Short standalone step text.",
+								"description": "Short standalone step text for one actionable task.",
 							},
 							"status": map[string]any{
 								"type":        "string",
-								"description": "One of pending, in_progress, completed.",
+								"description": "One of pending, in_progress, completed. Keep exactly one step in_progress until all work is complete.",
 								"enum":        []string{string(PlanStatusPending), string(PlanStatusInProgress), string(PlanStatusCompleted)},
 							},
 						},
@@ -125,7 +130,7 @@ func (t *planTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		return nil, err
 	}
 	return map[string]any{
-		"entries": planEntriesToAny(entries),
+		"message": "Plan updated",
 	}, nil
 }
 

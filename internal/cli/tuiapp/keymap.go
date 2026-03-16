@@ -9,23 +9,25 @@ import (
 )
 
 type appKeyMap struct {
-	Send        key.Binding
-	Queue       key.Binding
-	Interrupt   key.Binding
-	Mode        key.Binding
-	HistoryPrev key.Binding
-	HistoryNext key.Binding
-	ChoosePrev  key.Binding
-	ChooseNext  key.Binding
-	Accept      key.Binding
-	Complete    key.Binding
-	ImagePaste  key.Binding
-	TextPaste   key.Binding
-	Clear       key.Binding
-	Back        key.Binding
-	PageUp      key.Binding
-	PageDown    key.Binding
-	Quit        key.Binding
+	Send          key.Binding
+	Queue         key.Binding
+	Interrupt     key.Binding
+	Mode          key.Binding
+	HistoryPrev   key.Binding
+	HistoryNext   key.Binding
+	ChoosePrev    key.Binding
+	ChooseNext    key.Binding
+	Accept        key.Binding
+	Complete      key.Binding
+	ImagePaste    key.Binding
+	TextPaste     key.Binding
+	Clear         key.Binding
+	Back          key.Binding
+	OverlayScroll key.Binding
+	OverlayClose  key.Binding
+	PageUp        key.Binding
+	PageDown      key.Binding
+	Quit          key.Binding
 }
 
 type helpBindings struct {
@@ -53,23 +55,25 @@ func defaultKeyMap(isWSL bool) appKeyMap {
 		textPasteHelp = "ctrl+v"
 	}
 	return appKeyMap{
-		Send:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
-		Queue:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
-		Interrupt:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt")),
-		Mode:        key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "mode")),
-		HistoryPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history")),
-		HistoryNext: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "draft")),
-		ChoosePrev:  key.NewBinding(key.WithKeys("up"), key.WithHelp("↑/↓", "select")),
-		ChooseNext:  key.NewBinding(key.WithKeys("down"), key.WithHelp("↑/↓", "select")),
-		Accept:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")),
-		Complete:    key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "fill")),
-		ImagePaste:  key.NewBinding(key.WithKeys(imagePasteKeys...), key.WithHelp(imagePasteHelp, "image")),
-		TextPaste:   key.NewBinding(key.WithKeys(textPasteKeys...), key.WithHelp(textPasteHelp, "text")),
-		Clear:       key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear")),
-		Back:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
-		PageUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll")),
-		PageDown:    key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll")),
-		Quit:        key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		Queue:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
+		Interrupt:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt")),
+		Mode:          key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "mode")),
+		HistoryPrev:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history")),
+		HistoryNext:   key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "draft")),
+		ChoosePrev:    key.NewBinding(key.WithKeys("up"), key.WithHelp("↑/↓", "select")),
+		ChooseNext:    key.NewBinding(key.WithKeys("down"), key.WithHelp("↑/↓", "select")),
+		Accept:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply")),
+		Complete:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "fill")),
+		ImagePaste:    key.NewBinding(key.WithKeys(imagePasteKeys...), key.WithHelp(imagePasteHelp, "image")),
+		TextPaste:     key.NewBinding(key.WithKeys(textPasteKeys...), key.WithHelp(textPasteHelp, "text")),
+		Clear:         key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "clear")),
+		Back:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
+		OverlayScroll: key.NewBinding(key.WithKeys("up", "down"), key.WithHelp("↑/↓", "scroll")),
+		OverlayClose:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
+		PageUp:        key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll")),
+		PageDown:      key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll")),
+		Quit:          key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 	}
 }
 
@@ -119,6 +123,14 @@ func (m *Model) currentFooterHelp() helpBindings {
 			short: enabledBindings(m.keys.Accept, m.keys.Back),
 			full: [][]key.Binding{
 				enabledBindings(m.keys.Accept, m.keys.Clear, m.keys.Back),
+			},
+		}
+	}
+	if m.btwOverlay != nil {
+		return helpBindings{
+			short: enabledBindings(m.keys.OverlayClose, m.keys.OverlayScroll),
+			full: [][]key.Binding{
+				enabledBindings(m.keys.OverlayScroll, m.keys.PageUp, m.keys.PageDown, m.keys.OverlayClose),
 			},
 		}
 	}
