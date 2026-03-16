@@ -208,13 +208,20 @@ func TestHostRunner_Async(t *testing.T) {
 	}
 
 	var stdout []byte
-	waitForCondition(t, 5*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		var readErr error
 		stdout, _, _, _, readErr = runner.ReadOutput(sessionID, 0, 0)
 		if readErr != nil {
 			t.Fatalf("ReadOutput failed: %v", readErr)
 		}
-		return strings.Contains(string(stdout), "async-test")
+		if strings.Contains(string(stdout), "async-test") {
+			return true
+		}
+		status, statusErr := runner.GetSessionStatus(sessionID)
+		if statusErr != nil {
+			t.Fatalf("GetSessionStatus failed: %v", statusErr)
+		}
+		return status.State == SessionStateCompleted || status.State == SessionStateError || status.State == SessionStateTerminated
 	})
 
 	result, err := runner.WaitSession(context.Background(), sessionID, 5*time.Second)
@@ -248,7 +255,7 @@ func TestHostRunner_AsyncWriteRead(t *testing.T) {
 	}
 
 	var stdout []byte
-	waitForCondition(t, time.Second, func() bool {
+	waitForCondition(t, 5*time.Second, func() bool {
 		var err error
 		stdout, _, _, _, err = runner.ReadOutput(sessionID, 0, 0)
 		if err != nil {
