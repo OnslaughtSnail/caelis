@@ -75,12 +75,15 @@ func (t *PatchTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	if err := t.runtime.FileSystem().WriteFile(plan.path, []byte(plan.after), plan.mode); err != nil {
 		return nil, err
 	}
+	diffStats := CountLineDiff(plan.before, plan.after)
 	return map[string]any{
-		"path":      plan.path,
-		"replaced":  plan.replaced,
-		"old_count": plan.oldCount,
-		"created":   plan.created,
-		"metadata":  buildPatchMetadata(buildPatchPreview(plan.before, plan.after), plan.hunk),
+		"path":          plan.path,
+		"replaced":      plan.replaced,
+		"old_count":     plan.oldCount,
+		"created":       plan.created,
+		"added_lines":   diffStats.Added,
+		"removed_lines": diffStats.Removed,
+		"metadata":      buildPatchMetadata(buildPatchPreview(plan.before, plan.after), plan.hunk),
 	}, nil
 }
 

@@ -14,6 +14,8 @@ type toolCallMutationVisuals struct {
 	DiffMsg      tuievents.DiffBlockMsg
 	DiffShown    bool
 	ChangeCounts mutationChangeCounts
+	PreviewPath  string
+	PreviewNew   string
 }
 
 type mutationChangeCounts struct {
@@ -28,8 +30,10 @@ func buildToolCallMutationVisuals(runtime toolexec.Runtime, toolName string, cal
 	}
 	visuals := toolCallMutationVisuals{
 		ChangeCounts: mutationChangeCountsForTool(strings.ToUpper(strings.TrimSpace(toolName)), preview, callArgs),
+		PreviewPath:  preview.Path,
+		PreviewNew:   preview.New,
 	}
-	if countLines(preview.Old)+countLines(preview.New) > richDiffMaxLines {
+	if shouldSkipRichDiff(preview, visuals.ChangeCounts) {
 		return visuals, true
 	}
 	visuals.DiffMsg = tuievents.DiffBlockMsg{
@@ -62,26 +66,25 @@ func mutationChangeCountsForTool(toolName string, preview toolfs.MutationPreview
 				replacements = 1
 			}
 		}
-		removed := 0
-		if oldText != "" {
-			removed = countLines(oldText) * replacements
-		}
-		added := 0
-		if newText != "" {
-			added = countLines(newText) * replacements
-		}
-		return mutationChangeCounts{Added: added, Removed: removed}
-	case "WRITE":
+		stats := toolfs.CountLineDiff(oldText, newText)
 		return mutationChangeCounts{
-			Added:   countLines(preview.New),
-			Removed: countLines(preview.Old),
+			Added:   stats.Added * replacements,
+			Removed: stats.Removed * replacements,
 		}
+	case "WRITE":
+		stats := toolfs.CountLineDiff(preview.Old, preview.New)
+		return mutationChangeCounts{Added: stats.Added, Removed: stats.Removed}
 	default:
 		return mutationChangeCounts{}
 	}
 }
 
 func mutationChangeCountsFromResult(toolName string, result map[string]any, callArgs map[string]any) mutationChangeCounts {
+	if added, addedOK := asInt(result["added_lines"]); addedOK {
+		if removed, removedOK := asInt(result["removed_lines"]); removedOK {
+			return mutationChangeCounts{Added: max(0, added), Removed: max(0, removed)}
+		}
+	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
 	case "PATCH":
 		replacements, ok := asInt(result["replaced"])
@@ -90,29 +93,48 @@ func mutationChangeCountsFromResult(toolName string, result map[string]any, call
 		}
 		oldText := asString(callArgs["old"])
 		newText := asString(callArgs["new"])
-		removed := 0
-		if oldText != "" {
-			removed = countLines(oldText) * replacements
+		stats := toolfs.CountLineDiff(oldText, newText)
+		return mutationChangeCounts{
+			Added:   stats.Added * replacements,
+			Removed: stats.Removed * replacements,
 		}
-		added := 0
-		if newText != "" {
-			added = countLines(newText) * replacements
-		}
-		return mutationChangeCounts{Added: added, Removed: removed}
 	case "WRITE":
-		added, ok := asInt(result["line_count"])
-		if !ok || added < 0 {
-			added = countLines(asString(callArgs["content"]))
-		}
-		if added < 0 {
-			added = 0
-		}
-		return mutationChangeCounts{Added: added, Removed: 0}
+		return mutationChangeCounts{}
 	default:
 		return mutationChangeCounts{}
 	}
 }
 
+func legacyWriteMutationChangeCounts(result map[string]any, callArgs map[string]any) mutationChangeCounts {
+	if _, addedOK := asInt(result["added_lines"]); addedOK {
+		if _, removedOK := asInt(result["removed_lines"]); removedOK {
+			return mutationChangeCounts{}
+		}
+	}
+	added, ok := asInt(result["line_count"])
+	if !ok || added < 0 {
+		added = countLines(asString(callArgs["content"]))
+	}
+	if added < 0 {
+		added = 0
+	}
+	return mutationChangeCounts{Added: added, Removed: 0}
+}
+
 func formatMutationChangeSummary(counts mutationChangeCounts) string {
 	return fmt.Sprintf("+%d -%d", max(0, counts.Added), max(0, counts.Removed))
+}
+
+func shouldSkipRichDiff(preview toolfs.MutationPreview, counts mutationChangeCounts) bool {
+	const richDiffMaxTotalLines = 5000
+
+	totalLines := countLines(preview.Old) + countLines(preview.New)
+	if totalLines > richDiffMaxTotalLines {
+		return true
+	}
+	diffLines := counts.Added + counts.Removed
+	if diffLines <= 0 {
+		diffLines = totalLines
+	}
+	return diffLines > richDiffMaxLines
 }

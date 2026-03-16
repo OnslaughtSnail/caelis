@@ -68,12 +68,15 @@ func (t *WriteTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	if err := t.runtime.FileSystem().WriteFile(plan.path, []byte(plan.after), plan.mode); err != nil {
 		return nil, err
 	}
+	diffStats := CountLineDiff(plan.before, plan.after)
 
 	return map[string]any{
 		"path":          plan.path,
 		"created":       plan.created,
 		"bytes_written": len([]byte(plan.after)),
 		"line_count":    lineCount(plan.after),
+		"added_lines":   diffStats.Added,
+		"removed_lines": diffStats.Removed,
 	}, nil
 }
 

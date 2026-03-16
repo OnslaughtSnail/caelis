@@ -26,6 +26,9 @@ func TestWriteTool_CreateFileWithoutReadEvidence(t *testing.T) {
 	if !created {
 		t.Fatalf("expected created=true, got %v", out["created"])
 	}
+	if out["added_lines"] != 1 || out["removed_lines"] != 0 {
+		t.Fatalf("expected +1 -0 stats, got +%v -%v", out["added_lines"], out["removed_lines"])
+	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +59,9 @@ func TestWriteTool_OverwriteExistingFile(t *testing.T) {
 	created, _ := out["created"].(bool)
 	if created {
 		t.Fatalf("expected created=false, got %v", out["created"])
+	}
+	if out["added_lines"] != 1 || out["removed_lines"] != 1 {
+		t.Fatalf("expected +1 -1 stats, got +%v -%v", out["added_lines"], out["removed_lines"])
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

@@ -1142,7 +1142,7 @@ func (m *Model) renderReasoningBlockLines(raw string) []string {
 		}
 		line = prefix + line
 		if isMarkdown {
-			lines[i] = line
+			lines[i] = m.theme.ReasoningStyle().Render(tuikit.LinkifyText(line, m.theme.LinkStyle()))
 			continue
 		}
 		lines[i] = tuikit.ColorizeLogLine(line, tuikit.LineStyleReasoning, m.theme)

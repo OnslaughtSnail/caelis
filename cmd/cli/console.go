@@ -595,6 +595,7 @@ func (c *cliConsole) emitAssistantChunkToTUI(kind string, text string, final boo
 
 type tuiForwardOptions struct {
 	ShowMutationDiff bool
+	ReplayMode       bool
 }
 
 func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[string]toolCallSnapshot) bool {
@@ -633,6 +634,12 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		}
 	}
 	if len(msg.ToolCalls) > 0 {
+		previewRuntime := c.execRuntime
+		previewFS := newMutationPreviewFS(nil)
+		if !opts.ReplayMode && c.execRuntime != nil && c.execRuntime.FileSystem() != nil {
+			previewFS = newMutationPreviewFS(c.execRuntime.FileSystem())
+			previewRuntime = mutationPreviewRuntime{base: c.execRuntime, fsys: previewFS}
+		}
 		for _, call := range msg.ToolCalls {
 			if isPlanToolName(call.Name) {
 				handled = true
@@ -641,8 +648,11 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			parsedArgs := parseToolArgsForDisplay(call.Args)
 			visuals := toolCallMutationVisuals{}
 			visualsOK := false
-			if isFileMutationTool(call.Name) {
-				visuals, visualsOK = buildToolCallMutationVisuals(c.execRuntime, call.Name, parsedArgs)
+			if isFileMutationTool(call.Name) && !opts.ReplayMode {
+				visuals, visualsOK = buildToolCallMutationVisuals(previewRuntime, call.Name, parsedArgs)
+				if visualsOK && previewFS != nil && strings.TrimSpace(visuals.PreviewPath) != "" {
+					previewFS.Stage(visuals.PreviewPath, visuals.PreviewNew)
+				}
 			}
 			if pendingToolCalls != nil && call.ID != "" {
 				diffShown := opts.ShowMutationDiff && visualsOK && visuals.DiffShown
@@ -705,8 +715,12 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			if richDiffShown {
 				return true
 			}
-			if changeCounts == (mutationChangeCounts{}) {
-				changeCounts = mutationChangeCountsFromResult(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+			if resultCounts := mutationChangeCountsFromResult(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs); resultCounts != (mutationChangeCounts{}) {
+				changeCounts = resultCounts
+			} else if opts.ReplayMode && strings.EqualFold(msg.ToolResponse.Name, "WRITE") {
+				if legacyCounts := legacyWriteMutationChangeCounts(msg.ToolResponse.Result, callArgs); legacyCounts != (mutationChangeCounts{}) {
+					changeCounts = legacyCounts
+				}
 			}
 			summary := formatMutationChangeSummary(changeCounts)
 			if changeCounts == (mutationChangeCounts{}) {
@@ -1600,6 +1614,7 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 		}
 		if c.forwardEventToTUIWithOptions(ev, pendingToolCalls, tuiForwardOptions{
 			ShowMutationDiff: false,
+			ReplayMode:       true,
 		}) {
 			continue
 		}

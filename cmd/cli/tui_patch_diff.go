@@ -16,7 +16,8 @@ func buildToolCallDiffBlockMsg(runtime toolexec.Runtime, toolName string, callAr
 	if err != nil {
 		return tuievents.DiffBlockMsg{}, false, false
 	}
-	if countLines(preview.Old)+countLines(preview.New) > richDiffMaxLines {
+	counts := mutationChangeCountsForTool(strings.ToUpper(strings.TrimSpace(toolName)), preview, callArgs)
+	if shouldSkipRichDiff(preview, counts) {
 		return tuievents.DiffBlockMsg{}, true, true
 	}
 	msg := tuievents.DiffBlockMsg{

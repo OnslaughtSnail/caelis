@@ -54,6 +54,9 @@ func TestPatchTool_AppliesSingleReplacement(t *testing.T) {
 	if out["replaced"] != 1 {
 		t.Fatalf("expected replaced=1, got %v", out["replaced"])
 	}
+	if out["added_lines"] != 1 || out["removed_lines"] != 1 {
+		t.Fatalf("expected +1 -1 stats, got +%v -%v", out["added_lines"], out["removed_lines"])
+	}
 	preview := patchPreviewFromResult(out)
 	if !strings.Contains(preview, "--- old") || !strings.Contains(preview, "+++ new") {
 		t.Fatalf("expected patch preview header, got %q", preview)
@@ -72,6 +75,30 @@ func TestPatchTool_AppliesSingleReplacement(t *testing.T) {
 	}
 	if string(content) != "world\n" {
 		t.Fatalf("unexpected patched content: %q", string(content))
+	}
+}
+
+func TestPatchTool_ReportsInsertedLinesWithoutPhantomRemovals(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "insert.txt")
+	if err := os.WriteFile(path, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), map[string]any{
+		"path": path,
+		"old":  "a\nb",
+		"new":  "a\nx\nb",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["added_lines"] != 1 || out["removed_lines"] != 0 {
+		t.Fatalf("expected +1 -0 stats, got +%v -%v", out["added_lines"], out["removed_lines"])
 	}
 }
 

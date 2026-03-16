@@ -691,10 +691,12 @@ func TestHandleResume_WithPatchResponse_ReplaysCompactSummaryWithoutDiffBlock(t 
 				ID:   "call_patch_1",
 				Name: "PATCH",
 				Result: map[string]any{
-					"path":      diffFixturePath,
-					"created":   false,
-					"replaced":  1,
-					"old_count": 1,
+					"path":          diffFixturePath,
+					"created":       false,
+					"replaced":      1,
+					"old_count":     1,
+					"added_lines":   1,
+					"removed_lines": 1,
 				},
 			},
 		},
@@ -740,6 +742,185 @@ func TestHandleResume_WithPatchResponse_ReplaysCompactSummaryWithoutDiffBlock(t 
 	if !foundSummary {
 		t.Fatalf("expected compact patch summary in replay events, got %#v", sender.msgs)
 	}
+}
+
+func TestHandleResume_WithPatchInsert_ReplaysTrueDiffStats(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	diffFixtureDir := t.TempDir()
+	diffFixturePath := filepath.Join(diffFixtureDir, "a.txt")
+	if err := os.WriteFile(diffFixturePath, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "resume-patch-insert"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:   "ev-call",
+		Time: time.Now(),
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{
+					ID:   "call_patch_insert",
+					Name: "PATCH",
+					Args: fmt.Sprintf(`{"path":%q,"old":"a\nb","new":"a\nx\nb"}`, diffFixturePath),
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:   "ev-result",
+		Time: time.Now().Add(time.Second),
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_patch_insert",
+				Name: "PATCH",
+				Result: map[string]any{
+					"path":          diffFixturePath,
+					"created":       false,
+					"replaced":      1,
+					"old_count":     1,
+					"added_lines":   1,
+					"removed_lines": 0,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "resume-patch-insert", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	sender := &testSender{}
+	c := &cliConsole{
+		baseCtx:       context.Background(),
+		rt:            rt,
+		appName:       "app",
+		userID:        "u",
+		workspace:     workspace,
+		sessionIndex:  idx,
+		sessionID:     "default",
+		execRuntime:   previewTestRuntime{cwd: diffFixtureDir},
+		out:           &out,
+		ui:            newUI(&out, true, false),
+		showReasoning: true,
+		tuiSender:     sender,
+	}
+	if _, err := handleResume(c, []string{"resume-patch-insert"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range sender.msgs {
+		msg, ok := raw.(tuievents.LogChunkMsg)
+		if ok && strings.Contains(msg.Chunk, "✓ PATCH +1 -0") {
+			return
+		}
+	}
+	t.Fatalf("expected compact patch summary +1 -0, got %#v", sender.msgs)
+}
+
+func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	diffFixtureDir := t.TempDir()
+	diffFixturePath := filepath.Join(diffFixtureDir, "a.txt")
+	if err := os.WriteFile(diffFixturePath, []byte("current\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "resume-write-legacy"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:   "ev-call",
+		Time: time.Now(),
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{
+					ID:   "call_write_legacy",
+					Name: "WRITE",
+					Args: fmt.Sprintf(`{"path":%q,"content":"new-one\nnew-two\n"}`, diffFixturePath),
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:   "ev-result",
+		Time: time.Now().Add(time.Second),
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_write_legacy",
+				Name: "WRITE",
+				Result: map[string]any{
+					"path":       diffFixturePath,
+					"created":    false,
+					"line_count": 2,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "resume-write-legacy", time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	sender := &testSender{}
+	c := &cliConsole{
+		baseCtx:       context.Background(),
+		rt:            rt,
+		appName:       "app",
+		userID:        "u",
+		workspace:     workspace,
+		sessionIndex:  idx,
+		sessionID:     "default",
+		execRuntime:   previewTestRuntime{cwd: diffFixtureDir},
+		out:           &out,
+		ui:            newUI(&out, true, false),
+		showReasoning: true,
+		tuiSender:     sender,
+	}
+	if _, err := handleResume(c, []string{"resume-write-legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range sender.msgs {
+		msg, ok := raw.(tuievents.LogChunkMsg)
+		if ok && strings.Contains(msg.Chunk, "✓ WRITE +2 -0") {
+			return
+		}
+	}
+	t.Fatalf("expected legacy WRITE summary +2 -0, got %#v", sender.msgs)
 }
 
 func TestHandleResume_DefaultUsesMostRecentNonCurrent(t *testing.T) {

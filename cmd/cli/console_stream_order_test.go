@@ -267,8 +267,142 @@ func TestForwardEventToTUI_FileToolResponseEmitsCompactSummaryWhenDiffSkipped(t 
 	if !ok {
 		t.Fatalf("expected second message LogChunkMsg, got %T", sender.msgs[1])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ WRITE +501 -501") {
+	if !strings.Contains(logMsg.Chunk, "✓ WRITE +500 -500") {
 		t.Fatalf("unexpected compact WRITE summary: %q", logMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_PatchUsesDiffStatsForInsertedLineSummary(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(path, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+	pending := map[string]toolCallSnapshot{}
+
+	handled := c.forwardEventToTUIWithOptions(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{ID: "call_patch_insert", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"a\nb","new":"a\nx\nb"}`, path)},
+			},
+		},
+	}, pending, tuiForwardOptions{ShowMutationDiff: false})
+	if !handled {
+		t.Fatal("expected tool call to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected only call log when rich diff is disabled, got %#v", sender.msgs)
+	}
+	sender.msgs = nil
+
+	handled = c.forwardEventToTUIWithOptions(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_patch_insert",
+				Name: "PATCH",
+				Result: map[string]any{
+					"path":          path,
+					"created":       false,
+					"replaced":      1,
+					"old_count":     1,
+					"added_lines":   1,
+					"removed_lines": 0,
+				},
+			},
+		},
+	}, pending, tuiForwardOptions{ShowMutationDiff: false})
+	if !handled {
+		t.Fatal("expected tool response to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected one compact summary, got %#v", sender.msgs)
+	}
+	logMsg, ok := sender.msgs[0].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
+	}
+	if !strings.Contains(logMsg.Chunk, "✓ PATCH +1 -0") {
+		t.Fatalf("unexpected compact PATCH summary: %q", logMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_LargeFileSmallPatchStillEmitsRichDiff(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "large.txt")
+	lines := make([]string, 0, 1400)
+	for i := 1; i <= 1400; i++ {
+		lines = append(lines, fmt.Sprintf("line-%04d", i))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	oldSnippet := "line-1200\nline-1201\nline-1202"
+	newSnippet := "line-1200\ninserted\nline-1201\nline-1202"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{ID: "call_patch_large", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":%q,"new":%q}`, path, oldSnippet, newSnippet)},
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected tool call to be handled")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected call log and rich diff, got %#v", sender.msgs)
+	}
+	if _, ok := sender.msgs[1].(tuievents.DiffBlockMsg); !ok {
+		t.Fatalf("expected rich diff block, got %T", sender.msgs[1])
+	}
+}
+
+func TestForwardEventToTUI_StagesEarlierPatchForLaterPreviewInSameEvent(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "chain.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{
+				{ID: "call_1", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"one\ntwo","new":"one\nmid\ntwo"}`, path)},
+				{ID: "call_2", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"one\nmid\ntwo","new":"one\nmid\ntwo\nend"}`, path)},
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected tool calls to be handled")
+	}
+	diffBlocks := 0
+	for _, raw := range sender.msgs {
+		if _, ok := raw.(tuievents.DiffBlockMsg); ok {
+			diffBlocks++
+		}
+	}
+	if diffBlocks != 2 {
+		t.Fatalf("expected both PATCH calls to render rich diffs, got %#v", sender.msgs)
 	}
 }
 

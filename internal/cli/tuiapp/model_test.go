@@ -1815,8 +1815,8 @@ func TestReasoningBlockLinesRenderMarkdownWhileStreaming(t *testing.T) {
 		t.Fatalf("expected heading markers hidden in reasoning block, got %q", joined)
 	}
 	raw := strings.Join(m.historyLines, "\n")
-	if strings.Contains(raw, "\x1b[") {
-		t.Fatalf("expected reasoning markdown to render without ANSI colors, got %q", raw)
+	if !strings.Contains(raw, "\x1b[") {
+		t.Fatalf("expected reasoning markdown to retain reasoning style ANSI, got %q", raw)
 	}
 }
 
