@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.0.24 - 2026-03-16
+
+### TUI Rendering, Streaming & Mutation Summaries
+- Improved Bubble Tea streaming rendering so Markdown/plain-text output stays stable across incremental deltas, preserving short tokens and avoiding unwanted indentation drift.
+- Corrected `PATCH` / `WRITE` mutation added/removed line counts, including better replay-time handling and richer preview accounting for insert-only edits and legacy write responses.
+- Suppressed misleading rich diffs and summaries for no-op file writes so unchanged mutations no longer render phantom removals or noisy replay output.
+
+### Ephemeral `/btw` Side Questions
+- Added `/btw <question>` as an ephemeral side-question flow that reuses current session context without appending the exchange to persisted conversation history.
+- Added dedicated overlay event typing/visibility handling across runtime, session projection, ACP, and TUI layers so overlay turns stay non-persistent and machine-classifiable.
+- Blocked tool use during `/btw` runs and added dedicated TUI overlay rendering/interaction coverage for side-question answers, errors, and dismissal behavior.
+
+### Planning & Runtime Event Semantics
+- Normalized runtime event categorization around stable `meta.event_type` values, with backward-compatible inference for legacy metadata.
+- Tightened `PLAN` tool guidance/response semantics so plan updates can stay lightweight in the transcript while still updating structured session state.
+
 ## v0.0.23 - 2026-03-15
 
 ### Runtime, Prompt Flow & Session Streaming

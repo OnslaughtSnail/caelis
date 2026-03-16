@@ -18,9 +18,9 @@ It is designed to be extracted as a standalone repository.
 - Token-budget based auto compaction (append-only event strategy).
 - MCP ToolSet integration (`stdio` / `sse` / `streamable`), assembled via `mcp_tools` provider.
 - Experimental CLI-only LSP plugin provider (`lsp_tools`), opt-in via `-experimental-lsp`.
-- Full Bubble Tea TUI with streaming output, tool display, approval UX, reasoning blocks, and inline diff.
+- Full Bubble Tea TUI with streaming output, stable incremental Markdown/plain-text rendering, tool display, approval UX, reasoning blocks, inline diff, and ephemeral `/btw` side-question overlays.
 - Model catalog (static snapshot + remote refresh) with per-model reasoning capability discovery.
-- Tool-level authorization baseline with per-tool allow/deny policy evaluation.
+- Tool-level authorization baseline with per-tool allow/deny policy evaluation, including tool denial for ephemeral `/btw` overlay turns.
 - Workspace boundary policy restricting filesystem tools to project root.
 - Structured prompt environment context injection (`cwd`, `shell`, `current_date`, `timezone`).
 - `@file` / `@image` input reference parsing in user prompts; clipboard image capture.
@@ -205,7 +205,7 @@ go run ./eval/cmd \
 - `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
 
 ## Release
-- Current release: `v0.0.23` (see `VERSION` and `CHANGELOG.md`).
+- Current release: `v0.0.24` (see `VERSION` and `CHANGELOG.md`).
 - Local dry-run package:
 ```bash
 make release-dry-run
@@ -228,5 +228,5 @@ npm i -g @onslaughtsnail/caelis
    - Repository: `OnslaughtSnail/caelis`
    - Workflow file: `release.yml`
 3. In GitHub repo settings, ensure Actions are allowed and workflow permissions are not blocking OIDC.
-4. Push a tag like `v0.0.23` to trigger release + npm publish.
+4. Push a tag like `v0.0.24` to trigger release + npm publish.
 5. Detailed checklist: `docs/npm-release.md`.
