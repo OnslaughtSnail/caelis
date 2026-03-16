@@ -225,6 +225,12 @@ func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Mod
 	return m, m.maybeStartClosingToolOutputFades()
 }
 
+// minReplayLen is the minimum byte length for an incoming chunk to be
+// considered a replayed older cumulative snapshot.  Short delta tokens
+// (e.g. "#", "- ", "**", "\n") frequently coincide with the opening
+// characters of the accumulated text and must not be dropped.
+const minReplayLen = 16
+
 func mergeStreamChunk(existing string, incoming string, final bool) string {
 	if final {
 		incoming = strings.TrimSpace(incoming)
@@ -240,11 +246,13 @@ func mergeStreamChunk(existing string, incoming string, final bool) string {
 		return incoming
 	}
 	if strings.HasPrefix(incoming, existing) {
-		// Cumulative stream chunk.
+		// Cumulative stream chunk: incoming includes all previous text.
 		return incoming
 	}
-	if strings.HasPrefix(existing, incoming) {
-		// Replayed/duplicated old chunk.
+	// Only treat as a replayed older cumulative snapshot when the incoming
+	// text is long enough to be a credible replay, not a short delta token
+	// that coincidentally matches the opening characters of the buffer.
+	if len(incoming) >= minReplayLen && strings.HasPrefix(existing, incoming) {
 		return existing
 	}
 	return existing + incoming
@@ -1086,11 +1094,12 @@ func (m *Model) shiftAnchoredBlocks(threshold, delta int, skipKey string) {
 }
 
 func (m *Model) renderAssistantBlockLines(raw string) []string {
-	trimmed := strings.TrimSpace(raw)
-	isMarkdown := looksLikeMarkdown(trimmed)
-	rendered := renderAssistantMarkdown(trimmed, maxInt(20, m.viewport.Width()), m.theme)
+	rendered, isMarkdown := renderNarrativeMarkdown(raw, maxInt(20, m.viewport.Width()), m.theme)
 	if rendered == "" {
 		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
+	}
+	if !isMarkdown {
+		rendered = normalizePlainBlockText(ansi.Strip(rendered))
 	}
 	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
 	if len(lines) > 0 {
@@ -1119,21 +1128,37 @@ func trimLeadingBlankLines(lines []string) []string {
 }
 
 func (m *Model) renderReasoningBlockLines(raw string) []string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
+	rendered, isMarkdown := renderNarrativeMarkdown(raw, maxInt(20, m.viewport.Width()), m.theme)
+	if rendered == "" {
 		return []string{tuikit.ColorizeLogLine("· ", tuikit.LineStyleReasoning, m.theme)}
 	}
-	lines := strings.Split(trimmed, "\n")
+	rendered = normalizePlainBlockText(ansi.Strip(rendered))
+	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
 	for i, line := range lines {
 		line = strings.TrimRight(line, "\r")
+		prefix := "  "
 		if i == 0 {
-			line = "· " + line
-		} else {
-			line = "  " + line
+			prefix = "· "
+		}
+		line = prefix + line
+		if isMarkdown {
+			lines[i] = line
+			continue
 		}
 		lines[i] = tuikit.ColorizeLogLine(line, tuikit.LineStyleReasoning, m.theme)
 	}
 	return lines
+}
+
+func normalizePlainBlockText(rendered string) string {
+	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *Model) renderDiffBlockLines(msg tuievents.DiffBlockMsg) []string {

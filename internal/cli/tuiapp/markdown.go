@@ -19,25 +19,31 @@ var (
 	markdownRendererCache          sync.Map
 	blockMathPattern               = regexp.MustCompile(`(?ms)(^|\n)\$\$\s*\n?(.*?)\n?\s*\$\$`)
 	inlineMathPattern              = regexp.MustCompile(`(^|[^\\$])\$([^\n$]+?)\$`)
+	leadingANSIPattern             = regexp.MustCompile(`^(?:\x1b\[[0-9;]*m)*`)
 )
 
-func renderAssistantMarkdown(text string, width int, theme tuikit.Theme) string {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return ""
+func renderNarrativeMarkdown(text string, width int, theme tuikit.Theme) (string, bool) {
+	if strings.TrimSpace(text) == "" {
+		return "", false
 	}
-	normalized := normalizeTerminalMarkdown(trimmed)
-	if !looksLikeMarkdown(normalized) {
-		return trimmed
-	}
+	normalized := normalizeTerminalMarkdown(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"))
+	isMarkdown := looksLikeMarkdown(normalized)
 	rendered, err := renderMarkdown(normalized, width, theme)
 	if err != nil {
-		return trimmed
+		return text, isMarkdown
 	}
 	rendered = strings.TrimSuffix(rendered, "\n")
 	if rendered == "" {
-		return trimmed
+		return text, isMarkdown
 	}
+	if !isMarkdown {
+		rendered = normalizeRenderedPlainText(rendered)
+	}
+	return rendered, isMarkdown
+}
+
+func renderAssistantMarkdown(text string, width int, theme tuikit.Theme) string {
+	rendered, _ := renderNarrativeMarkdown(text, width, theme)
 	return rendered
 }
 
@@ -130,15 +136,12 @@ func looksLikeMarkdown(text string) bool {
 		return false
 	}
 	markers := []string{
-		"```", "\n#", "\n- ", "\n* ", "\n1. ", "\n> ", "`", "**", "__", "![", "](", "$$",
+		"```", "\n#", "\n- ", "\n* ", "\n1. ", "\n> ", "`", "**", "__", "![", "](",
 	}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {
 			return true
 		}
-	}
-	if containsInlineMath(text) {
-		return true
 	}
 	if strings.HasPrefix(text, "#") ||
 		strings.HasPrefix(text, "- ") ||
@@ -146,6 +149,9 @@ func looksLikeMarkdown(text string) bool {
 		strings.HasPrefix(text, "1. ") ||
 		strings.HasPrefix(text, "> ") ||
 		strings.HasPrefix(text, "$$") {
+		return true
+	}
+	if containsInlineMath(text) {
 		return true
 	}
 	return false
@@ -167,8 +173,7 @@ func normalizeTerminalMarkdown(input string) string {
 		}
 		return prefix + "```text\n" + body + "\n```"
 	})
-	output = replaceInlineMath(output)
-	return output
+	return replaceInlineMath(output)
 }
 
 func containsInlineMath(text string) bool {
@@ -211,6 +216,43 @@ func replaceInlineMath(text string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+func normalizeRenderedPlainText(rendered string) string {
+	lines := strings.Split(rendered, "\n")
+	lines = trimLeadingBlankLines(lines)
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	allIndented := len(lines) > 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		rest := strings.TrimPrefix(line, leadingANSIPattern.FindString(line))
+		if !strings.HasPrefix(rest, "  ") {
+			allIndented = false
+			break
+		}
+	}
+	if allIndented {
+		for i, line := range lines {
+			lines[i] = trimStyledParagraphIndent(line)
+		}
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func trimStyledParagraphIndent(line string) string {
+	prefix := leadingANSIPattern.FindString(line)
+	rest := strings.TrimPrefix(line, prefix)
+	if strings.HasPrefix(rest, "  ") {
+		return prefix + strings.TrimPrefix(rest, "  ")
+	}
+	return line
 }
 
 func isInlineMathBody(body string) bool {

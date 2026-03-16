@@ -1795,6 +1795,31 @@ func TestReasoningStreamKeepsBlockStyleAcrossParagraphs(t *testing.T) {
 	}
 }
 
+func TestReasoningBlockLinesRenderMarkdownWhileStreaming(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ReasoningStreamMsg{
+		Text:  "## Thinking\n\n- one\n- two",
+		Final: false,
+	})
+
+	if m.reasoningBlock == nil {
+		t.Fatal("expected active reasoning block")
+	}
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	if !strings.Contains(joined, "Thinking") || !strings.Contains(joined, "• one") || !strings.Contains(joined, "• two") {
+		t.Fatalf("expected reasoning markdown rendered in place, got %q", joined)
+	}
+	if strings.Contains(joined, "## Thinking") {
+		t.Fatalf("expected heading markers hidden in reasoning block, got %q", joined)
+	}
+	raw := strings.Join(m.historyLines, "\n")
+	if strings.Contains(raw, "\x1b[") {
+		t.Fatalf("expected reasoning markdown to render without ANSI colors, got %q", raw)
+	}
+}
+
 func TestAssistantAfterReasoningHasNoExtraGap(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -1869,6 +1894,73 @@ func TestReasoningThenFinalAnswerReusesExistingAnswerBlock(t *testing.T) {
 	}
 	if strings.Contains(joined, "* Hello\n* Hello world") {
 		t.Fatalf("expected final answer to replace partial block in place, got %q", joined)
+	}
+}
+
+func TestMergeStreamChunkDoesNotDropShortDelta(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing string
+		incoming string
+		want     string
+	}{
+		{"repeated char delta", "好的，直接输出", "好", "好的，直接输出好"},
+		{"heading marker delta", "# Title\n\n", "# ", "# Title\n\n# "},
+		{"list marker delta", "- item 1\n", "- ", "- item 1\n- "},
+		{"bold marker delta", "**bold**\n", "**", "**bold**\n**"},
+		{"blockquote delta", "> quote 1\n", "> ", "> quote 1\n> "},
+		{"space delta", " indented", " ", " indented "},
+		{"star list delta", "* first\n", "* ", "* first\n* "},
+		{"numbered list delta", "1. first\n", "1.", "1. first\n1."},
+		{"code fence delta", "text\n", "```", "text\n```"},
+		// Cumulative replay detection still works for long text.
+		{"long cumulative replay", "Hello world! This is a complete sentence.", "Hello world! This is a comple", "Hello world! This is a complete sentence."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeStreamChunk(tt.existing, tt.incoming, false)
+			if got != tt.want {
+				t.Errorf("mergeStreamChunk(%q, %q, false) =\n  got  %q\n  want %q",
+					tt.existing, tt.incoming, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStreamingDeltaTokensPreserveMarkdownStructure(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	// Simulate token-by-token delta streaming (like OpenAI-compatible API).
+	tokens := []string{
+		"好的", "：", "\n", "\n",
+		"#", " TUI", " 测试",
+		"\n", "\n",
+		"##", " 格式",
+		"\n", "\n",
+		"1.", " **", "加粗", "**",
+		"\n",
+		"2.", " *", "斜体", "*",
+	}
+	for _, tok := range tokens {
+		_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: tok, Final: false})
+	}
+
+	full := strings.Join(tokens, "")
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: full, Final: true})
+
+	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	// Heading markers should be consumed by markdown renderer.
+	if strings.Contains(joined, "# TUI") || strings.Contains(joined, "## 格式") {
+		t.Fatalf("expected heading markers hidden by markdown rendering, got:\n%s", joined)
+	}
+	// Bold markers should be consumed.
+	if strings.Contains(joined, "**加粗**") {
+		t.Fatalf("expected bold markers hidden, got:\n%s", joined)
+	}
+	// Content should still be present.
+	if !strings.Contains(joined, "TUI") || !strings.Contains(joined, "加粗") {
+		t.Fatalf("expected content preserved, got:\n%s", joined)
 	}
 }
 
