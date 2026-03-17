@@ -10,7 +10,7 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -71,10 +71,10 @@ func (t *ReadTool) Description() string {
 	return "Read a text file segment by path with offset/limit/token caps."
 }
 
-func (t *ReadTool) Capability() toolcap.Capability {
-	return toolcap.Capability{
-		Operations: []toolcap.Operation{toolcap.OperationFileRead},
-		Risk:       toolcap.RiskLow,
+func (t *ReadTool) Capability() capability.Capability {
+	return capability.Capability{
+		Operations: []capability.Operation{capability.OperationFileRead},
+		Risk:       capability.RiskLow,
 	}
 }
 

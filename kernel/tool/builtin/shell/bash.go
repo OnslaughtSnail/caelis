@@ -13,7 +13,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	ktool "github.com/OnslaughtSnail/caelis/kernel/tool"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -64,10 +64,10 @@ func (t *BashTool) Description() string {
 	return "Execute a shell command and return stdout/stderr."
 }
 
-func (t *BashTool) Capability() toolcap.Capability {
-	return toolcap.Capability{
-		Operations: []toolcap.Operation{toolcap.OperationExec},
-		Risk:       toolcap.RiskHigh,
+func (t *BashTool) Capability() capability.Capability {
+	return capability.Capability{
+		Operations: []capability.Operation{capability.OperationExec},
+		Risk:       capability.RiskHigh,
 	}
 }
 

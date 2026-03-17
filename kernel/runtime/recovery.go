@@ -3,7 +3,6 @@ package runtime
 import (
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -13,7 +12,7 @@ const (
 )
 
 func buildRecoveryEvents(events []*session.Event) []*session.Event {
-	pending := eventview.PendingToolCalls(eventview.AgentVisibleView(events))
+	pending := session.PendingToolCalls(session.AgentVisibleView(events))
 	if len(pending) == 0 {
 		return nil
 	}

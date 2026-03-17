@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.0.25 - 2026-03-17
+
+### Internal Architecture Refactor
+- Moved CLI-owned assembly, prompting, and skills metadata helpers out of legacy kernel packages into `internal/app/assembly`, `internal/app/prompting`, and `internal/app/skills`.
+- Moved session projection helpers into `kernel/session` and normalized tool capability metadata under `kernel/tool/capability`, reducing redundant top-level kernel packages.
+- Split large runtime, ACP server, and TUI rendering files into focused modules to make replay, lifecycle, task control, prompt parsing, and rendering logic easier to maintain without changing the exposed behavior.
+
+### Runtime, ACP, And UI Hardening
+- Preserved runtime/ACP behavior while refactoring by adding and updating regression coverage around session projections, persisted task rules, ACP sanitization, runtime replay, and permission/session-mode switching.
+- Improved TUI activity/result pairing so batched tool updates produce fewer orphaned entries and clearer merged activity state.
+- Added explicit unknown-tool failures in the agent loop so unsupported tool calls surface a direct error instead of falling through policy and authorization paths.
+
+### Documentation
+- Refreshed the repository documentation to reflect the current application structure, runtime model, supported entry points, and release version.
+
 ## v0.0.24 - 2026-03-16
 
 ### TUI Rendering, Streaming & Mutation Summaries

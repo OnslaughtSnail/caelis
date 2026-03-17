@@ -1,4 +1,4 @@
-package bootstrap
+package assembly
 
 import (
 	"context"

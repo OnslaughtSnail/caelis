@@ -10,7 +10,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 type policyHistoryCtx struct {
@@ -42,9 +42,9 @@ func TestRequireReadBeforeWrite_DeniesWithoutReadEvidence(t *testing.T) {
 			Args: "{}",
 		},
 		Args: map[string]any{"path": target},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	})
 	if err != nil {
@@ -87,9 +87,9 @@ func TestRequireReadBeforeWrite_AllowsWithReadEvidence(t *testing.T) {
 			Args: "{}",
 		},
 		Args: map[string]any{"path": target},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	})
 	if err != nil {
@@ -105,9 +105,9 @@ func TestRequireReadBeforeWrite_SkipsNonWriteTools(t *testing.T) {
 	hook := RequireReadBeforeWrite(ReadBeforeWriteConfig{})
 	_, err := hook.BeforeTool(context.Background(), ToolInput{
 		Call: model.ToolCall{Name: "LIST"},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileRead},
-			Risk:       toolcap.RiskLow,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileRead},
+			Risk:       capability.RiskLow,
 		},
 	})
 	if err != nil {
@@ -124,9 +124,9 @@ func TestRequireReadBeforeWrite_AllowsNewFileWithoutRead(t *testing.T) {
 			Args: "{}",
 		},
 		Args: map[string]any{"path": target},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	})
 	if err != nil {
@@ -150,9 +150,9 @@ func TestRequireReadBeforeWrite_AllowsEmptyFileWithoutRead(t *testing.T) {
 			Args: "{}",
 		},
 		Args: map[string]any{"path": target},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	})
 	if err != nil {
@@ -225,9 +225,9 @@ func TestRequireReadBeforeWrite_AllowsWithPersistedReadIndexWhenReadonlyStateIsS
 	out, err := hook.BeforeTool(ctx, ToolInput{
 		Call: model.ToolCall{Name: "WRITE", Args: "{}"},
 		Args: map[string]any{"path": target},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	})
 	if err != nil {
@@ -273,9 +273,9 @@ func TestRequireReadBeforeWrite_BackfillsReadIndexFromPersistedEvents(t *testing
 	out, err := hook.BeforeTool(ctx, ToolInput{
 		Call: model.ToolCall{Name: "WRITE", Args: "{}"},
 		Args: map[string]any{"path": target},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	})
 	if err != nil {

@@ -19,12 +19,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
-	"github.com/OnslaughtSnail/caelis/kernel/skills"
 )
 
 const connectModelCacheTTL = 30 * time.Second
@@ -278,7 +278,7 @@ func (c *cliConsole) loopTUITea() error {
 			return candidates, err
 		},
 		SkillComplete: func(query string, limit int) ([]string, error) {
-			discovered := skills.DiscoverMeta(c.skillDirs)
+			discovered := appskills.DiscoverMeta(c.skillDirs)
 			if len(discovered.Metas) == 0 {
 				return nil, nil
 			}

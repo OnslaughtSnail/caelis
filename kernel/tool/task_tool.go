@@ -8,7 +8,7 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -61,8 +61,8 @@ func (t *taskTool) Declaration() model.ToolDefinition {
 	}
 }
 
-func (t *taskTool) Capability() toolcap.Capability {
-	return toolcap.Capability{Risk: toolcap.RiskLow}
+func (t *taskTool) Capability() capability.Capability {
+	return capability.Capability{Risk: capability.RiskLow}
 }
 
 func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {

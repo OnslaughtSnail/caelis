@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OnslaughtSnail/caelis/kernel/promptpipeline"
-	"github.com/OnslaughtSnail/caelis/kernel/skills"
+	appprompting "github.com/OnslaughtSnail/caelis/internal/app/prompting"
+	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 )
 
 type promptSpecResult struct {
-	Spec     promptpipeline.AssembleSpec
+	Spec     appprompting.AssembleSpec
 	Warnings []error
 }
 
@@ -34,7 +34,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	globalAgents, globalWarn := readOptionalPromptFile(globalAgentsPath)
 	workspaceAgents, workspaceWarn := readOptionalPromptFile(workspaceAgentsPath)
 
-	discovered := skills.DiscoverMeta(in.SkillDirs)
+	discovered := appskills.DiscoverMeta(in.SkillDirs)
 	sort.Slice(discovered.Metas, func(i, j int) bool {
 		return discovered.Metas[i].Path < discovered.Metas[j].Path
 	})
@@ -48,30 +48,30 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 	warnings = append(warnings, discovered.Warnings...)
 
-	additional := make([]promptpipeline.PromptFragment, 0, 4)
+	additional := make([]appprompting.PromptFragment, 0, 4)
 	if activePolicies := buildActiveAgentPoliciesPrompt(globalAgents, workspaceAgents, workspaceAgentsPath); activePolicies != "" {
-		additional = append(additional, promptpipeline.PromptFragment{
+		additional = append(additional, appprompting.PromptFragment{
 			Stage:   "active_agent_policies",
 			Source:  "cli:active-agent-policies",
 			Content: activePolicies,
 		})
 	}
 	if sessionOverrides := buildSessionOverridePrompt(in.BasePrompt); sessionOverrides != "" {
-		additional = append(additional, promptpipeline.PromptFragment{
+		additional = append(additional, appprompting.PromptFragment{
 			Stage:   "session_overrides",
 			Source:  "cli:session-overrides",
 			Content: sessionOverrides,
 		})
 	}
 	if workspaceContext := builtInWorkspaceContextPrompt(workspaceDir); workspaceContext != "" {
-		additional = append(additional, promptpipeline.PromptFragment{
+		additional = append(additional, appprompting.PromptFragment{
 			Stage:   "workspace_context",
 			Source:  "cli:workspace-context",
 			Content: workspaceContext,
 		})
 	}
 	if in.EnableExperimentalLSPPrompt {
-		additional = append(additional, promptpipeline.PromptFragment{
+		additional = append(additional, appprompting.PromptFragment{
 			Stage:   "experimental_lsp",
 			Source:  "cli:experimental-lsp-routing",
 			Content: "## Experimental LSP Routing\n\n" + defaultExperimentalLSPRoutingPrompt,
@@ -79,10 +79,10 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 
 	return promptSpecResult{
-		Spec: promptpipeline.AssembleSpec{
+		Spec: appprompting.AssembleSpec{
 			IdentityPrompt:   builtInIdentityPrompt(in.AppName),
 			IdentitySource:   "cli:built-in-identity",
-			SkillsMetaPrompt: skills.BuildMetaPrompt(discovered.Metas),
+			SkillsMetaPrompt: appskills.BuildMetaPrompt(discovered.Metas),
 			SkillsMetaSource: "skills metadata",
 			Additional:       additional,
 		},

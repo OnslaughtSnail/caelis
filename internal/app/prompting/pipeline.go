@@ -1,4 +1,4 @@
-package promptpipeline
+package prompting
 
 import (
 	"bytes"

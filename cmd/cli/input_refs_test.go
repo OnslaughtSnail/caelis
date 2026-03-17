@@ -123,7 +123,7 @@ func TestMentionQueryAtCursor(t *testing.T) {
 func TestInputReferenceResolver_CompleteFiles(t *testing.T) {
 	workspace := t.TempDir()
 	mustWriteFile(t, filepath.Join(workspace, "cmd", "cli", "console.go"), "package main\n")
-	mustWriteFile(t, filepath.Join(workspace, "kernel", "skills", "meta.go"), "package skills\n")
+	mustWriteFile(t, filepath.Join(workspace, "internal", "app", "skills", "meta.go"), "package skills\n")
 
 	resolver, _, err := newInputReferenceResolver(workspace, nil)
 	if err != nil {
@@ -138,13 +138,13 @@ func TestInputReferenceResolver_CompleteFiles(t *testing.T) {
 	}
 	found := false
 	for _, one := range candidates {
-		if one == "kernel/skills/meta.go" {
+		if one == "internal/app/skills/meta.go" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected kernel/skills/meta.go in candidates: %v", candidates)
+		t.Fatalf("expected internal/app/skills/meta.go in candidates: %v", candidates)
 	}
 }
 

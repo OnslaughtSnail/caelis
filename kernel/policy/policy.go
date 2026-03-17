@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 // ModelInput is the mutable request envelope for BeforeModel hooks.
@@ -17,7 +17,7 @@ type ModelInput struct {
 type ToolInput struct {
 	Call       model.ToolCall
 	Args       map[string]any
-	Capability toolcap.Capability
+	Capability capability.Capability
 	Decision   Decision
 }
 
@@ -25,7 +25,7 @@ type ToolInput struct {
 type ToolOutput struct {
 	Call       model.ToolCall
 	Args       map[string]any
-	Capability toolcap.Capability
+	Capability capability.Capability
 	Decision   Decision
 	Result     map[string]any
 	Err        error

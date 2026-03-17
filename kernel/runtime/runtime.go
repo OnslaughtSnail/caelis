@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
-	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -165,7 +164,7 @@ func (r *Runtime) buildInvocationContext(
 }
 
 func (r *Runtime) projectInvocationEvents(allEvents []*session.Event) session.Events {
-	return eventview.AgentVisibleView(allEvents)
+	return session.AgentVisibleView(allEvents)
 }
 
 func (r *Runtime) snapshotReadonlyState(ctx context.Context, sess *session.Session) (session.ReadonlyState, error) {

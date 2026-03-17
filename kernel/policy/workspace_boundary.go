@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 // WorkspaceBoundaryConfig configures the workspace boundary enforcement hook.
@@ -48,7 +48,7 @@ func (h workspaceBoundaryHook) BeforeTool(ctx context.Context, in ToolInput) (To
 	}
 
 	// Only intercept file-write operations (WRITE, PATCH, etc.)
-	if !in.Capability.HasOperation(toolcap.OperationFileWrite) {
+	if !in.Capability.HasOperation(capability.OperationFileWrite) {
 		return in, nil
 	}
 

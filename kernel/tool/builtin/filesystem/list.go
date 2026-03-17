@@ -9,7 +9,7 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -36,10 +36,10 @@ func (t *ListTool) Description() string {
 	return "List files and directories in one path."
 }
 
-func (t *ListTool) Capability() toolcap.Capability {
-	return toolcap.Capability{
-		Operations: []toolcap.Operation{toolcap.OperationFileRead},
-		Risk:       toolcap.RiskLow,
+func (t *ListTool) Capability() capability.Capability {
+	return capability.Capability{
+		Operations: []capability.Operation{capability.OperationFileRead},
+		Risk:       capability.RiskLow,
 	}
 }
 

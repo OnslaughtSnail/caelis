@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -80,7 +79,7 @@ func lifecycleEvent(sess *session.Session, status RunLifecycleStatus, phase stri
 }
 
 func isLifecycleEvent(ev *session.Event) bool {
-	return eventview.IsLifecycle(ev)
+	return session.IsLifecycle(ev)
 }
 
 // LifecycleInfo is parsed lifecycle state from one lifecycle event.

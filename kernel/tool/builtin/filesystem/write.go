@@ -6,7 +6,7 @@ import (
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -33,10 +33,10 @@ func (t *WriteTool) Description() string {
 	return "Write full file content by path."
 }
 
-func (t *WriteTool) Capability() toolcap.Capability {
-	return toolcap.Capability{
-		Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-		Risk:       toolcap.RiskMedium,
+func (t *WriteTool) Capability() capability.Capability {
+	return capability.Capability{
+		Operations: []capability.Operation{capability.OperationFileWrite},
+		Risk:       capability.RiskMedium,
 	}
 }
 

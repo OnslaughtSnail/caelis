@@ -15,7 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 type testCtx struct {
@@ -66,16 +66,16 @@ func (t namedTool) Run(ctx context.Context, args map[string]any) (map[string]any
 
 type capabilityNamedTool struct {
 	namedTool
-	capability toolcap.Capability
+	capability capability.Capability
 }
 
-func (t capabilityNamedTool) Capability() toolcap.Capability {
+func (t capabilityNamedTool) Capability() capability.Capability {
 	return t.capability
 }
 
 type captureCapabilityHook struct {
-	before []toolcap.Capability
-	after  []toolcap.Capability
+	before []capability.Capability
+	after  []capability.Capability
 }
 
 func (h *captureCapabilityHook) Name() string { return "capture_capability" }
@@ -298,9 +298,9 @@ func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
 				return map[string]any{"ok": true}, nil
 			},
 		},
-		capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationExec},
-			Risk:       toolcap.RiskHigh,
+		capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationExec},
+			Risk:       capability.RiskHigh,
 		},
 	}
 	hook := &captureCapabilityHook{}
@@ -344,10 +344,10 @@ func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
 	if len(hook.after) == 0 {
 		t.Fatal("expected after-tool policy to capture capability")
 	}
-	if !hook.before[0].HasOperation(toolcap.OperationExec) || hook.before[0].Risk != toolcap.RiskHigh {
+	if !hook.before[0].HasOperation(capability.OperationExec) || hook.before[0].Risk != capability.RiskHigh {
 		t.Fatalf("unexpected before capability: %#v", hook.before[0])
 	}
-	if !hook.after[0].HasOperation(toolcap.OperationExec) || hook.after[0].Risk != toolcap.RiskHigh {
+	if !hook.after[0].HasOperation(capability.OperationExec) || hook.after[0].Risk != capability.RiskHigh {
 		t.Fatalf("unexpected after capability: %#v", hook.after[0])
 	}
 }

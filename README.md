@@ -1,127 +1,150 @@
 # caelis
 
-`caelis` is a clean-slate Agent framework kernel prototype.
-It is designed to be extracted as a standalone repository.
+`caelis` is a terminal-first agent runtime with a Bubble Tea console, an ACP server mode, persistent sessions, sandbox-aware command execution, MCP integration, and resumable task/delegation flows.
 
-## Scope
-- Kernel-first architecture.
-- Minimal M1: single agent + synchronous tool loop.
-- Experimental delegated child-run prototype via core `DELEGATE`.
-- Compile-time plugin registration + provider-based assembly.
-- Built-in mandatory `READ` tool with line/token caps.
-- Modular system prompt pipeline with built-in identity and `AGENTS.md` policy assembly.
-- Skills metadata auto-discovery from `~/.agents/skills` and prompt injection.
-- Policy hooks (egress/audit/output) with default allow behavior.
-- Unified model provider layer with API types: `openai`, `openai_compatible`, `openrouter`, `gemini`, `anthropic`, `deepseek`.
-- CLI shell and real-model eval runner.
-- Tool execution runtime abstraction (`no_sandbox` / `sandbox` with extensible backend type).
-- Token-budget based auto compaction (append-only event strategy).
-- MCP ToolSet integration (`stdio` / `sse` / `streamable`), assembled via `mcp_tools` provider.
-- Experimental CLI-only LSP plugin provider (`lsp_tools`), opt-in via `-experimental-lsp`.
-- Full Bubble Tea TUI with streaming output, stable incremental Markdown/plain-text rendering, tool display, approval UX, reasoning blocks, inline diff, and ephemeral `/btw` side-question overlays.
-- Model catalog (static snapshot + remote refresh) with per-model reasoning capability discovery.
-- Tool-level authorization baseline with per-tool allow/deny policy evaluation, including tool denial for ephemeral `/btw` overlay turns.
-- Workspace boundary policy restricting filesystem tools to project root.
-- Structured prompt environment context injection (`cwd`, `shell`, `current_date`, `timezone`).
-- `@file` / `@image` input reference parsing in user prompts; clipboard image capture.
-- Headless execution mode for non-interactive single-shot runs.
+## What It Does
 
-## Quick Start
+- Runs an interactive TUI agent in your terminal.
+- Supports headless single-shot execution for scripted use.
+- Exposes the same runtime over ACP for external clients.
+- Persists sessions, plans, tasks, and lifecycle state so runs can be resumed safely.
+- Routes shell execution through `default` approval mode or `full_control`.
+- Supports built-in workspace tools, shell tools, MCP tools, and optional CLI LSP tools.
+- Assembles prompts from built-in identity/runtime context, `AGENTS.md`, and discovered skills metadata.
+
+## Current Layout
+
+The codebase is organized around a small runtime kernel plus CLI-owned application wiring:
+
+- `cmd/cli`: console mode, ACP mode, config/session wiring, prompt assembly inputs.
+- `internal/app/assembly`: plugin/provider assembly for tools and policies.
+- `internal/app/prompting`: prompt fragment assembly.
+- `internal/app/skills`: skill metadata discovery and prompt rendering.
+- `internal/acp`: ACP protocol server, session state handling, prompt parsing, streaming updates.
+- `kernel/runtime`: run loop, replay, lifecycle, compaction, tasks, delegation, persistence.
+- `kernel/session`: session/event types, visibility rules, projections, context windows.
+- `kernel/tool/capability`: normalized tool capability metadata used by policies.
+
+## Build
+
 ```bash
 make build
 make vet
 make test
 ```
 
-Run CLI:
-```bash
-go run ./cmd/cli \
-  -tool-providers workspace_tools,shell_tools,mcp_tools \
-  -policy-providers default_allow \
-  -model deepseek/deepseek-chat \
-  -ui=tui \
-  -permission-mode default \
-  -experimental-lsp \
-  -mcp-config ~/.agents/mcp_servers.json \
-  -compact-watermark=0.7 \
-  -context-window=65536 \
-  -session demo \
-  -input "hello"
-```
-
 Show version:
+
 ```bash
 go run ./cmd/cli -version
 ```
 
-Launcher modes:
-- default: `console` (when mode keyword omitted)
-- explicit: `go run ./cmd/cli console ...`
-- reserved placeholders: `go run ./cmd/cli api ...`, `go run ./cmd/cli web ...`
+## Quick Start
 
-Tool execution runtime flags:
-- `-ui`: interactive UI mode `auto|tui`
-  - default `auto`: use `tui` when stdin/stdout are TTY
-  - `tui`: force terminal UI mode (requires TTY)
-  - TUI input shortcuts (MVP): `↑/↓` history, `←/→` cursor move, `Home/End`, `Ctrl+A/E` line start/end, `Ctrl+U/W` delete, `Ctrl+C` interrupt/quit
-- `-permission-mode`: `default|full_control`
-  - `full_control`: run commands on host directly, no approval required
-  - `default`: run commands in sandbox by default; escalated host command requires approval
-- `-sandbox-type`: sandbox backend type (when `-permission-mode=default`, pluggable by runtime registry)
-  - default: macOS uses `seatbelt`; Linux auto-tries `bwrap`, then falls back to `landlock (experimental)`
-  - on macOS, only `seatbelt` is supported in `default` mode
-  - on Linux, `bwrap` and `landlock (experimental)` are supported in `default` mode
-  - built-in: `seatbelt` (macOS `sandbox-exec`)
-  - built-in: `landlock` (experimental Linux fallback backend; uses `PR_SET_NO_NEW_PRIVS`, seccomp network filtering, and Landlock filesystem rules; prefers a sibling `caelis-sandbox-helper` binary when present, otherwise falls back to the current CLI executable as helper; avoids Linux user-namespace dependencies but cannot enforce read-only subpaths such as `.git` inside a writable workspace)
-  - built-in: `bwrap` (Linux preferred backend; uses bubblewrap for stronger namespace-based filesystem and network isolation; requires both the `bwrap` binary and a working Linux user-namespace setup, or a setuid-root `bwrap`; CLI suggests distro-specific install commands such as `sudo apt install bubblewrap` on Debian/Ubuntu and links to the bubblewrap docs when unavailable)
-- `-mcp-config`: MCP server config JSON path, default `~/.agents/mcp_servers.json` (missing file means MCP disabled)
-- `-credential-store`: credential persistence mode (`auto|file|ephemeral`), default `auto`
+Interactive console:
 
-Fallback behavior:
-- In `default` mode on macOS, runtime only supports `seatbelt`; when unavailable it falls back to `host+approval`.
-- In `default` mode on Linux, runtime auto-tries `bwrap` first and falls back to `landlock` when bubblewrap is unavailable or its startup prerequisites are blocked.
-- If no sandbox backend is available at startup (for example `sandbox-exec` missing on macOS, Landlock unsupported by the host kernel, or Linux neither has working bubblewrap nor Landlock support), CLI falls back to `host+approval` and prints a warning.
-- In non-interactive runs without approver context, escalated commands return `ApprovalRequiredError` with a hint to use interactive approval or `-permission-mode full_control`.
-- If a command is routed to sandbox but fails with "command not found" (`exit code 127`), BASH asks for approval and retries on host.
+```bash
+go run ./cmd/cli console \
+  -ui=tui \
+  -model openai-compatible/glm-5 \
+  -tool-providers workspace_tools,shell_tools,mcp_tools \
+  -policy-providers default_allow \
+  -permission-mode default \
+  -mcp-config ~/.agents/mcp_servers.json
+```
 
-Approval UX in interactive CLI:
-- Host escalation requires explicit approval by default.
-- Approval prompt options:
-  - `y`: allow once
-  - `a`: allow this exact command for current session (no more prompts for same command text)
-  - `n` / empty: cancel
-- On cancel, current agent run stops immediately and control returns to the user prompt.
+Headless single-shot run:
 
-BASH timeout behavior:
-- BASH tool has a default timeout of `30m` for direct foreground execution.
-- BASH tool has no default idle timeout; long-running commands are expected to use async task flow rather than be killed for silence alone.
-- `yield_time_ms` now controls foreground vs async behavior:
-  - omitted: wait briefly (`5s`) and return a `task_id` if still running
-  - `0`: return a `task_id` immediately
-  - `-1`: force synchronous foreground execution until completion
-- When `tty=true` and `yield_time_ms` is omitted, BASH waits briefly (`1200ms`) and then returns a `task_id` so `TASK write` can continue the interactive session.
-- Per-call `timeout_ms` and `idle_timeout_ms` overrides were removed from the BASH tool schema.
-- Host/sandbox execution enforces non-interactive environment defaults (`CI=1`, `TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `PAGER=cat`, `NO_COLOR=1`).
+```bash
+go run ./cmd/cli console \
+  -model openai-compatible/glm-5 \
+  -input "Summarize the repository layout."
+```
 
-System prompt pipeline order (high -> low):
-1. `~/.{app}/prompts/IDENTITY.md`
-2. `~/.{app}/prompts/AGENTS.md`
-3. `{workspace}/AGENTS.md` (optional)
-4. CLI-provided runtime fragments (for example `<environment_context>` with `cwd` / `shell` / `current_date` / `timezone`, plus experimental LSP routing when enabled)
-5. `~/.{app}/prompts/USER.md` + `-system-prompt` runtime override
-6. skills metadata section (auto-discovered)
+ACP server:
 
-If template files are missing, CLI auto-creates defaults in `~/.{app}/prompts`.
+```bash
+go run ./cmd/cli acp \
+  -model openai-compatible/glm-5 \
+  -tool-providers workspace_tools,shell_tools,mcp_tools \
+  -policy-providers default_allow \
+  -permission-mode default
+```
 
-MCP config example (`~/.agents/mcp_servers.json`):
+If you have not configured a model yet, start the console and run `/connect`.
+
+## Runtime Model
+
+`caelis` has two execution modes:
+
+- `-permission-mode default`: commands run in a sandbox when available; host escalation requires approval.
+- `-permission-mode full_control`: commands run directly on the host with no approval gate.
+
+Sandbox backend selection is controlled by `-sandbox-type` in `default` mode:
+
+- macOS: `seatbelt`
+- Linux: `bwrap`, then `landlock` fallback when available
+
+If no supported sandbox backend is available, `caelis` falls back to host execution with approval and prints a warning.
+
+## Sessions And Interaction
+
+Interactive console sessions are persisted under `~/.caelis/sessions` by default. The console starts a new session unless you pass `-session`, and you can switch or recover work with slash commands.
+
+Current interactive slash commands:
+
+- `/help`
+- `/btw <question>`
+- `/version`
+- `/exit`
+- `/quit`
+- `/new`
+- `/fork`
+- `/compact [note]`
+- `/status`
+- `/sandbox [auto|<type>]`
+- `/model use <alias> [reasoning]`
+- `/model del [alias ...]`
+- `/connect`
+- `/resume [session-id]`
+
+`/btw` runs an ephemeral side-question turn against the current context without persisting that exchange into conversation history.
+
+## Prompt And Skills
+
+Prompt assembly combines:
+
+1. Built-in identity/runtime instructions
+2. Global `AGENTS.md`
+3. Workspace `AGENTS.md`
+4. Session/runtime prompt fragments
+5. Skill metadata discovered from configured skill directories
+
+Skills are discovered from local `SKILL.md` files and rendered as metadata into the final system prompt. The current skill discovery and prompt assembly pipeline lives in `internal/app/skills` and `internal/app/prompting`.
+
+## Tools
+
+The default console/ACP configuration uses:
+
+- `workspace_tools`
+- `shell_tools`
+- `mcp_tools`
+
+Optional:
+
+- `lsp_tools` via `-experimental-lsp`
+
+Built-in tool families include file reads/writes/search, shell execution, task control, delegation, and planning. MCP servers are configured through `~/.agents/mcp_servers.json` by default.
+
+Example MCP config:
+
 ```json
 {
   "cache_ttl_seconds": 60,
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
-      "include_tools": ["read_file", "list_directory"]
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
     },
     "browser": {
       "transport": "streamable",
@@ -131,102 +154,24 @@ MCP config example (`~/.agents/mcp_servers.json`):
 }
 ```
 
-MCP Web tools guidance:
-- First phase uses MCP, not an in-kernel `web_tools` provider.
-- Prefer read-only `search` / `fetch` tool exposure.
-- Example config and UX notes: [docs/mcp_web_tools.md](docs/mcp_web_tools.md)
-
-Interactive slash commands:
-- `/help`: show command help
-- `/btw <question>`: ask one ephemeral side question using current context without adding it to session history
-- `/version`: show version info
-- `/status`: show current model and execution runtime status
-- `/new`: start a fresh conversation session
-- `/fork`: fork current conversation into a new named session
-- `/resume [session-id]`: resume the latest or specified session
-- `/sandbox [<type>]`: show or switch sandbox backend type
-- `/model use <alias> [reasoning]`: switch model and optional reasoning effort
-- `/model del [alias ...]`: remove configured model aliases
-- `/connect`: interactive provider/model setup
-- `/compact [note]`: trigger one manual compaction
-- `/exit` / `/quit`: quit
-
-Session behavior:
-- Interactive CLI starts in a new session by default.
-- Pass `-session <id>` to resume or continue an existing session.
-- Sessions with no conversation events are not persisted.
-
-CLI runtime preferences such as default model alias, `permission-mode`, and `sandbox-type` are persisted in app config and reused on next start.
-
-Config env placeholder behavior:
-- Provider config (`~/.{app}/{app}_config.json`) supports `${ENV_NAME}` placeholders in string fields (for example `"token": "${DEEPSEEK_API_KEY}"`).
-- On startup, CLI optionally loads `.env` from:
-  - current working directory
-  - config file directory (`~/.{app}/`)
-- `.env` is optional; missing `.env` is allowed.
-- If config contains unresolved placeholders, startup fails with an explicit `invalid config` error and the unresolved env var name.
-
-LSP behavior:
-- LSP tools live in a CLI-only experimental plugin provider: `lsp_tools`.
-- They are disabled by default; enable them with `-experimental-lsp` or by explicitly adding `lsp_tools` to `-tool-providers`.
-- When enabled, CLI auto-detects workspace language and injects one language server toolset when a supported server exists locally.
-- Supported workspace language families: Go, Python, TypeScript, JavaScript, Rust, C/C++.
-
-Manual compaction command in interactive mode:
-```text
-/compact optional note
-```
-
-Run lightweight eval:
-```bash
-go run ./eval/cmd -suite light
-```
-
-Eval model selection behavior:
-- Eval reads model credentials from environment (`DEEPSEEK_API_KEY`, `GEMINI_API_KEY`).
-- It runs only model aliases whose credentials are configured.
-- If no eval credentials are configured, eval exits with a clear error.
-- `eval/cmd` optionally loads nearest `.env` (for convenience only); `.env` is not required.
-
-Run real-model eval matrix (stream/non-stream + thinking/non-thinking):
-```bash
-go run ./eval/cmd \
-  -suite light \
-  -models "deepseek-chat,gemini-2.5-flash" \
-  -stream-modes both \
-  -thinking-modes both \
-  -thinking-budget 1024
-```
-
-## Security Notes
-- `/connect` always prompts for `api_key` and updates provider config immediately.
-- CLI runtime uses provider config (`~/.{app}/{app}_config.json`) as the single source for model auth at request time.
-- Credential store (`~/.{app}/{app}_credentials.json`) is auxiliary only (`-credential-store=auto` by default, `0700` dir + `0600` file + atomic writes). Existing credential entries are merged into provider config on startup when config token is missing.
-- `token_env` is no longer used as a runtime auth source; direct env override behavior is removed.
-
 ## Release
-- Current release: `v0.0.24` (see `VERSION` and `CHANGELOG.md`).
-- Local dry-run package:
+
+- Current release: `v0.0.25`
+- Version source: `VERSION`
+- Changelog: `CHANGELOG.md`
+
+Local dry run:
+
 ```bash
 make release-dry-run
 ```
-- CI release is triggered by git tag push like `v0.0.1`.
 
-### npm Distribution
-- npm package source lives in `npm/` and publishes package `@onslaughtsnail/caelis`.
-- End users install with:
+CI release is triggered by pushing a version tag such as `v0.0.25`.
+
+## npm Package
+
+The npm package lives under `npm/` and publishes as `@onslaughtsnail/caelis`.
+
 ```bash
 npm i -g @onslaughtsnail/caelis
 ```
-- npm publish runs in `.github/workflows/release.yml` after GoReleaser uploads release assets.
-- npm package downloads platform binary from GitHub Releases during `postinstall`.
-
-#### One-time GitHub/npm setup
-1. Login to npm and ensure package name `@onslaughtsnail/caelis` is available (or change name in `npm/package.json`).
-2. In npm package settings, configure **Trusted Publisher**:
-   - Provider: GitHub Actions
-   - Repository: `OnslaughtSnail/caelis`
-   - Workflow file: `release.yml`
-3. In GitHub repo settings, ensure Actions are allowed and workflow permissions are not blocking OIDC.
-4. Push a tag like `v0.0.24` to trigger release + npm publish.
-5. Detailed checklist: `docs/npm-release.md`.

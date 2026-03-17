@@ -11,8 +11,8 @@ import (
 	"sync"
 	"unicode"
 
+	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 	"github.com/OnslaughtSnail/caelis/internal/gitignorefilter"
-	"github.com/OnslaughtSnail/caelis/kernel/skills"
 )
 
 var skillTriggerPattern = regexp.MustCompile(`\$([A-Za-z0-9][A-Za-z0-9._-]*)`)
@@ -20,7 +20,7 @@ var skillTriggerPattern = regexp.MustCompile(`\$([A-Za-z0-9][A-Za-z0-9._-]*)`)
 type inputReferenceResolver struct {
 	workspaceRoot string
 
-	skillByName map[string]skills.Meta
+	skillByName map[string]appskills.Meta
 
 	fileOnce sync.Once
 	fileErr  error
@@ -38,10 +38,10 @@ func newInputReferenceResolver(workspaceRoot string, skillDirs []string) (*input
 	}
 	resolver := &inputReferenceResolver{
 		workspaceRoot: filepath.Clean(absRoot),
-		skillByName:   map[string]skills.Meta{},
+		skillByName:   map[string]appskills.Meta{},
 	}
 
-	discovered := skills.DiscoverMeta(skillDirs)
+	discovered := appskills.DiscoverMeta(skillDirs)
 	sort.Slice(discovered.Metas, func(i, j int) bool {
 		return discovered.Metas[i].Path < discovered.Metas[j].Path
 	})

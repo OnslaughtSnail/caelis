@@ -12,7 +12,7 @@ import (
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 // stubRuntime implements toolexec.Runtime for workspace boundary tests.
@@ -58,9 +58,9 @@ func writeToolInput(path string) ToolInput {
 	return ToolInput{
 		Call: model.ToolCall{Name: "WRITE"},
 		Args: map[string]any{"path": path, "content": "test"},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	}
 }
@@ -174,9 +174,9 @@ func TestWorkspaceBoundary_ApprovalRequestIncludesPathScopeAndPreview(t *testing
 			"old":  oldValue,
 			"new":  newValue,
 		},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileWrite},
-			Risk:       toolcap.RiskMedium,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileWrite},
+			Risk:       capability.RiskMedium,
 		},
 	}
 	if _, err := hook.BeforeTool(ctx, in); err != nil {
@@ -321,9 +321,9 @@ func TestWorkspaceBoundary_SkipsNonWriteOps(t *testing.T) {
 	in := ToolInput{
 		Call: model.ToolCall{Name: "READ"},
 		Args: map[string]any{"path": "/etc/passwd"},
-		Capability: toolcap.Capability{
-			Operations: []toolcap.Operation{toolcap.OperationFileRead},
-			Risk:       toolcap.RiskLow,
+		Capability: capability.Capability{
+			Operations: []capability.Operation{capability.OperationFileRead},
+			Risk:       capability.RiskLow,
 		},
 	}
 	_, err := hook.BeforeTool(context.Background(), in)

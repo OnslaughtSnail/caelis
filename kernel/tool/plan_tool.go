@@ -7,7 +7,7 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const PlanToolName = "PLAN"
@@ -84,8 +84,8 @@ func (t *planTool) Declaration() model.ToolDefinition {
 	}
 }
 
-func (t *planTool) Capability() toolcap.Capability {
-	return toolcap.Capability{Risk: toolcap.RiskLow}
+func (t *planTool) Capability() capability.Capability {
+	return capability.Capability{Risk: capability.RiskLow}
 }
 
 func (t *planTool) Run(ctx context.Context, args map[string]any) (map[string]any, error) {

@@ -1,11 +1,10 @@
-package eventview
+package session
 
 import (
 	"sort"
 	"strings"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
 // PendingToolCall is one tool call that has not yet been matched by a response.
@@ -17,31 +16,31 @@ type PendingToolCall struct {
 }
 
 // ContextWindow returns the latest model-visible persisted event window.
-func ContextWindow(events []*session.Event) []*session.Event {
-	return session.ContextWindowEvents(events)
+func ContextWindow(events []*Event) []*Event {
+	return ContextWindowEvents(events)
 }
 
 // ContextWindowView wraps the latest model-visible persisted event window.
-func ContextWindowView(events []*session.Event) session.Events {
-	return session.NewEvents(ContextWindow(events))
+func ContextWindowView(events []*Event) Events {
+	return NewEvents(ContextWindow(events))
 }
 
 // AgentVisible returns events visible to agent logic from full persisted history.
-func AgentVisible(events []*session.Event) []*session.Event {
+func AgentVisible(events []*Event) []*Event {
 	return WithoutLifecycle(ContextWindowView(events))
 }
 
 // AgentVisibleView wraps the events visible to agent logic from full persisted history.
-func AgentVisibleView(events []*session.Event) session.Events {
-	return session.NewEvents(AgentVisible(events))
+func AgentVisibleView(events []*Event) Events {
+	return NewEvents(AgentVisible(events))
 }
 
 // WithoutLifecycle returns persisted session events visible to agent logic.
-func WithoutLifecycle(events session.Events) []*session.Event {
+func WithoutLifecycle(events Events) []*Event {
 	if events == nil || events.Len() == 0 {
 		return nil
 	}
-	out := make([]*session.Event, 0, events.Len())
+	out := make([]*Event, 0, events.Len())
 	for ev := range events.All() {
 		if ev == nil || IsLifecycle(ev) {
 			continue
@@ -52,7 +51,7 @@ func WithoutLifecycle(events session.Events) []*session.Event {
 }
 
 // PendingToolCalls returns unmatched tool calls ordered by originating event position.
-func PendingToolCalls(events session.Events) []PendingToolCall {
+func PendingToolCalls(events Events) []PendingToolCall {
 	if events == nil || events.Len() == 0 {
 		return nil
 	}
@@ -109,7 +108,7 @@ func PendingToolCalls(events session.Events) []PendingToolCall {
 }
 
 // Messages projects persisted events into model input messages.
-func Messages(events session.Events, systemPrompt string, sanitizer func(map[string]any) map[string]any) []model.Message {
+func Messages(events Events, systemPrompt string, sanitizer func(map[string]any) map[string]any) []model.Message {
 	if sanitizer == nil {
 		sanitizer = func(result map[string]any) map[string]any { return result }
 	}
@@ -128,7 +127,7 @@ func Messages(events session.Events, systemPrompt string, sanitizer func(map[str
 		if ev == nil {
 			continue
 		}
-		if session.IsUIOnly(ev) || session.IsNotice(ev) {
+		if IsUIOnly(ev) || IsNotice(ev) {
 			continue
 		}
 		msg := ev.Message
@@ -143,6 +142,6 @@ func Messages(events session.Events, systemPrompt string, sanitizer func(map[str
 }
 
 // IsLifecycle reports whether one event is a runtime lifecycle event.
-func IsLifecycle(ev *session.Event) bool {
-	return session.EventTypeOf(ev) == session.EventTypeLifecycle
+func IsLifecycle(ev *Event) bool {
+	return EventTypeOf(ev) == EventTypeLifecycle
 }

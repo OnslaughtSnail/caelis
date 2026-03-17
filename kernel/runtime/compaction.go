@@ -9,7 +9,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -87,7 +86,7 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 }
 
 func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput, notify func(*session.Event) bool) (*session.Event, error) {
-	windowEvents := eventview.AgentVisible(in.Events)
+	windowEvents := session.AgentVisible(in.Events)
 	if len(windowEvents) == 0 {
 		return nil, nil
 	}

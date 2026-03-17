@@ -764,9 +764,12 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 	var (
 		parentEvents []*session.Event
 		liveUpdates  []sessionstream.Update
+		liveMu       sync.Mutex
 	)
 	runCtx := sessionstream.WithStreamer(context.Background(), sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		liveMu.Lock()
 		liveUpdates = append(liveUpdates, update)
+		liveMu.Unlock()
 	}))
 	for ev, runErr := range runEvents(t, rt, runCtx, RunRequest{
 		AppName:   "app",
@@ -842,8 +845,11 @@ func TestRuntime_Run_DelegatedChildRunPersistsLineage(t *testing.T) {
 			t.Fatalf("expected delegation_id metadata, got %+v", ev.Meta)
 		}
 	}
+	liveMu.Lock()
+	liveSnapshot := append([]sessionstream.Update(nil), liveUpdates...)
+	liveMu.Unlock()
 	var sawLiveChild bool
-	for _, update := range liveUpdates {
+	for _, update := range liveSnapshot {
 		if update.Event == nil || strings.TrimSpace(update.SessionID) != childSessionID {
 			continue
 		}

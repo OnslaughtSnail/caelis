@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
-	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	kernelpolicy "github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -101,7 +101,7 @@ func TestHandlePermission_SwitchMode(t *testing.T) {
 		baseCtx:       context.Background(),
 		execRuntime:   rt,
 		sandboxType:   cliTestSandboxType(),
-		resolved:      &bootstrap.ResolvedSpec{Tools: []tool.Tool{bashTool}},
+		resolved:      &appassembly.ResolvedSpec{Tools: []tool.Tool{bashTool}},
 		showReasoning: true,
 	}
 	_, err = handlePermission(console, []string{"default"})
@@ -140,7 +140,7 @@ func TestHandlePermission_FullControlEnablesFullAccessSessionMode(t *testing.T) 
 		execRuntime: rt,
 		sandboxType: cliTestSandboxType(),
 		sessionMode: sessionmode.DefaultMode,
-		resolved:    &bootstrap.ResolvedSpec{},
+		resolved:    &appassembly.ResolvedSpec{},
 	}
 	_, err = handlePermission(console, []string{"full_control"})
 	if err != nil {
@@ -175,7 +175,7 @@ func TestHandlePermission_DefaultPreservesPlanMode(t *testing.T) {
 		execRuntime: rt,
 		sandboxType: cliTestSandboxType(),
 		sessionMode: sessionmode.PlanMode,
-		resolved:    &bootstrap.ResolvedSpec{},
+		resolved:    &appassembly.ResolvedSpec{},
 	}
 	_, err = handlePermission(console, []string{"default"})
 	if err != nil {
@@ -291,7 +291,7 @@ func TestSetSessionMode_FullAccessDoesNotPersistGlobalRuntimeDefaults(t *testing
 		configStore:  cfg,
 		execRuntime:  rt,
 		sandboxType:  cliTestSandboxType(),
-		resolved:     &bootstrap.ResolvedSpec{},
+		resolved:     &appassembly.ResolvedSpec{},
 	}
 	if _, err := store.GetOrCreate(context.Background(), &session.Session{
 		AppName: console.appName,
@@ -338,7 +338,7 @@ func TestSetSessionMode_DoesNotSendTUIStatusInline(t *testing.T) {
 		sessionStore: store,
 		execRuntime:  rt,
 		sandboxType:  cliTestSandboxType(),
-		resolved:     &bootstrap.ResolvedSpec{},
+		resolved:     &appassembly.ResolvedSpec{},
 		tuiSender:    panicSender{},
 	}
 	if _, err := store.GetOrCreate(context.Background(), &session.Session{
@@ -426,7 +426,7 @@ func TestHandlePermission_PersistsGlobalRuntimeDefaults(t *testing.T) {
 		execRuntime: rt,
 		sandboxType: cliTestSandboxType(),
 		sessionMode: sessionmode.DefaultMode,
-		resolved:    &bootstrap.ResolvedSpec{},
+		resolved:    &appassembly.ResolvedSpec{},
 	}
 
 	if _, err := handlePermission(console, []string{"full_control"}); err != nil {
@@ -538,7 +538,7 @@ func TestUpdateExecutionRuntime_ClosesPreviousRuntime(t *testing.T) {
 		baseCtx:     context.Background(),
 		execRuntime: rt,
 		sandboxType: cliTestSandboxType(),
-		resolved:    &bootstrap.ResolvedSpec{},
+		resolved:    &appassembly.ResolvedSpec{},
 	}
 	if err := console.updateExecutionRuntime(toolexec.PermissionModeFullControl, cliTestSandboxType()); err != nil {
 		t.Fatal(err)

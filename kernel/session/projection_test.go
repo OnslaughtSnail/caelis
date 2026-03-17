@@ -1,16 +1,15 @@
-package eventview
+package session
 
 import (
 	"testing"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
 func TestAgentVisible_UsesLatestContextWindowWithoutLifecycle(t *testing.T) {
 	now := time.Now()
-	events := []*session.Event{
+	events := []*Event{
 		{ID: "old-user", Time: now, Message: model.Message{Role: model.RoleUser, Text: "old"}},
 		{ID: "life-1", Time: now, Message: model.Message{Role: model.RoleSystem}, Meta: map[string]any{"kind": "lifecycle"}},
 		{ID: "compact", Time: now, Message: model.Message{Role: model.RoleUser, Text: "summary"}, Meta: map[string]any{"kind": "compaction"}},
@@ -29,11 +28,11 @@ func TestAgentVisible_UsesLatestContextWindowWithoutLifecycle(t *testing.T) {
 
 func TestMessages_SkipsUIOnlyAndRuntimeSystemNotices(t *testing.T) {
 	now := time.Now()
-	uiOnly := session.MarkNotice(&session.Event{
+	uiOnly := MarkNotice(&Event{
 		ID:   "ui-only",
 		Time: now,
-	}, session.NoticeLevelWarn, "retrying in 1s")
-	events := session.NewEvents([]*session.Event{
+	}, NoticeLevelWarn, "retrying in 1s")
+	events := NewEvents([]*Event{
 		{ID: "user", Time: now, Message: model.Message{Role: model.RoleUser, Text: "hi"}},
 		uiOnly,
 		{ID: "warn-old", Time: now, Message: model.Message{Role: model.RoleSystem, Text: "warn: old persisted warning"}},
@@ -58,7 +57,7 @@ func TestMessages_SkipsUIOnlyAndRuntimeSystemNotices(t *testing.T) {
 
 func TestPendingToolCalls_ReturnsOnlyUnmatchedCallsInOrder(t *testing.T) {
 	now := time.Now()
-	events := []*session.Event{
+	events := []*Event{
 		{
 			ID:   "assistant-1",
 			Time: now,
@@ -90,7 +89,7 @@ func TestPendingToolCalls_ReturnsOnlyUnmatchedCallsInOrder(t *testing.T) {
 		},
 	}
 
-	got := PendingToolCalls(session.NewEvents(events))
+	got := PendingToolCalls(NewEvents(events))
 	if len(got) != 2 {
 		t.Fatalf("expected 2 pending tool calls, got %d", len(got))
 	}

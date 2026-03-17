@@ -8,7 +8,7 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -35,10 +35,10 @@ func (t *GlobTool) Description() string {
 	return "Match files by glob pattern."
 }
 
-func (t *GlobTool) Capability() toolcap.Capability {
-	return toolcap.Capability{
-		Operations: []toolcap.Operation{toolcap.OperationFileRead},
-		Risk:       toolcap.RiskLow,
+func (t *GlobTool) Capability() capability.Capability {
+	return capability.Capability{
+		Operations: []capability.Operation{capability.OperationFileRead},
+		Risk:       capability.RiskLow,
 	}
 }
 

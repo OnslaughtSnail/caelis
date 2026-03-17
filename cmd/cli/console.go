@@ -14,8 +14,9 @@ import (
 	"time"
 	"unicode"
 
+	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
+	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
-	"github.com/OnslaughtSnail/caelis/kernel/bootstrap"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
@@ -23,7 +24,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
-	"github.com/OnslaughtSnail/caelis/kernel/skills"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
@@ -47,7 +47,7 @@ type cliConsole struct {
 	workspace     workspaceContext
 	workspaceLine string
 
-	resolved          *bootstrap.ResolvedSpec
+	resolved          *appassembly.ResolvedSpec
 	sessionStore      session.Store
 	execRuntime       toolexec.Runtime
 	execRuntimeView   *swappableRuntime
@@ -221,7 +221,7 @@ type cliConsoleConfig struct {
 	ContextWindow         int
 	Workspace             workspaceContext
 	WorkspaceLine         string
-	Resolved              *bootstrap.ResolvedSpec
+	Resolved              *appassembly.ResolvedSpec
 	SessionStore          session.Store
 	ExecRuntime           toolexec.Runtime
 	ExecRuntimeView       *swappableRuntime
@@ -1734,7 +1734,7 @@ func handleTools(c *cliConsole, args []string) (bool, error) {
 
 func handleSkills(c *cliConsole, args []string) (bool, error) {
 	_ = args
-	discovered := skills.DiscoverMeta(c.skillDirs)
+	discovered := appskills.DiscoverMeta(c.skillDirs)
 	if len(discovered.Metas) == 0 {
 		c.printf("skills: (none discovered)\n")
 		for _, w := range discovered.Warnings {

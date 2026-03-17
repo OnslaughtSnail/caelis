@@ -1,4 +1,4 @@
-package toolcap
+package capability
 
 import "testing"
 

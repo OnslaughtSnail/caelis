@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -45,7 +44,7 @@ func (r *Runtime) ContextUsage(ctx context.Context, req UsageRequest) (ContextUs
 			return ContextUsage{}, err
 		}
 	}
-	window := eventview.AgentVisible(events)
+	window := session.AgentVisible(events)
 	windowTokens := resolveContextWindowTokens(req.ContextWindowTokens, req.Model, r.compaction.DefaultContextWindowTokens)
 	inputBudget := windowTokens - r.compaction.ReserveOutputTokens - r.compaction.SafetyMarginTokens
 	if inputBudget < 1 {

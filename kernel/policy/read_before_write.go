@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 const (
@@ -49,7 +49,7 @@ func (h readBeforeWriteHook) BeforeModel(ctx context.Context, in ModelInput) (Mo
 }
 
 func (h readBeforeWriteHook) BeforeTool(ctx context.Context, in ToolInput) (ToolInput, error) {
-	if !in.Capability.HasOperation(toolcap.OperationFileWrite) {
+	if !in.Capability.HasOperation(capability.OperationFileWrite) {
 		return in, nil
 	}
 	args := resolveToolInputArgs(in)

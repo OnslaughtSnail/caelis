@@ -10,13 +10,12 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
-	"github.com/OnslaughtSnail/caelis/kernel/eventview"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
-	"github.com/OnslaughtSnail/caelis/kernel/toolcap"
+	toolcap "github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
 // Config controls behavior of LLMAgent.
@@ -198,7 +197,7 @@ func (a *Agent) generateTurnResponse(
 ) (*model.Response, error) {
 	toolDecls := tool.Declarations(ctx.Tools())
 	in, err := policy.ApplyBeforeModel(ctx, state.hooks, policy.ModelInput{
-		Messages: eventview.Messages(ctx.Events(), a.cfg.SystemPrompt, a.toolResultSanitizer),
+		Messages: session.Messages(ctx.Events(), a.cfg.SystemPrompt, a.toolResultSanitizer),
 		Tools:    toolDecls,
 	})
 	if err != nil {
@@ -368,12 +367,12 @@ func (a *Agent) executeToolCall(
 		return nil
 	}
 
-	capability := toolcap.Of(t)
+	toolCapability := toolcap.Of(t)
 	toolCtx := toolexec.WithToolCallInfo(context.Context(ctx), call.Name, call.ID)
 	beforeIn, err := policy.ApplyBeforeTool(toolCtx, state.hooks, policy.ToolInput{
 		Call:       call,
 		Args:       cloneArgs(args),
-		Capability: capability,
+		Capability: toolCapability,
 	})
 	if err != nil {
 		return err
@@ -450,7 +449,7 @@ func toMessagesWithSanitizer(
 	if sanitizer == nil {
 		sanitizer = defaultSanitizeToolResultForModel
 	}
-	return eventview.Messages(session.NewEvents(events), systemPrompt, sanitizer)
+	return session.Messages(session.NewEvents(events), systemPrompt, sanitizer)
 }
 
 func defaultSanitizeToolResultForModel(result map[string]any) map[string]any {
