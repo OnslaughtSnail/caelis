@@ -4507,6 +4507,32 @@ func TestExplorationBlockMergesReadAndSearchResultSummaries(t *testing.T) {
 	}
 }
 
+func TestExplorationBlockMergesBatchedReadResultsWithEarlierCalls(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ hpfs.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ hpfs.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ quota.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ READ 311-370\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ READ 1321-1360\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ READ 1-21\n"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Read hpfs.go 311-370") {
+		t.Fatalf("expected first read paired with filename, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Read hpfs.go 1321-1360") {
+		t.Fatalf("expected second read paired with filename, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Read quota.go 1-21") {
+		t.Fatalf("expected trailing read paired with filename, got:\n%s", view)
+	}
+	if strings.Contains(view, "Read 1321-1360") || strings.Contains(view, "Read 1-21") {
+		t.Fatalf("expected no orphaned read ranges, got:\n%s", view)
+	}
+}
+
 func TestExplorationBlockCollapsesBeforeAssistantAnswer(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

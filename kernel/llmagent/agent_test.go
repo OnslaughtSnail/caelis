@@ -1509,6 +1509,72 @@ func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
 	t.Fatal("expected run to fail with approval canceled error")
 }
 
+func TestLLMAgent_UnknownToolReturnsErrorWithoutAuthorization(t *testing.T) {
+	hook := &captureCapabilityHook{}
+	step := 0
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		step++
+		switch step {
+		case 1:
+			return &model.Response{Message: model.Message{
+				Role: model.RoleAssistant,
+				ToolCalls: []model.ToolCall{{
+					ID:   "c1",
+					Name: "GREP",
+					Args: jsonArgs(map[string]any{"pattern": "quota"}),
+				}},
+			}}, nil
+		case 2:
+			last := req.Messages[len(req.Messages)-1]
+			if last.Role != model.RoleTool || last.ToolResponse == nil {
+				t.Fatalf("expected tool error response, got %+v", last)
+			}
+			if got := fmt.Sprint(last.ToolResponse.Result["error"]); !strings.Contains(got, `unknown tool "GREP"`) {
+				t.Fatalf("expected unknown tool error, got %q", got)
+			}
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		default:
+			t.Fatalf("unexpected llm step %d", step)
+			return nil, nil
+		}
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+		policies: []policy.Hook{
+			policy.DefaultSecurityBaseline(),
+			hook,
+		},
+	}
+
+	var toolEvent *session.Event
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if ev != nil && ev.Message.ToolResponse != nil {
+			toolEvent = ev
+		}
+	}
+	if toolEvent == nil || toolEvent.Message.ToolResponse == nil {
+		t.Fatal("expected tool response event")
+	}
+	if got := fmt.Sprint(toolEvent.Message.ToolResponse.Result["error"]); !strings.Contains(got, `unknown tool "GREP"`) {
+		t.Fatalf("expected unknown tool error in emitted response, got %q", got)
+	}
+	if len(hook.before) != 0 || len(hook.after) != 0 {
+		t.Fatalf("expected policy hooks skipped for unknown tool, got before=%d after=%d", len(hook.before), len(hook.after))
+	}
+}
+
 func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 	echoTool, err := tool.NewFunction[struct{}, struct {
 		Out string `json:"out"`

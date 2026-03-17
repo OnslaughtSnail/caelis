@@ -344,10 +344,31 @@ func (a *Agent) executeToolCall(
 		return nil
 	}
 
-	capability := toolcap.Capability{Risk: toolcap.RiskUnknown}
-	if toolForCap, exists := ctx.Tool(call.Name); exists {
-		capability = toolcap.Of(toolForCap)
+	t, ok := ctx.Tool(call.Name)
+	if !ok {
+		execOut := policy.ToolOutput{
+			Call: call,
+			Args: cloneArgs(args),
+			Err:  fmt.Errorf("llmagent: unknown tool %q", call.Name),
+		}
+		execOut.Result = map[string]any{"error": execOut.Err.Error()}
+		finalResult := annotateToolResultMetadata(execOut.Result, execOut.Err)
+		toolMsg := model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:     call.ID,
+				Name:   call.Name,
+				Result: finalResult,
+			},
+		}
+		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
+		if !yield(ev, nil) {
+			return errYieldStopped
+		}
+		return nil
 	}
+
+	capability := toolcap.Of(t)
 	toolCtx := toolexec.WithToolCallInfo(context.Context(ctx), call.Name, call.ID)
 	beforeIn, err := policy.ApplyBeforeTool(toolCtx, state.hooks, policy.ToolInput{
 		Call:       call,
@@ -372,11 +393,7 @@ func (a *Agent) executeToolCall(
 		Capability: beforeIn.Capability,
 		Decision:   decision,
 	}
-	t, ok := ctx.Tool(call.Name)
-	if !ok {
-		execOut.Err = fmt.Errorf("llmagent: unknown tool %q", call.Name)
-		execOut.Result = map[string]any{"error": execOut.Err.Error()}
-	} else if decision.Effect == policy.DecisionEffectDeny {
+	if decision.Effect == policy.DecisionEffectDeny {
 		reason := strings.TrimSpace(decision.Reason)
 		if reason == "" {
 			reason = "tool denied by policy"

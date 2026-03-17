@@ -675,18 +675,45 @@ type activityDisplayEntry struct {
 
 func buildActivityDisplayEntries(entries []activityEntry) []activityDisplayEntry {
 	out := make([]activityDisplayEntry, 0, len(entries))
-	for i := 0; i < len(entries); i++ {
-		if i+1 < len(entries) {
-			if merged, ok := mergeActivityEntries(entries[i], entries[i+1]); ok {
-				out = append(out, merged)
-				i++
+	type pendingActivityEntry struct {
+		displayIndex int
+		call         activityEntry
+	}
+	pending := map[string][]pendingActivityEntry{}
+	for _, entry := range entries {
+		key := activityEntryMergeKey(entry)
+		if !entry.result {
+			verb, detail := activityEntryDisplay(entry)
+			out = append(out, activityDisplayEntry{verb: verb, detail: detail})
+			if key != "" {
+				pending[key] = append(pending[key], pendingActivityEntry{
+					displayIndex: len(out) - 1,
+					call:         entry,
+				})
+			}
+			continue
+		}
+		if key != "" && len(pending[key]) > 0 {
+			ref := pending[key][0]
+			pending[key] = pending[key][1:]
+			if merged, ok := mergeActivityEntries(ref.call, entry); ok {
+				out[ref.displayIndex] = merged
 				continue
 			}
 		}
-		verb, detail := activityEntryDisplay(entries[i])
+		verb, detail := activityEntryDisplay(entry)
 		out = append(out, activityDisplayEntry{verb: verb, detail: detail})
 	}
 	return out
+}
+
+func activityEntryMergeKey(entry activityEntry) string {
+	switch strings.ToUpper(strings.TrimSpace(entry.tool)) {
+	case "READ", "SEARCH", "LIST", "GLOB":
+		return strings.ToUpper(strings.TrimSpace(entry.tool)) + ":" + strings.ToUpper(strings.TrimSpace(entry.action))
+	default:
+		return ""
+	}
 }
 
 func mergeActivityEntries(call activityEntry, result activityEntry) (activityDisplayEntry, bool) {
