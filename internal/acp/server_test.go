@@ -1683,24 +1683,52 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 }
 
 func pathWithinRoot(root string, path string) bool {
-	root = filepath.Clean(strings.TrimSpace(root))
-	path = filepath.Clean(strings.TrimSpace(path))
+	root = resolvePathForContainment(root)
+	path = resolvePathForContainment(path)
 	if root == "" || path == "" {
 		return false
 	}
-	rootResolved, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		rootResolved = root
-	}
-	pathResolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		pathResolved = path
-	}
-	rel, err := filepath.Rel(rootResolved, pathResolved)
+	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return false
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	if rel == "." {
+		return true
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return !filepath.IsAbs(rel)
+}
+
+func resolvePathForContainment(path string) string {
+	current := filepath.Clean(strings.TrimSpace(path))
+	if current == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(current); err == nil {
+		return filepath.Clean(resolved)
+	}
+	suffix := make([]string, 0, 4)
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(strings.TrimSpace(path))
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+		if _, err := os.Lstat(current); err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(current)
+		if err != nil {
+			continue
+		}
+		for i := len(suffix) - 1; i >= 0; i-- {
+			resolved = filepath.Join(resolved, suffix[i])
+		}
+		return filepath.Clean(resolved)
+	}
 }
 
 func (h *harness) close() {

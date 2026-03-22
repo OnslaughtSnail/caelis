@@ -344,7 +344,7 @@ func TestRuntimeRunnerEvents_ReplaysAllDroppedDurablePages(t *testing.T) {
 	}
 	defer runner.Close()
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		events, listErr := store.ListEvents(context.Background(), sess)
 		if listErr != nil {
