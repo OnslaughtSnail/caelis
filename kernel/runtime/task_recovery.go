@@ -8,7 +8,6 @@ import (
 	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
@@ -69,8 +68,8 @@ func (r *Runtime) reconcileTaskEntry(ctx context.Context, entry *task.Entry, exe
 		}
 	}
 	switch entry.Kind {
-	case task.KindDelegate:
-		return r.reconcileDelegateTask(ctx, entry)
+	case task.KindDelegate, task.KindSpawn:
+		return r.reconcileSubagentTask(ctx, entry)
 	case task.KindBash:
 		return r.reconcileBashTask(ctx, entry, execRuntime)
 	default:
@@ -128,7 +127,7 @@ func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, exec
 	return entry, nil
 }
 
-func (r *Runtime) reconcileDelegateTask(ctx context.Context, entry *task.Entry) (*task.Entry, error) {
+func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) (*task.Entry, error) {
 	childSessionID := strings.TrimSpace(stringValue(entry.Result, "child_session_id"))
 	if childSessionID == "" {
 		childSessionID = strings.TrimSpace(stringValue(entry.Result, "_ui_child_session_id"))
@@ -150,33 +149,17 @@ func (r *Runtime) reconcileDelegateTask(ctx context.Context, entry *task.Entry) 
 	if err != nil {
 		return nil, err
 	}
-	if !state.HasLifecycle || state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval {
-		sess, getErr := r.store.GetOrCreate(ctx, &session.Session{
-			AppName: entry.Session.AppName,
-			UserID:  entry.Session.UserID,
-			ID:      childSessionID,
-		})
-		if getErr != nil {
-			return nil, getErr
-		}
-		cause := fmt.Errorf("subagent execution was interrupted; relaunch is required")
-		_ = r.appendAndYieldLifecycle(ctx, sess, RunLifecycleStatusInterrupted, "delegate_recovery", cause, func(*session.Event, error) bool {
-			return true
-		})
-		state = RunState{
-			HasLifecycle: true,
-			Status:       RunLifecycleStatusInterrupted,
-			Phase:        "delegate_recovery",
-			Error:        cause.Error(),
-			UpdatedAt:    time.Now(),
-		}
-	}
 	assistant, err := latestAssistantText(ctx, r, entry.Session.AppName, entry.Session.UserID, childSessionID)
 	if err != nil {
 		return nil, err
 	}
-	entry.State = runtimeTaskState(state.Status)
-	entry.Running = entry.State == task.StateRunning || entry.State == task.StateWaitingApproval
+	if !state.HasLifecycle {
+		entry.State = task.StateRunning
+		entry.Running = true
+	} else {
+		entry.State = runtimeTaskState(state.Status)
+		entry.Running = entry.State == task.StateRunning || entry.State == task.StateWaitingApproval
+	}
 	entry.UpdatedAt = time.Now()
 	if entry.Result == nil {
 		entry.Result = map[string]any{}
@@ -189,6 +172,9 @@ func (r *Runtime) reconcileDelegateTask(ctx context.Context, entry *task.Entry) 
 	if entry.State == task.StateWaitingApproval {
 		entry.Result["approval_pending"] = true
 		entry.Result["_ui_approval_pending"] = true
+	} else {
+		delete(entry.Result, "approval_pending")
+		delete(entry.Result, "_ui_approval_pending")
 	}
 	if !entry.Running && assistant != "" {
 		entry.Result["final_result"] = assistant

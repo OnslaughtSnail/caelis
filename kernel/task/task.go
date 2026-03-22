@@ -17,7 +17,9 @@ import (
 type Kind string
 
 const (
-	KindBash     Kind = "bash"
+	KindBash Kind = "bash"
+	// KindDelegate is a legacy persisted kind kept for backward compatibility.
+	// New subagent tasks should use KindSpawn.
 	KindDelegate Kind = "delegate"
 	KindSpawn    Kind = "spawn"
 )
@@ -74,7 +76,7 @@ type DelegateStartRequest struct {
 	ContentParts []model.ContentPart
 	Yield        time.Duration
 	Timeout      time.Duration
-	Kind         Kind // defaults to KindDelegate if empty
+	Kind         Kind // defaults to KindSpawn if empty; KindDelegate is normalized to KindSpawn
 }
 
 type ControlRequest struct {

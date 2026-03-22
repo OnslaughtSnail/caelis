@@ -74,8 +74,8 @@ func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controlle
 			route:     stringValue(entry.Spec, taskSpecRoute),
 			store:     m.store,
 		}
-	case task.KindDelegate:
-		return &delegateTaskController{
+	case task.KindDelegate, task.KindSpawn:
+		return &subagentTaskController{
 			runtime:      m.runtime,
 			appName:      entry.Session.AppName,
 			userID:       entry.Session.UserID,

@@ -10,7 +10,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
-type delegateTaskController struct {
+type subagentTaskController struct {
 	runtime      *Runtime
 	appName      string
 	userID       string
@@ -22,7 +22,7 @@ type delegateTaskController struct {
 	timeout      time.Duration
 }
 
-func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
+func (c *subagentTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
 	deadline := time.Time{}
 	if yield > 0 {
 		deadline = time.Now().Add(yield)
@@ -51,15 +51,15 @@ func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, 
 	}
 }
 
-func (c *delegateTaskController) Status(ctx context.Context, record *task.Record) (task.Snapshot, error) {
+func (c *subagentTaskController) Status(ctx context.Context, record *task.Record) (task.Snapshot, error) {
 	return c.inspect(ctx, record, false)
 }
 
-func (c *delegateTaskController) Write(context.Context, *task.Record, string, time.Duration) (task.Snapshot, error) {
-	return task.Snapshot{}, fmt.Errorf("task: delegate tasks do not accept input")
+func (c *subagentTaskController) Write(context.Context, *task.Record, string, time.Duration) (task.Snapshot, error) {
+	return task.Snapshot{}, fmt.Errorf("task: subagent tasks do not accept input")
 }
 
-func (c *delegateTaskController) Cancel(ctx context.Context, record *task.Record) (task.Snapshot, error) {
+func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record) (task.Snapshot, error) {
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -83,9 +83,9 @@ func (c *delegateTaskController) Cancel(ctx context.Context, record *task.Record
 	return snapshot, nil
 }
 
-func (c *delegateTaskController) inspect(ctx context.Context, record *task.Record, advance bool) (task.Snapshot, error) {
+func (c *subagentTaskController) inspect(ctx context.Context, record *task.Record, advance bool) (task.Snapshot, error) {
 	if c == nil || c.runtime == nil {
-		return task.Snapshot{}, fmt.Errorf("task: delegate controller is unavailable")
+		return task.Snapshot{}, fmt.Errorf("task: subagent controller is unavailable")
 	}
 	state, err := c.runtime.RunState(ctx, RunStateRequest{
 		AppName:   c.appName,

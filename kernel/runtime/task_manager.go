@@ -126,10 +126,7 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 	if req.Yield < 0 {
 		req.Yield = 0
 	}
-	kind := req.Kind
-	if kind == "" {
-		kind = task.KindSpawn
-	}
+	kind := canonicalSubagentTaskKind(req.Kind)
 	label := strings.ToUpper(string(kind))
 	if label == "" {
 		label = "SPAWN"
@@ -147,7 +144,7 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 		return task.Snapshot{}, err
 	}
 	cancel := cancelSubagentFunc(m.subagents, runResult.SessionID)
-	controller := &delegateTaskController{
+	controller := &subagentTaskController{
 		runtime:      m.runtime,
 		appName:      m.runReq.AppName,
 		userID:       m.runReq.UserID,
@@ -188,6 +185,15 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 	}
 	snapshot.Yielded = runResult.Yielded || snapshot.Running
 	return snapshot, nil
+}
+
+func canonicalSubagentTaskKind(kind task.Kind) task.Kind {
+	switch kind {
+	case "", task.KindDelegate, task.KindSpawn:
+		return task.KindSpawn
+	default:
+		return kind
+	}
 }
 
 type cancelableSubagentRunner interface {

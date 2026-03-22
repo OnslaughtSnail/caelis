@@ -54,7 +54,7 @@ func TestTaskManager_WaitReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) 
 	store := taskinmemory.New()
 	entry := &task.Entry{
 		TaskID:         "t-cancelled-wait",
-		Kind:           task.KindDelegate,
+		Kind:           task.KindSpawn,
 		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "s"},
 		Title:          "delegate job",
 		State:          task.StateCancelled,
@@ -303,7 +303,7 @@ func TestTaskManager_WaitSuppressesTTYTranscriptWhenTaskCompletes(t *testing.T) 
 	}
 }
 
-func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) {
+func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) {
 	sessStore := sessioninmemory.New()
 	rt, err := New(Config{Store: sessStore})
 	if err != nil {
@@ -326,13 +326,13 @@ func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 
 	record := &task.Record{
 		ID:      "t-delegate-output",
-		Kind:    task.KindDelegate,
+		Kind:    task.KindSpawn,
 		Title:   "delegate job",
 		State:   task.StateRunning,
 		Running: true,
 		Session: task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
 	}
-	controller := &delegateTaskController{
+	controller := &subagentTaskController{
 		runtime:      rt,
 		appName:      "app",
 		userID:       "u",
@@ -352,7 +352,7 @@ func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 		t.Fatalf("expected delegate snapshot to remain running, got state=%q running=%v", snapshot.State, snapshot.Running)
 	}
 	if got := snapshot.Result["progress_state"]; got != string(task.StateRunning) {
-		t.Fatalf("expected delegate progress_state in snapshot result, got %#v", snapshot.Result)
+		t.Fatalf("expected subagent progress_state in snapshot result, got %#v", snapshot.Result)
 	}
 	if _, ok := snapshot.Result["latest_output"]; ok {
 		t.Fatalf("did not expect delegate latest_output to leak into snapshot result, got %#v", snapshot.Result)
@@ -363,7 +363,7 @@ func TestTaskManager_ListFiltersRegistryBySession(t *testing.T) {
 	store := taskinmemory.New()
 	registry := task.NewRegistry(task.RegistryConfig{})
 
-	current := registry.Create(task.KindDelegate, "current", nil, false, true)
+	current := registry.Create(task.KindSpawn, "current", nil, false, true)
 	current.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"}
 
 	other := registry.Create(task.KindBash, "other", nil, true, true)
@@ -408,6 +408,69 @@ func TestTaskManager_ListFiltersRegistryBySession(t *testing.T) {
 	}
 	if seen[other.ID] {
 		t.Fatalf("did not expect other session task %q in list, got %#v", other.ID, items)
+	}
+}
+
+func TestTaskManager_StatusRebuildsPersistedSpawnController(t *testing.T) {
+	sessStore := sessioninmemory.New()
+	taskStore := taskinmemory.New()
+	rt, err := New(Config{Store: sessStore, TaskStore: taskStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child"}
+	if _, err := sessStore.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessStore.GetOrCreate(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessStore.ReplaceState(context.Background(), child, runStateSnapshot(RunState{
+		HasLifecycle: true,
+		Status:       RunLifecycleStatusRunning,
+		Phase:        "run",
+		UpdatedAt:    time.Now(),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := taskStore.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-spawn-persisted",
+		Kind:           task.KindSpawn,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "spawned child",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecPrompt:       "inspect repo",
+			taskSpecChildSession: "child",
+			taskSpecDelegationID: "dlg-1",
+		},
+		Result: map[string]any{
+			"child_session_id": "child",
+			"delegation_id":    "dlg-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTaskManager(rt, nil, nil, taskStore, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	snapshot, err := manager.Status(context.Background(), task.ControlRequest{TaskID: "t-spawn-persisted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Kind != task.KindSpawn {
+		t.Fatalf("expected spawn snapshot kind, got %q", snapshot.Kind)
+	}
+	if !snapshot.Running || snapshot.State != task.StateRunning {
+		t.Fatalf("expected persisted spawn task to remain controllable, got state=%q running=%v", snapshot.State, snapshot.Running)
+	}
+	if got := snapshot.Result["_ui_child_session_id"]; got != "child" {
+		t.Fatalf("expected child session metadata, got %#v", snapshot.Result)
 	}
 }
 
