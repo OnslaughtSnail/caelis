@@ -10,53 +10,7 @@ import (
 
 	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
-	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 )
-
-func buildACPMCPConfig(base toolmcp.Config, servers []internalacp.MCPServer) (toolmcp.Config, error) {
-	if len(servers) == 0 {
-		return base, nil
-	}
-	cfg := toolmcp.Config{
-		CacheTTL: base.CacheTTL,
-		Servers:  append(make([]toolmcp.ServerConfig, 0, len(base.Servers)+len(servers)), base.Servers...),
-	}
-	for _, item := range servers {
-		name := strings.TrimSpace(item.Name)
-		if name == "" {
-			return toolmcp.Config{}, fmt.Errorf("acp mcp server name is required")
-		}
-		server := toolmcp.ServerConfig{Name: name, Prefix: name}
-		switch strings.TrimSpace(strings.ToLower(item.Type)) {
-		case "", "stdio":
-			server.Transport = toolmcp.TransportStdio
-			server.Command = strings.TrimSpace(item.Command)
-			server.Args = append([]string(nil), item.Args...)
-			if server.Command == "" {
-				return toolmcp.Config{}, fmt.Errorf("acp mcp server %q command is required", name)
-			}
-			if len(item.Env) > 0 {
-				server.Env = map[string]string{}
-				for _, env := range item.Env {
-					server.Env[strings.TrimSpace(env.Name)] = env.Value
-				}
-			}
-		case "http":
-			server.Transport = toolmcp.TransportStreamable
-			server.URL = strings.TrimSpace(item.URL)
-		case "sse":
-			server.Transport = toolmcp.TransportSSE
-			server.URL = strings.TrimSpace(item.URL)
-		default:
-			return toolmcp.Config{}, fmt.Errorf("unsupported acp mcp transport %q", item.Type)
-		}
-		if len(item.Headers) > 0 {
-			return toolmcp.Config{}, fmt.Errorf("acp mcp headers are not supported yet for %q", name)
-		}
-		cfg.Servers = append(cfg.Servers, server)
-	}
-	return cfg, nil
-}
 
 func resolveACPSessionReasoning(defaults modelRuntimeSettings, values map[string]string) string {
 	reasoningEffort := normalizeReasoningEffort(defaults.ReasoningEffort)

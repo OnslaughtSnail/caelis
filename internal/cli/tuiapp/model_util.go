@@ -7,7 +7,6 @@ import (
 	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
-	"github.com/mattn/go-runewidth"
 )
 
 // ---------------------------------------------------------------------------
@@ -484,44 +483,11 @@ func renderSelectionOnLines(lines []string, start textSelectionPoint, end textSe
 }
 
 func displayColumns(s string) int {
-	return runewidth.StringWidth(s)
+	return graphemeWidth(s)
 }
 
 func sliceByDisplayColumns(s string, start int, end int) string {
-	if start < 0 {
-		start = 0
-	}
-	if end < start {
-		end = start
-	}
-	if s == "" || start == end {
-		return ""
-	}
-	var b strings.Builder
-	col := 0
-	prevIncluded := false
-	for _, r := range s {
-		w := runewidth.RuneWidth(r)
-		if w < 0 {
-			w = 0
-		}
-		if w == 0 {
-			if prevIncluded {
-				b.WriteRune(r)
-			}
-			continue
-		}
-		if col >= end {
-			break
-		}
-		include := col >= start && col < end
-		if include {
-			b.WriteRune(r)
-		}
-		prevIncluded = include
-		col += w
-	}
-	return b.String()
+	return graphemeSlice(s, start, end)
 }
 
 func minInt(a int, b int) int {

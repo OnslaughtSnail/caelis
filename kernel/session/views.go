@@ -2,7 +2,6 @@ package session
 
 import (
 	"iter"
-	"maps"
 )
 
 // Events provides readonly access to a sequence of session events.
@@ -22,7 +21,9 @@ type eventSlice struct {
 	events []*Event
 }
 
-// NewEvents wraps one event slice as a readonly view.
+// NewEvents wraps one event slice as a readonly view. Each event is
+// deep-copied so mutations to the source slice or its nested maps/slices
+// never leak into the view (and vice versa).
 func NewEvents(events []*Event) Events {
 	if len(events) == 0 {
 		return eventSlice{}
@@ -32,8 +33,7 @@ func NewEvents(events []*Event) Events {
 		if ev == nil {
 			continue
 		}
-		cp := *ev
-		out = append(out, &cp)
+		out = append(out, CloneEvent(ev))
 	}
 	return eventSlice{events: out}
 }
@@ -41,7 +41,7 @@ func NewEvents(events []*Event) Events {
 func (e eventSlice) All() iter.Seq[*Event] {
 	return func(yield func(*Event) bool) {
 		for i := 0; i < len(e.events); i++ {
-			if !yield(e.At(i)) {
+			if !yield(e.events[i]) {
 				return
 			}
 		}
@@ -56,19 +56,17 @@ func (e eventSlice) At(i int) *Event {
 	if i < 0 || i >= len(e.events) || e.events[i] == nil {
 		return nil
 	}
-	cp := *e.events[i]
-	return &cp
+	return CloneEvent(e.events[i])
 }
 
 type readonlyStateSnapshot struct {
 	values map[string]any
 }
 
-// NewReadonlyState wraps one map snapshot as readonly state.
+// NewReadonlyState wraps one map snapshot as readonly state. Nested maps and
+// slices are deep-copied so external mutations never leak into the snapshot.
 func NewReadonlyState(values map[string]any) ReadonlyState {
-	out := map[string]any{}
-	maps.Copy(out, values)
-	return readonlyStateSnapshot{values: out}
+	return readonlyStateSnapshot{values: cloneMap(values)}
 }
 
 func (s readonlyStateSnapshot) Get(key string) (any, bool) {

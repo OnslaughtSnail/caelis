@@ -78,17 +78,24 @@ type SessionInfo struct {
 
 // SessionStatus provides detailed status of a session.
 type SessionStatus struct {
-	ID           string
-	Command      string
-	Dir          string
-	TTY          bool
-	State        SessionState
-	StartTime    time.Time
-	LastActivity time.Time
-	ExitCode     int
-	StdoutBytes  int64
-	StderrBytes  int64
-	Error        string
+	ID                   string
+	Command              string
+	Dir                  string
+	TTY                  bool
+	State                SessionState
+	StartTime            time.Time
+	LastActivity         time.Time
+	ExitCode             int
+	CaptureCapBytes      int64
+	StdoutBytes          int64
+	StderrBytes          int64
+	StdoutRetainedBytes  int64
+	StderrRetainedBytes  int64
+	StdoutDroppedBytes   int64
+	StderrDroppedBytes   int64
+	StdoutEarliestMarker int64
+	StderrEarliestMarker int64
+	Error                string
 }
 
 // AsyncSessionConfig configures an async session.
@@ -104,7 +111,7 @@ type AsyncSessionConfig struct {
 }
 
 const (
-	defaultOutputBufferCap = 64 * 1024 // 64KB
+	defaultOutputBufferCap = 1024 * 1024 // 1MB
 	outputChannelBuffer    = 256
 )
 
@@ -223,8 +230,11 @@ func (s *AsyncSession) readOutput(reader io.Reader, stream string, buffer *RingB
 			data := make([]byte, n)
 			copy(data, buf[:n])
 
-			// Write to ring buffer (always safe)
-			buffer.Write(data)
+			// RingBuffer.Write never returns a partial write; keep the check to
+			// satisfy errcheck and future-proof the contract.
+			if _, writeErr := buffer.Write(data); writeErr != nil {
+				return
+			}
 
 			// Update activity timestamp
 			s.lastActivity.Store(time.Now().UnixNano())
@@ -243,9 +253,6 @@ func (s *AsyncSession) readOutput(reader io.Reader, stream string, buffer *RingB
 			}
 		}
 		if err != nil {
-			if err != io.EOF {
-				// Log error but don't fail
-			}
 			return
 		}
 	}
@@ -310,7 +317,7 @@ func (s *AsyncSession) enforceTimeouts() {
 			// Absolute timeout
 			if s.timeout > 0 && time.Since(s.StartTime) > s.timeout {
 				s.state.Store(SessionStateTerminated)
-				s.Terminate()
+				_ = s.Terminate()
 				return
 			}
 
@@ -319,7 +326,7 @@ func (s *AsyncSession) enforceTimeouts() {
 				last := time.Unix(0, s.lastActivity.Load())
 				if time.Since(last) > s.idleTimeout {
 					s.state.Store(SessionStateTerminated)
-					s.Terminate()
+					_ = s.Terminate()
 					return
 				}
 			}
@@ -380,22 +387,33 @@ func (s *AsyncSession) Status() SessionStatus {
 	if s.stderrBuffer != nil {
 		stderr = string(s.stderrBuffer.ReadAll())
 	}
+	state := s.state.Load().(SessionState)
 
 	status := SessionStatus{
-		ID:           s.ID,
-		Command:      s.Command,
-		Dir:          s.Dir,
-		TTY:          s.tty,
-		State:        s.state.Load().(SessionState),
-		StartTime:    s.StartTime,
-		LastActivity: time.Unix(0, s.lastActivity.Load()),
-		ExitCode:     int(s.exitCode.Load()),
-		StdoutBytes:  s.stdoutBuffer.TotalWritten(),
-		StderrBytes:  s.stderrBuffer.TotalWritten(),
+		ID:                   s.ID,
+		Command:              s.Command,
+		Dir:                  s.Dir,
+		TTY:                  s.tty,
+		State:                state,
+		StartTime:            s.StartTime,
+		LastActivity:         time.Unix(0, s.lastActivity.Load()),
+		ExitCode:             int(s.exitCode.Load()),
+		CaptureCapBytes:      int64(s.stdoutBuffer.Cap()),
+		StdoutBytes:          s.stdoutBuffer.TotalWritten(),
+		StderrBytes:          s.stderrBuffer.TotalWritten(),
+		StdoutRetainedBytes:  int64(s.stdoutBuffer.Len()),
+		StderrRetainedBytes:  int64(s.stderrBuffer.Len()),
+		StdoutDroppedBytes:   s.stdoutBuffer.DroppedBytes(),
+		StderrDroppedBytes:   s.stderrBuffer.DroppedBytes(),
+		StdoutEarliestMarker: s.stdoutBuffer.EarliestMarker(),
+		StderrEarliestMarker: s.stderrBuffer.EarliestMarker(),
 	}
 
-	if s.exitErr != nil && s.state.Load() == SessionStateError {
-		status.Error = s.exitErr.Error()
+	s.mu.RLock()
+	exitErr := s.exitErr
+	s.mu.RUnlock()
+	if exitErr != nil && state == SessionStateError {
+		status.Error = exitErr.Error()
 	}
 
 	// Check if there's unread output
@@ -506,7 +524,7 @@ func (s *AsyncSession) Close() error {
 		// Signal reader goroutines to stop sending to outputChan.
 		close(s.doneChan)
 
-		s.Terminate()
+		_ = s.Terminate()
 
 		// Wait for reader goroutines to finish so no goroutine can send
 		// to outputChan after this point.  The goroutines will exit once

@@ -114,53 +114,49 @@ func TestSummarizeToolResponse_WriteUnchangedUsesCompactSummary(t *testing.T) {
 	}
 }
 
-func TestSummarizeToolResponse_DelegateRendersAssistantWithoutChildID(t *testing.T) {
-	got := summarizeToolResponse("DELEGATE", map[string]any{
+func TestSummarizeToolResponse_SpawnRendersAssistantWithoutChildID(t *testing.T) {
+	got := summarizeToolResponse("SPAWN", map[string]any{
 		"child_session_id": "s-1234567890ab",
 		"summary":          "## Done\n\n- item",
 	})
 	if strings.Contains(got, "child=") {
-		t.Fatalf("did not expect child session id in delegate summary: %q", got)
+		t.Fatalf("did not expect child session id in spawn summary: %q", got)
 	}
 	if !strings.HasPrefix(got, "\n") {
-		t.Fatalf("expected delegate summary to render on the next line, got %q", got)
+		t.Fatalf("expected spawn summary to render on the next line, got %q", got)
 	}
 	if !strings.Contains(got, "Done") {
-		t.Fatalf("unexpected delegate summary: %q", got)
+		t.Fatalf("unexpected spawn summary: %q", got)
 	}
 }
 
-func TestSummarizeToolResponse_DelegateRunningIncludesLatestOutput(t *testing.T) {
-	got := summarizeToolResponseWithCall("DELEGATE", map[string]any{
-		"task_id":       "t-1234567890ab",
-		"running":       true,
-		"waited_ms":     30000,
-		"latest_output": "line-1\nline-2",
+func TestSummarizeToolResponse_SpawnRunningShowsYieldOnly(t *testing.T) {
+	got := summarizeToolResponseWithCall("SPAWN", map[string]any{
+		"task_id": "t-1234567890ab",
+		"state":   "running",
+		"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+		"result":  "subagent is running",
 	}, map[string]any{
 		"task":          "inspect repo",
 		"yield_time_ms": 30000,
 	})
-	if !strings.Contains(got, "yielded after 30 s") || !strings.Contains(got, "line-2") {
-		t.Fatalf("unexpected delegate running summary: %q", got)
-	}
-	if strings.Contains(got, "t-1234567890ab") {
-		t.Fatalf("did not expect task id in delegate running summary: %q", got)
+	if !strings.Contains(got, "task yielded before completion") {
+		t.Fatalf("unexpected spawn running summary: %q", got)
 	}
 }
 
 func TestSummarizeToolResponse_BashYieldIsFriendly(t *testing.T) {
 	got := summarizeToolResponseWithCall("BASH", map[string]any{
 		"task_id": "t-1234567890ab",
-		"running": true,
+		"state":   "running",
+		"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+		"result":  "progress: 1/10",
 	}, map[string]any{
 		"command":       "sleep 10",
 		"yield_time_ms": 2000,
 	})
-	if got != "yielded after 2 s" {
+	if !strings.Contains(got, "task yielded before completion") || !strings.Contains(got, "progress: 1/10") {
 		t.Fatalf("unexpected bash running summary: %q", got)
-	}
-	if strings.Contains(got, "t-1234567890ab") {
-		t.Fatalf("did not expect task id in bash running summary: %q", got)
 	}
 }
 
@@ -176,39 +172,38 @@ func TestSummarizeToolArgs_BashOmitsCommandWrapper(t *testing.T) {
 	}
 }
 
-func TestSummarizeToolArgs_DelegateOmitsTaskWrapper(t *testing.T) {
-	got := summarizeToolArgs("DELEGATE", map[string]any{
+func TestSummarizeToolArgs_SpawnOmitsTaskWrapper(t *testing.T) {
+	got := summarizeToolArgs("SPAWN", map[string]any{
 		"task": "sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"This task simulated a long-running delegate with a deliberately verbose payload for summary truncation\"; python3 -c \"print('tail marker')\"",
 	})
 	if strings.Contains(got, "{task=") {
-		t.Fatalf("expected raw delegate task text without wrapper, got %q", got)
+		t.Fatalf("expected raw spawn task text without wrapper, got %q", got)
 	}
 	if !strings.Contains(got, "sleep 8;") || !strings.Contains(got, "tail marker") || !strings.Contains(got, "deliberately verbose payload") {
-		t.Fatalf("expected delegate summary to keep full normalized text for display-layer truncation, got %q", got)
+		t.Fatalf("expected spawn summary to keep full normalized text for display-layer truncation, got %q", got)
 	}
 }
 
 func TestSummarizeToolResponse_TaskWaitRendersFriendlySummary(t *testing.T) {
 	got := summarizeToolResponseWithCall("TASK", map[string]any{
-		"task_id":       "t-1234567890ab",
-		"state":         "running",
-		"running":       true,
-		"latest_output": "line-1\nline-2",
+		"task_id": "t-1234567890ab",
+		"state":   "running",
+		"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+		"result":  "line-1\nline-2",
 	}, map[string]any{
 		"action":        "wait",
 		"task_id":       "t-1234567890ab",
 		"yield_time_ms": 5000,
 	})
-	if got != "5 s" {
+	if got != "task yielded before completion" {
 		t.Fatalf("unexpected task wait summary: %q", got)
 	}
 }
 
 func TestSummarizeToolResponse_TaskWaitCompletedDoesNotEchoRequestedDuration(t *testing.T) {
 	got := summarizeToolResponseWithCall("TASK", map[string]any{
-		"task_id": "t-1234567890ab",
-		"state":   "completed",
-		"running": false,
+		"state": "completed",
+		"msg":   "task success",
 	}, map[string]any{
 		"action":        "wait",
 		"task_id":       "t-1234567890ab",
@@ -221,17 +216,16 @@ func TestSummarizeToolResponse_TaskWaitCompletedDoesNotEchoRequestedDuration(t *
 
 func TestSummarizeToolResponse_TaskWaitFastRunningPrefersStateOverRequestedDuration(t *testing.T) {
 	got := summarizeToolResponseWithCall("TASK", map[string]any{
-		"task_id":       "t-1234567890ab",
-		"state":         "running",
-		"running":       true,
-		"waited_ms":     0,
-		"latest_output": "still going",
+		"task_id": "t-1234567890ab",
+		"state":   "running",
+		"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+		"result":  "still going",
 	}, map[string]any{
 		"action":        "wait",
 		"task_id":       "t-1234567890ab",
 		"yield_time_ms": 30000,
 	})
-	if got != "Running" {
+	if got != "task yielded before completion" {
 		t.Fatalf("unexpected fast-running task wait summary: %q", got)
 	}
 }
@@ -240,27 +234,26 @@ func TestSummarizeToolResponse_TaskStatusRendersFriendlyState(t *testing.T) {
 	got := summarizeToolResponseWithCall("TASK", map[string]any{
 		"task_id": "t-1234567890ab",
 		"state":   "waiting_input",
-		"running": false,
+		"msg":     "waiting for input; use TASK write with task_id t-1234567890ab",
 	}, map[string]any{
 		"action":  "status",
 		"task_id": "t-1234567890ab",
 	})
-	if got != "Waiting for input" {
+	if !strings.Contains(got, "waiting for input") {
 		t.Fatalf("unexpected task status summary: %q", got)
 	}
 }
 
 func TestSummarizeToolResponse_TaskListRendersFriendlySummary(t *testing.T) {
 	got := summarizeToolResponseWithCall("TASK", map[string]any{
-		"count": 2,
 		"tasks": []any{
-			map[string]any{"task_id": "t-1", "state": "running", "running": true},
-			map[string]any{"task_id": "t-2", "state": "cancelled", "running": false},
+			map[string]any{"task_id": "t-1", "state": "running", "summary": "task yielded before completion"},
+			map[string]any{"task_id": "t-2", "state": "cancelled", "summary": "cancelled"},
 		},
 	}, map[string]any{
 		"action": "list",
 	})
-	if got != "Listed 2 tasks (1 running)" {
+	if got != "Listed 2 tasks (1 active)" {
 		t.Fatalf("unexpected task list summary: %q", got)
 	}
 }
@@ -326,6 +319,20 @@ func TestSummarizeToolArgs_TaskStatusAndCancelHideRawTaskIDs(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolArgs_TaskWriteShowsInputPreview(t *testing.T) {
+	got := summarizeToolArgs("TASK", map[string]any{
+		"action":  "write",
+		"task_id": "t-1234567890ab",
+		"input":   "hello\n",
+	})
+	if got != "hello\\n" {
+		t.Fatalf("expected write input preview, got %q", got)
+	}
+	if strings.Contains(got, "action=") || strings.Contains(got, "t-1234567890ab") {
+		t.Fatalf("did not expect raw action/task metadata in write preview, got %q", got)
+	}
+}
+
 func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
 	var out bytes.Buffer
 	state := &renderState{
@@ -351,10 +358,10 @@ func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
 				ID:   "call_task_1",
 				Name: "TASK",
 				Result: map[string]any{
-					"task_id":       "t-1234567890ab",
-					"state":         "running",
-					"running":       true,
-					"latest_output": "line-1\nline-2",
+					"task_id": "t-1234567890ab",
+					"state":   "running",
+					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+					"result":  "line-1\nline-2",
 				},
 			},
 		},
@@ -363,7 +370,7 @@ func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
 	if !strings.Contains(rendered, "▸ WAIT 5 s") {
 		t.Fatalf("expected WAIT call render, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "✓ WAITED 5 s") {
+	if !strings.Contains(rendered, "✓ WAITED task yielded before completion") {
 		t.Fatalf("expected friendly TASK render, got %q", rendered)
 	}
 	if strings.Contains(rendered, "t-1234567890ab") || strings.Contains(rendered, "line-2") {
@@ -398,13 +405,13 @@ func TestPrintEvent_TaskResponseWithoutYieldUsesDefaultFriendlyWait(t *testing.T
 				Result: map[string]any{
 					"task_id": "t-1234567890ab",
 					"state":   "running",
-					"running": true,
+					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
 				},
 			},
 		},
 	}, state)
 	rendered := out.String()
-	if !strings.Contains(rendered, "▸ WAIT 5 s") || !strings.Contains(rendered, "✓ WAITED 5 s") {
+	if !strings.Contains(rendered, "▸ WAIT 5 s") || !strings.Contains(rendered, "✓ WAITED task yielded before completion") {
 		t.Fatalf("expected default friendly wait rendering, got %q", rendered)
 	}
 }
@@ -447,8 +454,8 @@ func TestSummarizeToolResponse_TaskCancelAvoidsDuplicateCancelledLabel(t *testin
 	}
 }
 
-func TestRenderDelegateSummaryPreview_StripsCodeFences(t *testing.T) {
-	got := renderDelegateSummaryPreview("## Header\n\n```sh\necho hi\nls\n```\n\nDone")
+func TestRenderSpawnSummaryPreview_StripsCodeFences(t *testing.T) {
+	got := renderSpawnSummaryPreview("## Header\n\n```sh\necho hi\nls\n```\n\nDone")
 	if strings.Contains(got, "```") {
 		t.Fatalf("expected code fences stripped, got %q", got)
 	}
@@ -456,7 +463,7 @@ func TestRenderDelegateSummaryPreview_StripsCodeFences(t *testing.T) {
 		t.Fatalf("expected fenced block contents hidden, got %q", got)
 	}
 	if !strings.Contains(got, "Header") || !strings.Contains(got, "Done") {
-		t.Fatalf("unexpected delegate preview %q", got)
+		t.Fatalf("unexpected spawn preview %q", got)
 	}
 }
 
@@ -471,8 +478,8 @@ func TestCompactTaskPreview_StripsDelegateCodeFenceContent(t *testing.T) {
 }
 
 func TestFormatToolResultLine_RendersMultilineBodyBelowHeader(t *testing.T) {
-	got := formatToolResultLine("✓ ", "DELEGATE", "\nline-1\nline-2")
-	if got != "✓ DELEGATE\nline-1\nline-2\n" {
+	got := formatToolResultLine("✓ ", "SPAWN", "\nline-1\nline-2")
+	if got != "✓ SPAWN\nline-1\nline-2\n" {
 		t.Fatalf("unexpected multiline tool result rendering: %q", got)
 	}
 }

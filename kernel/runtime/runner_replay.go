@@ -116,10 +116,10 @@ func (b *replayBuffer) snapshotFrom(next uint64) replaySnapshot {
 	return snap
 }
 
-func durableReplaySlice(events []*session.Event, persistPartial bool) []*session.Event {
+func durableReplaySlice(events []*session.Event) []*session.Event {
 	out := make([]*session.Event, 0, len(events))
 	for _, ev := range events {
-		if isDurableReplayEvent(ev, persistPartial) {
+		if isDurableReplayEvent(ev) {
 			out = append(out, ev)
 		}
 	}
@@ -152,11 +152,11 @@ func streamResyncEvent() *session.Event {
 	})
 }
 
-func isDurableReplayEvent(ev *session.Event, persistPartial bool) bool {
+func isDurableReplayEvent(ev *session.Event) bool {
 	if ev == nil {
 		return false
 	}
-	if !shouldPersistEvent(ev, persistPartial) {
+	if !shouldPersistEvent(ev) {
 		return false
 	}
 	if isEventPartial(ev) {

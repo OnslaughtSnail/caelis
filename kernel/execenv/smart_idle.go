@@ -22,56 +22,54 @@ type IdleDetectionResult struct {
 // is waiting for user input vs performing a long-running computation.
 type SmartIdleDetector struct {
 	promptPatterns []*regexp.Regexp
-	lastOutput     []byte
-	lastCheck      time.Time
 }
 
 // Common shell prompt patterns
 var defaultPromptPatterns = []*regexp.Regexp{
 	// Standard shell prompts
-	regexp.MustCompile(`[$#>]\s*$`),                      // $ or # or > at end
-	regexp.MustCompile(`^\s*\$\s*$`),                     // Just $
-	regexp.MustCompile(`^.*@.*[:~].*[$#]\s*$`),           // user@host:~$
-	regexp.MustCompile(`^\[.*\]\s*[$#>]\s*$`),            // [user@host dir]$
-	regexp.MustCompile(`^.*\s*%\s*$`),                    // zsh style %
-	regexp.MustCompile(`^\(.*\)\s*.*[$#>]\s*$`),          // (venv) user$
-	regexp.MustCompile(`^PS\d*>\s*$`),                    // PowerShell PS1>
-	regexp.MustCompile(`^>>>\s*$`),                       // Python REPL
-	regexp.MustCompile(`^\.{3}\s*$`),                     // Python continuation ...
-	regexp.MustCompile(`^In\s*\[\d+\]:\s*$`),             // IPython
-	regexp.MustCompile(`^irb.*>\s*$`),                    // Ruby IRB
-	regexp.MustCompile(`^>\s*$`),                         // Node.js REPL
-	regexp.MustCompile(`^\?\s*$`),                        // R prompt
-	regexp.MustCompile(`^sqlite>\s*$`),                   // SQLite
-	regexp.MustCompile(`^mysql>\s*$`),                    // MySQL
-	regexp.MustCompile(`^postgres.*[=#]>\s*$`),           // PostgreSQL
-	regexp.MustCompile(`^=>>\s*$`),                       // Elixir iex
-	regexp.MustCompile(`^ghci>\s*$`),                     // Haskell GHCi
-	regexp.MustCompile(`^scala>\s*$`),                    // Scala REPL
-	regexp.MustCompile(`^groovy:\d+>\s*$`),               // Groovy
-	regexp.MustCompile(`^gdb>\s*$`),                      // GDB debugger
-	regexp.MustCompile(`^\(Pdb\)\s*$`),                   // Python debugger
-	regexp.MustCompile(`^\(gdb\)\s*$`),                   // GDB
-	regexp.MustCompile(`^debug>\s*$`),                    // Node debugger
-	regexp.MustCompile(`^.*\(yes/no.*\)\s*[?:]\s*$`),     // SSH host key confirmation
-	regexp.MustCompile(`^Password:\s*$`),                 // Password prompt
-	regexp.MustCompile(`^Enter passphrase.*:\s*$`),       // SSH passphrase
-	regexp.MustCompile(`^\[Y/n\]\s*$`),                   // apt-get style
-	regexp.MustCompile(`^\[y/N\]\s*$`),                   // Confirmation prompts
-	regexp.MustCompile(`^Continue\?.*$`),                 // Various continue prompts
-	regexp.MustCompile(`^Press.*to continue.*$`),         // Press key prompts
-	regexp.MustCompile(`^--More--\s*$`),                  // Pager
-	regexp.MustCompile(`^:\s*$`),                         // less/more pager
-	regexp.MustCompile(`^Do you want to continue.*$`),    // Various continue prompts
-	regexp.MustCompile(`^Proceed\?.*$`),                  // Proceed prompts
-	regexp.MustCompile(`^Are you sure.*\?.*$`),           // Confirmation
-	regexp.MustCompile(`^Enter.*:\s*$`),                  // Input prompts
-	regexp.MustCompile(`^Type.*:\s*$`),                   // Type prompts
-	regexp.MustCompile(`^Input.*:\s*$`),                  // Input prompts
-	regexp.MustCompile(`^Please enter.*:\s*$`),           // Please enter prompts
-	regexp.MustCompile(`^Overwrite.*\?.*$`),              // Overwrite confirmation
-	regexp.MustCompile(`^Replace.*\?.*$`),                // Replace confirmation
-	regexp.MustCompile(`^Delete.*\?.*$`),                 // Delete confirmation
+	regexp.MustCompile(`[$#>]\s*$`),                   // $ or # or > at end
+	regexp.MustCompile(`^\s*\$\s*$`),                  // Just $
+	regexp.MustCompile(`^.*@.*[:~].*[$#]\s*$`),        // user@host:~$
+	regexp.MustCompile(`^\[.*\]\s*[$#>]\s*$`),         // [user@host dir]$
+	regexp.MustCompile(`^.*\s*%\s*$`),                 // zsh style %
+	regexp.MustCompile(`^\(.*\)\s*.*[$#>]\s*$`),       // (venv) user$
+	regexp.MustCompile(`^PS\d*>\s*$`),                 // PowerShell PS1>
+	regexp.MustCompile(`^>>>\s*$`),                    // Python REPL
+	regexp.MustCompile(`^\.{3}\s*$`),                  // Python continuation ...
+	regexp.MustCompile(`^In\s*\[\d+\]:\s*$`),          // IPython
+	regexp.MustCompile(`^irb.*>\s*$`),                 // Ruby IRB
+	regexp.MustCompile(`^>\s*$`),                      // Node.js REPL
+	regexp.MustCompile(`^\?\s*$`),                     // R prompt
+	regexp.MustCompile(`^sqlite>\s*$`),                // SQLite
+	regexp.MustCompile(`^mysql>\s*$`),                 // MySQL
+	regexp.MustCompile(`^postgres.*[=#]>\s*$`),        // PostgreSQL
+	regexp.MustCompile(`^=>>\s*$`),                    // Elixir iex
+	regexp.MustCompile(`^ghci>\s*$`),                  // Haskell GHCi
+	regexp.MustCompile(`^scala>\s*$`),                 // Scala REPL
+	regexp.MustCompile(`^groovy:\d+>\s*$`),            // Groovy
+	regexp.MustCompile(`^gdb>\s*$`),                   // GDB debugger
+	regexp.MustCompile(`^\(Pdb\)\s*$`),                // Python debugger
+	regexp.MustCompile(`^\(gdb\)\s*$`),                // GDB
+	regexp.MustCompile(`^debug>\s*$`),                 // Node debugger
+	regexp.MustCompile(`^.*\(yes/no.*\)\s*[?:]\s*$`),  // SSH host key confirmation
+	regexp.MustCompile(`^Password:\s*$`),              // Password prompt
+	regexp.MustCompile(`^Enter passphrase.*:\s*$`),    // SSH passphrase
+	regexp.MustCompile(`^\[Y/n\]\s*$`),                // apt-get style
+	regexp.MustCompile(`^\[y/N\]\s*$`),                // Confirmation prompts
+	regexp.MustCompile(`^Continue\?.*$`),              // Various continue prompts
+	regexp.MustCompile(`^Press.*to continue.*$`),      // Press key prompts
+	regexp.MustCompile(`^--More--\s*$`),               // Pager
+	regexp.MustCompile(`^:\s*$`),                      // less/more pager
+	regexp.MustCompile(`^Do you want to continue.*$`), // Various continue prompts
+	regexp.MustCompile(`^Proceed\?.*$`),               // Proceed prompts
+	regexp.MustCompile(`^Are you sure.*\?.*$`),        // Confirmation
+	regexp.MustCompile(`^Enter.*:\s*$`),               // Input prompts
+	regexp.MustCompile(`^Type.*:\s*$`),                // Type prompts
+	regexp.MustCompile(`^Input.*:\s*$`),               // Input prompts
+	regexp.MustCompile(`^Please enter.*:\s*$`),        // Please enter prompts
+	regexp.MustCompile(`^Overwrite.*\?.*$`),           // Overwrite confirmation
+	regexp.MustCompile(`^Replace.*\?.*$`),             // Replace confirmation
+	regexp.MustCompile(`^Delete.*\?.*$`),              // Delete confirmation
 }
 
 // NewSmartIdleDetector creates a new smart idle detector.
@@ -144,7 +142,7 @@ func (d *SmartIdleDetector) checkPromptPatterns(output []byte) (bool, string) {
 	// Get the last line (or last few lines for multi-line prompts)
 	lines := bytes.Split(output, []byte("\n"))
 	var lastLines []byte
-	
+
 	// Check last 3 non-empty lines
 	count := 0
 	for i := len(lines) - 1; i >= 0 && count < 3; i-- {
@@ -183,7 +181,7 @@ func (d *SmartIdleDetector) checkProcessState(pid int) (bool, string) {
 	// Parse stat file: fields are space-separated, but comm field can contain spaces
 	// Format: pid (comm) state ppid pgrp session tty_nr tpgid ...
 	statStr := string(data)
-	
+
 	// Find the closing parenthesis of comm field
 	commEnd := strings.LastIndex(statStr, ")")
 	if commEnd < 0 || commEnd+2 >= len(statStr) {
@@ -266,10 +264,10 @@ func (d *SmartIdleDetector) checkWaitingIndicators(output []byte) string {
 
 // SmartIdleConfig configures smart idle detection.
 type SmartIdleConfig struct {
-	Enabled           bool          // Whether to use smart detection
-	MinIdleDuration   time.Duration // Minimum idle time before analysis
-	CheckInterval     time.Duration // How often to check
-	FallbackTimeout   time.Duration // Maximum time before forced termination
+	Enabled         bool          // Whether to use smart detection
+	MinIdleDuration time.Duration // Minimum idle time before analysis
+	CheckInterval   time.Duration // How often to check
+	FallbackTimeout time.Duration // Maximum time before forced termination
 }
 
 // DefaultSmartIdleConfig returns default smart idle configuration.

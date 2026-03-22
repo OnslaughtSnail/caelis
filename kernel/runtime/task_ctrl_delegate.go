@@ -10,7 +10,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
-type delegateTaskController struct {
+type subagentTaskController struct {
 	runtime      *Runtime
 	appName      string
 	userID       string
@@ -18,9 +18,11 @@ type delegateTaskController struct {
 	delegationID string
 	cancel       context.CancelFunc
 	store        task.Store
+	agent        string
+	timeout      time.Duration
 }
 
-func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
+func (c *subagentTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
 	deadline := time.Time{}
 	if yield > 0 {
 		deadline = time.Now().Add(yield)
@@ -49,15 +51,15 @@ func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, 
 	}
 }
 
-func (c *delegateTaskController) Status(ctx context.Context, record *task.Record) (task.Snapshot, error) {
+func (c *subagentTaskController) Status(ctx context.Context, record *task.Record) (task.Snapshot, error) {
 	return c.inspect(ctx, record, false)
 }
 
-func (c *delegateTaskController) Write(context.Context, *task.Record, string, time.Duration) (task.Snapshot, error) {
-	return task.Snapshot{}, fmt.Errorf("task: delegate tasks do not accept input")
+func (c *subagentTaskController) Write(context.Context, *task.Record, string, time.Duration) (task.Snapshot, error) {
+	return task.Snapshot{}, fmt.Errorf("task: subagent tasks do not accept input")
 }
 
-func (c *delegateTaskController) Cancel(ctx context.Context, record *task.Record) (task.Snapshot, error) {
+func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record) (task.Snapshot, error) {
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -67,9 +69,13 @@ func (c *delegateTaskController) Cancel(ctx context.Context, record *task.Record
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"child_session_id": c.sessionID,
-			"delegation_id":    c.delegationID,
-			"state":            string(task.StateCancelled),
+			"_ui_child_session_id": c.sessionID,
+			"_ui_delegation_id":    c.delegationID,
+			"_ui_agent":            c.agent,
+			"progress_state":       string(task.StateCancelled),
+		}
+		if c.timeout > 0 {
+			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
 		snapshot = one.LockedSnapshot(task.Output{})
 	})
@@ -77,9 +83,9 @@ func (c *delegateTaskController) Cancel(ctx context.Context, record *task.Record
 	return snapshot, nil
 }
 
-func (c *delegateTaskController) inspect(ctx context.Context, record *task.Record, advance bool) (task.Snapshot, error) {
+func (c *subagentTaskController) inspect(ctx context.Context, record *task.Record, advance bool) (task.Snapshot, error) {
 	if c == nil || c.runtime == nil {
-		return task.Snapshot{}, fmt.Errorf("task: delegate controller is unavailable")
+		return task.Snapshot{}, fmt.Errorf("task: subagent controller is unavailable")
 	}
 	state, err := c.runtime.RunState(ctx, RunStateRequest{
 		AppName:   c.appName,
@@ -102,19 +108,10 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 	var output task.Output
 	var assistant string
 	record.WithLock(func(one *task.Record) {
-		if len(one.Result) > 0 {
-			if text, ok := one.Result["assistant"].(string); ok {
-				assistant = text
-			}
-		}
+		assistant, _ = one.Result["final_result"].(string)
 	})
-	for _, ev := range events {
-		if ev == nil {
-			continue
-		}
-		if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
-			assistant = text
-		}
+	if final := FinalAssistantText(events); final != "" {
+		assistant = final
 	}
 	record.WithLock(func(one *task.Record) {
 		start := one.EventCursor
@@ -123,7 +120,7 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 		}
 		if advance {
 			for _, ev := range events[start:] {
-				output.Log += delegateEventLogLine(ev)
+				output.Log += subagentEventLogLine(ev)
 			}
 			one.EventCursor = len(events)
 		}
@@ -136,14 +133,21 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 		}
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"child_session_id": c.sessionID,
-			"delegation_id":    c.delegationID,
-			"assistant":        assistant,
-			"summary":          assistant,
-			"state":            string(one.State),
+			"_ui_child_session_id": c.sessionID,
+			"_ui_delegation_id":    c.delegationID,
+			"_ui_agent":            c.agent,
+			"progress_state":       string(one.State),
 		}
-		if preview := delegatePreviewFromEvents(events); preview != "" {
-			one.Result["latest_output"] = preview
+		if c.timeout > 0 {
+			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
+		}
+		if one.State == task.StateWaitingApproval {
+			one.Result["approval_pending"] = true
+			one.Result["_ui_approval_pending"] = true
+		}
+		if !one.Running && assistant != "" {
+			one.Result["final_result"] = assistant
+			one.Result["final_summary"] = assistant
 		}
 		snapshot = one.LockedSnapshot(output)
 	})
@@ -151,7 +155,7 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 	return snapshot, nil
 }
 
-func delegatePreviewFromEvents(events []*session.Event) string {
+func subagentPreviewFromEvents(events []*session.Event) string {
 	lines := make([]string, 0, 8)
 	inFence := false
 	for _, ev := range events {
@@ -160,7 +164,7 @@ func delegatePreviewFromEvents(events []*session.Event) string {
 		}
 		if reasoning := strings.TrimSpace(ev.Message.Reasoning); reasoning != "" {
 			for _, line := range strings.Split(reasoning, "\n") {
-				line = delegatePreviewLine(line, &inFence)
+				line = subagentPreviewLine(line, &inFence)
 				if line == "" {
 					continue
 				}
@@ -169,7 +173,7 @@ func delegatePreviewFromEvents(events []*session.Event) string {
 		}
 		if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
 			for _, line := range strings.Split(text, "\n") {
-				line = delegatePreviewLine(line, &inFence)
+				line = subagentPreviewLine(line, &inFence)
 				if line == "" {
 					continue
 				}
@@ -186,7 +190,7 @@ func delegatePreviewFromEvents(events []*session.Event) string {
 	return strings.Join(lines, "\n")
 }
 
-func delegatePreviewLine(line string, inFence *bool) string {
+func subagentPreviewLine(line string, inFence *bool) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return ""
@@ -218,7 +222,7 @@ func runtimeTaskState(status RunLifecycleStatus) task.State {
 	}
 }
 
-func delegateEventLogLine(ev *session.Event) string {
+func subagentEventLogLine(ev *session.Event) string {
 	if ev == nil {
 		return ""
 	}

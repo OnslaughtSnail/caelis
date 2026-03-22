@@ -6,7 +6,8 @@ import (
 )
 
 func TestWithStreamer_NilContextReturnsBackground(t *testing.T) {
-	ctx := WithStreamer(nil, nil)
+	var nilCtx context.Context
+	ctx := WithStreamer(nilCtx, nil)
 	if ctx == nil {
 		t.Fatal("expected non-nil context")
 	}

@@ -28,8 +28,11 @@ func TestReadTool_OffsetAndLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := out["line_count"]; got != 2 {
-		t.Fatalf("unexpected line_count: %v", got)
+	if got := out["start_line"]; got != 2 {
+		t.Fatalf("unexpected start_line: %v", got)
+	}
+	if got := out["end_line"]; got != 3 {
+		t.Fatalf("unexpected end_line: %v", got)
 	}
 	text, _ := out["content"].(string)
 	if !strings.Contains(text, "2: line2") || !strings.Contains(text, "3: line3") {
@@ -57,8 +60,7 @@ func TestReadTool_TokenLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reason, _ := out["truncated_reason"].(string)
-	if reason != "token_limit" {
-		t.Fatalf("expected token_limit, got %q", reason)
+	if out["has_more"] != true {
+		t.Fatalf("expected has_more=true, got %#v", out)
 	}
 }

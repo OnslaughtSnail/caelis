@@ -19,14 +19,12 @@ func applyVolcengineThinkingReasoning(payload *openAICompatRequest, cfg model.Re
 		return
 	}
 	effort := strings.ToLower(strings.TrimSpace(cfg.Effort))
-	state := "auto"
+	state := "enabled"
 	switch effort {
 	case "none":
 		state = "disabled"
 	case "":
 		state = "auto"
-	default:
-		state = "enabled"
 	}
 	payload.Thinking = &openAIThinking{Type: state}
 	payload.Reasoning = nil

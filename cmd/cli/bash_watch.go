@@ -23,9 +23,9 @@ func (c *cliConsole) syncBashTaskWatch(respToolID string, respToolName string, r
 	if taskID == "" || sessionID == "" {
 		return
 	}
-	running, _ := result["running"].(bool)
+	state := strings.ToLower(strings.TrimSpace(fmt.Sprint(result["state"])))
 	route := strings.TrimSpace(fmt.Sprint(result["route"]))
-	if running {
+	if state == "" || state == "running" || state == "waiting_input" || state == "waiting_approval" {
 		c.ensureBashTaskWatch(taskID, respToolID, sessionID, route)
 		return
 	}

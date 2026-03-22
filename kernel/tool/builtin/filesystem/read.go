@@ -152,8 +152,7 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		usedToken int
 		lines     []string
 
-		hasMore         bool
-		truncatedReason string
+		hasMore bool
 	)
 	for scanner.Scan() {
 		lineNo++
@@ -162,7 +161,6 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		}
 		if len(lines) >= limit {
 			hasMore = true
-			truncatedReason = "line_limit"
 			break
 		}
 		line := scanner.Text()
@@ -179,7 +177,6 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 				usedToken += tokens
 			}
 			hasMore = true
-			truncatedReason = "token_limit"
 			break
 		}
 		lines = append(lines, line)
@@ -209,20 +206,17 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	}
 
 	return map[string]any{
-		"path":               targetPath,
-		"offset":             offset,
-		"applied_limit":      limit,
-		"applied_max_tokens": maxTokens,
-		"start_line":         startLine,
-		"end_line":           endLine,
-		"next_offset":        nextOffset,
-		"line_count":         len(lines),
-		"used_tokens":        usedToken,
-		"has_more":           hasMore,
-		"truncated":          hasMore,
-		"truncated_reason":   truncatedReason,
-		"content":            content.String(),
+		"path":        targetPath,
+		"start_line":  startLine,
+		"end_line":    endLine,
+		"next_offset": nextOffset,
+		"has_more":    hasMore,
+		"content":     content.String(),
 	}, nil
+}
+
+func (t *ReadTool) WithRuntime(runtime toolexec.Runtime) (*ReadTool, error) {
+	return NewReadWithRuntime(t.cfg, runtime)
 }
 
 func estimateToken(text string) int {

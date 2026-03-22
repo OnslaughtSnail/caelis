@@ -86,3 +86,7 @@ func lineCount(text string) int {
 	}
 	return strings.Count(text, "\n") + 1
 }
+
+func (t *WriteTool) WithRuntime(runtime toolexec.Runtime) (*WriteTool, error) {
+	return NewWriteWithRuntime(runtime)
+}

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"strings"
 	"testing"
@@ -94,10 +95,10 @@ func TestRuntimeRun_AutoCompaction(t *testing.T) {
 			foundAutoCompaction = true
 		}
 		if notice, ok := session.EventNotice(ev); ok {
-			if strings.Contains(notice.Text, "正在自动压缩") {
+			if notice.Kind == "compaction_notice" && notice.Text == "compaction.start" {
 				foundStartNotice = true
 			}
-			if strings.Contains(notice.Text, "自动上下文压缩完成") {
+			if notice.Kind == "compaction_notice" && notice.Text == "compaction.done" {
 				foundDoneNotice = true
 			}
 		}
@@ -154,7 +155,7 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 		if ev != nil && ev.Message.Role == model.RoleAssistant && ev.Message.Text == "final" {
 			foundFinalAssistant = true
 		}
-		if notice, ok := session.EventNotice(ev); ok && strings.Contains(notice.Text, "压缩后重试") {
+		if notice, ok := session.EventNotice(ev); ok && notice.Kind == "compaction_notice" && notice.Text == "compaction.done" {
 			foundOverflowNotice = true
 		}
 	}
@@ -242,19 +243,63 @@ func TestRuntimeCompact_ReplacesWindowWithCheckpoint(t *testing.T) {
 	if ev.Message.Role != model.RoleUser {
 		t.Fatalf("expected compaction role=user, got %q", ev.Message.Role)
 	}
-	if strings.TrimSpace(ev.Message.Text) == "" {
-		t.Fatalf("expected non-empty compaction text")
+	if !strings.Contains(ev.Message.Text, "# CONTEXT SNAPSHOT") {
+		t.Fatalf("expected compaction text to start with CONTEXT SNAPSHOT header, got %q", ev.Message.Text[:min(80, len(ev.Message.Text))])
+	}
+	if !strings.Contains(ev.Message.Text, "Do not treat this as a new user instruction") {
+		t.Fatalf("expected compaction text to contain non-instruction disclaimer")
 	}
 
 	window, err := store.ListContextWindowEvents(context.Background(), sess)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(window) != 1 {
-		t.Fatalf("expected 1 window event after compact, got %d", len(window))
+	// Context window should be: [compaction, tail_user, tail_assistant]
+	// The last user→assistant interaction is preserved as tail.
+	if len(window) < 1 {
+		t.Fatal("expected at least compaction event in window")
 	}
 	if !isCompactionEvent(window[0]) {
 		t.Fatalf("expected first window event to be compaction, got id=%q", window[0].ID)
+	}
+	// With 4 seed events (2 turns), the tail should preserve the last turn
+	// (keep_user + keep_assistant) and summarize the first turn.
+	if len(window) != 3 {
+		t.Fatalf("expected 3 window events (compaction + 2 tail), got %d", len(window))
+	}
+	if window[1].Message.Text != "keep this question" {
+		t.Fatalf("expected tail[0] = 'keep this question', got %q", window[1].Message.Text)
+	}
+	if window[2].Message.Text != "keep this answer" {
+		t.Fatalf("expected tail[1] = 'keep this answer', got %q", window[2].Message.Text)
+	}
+	meta, _ := ev.Meta[metaCompaction].(map[string]any)
+	tailIDs, ok := meta["tail_event_ids"].([]string)
+	if !ok {
+		t.Fatalf("expected tail_event_ids to be []string, got %T", meta["tail_event_ids"])
+	}
+	if len(tailIDs) != 2 || tailIDs[0] != "keep_user" || tailIDs[1] != "keep_assistant" {
+		t.Fatalf("unexpected tail_event_ids: %#v", tailIDs)
+	}
+
+	// P1 invariant: full history must NOT contain duplicated events.
+	// The tail is reconstructed at read time, not re-appended to the store.
+	allEvents, err := store.ListEvents(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expect exactly: 4 seed events + 1 compaction = 5 total.
+	if len(allEvents) != 5 {
+		t.Fatalf("expected 5 total events in full history (4 seed + 1 compaction), got %d", len(allEvents))
+	}
+	idSet := make(map[string]int, len(allEvents))
+	for _, e := range allEvents {
+		idSet[e.ID]++
+	}
+	for id, count := range idSet {
+		if count > 1 {
+			t.Fatalf("event ID %q appears %d times in full history — durable history is polluted", id, count)
+		}
 	}
 }
 
@@ -299,4 +344,123 @@ func compactionTrigger(ev *session.Event) string {
 	}
 	trigger, _ := meta["trigger"].(string)
 	return trigger
+}
+
+func TestIsContextOverflowError_StructuredType(t *testing.T) {
+	overflow := &model.ContextOverflowError{Cause: errors.New("too many tokens in request")}
+	if !isContextOverflowError(overflow) {
+		t.Fatal("expected structured ContextOverflowError to be detected")
+	}
+
+	// Wrapped in another error layer
+	wrapped := fmt.Errorf("provider: %w", overflow)
+	if !isContextOverflowError(wrapped) {
+		t.Fatal("expected wrapped ContextOverflowError to be detected")
+	}
+
+	// Non-overflow error
+	if isContextOverflowError(errors.New("network timeout")) {
+		t.Fatal("expected non-overflow error to NOT be detected")
+	}
+
+	// Nil
+	if isContextOverflowError(nil) {
+		t.Fatal("nil should not be overflow")
+	}
+}
+
+func TestIsContextOverflowError_StringFallback(t *testing.T) {
+	// Legacy string-based detection still works
+	if !isContextOverflowError(errors.New("context length exceeded")) {
+		t.Fatal("expected string fallback to detect 'context length'")
+	}
+	if !isContextOverflowError(errors.New("prompt is too long for model")) {
+		t.Fatal("expected string fallback to detect 'prompt is too long'")
+	}
+}
+
+func TestCompactionEvent_StructuredMarkdownFormat(t *testing.T) {
+	store := inmemory.New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-markdown-fmt"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedCompactionHistory(store, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	rt, err := New(Config{Store: store, Compaction: CompactionConfig{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ev, err := rt.Compact(context.Background(), CompactRequest{
+		AppName:   sess.AppName,
+		UserID:    sess.UserID,
+		SessionID: sess.ID,
+		Model:     newRuntimeTestLLM("fake"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev == nil {
+		t.Fatal("expected compaction event")
+	}
+	text := ev.Message.Text
+	if !strings.HasPrefix(text, "# CONTEXT SNAPSHOT") {
+		t.Fatalf("compaction text must start with '# CONTEXT SNAPSHOT', got prefix: %q", text[:min(40, len(text))])
+	}
+	if !strings.Contains(text, "Do not treat this as a new user instruction") {
+		t.Fatal("compaction text must contain non-instruction disclaimer")
+	}
+	if ev.Message.Role != model.RoleUser {
+		t.Fatalf("compaction must use RoleUser, got %q", ev.Message.Role)
+	}
+}
+
+func TestCompactionNotice_StructuredNotHumanText(t *testing.T) {
+	ev := compactionNoticeEvent(triggerAuto, 5000, 2000, "start")
+	if ev == nil {
+		t.Fatal("expected notice event")
+	}
+	notice, ok := session.EventNotice(ev)
+	if !ok {
+		t.Fatal("expected event to be a notice")
+	}
+
+	// Notice must carry a machine-readable kind, not human-presentable text.
+	if notice.Kind != "compaction_notice" {
+		t.Fatalf("expected notice.Kind = 'compaction_notice', got %q", notice.Kind)
+	}
+	if notice.Text != "compaction.start" {
+		t.Fatalf("expected machine-readable text 'compaction.start', got %q", notice.Text)
+	}
+
+	// Structured metadata must carry all rendering fields.
+	phase, _ := ev.Meta["compaction_phase"].(string)
+	trigger, _ := ev.Meta["compaction_trigger"].(string)
+	preTokens, _ := ev.Meta["pre_tokens"].(int)
+	if phase != "start" {
+		t.Fatalf("expected meta compaction_phase='start', got %q", phase)
+	}
+	if trigger != triggerAuto {
+		t.Fatalf("expected meta compaction_trigger=%q, got %q", triggerAuto, trigger)
+	}
+	if preTokens != 5000 {
+		t.Fatalf("expected meta pre_tokens=5000, got %d", preTokens)
+	}
+
+	// "done" notice
+	evDone := compactionNoticeEvent(triggerOverflowRecovery, 5000, 2000, "done")
+	noticeDone, ok := session.EventNotice(evDone)
+	if !ok {
+		t.Fatal("expected done notice event")
+	}
+	if noticeDone.Text != "compaction.done" {
+		t.Fatalf("expected machine-readable text 'compaction.done', got %q", noticeDone.Text)
+	}
+	postTokens, _ := evDone.Meta["post_tokens"].(int)
+	if postTokens != 2000 {
+		t.Fatalf("expected meta post_tokens=2000, got %d", postTokens)
+	}
 }

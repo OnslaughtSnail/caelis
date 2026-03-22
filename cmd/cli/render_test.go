@@ -188,6 +188,27 @@ func TestPrintEvent_NoticeWarningRenders(t *testing.T) {
 	}
 }
 
+func TestRenderNoticeText_CompactionNotice(t *testing.T) {
+	notice := session.Notice{
+		Level: session.NoticeLevelNote,
+		Text:  "compaction.done",
+		Kind:  "compaction_notice",
+		Meta: map[string]any{
+			"compaction_phase":   "done",
+			"compaction_trigger": "auto",
+			"pre_tokens":         9000,
+			"post_tokens":        3200,
+		},
+	}
+	got := renderNoticeText(notice)
+	if strings.Contains(got, "compaction.done") {
+		t.Fatalf("expected human-readable compaction text, got %q", got)
+	}
+	if !strings.Contains(got, "compaction finished") || !strings.Contains(got, "9000 -> 3200") {
+		t.Fatalf("unexpected compaction notice text %q", got)
+	}
+}
+
 func TestVisibleUserTextCombinesImagesAndText(t *testing.T) {
 	msg := model.Message{
 		Role: model.RoleUser,

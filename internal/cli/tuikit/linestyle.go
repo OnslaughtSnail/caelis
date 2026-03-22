@@ -157,9 +157,9 @@ func ColorizeLogLine(line string, style LineStyle, theme Theme) string {
 func colorizeAssistantLine(line string, theme Theme) string {
 	if strings.HasPrefix(line, "* ") {
 		prefix := theme.AssistantStyle().Render("* ")
-		return prefix + LinkifyText(line[len("* "):], theme.LinkStyle())
+		return prefix + theme.TextStyle().Render(LinkifyText(line[len("* "):], theme.LinkStyle()))
 	}
-	return theme.AssistantStyle().Render(LinkifyText(line, theme.LinkStyle()))
+	return theme.TextStyle().Render(LinkifyText(line, theme.LinkStyle()))
 }
 
 func colorizeUserLine(line string, theme Theme) string {

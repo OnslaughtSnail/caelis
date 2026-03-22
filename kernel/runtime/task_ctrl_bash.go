@@ -9,6 +9,13 @@ import (
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
+)
+
+const (
+	bashTaskPollInterval     = 120 * time.Millisecond
+	bashTaskLiveStreamDelay  = time.Second
+	bashTaskOriginalToolName = "BASH"
 )
 
 type bashTaskController struct {
@@ -43,6 +50,7 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 		deadline = time.Now().Add(yield)
 	}
 	var output task.Output
+	live := newBashTaskLiveStream(ctx, record, yield)
 	for {
 		select {
 		case <-ctx.Done():
@@ -77,8 +85,18 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 		if err != nil {
 			return task.Snapshot{}, err
 		}
-		var snapshot task.Snapshot
-		latestOutput := bashOutputPreview(stdout, stderr)
+		var (
+			snapshot     task.Snapshot
+			finalOutput  task.Output
+			latestOutput = bashOutputPreview(stdout, stderr)
+			outputMeta   = bashTaskOutputMeta(status, c.tty)
+		)
+		if status.State != toolexec.SessionStateRunning && !c.tty {
+			finalOutput = readRetainedOutput(c.runner, c.sessionID)
+			if latestOutput == "" {
+				latestOutput = bashOutputPreview([]byte(finalOutput.Stdout), []byte(finalOutput.Stderr))
+			}
+		}
 		record.WithLock(func(one *task.Record) {
 			one.StdoutCursor = nextStdout
 			one.StderrCursor = nextStderr
@@ -86,22 +104,36 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 			one.Running = status.State == toolexec.SessionStateRunning
 			one.UpdatedAt = time.Now()
 			one.Result = map[string]any{
-				"command":    c.command,
-				"workdir":    c.workdir,
-				"tty":        c.tty,
-				"route":      c.route,
-				"state":      string(one.State),
-				"exit_code":  status.ExitCode,
-				"session_id": c.sessionID,
+				"command":     c.command,
+				"workdir":     c.workdir,
+				"tty":         c.tty,
+				"route":       c.route,
+				"state":       string(one.State),
+				"exit_code":   status.ExitCode,
+				"session_id":  c.sessionID,
+				"output_meta": outputMeta,
 			}
 			if latestOutput != "" {
 				one.Result["latest_output"] = latestOutput
 			}
-			output.Stdout += string(stdout)
-			output.Stderr += string(stderr)
-			snapshot = one.LockedSnapshot(output)
+			if one.Running {
+				output.Stdout += string(stdout)
+				output.Stderr += string(stderr)
+				if !c.tty {
+					snapshot = one.LockedSnapshot(output)
+				} else {
+					snapshot = one.LockedSnapshot(task.Output{})
+				}
+				return
+			}
+			if c.tty {
+				snapshot = one.LockedSnapshot(task.Output{})
+				return
+			}
+			snapshot = one.LockedSnapshot(finalOutput)
 		})
 		_ = persistControllerRecord(ctx, c.store, record)
+		live.emit(ctx, snapshot)
 
 		if !snapshot.Running {
 			return snapshot, nil
@@ -112,8 +144,97 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 		select {
 		case <-ctx.Done():
 			return task.Snapshot{}, ctx.Err()
-		case <-time.After(120 * time.Millisecond):
+		case <-time.After(bashTaskPollInterval):
 		}
+	}
+}
+
+type bashTaskLiveStream struct {
+	enabled      bool
+	taskID       string
+	callID       string
+	startedAt    time.Time
+	started      bool
+	lastState    string
+	stdoutOffset int
+	stderrOffset int
+}
+
+func newBashTaskLiveStream(ctx context.Context, record *task.Record, yield time.Duration) bashTaskLiveStream {
+	if record == nil || strings.TrimSpace(record.ID) == "" || yield <= bashTaskLiveStreamDelay {
+		return bashTaskLiveStream{}
+	}
+	info, ok := toolexec.ToolCallInfoFromContext(ctx)
+	if !ok || !strings.EqualFold(strings.TrimSpace(info.Name), bashTaskOriginalToolName) {
+		return bashTaskLiveStream{}
+	}
+	callID := strings.TrimSpace(info.ID)
+	if callID == "" {
+		return bashTaskLiveStream{}
+	}
+	return bashTaskLiveStream{
+		enabled:   true,
+		taskID:    strings.TrimSpace(record.ID),
+		callID:    callID,
+		startedAt: time.Now(),
+	}
+}
+
+func (s *bashTaskLiveStream) emit(ctx context.Context, snapshot task.Snapshot) {
+	if s == nil || !s.enabled {
+		return
+	}
+	if !s.started {
+		if snapshot.Running && time.Since(s.startedAt) < bashTaskLiveStreamDelay {
+			return
+		}
+		s.started = true
+		s.lastState = strings.TrimSpace(string(snapshot.State))
+		taskstream.Emit(ctx, taskstream.Event{
+			Label:  bashTaskOriginalToolName,
+			TaskID: s.taskID,
+			CallID: s.callID,
+			State:  s.lastState,
+		})
+	}
+	if text := snapshot.Output.Stdout; len(text) > s.stdoutOffset {
+		taskstream.Emit(ctx, taskstream.Event{
+			Label:  bashTaskOriginalToolName,
+			TaskID: s.taskID,
+			CallID: s.callID,
+			Stream: "stdout",
+			Chunk:  text[s.stdoutOffset:],
+		})
+		s.stdoutOffset = len(text)
+	}
+	if text := snapshot.Output.Stderr; len(text) > s.stderrOffset {
+		taskstream.Emit(ctx, taskstream.Event{
+			Label:  bashTaskOriginalToolName,
+			TaskID: s.taskID,
+			CallID: s.callID,
+			Stream: "stderr",
+			Chunk:  text[s.stderrOffset:],
+		})
+		s.stderrOffset = len(text)
+	}
+	state := strings.TrimSpace(string(snapshot.State))
+	if state != "" && state != s.lastState {
+		taskstream.Emit(ctx, taskstream.Event{
+			Label:  bashTaskOriginalToolName,
+			TaskID: s.taskID,
+			CallID: s.callID,
+			State:  state,
+		})
+		s.lastState = state
+	}
+	if !snapshot.Running {
+		taskstream.Emit(ctx, taskstream.Event{
+			Label:  bashTaskOriginalToolName,
+			TaskID: s.taskID,
+			CallID: s.callID,
+			State:  state,
+			Final:  true,
+		})
 	}
 }
 
@@ -162,13 +283,14 @@ func (c *bashTaskController) Status(ctx context.Context, record *task.Record) (t
 		one.Running = status.State == toolexec.SessionStateRunning
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"command":    c.command,
-			"workdir":    c.workdir,
-			"tty":        c.tty,
-			"route":      c.route,
-			"state":      string(one.State),
-			"exit_code":  status.ExitCode,
-			"session_id": c.sessionID,
+			"command":     c.command,
+			"workdir":     c.workdir,
+			"tty":         c.tty,
+			"route":       c.route,
+			"state":       string(one.State),
+			"exit_code":   status.ExitCode,
+			"session_id":  c.sessionID,
+			"output_meta": bashTaskOutputMeta(status, c.tty),
 		}
 		if preview != "" {
 			one.Result["latest_output"] = preview
@@ -196,6 +318,7 @@ func (c *bashTaskController) Cancel(ctx context.Context, record *task.Record) (t
 	if err := c.runner.TerminateSession(c.sessionID); err != nil {
 		return task.Snapshot{}, err
 	}
+	status, _ := c.runner.GetSessionStatus(c.sessionID)
 	preview, _ := c.previewOutput()
 	var snapshot task.Snapshot
 	record.WithLock(func(one *task.Record) {
@@ -203,12 +326,13 @@ func (c *bashTaskController) Cancel(ctx context.Context, record *task.Record) (t
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"command":    c.command,
-			"workdir":    c.workdir,
-			"tty":        c.tty,
-			"route":      c.route,
-			"state":      string(one.State),
-			"session_id": c.sessionID,
+			"command":     c.command,
+			"workdir":     c.workdir,
+			"tty":         c.tty,
+			"route":       c.route,
+			"state":       string(one.State),
+			"session_id":  c.sessionID,
+			"output_meta": bashTaskOutputMeta(status, c.tty),
 		}
 		if preview != "" {
 			one.Result["latest_output"] = preview
@@ -257,6 +381,39 @@ func bashOutputPreview(stdout []byte, stderr []byte) string {
 		lines = lines[len(lines)-6:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func bashTaskOutputMeta(status toolexec.SessionStatus, tty bool) map[string]any {
+	stdoutCapReached := status.StdoutDroppedBytes > 0
+	stderrCapReached := status.StderrDroppedBytes > 0
+	return map[string]any{
+		"streamed":               tty,
+		"tty":                    tty,
+		"capture_cap_bytes":      status.CaptureCapBytes,
+		"stdout_captured_bytes":  status.StdoutBytes,
+		"stderr_captured_bytes":  status.StderrBytes,
+		"stdout_retained_bytes":  status.StdoutRetainedBytes,
+		"stderr_retained_bytes":  status.StderrRetainedBytes,
+		"stdout_cap_reached":     stdoutCapReached,
+		"stderr_cap_reached":     stderrCapReached,
+		"stdout_dropped_bytes":   status.StdoutDroppedBytes,
+		"stderr_dropped_bytes":   status.StderrDroppedBytes,
+		"stdout_earliest_marker": status.StdoutEarliestMarker,
+		"stderr_earliest_marker": status.StderrEarliestMarker,
+		"capture_truncated":      stdoutCapReached || stderrCapReached,
+		"model_truncated":        false,
+	}
+}
+
+func readRetainedOutput(runner toolexec.AsyncCommandRunner, sessionID string) task.Output {
+	if runner == nil || strings.TrimSpace(sessionID) == "" {
+		return task.Output{}
+	}
+	stdout, stderr, _, _, err := runner.ReadOutput(sessionID, 0, 0)
+	if err != nil {
+		return task.Output{}
+	}
+	return task.Output{Stdout: string(stdout), Stderr: string(stderr)}
 }
 
 func asyncBashRunnerForRoute(execRuntime toolexec.Runtime, route string) (toolexec.AsyncCommandRunner, bool) {

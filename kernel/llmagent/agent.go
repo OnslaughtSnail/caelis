@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/filesystem"
 	toolcap "github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
 
@@ -65,12 +66,12 @@ type agentRunState struct {
 	hooks []policy.Hook
 }
 
-type legacyRunContext struct {
+type runContext struct {
 	agent.InvocationContext
 	recorded []*session.Event
 }
 
-func (c *legacyRunContext) Events() session.Events {
+func (c *runContext) Events() session.Events {
 	base := make([]*session.Event, 0, c.InvocationContext.Events().Len()+len(c.recorded))
 	seen := make(map[string]struct{}, c.InvocationContext.Events().Len()+len(c.recorded))
 	for ev := range c.InvocationContext.Events().All() {
@@ -99,12 +100,11 @@ func (c *legacyRunContext) Events() session.Events {
 	return session.NewEvents(base)
 }
 
-func (c *legacyRunContext) appendRecordedEvent(ev *session.Event) {
+func (c *runContext) appendRecordedEvent(ev *session.Event) {
 	if ev == nil {
 		return
 	}
-	cp := *ev
-	c.recorded = append(c.recorded, &cp)
+	c.recorded = append(c.recorded, session.CloneEvent(ev))
 }
 
 func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
@@ -113,7 +113,7 @@ func (a *Agent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error
 			yield(nil, err)
 			return
 		}
-		runCtx := &legacyRunContext{InvocationContext: ctx}
+		runCtx := &runContext{InvocationContext: ctx}
 		state := agentRunState{hooks: ctx.Policies()}
 		for {
 			done, nextState, err := a.step(runCtx, state, func(ev *session.Event, err error) bool {
@@ -306,12 +306,98 @@ func (a *Agent) executeToolCalls(
 	toolCalls []model.ToolCall,
 	yield func(*session.Event, error) bool,
 ) error {
-	for _, call := range toolCalls {
-		if err := a.executeToolCall(ctx, state, call, yield); err != nil {
+	for i := 0; i < len(toolCalls); {
+		if !toolCallCanRunConcurrently(toolCalls[i]) {
+			if err := a.executeToolCall(ctx, state, toolCalls[i], yield); err != nil {
+				return err
+			}
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(toolCalls) && toolCallCanRunConcurrently(toolCalls[j]) {
+			j++
+		}
+		if err := a.executeConcurrentToolCalls(ctx, state, toolCalls[i:j], yield); err != nil {
 			return err
+		}
+		i = j
+	}
+	return nil
+}
+
+type bufferedYieldItem struct {
+	ev  *session.Event
+	err error
+}
+
+type bufferedToolCallResult struct {
+	items []bufferedYieldItem
+	err   error
+}
+
+func (a *Agent) executeConcurrentToolCalls(
+	ctx agent.InvocationContext,
+	state *agentRunState,
+	toolCalls []model.ToolCall,
+	yield func(*session.Event, error) bool,
+) error {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+	if len(toolCalls) == 1 {
+		return a.executeToolCall(ctx, state, toolCalls[0], yield)
+	}
+	results := make([]bufferedToolCallResult, len(toolCalls))
+	type resultMsg struct {
+		index  int
+		result bufferedToolCallResult
+	}
+	resultCh := make(chan resultMsg, len(toolCalls))
+	for i, call := range toolCalls {
+		go func(index int, one model.ToolCall) {
+			var buffered []bufferedYieldItem
+			err := a.executeToolCall(ctx, state, one, func(ev *session.Event, err error) bool {
+				if ev != nil {
+					ev = session.CloneEvent(ev)
+				}
+				buffered = append(buffered, bufferedYieldItem{ev: ev, err: err})
+				return true
+			})
+			resultCh <- resultMsg{
+				index: index,
+				result: bufferedToolCallResult{
+					items: buffered,
+					err:   err,
+				},
+			}
+		}(i, call)
+	}
+	for range toolCalls {
+		msg := <-resultCh
+		results[msg.index] = msg.result
+	}
+	for _, result := range results {
+		for _, item := range result.items {
+			if !yield(item.ev, item.err) {
+				return errYieldStopped
+			}
+		}
+		if result.err != nil {
+			return result.err
 		}
 	}
 	return nil
+}
+
+func toolCallCanRunConcurrently(call model.ToolCall) bool {
+	name := strings.ToUpper(strings.TrimSpace(call.Name))
+	switch name {
+	case filesystem.WriteToolName, filesystem.PatchToolName:
+		return false
+	default:
+		return true
+	}
 }
 
 func (a *Agent) executeToolCall(
@@ -576,6 +662,7 @@ var errEmptyModelResponse = errors.New("llmagent: empty model response")
 type interruptedModelResponseError struct {
 	cause          error
 	partialEmitted bool
+	finishReason   model.FinishReason
 }
 
 func (e *interruptedModelResponseError) Error() string {
@@ -650,6 +737,12 @@ func (a *Agent) generateWithRetry(
 				err = &interruptedModelResponseError{
 					cause:          fmt.Errorf("model returned without completing the turn"),
 					partialEmitted: emittedPartial,
+				}
+			case finishReasonIsIncomplete(resp.FinishReason):
+				err = &interruptedModelResponseError{
+					cause:          fmt.Errorf("model ended with finish reason %q", resp.FinishReason),
+					partialEmitted: emittedPartial,
+					finishReason:   resp.FinishReason,
 				}
 			default:
 				return resp, nil
@@ -924,6 +1017,18 @@ func interruptedResponseWarning(err *interruptedModelResponseError) string {
 	if err == nil {
 		return "warn: model response was interrupted before the turn completed."
 	}
+	switch err.finishReason {
+	case model.FinishReasonLength:
+		if err.partialEmitted {
+			return "warn: model output hit the configured token limit before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content. You can send /continue to resume or increase max_output_tokens."
+		}
+		return "warn: model output hit the configured token limit before completion. The request was retried automatically when safe."
+	case model.FinishReasonContentFilter:
+		if err.partialEmitted {
+			return "warn: model output was stopped by content filtering before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content."
+		}
+		return "warn: model output was stopped by content filtering before completion. The request was retried automatically when safe."
+	}
 	cause := summarizeRetryCause(err.cause)
 	if err.partialEmitted {
 		return fmt.Sprintf(
@@ -959,6 +1064,9 @@ func responseMeta(resp *model.Response) map[string]any {
 	if value := strings.TrimSpace(resp.Model); value != "" {
 		meta["model"] = value
 	}
+	if value := strings.TrimSpace(string(resp.FinishReason)); value != "" {
+		meta["finish_reason"] = value
+	}
 	usage := map[string]any{}
 	if resp.Usage.PromptTokens > 0 {
 		usage["prompt_tokens"] = resp.Usage.PromptTokens
@@ -976,4 +1084,13 @@ func responseMeta(resp *model.Response) map[string]any {
 		return nil
 	}
 	return meta
+}
+
+func finishReasonIsIncomplete(reason model.FinishReason) bool {
+	switch reason {
+	case model.FinishReasonLength, model.FinishReasonContentFilter:
+		return true
+	default:
+		return false
+	}
 }

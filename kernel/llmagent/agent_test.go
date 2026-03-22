@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/kernel/delegation"
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -26,7 +27,7 @@ type testCtx struct {
 	tools    []tool.Tool
 	toolMap  map[string]tool.Tool
 	policies []policy.Hook
-	runner   delegation.Runner
+	runner   agent.SubagentRunner
 	overlay  bool
 }
 
@@ -43,7 +44,7 @@ func (c *testCtx) Tool(name string) (tool.Tool, bool) {
 	return t, ok
 }
 func (c *testCtx) Policies() []policy.Hook { return c.policies }
-func (c *testCtx) SubagentRunner() delegation.Runner {
+func (c *testCtx) SubagentRunner() agent.SubagentRunner {
 	return c.runner
 }
 
@@ -180,8 +181,7 @@ func eventIsPartialEvent(ev *session.Event) bool {
 	if ev == nil || ev.Meta == nil {
 		return false
 	}
-	raw, ok := ev.Meta["partial"]
-	flag, ok := raw.(bool)
+	flag, ok := ev.Meta["partial"].(bool)
 	return ok && flag
 }
 
@@ -241,6 +241,131 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	}
 	if events[len(events)-1].Message.Text != "done" {
 		t.Fatalf("unexpected final text: %q", events[len(events)-1].Message.Text)
+	}
+}
+
+func TestLLMAgent_ConcurrentNonMutatingToolCallsRunTogether(t *testing.T) {
+	var started atomic.Int32
+	allStarted := make(chan struct{})
+	newConcurrentTool := func(name string) namedTool {
+		return namedTool{
+			name: name,
+			run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+				_ = ctx
+				_ = args
+				if started.Add(1) == 3 {
+					close(allStarted)
+				}
+				select {
+				case <-allStarted:
+				case <-time.After(250 * time.Millisecond):
+					return nil, fmt.Errorf("%s did not start concurrently", name)
+				}
+				return map[string]any{"tool": name}, nil
+			},
+		}
+	}
+
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{
+				{ID: "c1", Name: "READ", Args: "{}"},
+				{ID: "c2", Name: "BASH", Args: "{}"},
+				{ID: "c3", Name: "SPAWN", Args: "{}"},
+			}}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{ID: "s"},
+		history: []*session.Event{{ID: "u1", Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools: []tool.Tool{
+			newConcurrentTool("READ"),
+			newConcurrentTool("BASH"),
+			newConcurrentTool("SPAWN"),
+		},
+		toolMap: map[string]tool.Tool{},
+	}
+	for _, one := range ctx.tools {
+		ctx.toolMap[one.Name()] = one
+	}
+
+	var toolResponses int
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			t.Fatalf("unexpected run error: %v", runErr)
+		}
+		if ev != nil && ev.Message.ToolResponse != nil {
+			toolResponses++
+		}
+	}
+	if toolResponses != 3 {
+		t.Fatalf("expected 3 tool responses, got %d", toolResponses)
+	}
+}
+
+func TestLLMAgent_WriteStaysSequentialAgainstConcurrentBatch(t *testing.T) {
+	writeDone := make(chan struct{})
+	writeTool := namedTool{
+		name: "WRITE",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			time.Sleep(40 * time.Millisecond)
+			close(writeDone)
+			return map[string]any{"tool": "WRITE"}, nil
+		},
+	}
+	bashTool := namedTool{
+		name: "BASH",
+		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			_ = ctx
+			_ = args
+			select {
+			case <-writeDone:
+				return map[string]any{"tool": "BASH"}, nil
+			default:
+				return nil, errors.New("BASH started before WRITE finished")
+			}
+		},
+	}
+
+	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser {
+			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{
+				{ID: "c1", Name: "WRITE", Args: "{}"},
+				{ID: "c2", Name: "BASH", Args: "{}"},
+			}}}, nil
+		}
+		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+	})
+
+	ag, err := New(Config{Name: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{ID: "s"},
+		history: []*session.Event{{ID: "u1", Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		llm:     llm,
+		tools:   []tool.Tool{writeTool, bashTool},
+		toolMap: map[string]tool.Tool{"WRITE": writeTool, "BASH": bashTool},
+	}
+
+	for _, runErr := range collectRunErrors(ag.Run(ctx)) {
+		if runErr != nil {
+			t.Fatalf("unexpected run error: %v", runErr)
+		}
 	}
 }
 
@@ -847,6 +972,74 @@ func TestLLMAgent_PartialStreamCancellationStaysSilent(t *testing.T) {
 	}
 	if len(warnings) != 0 {
 		t.Fatalf("expected no interruption warning on cancel, got %#v", warnings)
+	}
+}
+
+func TestLLMAgent_FinishReasonLengthWarnsAndSkipsRetry(t *testing.T) {
+	attempts := 0
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		attempts++
+		return []seqResult{
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "partial answer"},
+					Partial:      true,
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{
+				resp: &model.Response{
+					Message:      model.Message{Role: model.RoleAssistant, Text: "partial answer"},
+					TurnComplete: true,
+					FinishReason: model.FinishReasonLength,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+		}
+	})
+	ag, err := New(Config{Name: "test", EmitPartialEvents: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+	var (
+		warnings []string
+		gotErr   error
+	)
+	for ev, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+			continue
+		}
+		if notice, ok := session.EventNotice(ev); ok {
+			warnings = append(warnings, notice.Text)
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected truncated response error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected no automatic retry after partial truncated output, got %d attempts", attempts)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("expected truncation warning")
+	}
+	last := warnings[len(warnings)-1]
+	if !strings.Contains(last, "configured token limit") {
+		t.Fatalf("expected token-limit warning, got %#v", warnings)
+	}
+	if !strings.Contains(last, "/continue") {
+		t.Fatalf("expected continue hint in warning, got %#v", warnings)
 	}
 }
 
@@ -1644,6 +1837,12 @@ func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 	}
 	if meta["truncated"] != true {
 		t.Fatalf("expected truncated meta true, got: %#v", meta["truncated"])
+	}
+	if _, exists := toolEvent.Message.ToolResponse.Result["truncation_notice"]; exists {
+		t.Fatalf("did not expect visible truncation notice, got %#v", toolEvent.Message.ToolResponse.Result)
+	}
+	if _, exists := toolEvent.Message.ToolResponse.Result["full_result_path"]; exists {
+		t.Fatalf("did not expect full_result_path, got %#v", toolEvent.Message.ToolResponse.Result)
 	}
 }
 

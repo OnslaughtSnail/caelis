@@ -25,12 +25,7 @@ func toolKindForName(name string) string {
 		return ToolKindOther
 	case "BASH", "TASK":
 		return ToolKindExecute
-	case "DELEGATE":
-		return ToolKindOther
 	default:
-		if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(name)), "MCP__") {
-			return ToolKindFetch
-		}
 		return ToolKindOther
 	}
 }
@@ -58,6 +53,11 @@ func summarizeToolCallTitle(name string, args map[string]any) string {
 		case "status", "cancel":
 			if taskID := strings.TrimSpace(stringValue(args["task_id"])); taskID != "" {
 				return fmt.Sprintf("%s %s", display, idutil.ShortDisplay(taskID))
+			}
+			return display
+		case "write":
+			if preview := summarizeTaskWriteInputForACP(args); preview != "" {
+				return fmt.Sprintf("%s %s", display, preview)
 			}
 			return display
 		default:
@@ -289,6 +289,31 @@ func effectiveTaskWaitMSForACP(action string, args map[string]any) int {
 	return waitMS
 }
 
+func summarizeTaskWriteInputForACP(args map[string]any) string {
+	input := stringValue(args["input"])
+	if input == "" {
+		return ""
+	}
+	return truncateTaskWriteInputForACP(input, 120)
+}
+
+func truncateTaskWriteInputForACP(input string, limit int) string {
+	text := strings.NewReplacer(
+		"\r\n", "\\n",
+		"\n", "\\n",
+		"\r", "\\r",
+		"\t", "\\t",
+	).Replace(input)
+	rs := []rune(text)
+	if limit <= 0 || len(rs) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return string(rs[:limit])
+	}
+	return string(rs[:limit-3]) + "..."
+}
+
 func supplementalToolCallUpdates(sess *serverSession, resp *model.ToolResponse) []ToolCallUpdate {
 	if sess == nil || resp == nil || len(resp.Result) == 0 {
 		return nil
@@ -323,19 +348,22 @@ func supplementalToolCallUpdates(sess *serverSession, resp *model.ToolResponse) 
 
 func cancelledOriginResult(result map[string]any) map[string]any {
 	if len(result) == 0 {
-		return map[string]any{"state": "cancelled", "cancelled": true}
+		return map[string]any{"state": "cancelled", "msg": "cancelled"}
 	}
 	out := map[string]any{
-		"state":     "cancelled",
-		"cancelled": true,
+		"state": "cancelled",
+		"msg":   "cancelled",
 	}
-	for _, key := range []string{"task_id", "session_id", "command", "workdir", "route", "tty", "latest_output"} {
+	for _, key := range []string{"task_id", "session_id"} {
 		if value, ok := result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
 			out[key] = value
 		}
 	}
-	if output, ok := result["output"]; ok && output != nil {
-		out["output"] = sanitizeToolResultValueForACP(output)
+	for _, key := range []string{"result", "output", "latest_output"} {
+		if output, ok := result[key]; ok && output != nil {
+			out["result"] = sanitizeToolResultValueForACP(output)
+			break
+		}
 	}
 	return out
 }

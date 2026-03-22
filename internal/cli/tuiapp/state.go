@@ -4,9 +4,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/help"
-	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -21,9 +19,9 @@ const runningLightBandRadius = 5.5
 const runningLightLead = 4.0
 const copyHintDuration = 1600 * time.Millisecond
 const toolOutputPreviewLines = 4
+const toolOutputHistoryLines = 2000
+const subagentOutputPreviewLines = 12
 const activityBlockPreviewLines = 8
-const toolOutputFadeHold = 650 * time.Millisecond
-const toolOutputFadeInterval = 110 * time.Millisecond
 const inputHorizontalInset = tuikit.InputInset
 const paletteAnimationInterval = 16 * time.Millisecond
 const paletteAnimationStep = 3
@@ -161,12 +159,15 @@ type inputAttachment struct {
 	Offset int
 }
 
+// assistantBlockState is kept only for the test migration period.
+// New code uses AssistantBlock / ReasoningBlock in Document.
 type assistantBlockState struct {
 	start int
 	end   int
 	raw   string
 }
 
+// diffBlockState is kept only for the test migration period.
 type diffBlockState struct {
 	start int
 	end   int
@@ -205,29 +206,11 @@ type toolOutputLine struct {
 	stream string
 }
 
-type toolOutputState struct {
-	key              string
-	tool             string
-	callID           string
-	state            string
-	start            int
-	end              int
-	startedAt        time.Time
-	updatedAt        time.Time
-	finalizedAt      time.Time
-	lastStream       string
-	lines            []toolOutputLine
-	stdoutPartial    string
-	stderrPartial    string
-	assistantPartial string
-	reasoningPartial string
-	delegateFence    bool
-	active           bool
-	closing          bool
-	fadeStep         int
-	fadeQueued       bool
-	fadeLineCount    int
-}
+// toolOutputState is REMOVED — replaced by BashPanelBlock in Document.
+// The type definition is kept temporarily for compilation during migration.
+
+// subagentPanelState is REMOVED — replaced by SubagentPanelBlock in Document.
+// The type definition is kept temporarily for compilation during migration.
 
 type planEntryState struct {
 	Content string
@@ -241,6 +224,12 @@ type btwOverlayState struct {
 	Scroll   int
 }
 
+// toolAnchor is a pending, unclaimed tool-style TranscriptBlock.
+type toolAnchor struct {
+	blockID  string
+	toolName string // normalized tool name from "▸ TOOLNAME ..." line
+}
+
 type Model struct {
 	cfg       Config
 	theme     tuikit.Theme
@@ -252,32 +241,53 @@ type Model struct {
 	height  int
 	focused bool
 
+	// --- Document model (source of truth for viewport content) ---
+	doc *Document
+
+	// Active block tracking IDs (empty string means no active block).
+	activeAssistantID string
+	activeReasoningID string
+	activeActivityID  string
+
+	// Maps external keys to doc block IDs.
+	toolOutputBlockIDs map[string]string
+	subagentBlockIDs   map[string]string
+
+	// pendingToolAnchors tracks tool-style TranscriptBlocks ("▸ BASH ...",
+	// "▸ SPAWN ...") that haven't yet been claimed by a panel. FIFO order.
+	pendingToolAnchors []toolAnchor
+
+	// callAnchorIndex maps a CallID (or SpawnID parent CallID) to the block ID
+	// of its corresponding "▸ TOOL ..." line. Once a pending anchor is claimed,
+	// it's stored here for stable future lookups.
+	callAnchorIndex map[string]string
+
+	// taskOriginCallID maps a background TaskID to the CallID of the original
+	// BASH tool invocation that yielded it. This ensures that subsequent
+	// watch/wait/write/cancel events route back to the original panel.
+	taskOriginCallID map[string]string
+
 	streamLine         string
 	lastCommittedStyle tuikit.LineStyle
 	lastCommittedRaw   string
 	hasCommittedLine   bool
-	assistantBlock     *assistantBlockState
-	reasoningBlock     *assistantBlockState
 	lastFinalAnswer    string
-	diffBlocks         []diffBlockState
-	activityBlock      *foldedActivityBlockState
-	toolOutputs        map[string]*toolOutputState
 	planEntries        []planEntryState
 	welcomeCardPending bool
 	runStartedAt       time.Time
 	lastRunDuration    time.Duration
 	hasLastRunDuration bool
 	showTurnDivider    bool
-	btwOverlay         *btwOverlayState
-	btwDismissed       bool
 
-	transientLogIdx  int
+	// Transient log replacement tracking — now uses block IDs.
+	transientBlockID string
 	transientIsRetry bool
 	transientRemove  bool
 
-	historyLines        []string
+	// Viewport caches — populated by syncViewportContent from Document.
 	viewportStyledLines []string
 	viewportPlainLines  []string
+	viewportBlockIDs    []string
 	viewport            viewport.Model
 	userScrolledUp      bool
 	ready               bool
@@ -295,9 +305,11 @@ type Model struct {
 	fixedSelectionStart textSelectionPoint
 	fixedSelectionEnd   textSelectionPoint
 
-	textarea textarea.Model
-	input    []rune
-	cursor   int
+	// --- Composer (independent sub-model for input management) ---
+	Composer
+
+	// --- Overlay state (unified overlay management) ---
+	OverlayState
 
 	running bool
 	spinner spinner.Model
@@ -311,54 +323,6 @@ type Model struct {
 	hint          string
 	hintEntries   []hintEntry
 	nextHintID    uint64
-
-	showPalette      bool
-	palette          list.Model
-	paletteAnimLines int
-	paletteAnimating bool
-
-	mentionQuery      string
-	mentionCandidates []string
-	mentionIndex      int
-	mentionStart      int
-	mentionEnd        int
-
-	skillQuery      string
-	skillCandidates []string
-	skillIndex      int
-	skillStart      int
-	skillEnd        int
-
-	history                 []string
-	historyAttachments      [][]inputAttachment
-	historyIndex            int
-	historyDraft            string
-	historyDraftAttachments []inputAttachment
-	pendingQueue            *pendingPrompt
-
-	slashCandidates []string
-	slashIndex      int
-	slashPrefix     string
-
-	resumeActive     bool
-	resumeQuery      string
-	resumeCandidates []ResumeCandidate
-	resumeIndex      int
-
-	slashArgActive     bool
-	slashArgCommand    string
-	slashArgQuery      string
-	slashArgCandidates []SlashArgCandidate
-	slashArgIndex      int
-
-	wizard *wizardRuntime
-
-	activePrompt  *promptState
-	pendingPrompt []tuievents.PromptRequestMsg
-
-	attachmentCount  int
-	attachmentNames  []string
-	inputAttachments []inputAttachment
 
 	pendingInputAt     time.Time
 	inputLatencyWindow []time.Duration

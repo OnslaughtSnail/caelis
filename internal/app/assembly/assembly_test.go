@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
-	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -14,7 +13,7 @@ import (
 func TestAssemble_PolicyProviderOnly(t *testing.T) {
 	got, err := Assemble(context.Background(), AssembleSpec{
 		Registry:        mustBuiltinRegistry(t),
-		PolicyProviders: []string{pluginbuiltin.ProviderDefaultPolicy},
+		PolicyProviders: []string{ProviderDefaultPolicy},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +31,7 @@ func TestAssemble_PolicyProviderOnly(t *testing.T) {
 
 func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
 	got, err := Assemble(context.Background(), AssembleSpec{
-		PolicyProviders: []string{pluginbuiltin.ProviderDefaultPolicy},
+		PolicyProviders: []string{ProviderDefaultPolicy},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +64,7 @@ func TestAssemble_CoreReadInjectedByRuntime(t *testing.T) {
 func mustBuiltinRegistry(t *testing.T) *plugin.Registry {
 	t.Helper()
 	reg := plugin.NewRegistry()
-	if err := pluginbuiltin.RegisterAll(reg, pluginbuiltin.RegisterOptions{}); err != nil {
+	if err := RegisterBuiltinProviders(reg, RegisterOptions{}); err != nil {
 		t.Fatalf("register builtin providers: %v", err)
 	}
 	return reg

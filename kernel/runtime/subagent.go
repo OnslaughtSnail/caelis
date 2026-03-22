@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
-	"github.com/OnslaughtSnail/caelis/kernel/delegation"
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -19,6 +20,7 @@ const (
 	metaParentSessionID = "parent_session_id"
 	metaChildSessionID  = "child_session_id"
 	metaParentToolCall  = "parent_tool_call_id"
+	metaParentToolName  = "parent_tool_name"
 	metaDelegationID    = "delegation_id"
 )
 
@@ -26,6 +28,7 @@ type delegationLineage struct {
 	ParentSessionID string
 	ChildSessionID  string
 	ParentToolCall  string
+	ParentToolName  string
 	DelegationID    string
 	TaskID          string
 }
@@ -36,9 +39,11 @@ type runtimeSubagentRunner struct {
 	runtime *Runtime
 	parent  *session.Session
 	req     RunRequest
+	mu      sync.Mutex
+	active  map[string]context.CancelFunc
 }
 
-func newSubagentRunner(r *Runtime, parent *session.Session, req RunRequest) delegation.Runner {
+func newSubagentRunner(r *Runtime, parent *session.Session, req RunRequest) agent.SubagentRunner {
 	if r == nil || parent == nil {
 		return nil
 	}
@@ -46,28 +51,75 @@ func newSubagentRunner(r *Runtime, parent *session.Session, req RunRequest) dele
 		runtime: r,
 		parent:  parent,
 		req:     req,
+		active:  map[string]context.CancelFunc{},
 	}
 }
 
-func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req delegation.RunRequest) (delegation.RunResult, error) {
+func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
+	if strings.TrimSpace(req.Agent) == "" {
+		req.Agent = "self"
+	}
 	childReq, lineage, err := r.prepareChildRun(ctx, req)
 	if err != nil {
-		return delegation.RunResult{}, err
+		return agent.SubagentRunResult{}, err
 	}
-	runner, err := r.runtime.Run(attachSubagentContext(ctx, lineage), childReq)
-	if err != nil {
-		return delegation.RunResult{}, err
+	base := detachSubagentContext(ctx, lineage)
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if req.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(base, req.Timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(base)
 	}
-	defer runner.Close()
-	for ev, runErr := range runner.Events() {
-		if runErr != nil {
-			return delegation.RunResult{}, runErr
+	r.registerCancel(childReq.SessionID, cancel)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer r.unregisterCancel(childReq.SessionID)
+		r.runDetachedSubagent(runCtx, childReq, lineage)
+	}()
+
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	yielded := false
+	if req.Yield > 0 {
+		timer := time.NewTimer(req.Yield)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			yielded = true
+		case <-waitCtx.Done():
+			return agent.SubagentRunResult{}, waitCtx.Err()
 		}
-		_ = ev
+	} else {
+		select {
+		case <-done:
+		default:
+			yielded = true
+		}
+	}
+	if yielded {
+		return agent.SubagentRunResult{
+			SessionID:    childReq.SessionID,
+			DelegationID: lineage.DelegationID,
+			Agent:        req.Agent,
+			State:        string(RunLifecycleStatusRunning),
+			Running:      true,
+			Yielded:      true,
+			Timeout:      req.Timeout,
+		}, nil
 	}
 	result, err := r.inspectSubagent(ctx, childReq.SessionID)
 	if err != nil {
-		return delegation.RunResult{}, err
+		return agent.SubagentRunResult{}, err
+	}
+	result.Agent = req.Agent
+	result.Timeout = req.Timeout
+	if result.Running {
+		result.Yielded = true
 	}
 	if strings.TrimSpace(result.DelegationID) == "" {
 		result.DelegationID = lineage.DelegationID
@@ -75,46 +127,42 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req delegation.
 	return result, nil
 }
 
-func (r *runtimeSubagentRunner) StartSubagent(ctx context.Context, req delegation.RunRequest) (delegation.RunResult, error) {
-	childReq, lineage, err := r.prepareChildRun(ctx, req)
-	if err != nil {
-		return delegation.RunResult{}, err
+func (r *runtimeSubagentRunner) CancelSubagent(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
 	}
-	go r.runDetachedSubagent(detachSubagentContext(ctx, lineage), childReq, lineage)
-	return delegation.RunResult{
-		SessionID:    childReq.SessionID,
-		DelegationID: lineage.DelegationID,
-		State:        string(RunLifecycleStatusRunning),
-		Running:      true,
-	}, nil
+	r.mu.Lock()
+	cancel, ok := r.active[sessionID]
+	r.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+		return true
+	}
+	return false
 }
 
-func (r *runtimeSubagentRunner) StatusSubagent(ctx context.Context, req delegation.StatusRequest) (delegation.RunResult, error) {
-	return r.inspectSubagent(ctx, req.SessionID)
+func (r *runtimeSubagentRunner) registerCancel(sessionID string, cancel context.CancelFunc) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || cancel == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active == nil {
+		r.active = map[string]context.CancelFunc{}
+	}
+	r.active[sessionID] = cancel
 }
 
-func (r *runtimeSubagentRunner) WaitSubagent(ctx context.Context, req delegation.WaitRequest) (delegation.RunResult, error) {
-	deadline := time.Time{}
-	if req.Timeout > 0 {
-		deadline = time.Now().Add(req.Timeout)
+func (r *runtimeSubagentRunner) unregisterCancel(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
 	}
-	for {
-		result, err := r.inspectSubagent(ctx, req.SessionID)
-		if err != nil {
-			return delegation.RunResult{}, err
-		}
-		if !result.Running {
-			return result, nil
-		}
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return result, nil
-		}
-		select {
-		case <-ctx.Done():
-			return delegation.RunResult{}, ctx.Err()
-		case <-time.After(150 * time.Millisecond):
-		}
-	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.active, sessionID)
 }
 
 func resolveChildSessionID(parentSessionID string, requested string) (string, error) {
@@ -127,6 +175,10 @@ func resolveChildSessionID(parentSessionID string, requested string) (string, er
 		return "", fmt.Errorf("runtime: delegated child session_id must differ from parent session")
 	}
 	return requested, nil
+}
+
+func ResolveChildSessionID(parentSessionID string, requested string) (string, error) {
+	return resolveChildSessionID(parentSessionID, requested)
 }
 
 func withDelegationLineage(ctx context.Context, lineage delegationLineage) context.Context {
@@ -150,6 +202,16 @@ func detachSubagentContext(ctx context.Context, lineage delegationLineage) conte
 	return base
 }
 
+func DetachDelegationContext(ctx context.Context, meta DelegationMetadata) context.Context {
+	return detachSubagentContext(ctx, delegationLineage{
+		ParentSessionID: meta.ParentSessionID,
+		ChildSessionID:  meta.ChildSessionID,
+		ParentToolCall:  meta.ParentToolCall,
+		ParentToolName:  meta.ParentToolName,
+		DelegationID:    meta.DelegationID,
+	})
+}
+
 func attachSubagentContext(ctx context.Context, lineage delegationLineage) context.Context {
 	base := withDelegationLineage(context.Background(), lineage)
 	if approver, ok := toolexec.ApproverFromContext(ctx); ok {
@@ -170,6 +232,16 @@ func attachSubagentContext(ctx context.Context, lineage delegationLineage) conte
 	base, cancel := context.WithCancel(base)
 	context.AfterFunc(ctx, cancel)
 	return base
+}
+
+func AttachDelegationContext(ctx context.Context, meta DelegationMetadata) context.Context {
+	return attachSubagentContext(ctx, delegationLineage{
+		ParentSessionID: meta.ParentSessionID,
+		ChildSessionID:  meta.ChildSessionID,
+		ParentToolCall:  meta.ParentToolCall,
+		ParentToolName:  meta.ParentToolName,
+		DelegationID:    meta.DelegationID,
+	})
 }
 
 func delegationLineageFromContext(ctx context.Context) (delegationLineage, bool) {
@@ -204,6 +276,9 @@ func annotateDelegationMeta(ctx context.Context, ev *session.Event, sessionID st
 	if value := strings.TrimSpace(lineage.ParentToolCall); value != "" {
 		ev.Meta[metaParentToolCall] = value
 	}
+	if value := strings.TrimSpace(lineage.ParentToolName); value != "" {
+		ev.Meta[metaParentToolName] = value
+	}
 	if value := strings.TrimSpace(lineage.DelegationID); value != "" {
 		ev.Meta[metaDelegationID] = value
 	}
@@ -226,7 +301,7 @@ func prepareEvent(ctx context.Context, sess *session.Session, ev *session.Event)
 	return session.EnsureEventType(ev)
 }
 
-func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req delegation.RunRequest) (RunRequest, delegationLineage, error) {
+func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req agent.SubagentRunRequest) (RunRequest, delegationLineage, error) {
 	if r == nil || r.runtime == nil || r.parent == nil {
 		return RunRequest{}, delegationLineage{}, fmt.Errorf("runtime: subagent runner is unavailable")
 	}
@@ -240,11 +315,12 @@ func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req delegat
 		ParentSessionID: r.parent.ID,
 		ChildSessionID:  childSessionID,
 		ParentToolCall:  strings.TrimSpace(callInfo.ID),
+		ParentToolName:  strings.TrimSpace(callInfo.Name),
 		DelegationID:    delegationID,
 	}
 	childReq := r.req
 	childReq.SessionID = childSessionID
-	childReq.Input = req.Input
+	childReq.Input = req.Task
 	childReq.ContentParts = append([]model.ContentPart(nil), req.ContentParts...)
 	return childReq, lineage, nil
 }
@@ -291,10 +367,10 @@ func (r *runtimeSubagentRunner) persistDetachedSubagentFailure(ctx context.Conte
 	})
 }
 
-func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID string) (delegation.RunResult, error) {
+func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID string) (agent.SubagentRunResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return delegation.RunResult{}, fmt.Errorf("runtime: delegated child session_id is required")
+		return agent.SubagentRunResult{}, fmt.Errorf("runtime: delegated child session_id is required")
 	}
 	state, err := r.runtime.RunState(ctx, RunStateRequest{
 		AppName:   r.req.AppName,
@@ -302,7 +378,7 @@ func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID s
 		SessionID: sessionID,
 	})
 	if err != nil {
-		return delegation.RunResult{}, err
+		return agent.SubagentRunResult{}, err
 	}
 	events, err := r.runtime.SessionEvents(ctx, SessionEventsRequest{
 		AppName:          r.req.AppName,
@@ -312,15 +388,15 @@ func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID s
 		IncludeLifecycle: false,
 	})
 	if err != nil {
-		return delegation.RunResult{}, err
+		return agent.SubagentRunResult{}, err
 	}
-	result := delegation.RunResult{
+	result := agent.SubagentRunResult{
 		SessionID: sessionID,
 		State:     string(state.Status),
 		Running:   state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval,
 	}
 	if !state.HasLifecycle && len(events) == 0 {
-		return delegation.RunResult{}, fmt.Errorf("runtime: delegated child session %q not found", sessionID)
+		return agent.SubagentRunResult{}, fmt.Errorf("runtime: delegated child session %q not found", sessionID)
 	}
 	for _, ev := range events {
 		if ev == nil {
@@ -329,10 +405,8 @@ func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID s
 		if result.DelegationID == "" {
 			result.DelegationID = strings.TrimSpace(subagentStringValue(ev.Meta[metaDelegationID]))
 		}
-		if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
-			result.Assistant = text
-		}
 	}
+	result.Assistant = FinalAssistantText(events)
 	if result.State == "" && !state.HasLifecycle {
 		result.State = string(RunLifecycleStatusRunning)
 		result.Running = true

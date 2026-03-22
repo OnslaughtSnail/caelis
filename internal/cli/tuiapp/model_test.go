@@ -53,6 +53,10 @@ func mouseRelease(x int, y int, button tea.MouseButton) tea.MouseReleaseMsg {
 	return tea.MouseReleaseMsg(tea.Mouse{X: x, Y: y, Button: button})
 }
 
+func mouseWheel(x int, y int, button tea.MouseButton) tea.MouseWheelMsg {
+	return tea.MouseWheelMsg(tea.Mouse{X: x, Y: y, Button: button})
+}
+
 func TestMentionQueryAtCursor(t *testing.T) {
 	input := []rune("check @kernel/to")
 	start, end, query, ok := mentionQueryAtCursor(input, len(input))
@@ -390,7 +394,7 @@ func TestViewRendersScrollbarWhenViewportOverflows(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	for i := 0; i < 40; i++ {
-		m.historyLines = append(m.historyLines, fmt.Sprintf("line %02d", i))
+		m.doc.Append(NewTranscriptBlock(fmt.Sprintf("line %02d", i), tuikit.LineStyleDefault))
 	}
 	m.syncViewportContent()
 
@@ -1448,8 +1452,8 @@ func TestMouseDragCopiesSelection(t *testing.T) {
 	if copied != "hello" {
 		t.Fatalf("expected selected text copied, got %q", copied)
 	}
-	if !m.hasSelectionRange() {
-		t.Fatal("expected viewport selection to remain after mouse release")
+	if m.hasSelectionRange() {
+		t.Fatal("expected viewport selection to be cleared after copy to prevent styled↔plain artifacts")
 	}
 }
 
@@ -1536,8 +1540,8 @@ func TestMouseDragCopyFailureShowsHintAndLog(t *testing.T) {
 	if got := m.hint; got != "copy: clipboard offline" {
 		t.Fatalf("expected explicit copy error hint, got %q", got)
 	}
-	if len(m.historyLines) == 0 || !strings.Contains(ansi.Strip(m.historyLines[len(m.historyLines)-1]), "copy: clipboard offline") {
-		t.Fatalf("expected clipboard failure logged in history, got %#v", m.historyLines)
+	if len(m.renderedStyledLines()) == 0 || !strings.Contains(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1]), "copy: clipboard offline") {
+		t.Fatalf("expected clipboard failure logged in history, got %#v", m.renderedStyledLines())
 	}
 }
 
@@ -1653,7 +1657,7 @@ func TestLogChunkCommitsCompletedLines(t *testing.T) {
 
 	_, cmd := m.Update(tuievents.LogChunkMsg{Chunk: "* hello\n│ reasoning\n"})
 
-	// In fullscreen mode, committed lines go to historyLines (no tea.Println cmd).
+	// In fullscreen mode, committed lines go to rendered lines (no tea.Println cmd).
 	if cmd != nil {
 		t.Fatal("expected nil cmd (no tea.Println in fullscreen mode)")
 	}
@@ -1663,8 +1667,8 @@ func TestLogChunkCommitsCompletedLines(t *testing.T) {
 	if !m.hasCommittedLine {
 		t.Fatal("expected hasCommittedLine to be true")
 	}
-	if len(m.historyLines) < 2 {
-		t.Fatalf("expected at least 2 history lines, got %d", len(m.historyLines))
+	if len(m.renderedStyledLines()) < 2 {
+		t.Fatalf("expected at least 2 history lines, got %d", len(m.renderedStyledLines()))
 	}
 }
 
@@ -1685,14 +1689,14 @@ func TestLogChunkMixedCompleteAndPartial(t *testing.T) {
 
 	_, cmd := m.Update(tuievents.LogChunkMsg{Chunk: "line1\npartial"})
 
-	// In fullscreen mode, committed lines go to historyLines (no tea.Println cmd).
+	// In fullscreen mode, committed lines go to rendered lines (no tea.Println cmd).
 	if cmd != nil {
 		t.Fatal("expected nil cmd (no tea.Println in fullscreen mode)")
 	}
 	if m.streamLine != "partial" {
 		t.Fatalf("expected 'partial' in stream buffer, got %q", m.streamLine)
 	}
-	if len(m.historyLines) < 1 {
+	if len(m.renderedStyledLines()) < 1 {
 		t.Fatal("expected at least 1 history line for committed 'line1'")
 	}
 }
@@ -1704,7 +1708,7 @@ func TestFlushStreamOnTaskResult(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* partial"})
 	_, cmd := m.Update(tuievents.TaskResultMsg{})
 
-	// In fullscreen mode, flush goes to historyLines (no tea.Println cmd).
+	// In fullscreen mode, flush goes to rendered lines (no tea.Println cmd).
 	if cmd != nil {
 		t.Fatal("expected nil cmd (no ExitNow, no tea.Println)")
 	}
@@ -1714,7 +1718,7 @@ func TestFlushStreamOnTaskResult(t *testing.T) {
 	if m.running {
 		t.Fatal("expected running to be false after task result")
 	}
-	if len(m.historyLines) < 1 {
+	if len(m.renderedStyledLines()) < 1 {
 		t.Fatal("expected at least 1 history line from flushed stream")
 	}
 }
@@ -1753,27 +1757,27 @@ func TestAssistantStreamUpdatesMarkdownBlockInPlace(t *testing.T) {
 	resizeModel(m)
 
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "## He", Final: false})
-	if m.assistantBlock == nil {
+	if m.activeAssistantID == "" {
 		t.Fatal("expected active assistant block after partial stream")
 	}
-	start := m.assistantBlock.start
+	startID := m.activeAssistantID
 
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "ading\n\n- one", Final: false})
-	if m.assistantBlock == nil {
+	if m.activeAssistantID == "" {
 		t.Fatal("expected active assistant block after second partial stream")
 	}
-	if m.assistantBlock.start != start {
-		t.Fatalf("expected assistant block to be updated in place, got start=%d want=%d", m.assistantBlock.start, start)
+	if m.activeAssistantID != startID {
+		t.Fatalf("expected assistant block to be updated in place")
 	}
 
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "## Heading\n\n- one\n- two", Final: true})
-	if m.assistantBlock != nil {
+	if m.activeAssistantID != "" {
 		t.Fatal("expected assistant block to be finalized")
 	}
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
-	if !strings.Contains(joined, "• one") || !strings.Contains(joined, "• two") {
-		t.Fatalf("expected markdown list rendering in history, got %q", joined)
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if !strings.Contains(joined, "- one") || !strings.Contains(joined, "- two") {
+		t.Fatalf("expected plain list formatting in history, got %q", joined)
 	}
 	if strings.Contains(joined, "## Heading") {
 		t.Fatalf("expected heading markers to be hidden, got %q", joined)
@@ -1789,7 +1793,7 @@ func TestReasoningStreamKeepsBlockStyleAcrossParagraphs(t *testing.T) {
 		Final: true,
 	})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "第一段") || strings.Contains(joined, "第二段") {
 		t.Fatalf("expected finalized reasoning block to auto-collapse, got %q", joined)
 	}
@@ -1804,19 +1808,41 @@ func TestReasoningBlockLinesRenderMarkdownWhileStreaming(t *testing.T) {
 		Final: false,
 	})
 
-	if m.reasoningBlock == nil {
+	if m.activeReasoningID == "" {
 		t.Fatal("expected active reasoning block")
 	}
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
-	if !strings.Contains(joined, "Thinking") || !strings.Contains(joined, "• one") || !strings.Contains(joined, "• two") {
-		t.Fatalf("expected reasoning markdown rendered in place, got %q", joined)
-	}
+	// Markdown is normalized into plain transcript form during streaming.
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "## Thinking") {
-		t.Fatalf("expected heading markers hidden in reasoning block, got %q", joined)
+		t.Fatalf("expected reasoning stream to hide heading markers, got %q", joined)
 	}
-	raw := strings.Join(m.historyLines, "\n")
+	if !strings.Contains(joined, "Thinking") || !strings.Contains(joined, "one") || !strings.Contains(joined, "two") {
+		t.Fatalf("expected rendered content to be present, got %q", joined)
+	}
+	raw := strings.Join(m.renderedStyledLines(), "\n")
 	if !strings.Contains(raw, "\x1b[") {
-		t.Fatalf("expected reasoning markdown to retain reasoning style ANSI, got %q", raw)
+		t.Fatalf("expected reasoning stream to retain ANSI styling, got %q", raw)
+	}
+}
+
+func TestAssistantFinalRenderPreservesWideCharacters(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "我有以下工具可以使用：\n\n    文件系统工具",
+		Final: false,
+	})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{
+		Kind:  "answer",
+		Text:  "我有以下工具可以使用：\n\n    文件系统工具",
+		Final: true,
+	})
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if !strings.Contains(joined, "文件系统工具") {
+		t.Fatalf("expected wide-character text preserved after final render, got %q", joined)
 	}
 }
 
@@ -1833,7 +1859,7 @@ func TestAssistantAfterReasoningHasNoExtraGap(t *testing.T) {
 		Final: true,
 	})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "thinking") {
 		t.Fatalf("expected finalized reasoning hidden before answer render, got %q", joined)
 	}
@@ -1862,7 +1888,7 @@ func TestAssistantStreamMergesCumulativeChunks(t *testing.T) {
 		Final: true,
 	})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Count(joined, "Hello world") != 1 {
 		t.Fatalf("expected merged cumulative output once, got %q", joined)
 	}
@@ -1888,7 +1914,7 @@ func TestReasoningThenFinalAnswerReusesExistingAnswerBlock(t *testing.T) {
 		Final: true,
 	})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Count(joined, "Hello world") != 1 {
 		t.Fatalf("expected one finalized answer block, got %q", joined)
 	}
@@ -1915,6 +1941,17 @@ func TestMergeStreamChunkDoesNotDropShortDelta(t *testing.T) {
 		{"code fence delta", "text\n", "```", "text\n```"},
 		// Cumulative replay detection still works for long text.
 		{"long cumulative replay", "Hello world! This is a complete sentence.", "Hello world! This is a comple", "Hello world! This is a complete sentence."},
+		// Forward-prefix false-positive: a short accumulated buffer whose
+		// content coincidentally appears at the start of the next delta token
+		// must NOT be silently dropped (regression: old code treated any
+		// incoming that starts with existing as a cumulative update).
+		{"short existing prefix of incoming", "好", "好的，直接输出你的问题！", "好好的，直接输出你的问题！"},
+		{"single chinese char prefix", "你", "你好，", "你你好，"},
+		{"two char prefix collision", "ab", "abcdef", "ababcdef"},
+		// Long text where incoming starts with existing: since we removed
+		// cumulative-mode support entirely (all providers are delta), this
+		// must also concatenate.
+		{"long existing prefix of incoming", "Hello world! This is a test.", "Hello world! This is a test. More content.", "Hello world! This is a test.Hello world! This is a test. More content."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1949,7 +1986,7 @@ func TestStreamingDeltaTokensPreserveMarkdownStructure(t *testing.T) {
 	full := strings.Join(tokens, "")
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: full, Final: true})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	// Heading markers should be consumed by markdown renderer.
 	if strings.Contains(joined, "# TUI") || strings.Contains(joined, "## 格式") {
 		t.Fatalf("expected heading markers hidden by markdown rendering, got:\n%s", joined)
@@ -1980,7 +2017,7 @@ func TestReasoningStreamDoesNotAccumulateAcrossToolTurns(t *testing.T) {
 		Final: false,
 	})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "phase1phase2") {
 		t.Fatalf("expected reasoning blocks separated by tool turn, got %q", joined)
 	}
@@ -1997,12 +2034,12 @@ func TestAssistantFinalDuplicateEventIsSuppressed(t *testing.T) {
 	resizeModel(m)
 
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
-	if m.assistantBlock != nil {
+	if m.activeAssistantID != "" {
 		t.Fatal("expected final one-shot answer block to close immediately")
 	}
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Count(joined, "* done") != 1 {
 		t.Fatalf("expected duplicated final answer suppressed, got %q", joined)
 	}
@@ -2271,11 +2308,11 @@ func TestClearHistoryMsgResetsViewportContent(t *testing.T) {
 	_ = m.Init()
 	resizeModel(m)
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* stale line\n"})
-	if !strings.Contains(strings.Join(m.historyLines, "\n"), "stale line") {
+	if !strings.Contains(strings.Join(m.renderedStyledLines(), "\n"), "stale line") {
 		t.Fatal("expected stale line before clear")
 	}
 	_, _ = m.Update(tuievents.ClearHistoryMsg{})
-	joined := strings.Join(m.historyLines, "\n")
+	joined := strings.Join(m.renderedStyledLines(), "\n")
 	if strings.Contains(joined, "stale line") {
 		t.Fatalf("expected stale line removed after clear, got %q", joined)
 	}
@@ -2297,10 +2334,18 @@ func TestDiffBlockMsgRendersStructuredDiff(t *testing.T) {
 		Preview: "--- old\n+++ new\n-line1\n-old\n+line1\n+new",
 	})
 
-	if len(m.diffBlocks) != 1 {
-		t.Fatalf("expected one diff block, got %d", len(m.diffBlocks))
+	{
+		count := 0
+		for _, b := range m.doc.Blocks() {
+			if b.Kind() == BlockDiff {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one diff block, got %d", count)
+		}
 	}
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if !strings.Contains(joined, "PATCH edited a.txt") {
 		t.Fatalf("expected diff header, got %q", joined)
 	}
@@ -2318,9 +2363,9 @@ func TestDiffBlockResizeRerendersAdaptiveLayout(t *testing.T) {
 		Old:  "line1\nold",
 		New:  "line1\nnew",
 	})
-	before := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	before := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
-	after := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	after := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if before == after {
 		t.Fatalf("expected resize to rerender diff block, got identical output: %q", after)
 	}
@@ -2338,12 +2383,28 @@ func TestClearHistoryResetsDiffBlocks(t *testing.T) {
 		Old:  "old",
 		New:  "new",
 	})
-	if len(m.diffBlocks) != 1 {
-		t.Fatalf("expected one diff block, got %d", len(m.diffBlocks))
+	{
+		count := 0
+		for _, b := range m.doc.Blocks() {
+			if b.Kind() == BlockDiff {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected one diff block, got %d", count)
+		}
 	}
 	_, _ = m.Update(tuievents.ClearHistoryMsg{})
-	if len(m.diffBlocks) != 0 {
-		t.Fatalf("expected diff blocks reset on clear history, got %d", len(m.diffBlocks))
+	{
+		count := 0
+		for _, b := range m.doc.Blocks() {
+			if b.Kind() == BlockDiff {
+				count++
+			}
+		}
+		if count != 0 {
+			t.Fatalf("expected diff blocks reset on clear history, got %d", count)
+		}
 	}
 }
 
@@ -2409,7 +2470,7 @@ func TestViewHidesPendingQueueWhileRunning(t *testing.T) {
 	}
 }
 
-func TestViewShowsToolOutputPanelWithLatestFourLines(t *testing.T) {
+func TestViewShowsToolOutputPanelWithScrollableHistory(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
@@ -2430,11 +2491,8 @@ func TestViewShowsToolOutputPanelWithLatestFourLines(t *testing.T) {
 	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
 		t.Fatalf("expected bordered tool output box, got:\n%s", view)
 	}
-	if !strings.Contains(view, "BASH") || !strings.Contains(view, "<1s") {
-		t.Fatalf("expected tool panel header with elapsed time, got:\n%s", view)
-	}
-	if strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
-		t.Fatalf("expected old tool output lines to scroll out, got:\n%s", view)
+	if strings.Contains(view, "BASH") || strings.Contains(view, "<1s") {
+		t.Fatalf("did not expect bash header/timer inside panel, got:\n%s", view)
 	}
 	for _, want := range []string{"line-3", "line-4", "line-5", "line-6"} {
 		if !strings.Contains(view, want) {
@@ -2517,46 +2575,31 @@ func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
 		CallID: "call-1",
+		State:  "completed",
 		Final:  true,
 	})
 
 	view := stripModelView(m)
-	if !strings.Contains(view, "╭") || !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
-		t.Fatalf("expected bash panel to remain visible immediately after final, got:\n%s", view)
+	if !strings.Contains(view, "BASH date") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
+		t.Fatalf("expected bash panel to auto-collapse back into the call line after final, got:\n%s", view)
 	}
-	panel := m.toolOutputs["call-1"]
-	if panel == nil || !panel.closing || panel.fadeQueued {
-		t.Fatalf("expected bash panel to wait for later content before fading, got %#v", panel)
+	// In the document model, panels persist permanently after completion.
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to exist in doc after final")
 	}
-}
-
-func TestToolOutputStateOnlyFinalUpdatesVisibleStatus(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true, State: "running"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "working...\n",
-	})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", State: "cancelled", Final: true})
-
-	view := stripModelView(m)
-	if !strings.Contains(view, "working...") || !strings.Contains(view, "<1s") {
-		t.Fatalf("expected delegate panel content to remain visible after final update, got:\n%s", view)
-	}
-	if strings.Contains(view, "cancelled") {
-		t.Fatalf("did not expect final state label in panel header, got:\n%s", view)
+	if b := m.doc.Find(blockID); b == nil {
+		t.Fatal("expected bash panel block to exist in document")
+	} else if bp, ok := b.(*BashPanelBlock); !ok || bp.Expanded {
+		t.Fatal("expected final BASH panel to be collapsed")
 	}
 }
 
-func TestBashFinalDoesNotFadeOnDividerOnly(t *testing.T) {
+func TestBashFinalKeepsPanelAfterDivider(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH done\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
@@ -2567,24 +2610,26 @@ func TestBashFinalDoesNotFadeOnDividerOnly(t *testing.T) {
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
 		CallID: "call-1",
+		State:  "completed",
 		Final:  true,
 	})
-	m.historyLines = append(m.historyLines, m.userTurnDividerLine())
-	cmd := m.maybeStartClosingToolOutputFades()
-	if cmd != nil {
-		t.Fatal("expected divider-only content to not trigger bash fade")
+
+	// Panel should still exist in the document.
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to exist after final")
 	}
-	panel := m.toolOutputs["call-1"]
-	if panel == nil || panel.fadeQueued {
-		t.Fatalf("expected bash panel to remain pending after divider, got %#v", panel)
+	view := stripModelView(m)
+	if !strings.Contains(view, "BASH done") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
+		t.Fatalf("expected bash panel to persist but stay collapsed, got:\n%s", view)
 	}
 }
 
-func TestBashFinalFadeStartsAfterNewContentAndRemovesLineByLine(t *testing.T) {
+func TestBashPanelPersistsAfterNewContent(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
-	var cmd tea.Cmd
 
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH persist\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
@@ -2595,205 +2640,25 @@ func TestBashFinalFadeStartsAfterNewContentAndRemovesLineByLine(t *testing.T) {
 	_, _ = m.Update(tuievents.ToolStreamMsg{
 		Tool:   "BASH",
 		CallID: "call-1",
+		State:  "completed",
 		Final:  true,
 	})
-	_, cmd = m.Update(tuievents.LogChunkMsg{Chunk: "* next block\n"})
-	if cmd == nil {
-		t.Fatal("expected new content below bash panel to trigger fade")
-	}
-	panel := m.toolOutputs["call-1"]
-	if panel == nil || !panel.fadeQueued {
-		t.Fatalf("expected bash fade to be queued after new content, got %#v", panel)
-	}
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* next block\n"})
 
 	view := stripModelView(m)
-	for _, want := range []string{"line-1", "line-2", "line-3", "line-4", "next block"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("expected %q before fade starts, got:\n%s", want, view)
+	// Panel should persist in collapsed form after final; subsequent content still renders.
+	if !strings.Contains(view, "next block") || !strings.Contains(view, "BASH persist") {
+		t.Fatalf("expected collapsed bash panel and subsequent content, got:\n%s", view)
+	}
+	for _, want := range []string{"line-1", "line-2", "line-3", "line-4"} {
+		if strings.Contains(view, want) {
+			t.Fatalf("expected %q to be hidden by collapsed panel, got:\n%s", want, view)
 		}
 	}
 
-	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 1})
-	view = stripModelView(m)
-	if strings.Contains(view, "line-1") || !strings.Contains(view, "line-4") {
-		t.Fatalf("expected first fade step to drop the oldest visible line, got:\n%s", view)
-	}
-
-	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 2})
-	view = stripModelView(m)
-	if strings.Contains(view, "line-2") || !strings.Contains(view, "line-4") {
-		t.Fatalf("expected second fade step to keep shrinking the panel, got:\n%s", view)
-	}
-
-	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 3})
-	view = stripModelView(m)
-	if strings.Contains(view, "line-3") || !strings.Contains(view, "line-4") {
-		t.Fatalf("expected third fade step to leave only the newest line, got:\n%s", view)
-	}
-
-	_, _ = m.Update(toolOutputFadeMsg{key: "call-1", step: 4})
-	view = stripModelView(m)
-	if strings.Contains(view, "╭") || strings.Contains(view, "╰") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") || strings.Contains(view, "line-3") || strings.Contains(view, "line-4") {
-		t.Fatalf("expected bash panel to disappear after fade completes, got:\n%s", view)
-	}
-}
-
-func TestDelegatePanelShowsOnlyReasoningAndAssistant(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "reasoning",
-		Chunk:  "thinking...\n",
-	})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "✓ LIST 10 entries\n",
-	})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "still working...\n",
-	})
-
-	view := stripModelView(m)
-	if !strings.Contains(view, "thinking...") {
-		t.Fatalf("expected delegate reasoning in panel, got:\n%s", view)
-	}
-	if strings.Contains(view, "\nanswer\n") {
-		t.Fatalf("did not expect raw answer label in delegate panel, got:\n%s", view)
-	}
-	if !strings.Contains(view, "✓ LIST 10 entries") {
-		t.Fatalf("expected delegate tool result visible in panel, got:\n%s", view)
-	}
-	if !strings.Contains(view, "still working...") {
-		t.Fatalf("expected delegate assistant output in panel, got:\n%s", view)
-	}
-}
-
-func TestDelegatePanelHeaderShowsOnlyElapsedTime(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true, State: "running"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "working...\n",
-	})
-	view := stripModelView(m)
-	if !strings.Contains(view, "<1s") {
-		t.Fatalf("expected delegate panel header to show elapsed time, got:\n%s", view)
-	}
-	if strings.Contains(view, "╭ DELEGATE") || strings.Contains(view, "│ DELEGATE") {
-		t.Fatalf("did not expect duplicate delegate label in panel header, got:\n%s", view)
-	}
-}
-
-func TestDelegatePanelMergesParagraphWrappedPreviewLines(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "First sentence wraps here and stops\nthen continues on the next line.\n",
-	})
-
-	view := stripModelView(m)
-	if strings.Contains(view, "stops\nthen continues") {
-		t.Fatalf("expected delegate preview prose lines merged into one paragraph, got:\n%s", view)
-	}
-	if !strings.Contains(view, "stops then continues on the next") {
-		t.Fatalf("expected merged delegate preview paragraph, got:\n%s", view)
-	}
-}
-
-func TestDelegatePanelSkipsFencedCodeBlockContent(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone.\n",
-	})
-
-	view := stripModelView(m)
-	if !strings.Contains(view, "working...") || !strings.Contains(view, "done.") {
-		t.Fatalf("expected prose lines to remain visible, got:\n%s", view)
-	}
-	if strings.Contains(view, "demo.html") || strings.Contains(view, "\n12\n") {
-		t.Fatalf("expected fenced command output hidden from delegate panel, got:\n%s", view)
-	}
-}
-
-func TestDelegatePanelPrioritizesAssistantLinesOverReasoningNoise(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
-	for i := 1; i <= 5; i++ {
-		_, _ = m.Update(tuievents.ToolStreamMsg{
-			Tool:   "DELEGATE",
-			TaskID: "t-1",
-			CallID: "call-1",
-			Stream: "reasoning",
-			Chunk:  fmt.Sprintf("thinking-%d\n", i),
-		})
-	}
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "final visible update\n",
-	})
-
-	view := stripModelView(m)
-	if !strings.Contains(view, "final visible update") {
-		t.Fatalf("expected assistant text to remain visible in delegate preview, got:\n%s", view)
-	}
-}
-
-func TestDelegatePanelShowsPartialAssistantChunkWithoutTrailingNewline(t *testing.T) {
-	m := newTestModel()
-	resizeModel(m)
-
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE inspect\n"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "t-1", CallID: "call-1", Reset: true})
-	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "t-1",
-		CallID: "call-1",
-		Stream: "assistant",
-		Chunk:  "Streaming partial delegate answer without newline yet",
-	})
-
-	view := stripModelView(m)
-	if !strings.Contains(view, "Streaming partial delegate") {
-		t.Fatalf("expected delegate partial assistant chunk visible immediately, got:\n%s", view)
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to persist in document")
 	}
 }
 
@@ -2809,26 +2674,62 @@ func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 		Stream: "stdout",
 		Chunk:  "bash-line\n",
 	})
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE second\n"})
-	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "DELEGATE", TaskID: "task-2", CallID: "call-2", Reset: true})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN second\n"})
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "spawn-2", AttachTarget: "spawn-2", Agent: "self", CallID: "call-2"})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "spawn-2", Stream: "assistant", Chunk: "spawn-line\n"})
+
+	view := stripModelView(m)
+	bashIdx := strings.Index(view, "BASH first")
+	bashLineIdx := strings.Index(view, "bash-line")
+	spawnCallIdx := strings.Index(view, "SPAWN second")
+	spawnLineIdx := strings.Index(view, "spawn-line")
+	if bashIdx < 0 || bashLineIdx < 0 || spawnCallIdx < 0 || spawnLineIdx < 0 {
+		t.Fatalf("expected call lines and anchored outputs, got:\n%s", view)
+	}
+	if !(bashIdx < bashLineIdx && bashLineIdx < spawnCallIdx && spawnCallIdx < spawnLineIdx) {
+		t.Fatalf("expected each tool output block below its own call line, got:\n%s", view)
+	}
+}
+
+func TestSpawnTaskStreamIgnoredInFavorOfSubagentPanel(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "SPAWN", TaskID: "task-1", CallID: "call-1", Reset: true})
 	_, _ = m.Update(tuievents.ToolStreamMsg{
-		Tool:   "DELEGATE",
-		TaskID: "task-2",
-		CallID: "call-2",
+		Tool:   "SPAWN",
+		TaskID: "task-1",
+		CallID: "call-1",
 		Stream: "assistant",
-		Chunk:  "delegate-line\n",
+		Chunk:  "this duplicate preview should stay hidden\n",
+	})
+	// In the document model, SPAWN tool streams are suppressed (no BashPanelBlock for SPAWN).
+	if blockID := m.toolOutputBlockIDs["task-1"]; blockID != "" {
+		t.Fatalf("did not expect SPAWN tool-output panel in document, got block %s", blockID)
+	}
+
+	_, _ = m.Update(tuievents.SubagentStartMsg{
+		SpawnID:      "spawn-1",
+		AttachTarget: "child-1",
+		Agent:        "self",
+		CallID:       "call-1",
+	})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{
+		SpawnID: "spawn-1",
+		Stream:  "assistant",
+		Chunk:   "child output",
 	})
 
 	view := stripModelView(m)
-	bashIdx := strings.Index(view, "▸ BASH first")
-	bashLineIdx := strings.Index(view, "bash-line")
-	delegateCallIdx := strings.Index(view, "▸ DELEGATE second")
-	delegateLineIdx := strings.Index(view, "delegate-line")
-	if bashIdx < 0 || bashLineIdx < 0 || delegateCallIdx < 0 || delegateLineIdx < 0 {
-		t.Fatalf("expected call lines and anchored outputs, got:\n%s", view)
+	if strings.Count(view, "SPAWN demo task") != 1 {
+		t.Fatalf("expected single SPAWN call line, got:\n%s", view)
 	}
-	if !(bashIdx < bashLineIdx && bashLineIdx < delegateCallIdx && delegateCallIdx < delegateLineIdx) {
-		t.Fatalf("expected each tool output block below its own call line, got:\n%s", view)
+	if strings.Contains(view, "this duplicate preview should stay hidden") {
+		t.Fatalf("did not expect generic SPAWN tool preview in view, got:\n%s", view)
+	}
+	if !strings.Contains(view, "child output") {
+		t.Fatalf("expected subagent panel content visible, got:\n%s", view)
 	}
 }
 
@@ -3006,8 +2907,8 @@ func TestTextPasteFallbackShowsErrorHint(t *testing.T) {
 	if got := m.hint; got != "paste: clipboard unavailable" {
 		t.Fatalf("expected explicit paste error hint, got %q", got)
 	}
-	if len(m.historyLines) == 0 || !strings.Contains(ansi.Strip(m.historyLines[len(m.historyLines)-1]), "paste: clipboard unavailable") {
-		t.Fatalf("expected paste error logged in history, got %#v", m.historyLines)
+	if len(m.renderedStyledLines()) == 0 || !strings.Contains(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1]), "paste: clipboard unavailable") {
+		t.Fatalf("expected paste error logged in history, got %#v", m.renderedStyledLines())
 	}
 }
 
@@ -3294,10 +3195,10 @@ func TestSubmitLineIncludesAttachmentDisplayTokens(t *testing.T) {
 
 	_, _ = m.submitLine(line)
 
-	if len(m.historyLines) == 0 {
+	if len(m.renderedStyledLines()) == 0 {
 		t.Fatal("expected committed user history line")
 	}
-	got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1]))
+	got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1]))
 	want := "> [image: clipboard-a.png] Hi豆包[image: clipboard-b.png] 这两个是什么APP?"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
@@ -3521,8 +3422,8 @@ func TestEnterSubmitsMessageWhileRunning(t *testing.T) {
 	if len(called) != 1 || called[0] != "queued message" {
 		t.Fatalf("expected running message to be executed, got %+v", called)
 	}
-	if len(m.historyLines) != 0 {
-		t.Fatalf("expected running submit not to commit user line before runtime ack, got %+v", m.historyLines)
+	if len(m.renderedStyledLines()) != 0 {
+		t.Fatalf("expected running submit not to commit user line before runtime ack, got %+v", m.renderedStyledLines())
 	}
 	if m.pendingQueue == nil || m.pendingQueue.displayLine != "queued message" {
 		t.Fatalf("expected pending queue to show queued message, got %+v", m.pendingQueue)
@@ -3580,8 +3481,8 @@ func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
 	if got.Mode != SubmissionModeOverlay {
 		t.Fatalf("expected overlay submission mode, got %+v", got)
 	}
-	if len(m.historyLines) != 0 {
-		t.Fatalf("expected /btw not to commit history, got %+v", m.historyLines)
+	if len(m.renderedStyledLines()) != 0 {
+		t.Fatalf("expected /btw not to commit history, got %+v", m.renderedStyledLines())
 	}
 	if m.pendingQueue != nil {
 		t.Fatalf("expected /btw not to use pending queue, got %+v", m.pendingQueue)
@@ -3617,10 +3518,10 @@ func TestUserMessageMsgCommitsPendingUserLine(t *testing.T) {
 	if m.pendingQueue != nil {
 		t.Fatalf("expected pending queue cleared after commit, got %+v", m.pendingQueue)
 	}
-	if len(m.historyLines) == 0 {
+	if len(m.renderedStyledLines()) == 0 {
 		t.Fatal("expected committed user line after runtime ack")
 	}
-	got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1]))
+	got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1]))
 	if got != "> queued message" {
 		t.Fatalf("expected committed user line, got %q", got)
 	}
@@ -3720,17 +3621,17 @@ func TestInterruptedTaskResultDropsPartialAssistantOutput(t *testing.T) {
 	m.running = true
 
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "partial answer", Final: false})
-	if m.assistantBlock == nil {
+	if m.activeAssistantID == "" {
 		t.Fatal("expected partial assistant block before interrupt")
 	}
 
 	_, _ = m.Update(tuievents.TaskResultMsg{Interrupted: true})
 
-	if m.assistantBlock != nil {
+	if m.activeAssistantID != "" {
 		t.Fatal("expected assistant block cleared after interrupt")
 	}
-	if strings.Contains(strings.Join(m.historyLines, "\n"), "partial answer") {
-		t.Fatalf("expected partial answer removed after interrupt, got %#v", m.historyLines)
+	if strings.Contains(strings.Join(m.renderedStyledLines(), "\n"), "partial answer") {
+		t.Fatalf("expected partial answer removed after interrupt, got %#v", m.renderedStyledLines())
 	}
 }
 
@@ -3826,8 +3727,8 @@ func TestHistoryBufferAppend(t *testing.T) {
 
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* hello\n"})
 
-	if len(m.historyLines) == 0 {
-		t.Fatal("expected historyLines to be non-empty")
+	if len(m.renderedStyledLines()) == 0 {
+		t.Fatal("expected rendered lines to be non-empty")
 	}
 }
 
@@ -3866,7 +3767,7 @@ func TestToolCallSpacing_GapBetweenCalls_NoGapBeforeResult(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ build.sh\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ PATCH build.sh\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ PATCH +1 -1\n"})
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "\n·\n") {
 		t.Fatalf("did not expect synthetic dot spacer between tool calls, got %q", joined)
 	}
@@ -3885,7 +3786,7 @@ func TestWriteResultMergesIntoPriorCallLine(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WRITE build.sh\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WRITE +3 -0\n"})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if !strings.Contains(joined, "▸ WRITE build.sh +3 -0") {
 		t.Fatalf("expected write result merged into call line, got %q", joined)
 	}
@@ -3898,7 +3799,7 @@ func TestAssistantStreamAddsPrefixMarker(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "hello", Final: true})
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if !strings.Contains(joined, "* hello") {
 		t.Fatalf("expected assistant prefix marker, got %q", joined)
 	}
@@ -3914,17 +3815,17 @@ func TestViewportHardWrapLongLine(t *testing.T) {
 	}
 }
 
-func TestViewportCompactsDelegateCallLineByWidth(t *testing.T) {
+func TestViewportCompactsSpawnCallLineByWidth(t *testing.T) {
 	m := newTestModel()
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
-	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ DELEGATE sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"All done.\"\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"All done.\"\n"})
 
 	view := stripModelView(m)
-	if !strings.Contains(view, "▸ DELEGATE") {
-		t.Fatalf("expected delegate line visible, got:\n%s", view)
+	if !strings.Contains(view, "▸ SPAWN") {
+		t.Fatalf("expected spawn line visible, got:\n%s", view)
 	}
 	if !strings.Contains(view, "......") {
-		t.Fatalf("expected delegate line compacted with six-dot middle marker, got:\n%s", view)
+		t.Fatalf("expected spawn line compacted with six-dot middle marker, got:\n%s", view)
 	}
 }
 
@@ -4082,7 +3983,7 @@ func TestTransientRetryReplacement(t *testing.T) {
 		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: line})
 	}
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	// Only the latest retry should be visible.
 	if !strings.Contains(joined, "5/5") {
 		t.Fatalf("expected latest retry visible, got %q", joined)
@@ -4096,7 +3997,7 @@ func TestTransientRetryReplacement(t *testing.T) {
 	}
 	// Should occupy exactly 1 history line (the single transient slot).
 	count := 0
-	for _, l := range m.historyLines {
+	for _, l := range m.renderedStyledLines() {
 		if strings.Contains(ansi.Strip(l), "retrying") {
 			count++
 		}
@@ -4114,7 +4015,7 @@ func TestTransientWarnReplacement(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! second warning\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! third warning\n"})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if !strings.Contains(joined, "third warning") {
 		t.Fatalf("expected latest warn visible, got %q", joined)
 	}
@@ -4130,16 +4031,16 @@ func TestLogChunkKeepsAssistantAndToolBlocksContiguous(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* drafted a plan\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ SKILL.md\n"})
 
-	if len(m.historyLines) < 3 {
-		t.Fatalf("expected assistant and exploration block lines; got %d lines", len(m.historyLines))
+	if len(m.renderedStyledLines()) < 3 {
+		t.Fatalf("expected assistant and exploration block lines; got %d lines", len(m.renderedStyledLines()))
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[0])); got != "* drafted a plan" {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[0])); got != "* drafted a plan" {
 		t.Fatalf("unexpected first line %q", got)
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[1])); got != "▸ Exploring 1 files" {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[1])); got != "▸ Exploring 1 files" {
 		t.Fatalf("unexpected exploration title %q", got)
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[2])); got != "│ Read SKILL.md" {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[2])); got != "│ Read SKILL.md" {
 		t.Fatalf("unexpected exploration child line %q", got)
 	}
 }
@@ -4155,16 +4056,16 @@ func TestTaskResultAddsDividerAfterAgentTurn(t *testing.T) {
 	m.runStartedAt = time.Time{}
 	_, _ = m.Update(tuievents.TaskResultMsg{})
 
-	if len(m.historyLines) < 3 {
-		t.Fatalf("expected user, assistant, divider; got %d lines", len(m.historyLines))
+	if len(m.renderedStyledLines()) < 3 {
+		t.Fatalf("expected user, assistant, divider; got %d lines", len(m.renderedStyledLines()))
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])); !strings.Contains(got, "1.2s") || !strings.Contains(got, "─") {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1])); !strings.Contains(got, "1.2s") || !strings.Contains(got, "─") {
 		t.Fatalf("expected duration divider after completed turn, got %q", got)
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-2])); got != "* assistant reply" {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-2])); got != "* assistant reply" {
 		t.Fatalf("expected assistant line before divider, got %q", got)
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-3])); got != "> continue" {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-3])); got != "> continue" {
 		t.Fatalf("unexpected user line %q", got)
 	}
 }
@@ -4177,10 +4078,10 @@ func TestTaskResultDoesNotAddDividerForSlashCommand(t *testing.T) {
 	m.runStartedAt = time.Now().Add(-1500 * time.Millisecond)
 	_, _ = m.Update(tuievents.TaskResultMsg{})
 
-	if len(m.historyLines) != 1 {
-		t.Fatalf("expected slash command to avoid turn divider, got %d lines", len(m.historyLines))
+	if len(m.renderedStyledLines()) != 1 {
+		t.Fatalf("expected slash command to avoid turn divider, got %d lines", len(m.renderedStyledLines()))
 	}
-	if got := strings.TrimSpace(ansi.Strip(m.historyLines[0])); got != "> /status" {
+	if got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[0])); got != "> /status" {
 		t.Fatalf("unexpected slash command line %q", got)
 	}
 }
@@ -4190,8 +4091,8 @@ func TestBTWOverlayMessageDoesNotCommitConversationHistory(t *testing.T) {
 	resizeModel(m)
 
 	_, _ = m.submitLineWithDisplay("/btw config file name?", "/btw config file name?")
-	if len(m.historyLines) != 0 {
-		t.Fatalf("expected /btw submit to stay out of history, got %+v", m.historyLines)
+	if len(m.renderedStyledLines()) != 0 {
+		t.Fatalf("expected /btw submit to stay out of history, got %+v", m.renderedStyledLines())
 	}
 	if m.btwOverlay == nil {
 		t.Fatal("expected btw overlay to open")
@@ -4208,8 +4109,8 @@ func TestBTWOverlayMessageDoesNotCommitConversationHistory(t *testing.T) {
 	if m.btwOverlay == nil || m.btwOverlay.Answer != "caelis.toml" || m.btwOverlay.Loading {
 		t.Fatalf("expected btw overlay answer populated, got %+v", m.btwOverlay)
 	}
-	if len(m.historyLines) != 0 {
-		t.Fatalf("expected btw answer to stay out of history, got %+v", m.historyLines)
+	if len(m.renderedStyledLines()) != 0 {
+		t.Fatalf("expected btw answer to stay out of history, got %+v", m.renderedStyledLines())
 	}
 	view := stripModelView(m)
 	if strings.Contains(view, "BTW") || strings.Contains(view, "QUESTION:") {
@@ -4329,7 +4230,7 @@ func TestErrorAlwaysAppended(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "error: first failure\n"})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "error: second failure\n"})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if !strings.Contains(joined, "first failure") {
 		t.Fatalf("expected first error preserved, got %q", joined)
 	}
@@ -4349,7 +4250,7 @@ func TestRetryThenNonRetryBreaksTransient(t *testing.T) {
 	// New retry starts a fresh transient slot.
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "! retrying request (3/3)\n"})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if !strings.Contains(joined, "▸ Explored 1 files") {
 		t.Fatalf("expected read turn collapsed before next retry, got %q", joined)
 	}
@@ -4387,11 +4288,11 @@ func TestActiveExplorationBlockReRendersOnSpinnerTick(t *testing.T) {
 	m.running = true
 	m.startRunningAnimation()
 
-	before := m.historyLines[0]
+	before := m.renderedStyledLines()[0]
 	for i := 0; i < 3; i++ {
 		_, _ = m.Update(spinner.TickMsg{})
 	}
-	after := m.historyLines[0]
+	after := m.renderedStyledLines()[0]
 	if before == after {
 		t.Fatalf("expected active exploration header to animate on spinner ticks")
 	}
@@ -4437,7 +4338,7 @@ func TestLogBlockGapBetweenNarrativeAndTool(t *testing.T) {
 	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: "hello world", Final: true})
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ file.txt\n"})
 
-	joined := ansi.Strip(strings.Join(m.historyLines, "\n"))
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "\n·\n") {
 		t.Fatalf("did not expect synthetic dot spacer between assistant and tool, got %q", joined)
 	}
@@ -4646,7 +4547,7 @@ func TestAdjacentTaskMonitorSummariesMergeIntoOneLine(t *testing.T) {
 	_, _ = m.Update(tuievents.TaskResultMsg{})
 
 	view := stripModelView(m)
-	if len(m.historyLines) != 1 {
+	if len(m.renderedStyledLines()) != 1 {
 		t.Fatalf("expected adjacent task summaries merged into one line, got:\n%s", view)
 	}
 	if !strings.Contains(view, "Checked 1 tasks, Checked 1 tasks, Checked 2 tasks") {

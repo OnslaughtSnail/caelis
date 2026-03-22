@@ -10,7 +10,7 @@ import (
 type ErrorCode string
 
 const (
-	ErrorCodeSessionBusy          ErrorCode = "ERR_SESSION_BUSY"
+	ErrorCodeSessionBusy           ErrorCode = "ERR_SESSION_BUSY"
 	ErrorCodeApprovalRequired      ErrorCode = "ERR_APPROVAL_REQUIRED"
 	ErrorCodeApprovalAborted       ErrorCode = "ERR_APPROVAL_ABORTED"
 	ErrorCodeSandboxUnsupported    ErrorCode = "ERR_SANDBOX_UNSUPPORTED"

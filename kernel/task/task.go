@@ -11,13 +11,14 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
 )
 
 type Kind string
 
 const (
-	KindBash     Kind = "bash"
-	KindDelegate Kind = "delegate"
+	KindBash  Kind = "bash"
+	KindSpawn Kind = "spawn"
 )
 
 type State string
@@ -66,9 +67,13 @@ type BashStartRequest struct {
 	SandboxPolicyOverride *toolexec.SandboxPolicy
 }
 
-type DelegateStartRequest struct {
-	Task  string
-	Yield time.Duration
+type SpawnStartRequest struct {
+	Agent        string
+	Task         string
+	ContentParts []model.ContentPart
+	Yield        time.Duration
+	Timeout      time.Duration
+	Kind         Kind // defaults to KindSpawn if empty
 }
 
 type ControlRequest struct {
@@ -79,7 +84,7 @@ type ControlRequest struct {
 
 type Manager interface {
 	StartBash(context.Context, BashStartRequest) (Snapshot, error)
-	StartDelegate(context.Context, DelegateStartRequest) (Snapshot, error)
+	StartSpawn(context.Context, SpawnStartRequest) (Snapshot, error)
 	Wait(context.Context, ControlRequest) (Snapshot, error)
 	Status(context.Context, ControlRequest) (Snapshot, error)
 	Write(context.Context, ControlRequest) (Snapshot, error)
@@ -342,9 +347,31 @@ func cloneMap(input map[string]any) map[string]any {
 	}
 	out := make(map[string]any, len(input))
 	for key, value := range input {
-		out[key] = value
+		out[key] = cloneValue(value)
 	}
 	return out
+}
+
+func cloneSlice(input []any) []any {
+	if len(input) == 0 {
+		return nil
+	}
+	out := make([]any, len(input))
+	for i, value := range input {
+		out[i] = cloneValue(value)
+	}
+	return out
+}
+
+func cloneValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMap(typed)
+	case []any:
+		return cloneSlice(typed)
+	default:
+		return typed
+	}
 }
 
 func CloneEntry(in *Entry) *Entry {

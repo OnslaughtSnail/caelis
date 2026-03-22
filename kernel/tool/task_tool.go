@@ -27,7 +27,7 @@ func (t *taskTool) Name() string {
 }
 
 func (t *taskTool) Description() string {
-	return "Control a long-running task created by BASH, DELEGATE, or future async tools. Use wait/status/write/cancel/list with task_id."
+	return "Control a long-running task created by BASH, SPAWN, or future async tools. Use wait/status/write/cancel/list with task_id."
 }
 
 func (t *taskTool) Declaration() model.ToolDefinition {
@@ -94,14 +94,11 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
 		}
-		startedAt := time.Now()
 		snapshot, err := manager.Wait(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		result := AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot)
-		result["waited_ms"] = int(time.Since(startedAt).Milliseconds())
-		return result, nil
+		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
 	case "status":
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
@@ -115,14 +112,11 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
 		}
-		startedAt := time.Now()
 		snapshot, err := manager.Write(ctx, req)
 		if err != nil {
 			return nil, err
 		}
-		result := AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot)
-		result["waited_ms"] = int(time.Since(startedAt).Milliseconds())
-		return result, nil
+		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
 	case "cancel":
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
@@ -139,11 +133,10 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		}
 		out := make([]map[string]any, 0, len(items))
 		for _, item := range items {
-			out = append(out, SnapshotResultMap(item))
+			out = append(out, CompactTaskListItem(item))
 		}
 		return map[string]any{
 			"tasks": out,
-			"count": len(out),
 		}, nil
 	default:
 		return nil, fmt.Errorf("tool: invalid action %q", action)

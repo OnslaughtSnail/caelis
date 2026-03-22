@@ -27,9 +27,15 @@ func TestRingBuffer_Wraparound(t *testing.T) {
 	rb := NewRingBuffer(10)
 
 	// Write more than capacity
-	rb.Write([]byte("12345"))
-	rb.Write([]byte("67890"))
-	rb.Write([]byte("abc"))
+	if _, err := rb.Write([]byte("12345")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if _, err := rb.Write([]byte("67890")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if _, err := rb.Write([]byte("abc")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
 
 	// Should keep the last 10 characters
 	data := rb.ReadAll()
@@ -43,11 +49,15 @@ func TestRingBuffer_Wraparound(t *testing.T) {
 func TestRingBuffer_ReadNewSince(t *testing.T) {
 	rb := NewRingBuffer(100)
 
-	rb.Write([]byte("first"))
+	if _, err := rb.Write([]byte("first")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
 	marker := rb.TotalWritten()
 
-	rb.Write([]byte("second"))
-	
+	if _, err := rb.Write([]byte("second")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
 	newData, newMarker := rb.ReadNewSince(marker)
 	if string(newData) != "second" {
 		t.Fatalf("Expected 'second', got %q", string(newData))
@@ -62,7 +72,9 @@ func TestRingBuffer_LargeWrite(t *testing.T) {
 
 	// Write data larger than capacity
 	largeData := []byte("this is a very long string that exceeds the buffer capacity")
-	rb.Write(largeData)
+	if _, err := rb.Write(largeData); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
 
 	// Should only keep the last 10 bytes
 	data := rb.ReadAll()
@@ -72,5 +84,30 @@ func TestRingBuffer_LargeWrite(t *testing.T) {
 	expected := largeData[len(largeData)-10:]
 	if string(data) != string(expected) {
 		t.Fatalf("Expected %q, got %q", string(expected), string(data))
+	}
+	if got := rb.DroppedBytes(); got != int64(len(largeData)-10) {
+		t.Fatalf("expected dropped=%d, got %d", len(largeData)-10, got)
+	}
+	if got := rb.EarliestMarker(); got != int64(len(largeData)-10) {
+		t.Fatalf("expected earliest marker=%d, got %d", len(largeData)-10, got)
+	}
+}
+
+func TestRingBuffer_DroppedBytesAcrossWraparound(t *testing.T) {
+	rb := NewRingBuffer(5)
+	if _, err := rb.Write([]byte("abcde")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if _, err := rb.Write([]byte("fg")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if got := string(rb.ReadAll()); got != "cdefg" {
+		t.Fatalf("expected retained tail, got %q", got)
+	}
+	if got := rb.DroppedBytes(); got != 2 {
+		t.Fatalf("expected dropped=2, got %d", got)
+	}
+	if got := rb.EarliestMarker(); got != 2 {
+		t.Fatalf("expected earliest marker=2, got %d", got)
 	}
 }

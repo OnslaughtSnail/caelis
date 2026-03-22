@@ -136,6 +136,34 @@ func TestLookupModelCapabilities_Gemini(t *testing.T) {
 	}
 }
 
+func TestLookupModelCapabilities_MimoPro(t *testing.T) {
+	caps, found := LookupModelCapabilities("xiaomi", "mimo-v2-pro")
+	if !found {
+		t.Fatal("expected match for mimo-v2-pro")
+	}
+	if caps.ContextWindowTokens != 1048576 {
+		t.Fatalf("expected context 1048576, got %d", caps.ContextWindowTokens)
+	}
+	if caps.MaxOutputTokens != 131072 {
+		t.Fatalf("expected max output 131072, got %d", caps.MaxOutputTokens)
+	}
+	if caps.DefaultMaxOutputTokens != 32768 {
+		t.Fatalf("expected default max output 32768, got %d", caps.DefaultMaxOutputTokens)
+	}
+	if !caps.SupportsToolCalls {
+		t.Fatal("mimo-v2-pro should support tool calls")
+	}
+	if !caps.SupportsReasoning {
+		t.Fatal("mimo-v2-pro should support reasoning")
+	}
+	if caps.SupportsImages {
+		t.Fatal("mimo-v2-pro should not be treated as an image model")
+	}
+	if caps.ReasoningMode != ReasoningModeToggle {
+		t.Fatalf("expected toggle reasoning mode, got %q", caps.ReasoningMode)
+	}
+}
+
 func TestApplyConfigDefaults_FillsDefaults(t *testing.T) {
 	cfg := &modelproviders.Config{
 		Provider: "deepseek",

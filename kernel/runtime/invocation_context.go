@@ -3,7 +3,7 @@ package runtime
 import (
 	"context"
 
-	"github.com/OnslaughtSnail/caelis/kernel/delegation"
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -19,7 +19,7 @@ type invocationContext struct {
 	tools    []tool.Tool
 	toolMap  map[string]tool.Tool
 	policies []policy.Hook
-	runner   delegation.Runner
+	runner   agent.SubagentRunner
 	tasks    *runtimeTaskManager
 	overlay  bool
 }
@@ -61,6 +61,6 @@ func (c *invocationContext) Policies() []policy.Hook {
 	return out
 }
 
-func (c *invocationContext) SubagentRunner() delegation.Runner {
+func (c *invocationContext) SubagentRunner() agent.SubagentRunner {
 	return c.runner
 }

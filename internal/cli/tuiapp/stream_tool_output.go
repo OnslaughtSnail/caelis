@@ -1,23 +1,108 @@
 package tuiapp
 
 import (
-	"image/color"
 	"strconv"
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
-	"github.com/charmbracelet/x/ansi"
 )
 
-func (m *Model) toolOutputKey(msg tuievents.TaskStreamMsg) string {
-	if taskID := strings.TrimSpace(msg.TaskID); taskID != "" {
-		return taskID
+// resolveCallAnchor returns the block ID of the tool-call TranscriptBlock
+// ("▸ TOOLNAME ...") that corresponds to the given callID and toolName.
+// It first checks the stable callAnchorIndex; if not found, it claims the
+// oldest pending anchor matching toolName (FIFO).
+func (m *Model) resolveCallAnchor(callID, toolName string) string {
+	if m.callAnchorIndex == nil {
+		m.callAnchorIndex = map[string]string{}
 	}
-	if callID := strings.TrimSpace(msg.CallID); callID != "" {
+	if callID != "" {
+		if bid, ok := m.callAnchorIndex[callID]; ok {
+			return bid
+		}
+	}
+	// Claim oldest pending anchor matching the tool name.
+	normalized := strings.ToUpper(strings.TrimSpace(toolName))
+	for i, a := range m.pendingToolAnchors {
+		if strings.EqualFold(a.toolName, normalized) {
+			m.pendingToolAnchors = append(m.pendingToolAnchors[:i], m.pendingToolAnchors[i+1:]...)
+			if callID != "" {
+				m.callAnchorIndex[callID] = a.blockID
+			}
+			return a.blockID
+		}
+	}
+	// No matching anchor by name — claim the oldest one (best-effort).
+	if len(m.pendingToolAnchors) > 0 {
+		a := m.pendingToolAnchors[0]
+		m.pendingToolAnchors = m.pendingToolAnchors[1:]
+		if callID != "" {
+			m.callAnchorIndex[callID] = a.blockID
+		}
+		return a.blockID
+	}
+	return ""
+}
+
+// extractToolCallName extracts the tool name from a "▸ TOOLNAME ..." log line.
+// Returns the name and true if the line is a tool call start; empty and false otherwise.
+func extractToolCallName(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "▸") {
+		return "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "▸"))
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return "", false
+	}
+	return strings.ToUpper(fields[0]), true
+}
+
+// panelProducingTools lists the tool names that generate companion panels.
+// Only these tools are tracked as pending anchors; others (READ, WRITE, etc.)
+// are one-shot transcript lines that never need a panel insertion point.
+var panelProducingTools = map[string]bool{
+	"BASH":  true,
+	"SPAWN": true,
+}
+
+func (m *Model) toolOutputKey(msg tuievents.TaskStreamMsg) string {
+	taskID := strings.TrimSpace(msg.TaskID)
+	callID := strings.TrimSpace(msg.CallID)
+	hasOriginPanel := callID != "" && m.findBashPanelBlock(callID) != nil
+
+	// Register taskID → callID mapping when both are present.
+	// The kernel's task_snapshot sets CallID == TaskID, so the first event
+	// from a yielded task is self-referential.  bash_watch.go later sends
+	// the real original BASH CallID.  Accept a mapping update when:
+	//   1. No mapping exists yet, OR
+	//   2. The existing mapping is self-referential (callID == taskID) and
+	//      the incoming callID is genuinely different (the real origin).
+	// Ignore TASK/status response IDs unless they already resolve to an
+	// existing origin panel; otherwise they can poison taskID → callID.
+	if taskID != "" && callID != "" {
+		if m.taskOriginCallID == nil {
+			m.taskOriginCallID = map[string]string{}
+		}
+		existing, mapped := m.taskOriginCallID[taskID]
+		switch {
+		case !mapped && (callID == taskID || hasOriginPanel):
+			m.taskOriginCallID[taskID] = callID
+		case existing == taskID && callID != taskID && hasOriginPanel:
+			m.taskOriginCallID[taskID] = callID
+		}
+	}
+
+	// Resolve taskID to origin callID if mapped.
+	if taskID != "" {
+		if origin, ok := m.taskOriginCallID[taskID]; ok {
+			return origin
+		}
+	}
+
+	if callID != "" {
 		return callID
 	}
 	toolName := strings.TrimSpace(msg.Label)
@@ -27,65 +112,166 @@ func (m *Model) toolOutputKey(msg tuievents.TaskStreamMsg) string {
 	return toolName
 }
 
-func (m *Model) ensureToolOutputPanel(key, toolName, callID string, reset bool) *toolOutputState {
+// findBashPanelBlock looks up an existing BASH panel by key without creating one.
+func (m *Model) findBashPanelBlock(key string) *BashPanelBlock {
+	key = strings.TrimSpace(key)
+	if key == "" || m.toolOutputBlockIDs == nil {
+		return nil
+	}
+	blockID, ok := m.toolOutputBlockIDs[key]
+	if !ok {
+		return nil
+	}
+	block := m.doc.Find(blockID)
+	if block == nil {
+		return nil
+	}
+	bp, _ := block.(*BashPanelBlock)
+	return bp
+}
+
+func (m *Model) ensureBashPanelBlock(key, toolName, callID string, reset bool) *BashPanelBlock {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return nil
 	}
-	if m.toolOutputs == nil {
-		m.toolOutputs = map[string]*toolOutputState{}
+	if m.toolOutputBlockIDs == nil {
+		m.toolOutputBlockIDs = map[string]string{}
 	}
-	panel, ok := m.toolOutputs[key]
-	if !ok || reset {
-		now := time.Now()
-		panel = &toolOutputState{
-			key:       key,
-			tool:      strings.TrimSpace(toolName),
-			callID:    strings.TrimSpace(callID),
-			start:     len(m.historyLines),
-			end:       len(m.historyLines),
-			startedAt: now,
-			updatedAt: now,
+	blockID, ok := m.toolOutputBlockIDs[key]
+	if ok && !reset {
+		block := m.doc.Find(blockID)
+		if block != nil {
+			if bp, ok := block.(*BashPanelBlock); ok {
+				if strings.TrimSpace(bp.ToolName) == "" {
+					bp.ToolName = strings.TrimSpace(toolName)
+				}
+				if strings.TrimSpace(bp.CallID) == "" {
+					bp.CallID = strings.TrimSpace(callID)
+				}
+				m.syncInlineBashAnchorState(bp)
+				return bp
+			}
 		}
-		m.toolOutputs[key] = panel
+	}
+	bp := NewBashPanelBlock(toolName, callID)
+	bp.Key = key
+	// Anchor panel after its specific tool call line.
+	anchorID := m.resolveCallAnchor(callID, toolName)
+	if anchorID != "" {
+		m.doc.InsertAfter(anchorID, bp)
 	} else {
-		if strings.TrimSpace(panel.tool) == "" {
-			panel.tool = strings.TrimSpace(toolName)
-		}
-		if strings.TrimSpace(panel.callID) == "" {
-			panel.callID = strings.TrimSpace(callID)
-		}
+		m.doc.Append(bp)
 	}
-	panel.closing = false
-	panel.fadeStep = 0
-	panel.finalizedAt = time.Time{}
-	return panel
+	m.toolOutputBlockIDs[key] = bp.BlockID()
+	m.syncInlineBashAnchorState(bp)
+	return bp
 }
 
-func (m *Model) applyToolOutputState(panel *toolOutputState, state string, final bool) {
+func (m *Model) applyBashPanelState(panel *BashPanelBlock, state string, final bool) {
 	if panel == nil {
 		return
 	}
 	normalized := normalizeToolOutputState(state)
 	if normalized != "" {
-		panel.state = normalized
+		panel.State = normalized
 	}
-	switch panel.state {
+	now := time.Now()
+	switch panel.State {
 	case "running", "waiting_approval", "waiting_input":
-		panel.active = true
+		panel.Active = true
+		panel.EndedAt = time.Time{}
 	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
-		panel.active = false
+		panel.Active = false
+		if panel.EndedAt.IsZero() {
+			panel.EndedAt = now
+		}
 	}
 	if final {
-		panel.active = false
+		panel.Active = false
+		if panel.EndedAt.IsZero() {
+			panel.EndedAt = now
+		}
 	}
+	panel.UpdatedAt = now
+	m.syncInlineBashAnchorState(panel)
+}
+
+func isTerminalToolOutputState(state string) bool {
+	switch normalizeToolOutputState(state) {
+	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) findInlineBashPanelByAnchorBlockID(blockID string) *BashPanelBlock {
+	blockID = strings.TrimSpace(blockID)
+	if blockID == "" {
+		return nil
+	}
+	for callID, anchorID := range m.callAnchorIndex {
+		if strings.TrimSpace(anchorID) != blockID {
+			continue
+		}
+		panel := m.findBashPanelBlock(callID)
+		if isInlineBashPanel(panel) {
+			return panel
+		}
+	}
+	return nil
+}
+
+func (m *Model) syncInlineBashAnchorState(panel *BashPanelBlock) {
+	if !isInlineBashPanel(panel) || m == nil {
+		return
+	}
+	callID := strings.TrimSpace(panel.CallID)
+	if callID == "" {
+		return
+	}
+	anchorID := strings.TrimSpace(m.callAnchorIndex[callID])
+	if anchorID == "" {
+		return
+	}
+	tb := m.findTranscriptBlock(anchorID)
+	if tb == nil {
+		return
+	}
+	tb.Raw = inlineBashAnchorLabel(tb.Raw, panel.Expanded)
+}
+
+func inlineBashAnchorLabel(raw string, expanded bool) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return raw
+	}
+	prefix := ""
+	rest := trimmed
+	for _, candidate := range []string{"▸", "▾", "▶"} {
+		if strings.HasPrefix(trimmed, candidate) {
+			prefix = candidate
+			rest = strings.TrimSpace(strings.TrimPrefix(trimmed, candidate))
+			break
+		}
+	}
+	if prefix == "" {
+		return raw
+	}
+	next := "▸"
+	if expanded {
+		next = "▾"
+	}
+	leading := raw[:strings.Index(raw, trimmed)]
+	return leading + next + " " + rest
 }
 
 func (m *Model) clearToolOutputPanels() {
-	m.toolOutputs = nil
+	m.toolOutputBlockIDs = nil
 }
 
-func (m *Model) appendToolOutputChunk(panel *toolOutputState, stream, chunk string) {
+func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string) {
 	if panel == nil {
 		return
 	}
@@ -95,32 +281,32 @@ func (m *Model) appendToolOutputChunk(panel *toolOutputState, stream, chunk stri
 	if stream == "" {
 		stream = "stdout"
 	}
-	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
+	if isSpawnLikeTool(panel.ToolName) {
 		switch stream {
 		case "reasoning":
-			panel.reasoningPartial = m.consumeDelegatePreviewChunk(panel, panel.reasoningPartial, normalized, stream)
+			panel.ReasoningPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.ReasoningPartial, normalized, stream)
 		case "assistant":
-			panel.assistantPartial = m.consumeDelegatePreviewChunk(panel, panel.assistantPartial, normalized, stream)
+			panel.AssistantPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.AssistantPartial, normalized, stream)
 		case "stderr":
-			panel.stderrPartial = m.consumeDelegatePreviewChunk(panel, panel.stderrPartial, normalized, stream)
+			panel.StderrPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.StderrPartial, normalized, stream)
 		default:
-			panel.stdoutPartial = m.consumeToolOutputChunk(panel, panel.stdoutPartial, normalized, stream)
+			panel.StdoutPartial = m.consumeToolOutputChunkBlock(panel, panel.StdoutPartial, normalized, stream)
 		}
-		panel.lastStream = stream
-		panel.updatedAt = time.Now()
+		panel.LastStream = stream
+		panel.UpdatedAt = time.Now()
 		return
 	}
 	switch stream {
 	case "stderr":
-		panel.stderrPartial = m.consumeToolOutputChunk(panel, panel.stderrPartial, normalized, stream)
+		panel.StderrPartial = m.consumeToolOutputChunkBlock(panel, panel.StderrPartial, normalized, stream)
 	default:
-		panel.stdoutPartial = m.consumeToolOutputChunk(panel, panel.stdoutPartial, normalized, stream)
+		panel.StdoutPartial = m.consumeToolOutputChunkBlock(panel, panel.StdoutPartial, normalized, stream)
 	}
-	panel.lastStream = stream
-	panel.updatedAt = time.Now()
+	panel.LastStream = stream
+	panel.UpdatedAt = time.Now()
 }
 
-func (m *Model) consumeDelegatePreviewChunk(panel *toolOutputState, partial, chunk, stream string) string {
+func (m *Model) consumeSubagentPreviewChunkBlock(panel *BashPanelBlock, partial, chunk, stream string) string {
 	if chunk == "" {
 		return partial
 	}
@@ -132,20 +318,20 @@ func (m *Model) consumeDelegatePreviewChunk(panel *toolOutputState, partial, chu
 		}
 		line := strings.TrimRight(buf[:idx], "\r")
 		buf = buf[idx+1:]
-		if shouldSkipDelegatePreviewLine(panel, line) {
+		if shouldSkipSubagentPreviewLineBlock(panel, line) {
 			continue
 		}
-		if formatted := formatDelegatePreviewText(line, stream); formatted != "" {
-			m.appendDelegatePreviewLine(panel, formatted, stream)
+		if formatted := formatSubagentPreviewText(line, stream); formatted != "" {
+			m.appendSubagentPreviewLineBlock(panel, formatted, stream)
 		}
 	}
-	if len(panel.lines) > toolOutputPreviewLines*3 {
-		panel.lines = append([]toolOutputLine(nil), panel.lines[len(panel.lines)-(toolOutputPreviewLines*3):]...)
+	if len(panel.Lines) > toolOutputPreviewLines*3 {
+		panel.Lines = append([]toolOutputLine(nil), panel.Lines[len(panel.Lines)-(toolOutputPreviewLines*3):]...)
 	}
 	return buf
 }
 
-func (m *Model) appendDelegatePreviewLine(panel *toolOutputState, text string, stream string) {
+func (m *Model) appendSubagentPreviewLineBlock(panel *BashPanelBlock, text string, stream string) {
 	if panel == nil {
 		return
 	}
@@ -153,30 +339,30 @@ func (m *Model) appendDelegatePreviewLine(panel *toolOutputState, text string, s
 	if text == "" {
 		return
 	}
-	if len(panel.lines) > 0 {
-		last := &panel.lines[len(panel.lines)-1]
-		if canMergeDelegatePreviewLine(last, text, stream) {
+	if len(panel.Lines) > 0 {
+		last := &panel.Lines[len(panel.Lines)-1]
+		if canMergeSubagentPreviewLine(last, text, stream) {
 			last.text = strings.TrimSpace(last.text) + " " + text
 			return
 		}
 	}
-	panel.lines = append(panel.lines, toolOutputLine{text: text, stream: stream})
+	panel.Lines = append(panel.Lines, toolOutputLine{text: text, stream: stream})
 }
 
-func canMergeDelegatePreviewLine(last *toolOutputLine, nextText string, stream string) bool {
+func canMergeSubagentPreviewLine(last *toolOutputLine, nextText string, stream string) bool {
 	if last == nil {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(last.stream), strings.TrimSpace(stream)) {
 		return false
 	}
-	if !isDelegateParagraphText(last.text) || !isDelegateParagraphText(nextText) {
+	if !isSubagentParagraphText(last.text) || !isSubagentParagraphText(nextText) {
 		return false
 	}
 	return true
 }
 
-func isDelegateParagraphText(text string) bool {
+func isSubagentParagraphText(text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return false
@@ -194,7 +380,7 @@ func isDelegateParagraphText(text string) bool {
 	return true
 }
 
-func (m *Model) consumeToolOutputChunk(panel *toolOutputState, partial, chunk, stream string) string {
+func (m *Model) consumeToolOutputChunkBlock(panel *BashPanelBlock, partial, chunk, stream string) string {
 	if chunk == "" {
 		return partial
 	}
@@ -209,277 +395,27 @@ func (m *Model) consumeToolOutputChunk(panel *toolOutputState, partial, chunk, s
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if shouldSkipDelegatePreviewLine(panel, line) {
+		if shouldSkipSubagentPreviewLineBlock(panel, line) {
 			continue
 		}
-		panel.lines = append(panel.lines, toolOutputLine{text: line, stream: stream})
+		panel.Lines = append(panel.Lines, toolOutputLine{text: line, stream: stream})
 	}
-	if len(panel.lines) > toolOutputPreviewLines {
-		panel.lines = append([]toolOutputLine(nil), panel.lines[len(panel.lines)-toolOutputPreviewLines:]...)
+	if len(panel.Lines) > toolOutputHistoryLines {
+		panel.Lines = append([]toolOutputLine(nil), panel.Lines[len(panel.Lines)-toolOutputHistoryLines:]...)
 	}
 	return buf
 }
 
-func shouldSkipDelegatePreviewLine(panel *toolOutputState, line string) bool {
-	if panel == nil || !strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
+func shouldSkipSubagentPreviewLineBlock(panel *BashPanelBlock, line string) bool {
+	if panel == nil || !isSpawnLikeTool(panel.ToolName) {
 		return false
 	}
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "```") {
-		panel.delegateFence = !panel.delegateFence
+		panel.SubagentFence = !panel.SubagentFence
 		return true
 	}
-	return panel.delegateFence
-}
-
-func (m *Model) currentToolOutputLines(panel *toolOutputState) []toolOutputLine {
-	if panel == nil {
-		return nil
-	}
-	content := append([]toolOutputLine(nil), panel.lines...)
-	if partial := strings.TrimSpace(panel.stdoutPartial); partial != "" {
-		content = append(content, toolOutputLine{text: partial, stream: "stdout"})
-	}
-	if partial := strings.TrimSpace(panel.stderrPartial); partial != "" && !strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-		content = append(content, toolOutputLine{text: partial, stream: "stderr"})
-	}
-	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-		if partial := formatDelegatePreviewText(panel.reasoningPartial, "reasoning"); partial != "" {
-			content = append(content, toolOutputLine{text: partial, stream: "reasoning"})
-		}
-		if partial := formatDelegatePreviewText(panel.assistantPartial, "assistant"); partial != "" {
-			content = append(content, toolOutputLine{text: partial, stream: "assistant"})
-		}
-		if partial := formatDelegatePreviewText(panel.stderrPartial, "stderr"); partial != "" {
-			content = append(content, toolOutputLine{text: partial, stream: "stderr"})
-		}
-	}
-	filtered := content[:0]
-	for _, line := range content {
-		if strings.TrimSpace(line.text) == "" {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-			switch strings.ToLower(strings.TrimSpace(line.stream)) {
-			case "assistant", "reasoning", "stderr":
-			default:
-				continue
-			}
-		}
-		filtered = append(filtered, line)
-	}
-	content = filtered
-	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-		content = prioritizeDelegatePreviewLines(content, toolOutputPreviewLines)
-		return m.applyClosingToolOutputWindow(panel, content)
-	}
-	if len(content) > toolOutputPreviewLines {
-		content = content[len(content)-toolOutputPreviewLines:]
-	}
-	return m.applyClosingToolOutputWindow(panel, content)
-}
-
-func (m *Model) applyClosingToolOutputWindow(panel *toolOutputState, content []toolOutputLine) []toolOutputLine {
-	if panel == nil || !panel.closing || panel.fadeStep <= 0 || len(content) == 0 {
-		return content
-	}
-	visible := len(content) - panel.fadeStep
-	if visible <= 0 {
-		return nil
-	}
-	if visible >= len(content) {
-		return content
-	}
-	return content[len(content)-visible:]
-}
-
-func (m *Model) renderToolOutputBlockLines(panel *toolOutputState, content []toolOutputLine) []string {
-	if len(content) == 0 {
-		return nil
-	}
-	lines := make([]string, 0, len(content)+1)
-	panelInnerWidth := maxInt(1, m.viewport.Width()-4)
-	if header := m.renderToolOutputHeaderLine(panel, panelInnerWidth); header != "" {
-		lines = append(lines, header)
-	}
-	for _, line := range content {
-		text, prefix, style := m.renderToolOutputLine(panel, line)
-		availableTextWidth := maxInt(1, panelInnerWidth-displayColumns(prefix))
-		wrapped := []string{text}
-		if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-			wrapped = wrapToolOutputText(text, availableTextWidth)
-		} else if displayColumns(text) > availableTextWidth {
-			if availableTextWidth == 1 {
-				wrapped = []string{"…"}
-			} else {
-				wrapped = []string{sliceByDisplayColumns(text, 0, availableTextWidth-1) + "…"}
-			}
-		}
-		for _, segment := range wrapped {
-			lines = append(lines, style.Width(panelInnerWidth).Render(prefix+segment))
-			prefix = strings.Repeat(" ", displayColumns(prefix))
-		}
-	}
-	boxStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(m.toolOutputBorderColor(panel)).
-		Padding(0, 1).
-		Faint(panel != nil && panel.closing).
-		Width(panelInnerWidth)
-	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
-}
-
-func (m *Model) syncAnchoredToolOutputBlock(panel *toolOutputState) {
-	if panel == nil {
-		return
-	}
-	content := m.currentToolOutputLines(panel)
-	lines := m.renderToolOutputBlockLines(panel, content)
-	oldLen := panel.end - panel.start
-	m.replaceHistoryRange(panel.start, panel.end, lines)
-	panel.end = panel.start + len(lines)
-	delta := len(lines) - oldLen
-	if delta != 0 {
-		m.shiftAnchoredBlocks(panel.end-delta, delta, panel.key)
-	}
-	m.syncViewportContent()
-}
-
-func (m *Model) beginFinalizeToolOutputBlock(panel *toolOutputState) tea.Cmd {
-	if panel == nil {
-		return nil
-	}
-	content := m.currentToolOutputLines(panel)
-	if len(content) == 0 {
-		m.finalizeToolOutputBlock(panel)
-		return nil
-	}
-	panel.active = false
-	panel.closing = true
-	panel.fadeStep = 0
-	panel.fadeQueued = false
-	panel.fadeLineCount = len(content)
-	panel.finalizedAt = time.Now()
-	m.syncAnchoredToolOutputBlock(panel)
-	return nil
-}
-
-func (m *Model) finalizeToolOutputBlock(panel *toolOutputState) {
-	if panel == nil {
-		return
-	}
-	oldLen := panel.end - panel.start
-	m.replaceHistoryRange(panel.start, panel.end, nil)
-	delta := -oldLen
-	delete(m.toolOutputs, panel.key)
-	if delta != 0 {
-		m.shiftAnchoredBlocks(panel.end, delta, panel.key)
-	}
-	m.refreshHistoryTailState()
-	m.syncViewportContent()
-}
-
-func toolOutputFadeCmd(key string, step int, after time.Duration) tea.Cmd {
-	key = strings.TrimSpace(key)
-	if key == "" || step <= 0 || after <= 0 {
-		return nil
-	}
-	return tea.Tick(after, func(time.Time) tea.Msg {
-		return toolOutputFadeMsg{key: key, step: step}
-	})
-}
-
-func (m *Model) handleToolOutputFadeMsg(msg toolOutputFadeMsg) (tea.Model, tea.Cmd) {
-	if m == nil || m.toolOutputs == nil {
-		return m, nil
-	}
-	panel, ok := m.toolOutputs[strings.TrimSpace(msg.key)]
-	if !ok || panel == nil || !panel.closing {
-		return m, nil
-	}
-	panel.fadeQueued = false
-	if panel.fadeLineCount <= 0 {
-		panel.fadeLineCount = len(m.currentToolOutputLines(panel))
-	}
-	if msg.step >= panel.fadeLineCount {
-		m.finalizeToolOutputBlock(panel)
-		return m, nil
-	}
-	panel.fadeStep = msg.step
-	m.syncAnchoredToolOutputBlock(panel)
-	panel.fadeQueued = true
-	return m, toolOutputFadeCmd(panel.key, msg.step+1, toolOutputFadeInterval)
-}
-
-func (m *Model) renderToolOutputLine(panel *toolOutputState, line toolOutputLine) (text string, prefix string, style lipgloss.Style) {
-	text = tuikit.LinkifyText(strings.TrimSpace(line.text), m.theme.LinkStyle())
-	prefix = "  "
-	style = lipgloss.NewStyle().Foreground(m.theme.TextPrimary)
-	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-		return text, "  ", m.applyToolOutputFadeStyle(panel, style)
-	}
-	stream := strings.ToLower(strings.TrimSpace(line.stream))
-	if stream == "stderr" {
-		return text, "! ", m.theme.ErrorStyle()
-	}
-	style = m.applyToolOutputFadeStyle(panel, style)
-	return text, prefix, style
-}
-
-func (m *Model) renderToolOutputHeaderLine(panel *toolOutputState, width int) string {
-	if panel == nil || width <= 0 {
-		return ""
-	}
-	right := m.theme.HelpHintTextStyle().Render(m.toolOutputMeta(panel))
-	if strings.EqualFold(strings.TrimSpace(panel.tool), "DELEGATE") {
-		return composeStyledFooter(width, "", right)
-	}
-	tool := strings.ToUpper(strings.TrimSpace(panel.tool))
-	if tool == "" {
-		tool = "TASK"
-	}
-	left := m.theme.KeyLabelStyle().Bold(true).Render(tool)
-	return composeStyledFooter(width, left, right)
-}
-
-func (m *Model) toolOutputStatus(panel *toolOutputState) (string, lipgloss.Style) {
-	if panel == nil {
-		return "", m.theme.HelpHintTextStyle()
-	}
-	switch panel.state {
-	case "running":
-		return "running", m.theme.AssistantStyle().Bold(true)
-	case "waiting_approval":
-		return "approval", m.theme.WarnStyle().Bold(true)
-	case "waiting_input":
-		return "input", m.theme.HelpHintTextStyle().Bold(true)
-	case "completed":
-		return "done", m.theme.HelpHintTextStyle()
-	case "failed":
-		return "failed", m.theme.ErrorStyle().Bold(true)
-	case "interrupted":
-		return "interrupted", m.theme.WarnStyle().Bold(true)
-	case "cancelled", "canceled":
-		return "cancelled", m.theme.WarnStyle().Bold(true)
-	case "terminated":
-		return "terminated", m.theme.WarnStyle().Bold(true)
-	}
-	switch {
-	case panel.closing:
-		return "", m.theme.HelpHintTextStyle()
-	default:
-		return "", m.theme.HelpHintTextStyle()
-	}
-}
-
-func (m *Model) toolOutputMeta(panel *toolOutputState) string {
-	if panel == nil {
-		return ""
-	}
-	if age := formatToolOutputAge(time.Since(panel.startedAt)); age != "" {
-		return age
-	}
-	return ""
+	return panel.SubagentFence
 }
 
 func normalizeToolOutputState(state string) string {
@@ -492,13 +428,13 @@ func normalizeToolOutputState(state string) string {
 	}
 }
 
-func delegateToolSummary(panel *toolOutputState) string {
+func subagentToolSummary(panel *BashPanelBlock) string {
 	if panel == nil {
 		return ""
 	}
 	hasReasoning := false
 	hasAssistant := false
-	for _, line := range panel.lines {
+	for _, line := range panel.Lines {
 		switch strings.ToLower(strings.TrimSpace(line.stream)) {
 		case "reasoning":
 			hasReasoning = true
@@ -514,7 +450,7 @@ func delegateToolSummary(panel *toolOutputState) string {
 	case hasReasoning:
 		return "reasoning"
 	default:
-		return "delegate"
+		return "subagent"
 	}
 }
 
@@ -533,80 +469,7 @@ func formatToolOutputAge(d time.Duration) string {
 	return strconv.Itoa(minutes) + "m" + strconv.Itoa(seconds) + "s"
 }
 
-func (m *Model) applyToolOutputFadeStyle(panel *toolOutputState, style lipgloss.Style) lipgloss.Style {
-	if panel == nil || !panel.closing {
-		return style
-	}
-	style = style.Faint(true)
-	if panel.fadeStep > 0 {
-		style = style.Foreground(m.theme.TextSecondary)
-	}
-	return style
-}
-
-func (m *Model) toolOutputBorderColor(panel *toolOutputState) color.Color {
-	if panel == nil || !panel.closing {
-		return m.theme.PanelBorder
-	}
-	return m.theme.TextSecondary
-}
-
-func (m *Model) maybeStartClosingToolOutputFades() tea.Cmd {
-	if m == nil || len(m.toolOutputs) == 0 {
-		return nil
-	}
-	cmds := make([]tea.Cmd, 0, len(m.toolOutputs))
-	for _, panel := range m.toolOutputs {
-		if panel == nil || !panel.closing || panel.fadeQueued || panel.fadeStep > 0 {
-			continue
-		}
-		if !m.hasMeaningfulContentBelow(panel) {
-			continue
-		}
-		panel.fadeQueued = true
-		cmds = append(cmds, toolOutputFadeCmd(panel.key, 1, toolOutputFadeHold))
-	}
-	if len(cmds) == 0 {
-		return nil
-	}
-	return tea.Batch(cmds...)
-}
-
-func (m *Model) hasMeaningfulContentBelow(panel *toolOutputState) bool {
-	if panel == nil || panel.end >= len(m.historyLines) {
-		return false
-	}
-	for _, line := range m.historyLines[panel.end:] {
-		raw := strings.TrimSpace(ansi.Strip(line))
-		if raw == "" {
-			continue
-		}
-		if isDividerLike(raw) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func isDividerLike(text string) bool {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return true
-	}
-	for _, r := range text {
-		switch {
-		case r == '─' || r == ' ':
-		case r >= '0' && r <= '9':
-		case r == '.' || r == ':' || r == 'm' || r == 's':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
-func prioritizeDelegatePreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
+func prioritizeSubagentPreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
 	if len(content) <= limit || limit <= 0 {
 		return content
 	}
@@ -631,7 +494,7 @@ func prioritizeDelegatePreviewLines(content []toolOutputLine, limit int) []toolO
 	return selected
 }
 
-func formatDelegatePreviewText(text string, stream string) string {
+func formatSubagentPreviewText(text string, stream string) string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\t", " "))
 	if text == "" {
 		return ""
@@ -640,7 +503,7 @@ func formatDelegatePreviewText(text string, stream string) string {
 	text = strings.ReplaceAll(text, "__", "")
 	text = strings.ReplaceAll(text, "`", "")
 	text = strings.TrimLeft(text, "#*- ")
-	text = collapseDelegateInlineSpaces(text)
+	text = collapseSubagentInlineSpaces(text)
 	if text == "" {
 		return ""
 	}
@@ -660,7 +523,7 @@ func formatDelegatePreviewText(text string, stream string) string {
 	return strings.TrimSpace(text)
 }
 
-func collapseDelegateInlineSpaces(text string) string {
+func collapseSubagentInlineSpaces(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
@@ -714,4 +577,9 @@ func wrapToolOutputText(text string, width int) []string {
 		return []string{text}
 	}
 	return out
+}
+
+func isSpawnLikeTool(name string) bool {
+	name = strings.TrimSpace(name)
+	return strings.EqualFold(name, "SPAWN")
 }

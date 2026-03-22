@@ -1,161 +1,15 @@
 package tuiapp
 
 import (
-	"errors"
 	"regexp"
-	"strconv"
 	"strings"
-	"sync"
 	"unicode"
-
-	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
-	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/glamour/ansi"
-	"github.com/charmbracelet/glamour/styles"
 )
 
 var (
-	errMarkdownRendererUnavailable = errors.New("markdown renderer unavailable")
-	markdownRendererCache          sync.Map
-	blockMathPattern               = regexp.MustCompile(`(?ms)(^|\n)\$\$\s*\n?(.*?)\n?\s*\$\$`)
-	inlineMathPattern              = regexp.MustCompile(`(^|[^\\$])\$([^\n$]+?)\$`)
-	leadingANSIPattern             = regexp.MustCompile(`^(?:\x1b\[[0-9;]*m)*`)
+	blockMathPattern  = regexp.MustCompile(`(?ms)(^|\n)\$\$\s*\n?(.*?)\n?\s*\$\$`)
+	inlineMathPattern = regexp.MustCompile(`(^|[^\\$])\$([^\n$]+?)\$`)
 )
-
-func renderNarrativeMarkdown(text string, width int, theme tuikit.Theme) (string, bool) {
-	if strings.TrimSpace(text) == "" {
-		return "", false
-	}
-	normalized := normalizeTerminalMarkdown(strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n"))
-	isMarkdown := looksLikeMarkdown(normalized)
-	rendered, err := renderMarkdown(normalized, width, theme)
-	if err != nil {
-		return text, isMarkdown
-	}
-	rendered = strings.TrimSuffix(rendered, "\n")
-	if rendered == "" {
-		return text, isMarkdown
-	}
-	if !isMarkdown {
-		rendered = normalizeRenderedPlainText(rendered)
-	}
-	return rendered, isMarkdown
-}
-
-func renderAssistantMarkdown(text string, width int, theme tuikit.Theme) string {
-	rendered, _ := renderNarrativeMarkdown(text, width, theme)
-	return rendered
-}
-
-func renderMarkdown(input string, width int, theme tuikit.Theme) (string, error) {
-	if width <= 0 {
-		width = 80
-	}
-	renderer, err := markdownRenderer(width, theme)
-	if err != nil {
-		return "", errMarkdownRendererUnavailable
-	}
-	return renderer.Render(input)
-}
-
-func markdownRenderer(width int, theme tuikit.Theme) (*glamour.TermRenderer, error) {
-	key := markdownRendererKey(width, theme)
-	if cached, ok := markdownRendererCache.Load(key); ok {
-		if renderer, ok := cached.(*glamour.TermRenderer); ok && renderer != nil {
-			return renderer, nil
-		}
-	}
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStyles(markdownStyleConfig(theme)),
-		glamour.WithWordWrap(width),
-	)
-	if err != nil {
-		return nil, err
-	}
-	markdownRendererCache.Store(key, renderer)
-	return renderer, nil
-}
-
-func markdownRendererKey(width int, theme tuikit.Theme) string {
-	return strings.Join([]string{
-		stringValue(theme.CodeFg),
-		stringValue(theme.CodeBg),
-		stringValue(theme.CodeBlockFg),
-		stringValue(theme.CodeBlockBg),
-		stringValue(theme.LinkFg),
-	}, "|") + "|" + strconv.Itoa(width)
-}
-
-func markdownStyleConfig(theme tuikit.Theme) ansi.StyleConfig {
-	style := styles.LightStyleConfig
-	if theme.IsDark {
-		style = styles.DarkStyleConfig
-	}
-	// Keep headings readable, but hide Markdown heading markers.
-	style.H1.Prefix = ""
-	style.H2.Prefix = ""
-	style.H3.Prefix = ""
-	style.H4.Prefix = ""
-	style.H5.Prefix = ""
-	style.H6.Prefix = ""
-	// Avoid excessive accent colors on heading/list markers.
-	style.Heading.Color = nil
-	style.H1.Color = nil
-	style.H2.Color = nil
-	style.H3.Color = nil
-	style.H4.Color = nil
-	style.H5.Color = nil
-	style.H6.Color = nil
-	style.Enumeration.Color = nil
-	style.Item.Color = nil
-	// Reduce code background flashing during streaming rerenders.
-	style.Document.BackgroundColor = stringPtr(stringValue(theme.AppBg))
-	style.Link.Underline = boolPtr(true)
-	style.Link.Color = stringPtr(stringValue(theme.LinkFg))
-	style.LinkText.Underline = boolPtr(true)
-	style.LinkText.Color = stringPtr(stringValue(theme.LinkFg))
-	style.Code.BackgroundColor = stringPtr(stringValue(theme.CodeBg))
-	style.Code.Color = stringPtr(stringValue(theme.CodeFg))
-	style.CodeBlock.BackgroundColor = stringPtr(stringValue(theme.CodeBlockBg))
-	style.CodeBlock.Color = stringPtr(stringValue(theme.CodeBlockFg))
-	if style.CodeBlock.Chroma == nil {
-		style.CodeBlock.Chroma = &ansi.Chroma{}
-	}
-	style.CodeBlock.Chroma.Text = ansi.StylePrimitive{
-		Color: stringPtr(stringValue(theme.CodeBlockFg)),
-	}
-	style.CodeBlock.Chroma.Background = ansi.StylePrimitive{
-		BackgroundColor: stringPtr(stringValue(theme.CodeBlockBg)),
-		Color:           stringPtr(stringValue(theme.CodeBlockFg)),
-	}
-	return style
-}
-
-func looksLikeMarkdown(text string) bool {
-	if text == "" {
-		return false
-	}
-	markers := []string{
-		"```", "\n#", "\n- ", "\n* ", "\n1. ", "\n> ", "`", "**", "__", "![", "](",
-	}
-	for _, marker := range markers {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	if strings.HasPrefix(text, "#") ||
-		strings.HasPrefix(text, "- ") ||
-		strings.HasPrefix(text, "* ") ||
-		strings.HasPrefix(text, "1. ") ||
-		strings.HasPrefix(text, "> ") ||
-		strings.HasPrefix(text, "$$") {
-		return true
-	}
-	if containsInlineMath(text) {
-		return true
-	}
-	return false
-}
 
 func normalizeTerminalMarkdown(input string) string {
 	if input == "" {
@@ -171,7 +25,7 @@ func normalizeTerminalMarkdown(input string) string {
 		if body == "" {
 			return match
 		}
-		return prefix + "```text\n" + body + "\n```"
+		return prefix + body
 	})
 	return replaceInlineMath(output)
 }
@@ -206,9 +60,7 @@ func replaceInlineMath(text string) string {
 		}
 		b.WriteString(text[last:idx[0]])
 		b.WriteString(text[idx[2]:idx[3]])
-		b.WriteByte('`')
 		b.WriteString(body)
-		b.WriteByte('`')
 		last = idx[1]
 	}
 	if last == 0 {
@@ -216,43 +68,6 @@ func replaceInlineMath(text string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
-}
-
-func normalizeRenderedPlainText(rendered string) string {
-	lines := strings.Split(rendered, "\n")
-	lines = trimLeadingBlankLines(lines)
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-	allIndented := len(lines) > 0
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		rest := strings.TrimPrefix(line, leadingANSIPattern.FindString(line))
-		if !strings.HasPrefix(rest, "  ") {
-			allIndented = false
-			break
-		}
-	}
-	if allIndented {
-		for i, line := range lines {
-			lines[i] = trimStyledParagraphIndent(line)
-		}
-	}
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func trimStyledParagraphIndent(line string) string {
-	prefix := leadingANSIPattern.FindString(line)
-	rest := strings.TrimPrefix(line, prefix)
-	if strings.HasPrefix(rest, "  ") {
-		return prefix + strings.TrimPrefix(rest, "  ")
-	}
-	return line
 }
 
 func isInlineMathBody(body string) bool {
@@ -281,19 +96,4 @@ func isInlineMathBody(body string) bool {
 		return false
 	}
 	return hasLetter
-}
-
-func stringPtr(value string) *string {
-	return &value
-}
-
-func stringValue(color interface{}) string {
-	if value, ok := color.(interface{ String() string }); ok {
-		return value.String()
-	}
-	return ""
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }

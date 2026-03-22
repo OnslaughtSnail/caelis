@@ -80,6 +80,11 @@ func (s *Store) GetOrCreate(ctx context.Context, req *session.Session) (*session
 	return &cp, nil
 }
 
+// SessionDir returns the on-disk directory that stores a session.
+func (s *Store) SessionDir(req *session.Session) (string, error) {
+	return s.sessionDir(req)
+}
+
 func (s *Store) SessionExists(ctx context.Context, req *session.Session) (bool, error) {
 	_ = ctx
 	dir, err := s.sessionDir(req)
@@ -115,7 +120,7 @@ func (s *Store) AppendEvent(ctx context.Context, req *session.Session, ev *sessi
 		return err
 	}
 	defer f.Close()
-	raw, err := json.Marshal(ev)
+	raw, err := json.Marshal(session.CloneEvent(ev))
 	if err != nil {
 		return err
 	}
@@ -320,9 +325,9 @@ func writeFileAtomically(path string, data []byte, perm os.FileMode) error {
 
 func withStateFileLock(ctx context.Context, lockPath string, fn func() error) error {
 	const (
-		lockWait  = 10 * time.Millisecond
-		staleAge  = 30 * time.Second
-		lockPerm  = 0o700
+		lockWait = 10 * time.Millisecond
+		staleAge = 30 * time.Second
+		lockPerm = 0o700
 	)
 	for {
 		err := os.Mkdir(lockPath, lockPerm)

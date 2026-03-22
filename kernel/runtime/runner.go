@@ -121,7 +121,6 @@ func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
 						if !yield(streamResyncEvent(), nil) {
 							return
 						}
-						pendingResync = false
 					}
 					cursor := lastDurableCursor
 					for {
@@ -136,7 +135,7 @@ func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
 							if ev == nil {
 								continue
 							}
-							if isDurableReplayEvent(ev, h.req.PersistPartialEvents) {
+							if isDurableReplayEvent(ev) {
 								lastDurableCursor = ev.ID
 							}
 							if !yield(ev, nil) {
@@ -199,7 +198,7 @@ func (h *runHandle) fetchDurableAfter(cursor string) ([]*session.Event, string, 
 	}
 	if withCursor, ok := h.runtime.store.(session.CursorStore); ok {
 		events, nextCursor, err := withCursor.ListEventsAfter(h.ctx, h.sess, cursor, replayFetchLimit)
-		return durableReplaySlice(events, h.req.PersistPartialEvents), lastCursor(events, nextCursor), err
+		return durableReplaySlice(events), lastCursor(events, nextCursor), err
 	}
 	events, err := h.runtime.store.ListEvents(h.ctx, h.sess)
 	if err != nil {
@@ -218,7 +217,7 @@ func (h *runHandle) fetchDurableAfter(cursor string) ([]*session.Event, string, 
 	if start > len(events) {
 		start = len(events)
 	}
-	events = durableReplaySlice(events[start:], h.req.PersistPartialEvents)
+	events = durableReplaySlice(events[start:])
 	return events, lastCursor(events, cursor), nil
 }
 
@@ -251,11 +250,14 @@ func (r *Runtime) newRunner(ctx context.Context, req RunRequest) (*runHandle, er
 		r.releaseRunLease(leaseKey)
 		return nil, err
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	runID := idutil.NewRunID()
+	req.Model = model.WrapRequestTrace(req.Model)
+	runCtx := withRequestTraceContext(ctx, r.store, sess, runID)
+	runCtx, cancel := context.WithCancel(runCtx)
 	handle := &runHandle{
 		runtime:        r,
 		req:            req,
-		runID:          idutil.NewRunID(),
+		runID:          runID,
 		sess:           sess,
 		ctx:            runCtx,
 		cancel:         cancel,
@@ -433,7 +435,7 @@ func (h *runHandle) driveAgentRun(inv *invocationContext) (restart bool, ok bool
 			return false, false
 		}
 		ev := item.event
-		persist := shouldPersistEvent(ev, h.req.PersistPartialEvents)
+		persist := shouldPersistEvent(ev)
 		if ev != nil {
 			if !h.appendOutput(ev, nil, persist) {
 				_ = pump.respond(false)
@@ -513,14 +515,14 @@ func (h *runHandle) handleContextOverflow(inv *invocationContext) (restart bool,
 		if ev == nil {
 			return true
 		}
-		return h.appendOutput(ev, nil, shouldPersistEvent(ev, h.req.PersistPartialEvents))
+		return h.appendOutput(ev, nil, shouldPersistEvent(ev))
 	})
 	if compactErr != nil {
 		h.emitTerminalError(compactErr)
 		return false, false
 	}
 	if compactionEvent != nil {
-		if !h.appendOutput(compactionEvent, nil, shouldPersistEvent(compactionEvent, h.req.PersistPartialEvents)) {
+		if !h.appendOutput(compactionEvent, nil, shouldPersistEvent(compactionEvent)) {
 			return false, false
 		}
 	}

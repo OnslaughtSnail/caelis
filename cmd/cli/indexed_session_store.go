@@ -7,6 +7,10 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
 
+type sessionDirStore interface {
+	SessionDir(*session.Session) (string, error)
+}
+
 type indexedSessionStore struct {
 	inner     session.Store
 	index     *sessionIndex
@@ -82,6 +86,14 @@ func (s *indexedSessionStore) ListContextWindowEvents(ctx context.Context, req *
 		return nil, err
 	}
 	return events, nil
+}
+
+func (s *indexedSessionStore) SessionDir(req *session.Session) (string, error) {
+	withDir, ok := s.inner.(sessionDirStore)
+	if !ok {
+		return "", nil
+	}
+	return withDir.SessionDir(req)
 }
 
 func sessNow() time.Time {

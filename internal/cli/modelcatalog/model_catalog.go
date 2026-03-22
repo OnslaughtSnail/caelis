@@ -374,6 +374,19 @@ var builtinCatalog = []catalogEntry{
 	// ── Mimo ──────────────────────────────────────────────────────────────
 	{
 		provider: "xiaomi",
+		pattern:  "mimo-v2-pro",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    1048576,
+			MaxOutputTokens:        131072,
+			DefaultMaxOutputTokens: 32768,
+			SupportsToolCalls:      true,
+			SupportsReasoning:      true,
+			SupportsJSONOutput:     true,
+			SupportsImages:         false,
+		},
+	},
+	{
+		provider: "xiaomi",
 		pattern:  "mimo-v2-flash",
 		caps: ModelCapabilities{
 			ContextWindowTokens:    128000,
