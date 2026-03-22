@@ -75,7 +75,7 @@ func (t *selfSpawnTool) Run(ctx context.Context, args map[string]any) (map[strin
 	if !yieldSpecified || yieldSeconds <= 0 {
 		yieldSeconds = int(defaultSpawnYield / time.Second)
 	}
-	snapshot, err := manager.StartDelegate(ctx, task.DelegateStartRequest{
+	snapshot, err := manager.StartSpawn(ctx, task.SpawnStartRequest{
 		Agent: agentName,
 		Task:  taskText,
 		Yield: time.Duration(yieldSeconds) * time.Second,

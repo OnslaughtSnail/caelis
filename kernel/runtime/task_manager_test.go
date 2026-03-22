@@ -56,7 +56,7 @@ func TestTaskManager_WaitReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) 
 		TaskID:         "t-cancelled-wait",
 		Kind:           task.KindSpawn,
 		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "s"},
-		Title:          "delegate job",
+		Title:          "spawn job",
 		State:          task.StateCancelled,
 		Running:        false,
 		SupportsInput:  false,
@@ -327,7 +327,7 @@ func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 	record := &task.Record{
 		ID:      "t-delegate-output",
 		Kind:    task.KindSpawn,
-		Title:   "delegate job",
+		Title:   "spawn job",
 		State:   task.StateRunning,
 		Running: true,
 		Session: task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
@@ -346,16 +346,16 @@ func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
-		t.Fatalf("expected delegate wait to honor yield window despite new events, only waited %s; snapshot=%#v", elapsed, snapshot)
+		t.Fatalf("expected spawn wait to honor yield window despite new events, only waited %s; snapshot=%#v", elapsed, snapshot)
 	}
 	if !snapshot.Running {
-		t.Fatalf("expected delegate snapshot to remain running, got state=%q running=%v", snapshot.State, snapshot.Running)
+		t.Fatalf("expected spawn snapshot to remain running, got state=%q running=%v", snapshot.State, snapshot.Running)
 	}
 	if got := snapshot.Result["progress_state"]; got != string(task.StateRunning) {
 		t.Fatalf("expected subagent progress_state in snapshot result, got %#v", snapshot.Result)
 	}
 	if _, ok := snapshot.Result["latest_output"]; ok {
-		t.Fatalf("did not expect delegate latest_output to leak into snapshot result, got %#v", snapshot.Result)
+		t.Fatalf("did not expect spawn latest_output to leak into snapshot result, got %#v", snapshot.Result)
 	}
 }
 

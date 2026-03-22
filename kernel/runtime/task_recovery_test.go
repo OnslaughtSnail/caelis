@@ -208,7 +208,7 @@ func TestRuntime_ReconcileSession_ReattachesRecoverableBashTask(t *testing.T) {
 	}
 }
 
-func TestRuntime_ReconcileSession_KeepsLiveDelegateTask(t *testing.T) {
+func TestRuntime_ReconcileSession_KeepsLiveSpawnTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
 	rt, err := New(Config{Store: sessions, TaskStore: tasks})
@@ -217,7 +217,7 @@ func TestRuntime_ReconcileSession_KeepsLiveDelegateTask(t *testing.T) {
 	}
 	record := &task.Record{
 		ID:             "t-live-1",
-		Kind:           task.KindDelegate,
+		Kind:           task.KindSpawn,
 		Title:          "live task",
 		State:          task.StateRunning,
 		Running:        true,
@@ -229,7 +229,7 @@ func TestRuntime_ReconcileSession_KeepsLiveDelegateTask(t *testing.T) {
 	rt.taskRegistry.Put(record)
 	if err := tasks.Upsert(context.Background(), &task.Entry{
 		TaskID:         "t-live-1",
-		Kind:           task.KindDelegate,
+		Kind:           task.KindSpawn,
 		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
 		Title:          "live task",
 		State:          task.StateRunning,
@@ -261,7 +261,7 @@ func TestRuntime_ReconcileSession_KeepsLiveDelegateTask(t *testing.T) {
 	}
 }
 
-func TestRuntime_ReconcileSession_TreatsLegacyDelegateLikeSpawn(t *testing.T) {
+func TestRuntime_ReconcileSession_InterruptsLegacyDelegateTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
 	rt, err := New(Config{Store: sessions, TaskStore: tasks})
@@ -286,7 +286,7 @@ func TestRuntime_ReconcileSession_TreatsLegacyDelegateLikeSpawn(t *testing.T) {
 	}
 	if err := tasks.Upsert(context.Background(), &task.Entry{
 		TaskID:         "t-delegate-legacy",
-		Kind:           task.KindDelegate,
+		Kind:           task.Kind("delegate"),
 		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
 		Title:          "inspect repo",
 		State:          task.StateRunning,
@@ -322,7 +322,7 @@ func TestRuntime_ReconcileSession_TreatsLegacyDelegateLikeSpawn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotTask.State != task.StateRunning || !gotTask.Running {
-		t.Fatalf("expected legacy delegate task to recover like spawn, got state=%q running=%v", gotTask.State, gotTask.Running)
+	if gotTask.State != task.StateInterrupted || gotTask.Running {
+		t.Fatalf("expected legacy delegate task to be interrupted, got state=%q running=%v", gotTask.State, gotTask.Running)
 	}
 }

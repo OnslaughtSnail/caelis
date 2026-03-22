@@ -112,7 +112,7 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 	return snapshot, nil
 }
 
-func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.DelegateStartRequest) (task.Snapshot, error) {
+func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStartRequest) (task.Snapshot, error) {
 	if strings.TrimSpace(req.Task) == "" {
 		return task.Snapshot{}, fmt.Errorf("task: child task is required")
 	}
@@ -126,11 +126,11 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 	if req.Yield < 0 {
 		req.Yield = 0
 	}
-	kind := canonicalSubagentTaskKind(req.Kind)
-	label := strings.ToUpper(string(kind))
-	if label == "" {
-		label = "SPAWN"
+	kind, err := normalizeSpawnTaskKind(req.Kind)
+	if err != nil {
+		return task.Snapshot{}, err
 	}
+	label := strings.ToUpper(string(kind))
 	record := m.registry.Create(kind, req.Task, nil, false, true)
 	m.trackTurnTask(record.ID)
 	runResult, err := m.subagents.RunSubagent(ctx, agent.SubagentRunRequest{
@@ -187,12 +187,12 @@ func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.Delegat
 	return snapshot, nil
 }
 
-func canonicalSubagentTaskKind(kind task.Kind) task.Kind {
+func normalizeSpawnTaskKind(kind task.Kind) (task.Kind, error) {
 	switch kind {
-	case "", task.KindDelegate, task.KindSpawn:
-		return task.KindSpawn
+	case "", task.KindSpawn:
+		return task.KindSpawn, nil
 	default:
-		return kind
+		return "", fmt.Errorf("task: unsupported spawn kind %q", kind)
 	}
 }
 

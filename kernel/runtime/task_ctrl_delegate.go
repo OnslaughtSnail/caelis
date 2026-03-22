@@ -120,7 +120,7 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		}
 		if advance {
 			for _, ev := range events[start:] {
-				output.Log += delegateEventLogLine(ev)
+				output.Log += subagentEventLogLine(ev)
 			}
 			one.EventCursor = len(events)
 		}
@@ -155,7 +155,7 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 	return snapshot, nil
 }
 
-func delegatePreviewFromEvents(events []*session.Event) string {
+func subagentPreviewFromEvents(events []*session.Event) string {
 	lines := make([]string, 0, 8)
 	inFence := false
 	for _, ev := range events {
@@ -164,7 +164,7 @@ func delegatePreviewFromEvents(events []*session.Event) string {
 		}
 		if reasoning := strings.TrimSpace(ev.Message.Reasoning); reasoning != "" {
 			for _, line := range strings.Split(reasoning, "\n") {
-				line = delegatePreviewLine(line, &inFence)
+				line = subagentPreviewLine(line, &inFence)
 				if line == "" {
 					continue
 				}
@@ -173,7 +173,7 @@ func delegatePreviewFromEvents(events []*session.Event) string {
 		}
 		if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
 			for _, line := range strings.Split(text, "\n") {
-				line = delegatePreviewLine(line, &inFence)
+				line = subagentPreviewLine(line, &inFence)
 				if line == "" {
 					continue
 				}
@@ -190,7 +190,7 @@ func delegatePreviewFromEvents(events []*session.Event) string {
 	return strings.Join(lines, "\n")
 }
 
-func delegatePreviewLine(line string, inFence *bool) string {
+func subagentPreviewLine(line string, inFence *bool) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return ""
@@ -222,7 +222,7 @@ func runtimeTaskState(status RunLifecycleStatus) task.State {
 	}
 }
 
-func delegateEventLogLine(ev *session.Event) string {
+func subagentEventLogLine(ev *session.Event) string {
 	if ev == nil {
 		return ""
 	}

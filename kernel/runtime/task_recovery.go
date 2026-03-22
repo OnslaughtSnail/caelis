@@ -68,7 +68,7 @@ func (r *Runtime) reconcileTaskEntry(ctx context.Context, entry *task.Entry, exe
 		}
 	}
 	switch entry.Kind {
-	case task.KindDelegate, task.KindSpawn:
+	case task.KindSpawn:
 		return r.reconcileSubagentTask(ctx, entry)
 	case task.KindBash:
 		return r.reconcileBashTask(ctx, entry, execRuntime)

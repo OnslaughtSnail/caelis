@@ -133,7 +133,7 @@ func (s *stubTaskManager) StartBash(_ context.Context, req task.BashStartRequest
 	return s.startBash, nil
 }
 
-func (s *stubTaskManager) StartDelegate(context.Context, task.DelegateStartRequest) (task.Snapshot, error) {
+func (s *stubTaskManager) StartSpawn(context.Context, task.SpawnStartRequest) (task.Snapshot, error) {
 	return task.Snapshot{}, nil
 }
 

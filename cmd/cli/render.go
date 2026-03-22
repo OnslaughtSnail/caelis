@@ -650,7 +650,7 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 			return "task yielded before completion"
 		}
 		if summary != "" {
-			return "\n" + renderDelegateSummaryPreview(summary)
+			return "\n" + renderSpawnSummaryPreview(summary)
 		}
 		if label := friendlyTaskStateLabel(asString(result["state"]), false); label != "" {
 			return label
@@ -702,7 +702,7 @@ func mutationResultHasNoChanges(result map[string]any) bool {
 	return addedOK && removedOK && added == 0 && removed == 0
 }
 
-func renderDelegateSummaryPreview(summary string) string {
+func renderSpawnSummaryPreview(summary string) string {
 	summary = strings.TrimSpace(summary)
 	if summary == "" {
 		return ""
@@ -711,7 +711,7 @@ func renderDelegateSummaryPreview(summary string) string {
 	preview := make([]string, 0, len(lines))
 	inFence := false
 	for _, line := range lines {
-		trimmed := sanitizeDelegatePreviewLine(line, &inFence)
+		trimmed := sanitizeSpawnPreviewLine(line, &inFence)
 		if trimmed == "" {
 			continue
 		}
@@ -735,7 +735,7 @@ func compactTaskPreview(text string) string {
 	preview := make([]string, 0, len(lines))
 	inFence := false
 	for _, line := range lines {
-		trimmed := sanitizeDelegatePreviewLine(line, &inFence)
+		trimmed := sanitizeSpawnPreviewLine(line, &inFence)
 		if trimmed == "" {
 			continue
 		}
@@ -1038,7 +1038,7 @@ func effectiveTaskWaitMSForResult(action string, callArgs map[string]any) (int, 
 	return waitMS, true
 }
 
-func sanitizeDelegatePreviewLine(line string, inFence *bool) string {
+func sanitizeSpawnPreviewLine(line string, inFence *bool) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return ""

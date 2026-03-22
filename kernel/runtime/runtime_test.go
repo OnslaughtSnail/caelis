@@ -122,7 +122,7 @@ func (t testSelfSpawnTool) Run(ctx context.Context, args map[string]any) (map[st
 		return nil, fmt.Errorf("task manager unavailable")
 	}
 	taskText, _ := args["task"].(string)
-	snapshot, err := manager.StartDelegate(ctx, task.DelegateStartRequest{
+	snapshot, err := manager.StartSpawn(ctx, task.SpawnStartRequest{
 		Task: strings.TrimSpace(taskText),
 		Kind: task.KindSpawn,
 	})
@@ -962,7 +962,7 @@ func TestDelegatePreviewFromEvents_SkipsFencedCodeBlockContent(t *testing.T) {
 	events := []*session.Event{
 		{Message: model.Message{Role: model.RoleAssistant, Text: "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone."}},
 	}
-	got := delegatePreviewFromEvents(events)
+	got := subagentPreviewFromEvents(events)
 	if strings.Contains(got, "demo.html") || strings.Contains(got, "\n12\n") {
 		t.Fatalf("expected fenced block content hidden, got %q", got)
 	}

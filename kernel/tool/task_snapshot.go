@@ -22,7 +22,7 @@ func AppendTaskSnapshotEvents(result map[string]any, snapshot task.Snapshot) map
 	if label == "" {
 		label = "TASK"
 	}
-	if snapshotIsDelegated(snapshot) {
+	if snapshotIsSubagent(snapshot) {
 		if !running {
 			result = taskstream.AppendResultEvent(result, taskstream.Event{
 				Label:  label,
@@ -57,7 +57,7 @@ func AppendTaskSnapshotEvents(result map[string]any, snapshot task.Snapshot) map
 	}
 	if !isTTY && snapshot.Output.Log != "" {
 		stream := "stdout"
-		if snapshot.Kind == task.KindDelegate || snapshot.Kind == task.KindSpawn {
+		if snapshot.Kind == task.KindSpawn {
 			stream = "assistant"
 		}
 		result = taskstream.AppendResultEvent(result, taskstream.Event{
@@ -93,7 +93,7 @@ func SnapshotResultMap(snapshot task.Snapshot) map[string]any {
 		if value := snapshotResultValue(snapshot); value != "" {
 			result["result"] = value
 		}
-	case snapshotIsDelegated(snapshot):
+	case snapshotIsSubagent(snapshot):
 		if value := snapshotResultValue(snapshot); value != "" {
 			result["result"] = value
 		}
@@ -124,13 +124,8 @@ func snapshotIsActive(snapshot task.Snapshot) bool {
 	}
 }
 
-func snapshotIsDelegated(snapshot task.Snapshot) bool {
-	switch snapshot.Kind {
-	case task.KindDelegate, task.KindSpawn:
-		return true
-	default:
-		return false
-	}
+func snapshotIsSubagent(snapshot task.Snapshot) bool {
+	return snapshot.Kind == task.KindSpawn
 }
 
 func CompactTaskListItem(snapshot task.Snapshot) map[string]any {
@@ -178,7 +173,7 @@ func appendSnapshotStateFields(result map[string]any, snapshot task.Snapshot) {
 }
 
 func snapshotProgressSnippet(snapshot task.Snapshot) string {
-	if snapshotIsDelegated(snapshot) {
+	if snapshotIsSubagent(snapshot) {
 		if approvalPending(snapshot.Result) {
 			return "waiting for approval"
 		}
@@ -191,7 +186,7 @@ func snapshotProgressSnippet(snapshot task.Snapshot) string {
 }
 
 func snapshotTerminalOutput(snapshot task.Snapshot) string {
-	if snapshotIsDelegated(snapshot) {
+	if snapshotIsSubagent(snapshot) {
 		return compactSnippet(snapshotFinalResult(snapshot))
 	}
 	return compactSnippet(firstNonEmptyText(
@@ -249,7 +244,7 @@ func snapshotResultValue(snapshot task.Snapshot) string {
 	if snapshotIsActive(snapshot) {
 		return snapshotProgressSnippet(snapshot)
 	}
-	if snapshotIsDelegated(snapshot) {
+	if snapshotIsSubagent(snapshot) {
 		return snapshotFinalResult(snapshot)
 	}
 	return firstNonEmptyText(

@@ -17,11 +17,8 @@ import (
 type Kind string
 
 const (
-	KindBash Kind = "bash"
-	// KindDelegate is a legacy persisted kind kept for backward compatibility.
-	// New subagent tasks should use KindSpawn.
-	KindDelegate Kind = "delegate"
-	KindSpawn    Kind = "spawn"
+	KindBash  Kind = "bash"
+	KindSpawn Kind = "spawn"
 )
 
 type State string
@@ -70,13 +67,13 @@ type BashStartRequest struct {
 	SandboxPolicyOverride *toolexec.SandboxPolicy
 }
 
-type DelegateStartRequest struct {
+type SpawnStartRequest struct {
 	Agent        string
 	Task         string
 	ContentParts []model.ContentPart
 	Yield        time.Duration
 	Timeout      time.Duration
-	Kind         Kind // defaults to KindSpawn if empty; KindDelegate is normalized to KindSpawn
+	Kind         Kind // defaults to KindSpawn if empty
 }
 
 type ControlRequest struct {
@@ -87,7 +84,7 @@ type ControlRequest struct {
 
 type Manager interface {
 	StartBash(context.Context, BashStartRequest) (Snapshot, error)
-	StartDelegate(context.Context, DelegateStartRequest) (Snapshot, error)
+	StartSpawn(context.Context, SpawnStartRequest) (Snapshot, error)
 	Wait(context.Context, ControlRequest) (Snapshot, error)
 	Status(context.Context, ControlRequest) (Snapshot, error)
 	Write(context.Context, ControlRequest) (Snapshot, error)

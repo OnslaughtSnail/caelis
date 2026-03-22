@@ -281,14 +281,14 @@ func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string
 	if stream == "" {
 		stream = "stdout"
 	}
-	if isDelegateLikeTool(panel.ToolName) {
+	if isSpawnLikeTool(panel.ToolName) {
 		switch stream {
 		case "reasoning":
-			panel.ReasoningPartial = m.consumeDelegatePreviewChunkBlock(panel, panel.ReasoningPartial, normalized, stream)
+			panel.ReasoningPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.ReasoningPartial, normalized, stream)
 		case "assistant":
-			panel.AssistantPartial = m.consumeDelegatePreviewChunkBlock(panel, panel.AssistantPartial, normalized, stream)
+			panel.AssistantPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.AssistantPartial, normalized, stream)
 		case "stderr":
-			panel.StderrPartial = m.consumeDelegatePreviewChunkBlock(panel, panel.StderrPartial, normalized, stream)
+			panel.StderrPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.StderrPartial, normalized, stream)
 		default:
 			panel.StdoutPartial = m.consumeToolOutputChunkBlock(panel, panel.StdoutPartial, normalized, stream)
 		}
@@ -306,7 +306,7 @@ func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string
 	panel.UpdatedAt = time.Now()
 }
 
-func (m *Model) consumeDelegatePreviewChunkBlock(panel *BashPanelBlock, partial, chunk, stream string) string {
+func (m *Model) consumeSubagentPreviewChunkBlock(panel *BashPanelBlock, partial, chunk, stream string) string {
 	if chunk == "" {
 		return partial
 	}
@@ -318,11 +318,11 @@ func (m *Model) consumeDelegatePreviewChunkBlock(panel *BashPanelBlock, partial,
 		}
 		line := strings.TrimRight(buf[:idx], "\r")
 		buf = buf[idx+1:]
-		if shouldSkipDelegatePreviewLineBlock(panel, line) {
+		if shouldSkipSubagentPreviewLineBlock(panel, line) {
 			continue
 		}
-		if formatted := formatDelegatePreviewText(line, stream); formatted != "" {
-			m.appendDelegatePreviewLineBlock(panel, formatted, stream)
+		if formatted := formatSubagentPreviewText(line, stream); formatted != "" {
+			m.appendSubagentPreviewLineBlock(panel, formatted, stream)
 		}
 	}
 	if len(panel.Lines) > toolOutputPreviewLines*3 {
@@ -331,7 +331,7 @@ func (m *Model) consumeDelegatePreviewChunkBlock(panel *BashPanelBlock, partial,
 	return buf
 }
 
-func (m *Model) appendDelegatePreviewLineBlock(panel *BashPanelBlock, text string, stream string) {
+func (m *Model) appendSubagentPreviewLineBlock(panel *BashPanelBlock, text string, stream string) {
 	if panel == nil {
 		return
 	}
@@ -341,7 +341,7 @@ func (m *Model) appendDelegatePreviewLineBlock(panel *BashPanelBlock, text strin
 	}
 	if len(panel.Lines) > 0 {
 		last := &panel.Lines[len(panel.Lines)-1]
-		if canMergeDelegatePreviewLine(last, text, stream) {
+		if canMergeSubagentPreviewLine(last, text, stream) {
 			last.text = strings.TrimSpace(last.text) + " " + text
 			return
 		}
@@ -349,20 +349,20 @@ func (m *Model) appendDelegatePreviewLineBlock(panel *BashPanelBlock, text strin
 	panel.Lines = append(panel.Lines, toolOutputLine{text: text, stream: stream})
 }
 
-func canMergeDelegatePreviewLine(last *toolOutputLine, nextText string, stream string) bool {
+func canMergeSubagentPreviewLine(last *toolOutputLine, nextText string, stream string) bool {
 	if last == nil {
 		return false
 	}
 	if !strings.EqualFold(strings.TrimSpace(last.stream), strings.TrimSpace(stream)) {
 		return false
 	}
-	if !isDelegateParagraphText(last.text) || !isDelegateParagraphText(nextText) {
+	if !isSubagentParagraphText(last.text) || !isSubagentParagraphText(nextText) {
 		return false
 	}
 	return true
 }
 
-func isDelegateParagraphText(text string) bool {
+func isSubagentParagraphText(text string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return false
@@ -395,7 +395,7 @@ func (m *Model) consumeToolOutputChunkBlock(panel *BashPanelBlock, partial, chun
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if shouldSkipDelegatePreviewLineBlock(panel, line) {
+		if shouldSkipSubagentPreviewLineBlock(panel, line) {
 			continue
 		}
 		panel.Lines = append(panel.Lines, toolOutputLine{text: line, stream: stream})
@@ -406,16 +406,16 @@ func (m *Model) consumeToolOutputChunkBlock(panel *BashPanelBlock, partial, chun
 	return buf
 }
 
-func shouldSkipDelegatePreviewLineBlock(panel *BashPanelBlock, line string) bool {
-	if panel == nil || !isDelegateLikeTool(panel.ToolName) {
+func shouldSkipSubagentPreviewLineBlock(panel *BashPanelBlock, line string) bool {
+	if panel == nil || !isSpawnLikeTool(panel.ToolName) {
 		return false
 	}
 	trimmed := strings.TrimSpace(line)
 	if strings.HasPrefix(trimmed, "```") {
-		panel.DelegateFence = !panel.DelegateFence
+		panel.SubagentFence = !panel.SubagentFence
 		return true
 	}
-	return panel.DelegateFence
+	return panel.SubagentFence
 }
 
 func normalizeToolOutputState(state string) string {
@@ -428,7 +428,7 @@ func normalizeToolOutputState(state string) string {
 	}
 }
 
-func delegateToolSummary(panel *BashPanelBlock) string {
+func subagentToolSummary(panel *BashPanelBlock) string {
 	if panel == nil {
 		return ""
 	}
@@ -450,7 +450,7 @@ func delegateToolSummary(panel *BashPanelBlock) string {
 	case hasReasoning:
 		return "reasoning"
 	default:
-		return "delegate"
+		return "subagent"
 	}
 }
 
@@ -469,7 +469,7 @@ func formatToolOutputAge(d time.Duration) string {
 	return strconv.Itoa(minutes) + "m" + strconv.Itoa(seconds) + "s"
 }
 
-func prioritizeDelegatePreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
+func prioritizeSubagentPreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
 	if len(content) <= limit || limit <= 0 {
 		return content
 	}
@@ -494,7 +494,7 @@ func prioritizeDelegatePreviewLines(content []toolOutputLine, limit int) []toolO
 	return selected
 }
 
-func formatDelegatePreviewText(text string, stream string) string {
+func formatSubagentPreviewText(text string, stream string) string {
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\t", " "))
 	if text == "" {
 		return ""
@@ -503,7 +503,7 @@ func formatDelegatePreviewText(text string, stream string) string {
 	text = strings.ReplaceAll(text, "__", "")
 	text = strings.ReplaceAll(text, "`", "")
 	text = strings.TrimLeft(text, "#*- ")
-	text = collapseDelegateInlineSpaces(text)
+	text = collapseSubagentInlineSpaces(text)
 	if text == "" {
 		return ""
 	}
@@ -523,7 +523,7 @@ func formatDelegatePreviewText(text string, stream string) string {
 	return strings.TrimSpace(text)
 }
 
-func collapseDelegateInlineSpaces(text string) string {
+func collapseSubagentInlineSpaces(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
@@ -579,7 +579,7 @@ func wrapToolOutputText(text string, width int) []string {
 	return out
 }
 
-func isDelegateLikeTool(name string) bool {
+func isSpawnLikeTool(name string) bool {
 	name = strings.TrimSpace(name)
 	return strings.EqualFold(name, "SPAWN")
 }

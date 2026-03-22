@@ -207,7 +207,7 @@ type BashPanelBlock struct {
 	// Delegate-like tool fields
 	AssistantPartial string
 	ReasoningPartial string
-	DelegateFence    bool
+	SubagentFence    bool
 	LastStream       string
 }
 
@@ -266,17 +266,17 @@ func (b *BashPanelBlock) currentLines() []toolOutputLine {
 	if partial := strings.TrimSpace(b.StdoutPartial); partial != "" {
 		content = append(content, toolOutputLine{text: partial, stream: "stdout"})
 	}
-	if partial := strings.TrimSpace(b.StderrPartial); partial != "" && !isDelegateLikeTool(b.ToolName) {
+	if partial := strings.TrimSpace(b.StderrPartial); partial != "" && !isSpawnLikeTool(b.ToolName) {
 		content = append(content, toolOutputLine{text: partial, stream: "stderr"})
 	}
-	if isDelegateLikeTool(b.ToolName) {
-		if partial := formatDelegatePreviewText(b.ReasoningPartial, "reasoning"); partial != "" {
+	if isSpawnLikeTool(b.ToolName) {
+		if partial := formatSubagentPreviewText(b.ReasoningPartial, "reasoning"); partial != "" {
 			content = append(content, toolOutputLine{text: partial, stream: "reasoning"})
 		}
-		if partial := formatDelegatePreviewText(b.AssistantPartial, "assistant"); partial != "" {
+		if partial := formatSubagentPreviewText(b.AssistantPartial, "assistant"); partial != "" {
 			content = append(content, toolOutputLine{text: partial, stream: "assistant"})
 		}
-		if partial := formatDelegatePreviewText(b.StderrPartial, "stderr"); partial != "" {
+		if partial := formatSubagentPreviewText(b.StderrPartial, "stderr"); partial != "" {
 			content = append(content, toolOutputLine{text: partial, stream: "stderr"})
 		}
 	}
@@ -286,7 +286,7 @@ func (b *BashPanelBlock) currentLines() []toolOutputLine {
 		if strings.TrimSpace(line.text) == "" {
 			continue
 		}
-		if isDelegateLikeTool(b.ToolName) {
+		if isSpawnLikeTool(b.ToolName) {
 			switch strings.ToLower(strings.TrimSpace(line.stream)) {
 			case "assistant", "reasoning", "stderr":
 			default:
@@ -331,7 +331,7 @@ func (b *BashPanelBlock) renderPanelInnerLines(ctx BlockRenderContext, content [
 	var lines []string
 
 	emptyPlaceholder := ""
-	if len(content) == 0 && !isDelegateLikeTool(b.ToolName) {
+	if len(content) == 0 && !isSpawnLikeTool(b.ToolName) {
 		emptyPlaceholder = "no output"
 		if b.State == "waiting_input" {
 			emptyPlaceholder = "waiting for input"
@@ -347,7 +347,7 @@ func (b *BashPanelBlock) renderPanelInnerLines(ctx BlockRenderContext, content [
 	}
 
 	// Delegate-like tools still show the placeholder as a separate line.
-	if len(content) == 0 && isDelegateLikeTool(b.ToolName) {
+	if len(content) == 0 && isSpawnLikeTool(b.ToolName) {
 		noOut := ctx.Theme.HelpHintTextStyle().Render("no output")
 		lines = append(lines, noOut)
 	}
@@ -356,7 +356,7 @@ func (b *BashPanelBlock) renderPanelInnerLines(ctx BlockRenderContext, content [
 		text, prefix, style := b.renderOutputLine(ctx, line)
 		availableTextWidth := maxInt(1, contentWidth-displayColumns(prefix))
 		wrapped := []string{text}
-		if isDelegateLikeTool(b.ToolName) {
+		if isSpawnLikeTool(b.ToolName) {
 			wrapped = wrapToolOutputText(text, availableTextWidth)
 		} else if displayColumns(text) > availableTextWidth {
 			if availableTextWidth == 1 {
@@ -381,7 +381,7 @@ func (b *BashPanelBlock) renderHeaderLine(ctx BlockRenderContext, width int) str
 		return ""
 	}
 	right := ctx.Theme.HelpHintTextStyle().Render(formatToolOutputAge(b.elapsed()))
-	if isDelegateLikeTool(b.ToolName) {
+	if isSpawnLikeTool(b.ToolName) {
 		return composeStyledFooter(width, "", right)
 	}
 	tool := strings.ToUpper(strings.TrimSpace(b.ToolName))
@@ -417,7 +417,7 @@ func (b *BashPanelBlock) renderOutputLine(ctx BlockRenderContext, line toolOutpu
 	text = tuikit.LinkifyText(strings.TrimSpace(line.text), ctx.Theme.LinkStyle())
 	prefix = "  "
 	style = lipgloss.NewStyle().Foreground(ctx.Theme.TextPrimary)
-	if isDelegateLikeTool(b.ToolName) {
+	if isSpawnLikeTool(b.ToolName) {
 		return text, "  ", style
 	}
 	stream := strings.ToLower(strings.TrimSpace(line.stream))

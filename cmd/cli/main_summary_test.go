@@ -454,8 +454,8 @@ func TestSummarizeToolResponse_TaskCancelAvoidsDuplicateCancelledLabel(t *testin
 	}
 }
 
-func TestRenderDelegateSummaryPreview_StripsCodeFences(t *testing.T) {
-	got := renderDelegateSummaryPreview("## Header\n\n```sh\necho hi\nls\n```\n\nDone")
+func TestRenderSpawnSummaryPreview_StripsCodeFences(t *testing.T) {
+	got := renderSpawnSummaryPreview("## Header\n\n```sh\necho hi\nls\n```\n\nDone")
 	if strings.Contains(got, "```") {
 		t.Fatalf("expected code fences stripped, got %q", got)
 	}
@@ -463,7 +463,7 @@ func TestRenderDelegateSummaryPreview_StripsCodeFences(t *testing.T) {
 		t.Fatalf("expected fenced block contents hidden, got %q", got)
 	}
 	if !strings.Contains(got, "Header") || !strings.Contains(got, "Done") {
-		t.Fatalf("unexpected delegate preview %q", got)
+		t.Fatalf("unexpected spawn preview %q", got)
 	}
 }
 

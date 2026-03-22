@@ -9,7 +9,7 @@ import (
 )
 
 type stubTaskManager struct {
-	lastStart task.DelegateStartRequest
+	lastStart task.SpawnStartRequest
 	snapshot  task.Snapshot
 	err       error
 }
@@ -18,7 +18,7 @@ func (s *stubTaskManager) StartBash(context.Context, task.BashStartRequest) (tas
 	return task.Snapshot{}, nil
 }
 
-func (s *stubTaskManager) StartDelegate(_ context.Context, req task.DelegateStartRequest) (task.Snapshot, error) {
+func (s *stubTaskManager) StartSpawn(_ context.Context, req task.SpawnStartRequest) (task.Snapshot, error) {
 	s.lastStart = req
 	if s.err != nil {
 		return task.Snapshot{}, s.err
