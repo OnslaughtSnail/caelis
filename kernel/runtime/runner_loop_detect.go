@@ -137,8 +137,7 @@ func isStableTaskPollingTurn(events []*session.Event) bool {
 	if !strings.EqualFold(strings.TrimSpace(resp.Name), "TASK") {
 		return false
 	}
-	running, _ := resp.Result["running"].(bool)
-	return running
+	return strings.TrimSpace(fmt.Sprint(resp.Result["task_id"])) != ""
 }
 
 // turnSignature produces a content-addressable hash of a complete agent turn.

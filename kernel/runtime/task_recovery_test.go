@@ -210,6 +210,10 @@ func TestRuntime_ReconcileSession_ReattachesRecoverableBashTask(t *testing.T) {
 	if got.Result["session_id"] != "proc-1" || got.Result["interrupted"] != nil {
 		t.Fatalf("unexpected recovered result payload: %#v", got.Result)
 	}
+	meta, _ := got.Result["output_meta"].(map[string]any)
+	if captureCap := meta["capture_cap_bytes"]; captureCap != int64(0) {
+		t.Fatalf("expected recovery output_meta, got %#v", got.Result)
+	}
 }
 
 func TestRuntime_ReconcileSession_KeepsLiveDelegateTask(t *testing.T) {

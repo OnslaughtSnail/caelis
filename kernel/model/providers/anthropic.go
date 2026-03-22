@@ -49,6 +49,10 @@ func (l *anthropicLLM) Name() string {
 	return l.name
 }
 
+func (l *anthropicLLM) ProviderName() string {
+	return l.provider
+}
+
 func (l *anthropicLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }

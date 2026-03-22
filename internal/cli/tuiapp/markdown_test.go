@@ -8,21 +8,16 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-func TestLooksLikeMarkdown_IgnoresCurrencyText(t *testing.T) {
-	if looksLikeMarkdown("价格从 $5 到 $10") {
-		t.Fatal("did not expect currency text to be detected as markdown")
-	}
-}
-
-func TestRenderAssistantMarkdown_KeptCurrencyTextPlain(t *testing.T) {
+func TestNormalizeTerminalMarkdown_IgnoresCurrencyText(t *testing.T) {
 	in := "价格从 $5 到 $10"
-	if got := strings.TrimSpace(ansi.Strip(renderAssistantMarkdown(in, 80, tuikit.DefaultTheme()))); got != in {
+	got := normalizeTerminalMarkdown(in)
+	if got != in {
 		t.Fatalf("expected currency text unchanged, got %q", got)
 	}
 }
 
-func TestRenderAssistantMarkdown_FormatsInlineMath(t *testing.T) {
-	got := ansi.Strip(renderAssistantMarkdown("结果是 $E=mc^2$", 80, tuikit.DefaultTheme()))
+func TestNormalizeTerminalMarkdown_PreservesInlineMath(t *testing.T) {
+	got := normalizeTerminalMarkdown("结果是 $E=mc^2$")
 	if !strings.Contains(got, "E=mc^2") {
 		t.Fatalf("expected inline math content preserved, got %q", got)
 	}
@@ -31,8 +26,8 @@ func TestRenderAssistantMarkdown_FormatsInlineMath(t *testing.T) {
 	}
 }
 
-func TestRenderAssistantMarkdown_FormatsBlockMath(t *testing.T) {
-	got := ansi.Strip(renderAssistantMarkdown("$$\n\\frac{a}{b}\n$$", 80, tuikit.DefaultTheme()))
+func TestNormalizeTerminalMarkdown_FormatsBlockMath(t *testing.T) {
+	got := normalizeTerminalMarkdown("$$\n\\frac{a}{b}\n$$")
 	if !strings.Contains(got, "\\frac{a}{b}") {
 		t.Fatalf("expected block math content preserved, got %q", got)
 	}
@@ -41,29 +36,83 @@ func TestRenderAssistantMarkdown_FormatsBlockMath(t *testing.T) {
 	}
 }
 
-func TestRenderNarrativeMarkdown_AlwaysPassesThroughRenderer(t *testing.T) {
-	got, isMarkdown := renderNarrativeMarkdown("plain text", 80, tuikit.DefaultTheme())
-	if isMarkdown {
-		t.Fatal("did not expect plain text to be classified as markdown")
+func TestAssistantBlockRender_PlainTextPreserved(t *testing.T) {
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	block := NewAssistantBlock()
+	block.Raw = "plain text"
+	rows := block.Render(ctx)
+	if len(rows) == 0 {
+		t.Fatal("expected at least 1 row")
 	}
-	if strings.TrimSpace(ansi.Strip(got)) != "plain text" {
-		t.Fatalf("expected plain text preserved after renderer pass, got %q", got)
-	}
-}
-
-func TestRenderNarrativeMarkdown_PreservesTrailingListMarkerWhitespace(t *testing.T) {
-	_, isMarkdown := renderNarrativeMarkdown("文件操作：\n- ", 80, tuikit.DefaultTheme())
-	if !isMarkdown {
-		t.Fatal("expected trailing list marker whitespace to be preserved for partial markdown detection")
+	if !strings.Contains(rows[0].Plain, "plain text") {
+		t.Fatalf("expected plain text preserved, got %q", rows[0].Plain)
 	}
 }
 
-func TestRenderNarrativeMarkdown_PreservesPartialMathUntilClosed(t *testing.T) {
-	got, isMarkdown := renderNarrativeMarkdown("结果是 $E=mc", 80, tuikit.DefaultTheme())
-	if strings.Contains(ansi.Strip(got), "`E=mc`") {
-		t.Fatalf("did not expect unclosed math to be normalized, got %q", got)
+func TestAssistantBlockRender_PreservesTrailingListMarker(t *testing.T) {
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	block := NewAssistantBlock()
+	block.Raw = "文件操作：\n- "
+	rows := block.Render(ctx)
+	joined := ""
+	for _, r := range rows {
+		joined += r.Plain + "\n"
 	}
-	if isMarkdown && strings.Contains(ansi.Strip(got), "$E=mc") {
-		t.Fatalf("did not expect unclosed math to be rewritten while still incomplete, got %q", got)
+	if !strings.Contains(joined, "-") {
+		t.Fatalf("expected trailing list marker preserved, got %q", joined)
+	}
+}
+
+func TestAssistantBlockRender_PartialMathNotRewritten(t *testing.T) {
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	block := NewAssistantBlock()
+	block.Raw = "结果是 $E=mc"
+	rows := block.Render(ctx)
+	joined := ""
+	for _, r := range rows {
+		joined += r.Plain + "\n"
+	}
+	if strings.Contains(joined, "`E=mc`") {
+		t.Fatalf("did not expect unclosed math to be normalized, got %q", joined)
+	}
+}
+
+func TestRenderAssistantBlockLines_NormalizesMarkdownHeadingToAssistantStyle(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	lines := m.renderAssistantBlockLines("你好！\n\n# 关于我\n\n- 身份：我是你的个人 AI 助手")
+	wantHeading := m.theme.TextStyle().Bold(true).Render("关于我")
+
+	foundHeading := false
+	for _, line := range lines {
+		plain := strings.TrimSpace(ansi.Strip(line))
+		switch plain {
+		case "关于我":
+			foundHeading = true
+			if line != wantHeading {
+				t.Fatalf("expected heading to use bold TextPrimary, got %q", line)
+			}
+		case "# 关于我":
+			t.Fatalf("did not expect markdown heading marker to survive, got %q", line)
+		}
+	}
+
+	if !foundHeading {
+		t.Fatalf("expected assistant markdown heading preserved, got %q", ansi.Strip(strings.Join(lines, "\n")))
+	}
+}
+
+func TestRenderAssistantBlockLines_UsesNeutralBodyColor(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	lines := m.renderAssistantBlockLines("关于我")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+	got := lines[0]
+	if strings.Contains(got, "[38;5;77m关于我") || strings.Contains(got, "[38;2;86;211;100m关于我") {
+		t.Fatalf("did not expect assistant body to use green assistant color, got %q", got)
 	}
 }

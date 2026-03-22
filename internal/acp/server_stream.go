@@ -161,6 +161,10 @@ func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessions
 	if sessionID == "" || sessionID == strings.TrimSpace(rootSessionID) {
 		return nil
 	}
+	// Emit subagent-specific notifications for SPAWN child events.
+	if err := s.emitSubagentUpdates(rootSessionID, update); err != nil {
+		return err
+	}
 	var streamSess *serverSession
 	if eventIsPartial(update.Event) || update.Event.Message.Role == model.RoleAssistant {
 		streamSess = s.liveStreamSession(sessionID)
@@ -175,6 +179,199 @@ func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessions
 		}
 	}
 	return nil
+}
+
+// emitSubagentUpdates checks if a child session event belongs to a SPAWN subagent
+// and emits subagent-specific ACP update notifications to the parent session.
+func (s *Server) emitSubagentUpdates(parentSessionID string, update sessionstream.Update) error {
+	ev := update.Event
+	if ev == nil {
+		return nil
+	}
+	meta, ok := runtime.DelegationMetadataFromEvent(ev)
+	if !ok || meta.ParentToolName != tool.SpawnToolName {
+		return nil
+	}
+	spawnID := strings.TrimSpace(meta.ChildSessionID)
+	if spawnID == "" {
+		spawnID = strings.TrimSpace(update.SessionID)
+	}
+	if spawnID == "" {
+		spawnID = meta.ParentToolCall
+	}
+
+	agent := "self"
+
+	// Handle lifecycle (done/failed/interrupted) — clean up tracking state.
+	if info, ok := runtime.LifecycleFromEvent(ev); ok {
+		if isTerminalStatus(info.Status) {
+			s.subagentMu.Lock()
+			delete(s.subagentStarted, spawnID)
+			delete(s.subagentStreams, spawnID)
+			s.subagentMu.Unlock()
+			return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+				SessionID: parentSessionID,
+				Update: SubagentDoneUpdate{
+					SessionUpdate: UpdateSubagentDone,
+					SpawnID:       spawnID,
+					State:         string(info.Status),
+				},
+			})
+		}
+		return nil
+	}
+
+	// Emit start notification only once per spawnID.
+	s.subagentMu.Lock()
+	if s.subagentStarted == nil {
+		s.subagentStarted = map[string]bool{}
+	}
+	if s.subagentStreams == nil {
+		s.subagentStreams = map[string]*subagentACPState{}
+	}
+	alreadyStarted := s.subagentStarted[spawnID]
+	if !alreadyStarted {
+		s.subagentStarted[spawnID] = true
+	}
+	streamState := s.subagentStreams[spawnID]
+	if streamState == nil {
+		streamState = &subagentACPState{}
+		s.subagentStreams[spawnID] = streamState
+	}
+	s.subagentMu.Unlock()
+
+	if !alreadyStarted {
+		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+			SessionID: parentSessionID,
+			Update: SubagentStartUpdate{
+				SessionUpdate: UpdateSubagentStart,
+				SpawnID:       spawnID,
+				Agent:         agent,
+				CallID:        meta.ParentToolCall,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+
+	// Emit tool call updates.
+	for _, call := range ev.Message.ToolCalls {
+		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+			SessionID: parentSessionID,
+			Update: SubagentToolCallUpdate{
+				SessionUpdate: UpdateSubagentToolCall,
+				SpawnID:       spawnID,
+				ToolName:      call.Name,
+				CallID:        call.ID,
+			},
+		}); err != nil {
+			return err
+		}
+	}
+	if resp := ev.Message.ToolResponse; resp != nil {
+		stream := "stdout"
+		if hasToolError(resp.Result) {
+			stream = "stderr"
+		}
+		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+			SessionID: parentSessionID,
+			Update: SubagentToolCallUpdate{
+				SessionUpdate: UpdateSubagentToolCall,
+				SpawnID:       spawnID,
+				ToolName:      resp.Name,
+				CallID:        resp.ID,
+				Stream:        stream,
+				Final:         true,
+			},
+		}); err != nil {
+			return err
+		}
+		// Detect PLAN tool result and emit SubagentPlanUpdate.
+		if strings.EqualFold(strings.TrimSpace(resp.Name), tool.PlanToolName) && !hasToolError(resp.Result) {
+			entries := planEntriesFromResult(resp.Result)
+			if len(entries) > 0 {
+				if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+					SessionID: parentSessionID,
+					Update: SubagentPlanUpdate{
+						SessionUpdate: UpdateSubagentPlan,
+						SpawnID:       spawnID,
+						Entries:       entries,
+					},
+				}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Emit assistant/reasoning stream with delta dedup.
+	if ev.Message.Role == model.RoleAssistant {
+		partial := eventIsPartial(ev)
+
+		if reasoning := strings.TrimSpace(ev.Message.Reasoning); reasoning != "" {
+			s.subagentMu.Lock()
+			delta := subagentDelta(streamState.reasoningSent, reasoning)
+			streamState.reasoningSent = reasoning
+			if !partial {
+				// Final event: send remaining delta and reset for next turn.
+				streamState.reasoningSent = ""
+			}
+			s.subagentMu.Unlock()
+			if delta != "" {
+				if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+					SessionID: parentSessionID,
+					Update: SubagentStreamUpdate{
+						SessionUpdate: UpdateSubagentStream,
+						SpawnID:       spawnID,
+						Stream:        "reasoning",
+						Chunk:         delta,
+					},
+				}); err != nil {
+					return err
+				}
+			}
+		}
+
+		if answer := ev.Message.TextContent(); strings.TrimSpace(answer) != "" {
+			s.subagentMu.Lock()
+			delta := subagentDelta(streamState.assistantSent, answer)
+			streamState.assistantSent = answer
+			if !partial {
+				streamState.assistantSent = ""
+			}
+			s.subagentMu.Unlock()
+			if delta != "" {
+				if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+					SessionID: parentSessionID,
+					Update: SubagentStreamUpdate{
+						SessionUpdate: UpdateSubagentStream,
+						SpawnID:       spawnID,
+						Stream:        "assistant",
+						Chunk:         delta,
+					},
+				}); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// subagentDelta returns the portion of incoming not yet sent.
+func subagentDelta(sent, incoming string) string {
+	if strings.HasPrefix(incoming, sent) {
+		return incoming[len(sent):]
+	}
+	return incoming
+}
+
+func isTerminalStatus(status runtime.RunLifecycleStatus) bool {
+	switch status {
+	case runtime.RunLifecycleStatusCompleted, runtime.RunLifecycleStatusFailed, runtime.RunLifecycleStatusInterrupted:
+		return true
+	}
+	return false
 }
 
 func (s *Server) liveStreamSession(sessionID string) *serverSession {

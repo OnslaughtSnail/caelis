@@ -62,6 +62,10 @@
     "reasoning": true,
     "reasoning_mode": "toggle"
   },
+  "xiaomi:mimo-v2-pro": {
+    "reasoning": true,
+    "reasoning_mode": "toggle"
+  },
   "xiaomi:mimo-v2-reasoner": {
     "reasoning": true,
     "reasoning_mode": "toggle"

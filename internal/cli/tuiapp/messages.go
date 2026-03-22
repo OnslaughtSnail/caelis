@@ -19,11 +19,6 @@ type ctrlCExpireMsg struct {
 
 type paletteAnimationMsg struct{}
 
-type toolOutputFadeMsg struct {
-	key  string
-	step int
-}
-
 func animatePaletteCmd() tea.Cmd {
 	return tea.Tick(paletteAnimationInterval, func(time.Time) tea.Msg {
 		return paletteAnimationMsg{}

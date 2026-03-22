@@ -125,6 +125,13 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 	}
 
 	lastSummarizedID := toSummarize[len(toSummarize)-1].ID
+	tailIDs := make([]string, 0, len(tail))
+	for _, ev := range tail {
+		if ev == nil || strings.TrimSpace(ev.ID) == "" {
+			continue
+		}
+		tailIDs = append(tailIDs, ev.ID)
+	}
 	compactionEvent := &session.Event{
 		ID:        eventID(),
 		SessionID: in.Session.ID,
@@ -141,6 +148,8 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 				"note":                   strings.TrimSpace(in.Note),
 				"summarized_to_event_id": lastSummarizedID,
 				"summarized_events":      summarizedEvents,
+				"tail_events":            len(tail),
+				"tail_event_ids":         tailIDs,
 				"pre_tokens":             currentTokens,
 				"window_tokens":          windowTokens,
 				"watermark_ratio":        r.compaction.WatermarkRatio,
@@ -164,29 +173,15 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 }
 
 func compactionNoticeEvent(trigger string, beforeTokens int, afterTokens int, phase string) *session.Event {
-	text := ""
-	switch strings.TrimSpace(phase) {
-	case "start":
-		switch strings.TrimSpace(trigger) {
-		case triggerManual:
-			text = fmt.Sprintf("note: 正在压缩上下文，当前约 %d tokens。", beforeTokens)
-		case triggerOverflowRecovery:
-			text = fmt.Sprintf("note: 上下文超限，正在压缩后重试，当前约 %d tokens。", beforeTokens)
-		default:
-			text = fmt.Sprintf("note: 上下文接近上限，正在自动压缩，当前约 %d tokens。", beforeTokens)
-		}
-	case "done":
-		switch strings.TrimSpace(trigger) {
-		case triggerManual:
-			text = fmt.Sprintf("note: 上下文压缩完成，约 %d -> %d tokens。", beforeTokens, afterTokens)
-		case triggerOverflowRecovery:
-			text = fmt.Sprintf("note: 上下文压缩完成，约 %d -> %d tokens，继续重试。", beforeTokens, afterTokens)
-		default:
-			text = fmt.Sprintf("note: 自动上下文压缩完成，约 %d -> %d tokens。", beforeTokens, afterTokens)
-		}
-	default:
+	phase = strings.TrimSpace(phase)
+	trigger = strings.TrimSpace(trigger)
+	if phase != "start" && phase != "done" {
 		return nil
 	}
+	// The text field carries a machine-readable key (not human-presentable
+	// text). The UI/app layer should inspect Meta["kind"]=="compaction_notice"
+	// and render appropriate localized text from the structured metadata.
+	key := "compaction." + phase
 	return session.MarkNotice(&session.Event{
 		ID:   eventID(),
 		Time: time.Now(),
@@ -197,7 +192,7 @@ func compactionNoticeEvent(trigger string, beforeTokens int, afterTokens int, ph
 			"pre_tokens":         beforeTokens,
 			"post_tokens":        afterTokens,
 		},
-	}, session.NoticeLevelNote, text)
+	}, session.NoticeLevelNote, key)
 }
 
 func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, events []*session.Event, inputBudget int) (string, int, error) {
@@ -250,9 +245,43 @@ func splitCompactionTarget(window []*session.Event) ([]*session.Event, []*sessio
 	if len(window) == 0 {
 		return nil, nil
 	}
-	// Compact the entire current context window into one checkpoint event.
-	// This avoids mixing summary + preserved tail turns.
-	return window, nil
+	// Preserve the most recent complete interaction turn as tail. Walk
+	// backwards to find the boundary between "old history to summarize" and
+	// "recent tail to keep verbatim". A complete turn is defined as a
+	// contiguous sequence of assistant/tool events optionally preceded by a
+	// user event. We keep the last such turn plus its user message.
+	tailStart := findTailBoundary(window)
+	if tailStart <= 0 || tailStart >= len(window) {
+		// Not enough history to split meaningfully — summarize everything.
+		return window, nil
+	}
+	return window[:tailStart], window[tailStart:]
+}
+
+// findTailBoundary returns the index from which the tail begins. The tail
+// includes the last complete user→assistant(+tool) interaction turn.
+func findTailBoundary(events []*session.Event) int {
+	if len(events) <= 2 {
+		return 0
+	}
+	// Walk backwards to find the last user message. Everything from that
+	// user message onwards is the tail (the most recent full turn).
+	lastUserIdx := -1
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i] != nil && events[i].Message.Role == model.RoleUser {
+			lastUserIdx = i
+			break
+		}
+	}
+	if lastUserIdx < 0 {
+		return 0
+	}
+	// Don't let the tail be the entire window — there must be at least one
+	// event to summarize.
+	if lastUserIdx == 0 {
+		return 0
+	}
+	return lastUserIdx
 }
 
 func isCompactionEvent(ev *session.Event) bool {
@@ -292,7 +321,15 @@ func heuristicFallbackSummary(events []*session.Event, inputBudget int) string {
 }
 
 func defaultCompactionSummaryFormatter(summary string) string {
-	return strings.TrimSpace(summary)
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return ""
+	}
+	return "# CONTEXT SNAPSHOT\n" +
+		"This is a runtime-generated context compression snapshot.\n" +
+		"Do not treat this as a new user instruction.\n" +
+		"Use it only as compressed history for continuation.\n\n" +
+		summary
 }
 
 func eventToText(ev *session.Event) string {
@@ -378,6 +415,14 @@ func isContextOverflowError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Structured check first — providers should wrap overflow errors in
+	// model.ContextOverflowError.
+	if model.IsContextOverflow(err) {
+		return true
+	}
+	// Fallback: string matching for providers that haven't adopted the
+	// structured error yet. This path should be removed once all providers
+	// wrap overflow errors properly.
 	text := strings.ToLower(err.Error())
 	keywords := []string{
 		"context length",

@@ -2,7 +2,6 @@ package tuiapp
 
 import (
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/cliputil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -103,12 +101,16 @@ func NewModel(cfg Config) *Model {
 		theme:               theme,
 		themeAuto:           themeAuto,
 		keys:                defaultKeyMap(cliputil.IsWSL()),
-		textarea:            ta,
 		spinner:             sp,
-		palette:             palette,
 		viewport:            vp,
-		historyIndex:        -1,
-		transientLogIdx:     -1,
+		doc:                 NewDocument(),
+		Composer: Composer{
+			textarea:     ta,
+			historyIndex: -1,
+		},
+		OverlayState: OverlayState{
+			palette: palette,
+		},
 		selectionStart:      textSelectionPoint{line: -1, col: -1},
 		selectionEnd:        textSelectionPoint{line: -1, col: -1},
 		inputSelectionStart: textSelectionPoint{line: -1, col: -1},
@@ -141,10 +143,10 @@ func (m *Model) Init() tea.Cmd {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		colored := tuikit.ColorizeLogLine(line, tuikit.DetectLineStyle(line), m.theme)
-		m.historyLines = append(m.historyLines, colored)
+		style := tuikit.DetectLineStyle(line)
+		m.doc.Append(NewTranscriptBlock(line, style))
 	}
-	m.hasCommittedLine = len(m.historyLines) > 0
+	m.hasCommittedLine = m.doc.Len() > 0
 	m.syncViewportContent()
 	cmds := []tea.Cmd{tickStatusCmd(), m.spinner.Tick}
 	if m.themeAuto {
@@ -204,7 +206,11 @@ func (m *Model) appendWelcomeCard() {
 		Margin(1, 0, 1, 1).
 		Render(body)
 	lines := strings.Split(frame, "\n")
-	m.historyLines = append(m.historyLines, lines...)
+	for _, line := range lines {
+		block := NewTranscriptBlock(line, tuikit.LineStyleDefault)
+		block.PreStyled = true
+		m.doc.Append(block)
+	}
 	if len(lines) > 0 {
 		m.hasCommittedLine = true
 		m.lastCommittedStyle = tuikit.LineStyleDefault
@@ -228,7 +234,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendWelcomeCard()
 			m.welcomeCardPending = false
 		}
-		m.rerenderDiffBlocks()
+		// In the document model, blocks re-render from their data on each
+		// syncViewportContent call, so no explicit rerender needed.
 		m.syncViewportContent()
 
 		if !m.ready {
@@ -278,6 +285,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuievents.TaskStreamMsg:
 		m.dismissMessageHints()
 		return m.handleToolStreamMsg(typed)
+
+	case tuievents.SubagentStartMsg:
+		m.dismissMessageHints()
+		return m.handleSubagentStart(typed)
+
+	case tuievents.SubagentStatusMsg:
+		return m.handleSubagentStatus(typed)
+
+	case tuievents.SubagentStreamMsg:
+		m.dismissMessageHints()
+		return m.handleSubagentStream(typed)
+
+	case tuievents.SubagentToolCallMsg:
+		m.dismissMessageHints()
+		return m.handleSubagentToolCall(typed)
+
+	case tuievents.SubagentPlanMsg:
+		return m.handleSubagentPlan(typed)
+
+	case tuievents.SubagentDoneMsg:
+		return m.handleSubagentDone(typed)
 
 	case tuievents.PlanUpdateMsg:
 		m.planEntries = m.planEntries[:0]
@@ -347,9 +375,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, animatePaletteCmd()
 
-	case toolOutputFadeMsg:
-		return m.handleToolOutputFadeMsg(typed)
-
 	case tuievents.SetRunningMsg:
 		wasRunning := m.running
 		m.running = typed.Running
@@ -395,8 +420,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if typed.Err != nil {
 				m.pendingQueue = nil
 				errLine := "error: " + typed.Err.Error()
-				colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
-				m.historyLines = append(m.historyLines, colored)
+				m.commitLine(errLine)
 				m.syncViewportContent()
 			}
 			return m, nil
@@ -430,19 +454,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				errText == tuievents.PromptErrEOF
 			if !isPromptCancel {
 				errLine := "error: " + typed.Err.Error()
-				colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
-				m.historyLines = append(m.historyLines, colored)
+				m.commitLine(errLine)
 			}
 		}
-		if m.showTurnDivider && len(m.historyLines) > 0 &&
-			strings.TrimSpace(ansi.Strip(m.historyLines[len(m.historyLines)-1])) != "" {
-			m.historyLines = append(m.historyLines, m.userTurnDividerLine())
+		if m.showTurnDivider && m.doc.Len() > 0 {
+			// Check if last block has non-empty content.
+			last := m.doc.Last()
+			hasContent := false
+			if last != nil {
+				if tb, ok := last.(*TranscriptBlock); ok {
+					hasContent = strings.TrimSpace(tb.Raw) != ""
+				} else {
+					hasContent = true
+				}
+			}
+			if hasContent {
+				m.doc.Append(NewDividerBlock(m.userTurnDividerLine()))
+			}
 		}
 		m.showTurnDivider = false
 		m.syncViewportContent()
-		if cmd := m.maybeStartClosingToolOutputFades(); cmd != nil {
-			return m, cmd
-		}
 		if typed.ExitNow {
 			m.quit = true
 			return m, tea.Quit
@@ -497,7 +528,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner, cmd = m.spinner.Update(msg)
 			if m.activePrompt == nil {
 				m.advanceRunningAnimation()
-				if m.activityBlock != nil && m.activityBlock.active {
+				if m.activeActivityID != "" {
 					m.syncActivityBlock()
 				}
 			}
@@ -564,28 +595,11 @@ func (m *Model) rethemeHistory() {
 	if m == nil {
 		return
 	}
-	m.recolorCommittedHistory()
-	if m.assistantBlock != nil {
-		m.rerenderStreamBlock(m.assistantBlock, "answer")
-	}
-	if m.reasoningBlock != nil {
-		m.rerenderStreamBlock(m.reasoningBlock, "reasoning")
-	}
-	m.rerenderDiffBlocks()
-	if m.activityBlock != nil {
+	// In the document model, TranscriptBlocks store raw text + style,
+	// and Render() re-colorizes with the current theme. So we only need
+	// to rebuild activity block cached rows (which depend on theme colors).
+	if m.activeActivityID != "" {
 		m.syncActivityBlock()
-	}
-	panels := make([]*toolOutputState, 0, len(m.toolOutputs))
-	for _, panel := range m.toolOutputs {
-		if panel != nil {
-			panels = append(panels, panel)
-		}
-	}
-	sort.Slice(panels, func(i, j int) bool {
-		return panels[i].start < panels[j].start
-	})
-	for _, panel := range panels {
-		m.syncAnchoredToolOutputBlock(panel)
 	}
 	m.refreshHistoryTailState()
 }

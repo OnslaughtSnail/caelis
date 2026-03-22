@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/envload"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
@@ -33,11 +34,28 @@ const (
 var configEnvPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 type appConfig struct {
-	Version        int              `json:"version"`
-	DefaultModel   string           `json:"default_model"`
-	PermissionMode string           `json:"permission_mode,omitempty"`
-	SandboxType    string           `json:"sandbox_type,omitempty"`
-	Providers      []providerRecord `json:"providers,omitempty"`
+	Version        int                    `json:"version"`
+	DefaultModel   string                 `json:"default_model"`
+	PermissionMode string                 `json:"permission_mode,omitempty"`
+	SandboxType    string                 `json:"sandbox_type,omitempty"`
+	Providers      []providerRecord       `json:"providers,omitempty"`
+	AgentServers   map[string]agentRecord `json:"agent_servers,omitempty"`
+}
+
+// agentRecord declares one ACP agent available for SPAWN.
+// The built-in "self" agent is always implicitly available and does not
+// need to appear in this list.
+type agentRecord struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Type        string            `json:"type,omitempty"`
+	Transport   string            `json:"transport"`
+	Endpoint    string            `json:"endpoint,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	WorkDir     string            `json:"workDir,omitempty"`
 }
 
 type runtimeSettings struct {
@@ -238,6 +256,71 @@ func resolveAppConfigEnvPlaceholders(cfg *appConfig, configPath string) error {
 			return err
 		}
 	}
+	if len(cfg.AgentServers) > 0 {
+		keys := make([]string, 0, len(cfg.AgentServers))
+		for key := range cfg.AgentServers {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			rec := cfg.AgentServers[key]
+			if err := resolveAppConfigAgentPlaceholders(&rec, "agent_servers."+key, resolveField); err != nil {
+				return err
+			}
+			cfg.AgentServers[key] = rec
+		}
+	}
+	return nil
+}
+
+func resolveAppConfigAgentPlaceholders(rec *agentRecord, prefix string, resolveField func(string, *string) error) error {
+	if rec == nil {
+		return nil
+	}
+	if err := resolveField(prefix+".id", &rec.ID); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".name", &rec.Name); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".description", &rec.Description); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".type", &rec.Type); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".transport", &rec.Transport); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".endpoint", &rec.Endpoint); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".command", &rec.Command); err != nil {
+		return err
+	}
+	if err := resolveField(prefix+".workDir", &rec.WorkDir); err != nil {
+		return err
+	}
+	for i := range rec.Args {
+		if err := resolveField(fmt.Sprintf("%s.args[%d]", prefix, i), &rec.Args[i]); err != nil {
+			return err
+		}
+	}
+	if len(rec.Env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(rec.Env))
+	for key := range rec.Env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := rec.Env[key]
+		if err := resolveField(prefix+".env."+key, &value); err != nil {
+			return err
+		}
+		rec.Env[key] = value
+	}
 	return nil
 }
 
@@ -271,6 +354,119 @@ func (s *appConfigStore) DefaultModel() string {
 	}
 	value := strings.TrimSpace(s.data.DefaultModel)
 	return strings.ToLower(value)
+}
+
+// AgentDescriptors converts configured agent records into application agent descriptors.
+func (s *appConfigStore) AgentDescriptors() []appagents.Descriptor {
+	descs, _ := s.resolvedAgentDescriptors()
+	return descs
+}
+
+func (s *appConfigStore) resolvedAgentDescriptors() ([]appagents.Descriptor, error) {
+	if s == nil {
+		return nil, nil
+	}
+	records := s.normalizedAgentRecords()
+	out := make([]appagents.Descriptor, 0, len(records))
+	for _, rec := range records {
+		id := strings.TrimSpace(rec.ID)
+		if id == "" {
+			continue
+		}
+		desc, err := appagents.ResolveDescriptor(appagents.Descriptor{
+			ID:          id,
+			Name:        strings.TrimSpace(rec.Name),
+			Description: strings.TrimSpace(rec.Description),
+			Type:        strings.TrimSpace(strings.ToLower(rec.Type)),
+			Transport:   appagents.Transport(strings.TrimSpace(strings.ToLower(rec.Transport))),
+			Endpoint:    strings.TrimSpace(rec.Endpoint),
+			Command:     strings.TrimSpace(rec.Command),
+			Args:        append([]string(nil), rec.Args...),
+			Env:         copyStringMap(rec.Env),
+			WorkDir:     strings.TrimSpace(rec.WorkDir),
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, desc)
+	}
+	return out, nil
+}
+
+func (s *appConfigStore) AgentRegistry() (*appagents.Registry, error) {
+	descs, err := s.resolvedAgentDescriptors()
+	if err != nil {
+		return nil, err
+	}
+	reg := appagents.NewRegistry(descs...)
+	if err := reg.Validate(); err != nil {
+		return nil, err
+	}
+	return reg, nil
+}
+
+func (s *appConfigStore) normalizedAgentRecords() []agentRecord {
+	if s == nil {
+		return nil
+	}
+	out := make([]agentRecord, 0, len(s.data.AgentServers))
+	keys := make([]string, 0, len(s.data.AgentServers))
+	for key := range s.data.AgentServers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		rec := s.data.AgentServers[key]
+		if strings.TrimSpace(rec.ID) == "" {
+			rec.ID = key
+		}
+		if strings.TrimSpace(rec.Name) == "" {
+			rec.Name = key
+		}
+		normalizeAgentRecord(&rec)
+		out = append(out, rec)
+	}
+	return out
+}
+
+func (s *appConfigStore) UpsertAgentServer(name string, rec agentRecord) error {
+	if s == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("cli config: agent server name is required")
+	}
+	if s.data.AgentServers == nil {
+		s.data.AgentServers = map[string]agentRecord{}
+	}
+	if strings.TrimSpace(rec.ID) == "" {
+		rec.ID = name
+	}
+	if strings.TrimSpace(rec.Name) == "" {
+		rec.Name = name
+	}
+	normalizeAgentRecord(&rec)
+	s.data.AgentServers[name] = rec
+	return s.save()
+}
+
+func (s *appConfigStore) DeleteAgentServer(name string) error {
+	if s == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || len(s.data.AgentServers) == 0 {
+		return nil
+	}
+	if _, ok := s.data.AgentServers[name]; !ok {
+		return nil
+	}
+	delete(s.data.AgentServers, name)
+	if len(s.data.AgentServers) == 0 {
+		s.data.AgentServers = nil
+	}
+	return s.save()
 }
 
 func (s *appConfigStore) CredentialStoreMode() string {
@@ -713,6 +909,7 @@ func defaultAppConfig() appConfig {
 		DefaultModel:   defaultModel,
 		PermissionMode: defaultPermissionMode,
 		SandboxType:    platformDefaultSandboxType(),
+		AgentServers:   nil,
 		Providers:      nil,
 	}
 }
@@ -730,6 +927,24 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	}
 	cfg.PermissionMode = normalizePermissionMode(cfg.PermissionMode)
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
+	if len(cfg.AgentServers) > 0 {
+		keys := make([]string, 0, len(cfg.AgentServers))
+		for key := range cfg.AgentServers {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			rec := cfg.AgentServers[key]
+			if strings.TrimSpace(rec.ID) == "" {
+				rec.ID = key
+			}
+			if strings.TrimSpace(rec.Name) == "" {
+				rec.Name = key
+			}
+			normalizeAgentRecord(&rec)
+			cfg.AgentServers[key] = rec
+		}
+	}
 	for i := range cfg.Providers {
 		oldAlias := strings.TrimSpace(strings.ToLower(cfg.Providers[i].Alias))
 		normalizeLegacyProviderRecord(&cfg.Providers[i])
@@ -746,6 +961,106 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 			cfg.DefaultModel = newAlias
 		}
 	}
+}
+
+func normalizeAgentRecord(rec *agentRecord) {
+	if rec == nil {
+		return
+	}
+	rec.ID = strings.TrimSpace(rec.ID)
+	rec.Name = strings.TrimSpace(rec.Name)
+	rec.Description = strings.TrimSpace(rec.Description)
+	rec.Endpoint = strings.TrimSpace(rec.Endpoint)
+	rec.Command = strings.TrimSpace(rec.Command)
+	rec.WorkDir = strings.TrimSpace(rec.WorkDir)
+	rec.Args = normalizeStringSlice(rec.Args)
+	rec.Env = normalizeStringMap(rec.Env)
+	rec.Type = normalizeAgentRecordType(rec)
+	rec.Transport = normalizeAgentRecordTransport(rec.Transport, rec.Type)
+}
+
+func normalizeAgentRecordType(rec *agentRecord) string {
+	if rec == nil {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(rec.Type)) {
+	case "":
+		if rec.Command != "" || rec.Endpoint != "" || strings.TrimSpace(rec.Transport) != "" {
+			return appagents.TypeCustom
+		}
+		return appagents.TypeRegistry
+	case appagents.TypeBuiltin, appagents.TypeRegistry, appagents.TypeCustom:
+		return strings.ToLower(strings.TrimSpace(rec.Type))
+	default:
+		return strings.ToLower(strings.TrimSpace(rec.Type))
+	}
+}
+
+func normalizeAgentRecordTransport(raw string, kind string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value != "" {
+		return value
+	}
+	switch kind {
+	case appagents.TypeBuiltin:
+		return string(appagents.TransportSelf)
+	case appagents.TypeRegistry, appagents.TypeCustom:
+		return string(appagents.TransportACP)
+	default:
+		return value
+	}
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" {
+			continue
+		}
+		out[trimmedKey] = strings.TrimSpace(values[key])
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func normalizeLegacyProviderRecord(rec *providerRecord) {

@@ -11,7 +11,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
-	ktool "github.com/OnslaughtSnail/caelis/kernel/tool"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
@@ -250,21 +250,266 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		SupportsCancel: false,
 		Output:         task.Output{Stdout: result.Stdout, Stderr: result.Stderr},
 		Result: map[string]any{
-			"exit_code": result.ExitCode,
+			"exit_code":   result.ExitCode,
+			"output_meta": syncOutputMeta(result, tty),
 		},
 	}, string(decision.Route)), nil
 }
 
+func (t *BashTool) WithRuntime(runtime toolexec.Runtime) (*BashTool, error) {
+	cfg := t.cfg
+	cfg.Runtime = runtime
+	return NewBash(cfg)
+}
+
 func ktoolSnapshotResult(snapshot task.Snapshot, route string) map[string]any {
-	result := ktool.SnapshotResultMap(snapshot)
-	if strings.TrimSpace(route) != "" {
-		result["route"] = strings.TrimSpace(route)
+	_ = route
+	return snapshotResultMap(snapshot)
+}
+
+func ktoolAppendTaskEvents(result map[string]any, snapshot task.Snapshot) map[string]any {
+	return appendTaskSnapshotEvents(result, snapshot)
+}
+
+func appendTaskSnapshotEvents(result map[string]any, snapshot task.Snapshot) map[string]any {
+	if result == nil {
+		result = map[string]any{}
+	}
+	if snapshot.TaskID == "" {
+		return result
+	}
+	state := "running"
+	if !snapshot.Running {
+		switch snapshot.State {
+		case task.StateCompleted:
+			state = "completed"
+		case task.StateFailed:
+			state = "failed"
+		case task.StateInterrupted:
+			state = "interrupted"
+		case task.StateCancelled:
+			state = "cancelled"
+		case task.StateTerminated:
+			state = "terminated"
+		}
+	}
+	if snapshotOutputMetaTTY(snapshot.Result) {
+		return taskstream.AppendResultEvent(result, taskstream.Event{
+			Label:  "BASH",
+			TaskID: snapshot.TaskID,
+			State:  state,
+			Final:  !snapshot.Running,
+		})
+	}
+	return taskstream.AppendResultEvent(result, taskstream.Event{
+		Label:  "BASH",
+		TaskID: snapshot.TaskID,
+		State:  state,
+		Final:  !snapshot.Running,
+	})
+}
+
+func snapshotResultMap(snapshot task.Snapshot) map[string]any {
+	result := map[string]any{
+		"state": string(snapshot.State),
+	}
+	appendSnapshotMetaFields(result, snapshot)
+	if snapshotIsActive(snapshot) {
+		if id := strings.TrimSpace(snapshot.TaskID); id != "" {
+			result["task_id"] = id
+		}
+		if msg := snapshotStatusMessage(snapshot); msg != "" {
+			result["msg"] = msg
+		}
+		if value := snapshotProgressValue(snapshot); value != "" {
+			result["result"] = value
+		}
+		// Propagate fields needed by the TUI bash-watch poller.
+		if snapshot.Result != nil {
+			if v, ok := snapshot.Result["session_id"]; ok {
+				result["session_id"] = v
+			}
+			if v, ok := snapshot.Result["route"]; ok {
+				result["route"] = v
+			}
+		}
+		return result
+	}
+	if snapshotOutputMetaTTY(snapshot.Result) {
+		if value := snapshotProgressValue(snapshot); value != "" {
+			result["result"] = value
+		}
+	} else {
+		appendTerminalOutputFields(result, snapshot)
+	}
+	if msg := snapshotStatusMessage(snapshot); msg != "" {
+		result["msg"] = msg
 	}
 	return result
 }
 
-func ktoolAppendTaskEvents(result map[string]any, snapshot task.Snapshot) map[string]any {
-	return ktool.AppendTaskSnapshotEvents(result, snapshot)
+func snapshotIsActive(snapshot task.Snapshot) bool {
+	if snapshot.Running {
+		return true
+	}
+	switch snapshot.State {
+	case task.StateRunning, task.StateWaitingApproval, task.StateWaitingInput:
+		return true
+	default:
+		return false
+	}
+}
+
+func compactSnippet(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > 4 {
+		lines = lines[len(lines)-4:]
+	}
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+	text = strings.Join(lines, "\n")
+	rs := []rune(text)
+	if len(rs) > 240 {
+		return string(rs[:237]) + "..."
+	}
+	return text
+}
+
+func firstNonEmptyText(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "<nil>" {
+			return value
+		}
+	}
+	return ""
+}
+
+func snapshotYieldMessage(snapshot task.Snapshot) string {
+	id := strings.TrimSpace(snapshot.TaskID)
+	snippet := compactSnippet(firstNonEmptyText(snapshot.Output.Stdout, snapshot.Output.Stderr, snapshot.Output.Log))
+	base := "task yielded before completion"
+	if id != "" {
+		base += "; use TASK with task_id " + id
+	}
+	if snippet == "" {
+		return base
+	}
+	return base + "\n" + snippet
+}
+
+func snapshotStatusMessage(snapshot task.Snapshot) string {
+	id := strings.TrimSpace(snapshot.TaskID)
+	switch snapshot.State {
+	case task.StateCompleted:
+		return "task success"
+	case task.StateFailed:
+		return "task failed"
+	case task.StateCancelled:
+		return "cancelled"
+	case task.StateInterrupted:
+		return "interrupted"
+	case task.StateTerminated:
+		return "terminated"
+	case task.StateWaitingInput:
+		if id != "" {
+			return "waiting for input; use TASK write with task_id " + id
+		}
+		return "waiting for input"
+	case task.StateWaitingApproval:
+		if id != "" {
+			return "waiting for approval; use TASK with task_id " + id
+		}
+		return "waiting for approval"
+	default:
+		if id != "" {
+			return "task yielded before completion; use TASK with task_id " + id
+		}
+		return "task yielded before completion"
+	}
+}
+
+func snapshotProgressValue(snapshot task.Snapshot) string {
+	if preview := strings.TrimSpace(fmt.Sprint(snapshot.Result["latest_output"])); preview != "" && preview != "<nil>" {
+		return preview
+	}
+	return compactSnippet(firstNonEmptyText(snapshot.Output.Stdout, snapshot.Output.Stderr, snapshot.Output.Log))
+}
+
+func snapshotTerminalOutput(snapshot task.Snapshot) string {
+	return compactSnippet(firstNonEmptyText(snapshot.Output.Stdout, snapshot.Output.Stderr, snapshot.Output.Log))
+}
+
+func appendTerminalOutputFields(result map[string]any, snapshot task.Snapshot) {
+	if result == nil {
+		return
+	}
+	if stdout := strings.TrimSpace(snapshot.Output.Stdout); stdout != "" {
+		result["stdout"] = snapshot.Output.Stdout
+	}
+	if stderr := strings.TrimSpace(snapshot.Output.Stderr); stderr != "" {
+		result["stderr"] = snapshot.Output.Stderr
+	}
+	if output := strings.TrimSpace(snapshot.Output.Log); output != "" {
+		result["output"] = snapshot.Output.Log
+	}
+}
+
+func appendSnapshotMetaFields(result map[string]any, snapshot task.Snapshot) {
+	if result == nil || len(snapshot.Result) == 0 {
+		return
+	}
+	if value, ok := snapshot.Result["exit_code"]; ok && value != nil {
+		result["exit_code"] = value
+	}
+	if raw, ok := snapshot.Result["output_meta"]; ok {
+		if meta, ok := raw.(map[string]any); ok && len(meta) > 0 {
+			copied := make(map[string]any, len(meta))
+			for key, value := range meta {
+				copied[key] = value
+			}
+			result["output_meta"] = copied
+		}
+	}
+}
+
+func snapshotOutputMetaTTY(values map[string]any) bool {
+	if len(values) == 0 {
+		return false
+	}
+	raw, ok := values["output_meta"]
+	if !ok {
+		return false
+	}
+	meta, ok := raw.(map[string]any)
+	if !ok || len(meta) == 0 {
+		return false
+	}
+	typed, ok := meta["tty"].(bool)
+	return ok && typed
+}
+
+func syncOutputMeta(result toolexec.CommandResult, tty bool) map[string]any {
+	return map[string]any{
+		"streamed":              false,
+		"tty":                   tty,
+		"capture_cap_bytes":     0,
+		"stdout_captured_bytes": len(result.Stdout),
+		"stderr_captured_bytes": len(result.Stderr),
+		"stdout_retained_bytes": len(result.Stdout),
+		"stderr_retained_bytes": len(result.Stderr),
+		"stdout_cap_reached":    false,
+		"stderr_cap_reached":    false,
+		"stdout_dropped_bytes":  0,
+		"stderr_dropped_bytes":  0,
+		"capture_truncated":     false,
+		"model_truncated":       false,
+	}
 }
 
 func shouldEscalateWhenSandboxUnavailable(

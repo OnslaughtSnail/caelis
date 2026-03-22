@@ -78,6 +78,10 @@ func lifecycleEvent(sess *session.Session, status RunLifecycleStatus, phase stri
 	}
 }
 
+func LifecycleEvent(sess *session.Session, status RunLifecycleStatus, phase string, cause error) *session.Event {
+	return lifecycleEvent(sess, status, phase, cause)
+}
+
 func isLifecycleEvent(ev *session.Event) bool {
 	return session.IsLifecycle(ev)
 }

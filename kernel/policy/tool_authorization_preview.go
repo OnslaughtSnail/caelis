@@ -35,12 +35,7 @@ func toolAuthorizationRequest(toolName string, args map[string]any, reason strin
 		Preview:  summarizeAuthorizationPreview(args),
 		ScopeKey: approvalScopeKeyForTool(name, args),
 	}
-	switch {
-	case strings.HasPrefix(strings.ToUpper(name), "MCP__"):
-		req.Permission = "external MCP tool call"
-	default:
-		req.Permission = "tool authorization"
-	}
+	req.Permission = "tool authorization"
 	return req
 }
 

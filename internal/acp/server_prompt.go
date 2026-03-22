@@ -223,17 +223,10 @@ func (s *Server) loadImageContentPart(sessionID string, path string, mime string
 }
 
 func (s *Server) promptImageEnabled() bool {
-	if s == nil || s.cfg.PromptImageEnabled == nil {
+	if s == nil || s.cfg.Adapter == nil {
 		return false
 	}
-	return s.cfg.PromptImageEnabled()
-}
-
-func (s *Server) supportsPromptImage(cfg AgentSessionConfig) bool {
-	if s == nil || s.cfg.SupportsPromptImage == nil {
-		return false
-	}
-	return s.cfg.SupportsPromptImage(cfg)
+	return s.cfg.Adapter.Capabilities().PromptImage
 }
 
 func (s *Server) linkIsImage(path string, mime string) bool {

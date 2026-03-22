@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	sessioninmemory "github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 )
 
 func TestTaskManager_StatusReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) {
@@ -188,6 +188,121 @@ func TestTaskManager_BashWaitDoesNotReturnEarlyOnOutput(t *testing.T) {
 	}
 }
 
+func TestTaskManager_WaitReturnsRetainedOutputWhenNonTTYTaskCompletes(t *testing.T) {
+	store := taskinmemory.New()
+	entry := &task.Entry{
+		TaskID:         "t-bash-complete",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "s"},
+		Title:          "echo hi",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		StdoutCursor:   3,
+		Spec: map[string]any{
+			taskSpecCommand:       "echo hi",
+			taskSpecWorkdir:       "/tmp",
+			taskSpecRoute:         "host",
+			taskSpecExecSessionID: "sess-1",
+		},
+		Result: map[string]any{
+			"state": string(task.StateRunning),
+		},
+	}
+	if err := store.Upsert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &stubAsyncTaskRunner{
+		stdoutByMarker: map[int64][]byte{
+			0: []byte("one\ntwo\n"),
+			3: []byte("two\n"),
+		},
+		status: toolexec.SessionStatus{
+			State:               toolexec.SessionStateCompleted,
+			ExitCode:            0,
+			CaptureCapBytes:     1024,
+			StdoutBytes:         8,
+			StdoutRetainedBytes: 8,
+		},
+	}
+	manager := newTaskManager(nil, taskTestRuntime{host: runner}, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "s"}, RunRequest{}, nil)
+
+	snapshot, err := manager.Wait(context.Background(), task.ControlRequest{TaskID: entry.TaskID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Output.Stdout; got != "one\ntwo\n" {
+		t.Fatalf("expected retained stdout on completion, got %q", got)
+	}
+	meta, _ := snapshot.Result["output_meta"].(map[string]any)
+	if got := meta["tty"]; got != false {
+		t.Fatalf("expected non-tty output_meta, got %#v", snapshot.Result)
+	}
+}
+
+func TestTaskManager_WaitSuppressesTTYTranscriptWhenTaskCompletes(t *testing.T) {
+	store := taskinmemory.New()
+	entry := &task.Entry{
+		TaskID:         "t-bash-tty-complete",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "s"},
+		Title:          "interactive",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecCommand:       "interactive",
+			taskSpecWorkdir:       "/tmp",
+			taskSpecRoute:         "host",
+			taskSpecExecSessionID: "sess-1",
+			taskSpecTTY:           true,
+		},
+		Result: map[string]any{
+			"state": string(task.StateRunning),
+		},
+	}
+	if err := store.Upsert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &stubAsyncTaskRunner{
+		stdoutByMarker: map[int64][]byte{
+			0: []byte("name?\nalice\nhello alice\n"),
+		},
+		status: toolexec.SessionStatus{
+			State:               toolexec.SessionStateCompleted,
+			TTY:                 true,
+			ExitCode:            0,
+			CaptureCapBytes:     1024,
+			StdoutBytes:         24,
+			StdoutRetainedBytes: 24,
+		},
+	}
+	manager := newTaskManager(nil, taskTestRuntime{host: runner}, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "s"}, RunRequest{}, nil)
+
+	snapshot, err := manager.Wait(context.Background(), task.ControlRequest{TaskID: entry.TaskID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Output.Stdout != "" || snapshot.Output.Stderr != "" {
+		t.Fatalf("expected tty completion to suppress transcript, got %#v", snapshot.Output)
+	}
+	if got := strings.TrimSpace(snapshot.Result["latest_output"].(string)); !strings.Contains(got, "hello alice") {
+		t.Fatalf("expected tty preview in latest_output, got %#v", snapshot.Result)
+	}
+	meta, _ := snapshot.Result["output_meta"].(map[string]any)
+	if got := meta["streamed"]; got != true {
+		t.Fatalf("expected tty output_meta.streamed=true, got %#v", snapshot.Result)
+	}
+}
+
 func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) {
 	sessStore := sessioninmemory.New()
 	rt, err := New(Config{Store: sessStore})
@@ -236,8 +351,11 @@ func TestDelegateTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 	if !snapshot.Running {
 		t.Fatalf("expected delegate snapshot to remain running, got state=%q running=%v", snapshot.State, snapshot.Running)
 	}
-	if got := snapshot.Result["latest_output"]; !strings.Contains(strings.TrimSpace(fmt.Sprint(got)), "still working") {
-		t.Fatalf("expected delegate latest_output in snapshot result, got %#v", snapshot.Result)
+	if got := snapshot.Result["progress_state"]; got != string(task.StateRunning) {
+		t.Fatalf("expected delegate progress_state in snapshot result, got %#v", snapshot.Result)
+	}
+	if _, ok := snapshot.Result["latest_output"]; ok {
+		t.Fatalf("did not expect delegate latest_output to leak into snapshot result, got %#v", snapshot.Result)
 	}
 }
 
@@ -317,6 +435,7 @@ type stubAsyncTaskRunner struct {
 	stdoutByMarker   map[int64][]byte
 	stderrByMarker   map[int64][]byte
 	status           toolexec.SessionStatus
+	sessionID        string
 }
 
 func (s *stubAsyncTaskRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
@@ -324,7 +443,10 @@ func (s *stubAsyncTaskRunner) Run(context.Context, toolexec.CommandRequest) (too
 }
 
 func (s *stubAsyncTaskRunner) StartAsync(context.Context, toolexec.CommandRequest) (string, error) {
-	return "", nil
+	if strings.TrimSpace(s.sessionID) == "" {
+		s.sessionID = "sess-1"
+	}
+	return s.sessionID, nil
 }
 
 func (s *stubAsyncTaskRunner) WriteInput(string, []byte) error { return nil }
@@ -348,3 +470,49 @@ func (s *stubAsyncTaskRunner) WaitSession(context.Context, string, time.Duration
 func (s *stubAsyncTaskRunner) TerminateSession(string) error { return nil }
 
 func (s *stubAsyncTaskRunner) ListSessions() []toolexec.SessionInfo { return nil }
+
+func TestTaskManager_StartBashStreamsInitialOutputBeforeYieldReturns(t *testing.T) {
+	runner := &stubAsyncTaskRunner{
+		stdoutByMarker: map[int64][]byte{
+			0: []byte("hi\n"),
+		},
+		status:    toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		sessionID: "sess-live-1",
+	}
+	manager := newTaskManager(nil, taskTestRuntime{host: runner}, nil, taskinmemory.New(), &sessionContext{appName: "app", userID: "u", sessionID: "s"}, RunRequest{}, nil)
+
+	var seen []taskstream.Event
+	ctx := taskstream.WithStreamer(context.Background(), taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
+		seen = append(seen, ev)
+	}))
+	ctx = toolexec.WithToolCallInfo(ctx, "BASH", "call-bash-1")
+
+	snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
+		Command: "printf hi",
+		Workdir: "/tmp",
+		Route:   string(toolexec.ExecutionRouteHost),
+		Yield:   1100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Running || strings.TrimSpace(snapshot.TaskID) == "" {
+		t.Fatalf("expected yielded running snapshot, got %#v", snapshot)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("expected initial taskstream events before yield returns, got %#v", seen)
+	}
+	if seen[0].CallID != "call-bash-1" || seen[0].TaskID != snapshot.TaskID || seen[0].Reset || seen[0].State != "running" {
+		t.Fatalf("unexpected initial reset event: %#v", seen[0])
+	}
+	foundChunk := false
+	for _, ev := range seen {
+		if ev.Stream == "stdout" && ev.Chunk == "hi\n" {
+			foundChunk = true
+			break
+		}
+	}
+	if !foundChunk {
+		t.Fatalf("expected stdout chunk in live taskstream, got %#v", seen)
+	}
+}

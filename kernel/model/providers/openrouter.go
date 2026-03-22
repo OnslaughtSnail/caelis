@@ -65,7 +65,8 @@ type openRouterReqMsg struct {
 type openRouterResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
-		Message openRouterMsg `json:"message"`
+		Message      openRouterMsg `json:"message"`
+		FinishReason string        `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -77,7 +78,8 @@ type openRouterResponse struct {
 type openRouterStreamChunk struct {
 	Model   string `json:"model"`
 	Choices []struct {
-		Delta openRouterMsg `json:"delta"`
+		Delta        openRouterMsg `json:"delta"`
+		FinishReason string        `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -115,6 +117,10 @@ func newOpenRouter(cfg Config, token string) model.LLM {
 
 func (l *openRouterLLM) Name() string {
 	return l.name
+}
+
+func (l *openRouterLLM) ProviderName() string {
+	return l.provider
 }
 
 func (l *openRouterLLM) ContextWindowTokens() int {
@@ -210,6 +216,7 @@ func (l *openRouterLLM) Generate(ctx context.Context, req *model.Request) iter.S
 			yield(&model.Response{
 				Message:      msg,
 				TurnComplete: true,
+				FinishReason: normalizeOpenAICompatFinishReason(out.Choices[0].FinishReason),
 				Model:        out.Model,
 				Provider:     l.provider,
 				Usage: model.Usage{
@@ -226,6 +233,7 @@ func (l *openRouterLLM) Generate(ctx context.Context, req *model.Request) iter.S
 			toolCalls: map[int]*openAICompatToolCall{},
 		}
 		var usage model.Usage
+		finishReason := model.FinishReasonUnknown
 		stopped := false
 		if err := readSSE(resp.Body, func(data []byte) error {
 			var chunk openRouterStreamChunk
@@ -241,6 +249,9 @@ func (l *openRouterLLM) Generate(ctx context.Context, req *model.Request) iter.S
 			}
 			if len(chunk.Choices) == 0 {
 				return nil
+			}
+			if one := normalizeOpenAICompatFinishReason(chunk.Choices[0].FinishReason); one != model.FinishReasonUnknown {
+				finishReason = one
 			}
 			delta := chunk.Choices[0].Delta
 			if strings.TrimSpace(delta.Role) != "" {
@@ -303,6 +314,7 @@ func (l *openRouterLLM) Generate(ctx context.Context, req *model.Request) iter.S
 		yield(&model.Response{
 			Message:      finalMsg,
 			TurnComplete: true,
+			FinishReason: finishReason,
 			Model:        l.name,
 			Provider:     l.provider,
 			Usage:        usage,

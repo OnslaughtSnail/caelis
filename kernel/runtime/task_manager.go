@@ -7,8 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/kernel/delegation"
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 )
@@ -20,7 +21,7 @@ type runtimeTaskManager struct {
 	store     task.Store
 	parent    *sessionContext
 	runReq    RunRequest
-	subagents *runtimeSubagentRunner
+	subagents agent.SubagentRunner
 
 	turnMu      sync.Mutex
 	turnTaskIDs []string
@@ -43,7 +44,7 @@ const (
 	taskSpecPrompt        = "task"
 )
 
-func newTaskManager(r *Runtime, execRuntime toolexec.Runtime, registry *task.Registry, store task.Store, parent *sessionContext, req RunRequest, runner *runtimeSubagentRunner) *runtimeTaskManager {
+func newTaskManager(r *Runtime, execRuntime toolexec.Runtime, registry *task.Registry, store task.Store, parent *sessionContext, req RunRequest, runner agent.SubagentRunner) *runtimeTaskManager {
 	if registry == nil {
 		registry = task.NewRegistry(task.RegistryConfig{})
 	}
@@ -113,62 +114,94 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 
 func (m *runtimeTaskManager) StartDelegate(ctx context.Context, req task.DelegateStartRequest) (task.Snapshot, error) {
 	if strings.TrimSpace(req.Task) == "" {
-		return task.Snapshot{}, fmt.Errorf("task: delegate task is required")
+		return task.Snapshot{}, fmt.Errorf("task: child task is required")
 	}
 	if m.subagents == nil {
-		return task.Snapshot{}, fmt.Errorf("task: delegate runtime is unavailable")
+		return task.Snapshot{}, fmt.Errorf("task: child session runtime is unavailable")
+	}
+	agentName := strings.TrimSpace(req.Agent)
+	if agentName == "" {
+		agentName = "self"
 	}
 	if req.Yield < 0 {
 		req.Yield = 0
 	}
-
-	childReq, lineage, err := m.subagents.prepareChildRun(ctx, delegation.RunRequest{Input: req.Task})
+	kind := req.Kind
+	if kind == "" {
+		kind = task.KindSpawn
+	}
+	label := strings.ToUpper(string(kind))
+	if label == "" {
+		label = "SPAWN"
+	}
+	record := m.registry.Create(kind, req.Task, nil, false, true)
+	m.trackTurnTask(record.ID)
+	runResult, err := m.subagents.RunSubagent(ctx, agent.SubagentRunRequest{
+		Agent:        agentName,
+		Task:         req.Task,
+		ContentParts: append([]model.ContentPart(nil), req.ContentParts...),
+		Yield:        req.Yield,
+		Timeout:      req.Timeout,
+	})
 	if err != nil {
 		return task.Snapshot{}, err
 	}
-	record := m.registry.Create(task.KindDelegate, req.Task, nil, false, true)
-	m.trackTurnTask(record.ID)
-	lineage.TaskID = record.ID
-	baseCtx, cancel := context.WithCancel(detachSubagentContext(ctx, lineage))
+	cancel := cancelSubagentFunc(m.subagents, runResult.SessionID)
 	controller := &delegateTaskController{
 		runtime:      m.runtime,
 		appName:      m.runReq.AppName,
 		userID:       m.runReq.UserID,
-		sessionID:    childReq.SessionID,
-		delegationID: lineage.DelegationID,
+		sessionID:    runResult.SessionID,
+		delegationID: runResult.DelegationID,
 		cancel:       cancel,
 		store:        m.store,
+		agent:        runResult.Agent,
+		timeout:      runResult.Timeout,
 	}
 	record.Backend = controller
 	record.Session = task.SessionRef{AppName: m.parent.appName, UserID: m.parent.userID, SessionID: m.parent.sessionID}
 	record.Spec = map[string]any{
 		taskSpecPrompt:       req.Task,
-		taskSpecChildSession: childReq.SessionID,
-		taskSpecDelegationID: lineage.DelegationID,
+		taskSpecChildSession: runResult.SessionID,
+		taskSpecDelegationID: runResult.DelegationID,
+		"agent":              runResult.Agent,
+	}
+	if runResult.Timeout > 0 {
+		record.Spec["timeout_seconds"] = int(runResult.Timeout / time.Second)
 	}
 	if err := m.persistRecord(ctx, record); err != nil {
-		cancel()
+		if cancel != nil {
+			cancel()
+		}
 		return task.Snapshot{}, err
 	}
 	taskstream.Emit(ctx, taskstream.Event{
-		Label:  "DELEGATE",
+		Label:  label,
 		TaskID: record.ID,
 		CallID: record.ID,
 		State:  string(RunLifecycleStatusRunning),
 		Reset:  true,
 	})
-	go m.subagents.runDetachedSubagent(baseCtx, childReq, lineage)
-	startedAt := time.Now()
-	snapshot, err := controller.Wait(ctx, record, req.Yield)
+	snapshot, err := controller.Status(ctx, record)
 	if err != nil {
 		return task.Snapshot{}, err
 	}
-	if snapshot.Result == nil {
-		snapshot.Result = map[string]any{}
-	}
-	snapshot.Result["waited_ms"] = int(time.Since(startedAt).Milliseconds())
-	snapshot.Yielded = snapshot.Running
+	snapshot.Yielded = runResult.Yielded || snapshot.Running
 	return snapshot, nil
+}
+
+type cancelableSubagentRunner interface {
+	CancelSubagent(string) bool
+}
+
+func cancelSubagentFunc(runner agent.SubagentRunner, sessionID string) context.CancelFunc {
+	cancelable, ok := runner.(cancelableSubagentRunner)
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	return func() {
+		cancelable.CancelSubagent(sessionID)
+	}
 }
 
 func (m *runtimeTaskManager) trackTurnTask(taskID string) {
@@ -270,11 +303,15 @@ func (m *runtimeTaskManager) Cancel(ctx context.Context, req task.ControlRequest
 }
 
 func (m *runtimeTaskManager) List(ctx context.Context) ([]task.Snapshot, error) {
-	records := m.registry.List()
+	if m == nil || m.registry == nil {
+		return nil, nil
+	}
+	registry := m.registry
+	records := registry.List()
 	out := make([]task.Snapshot, 0, len(records))
 	seen := map[string]struct{}{}
 	current := task.SessionRef{}
-	if m != nil && m.parent != nil {
+	if m.parent != nil {
 		current = task.SessionRef{
 			AppName:   m.parent.appName,
 			UserID:    m.parent.userID,

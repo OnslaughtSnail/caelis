@@ -153,3 +153,50 @@ type BTWOverlayMsg struct {
 type BTWErrorMsg struct {
 	Text string
 }
+
+// SubagentStartMsg signals a new subagent panel should be created.
+type SubagentStartMsg struct {
+	SpawnID      string // unique spawn instance identifier
+	AttachTarget string // child session id or delegation id accepted by /attach
+	Agent        string // agent id (e.g. "self")
+	CallID       string // parent tool call ID
+}
+
+type SubagentStatusMsg struct {
+	SpawnID string
+	State   string // "running", "waiting_approval", "completed", "failed", "interrupted"
+
+	// Optional approval context (populated when State == "waiting_approval").
+	ApprovalTool    string // tool requesting approval (e.g. "BASH")
+	ApprovalCommand string // command or action awaiting approval
+}
+
+// SubagentStreamMsg carries assistant or reasoning chunks for a subagent panel.
+type SubagentStreamMsg struct {
+	SpawnID string
+	Stream  string // "assistant" or "reasoning"
+	Chunk   string
+}
+
+// SubagentToolCallMsg carries tool activity for a subagent panel.
+type SubagentToolCallMsg struct {
+	SpawnID  string
+	ToolName string
+	CallID   string
+	Args     string
+	Stream   string // "stdout", "stderr", "assistant"
+	Chunk    string
+	Final    bool
+}
+
+// SubagentPlanMsg carries a plan update for a subagent panel.
+type SubagentPlanMsg struct {
+	SpawnID string
+	Entries []PlanEntry
+}
+
+// SubagentDoneMsg signals a subagent panel has completed.
+type SubagentDoneMsg struct {
+	SpawnID string
+	State   string // "completed", "failed", "interrupted"
+}

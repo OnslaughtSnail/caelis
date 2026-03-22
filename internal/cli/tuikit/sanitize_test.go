@@ -106,3 +106,27 @@ func TestSkipANSISequenceTwoByte(t *testing.T) {
 		t.Errorf("expected end=2, got %d", end)
 	}
 }
+
+// TestSkipANSISequenceBeforeMultibyte verifies that a bare ESC followed by a
+// multibyte UTF-8 rune (e.g. a Chinese character) does not consume the first
+// byte of the rune.  The two-byte-escape handler must stop at ESC itself so
+// the main SanitizeLogText loop can decode the rune correctly.
+func TestSkipANSISequenceBeforeMultibyte(t *testing.T) {
+	// ESC immediately followed by '你' (0xE4 0xBD 0xA0).
+	input := "\x1b你"
+	end := skipANSISequence(input, 0)
+	// The function should advance past ESC only (index 1), not past ESC + 0xE4.
+	if end != 1 {
+		t.Errorf("skipANSISequence before multibyte rune: expected end=1, got %d", end)
+	}
+}
+
+// TestSanitizeLogTextPreservesChineseAfterEsc verifies that a stray ESC byte
+// before Chinese text does not cause the following character to be dropped.
+func TestSanitizeLogTextPreservesChineseAfterEsc(t *testing.T) {
+	// A bare ESC in the middle of Chinese text must not eat the next rune.
+	got := SanitizeLogText("你好\x1b世界")
+	if got != "你好世界" {
+		t.Errorf("expected %q, got %q", "你好世界", got)
+	}
+}

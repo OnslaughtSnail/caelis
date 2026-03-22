@@ -50,6 +50,10 @@ func (l *geminiLLM) Name() string {
 	return l.name
 }
 
+func (l *geminiLLM) ProviderName() string {
+	return l.provider
+}
+
 func (l *geminiLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }

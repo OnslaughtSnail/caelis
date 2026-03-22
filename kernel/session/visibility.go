@@ -21,10 +21,14 @@ const (
 )
 
 // Notice is one transient runtime notice rendered to the user but excluded
-// from model context and persisted history.
+// from model context and persisted history. When Kind is non-empty, it
+// identifies a structured notice whose presentation text should be generated
+// by the UI layer from the event metadata rather than from the Text field.
 type Notice struct {
 	Level string
 	Text  string
+	Kind  string
+	Meta  map[string]any
 }
 
 // MarkUIOnly annotates one event as UI-only so it can be shown live but
@@ -126,18 +130,64 @@ func IsNotice(ev *Event) bool {
 	return ok
 }
 
+// IsTransient reports whether an event is runtime-transient only. Transient
+// events may be streamed to the UI during one run but must never become part of
+// canonical durable history or future agent input.
+//
+// Event visibility tiers:
+//   - Canonical durable history: persisted events projected into future context.
+//     Identified by IsCanonicalHistoryEvent.
+//   - Invocation-only: visible to the current agent run (includes overlays)
+//     but excluded from persistence. Identified by IsInvocationVisibleEvent.
+//   - Transient: streaming-only events (partials, notices, UI-only) that are
+//     neither persisted nor projected. Identified by IsTransient.
+func IsTransient(ev *Event) bool {
+	if ev == nil {
+		return true
+	}
+	return IsPartial(ev) || IsUIOnly(ev) || IsOverlay(ev) || IsNotice(ev)
+}
+
+// IsCanonicalHistoryEvent reports whether an event belongs to durable session
+// history and may be projected back into future agent context.
+func IsCanonicalHistoryEvent(ev *Event) bool {
+	if ev == nil {
+		return false
+	}
+	if IsTransient(ev) || IsLifecycle(ev) {
+		return false
+	}
+	return true
+}
+
+// IsInvocationVisibleEvent reports whether an event may participate in the
+// current agent invocation context. Overlay events are visible only to the
+// current run, while other transient events remain excluded.
+func IsInvocationVisibleEvent(ev *Event) bool {
+	if ev == nil || IsLifecycle(ev) || IsPartial(ev) || IsUIOnly(ev) || IsNotice(ev) {
+		return false
+	}
+	return true
+}
+
 func eventNoticeMeta(meta map[string]any) (Notice, bool) {
 	if meta == nil {
 		return Notice{}, false
 	}
 	level, _ := meta[metaNoticeLevelKey].(string)
 	text, _ := meta[metaNoticeTextKey].(string)
+	kind, _ := meta["kind"].(string)
 	level = normalizeNoticeLevel(level)
 	text = strings.TrimSpace(text)
 	if level == "" || text == "" {
 		return Notice{}, false
 	}
-	return Notice{Level: level, Text: text}, true
+	return Notice{
+		Level: level,
+		Text:  text,
+		Kind:  strings.TrimSpace(kind),
+		Meta:  cloneMap(meta),
+	}, true
 }
 
 func normalizeNoticeLevel(level string) string {

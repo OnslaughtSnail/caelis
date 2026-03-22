@@ -14,8 +14,8 @@ require (
 	github.com/go-git/go-git/v5 v5.17.0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-runewidth v0.0.20
-	github.com/modelcontextprotocol/go-sdk v1.2.0
 	github.com/peterh/liner v1.2.2
+	github.com/rivo/uniseg v0.4.7
 	golang.org/x/image v0.36.0
 	golang.org/x/sys v0.41.0
 	google.golang.org/genai v1.49.0
@@ -44,7 +44,6 @@ require (
 	github.com/go-git/go-billy/v5 v5.8.0 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/jsonschema-go v0.3.0 // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
@@ -59,17 +58,14 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
 	golang.org/x/text v0.34.0 // indirect

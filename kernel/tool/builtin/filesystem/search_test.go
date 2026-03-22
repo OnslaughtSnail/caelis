@@ -40,10 +40,6 @@ func TestSearchTool_ReportsTruncationAndFileStats(t *testing.T) {
 	if !ok || fileCount <= 0 {
 		t.Fatalf("expected file_count>0, got %v", out["file_count"])
 	}
-	scanned, ok := out["scanned_files"].(int)
-	if !ok || scanned <= 0 {
-		t.Fatalf("expected scanned_files>0, got %v", out["scanned_files"])
-	}
 }
 
 func TestSearchTool_ReturnsColumn(t *testing.T) {

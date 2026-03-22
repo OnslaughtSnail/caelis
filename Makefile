@@ -7,7 +7,7 @@ LDFLAGS := -s -w \
 	-X github.com/OnslaughtSnail/caelis/internal/version.Commit=$(COMMIT) \
 	-X github.com/OnslaughtSnail/caelis/internal/version.Date=$(DATE)
 
-.PHONY: build build-cli install vet test eval-light eval-nightly eval-real-matrix release-dry-run
+.PHONY: build build-cli install vet lint test eval-light eval-nightly eval-real-matrix release-dry-run
 
 build:
 	go build ./...
@@ -21,6 +21,9 @@ build-cli:
 
 vet:
 	go vet ./...
+
+lint:
+	golangci-lint run ./kernel/...
 
 test:
 	go test ./...

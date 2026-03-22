@@ -7,9 +7,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 )
 
 type headlessOutputFormat string
@@ -74,7 +74,7 @@ func resolveSingleShotInput(
 	return "", false, nil
 }
 
-func runHeadlessOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest) (headlessRunResult, error) {
+func runHeadlessOnce(ctx context.Context, svc *sessionsvc.Service, req sessionsvc.RunTurnRequest) (headlessRunResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -83,10 +83,11 @@ func runHeadlessOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRe
 		answerPartial strings.Builder
 		promptTokens  int
 	)
-	runner, err := rt.Run(ctx, req)
+	runResult, err := svc.RunTurn(ctx, req)
 	if err != nil {
 		return headlessRunResult{}, err
 	}
+	runner := runResult.Handle
 	defer runner.Close() // Close always returns nil; safe to ignore.
 	for ev, err := range runner.Events() {
 		if err != nil {
@@ -130,7 +131,7 @@ func runHeadlessOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRe
 		lastAssistant = strings.TrimSpace(answerPartial.String())
 	}
 	return headlessRunResult{
-		SessionID:    strings.TrimSpace(req.SessionID),
+		SessionID:    strings.TrimSpace(runResult.Session.SessionID),
 		Output:       strings.TrimSpace(lastAssistant),
 		PromptTokens: promptTokens,
 	}, nil

@@ -44,6 +44,29 @@ type stubFileSystem struct {
 	home string
 }
 
+func assertBashOutput(t *testing.T, out map[string]any, want string) {
+	t.Helper()
+	if got := out["stdout"]; got != want {
+		t.Fatalf("unexpected bash stdout: %#v", out)
+	}
+	if got := out["state"]; got != string(task.StateCompleted) {
+		t.Fatalf("expected completed state, got %#v", out)
+	}
+	if got := out["msg"]; got != "task success" {
+		t.Fatalf("expected success msg, got %#v", out)
+	}
+	if _, exists := out["result"]; exists {
+		t.Fatalf("expected no compact result field, got %#v", out)
+	}
+	meta, ok := out["output_meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected output_meta, got %#v", out)
+	}
+	if got, ok := meta["model_truncated"].(bool); !ok || got {
+		t.Fatalf("expected model_truncated=false, got %#v", meta)
+	}
+}
+
 func testSandboxType() string {
 	if runtime.GOOS == "darwin" {
 		return "seatbelt"
@@ -201,9 +224,7 @@ func TestBash_DefaultSafeCommandRunsInSandbox(t *testing.T) {
 	if len(host.calls) != 0 {
 		t.Fatalf("expected host runner not called, got %d", len(host.calls))
 	}
-	if out["stdout"] != "sandbox-ok" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "sandbox-ok")
 }
 
 func TestBash_StreamsCommandOutputThroughContext(t *testing.T) {
@@ -290,6 +311,46 @@ func TestBash_YieldReturnsSharedTaskHandle(t *testing.T) {
 	}
 }
 
+func TestBash_SyncTTYKeepsTranscriptOutOfResultFields(t *testing.T) {
+	host := &recordingRunner{
+		result: toolexec.CommandResult{
+			Stdout:   "name?\nalice\nhello alice\n",
+			ExitCode: 0,
+		},
+	}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     host,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), map[string]any{
+		"command": "printf hi",
+		"tty":     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := out["stdout"]; exists {
+		t.Fatalf("expected tty output to stay out of stdout field, got %#v", out)
+	}
+	if got := strings.TrimSpace(out["result"].(string)); !strings.Contains(got, "hello alice") {
+		t.Fatalf("expected tty preview in result, got %#v", out)
+	}
+	meta, _ := out["output_meta"].(map[string]any)
+	if got := meta["streamed"]; got != false {
+		t.Fatalf("expected sync tty command to report streamed=false, got %#v", out)
+	}
+	if got := meta["tty"]; got != true {
+		t.Fatalf("expected tty=true in output_meta, got %#v", out)
+	}
+}
+
 func TestBash_DefaultUnsafeCommandRunsInSandboxWithoutApprovalWhenNoApprover(t *testing.T) {
 	host := &recordingRunner{}
 	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "sandbox-ok"}}
@@ -316,9 +377,7 @@ func TestBash_DefaultUnsafeCommandRunsInSandboxWithoutApprovalWhenNoApprover(t *
 	if len(sandbox.calls) != 1 {
 		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "sandbox-ok" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "sandbox-ok")
 }
 
 func TestBash_DefaultUnsafeCommandWithApprovalStillRunsInSandbox(t *testing.T) {
@@ -348,9 +407,7 @@ func TestBash_DefaultUnsafeCommandWithApprovalStillRunsInSandbox(t *testing.T) {
 	if len(sandbox.calls) != 1 {
 		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "sandbox-ok" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "sandbox-ok")
 }
 
 func TestBash_FullControlRunsOnHostWithoutApproval(t *testing.T) {
@@ -376,9 +433,7 @@ func TestBash_FullControlRunsOnHostWithoutApproval(t *testing.T) {
 	if len(host.calls) != 1 {
 		t.Fatalf("expected host runner called once, got %d", len(host.calls))
 	}
-	if out["stdout"] != "host-ok" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-ok")
 }
 
 func TestBash_RequireEscalatedBoolForcesHostApproval(t *testing.T) {
@@ -411,9 +466,7 @@ func TestBash_RequireEscalatedBoolForcesHostApproval(t *testing.T) {
 	if len(sandbox.calls) != 0 {
 		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "host-approved" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-approved")
 }
 
 func TestBash_RequireEscalatedWhitelistedCommandSkipsApproval(t *testing.T) {
@@ -445,9 +498,7 @@ func TestBash_RequireEscalatedWhitelistedCommandSkipsApproval(t *testing.T) {
 	if len(sandbox.calls) != 0 {
 		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "host-whitelisted" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-whitelisted")
 }
 
 func TestBash_RequireEscalatedDeniedStopsExecution(t *testing.T) {
@@ -517,9 +568,7 @@ func TestBash_ConsumesPolicyDecisionRequireApproval(t *testing.T) {
 	if len(sandbox.calls) != 0 {
 		t.Fatalf("expected sandbox runner not called, got %d", len(sandbox.calls))
 	}
-	if out["stdout"] != "host-approved" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-approved")
 }
 
 func TestBash_ConsumesPolicyDecisionDeny(t *testing.T) {
@@ -578,9 +627,7 @@ func TestBash_DefaultFallbackAllCommandsNeedApproval(t *testing.T) {
 	if len(host.calls) != 1 {
 		t.Fatalf("expected host runner called once, got %d", len(host.calls))
 	}
-	if out["stdout"] != "host-fallback" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-fallback")
 }
 
 func TestBash_InvalidRequireEscalatedType(t *testing.T) {
@@ -653,8 +700,12 @@ func TestBash_TTYWithoutYieldAutomaticallyBecomesTask(t *testing.T) {
 	if got := out["task_id"]; got != "t-bash-1" {
 		t.Fatalf("expected interactive command to yield task handle, got %#v", out)
 	}
-	if got := out["supports_input"]; got != true {
-		t.Fatalf("expected interactive command to expose supports_input, got %#v", out)
+	message := strings.TrimSpace(strings.TrimSpace(out["msg"].(string)))
+	if !strings.Contains(message, "use TASK with task_id t-bash-1") {
+		t.Fatalf("expected yielded message with task guidance, got %#v", out)
+	}
+	if got := strings.TrimSpace(out["result"].(string)); got != "What is your name?" {
+		t.Fatalf("expected yielded result preview, got %#v", out)
 	}
 }
 
@@ -893,9 +944,7 @@ func TestBash_SandboxCommandMissingEscalatesToHostAfterApproval(t *testing.T) {
 	if len(host.calls) != 1 {
 		t.Fatalf("expected host called once, got %d", len(host.calls))
 	}
-	if out["stdout"] != "host-ok" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-ok")
 }
 
 func TestBash_SandboxCommandMissingRequiresApprovalWhenNoApprover(t *testing.T) {
@@ -1111,9 +1160,7 @@ func TestBash_ACPXCommandRunsOnHostWhenEscalated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out["stdout"] != "host-ok" {
-		t.Fatalf("unexpected stdout: %v", out["stdout"])
-	}
+	assertBashOutput(t, out, "host-ok")
 	if len(host.calls) != 1 {
 		t.Fatalf("expected host runner called once, got %d", len(host.calls))
 	}

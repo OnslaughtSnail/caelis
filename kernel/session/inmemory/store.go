@@ -81,8 +81,7 @@ func (s *Store) AppendEvent(ctx context.Context, req *session.Session, ev *sessi
 	if !ok {
 		return session.ErrSessionNotFound
 	}
-	copyEv := *ev
-	e.events = append(e.events, &copyEv)
+	e.events = append(e.events, session.CloneEvent(ev))
 	return nil
 }
 
@@ -100,8 +99,7 @@ func (s *Store) ListEvents(ctx context.Context, req *session.Session) ([]*sessio
 	}
 	out := make([]*session.Event, 0, len(e.events))
 	for _, ev := range e.events {
-		cp := *ev
-		out = append(out, &cp)
+		out = append(out, session.CloneEvent(ev))
 	}
 	return out, nil
 }
@@ -150,8 +148,7 @@ func (s *Store) ListContextWindowEvents(ctx context.Context, req *session.Sessio
 	window := session.ContextWindowEvents(e.events)
 	out := make([]*session.Event, 0, len(window))
 	for _, ev := range window {
-		cp := *ev
-		out = append(out, &cp)
+		out = append(out, session.CloneEvent(ev))
 	}
 	return out, nil
 }

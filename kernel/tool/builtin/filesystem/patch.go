@@ -79,11 +79,9 @@ func (t *PatchTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	return map[string]any{
 		"path":          plan.path,
 		"replaced":      plan.replaced,
-		"old_count":     plan.oldCount,
 		"created":       plan.created,
 		"added_lines":   diffStats.Added,
 		"removed_lines": diffStats.Removed,
-		"metadata":      buildPatchMetadata(buildPatchPreview(plan.before, plan.after), plan.hunk),
 	}, nil
 }
 
@@ -152,4 +150,8 @@ func patchLineCount(text string) int {
 		return 0
 	}
 	return strings.Count(text, "\n") + 1
+}
+
+func (t *PatchTool) WithRuntime(runtime toolexec.Runtime) (*PatchTool, error) {
+	return NewPatchWithRuntime(runtime)
 }

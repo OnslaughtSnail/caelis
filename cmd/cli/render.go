@@ -95,6 +95,7 @@ type renderState struct {
 }
 
 type toolCallSnapshot struct {
+	Name          string
 	Args          map[string]any
 	RichDiffShown bool
 	ChangeCounts  mutationChangeCounts
@@ -288,7 +289,7 @@ func printEvent(ev *session.Event, state *renderState) {
 }
 
 func renderNotice(notice session.Notice, state *renderState) {
-	text := strings.TrimSpace(notice.Text)
+	text := renderNoticeText(notice)
 	if text == "" {
 		return
 	}
@@ -318,6 +319,63 @@ func renderNotice(notice session.Notice, state *renderState) {
 	default:
 		fmt.Fprintln(out, text)
 	}
+}
+
+// renderNoticeText produces the human-presentable text for a notice. For
+// structured notices (Kind != ""), it renders from the Kind; for legacy
+// notices, it returns the raw Text.
+func renderNoticeText(notice session.Notice) string {
+	if notice.Kind == "" {
+		return strings.TrimSpace(notice.Text)
+	}
+	switch notice.Kind {
+	case "compaction_notice":
+		phase, _ := notice.Meta["compaction_phase"].(string)
+		trigger, _ := notice.Meta["compaction_trigger"].(string)
+		before, beforeOK := noticeIntField(notice.Meta, "pre_tokens")
+		after, afterOK := noticeIntField(notice.Meta, "post_tokens")
+		switch strings.TrimSpace(phase) {
+		case "start":
+			if beforeOK {
+				return fmt.Sprintf("compaction started (%s, %d tokens)", fallbackNoticeValue(trigger, "auto"), before)
+			}
+			return fmt.Sprintf("compaction started (%s)", fallbackNoticeValue(trigger, "auto"))
+		case "done":
+			switch {
+			case beforeOK && afterOK:
+				return fmt.Sprintf("compaction finished (%s, %d -> %d tokens)", fallbackNoticeValue(trigger, "auto"), before, after)
+			case afterOK:
+				return fmt.Sprintf("compaction finished (%s, now %d tokens)", fallbackNoticeValue(trigger, "auto"), after)
+			default:
+				return fmt.Sprintf("compaction finished (%s)", fallbackNoticeValue(trigger, "auto"))
+			}
+		}
+	}
+	return strings.TrimSpace(notice.Text)
+}
+
+func noticeIntField(meta map[string]any, key string) (int, bool) {
+	if meta == nil {
+		return 0, false
+	}
+	switch v := meta[key].(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	default:
+		return 0, false
+	}
+}
+
+func fallbackNoticeValue(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func userTextFromContentParts(parts []model.ContentPart) string {
@@ -392,6 +450,11 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		switch strings.ToLower(action) {
 		case "status", "cancel":
 			return ""
+		case "write":
+			if preview := summarizeTaskWriteInput(args); preview != "" {
+				return preview
+			}
+			return ""
 		default:
 			taskID := strings.TrimSpace(asString(args["task_id"]))
 			if action != "" && taskID != "" {
@@ -426,15 +489,10 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		if path != "" {
 			return displayFileName(path)
 		}
-	case "DELEGATE":
+	case "SPAWN":
 		task := strings.TrimSpace(asString(args["task"]))
 		if task != "" {
 			return strings.Join(strings.Fields(task), " ")
-		}
-	}
-	if isMCPToolName(toolName) {
-		if target := summarizeWebLikeTarget(args); target != "" {
-			return target
 		}
 	}
 	keys := make([]string, 0, len(args))
@@ -484,7 +542,7 @@ func summarizeCompactToolResponseForTUI(toolName string, result map[string]any) 
 			}
 			return fmt.Sprintf("%d-%d", startLine, endLine)
 		}
-		count, _ := asInt(result["line_count"])
+		count := countLines(asString(result["content"]))
 		return fmt.Sprintf("%d lines", count)
 	case "SEARCH":
 		count, _ := asInt(result["count"])
@@ -514,43 +572,29 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
 	case "BASH":
-		if fmt.Sprint(result["running"]) == "true" {
-			summary := friendlyYieldLabel(effectiveBashYieldMS(callArgs))
-			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
-				if summary == "" {
-					return preview
-				}
-				return fmt.Sprintf("%s\n%s", summary, preview)
-			}
-			if summary != "" {
-				return summary
-			}
-			return "Running"
-		}
 		if errText := summarizeBashToolError(result); errText != "" {
 			return errText
 		}
-		exitCode, _ := asInt(result["exit_code"])
-		stdout := strings.TrimRight(asString(result["stdout"]), "\n")
-		stderr := strings.TrimRight(asString(result["stderr"]), "\n")
-		if exitCode != 0 {
-			output := strings.TrimSpace(stderr)
-			if output == "" {
-				output = strings.TrimSpace(stdout)
+		if firstNonEmpty(result, "task_id") != "" {
+			message := compactTaskPreview(userFacingTaskMessage(toolStatusMessage(result)))
+			progress := compactTaskPreview(toolResultValue(result))
+			switch {
+			case message != "" && progress != "":
+				return message + "\n" + progress
+			case message != "":
+				return message
+			case progress != "":
+				return progress
 			}
-			if output == "" {
-				return fmt.Sprintf("exit_code=%d", exitCode)
-			}
-			return fmt.Sprintf("exit_code=%d\n%s", exitCode, tailLines(output, 6))
+			return "task yielded before completion"
 		}
-		output := strings.TrimSpace(stdout)
-		if output == "" {
-			if strings.TrimSpace(stderr) != "" {
-				return tailLines(strings.TrimSpace(stderr), 5)
-			}
-			return "exit_code=0"
+		if output := strings.TrimSpace(toolResultValue(result)); output != "" {
+			return tailLines(output, 5)
 		}
-		return tailLines(output, 5)
+		if label := friendlyTaskStateLabel(asString(result["state"]), false); label != "" {
+			return strings.ToLower(label)
+		}
+		return "failed"
 	case "READ":
 		// Suppressed in printEvent; return empty for read-only tools.
 		return ""
@@ -597,40 +641,25 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		path := strings.TrimSpace(asString(result["path"]))
 		count, _ := asInt(result["count"])
 		return fmt.Sprintf("listed %d entries in %s", count, displayFileName(path))
-	case "DELEGATE":
-		summary := strings.TrimSpace(firstNonEmpty(result, "assistant", "summary", "output"))
-		if fmt.Sprint(result["running"]) == "true" {
-			headline := ""
-			if waitMS, ok := taskActualWaitMS(result); ok && waitMS > 0 {
-				headline = friendlyYieldLabel(waitMS)
+	case "SPAWN":
+		summary := strings.TrimSpace(firstNonEmpty(result, "result", "output", "final_result", "final_summary", "summary"))
+		if firstNonEmpty(result, "task_id") != "" {
+			if message := compactTaskPreview(userFacingTaskMessage(toolStatusMessage(result))); message != "" {
+				return message
 			}
-			if preview := compactTaskPreview(firstNonEmpty(result, "latest_output")); preview != "" {
-				if headline == "" {
-					return preview
-				}
-				return fmt.Sprintf("%s\n%s", headline, preview)
-			}
-			if headline != "" {
-				return headline
-			}
-			return "Running"
+			return "task yielded before completion"
 		}
 		if summary != "" {
 			return "\n" + renderDelegateSummaryPreview(summary)
 		}
-		if state := strings.TrimSpace(asString(result["state"])); state != "" {
-			return state
+		if label := friendlyTaskStateLabel(asString(result["state"]), false); label != "" {
+			return label
 		}
 	case "TASK":
-		taskState := strings.TrimSpace(asString(result["state"]))
 		action := strings.TrimSpace(asString(callArgs["action"]))
-		headline := summarizeTaskAction(action, callArgs, result)
-		if headline == "" && taskState != "" && !(strings.EqualFold(action, "cancel") && strings.EqualFold(taskState, "cancelled")) {
-			headline = taskState
-		}
-		return headline
+		return summarizeTaskAction(action, callArgs, result)
 	}
-	if value := firstNonEmpty(result, "error", "stderr", "message"); value != "" {
+	if value := firstNonEmpty(result, "error", "msg", "message"); value != "" {
 		return truncateInline(value, 160)
 	}
 	if value := firstNonEmpty(result, "summary", "output", "result"); value != "" {
@@ -719,50 +748,48 @@ func compactTaskPreview(text string) string {
 }
 
 func summarizeTaskAction(action string, callArgs map[string]any, result map[string]any) string {
-	taskState := strings.TrimSpace(asString(result["state"]))
-	running := fmt.Sprint(result["running"]) == "true"
-	count, _ := asInt(result["count"])
-	stateLabel := friendlyTaskStateLabel(taskState, running)
-	waited := ""
-	requestedWaitMS, hasRequestedWait := effectiveTaskWaitMSForResult(action, callArgs)
-	if hasRequestedWait {
-		waited = friendlyWaitLabel(requestedWaitMS)
-	}
-	actualWaitMS, hasActualWait := taskActualWaitMS(result)
-	if hasActualWait && actualWaitMS > 0 {
-		waited = friendlyWaitLabel(actualWaitMS)
-	}
+	messageLine := firstTaskMessageLine(toolStatusMessage(result))
+	messagePreview := compactTaskPreview(userFacingTaskMessage(toolStatusMessage(result)))
+	output := compactTaskPreview(toolResultValue(result))
+	stateLabel := friendlyTaskStateLabel(asString(result["state"]), false)
 
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "wait":
-		if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
-			return stateLabel
+		if errText := strings.TrimSpace(asString(result["error"])); errText != "" {
+			return truncateInline(errText, 160)
 		}
-		if hasActualWait && hasRequestedWait && requestedWaitMS > 0 && actualWaitMS+250 < requestedWaitMS {
-			if stateLabel != "" {
-				return stateLabel
-			}
-		}
-		if waited != "" {
-			return waited
+		if strings.TrimSpace(asString(result["task_id"])) != "" {
+			return "task yielded before completion"
 		}
 		if stateLabel != "" {
 			return stateLabel
 		}
+		if output != "" {
+			return output
+		}
+		if messageLine != "" {
+			return messageLine
+		}
 	case "status":
+		if errText := strings.TrimSpace(asString(result["error"])); errText != "" {
+			return truncateInline(errText, 160)
+		}
+		if messagePreview != "" {
+			return messagePreview
+		}
 		if stateLabel != "" {
 			return stateLabel
 		}
 	case "write":
-		if !running && taskState != "" && !strings.EqualFold(taskState, "running") && stateLabel != "" {
-			return "Sent input, " + strings.ToLower(stateLabel)
+		if errText := strings.TrimSpace(asString(result["error"])); errText != "" {
+			return truncateInline(errText, 160)
 		}
-		if waited != "" {
-			return "Sent input, waited " + waited
-		}
-		return "Sent input"
+		return ""
 	case "cancel":
-		if strings.EqualFold(stateLabel, "Cancelled") {
+		if output != "" {
+			return output
+		}
+		if strings.EqualFold(strings.TrimSpace(asString(result["state"])), "cancelled") {
 			return ""
 		}
 		if stateLabel != "" {
@@ -770,16 +797,17 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 		}
 		return ""
 	case "list":
+		count := taskListCount(result["tasks"])
 		runningCount := countRunningTasks(result["tasks"])
 		if count == 1 {
 			if runningCount == 1 {
-				return "Listed 1 task (1 running)"
+				return "Listed 1 task (1 active)"
 			}
 			return "Listed 1 task"
 		}
 		if count > 0 {
 			if runningCount > 0 {
-				return fmt.Sprintf("Listed %d tasks (%d running)", count, runningCount)
+				return fmt.Sprintf("Listed %d tasks (%d active)", count, runningCount)
 			}
 			return fmt.Sprintf("Listed %d tasks", count)
 		}
@@ -788,15 +816,49 @@ func summarizeTaskAction(action string, callArgs map[string]any, result map[stri
 	return ""
 }
 
-func taskActualWaitMS(result map[string]any) (int, bool) {
-	if len(result) == 0 {
-		return 0, false
+func taskListCount(raw any) int {
+	items, ok := raw.([]any)
+	if ok {
+		return len(items)
 	}
-	waitMS, ok := asInt(result["waited_ms"])
-	if !ok || waitMS < 0 {
-		return 0, false
+	switch value := raw.(type) {
+	case []map[string]any:
+		return len(value)
+	default:
+		return 0
 	}
-	return waitMS, true
+}
+
+func firstTaskMessageLine(text string) string {
+	text = userFacingTaskMessage(text)
+	if text == "" {
+		return ""
+	}
+	line, _, _ := strings.Cut(text, "\n")
+	return strings.TrimSpace(line)
+}
+
+func toolStatusMessage(result map[string]any) string {
+	return firstNonEmpty(result, "msg", "message")
+}
+
+func toolResultValue(result map[string]any) string {
+	return firstNonEmpty(result, "result", "output", "stdout", "stderr")
+}
+
+func userFacingTaskMessage(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if idx := strings.Index(lines[0], "; use TASK with task_id "); idx >= 0 {
+		lines[0] = strings.TrimSpace(lines[0][:idx])
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {
@@ -870,11 +932,44 @@ func countRunningTasks(raw any) int {
 		if !ok {
 			continue
 		}
-		if fmt.Sprint(one["running"]) == "true" || strings.EqualFold(strings.TrimSpace(asString(one["state"])), "running") {
+		if strings.TrimSpace(asString(one["task_id"])) == "" {
+			continue
+		}
+		state := strings.ToLower(strings.TrimSpace(asString(one["state"])))
+		switch state {
+		case "running", "waiting_input", "waiting_approval":
 			count++
+			continue
+		case "completed", "failed", "cancelled", "canceled", "interrupted", "terminated":
+			continue
 		}
 	}
 	return count
+}
+
+func summarizeTaskWriteInput(args map[string]any) string {
+	input := asString(args["input"])
+	if input == "" {
+		return ""
+	}
+	return truncateTaskWriteInput(input, 120)
+}
+
+func truncateTaskWriteInput(input string, limit int) string {
+	text := strings.NewReplacer(
+		"\r\n", "\\n",
+		"\n", "\\n",
+		"\r", "\\r",
+		"\t", "\\t",
+	).Replace(input)
+	rs := []rune(text)
+	if limit <= 0 || len(rs) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return string(rs[:limit])
+	}
+	return string(rs[:limit-3]) + "..."
 }
 
 func friendlyWaitLabel(waitMS int) string {
@@ -958,10 +1053,6 @@ func sanitizeDelegatePreviewLine(line string, inFence *bool) string {
 		return ""
 	}
 	return trimmed
-}
-
-func isMCPToolName(toolName string) bool {
-	return strings.Contains(strings.TrimSpace(strings.ToLower(toolName)), "__")
 }
 
 func summarizeWebLikeTarget(args map[string]any) string {

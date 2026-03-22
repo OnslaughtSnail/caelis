@@ -1001,7 +1001,7 @@ func desiredInputRows(value string, width int, maxRows int) int {
 	}
 	rows := 0
 	for _, line := range strings.Split(value, "\n") {
-		wrapped := ansi.HardwrapWc(line, width, true)
+		wrapped := ansi.Hardwrap(line, width, true)
 		if wrapped == "" {
 			rows++
 			continue
@@ -1021,7 +1021,7 @@ func hardWrapDisplayLine(line string, width int) string {
 	if width <= 0 || line == "" {
 		return line
 	}
-	return ansi.HardwrapWc(line, width, true)
+	return ansi.Hardwrap(line, width, true)
 }
 
 // renderMentionList renders the @mention candidates as an overlay list.

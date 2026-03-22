@@ -8,16 +8,18 @@ import (
 	"strings"
 
 	launcherfull "github.com/OnslaughtSnail/caelis/cmd/launcher/full"
+	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
+	"github.com/OnslaughtSnail/caelis/internal/app/acpext"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
+	appbootstrap "github.com/OnslaughtSnail/caelis/internal/app/bootstrap"
+	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/internal/version"
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
-	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
-	"github.com/OnslaughtSnail/caelis/kernel/tool"
-	toolmcp "github.com/OnslaughtSnail/caelis/kernel/tool/mcptoolset"
 
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/sandboxhelper"
@@ -27,22 +29,9 @@ func main() {
 	if sandboxhelper.MaybeRun(os.Args[1:]) {
 		return
 	}
-	launcher := launcherfull.NewLauncher(
-		runCLI,
-		runACP,
-		notImplementedLauncher("api"),
-		notImplementedLauncher("web"),
-	)
+	launcher := launcherfull.NewLauncher(runCLI, runACP)
 	if err := launcher.Execute(context.Background(), os.Args[1:]); err != nil {
 		exitErr(err)
-	}
-}
-
-func notImplementedLauncher(mode string) func(context.Context, []string) error {
-	return func(ctx context.Context, args []string) error {
-		_ = ctx
-		_ = args
-		return fmt.Errorf("%s launcher is not implemented yet", mode)
 	}
 }
 
@@ -66,8 +55,8 @@ func runCLI(ctx context.Context, args []string) error {
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	var (
-		toolProviders    = fs.String("tool-providers", pluginbuiltin.ProviderWorkspaceTools+","+pluginbuiltin.ProviderShellTools+","+pluginbuiltin.ProviderMCPTools, "Comma-separated tool providers")
-		policyProviders  = fs.String("policy-providers", pluginbuiltin.ProviderDefaultPolicy, "Comma-separated policy providers")
+		toolProviders    = fs.String("tool-providers", appassembly.ProviderWorkspaceTools+","+appassembly.ProviderShellTools, "Comma-separated tool providers")
+		policyProviders  = fs.String("policy-providers", appassembly.ProviderDefaultPolicy, "Comma-separated policy providers")
 		modelAlias       = fs.String("model", configStore.DefaultModel(), "Model alias")
 		uiMode           = fs.String("ui", string(uiModeAuto), "Interactive UI mode: auto|tui")
 		appName          = fs.String("app", initialAppName, "App name")
@@ -85,7 +74,6 @@ func runCLI(ctx context.Context, args []string) error {
 		permissionMode   = fs.String("permission-mode", configStore.PermissionMode(), "Permission mode: default|full_control")
 		sandboxType      = fs.String("sandbox-type", configStore.SandboxType(), "Sandbox backend type when permission-mode=default (Linux auto tries bwrap then landlock)")
 		experimentalLSP  = fs.Bool("experimental-lsp", false, "Enable experimental CLI LSP tools plugin")
-		mcpConfigPath    = fs.String("mcp-config", defaultMCPConfigPath(), "MCP config JSON path (default ~/.agents/mcp_servers.json)")
 		showVersion      = fs.Bool("version", false, "Show version and exit")
 		verbose          = fs.Bool("verbose", false, "Enable verbose output with debug details")
 		noColor          = fs.Bool("no-color", false, "Disable colored output")
@@ -130,6 +118,10 @@ func runCLI(ctx context.Context, args []string) error {
 		return err
 	}
 	workspace, err := resolveWorkspaceContext()
+	if err != nil {
+		return err
+	}
+	resolvedWorkspaceRoot, err := resolveWorkspaceRoot(workspace.CWD, "")
 	if err != nil {
 		return err
 	}
@@ -184,22 +176,9 @@ func runCLI(ctx context.Context, args []string) error {
 	if execRuntime.FallbackToHost() {
 		fmt.Fprintf(os.Stderr, "warn: sandbox unavailable, fallback to host+approval: %s\n", execRuntime.FallbackReason())
 	}
-	var mcpManager *toolmcp.Manager
-	mcpManager, err = loadMCPToolManager(*mcpConfigPath)
-	if err != nil {
-		return err
-	}
-	if mcpManager != nil {
-		defer func() {
-			if closeErr := mcpManager.Close(); closeErr != nil {
-				fmt.Fprintf(os.Stderr, "warn: close mcp manager failed: %v\n", closeErr)
-			}
-		}()
-	}
 	pluginRegistry := plugin.NewRegistry()
-	if err := pluginbuiltin.RegisterAll(pluginRegistry, pluginbuiltin.RegisterOptions{
+	if err := appassembly.RegisterBuiltinProviders(pluginRegistry, appassembly.RegisterOptions{
 		ExecutionRuntime: execRuntimeView,
-		MCPToolManager:   mcpManager,
 	}); err != nil {
 		return err
 	}
@@ -220,11 +199,6 @@ func runCLI(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if closeErr := resolved.Close(context.Background()); closeErr != nil {
-			fmt.Fprintf(os.Stderr, "warn: close assembled providers failed: %v\n", closeErr)
-		}
-	}()
 	factory := buildModelFactory(configStore, credentials)
 
 	alias := resolveModelAliasFromConfig(*modelAlias, configStore)
@@ -262,6 +236,149 @@ func runCLI(ctx context.Context, args []string) error {
 		}
 	}()
 	rt := sessionRT.Runtime
+	sessionModes := []internalacp.SessionMode{
+		{ID: "default", Name: "Default", Description: "Normal coding mode with execution enabled."},
+		{ID: "plan", Name: "Plan", Description: "Planning-first mode that focuses on analysis before making changes."},
+		{ID: "full_access", Name: "Full Access", Description: "Execute changes directly without interactive approval, while still blocking dangerous destructive commands."},
+	}
+	sessionConfig := buildACPSessionConfigOptions(sessionModes, factory, configStore, alias)
+	agentReg, err := configStore.AgentRegistry()
+	if err != nil {
+		return fmt.Errorf("invalid agent config: %w", err)
+	}
+	var newACPAdapter appbootstrap.ACPAdapterFactory
+	subagentRunnerFactory := acpext.NewACPSubagentRunnerFactory(acpext.Config{
+		Store:         store,
+		WorkspaceRoot: resolvedWorkspaceRoot,
+		WorkspaceCWD:  workspace.CWD,
+		ClientRuntime: execRuntime,
+		AgentRegistry: agentReg,
+		NewAdapter: func(conn *internalacp.Conn) (internalacp.Adapter, error) {
+			if newACPAdapter == nil {
+				return nil, fmt.Errorf("self acp adapter is not initialized")
+			}
+			return newACPAdapter(conn)
+		},
+	})
+	serviceSet, err := appbootstrap.Build(appbootstrap.Config{
+		Runtime:               rt,
+		Store:                 store,
+		AppName:               *appName,
+		UserID:                *userID,
+		WorkspaceCWD:          workspace.CWD,
+		Execution:             execRuntime,
+		Tools:                 resolved.Tools,
+		Policies:              resolved.Policies,
+		Resolved:              resolved,
+		EnablePlan:            true,
+		EnableSelfSpawn:       true,
+		Index:                 &cliSessionIndexAdapter{index: index},
+		SubagentRunnerFactory: subagentRunnerFactory,
+		ACP: &appbootstrap.ACPConfig{
+			WorkspaceRoot: resolvedWorkspaceRoot,
+			SessionModes:  sessionModes,
+			DefaultModeID: "default",
+			SessionConfig: sessionConfig,
+			BuildSystemPrompt: func(sessionCWD string) (string, error) {
+				return resolveSystemPrompt(buildAgentInput{
+					AppName:                     *appName,
+					WorkspaceDir:                sessionCWD,
+					EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
+					BasePrompt:                  *systemPrompt,
+					SkillDirs:                   skillDirList,
+				})
+			},
+			SessionConfigState: func(sessionCfg internalacp.AgentSessionConfig, templates []internalacp.SessionConfigOptionTemplate) []internalacp.SessionConfigOption {
+				return buildACPSessionConfigState(templates, factory, configStore, alias, sessionCfg)
+			},
+			NormalizeConfig: func(sessionCfg internalacp.AgentSessionConfig) internalacp.AgentSessionConfig {
+				return normalizeACPSessionConfig(factory, configStore, alias, sessionCfg)
+			},
+			NewModel: func(sessionCfg internalacp.AgentSessionConfig) (model.LLM, error) {
+				selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
+				return factory.NewByAlias(selectedAlias)
+			},
+			PromptImageEnabled: func() bool {
+				return true
+			},
+			SupportsPromptImage: func(sessionCfg internalacp.AgentSessionConfig) bool {
+				selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
+				return acpModelSupportsImages(factory, selectedAlias)
+			},
+			ListSessions: func(ctx context.Context, req internalacp.SessionListRequest) (internalacp.SessionListResponse, error) {
+				_ = ctx
+				return buildACPSessionList(index, workspace, req), nil
+			},
+			NewAgent: func(stream bool, sessionCWD string, frozenPrompt string, sessionCfg internalacp.AgentSessionConfig) (agent.Agent, error) {
+				selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
+				sessionRuntime := modelRuntime
+				if configStore != nil {
+					sessionRuntime = configStore.ModelRuntimeSettings(selectedAlias)
+				}
+				resolvedReasoningEffort := resolveACPSessionReasoning(sessionRuntime, sessionCfg.ConfigValues)
+				return buildAgent(buildAgentInput{
+					AppName:                     *appName,
+					WorkspaceDir:                sessionCWD,
+					EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
+					BasePrompt:                  *systemPrompt,
+					FrozenPrompt:                frozenPrompt,
+					SkillDirs:                   skillDirList,
+					StreamModel:                 stream,
+					ThinkingBudget:              sessionRuntime.ThinkingBudget,
+					ReasoningEffort:             resolvedReasoningEffort,
+					ModelProvider:               resolveProviderName(factory, selectedAlias),
+					ModelName:                   resolveModelName(factory, selectedAlias),
+					ModelConfig: func() modelproviders.Config {
+						if factory == nil {
+							return modelproviders.Config{}
+						}
+						cfg, _ := factory.ConfigForAlias(selectedAlias)
+						return cfg
+					}(),
+				})
+			},
+			NewSessionResources: func(ctx context.Context, acpConn *internalacp.Conn, sessionID string, sessionCWD string, caps internalacp.ClientCapabilities, modeResolver func() string) (*internalacp.SessionResources, error) {
+				execRuntimeACP := internalacp.NewRuntime(execRuntime, acpConn, sessionID, resolvedWorkspaceRoot, sessionCWD, caps, modeResolver)
+				registry := plugin.NewRegistry()
+				if err := appassembly.RegisterBuiltinProviders(registry, appassembly.RegisterOptions{
+					ExecutionRuntime: execRuntimeACP,
+				}); err != nil {
+					return nil, err
+				}
+				resolvedACPProviders := append([]string(nil), resolvedToolProviders...)
+				if includesProvider(resolvedACPProviders, providerLSPTools) {
+					if err := registerCLILSPToolProvider(registry, sessionCWD, execRuntimeACP); err != nil {
+						return nil, err
+					}
+				}
+				assembled, err := appassembly.Assemble(ctx, appassembly.AssembleSpec{
+					Registry:        registry,
+					ToolProviders:   resolvedACPProviders,
+					PolicyProviders: splitCSV(*policyProviders),
+				})
+				if err != nil {
+					return nil, err
+				}
+				return &internalacp.SessionResources{
+					Runtime:  execRuntimeACP,
+					Tools:    assembled.Tools,
+					Policies: assembled.Policies,
+					Close: func(closeCtx context.Context) error {
+						return assembled.Close(closeCtx)
+					},
+				}, nil
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	newACPAdapter = serviceSet.NewACPAdapter
+	defer func() {
+		if closeErr := serviceSet.Close(context.Background()); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "warn: close assembled providers failed: %v\n", closeErr)
+		}
+	}()
 
 	if singleShotMode {
 		if llm == nil {
@@ -349,17 +466,17 @@ func runCLI(ctx context.Context, args []string) error {
 				}
 			}
 		}
-		headlessResult, runErr := runHeadlessOnce(ctx, rt, runtime.RunRequest{
-			AppName:             *appName,
-			UserID:              *userID,
-			SessionID:           *sessionID,
+		headlessResult, runErr := runHeadlessOnce(ctx, serviceSet.SessionService, sessionsvc.RunTurnRequest{
+			SessionRef: sessionsvc.SessionRef{
+				AppName:      *appName,
+				UserID:       *userID,
+				SessionID:    *sessionID,
+				WorkspaceKey: workspace.Key,
+			},
 			Input:               resolvedInput,
 			ContentParts:        contentParts,
 			Agent:               ag,
 			Model:               llm,
-			Tools:               resolved.Tools,
-			CoreTools:           tool.CoreToolsConfig{Runtime: execRuntime},
-			Policies:            resolved.Policies,
 			ContextWindowTokens: *contextWindow,
 		})
 		if runErr != nil {
@@ -401,6 +518,12 @@ func runCLI(ctx context.Context, args []string) error {
 		NoColor:               *noColor,
 		Verbose:               *verbose,
 		UIMode:                string(resolvedUIMode),
+		AgentRegistry:         agentReg,
+		SessionService:        serviceSet.SessionService,
+		Gateway:               serviceSet.Gateway,
+		NewACPAdapter: func(conn *internalacp.Conn) (internalacp.Adapter, error) {
+			return serviceSet.NewACPAdapter(conn)
+		},
 	})
 	return console.loop()
 }

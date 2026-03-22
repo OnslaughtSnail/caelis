@@ -26,20 +26,22 @@ func normalizeActivityBoundary(kind string) activityBlockKind {
 func (m *Model) consumeActivityLine(line string) bool {
 	kind, entry, ok := parseActivityLine(line)
 	if !ok {
-		if m.activityBlock != nil {
+		if m.activeActivityID != "" {
 			m.finalizeActivityBlock()
 		}
 		return false
 	}
-	if m.reasoningBlock != nil {
-		m.discardAssistantBlock(&m.reasoningBlock)
+	if m.activeReasoningID != "" {
+		m.doc.Remove(m.activeReasoningID)
+		m.activeReasoningID = ""
 		m.refreshHistoryTailState()
 	}
-	if m.activityBlock == nil {
+	if m.activeActivityID == "" {
 		m.appendActivityEntry(kind, entry)
 		return true
 	}
-	if m.activityBlock != nil && m.activityBlock.kind != kind {
+	ab := m.findActivityBlock()
+	if ab != nil && ab.BlockKindField != kind {
 		m.finalizeActivityBlock()
 		m.appendActivityEntry(kind, entry)
 		return true
@@ -48,89 +50,123 @@ func (m *Model) consumeActivityLine(line string) bool {
 	return true
 }
 
+func (m *Model) findActivityBlock() *ActivityBlock {
+	if m.activeActivityID == "" {
+		return nil
+	}
+	b := m.doc.Find(m.activeActivityID)
+	if b == nil {
+		m.activeActivityID = ""
+		return nil
+	}
+	ab, ok := b.(*ActivityBlock)
+	if !ok {
+		m.activeActivityID = ""
+		return nil
+	}
+	return ab
+}
+
 func (m *Model) appendActivityEntry(kind activityBlockKind, entry activityEntry) {
-	if m.activityBlock == nil {
-		m.activityBlock = &foldedActivityBlockState{
-			kind:    kind,
-			start:   len(m.historyLines),
-			end:     len(m.historyLines),
-			active:  true,
-			entries: []activityEntry{entry},
-		}
+	ab := m.findActivityBlock()
+	if ab == nil {
+		ab = NewActivityBlock(kind)
+		ab.Entries = []activityEntry{entry}
+		m.doc.Append(ab)
+		m.activeActivityID = ab.BlockID()
 	} else {
-		m.activityBlock.entries = append(m.activityBlock.entries, entry)
-		m.activityBlock.active = true
-		m.activityBlock.finalized = false
+		ab.Entries = append(ab.Entries, entry)
+		ab.Active = true
+		ab.Finalized = false
 	}
 	m.syncActivityBlock()
 }
 
 func (m *Model) syncActivityBlock() {
-	if m.activityBlock == nil {
+	ab := m.findActivityBlock()
+	if ab == nil {
 		return
 	}
-	oldEnd := m.activityBlock.end
-	lines := m.renderActivityBlockLines(m.activityBlock)
-	oldLen := m.activityBlock.end - m.activityBlock.start
-	m.replaceHistoryRange(m.activityBlock.start, m.activityBlock.end, lines)
-	m.activityBlock.end = m.activityBlock.start + len(lines)
-	delta := len(lines) - oldLen
-	if delta != 0 {
-		current := m.activityBlock
-		m.activityBlock = nil
-		m.shiftAnchoredBlocks(oldEnd, delta, "")
-		m.activityBlock = current
+	foldedState := ab.toFoldedState()
+	lines := m.renderActivityBlockLines(foldedState)
+	rows := make([]RenderedRow, len(lines))
+	for i, l := range lines {
+		rows[i] = StyledRow(ab.id, l)
 	}
-	m.hasCommittedLine = len(m.historyLines) > 0
+	ab.cachedRows = rows
+	m.hasCommittedLine = m.doc.Len() > 0
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.syncViewportContent()
 }
 
 func (m *Model) finalizeActivityBlock() {
-	if m.activityBlock == nil {
+	ab := m.findActivityBlock()
+	if ab == nil {
+		m.activeActivityID = ""
 		return
 	}
-	m.activityBlock.active = false
-	m.activityBlock.finalized = true
-	m.activityBlock.summary = m.activityBlockSummary(m.activityBlock)
-	if m.activityBlock.kind == activityBlockTaskMonitor && strings.TrimSpace(m.activityBlock.summary) == "" {
-		oldLen := m.activityBlock.end - m.activityBlock.start
-		m.replaceHistoryRange(m.activityBlock.start, m.activityBlock.end, nil)
-		if oldLen != 0 {
-			m.shiftAnchoredBlocks(m.activityBlock.end, -oldLen, "")
-		}
-		m.activityBlock = nil
+	ab.Active = false
+	ab.Finalized = true
+	foldedState := ab.toFoldedState()
+	ab.Summary = m.activityBlockSummary(foldedState)
+	foldedState.summary = ab.Summary
+	if ab.BlockKindField == activityBlockTaskMonitor && strings.TrimSpace(ab.Summary) == "" {
+		m.doc.Remove(ab.BlockID())
+		m.activeActivityID = ""
 		m.refreshHistoryTailState()
 		m.syncViewportContent()
 		return
 	}
-	start := m.activityBlock.start
-	end := m.activityBlock.end
-	lines := []string{m.renderActivitySummaryLine(m.activityBlock)}
-	if m.activityBlock.kind == activityBlockTaskMonitor && start > 0 {
-		prevText := strings.TrimSpace(ansi.Strip(m.historyLines[start-1]))
-		if prevSummary, ok := parseTaskMonitorSummaryLine(prevText); ok {
-			if merged := mergeTaskMonitorSummaryTexts(prevSummary, strings.TrimSpace(m.activityBlock.summary)); strings.TrimSpace(merged) != "" {
-				lines = []string{m.renderStandaloneTaskMonitorSummaryLine(merged)}
-				start--
+	// Render finalized summary line.
+	summaryLine := m.renderActivitySummaryLine(foldedState)
+	// Try to merge with previous task monitor summary.
+	if ab.BlockKindField == activityBlockTaskMonitor {
+		if prevBlock := m.findPreviousTranscriptBlock(ab.BlockID()); prevBlock != nil {
+			prevText := strings.TrimSpace(ansi.Strip(prevBlock.Raw))
+			// The raw field stores uncolored text; check for task monitor summary pattern.
+			if prevSummary, ok := parseTaskMonitorSummaryLine(prevText); ok {
+				if merged := mergeTaskMonitorSummaryTexts(prevSummary, strings.TrimSpace(ab.Summary)); strings.TrimSpace(merged) != "" {
+					// Replace previous block with merged summary.
+					mergedText := "▸ " + merged
+					prevBlock.Raw = mergedText
+					prevBlock.Style = tuikit.DetectLineStyle(mergedText)
+					// Remove the activity block from doc.
+					m.doc.Remove(ab.BlockID())
+					m.activeActivityID = ""
+					m.refreshHistoryTailState()
+					m.syncViewportContent()
+					return
+				}
 			}
 		}
 	}
-	oldLen := end - start
-	m.replaceHistoryRange(start, end, lines)
-	end = start + len(lines)
-	delta := len(lines) - oldLen
-	if delta != 0 {
-		m.shiftAnchoredBlocks(end-delta, delta, "")
-	}
-	m.activityBlock = nil
+	// Convert activity block to a summary transcript block.
+	m.doc.Remove(ab.BlockID())
+	m.activeActivityID = ""
+	// Get raw text for the summary line
+	rawSummary := ansi.Strip(summaryLine)
+	summaryBlock := NewTranscriptBlock(rawSummary, tuikit.DetectLineStyle(rawSummary))
+	m.doc.Append(summaryBlock)
 	m.refreshHistoryTailState()
 	m.syncViewportContent()
 }
 
+// findPreviousTranscriptBlock returns the TranscriptBlock right before the given block ID.
+func (m *Model) findPreviousTranscriptBlock(blockID string) *TranscriptBlock {
+	blocks := m.doc.Blocks()
+	for i, b := range blocks {
+		if b.BlockID() == blockID && i > 0 {
+			if tb, ok := blocks[i-1].(*TranscriptBlock); ok {
+				return tb
+			}
+		}
+	}
+	return nil
+}
+
 func (m *Model) clearActivityBlock() {
-	m.activityBlock = nil
+	m.activeActivityID = ""
 }
 
 func (m *Model) renderActivityBlockLines(block *foldedActivityBlockState) []string {

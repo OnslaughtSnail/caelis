@@ -9,9 +9,7 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -453,267 +451,6 @@ func TestForwardEventToTUI_ReadResponseEmitsCompactSummary(t *testing.T) {
 	}
 }
 
-func TestForwardSessionEventToTUI_ProjectsDelegatedAssistantAndReasoning(t *testing.T) {
-	sender := &testSender{}
-	c := &cliConsole{
-		sessionID:         "parent-session",
-		tuiSender:         sender,
-		delegatePreviewer: newDelegatePreviewProjector(),
-	}
-
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Reasoning: "thinking"},
-			Meta: map[string]any{
-				"partial":             true,
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Text: "done"},
-			Meta: map[string]any{
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-
-	if len(sender.msgs) != 2 {
-		t.Fatalf("expected 2 projected delegate stream messages, got %d", len(sender.msgs))
-	}
-	first, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected first message TaskStreamMsg, got %T", sender.msgs[0])
-	}
-	second, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected second message TaskStreamMsg, got %T", sender.msgs[1])
-	}
-	if first.Label != "DELEGATE" || first.CallID != "call-delegate-1" || first.Stream != "reasoning" || first.Chunk != "thinking" {
-		t.Fatalf("unexpected projected reasoning msg: %+v", first)
-	}
-	if second.Label != "DELEGATE" || second.CallID != "call-delegate-1" || second.Stream != "assistant" || second.Chunk != "done\n" {
-		t.Fatalf("unexpected projected assistant msg: %+v", second)
-	}
-}
-
-func TestForwardSessionEventToTUI_ProjectsDelegatedReasoningPartialWithLeadingSpace(t *testing.T) {
-	sender := &testSender{}
-	c := &cliConsole{
-		sessionID:         "parent-session",
-		tuiSender:         sender,
-		delegatePreviewer: newDelegatePreviewProjector(),
-	}
-
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Reasoning: "I'll run"},
-			Meta: map[string]any{
-				"partial":             true,
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Reasoning: "I'll run the bash command"},
-			Meta: map[string]any{
-				"partial":             true,
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-
-	if len(sender.msgs) != 2 {
-		t.Fatalf("expected 2 projected delegate reasoning messages, got %d", len(sender.msgs))
-	}
-	second, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected second message TaskStreamMsg, got %T", sender.msgs[1])
-	}
-	if second.Chunk != " the bash command" {
-		t.Fatalf("expected leading space preserved in reasoning delta, got %q", second.Chunk)
-	}
-}
-
-func TestForwardSessionEventToTUI_ProjectsNestedChildToolEvents(t *testing.T) {
-	sender := &testSender{}
-	c := &cliConsole{
-		sessionID:         "parent-session",
-		tuiSender:         sender,
-		delegatePreviewer: newDelegatePreviewProjector(),
-	}
-
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "call-bash-1",
-					Name: "BASH",
-					Args: `{"command":"echo hi"}`,
-				}},
-			},
-			Meta: map[string]any{
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{
-				Role:         model.RoleTool,
-				ToolResponse: &model.ToolResponse{ID: "call-bash-1", Name: "BASH", Result: map[string]any{"stdout": "hi\n"}},
-			},
-			Meta: map[string]any{
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-
-	if len(sender.msgs) != 2 {
-		t.Fatalf("expected projected child tool activity, got %+v", sender.msgs)
-	}
-	callMsg, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected first message TaskStreamMsg, got %T", sender.msgs[0])
-	}
-	resultMsg, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected second message TaskStreamMsg, got %T", sender.msgs[1])
-	}
-	if callMsg.Stream != "assistant" || !strings.Contains(callMsg.Chunk, "▸ BASH") {
-		t.Fatalf("unexpected child tool call projection: %+v", callMsg)
-	}
-	if resultMsg.Stream != "assistant" || !strings.Contains(resultMsg.Chunk, "✓ BASH") {
-		t.Fatalf("unexpected child tool response projection: %+v", resultMsg)
-	}
-}
-
-func TestForwardSessionEventToTUI_DelegateWriteKeepsVerboseSummary(t *testing.T) {
-	sender := &testSender{}
-	c := &cliConsole{
-		sessionID:         "parent-session",
-		tuiSender:         sender,
-		delegatePreviewer: newDelegatePreviewProjector(),
-	}
-
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call-write-1", Name: "WRITE", Args: `{"path":"a.txt","content":"new\n"}`},
-				},
-			},
-			Meta: map[string]any{
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:   "call-write-1",
-					Name: "WRITE",
-					Result: map[string]any{
-						"path":       "a.txt",
-						"created":    false,
-						"line_count": 1,
-					},
-				},
-			},
-			Meta: map[string]any{
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-
-	if len(sender.msgs) != 2 {
-		t.Fatalf("expected projected child write call/response, got %+v", sender.msgs)
-	}
-	resultMsg, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected second message TaskStreamMsg, got %T", sender.msgs[1])
-	}
-	if !strings.Contains(resultMsg.Chunk, "✓ WRITE wrote a.txt (1 lines)") {
-		t.Fatalf("expected verbose write summary in delegate preview, got %+v", resultMsg)
-	}
-	if strings.Contains(resultMsg.Chunk, "+1 -") {
-		t.Fatalf("did not expect compact diff counts in delegate preview, got %+v", resultMsg)
-	}
-}
-
-func TestForwardSessionEventToTUI_FinalizesDelegatedPanelOnChildLifecycle(t *testing.T) {
-	sender := &testSender{}
-	c := &cliConsole{
-		sessionID:         "parent-session",
-		tuiSender:         sender,
-		delegatePreviewer: newDelegatePreviewProjector(),
-	}
-
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
-		SessionID: "child-session",
-		Event: &session.Event{
-			SessionID: "child-session",
-			Meta: map[string]any{
-				runtime.MetaLifecycle: map[string]any{"status": string(runtime.RunLifecycleStatusCompleted)},
-				"kind":                "lifecycle",
-				"parent_session_id":   "parent-session",
-				"child_session_id":    "child-session",
-				"parent_tool_call_id": "call-delegate-1",
-				"delegation_id":       "dlg-1",
-			},
-		},
-	})
-
-	if len(sender.msgs) != 1 {
-		t.Fatalf("expected one final projected lifecycle message, got %d", len(sender.msgs))
-	}
-	msg, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
-	if !ok {
-		t.Fatalf("expected TaskStreamMsg, got %T", sender.msgs[0])
-	}
-	if msg.Label != "DELEGATE" || msg.CallID != "call-delegate-1" || !msg.Final {
-		t.Fatalf("unexpected final delegate lifecycle msg: %+v", msg)
-	}
-}
-
 func TestForwardEventToTUI_BashSuccessWithoutOutputDoesNotEmitExitCodeLine(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{tuiSender: sender}
@@ -901,7 +638,7 @@ func TestForwardEventToTUI_NoOpWriteSkipsRichDiffAndUsesUnchangedSummary(t *test
 	}
 }
 
-func TestForwardEventToTUI_DelegateYieldDoesNotEmitTranscriptResultLine(t *testing.T) {
+func TestForwardEventToTUI_SpawnYieldDoesNotEmitTranscriptResultLine(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{tuiSender: sender}
 
@@ -909,22 +646,23 @@ func TestForwardEventToTUI_DelegateYieldDoesNotEmitTranscriptResultLine(t *testi
 		Message: model.Message{
 			Role: model.RoleAssistant,
 			ToolResponse: &model.ToolResponse{
-				ID:   "call_delegate",
-				Name: "DELEGATE",
+				ID:   "call_spawn",
+				Name: tool.SpawnToolName,
 				Result: map[string]any{
-					"task_id":       "t-1234567890ab",
-					"yield_time_ms": 30000,
-					"running":       true,
+					"task_id":              "t-1234567890ab",
+					"_ui_child_session_id": "s-child-1",
+					"_ui_agent":            "self",
+					"state":                "running",
 				},
 			},
 		},
 	}, map[string]toolCallSnapshot{})
 	if !handled {
-		t.Fatal("expected delegate tool response to be handled")
+		t.Fatal("expected spawn tool response to be handled")
 	}
 	for _, raw := range sender.msgs {
-		if msg, ok := raw.(tuievents.LogChunkMsg); ok && strings.Contains(msg.Chunk, "DELEGATE") {
-			t.Fatalf("expected no delegate result line in transcript, got %q", msg.Chunk)
+		if msg, ok := raw.(tuievents.LogChunkMsg); ok && strings.Contains(msg.Chunk, tool.SpawnToolName) {
+			t.Fatalf("expected no spawn result line in transcript, got %q", msg.Chunk)
 		}
 	}
 }
@@ -955,10 +693,10 @@ func TestForwardEventToTUI_TaskWaitEmitsVirtualCallAndFriendlySummary(t *testing
 				ID:   "call_task_1",
 				Name: "TASK",
 				Result: map[string]any{
-					"task_id":   "t-1234567890ab",
-					"state":     "running",
-					"running":   true,
-					"waited_ms": 5000,
+					"task_id": "t-1234567890ab",
+					"state":   "running",
+					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+					"result":  "still running",
 				},
 			},
 		},
@@ -980,7 +718,7 @@ func TestForwardEventToTUI_TaskWaitEmitsVirtualCallAndFriendlySummary(t *testing
 	if !ok {
 		t.Fatalf("expected second LogChunkMsg, got %T", sender.msgs[1])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ WAITED 5 s") {
+	if !strings.Contains(logMsg.Chunk, "✓ WAITED task yielded before completion") {
 		t.Fatalf("unexpected TASK wait log chunk: %q", logMsg.Chunk)
 	}
 }
@@ -1013,7 +751,7 @@ func TestForwardEventToTUI_TaskWaitWithoutYieldUsesDefaultSummary(t *testing.T) 
 				Result: map[string]any{
 					"task_id": "t-1234567890ab",
 					"state":   "running",
-					"running": true,
+					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
 				},
 			},
 		},
@@ -1035,7 +773,7 @@ func TestForwardEventToTUI_TaskWaitWithoutYieldUsesDefaultSummary(t *testing.T) 
 	if !ok {
 		t.Fatalf("expected second LogChunkMsg, got %T", sender.msgs[1])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ WAITED 5 s") {
+	if !strings.Contains(logMsg.Chunk, "✓ WAITED task yielded before completion") {
 		t.Fatalf("unexpected TASK wait log chunk: %q", logMsg.Chunk)
 	}
 }
@@ -1066,10 +804,9 @@ func TestForwardEventToTUI_TaskWaitImmediateReturnPrefersState(t *testing.T) {
 				ID:   "call_task_fast",
 				Name: "TASK",
 				Result: map[string]any{
-					"task_id":   "t-1234567890ab",
-					"state":     "running",
-					"running":   true,
-					"waited_ms": 0,
+					"task_id": "t-1234567890ab",
+					"state":   "running",
+					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
 				},
 			},
 		},
@@ -1084,11 +821,66 @@ func TestForwardEventToTUI_TaskWaitImmediateReturnPrefersState(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected second LogChunkMsg, got %T", sender.msgs[1])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ WAITED Running") {
+	if !strings.Contains(logMsg.Chunk, "✓ WAITED task yielded before completion") {
 		t.Fatalf("unexpected fast TASK wait log chunk: %q", logMsg.Chunk)
 	}
-	if strings.Contains(logMsg.Chunk, "30 s") {
-		t.Fatalf("did not expect requested wait duration in fast TASK wait log chunk: %q", logMsg.Chunk)
+}
+
+func TestForwardEventToTUI_TaskWaitWaitingInputEmitsSyntheticPanelState(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+	pending := map[string]toolCallSnapshot{}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleAssistant,
+			ToolCalls: []model.ToolCall{{
+				ID:   "call_task_input",
+				Name: "TASK",
+				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
+			}},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected TASK wait call to be handled")
+	}
+
+	handled = c.forwardEventToTUI(&session.Event{
+		Message: model.Message{
+			Role: model.RoleTool,
+			ToolResponse: &model.ToolResponse{
+				ID:   "call_task_input",
+				Name: "TASK",
+				Result: map[string]any{
+					"task_id": "t-1234567890ab",
+					"state":   "waiting_input",
+					"msg":     "waiting for input; use TASK write with task_id t-1234567890ab",
+				},
+			},
+		},
+	}, pending)
+	if !handled {
+		t.Fatal("expected TASK wait response to be handled")
+	}
+	if len(sender.msgs) != 3 {
+		t.Fatalf("expected call, panel state, and summary messages, got %#v", sender.msgs)
+	}
+	stateMsg, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected second msg TaskStreamMsg, got %T", sender.msgs[1])
+	}
+	if stateMsg.TaskID != "t-1234567890ab" || stateMsg.State != "waiting_input" {
+		t.Fatalf("unexpected synthetic panel state: %#v", stateMsg)
+	}
+	if strings.TrimSpace(stateMsg.Chunk) != "" {
+		t.Fatalf("expected no synthetic chunk for generic waiting_input state, got %q", stateMsg.Chunk)
+	}
+	logMsg, ok := sender.msgs[2].(tuievents.LogChunkMsg)
+	if !ok {
+		t.Fatalf("expected third msg LogChunkMsg, got %T", sender.msgs[2])
+	}
+	if !strings.Contains(logMsg.Chunk, "✓ WAITED task yielded before completion") {
+		t.Fatalf("unexpected TASK wait log chunk: %q", logMsg.Chunk)
 	}
 }
 
@@ -1133,7 +925,7 @@ func TestForwardEventToTUI_TaskWaitErrorStillUsesFriendlyLabel(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected second LogChunkMsg, got %T", sender.msgs[1])
 	}
-	if !strings.Contains(logMsg.Chunk, "! WAITED 5 s") {
+	if !strings.Contains(logMsg.Chunk, "! WAITED task manager is unavailable") {
 		t.Fatalf("expected friendly TASK error label, got %q", logMsg.Chunk)
 	}
 	if strings.Contains(logMsg.Chunk, "! TASK 5 s") {
@@ -1159,10 +951,9 @@ func TestForwardEventToTUI_TaskListEmitsFriendlySummary(t *testing.T) {
 				ID:   "call_task_list",
 				Name: "TASK",
 				Result: map[string]any{
-					"count": 2,
 					"tasks": []any{
-						map[string]any{"task_id": "t-1", "state": "running", "running": true},
-						map[string]any{"task_id": "t-2", "state": "cancelled", "running": false},
+						map[string]any{"task_id": "t-1", "state": "running", "summary": "task yielded before completion"},
+						map[string]any{"task_id": "t-2", "state": "cancelled", "summary": "cancelled"},
 					},
 				},
 			},
@@ -1178,7 +969,7 @@ func TestForwardEventToTUI_TaskListEmitsFriendlySummary(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ LIST Listed 2 tasks (1 running)") {
+	if !strings.Contains(logMsg.Chunk, "✓ LIST Listed 2 tasks (1 active)") {
 		t.Fatalf("unexpected TASK list log chunk: %q", logMsg.Chunk)
 	}
 }

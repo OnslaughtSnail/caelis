@@ -14,7 +14,12 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/OnslaughtSnail/caelis/internal/app/acpext"
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
+	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
+	apprunservice "github.com/OnslaughtSnail/caelis/internal/app/runservice"
+	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -85,7 +90,7 @@ type cliConsole struct {
 
 	runMu           sync.Mutex
 	activeRunCancel context.CancelFunc
-	activeRunner    runtime.Runner
+	activeRunner    sessionsvc.TurnHandle
 	interruptMu     sync.Mutex
 	lastInterruptAt time.Time
 	outMu           sync.Mutex
@@ -95,11 +100,17 @@ type cliConsole struct {
 	attachmentLibrary   map[string]model.ContentPart
 	pendingAttachmentMu sync.Mutex
 	tuiSender           interface{ Send(msg any) } // set in TUI mode for hint updates
-	delegatePreviewer   *delegatePreviewProjector
+	agentRegistry       *appagents.Registry
+	spawnPreviewer      *spawnPreviewProjector
 	bashWatchMu         sync.Mutex
 	bashTaskWatches     map[string]context.CancelFunc
 	connectModelCacheMu sync.Mutex
 	connectModelCache   map[string]connectModelCacheEntry
+	promptMu            sync.Mutex
+	promptSnapshots     map[string]string
+	sessionService      *sessionsvc.Service
+	gateway             *appgateway.Gateway
+	newACPAdapter       acpext.AdapterFactory
 }
 
 const interruptExitWindow = 2 * time.Second
@@ -179,8 +190,13 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		imageCache:            image.NewCache(32),
 		attachmentLibrary:     map[string]model.ContentPart{},
 		connectModelCache:     map[string]connectModelCacheEntry{},
-		delegatePreviewer:     newDelegatePreviewProjector(),
+		promptSnapshots:       map[string]string{},
+		agentRegistry:         cfg.AgentRegistry,
+		spawnPreviewer:        newSpawnPreviewProjector(),
 		bashTaskWatches:       map[string]context.CancelFunc{},
+		sessionService:        cfg.SessionService,
+		gateway:               cfg.Gateway,
+		newACPAdapter:         cfg.NewACPAdapter,
 		editor:                editor,
 		prompter:              editor,
 		out:                   out,
@@ -196,6 +212,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		"quit":    {Usage: "/quit", Description: "Alias of /exit", Handle: handleExit},
 		"new":     {Usage: "/new", Description: "Start a new conversation session", Handle: handleNew},
 		"fork":    {Usage: "/fork", Description: "Fork current conversation into a new session", Handle: handleFork},
+		"back":    {Usage: "/back", Description: "Return to the parent session after attach", Handle: handleBack},
 		"compact": {Usage: "/compact [note]", Description: "Compact context history", Handle: handleCompact},
 		"status":  {Usage: "/status", Description: "Show current session status", Handle: handleStatus},
 		"sandbox": {
@@ -203,6 +220,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type (auto/bwrap/landlock experimental)",
 			Handle:      handleSandbox,
 		},
+		"agent":   {Usage: "/agent list | add <preset> | rm <name>", Description: "Manage configured ACP agent servers", Handle: handleAgent},
 		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
@@ -245,6 +263,10 @@ type cliConsoleConfig struct {
 	NoColor               bool
 	Verbose               bool
 	UIMode                string
+	AgentRegistry         *appagents.Registry
+	SessionService        *sessionsvc.Service
+	Gateway               *appgateway.Gateway
+	NewACPAdapter         acpext.AdapterFactory
 }
 
 func (c *cliConsole) loop() error {
@@ -361,6 +383,78 @@ type preparedPromptSubmission struct {
 	contentParts []model.ContentPart
 }
 
+func (c *cliConsole) runService() (*apprunservice.Service, error) {
+	if c == nil {
+		return nil, fmt.Errorf("console is nil")
+	}
+	var tools []tool.Tool
+	var policies []kernelpolicy.Hook
+	if c.resolved != nil {
+		tools = c.resolved.Tools
+		policies = c.resolved.Policies
+	}
+	return apprunservice.New(apprunservice.ServiceConfig{
+		Runtime:         c.rt,
+		AppName:         c.appName,
+		UserID:          c.userID,
+		WorkspaceCWD:    c.workspace.CWD,
+		Execution:       c.execRuntime,
+		Tools:           tools,
+		Policies:        policies,
+		EnablePlan:      true,
+		EnableSelfSpawn: true,
+	})
+}
+
+func (c *cliConsole) sessionBoundary() (*sessionsvc.Service, error) {
+	if c == nil {
+		return nil, fmt.Errorf("console is nil")
+	}
+	if c.sessionService != nil {
+		return c.sessionService, nil
+	}
+	var tools []tool.Tool
+	var policies []kernelpolicy.Hook
+	if c.resolved != nil {
+		tools = c.resolved.Tools
+		policies = c.resolved.Policies
+	}
+	return sessionsvc.New(sessionsvc.ServiceConfig{
+		Runtime:         c.rt,
+		Store:           c.sessionStore,
+		AppName:         c.appName,
+		UserID:          c.userID,
+		WorkspaceCWD:    c.workspace.CWD,
+		Execution:       c.execRuntime,
+		Tools:           tools,
+		Policies:        policies,
+		EnablePlan:      true,
+		EnableSelfSpawn: true,
+		Index:           &cliSessionIndexAdapter{index: c.sessionIndex},
+		SubagentRunnerFactory: acpext.NewACPSubagentRunnerFactory(acpext.Config{
+			Store:         c.sessionStore,
+			WorkspaceCWD:  c.workspace.CWD,
+			ClientRuntime: c.execRuntime,
+			AgentRegistry: c.agentRegistry,
+			NewAdapter:    c.newACPAdapter,
+		}),
+	})
+}
+
+func (c *cliConsole) sessionGateway() (*appgateway.Gateway, error) {
+	if c == nil {
+		return nil, fmt.Errorf("console is nil")
+	}
+	if c.gateway != nil {
+		return c.gateway, nil
+	}
+	svc, err := c.sessionBoundary()
+	if err != nil {
+		return nil, err
+	}
+	return appgateway.New(svc)
+}
+
 func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.Attachment) (preparedPromptSubmission, error) {
 	if c.llm == nil {
 		return preparedPromptSubmission{}, fmt.Errorf("no model configured, use /connect to add provider and select model")
@@ -432,11 +526,16 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	if c.tuiSender != nil && consumedPending > 0 {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 	}
+	systemPrompt, err := c.ensureSessionPrompt(c.baseCtx)
+	if err != nil {
+		return preparedPromptSubmission{}, err
+	}
 	ag, err := buildAgent(buildAgentInput{
 		AppName:                     c.appName,
 		WorkspaceDir:                c.workspace.CWD,
 		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
 		BasePrompt:                  c.systemPrompt,
+		FrozenPrompt:                systemPrompt,
 		SkillDirs:                   c.skillDirs,
 		StreamModel:                 c.streamModel,
 		ThinkingBudget:              c.thinkingBudget,
@@ -498,29 +597,31 @@ func (c *cliConsole) runPreparedSubmission(prepared preparedPromptSubmission, su
 			c.forwardSessionEventToTUI(c.sessionID, update)
 		}))
 	}
-	runCtx, cancel := context.WithCancel(ctx)
 	pendingTUIToolCalls := map[string]toolCallSnapshot{}
-	runner, err := c.rt.Run(runCtx, runtime.RunRequest{
-		AppName:             c.appName,
-		UserID:              c.userID,
+	gw, err := c.sessionGateway()
+	if err != nil {
+		return err
+	}
+	runResult, err := gw.RunTurn(ctx, appgateway.RunTurnRequest{
+		Channel:             c.gatewayChannel(),
 		SessionID:           c.sessionID,
 		Input:               submission.Text,
 		ContentParts:        submission.ContentParts,
 		Agent:               prepared.agent,
 		Model:               c.llm,
-		Tools:               c.resolved.Tools,
-		CoreTools:           tool.CoreToolsConfig{Runtime: c.execRuntime},
-		Policies:            c.resolved.Policies,
 		ContextWindowTokens: c.contextWindow,
 	})
 	if err != nil {
-		cancel()
 		return err
+	}
+	c.sessionID = runResult.Session.SessionID
+	runner := runResult.Handle
+	cancel := func() {
+		_ = gw.InterruptSession(context.Background(), c.gatewayChannel(), "console interrupt")
 	}
 	c.setActiveRun(cancel, runner)
 	defer func() {
 		c.clearActiveRun()
-		cancel()
 		_ = runner.Close() // Close always returns nil; safe to ignore.
 	}()
 	return runRunner(runner, runRenderConfig{
@@ -601,32 +702,33 @@ func (c *cliConsole) startBTWAsync(prepared preparedPromptSubmission, submission
 			c.forwardSessionEventToTUI(c.sessionID, update)
 		}))
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	runner, err := c.rt.Run(runCtx, runtime.RunRequest{
-		AppName:             c.appName,
-		UserID:              c.userID,
+	gw, err := c.sessionGateway()
+	if err != nil {
+		return err
+	}
+	runResult, err := gw.RunTurn(ctx, appgateway.RunTurnRequest{
+		Channel:             c.gatewayChannel(),
 		SessionID:           c.sessionID,
 		Agent:               prepared.agent,
 		Model:               c.llm,
-		Tools:               c.resolved.Tools,
-		CoreTools:           tool.CoreToolsConfig{Runtime: c.execRuntime},
-		Policies:            c.resolved.Policies,
 		ContextWindowTokens: c.contextWindow,
 	})
 	if err != nil {
-		cancel()
 		return err
 	}
+	c.sessionID = runResult.Session.SessionID
+	runner := runResult.Handle
 	if err := runner.Submit(submission); err != nil {
-		cancel()
 		_ = runner.Close()
 		return err
+	}
+	cancel := func() {
+		_ = gw.InterruptSession(context.Background(), c.gatewayChannel(), "console interrupt")
 	}
 	c.setActiveRun(cancel, runner)
 	go func() {
 		defer func() {
 			c.clearActiveRun()
-			cancel()
 			_ = runner.Close()
 			if c.tuiSender != nil {
 				c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
@@ -656,31 +758,32 @@ func (c *cliConsole) startBTWAsync(prepared preparedPromptSubmission, submission
 func (c *cliConsole) runBTWBlocking(prepared preparedPromptSubmission, submission runtime.Submission) error {
 	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
-	runCtx, cancel := context.WithCancel(ctx)
-	runner, err := c.rt.Run(runCtx, runtime.RunRequest{
-		AppName:             c.appName,
-		UserID:              c.userID,
+	gw, err := c.sessionGateway()
+	if err != nil {
+		return err
+	}
+	runResult, err := gw.RunTurn(ctx, appgateway.RunTurnRequest{
+		Channel:             c.gatewayChannel(),
 		SessionID:           c.sessionID,
 		Agent:               prepared.agent,
 		Model:               c.llm,
-		Tools:               c.resolved.Tools,
-		CoreTools:           tool.CoreToolsConfig{Runtime: c.execRuntime},
-		Policies:            c.resolved.Policies,
 		ContextWindowTokens: c.contextWindow,
 	})
 	if err != nil {
-		cancel()
 		return err
 	}
+	c.sessionID = runResult.Session.SessionID
+	runner := runResult.Handle
 	if err := runner.Submit(submission); err != nil {
-		cancel()
 		_ = runner.Close()
 		return err
+	}
+	cancel := func() {
+		_ = gw.InterruptSession(context.Background(), c.gatewayChannel(), "console interrupt")
 	}
 	c.setActiveRun(cancel, runner)
 	defer func() {
 		c.clearActiveRun()
-		cancel()
 		_ = runner.Close()
 	}()
 	return runRunner(runner, runRenderConfig{
@@ -883,7 +986,8 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			c.tuiSender.Send(tuievents.LogChunkMsg{
 				Chunk: fmt.Sprintf("▸ %s %s\n", displayToolCallName(call.Name, parsedArgs), summarizeToolArgs(call.Name, parsedArgs)),
 			})
-			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) || strings.EqualFold(strings.TrimSpace(call.Name), tool.DelegateTaskToolName) {
+			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) ||
+				strings.EqualFold(strings.TrimSpace(call.Name), tool.SpawnToolName) {
 				c.tuiSender.Send(tuievents.TaskStreamMsg{
 					Label:  call.Name,
 					CallID: call.ID,
@@ -898,24 +1002,6 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 	}
 	if msg.ToolResponse != nil {
 		c.syncBashTaskWatch(msg.ToolResponse.ID, msg.ToolResponse.Name, msg.ToolResponse.Result)
-		emittedTaskStream := c.emitTaskStreamFromToolResult(msg.ToolResponse)
-		toolName := strings.TrimSpace(msg.ToolResponse.Name)
-		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), toolshell.BashToolName) {
-			c.tuiSender.Send(tuievents.TaskStreamMsg{
-				Label:  msg.ToolResponse.Name,
-				CallID: msg.ToolResponse.ID,
-				Final:  true,
-			})
-			hasError := hasToolError(msg.ToolResponse.Result)
-			exitCode, _ := asInt(msg.ToolResponse.Result["exit_code"])
-			if strings.TrimSpace(asString(msg.ToolResponse.Result["stdout"])) != "" ||
-				strings.TrimSpace(asString(msg.ToolResponse.Result["stderr"])) != "" {
-				return true
-			}
-			if emittedTaskStream || (!hasError && exitCode == 0) {
-				return true
-			}
-		}
 		var (
 			callArgs      map[string]any
 			richDiffShown bool
@@ -927,6 +1013,67 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 				richDiffShown = snapshot.RichDiffShown
 				changeCounts = snapshot.ChangeCounts
 				delete(pendingToolCalls, msg.ToolResponse.ID)
+			}
+		}
+		emittedTaskStream := c.emitTaskStreamFromToolResult(msg.ToolResponse, callArgs)
+		toolName := strings.TrimSpace(msg.ToolResponse.Name)
+		if strings.EqualFold(toolName, tool.SpawnToolName) {
+			spawnID := strings.TrimSpace(firstNonEmpty(
+				msg.ToolResponse.Result,
+				"_ui_child_session_id",
+				"child_session_id",
+				"task_id",
+			))
+			attachTarget := strings.TrimSpace(firstNonEmpty(
+				msg.ToolResponse.Result,
+				"_ui_child_session_id",
+				"child_session_id",
+				"_ui_delegation_id",
+				"delegation_id",
+			))
+			if spawnID != "" {
+				c.tuiSender.Send(tuievents.SubagentStartMsg{
+					SpawnID:      spawnID,
+					AttachTarget: attachTarget,
+					Agent:        strings.TrimSpace(firstNonEmpty(msg.ToolResponse.Result, "_ui_agent", "agent")),
+					CallID:       msg.ToolResponse.ID,
+				})
+				state := "running"
+				var approvalTool, approvalCmd string
+				if fmt.Sprint(msg.ToolResponse.Result["_ui_approval_pending"]) == "true" || fmt.Sprint(msg.ToolResponse.Result["approval_pending"]) == "true" {
+					state = "waiting_approval"
+					// Forward any available approval context from the kernel.
+					if v, ok := msg.ToolResponse.Result["_ui_approval_tool"].(string); ok {
+						approvalTool = v
+					}
+					if v, ok := msg.ToolResponse.Result["_ui_approval_command"].(string); ok {
+						approvalCmd = v
+					}
+				}
+				if explicit := strings.ToLower(strings.TrimSpace(asString(msg.ToolResponse.Result["state"]))); explicit != "" {
+					state = explicit
+				}
+				c.tuiSender.Send(tuievents.SubagentStatusMsg{
+					SpawnID:         spawnID,
+					State:           state,
+					ApprovalTool:    approvalTool,
+					ApprovalCommand: approvalCmd,
+				})
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), toolshell.BashToolName) {
+			c.tuiSender.Send(tuievents.TaskStreamMsg{
+				Label:  msg.ToolResponse.Name,
+				CallID: msg.ToolResponse.ID,
+				Final:  true,
+			})
+			hasError := hasToolError(msg.ToolResponse.Result)
+			exitCode, _ := asInt(msg.ToolResponse.Result["exit_code"])
+			if strings.TrimSpace(firstNonEmpty(msg.ToolResponse.Result, "result", "stdout", "stderr")) != "" {
+				return true
+			}
+			if emittedTaskStream || (!hasError && exitCode == 0) {
+				return true
 			}
 		}
 		if isFileMutationTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
@@ -957,7 +1104,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", displayName, compact)})
 			return true
 		}
-		if strings.EqualFold(toolName, tool.DelegateTaskToolName) && !hasToolError(msg.ToolResponse.Result) {
+		if strings.EqualFold(toolName, tool.SpawnToolName) && !hasToolError(msg.ToolResponse.Result) {
 			return true
 		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).
@@ -965,10 +1112,13 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			return true
 		}
 		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		if strings.EqualFold(toolName, tool.TaskToolName) && strings.EqualFold(strings.TrimSpace(asString(callArgs["action"])), "write") && !hasToolError(msg.ToolResponse.Result) {
+			summary = ""
+		}
 		if strings.EqualFold(toolName, tool.TaskToolName) && emittedTaskStream {
 			summary = ""
 		}
-		if strings.EqualFold(toolName, tool.DelegateTaskToolName) && emittedTaskStream {
+		if strings.EqualFold(toolName, tool.SpawnToolName) && emittedTaskStream {
 			summary = ""
 		}
 		if strings.TrimSpace(summary) != "" {
@@ -980,7 +1130,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine(prefix, displayName, summary)})
 		}
 		if strings.EqualFold(toolName, tool.TaskToolName) {
-			return emittedTaskStream || strings.TrimSpace(summary) != ""
+			return emittedTaskStream || strings.TrimSpace(summary) != "" || strings.EqualFold(strings.TrimSpace(asString(callArgs["action"])), "write")
 		}
 		return true
 	}
@@ -988,7 +1138,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 }
 
 func formatSessionNoticeChunk(notice session.Notice) string {
-	text := strings.TrimSpace(notice.Text)
+	text := renderNoticeText(notice)
 	if text == "" {
 		return ""
 	}
@@ -1002,12 +1152,15 @@ func formatSessionNoticeChunk(notice session.Notice) string {
 	}
 }
 
-func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool {
+func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, callArgs map[string]any) bool {
 	if c == nil || c.tuiSender == nil || resp == nil {
 		return false
 	}
 	events := taskstream.EventsFromResult(resp.Result)
 	if len(events) == 0 {
+		if msg, ok := syntheticTaskStreamMsgFromToolResult(resp, callArgs); ok {
+			c.tuiSender.Send(msg)
+		}
 		return false
 	}
 	for _, ev := range events {
@@ -1035,6 +1188,86 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse) bool
 		c.tuiSender.Send(msg)
 	}
 	return true
+}
+
+func syntheticTaskStreamMsgFromToolResult(resp *model.ToolResponse, callArgs map[string]any) (tuievents.TaskStreamMsg, bool) {
+	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.TaskToolName) {
+		return tuievents.TaskStreamMsg{}, false
+	}
+	action := strings.ToLower(strings.TrimSpace(asString(callArgs["action"])))
+	switch action {
+	case "wait", "status", "write":
+	default:
+		return tuievents.TaskStreamMsg{}, false
+	}
+	taskID := strings.TrimSpace(asString(resp.Result["task_id"]))
+	if taskID == "" {
+		return tuievents.TaskStreamMsg{}, false
+	}
+	state, chunk := taskPanelStateFromResult(resp.Result)
+	if state == "" {
+		return tuievents.TaskStreamMsg{}, false
+	}
+	if action != "write" && state == "running" {
+		return tuievents.TaskStreamMsg{}, false
+	}
+	return tuievents.TaskStreamMsg{
+		Label:  toolshell.BashToolName,
+		TaskID: taskID,
+		CallID: resp.ID,
+		Stream: "stdout",
+		Chunk:  chunk,
+		State:  state,
+	}, true
+}
+
+func taskPanelStateFromResult(result map[string]any) (state string, chunk string) {
+	if len(result) == 0 {
+		return "", ""
+	}
+	if explicit := strings.ToLower(strings.TrimSpace(asString(result["state"]))); explicit != "" {
+		switch explicit {
+		case "waiting_input", "waiting_approval", "running", "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+			return explicit, taskPanelChunkFromResult(result, explicit)
+		}
+	}
+	progress := strings.TrimSpace(taskProgressMessage(firstNonEmpty(result, "msg", "message")))
+	switch strings.ToLower(progress) {
+	case "waiting for input":
+		return "waiting_input", ""
+	case "waiting for approval":
+		return "waiting_approval", ""
+	}
+	return "", ""
+}
+
+func taskProgressMessage(text string) string {
+	text = userFacingTaskMessage(text)
+	if text == "" {
+		return ""
+	}
+	_, rest, found := strings.Cut(text, "\n")
+	if !found {
+		return ""
+	}
+	return strings.TrimSpace(rest)
+}
+
+func taskPanelChunkFromResult(result map[string]any, state string) string {
+	if chunk := strings.TrimSpace(firstNonEmpty(result, "result", "output", "stdout", "stderr")); chunk != "" {
+		return chunk
+	}
+	return taskPanelChunkFromMessage(firstNonEmpty(result, "msg", "message"), state)
+}
+
+func taskPanelChunkFromMessage(text string, state string) string {
+	progress := taskProgressMessage(text)
+	switch strings.ToLower(strings.TrimSpace(progress)) {
+	case "", "waiting for input", "waiting for approval", "still running", "still going", "subagent is running":
+		return ""
+	default:
+		return progress
+	}
 }
 
 func planUpdateMsgFromToolPayload(callArgs map[string]any, result map[string]any) tuievents.PlanUpdateMsg {
@@ -1069,7 +1302,7 @@ func decodePlanEntries(in any, out any) error {
 	return json.Unmarshal(raw, out)
 }
 
-func (c *cliConsole) setActiveRun(cancel context.CancelFunc, runner runtime.Runner) {
+func (c *cliConsole) setActiveRun(cancel context.CancelFunc, runner sessionsvc.TurnHandle) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	c.activeRunCancel = cancel
@@ -1091,7 +1324,7 @@ func (c *cliConsole) clearActiveRunCancel() {
 	c.clearActiveRun()
 }
 
-func (c *cliConsole) getActiveRunner() runtime.Runner {
+func (c *cliConsole) getActiveRunner() sessionsvc.TurnHandle {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
 	return c.activeRunner
@@ -1141,8 +1374,8 @@ func handleHelp(c *cliConsole, args []string) (bool, error) {
 			c.ui.Plain("  %-24s %s\n", cmd.Usage, cmd.Description)
 		}
 	}
-	helpSection("Session", []string{"new", "fork", "resume", "compact", "status"})
-	helpSection("Model", []string{"model", "connect"})
+	helpSection("Session", []string{"new", "fork", "attach", "back", "resume", "compact", "status"})
+	helpSection("Model", []string{"model", "connect", "agent"})
 	helpSection("Security", []string{"sandbox"})
 	helpSection("Other", []string{"btw", "help", "version", "exit", "quit"})
 	return false, nil
@@ -1176,7 +1409,18 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 	if len(args) != 0 {
 		return false, fmt.Errorf("usage: /new")
 	}
-	c.sessionID = nextConversationSessionID()
+	if gw, err := c.sessionGateway(); err == nil {
+		info, startErr := gw.StartSession(c.baseCtx, appgateway.StartSessionRequest{
+			Channel:            c.gatewayChannel(),
+			PreferredSessionID: nextConversationSessionID(),
+		})
+		if startErr != nil {
+			return false, startErr
+		}
+		c.sessionID = info.SessionID
+	} else {
+		c.sessionID = nextConversationSessionID()
+	}
 	c.lastPromptTokens = 0
 	_ = c.clearPendingAttachments()
 	if err := c.persistSessionMode(); err != nil {
@@ -1203,7 +1447,18 @@ func handleFork(c *cliConsole, args []string) (bool, error) {
 	if previous == "" {
 		return false, fmt.Errorf("cannot fork without an active session")
 	}
-	c.sessionID = nextConversationSessionID()
+	if gw, err := c.sessionGateway(); err == nil {
+		info, forkErr := gw.ForkSession(c.baseCtx, appgateway.StartSessionRequest{
+			Channel:            c.gatewayChannel(),
+			PreferredSessionID: nextConversationSessionID(),
+		})
+		if forkErr != nil {
+			return false, forkErr
+		}
+		c.sessionID = info.SessionID
+	} else {
+		c.sessionID = nextConversationSessionID()
+	}
 	_ = c.clearPendingAttachments()
 	if err := c.persistSessionMode(); err != nil {
 		return false, err
@@ -1215,6 +1470,62 @@ func handleFork(c *cliConsole, args []string) (bool, error) {
 		return false, nil
 	}
 	c.printf("fork succeeded\n")
+	return false, nil
+}
+
+func handleAttach(c *cliConsole, args []string) (bool, error) {
+	if len(args) != 1 {
+		return false, fmt.Errorf("usage: /attach <child-session-id|delegation-id>")
+	}
+	gw, err := c.sessionGateway()
+	if err != nil || gw == nil {
+		return false, fmt.Errorf("session gateway is not available")
+	}
+	target := strings.TrimSpace(args[0])
+	if target == "" {
+		return false, fmt.Errorf("child-session-id or delegation-id is required")
+	}
+	req := appgateway.AttachSessionRequest{Channel: c.gatewayChannel()}
+	if strings.HasPrefix(target, "dlg-") {
+		req.DelegationID = target
+	} else {
+		req.ChildSessionID = target
+	}
+	loaded, err := gw.AttachSession(c.baseCtx, req)
+	if err != nil {
+		return false, err
+	}
+	if err := c.applyLoadedSession(loaded); err != nil {
+		return false, err
+	}
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: c.sessionHint("attached child session"), ClearAfter: transientHintDuration})
+		return false, nil
+	}
+	c.printf("attached child session: %s\n", idutil.ShortDisplay(c.sessionID))
+	return false, nil
+}
+
+func handleBack(c *cliConsole, args []string) (bool, error) {
+	if len(args) != 0 {
+		return false, fmt.Errorf("usage: /back")
+	}
+	gw, err := c.sessionGateway()
+	if err != nil || gw == nil {
+		return false, fmt.Errorf("session gateway is not available")
+	}
+	loaded, err := gw.BackToParent(c.baseCtx, c.gatewayChannel())
+	if err != nil {
+		return false, err
+	}
+	if err := c.applyLoadedSession(loaded); err != nil {
+		return false, err
+	}
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: c.sessionHint("returned to parent session"), ClearAfter: transientHintDuration})
+		return false, nil
+	}
+	c.printf("returned to parent session: %s\n", idutil.ShortDisplay(c.sessionID))
 	return false, nil
 }
 
@@ -1716,18 +2027,20 @@ func (c *cliConsole) reloadConfiguredModels() error {
 
 func handleTools(c *cliConsole, args []string) (bool, error) {
 	_ = args
-	coreTools, err := tool.EnsureCoreTools(c.resolved.Tools, tool.CoreToolsConfig{
-		Runtime: c.execRuntime,
-	})
+	gw, err := c.sessionGateway()
+	if err != nil {
+		return false, err
+	}
+	toolNames, err := gw.VisibleTools()
 	if err != nil {
 		return false, err
 	}
 	c.printf("tools:\n")
-	for _, one := range coreTools {
-		if one == nil {
+	for _, name := range toolNames {
+		if strings.TrimSpace(name) == "" {
 			continue
 		}
-		c.printf("  - %s\n", one.Name())
+		c.printf("  - %s\n", name)
 	}
 	return false, nil
 }
@@ -1755,11 +2068,54 @@ func handleSkills(c *cliConsole, args []string) (bool, error) {
 }
 
 func handleResume(c *cliConsole, args []string) (bool, error) {
-	if c.sessionIndex == nil {
+	gw, err := c.sessionGateway()
+	if err != nil && c.sessionIndex == nil {
 		return false, fmt.Errorf("session index is not available")
 	}
 	if len(args) > 1 {
 		return false, fmt.Errorf("usage: /resume [session-id]")
+	}
+	if err != nil || gw == nil {
+		target := ""
+		if len(args) == 1 {
+			target = strings.TrimSpace(args[0])
+			if target == "" {
+				return false, fmt.Errorf("session-id is required")
+			}
+			resolved, ok, resolveErr := c.sessionIndex.ResolveWorkspaceSessionID(c.workspace.Key, target)
+			if resolveErr != nil {
+				return false, resolveErr
+			}
+			if !ok {
+				return false, fmt.Errorf("session %q not found in current workspace", target)
+			}
+			target = resolved
+		} else {
+			rec, ok, recentErr := c.sessionIndex.MostRecentWorkspaceSession(c.workspace.Key, c.sessionID)
+			if recentErr != nil {
+				return false, recentErr
+			}
+			if !ok || strings.TrimSpace(rec.SessionID) == "" {
+				return false, fmt.Errorf("no resumable session found in current workspace")
+			}
+			target = rec.SessionID
+		}
+		c.sessionID = target
+		if _, reconcileErr := c.rt.ReconcileSession(c.baseCtx, runtime.ReconcileSessionRequest{
+			AppName:     c.appName,
+			UserID:      c.userID,
+			SessionID:   c.sessionID,
+			ExecRuntime: c.execRuntime,
+		}); reconcileErr != nil {
+			return false, reconcileErr
+		}
+		if restoreErr := c.restoreSessionMode(c.loadSessionMode()); restoreErr != nil {
+			return false, restoreErr
+		}
+		if renderErr := c.renderResumedSessionEvents(); renderErr != nil {
+			return false, renderErr
+		}
+		return false, nil
 	}
 	target := ""
 	if len(args) == 1 {
@@ -1767,38 +2123,20 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 		if target == "" {
 			return false, fmt.Errorf("session-id is required")
 		}
-		resolved, ok, err := c.sessionIndex.ResolveWorkspaceSessionID(c.workspace.Key, target)
-		if err != nil {
-			return false, err
-		}
-		if !ok {
-			return false, fmt.Errorf("session %q not found in current workspace", target)
-		}
-		target = resolved
-	} else {
-		rec, ok, err := c.sessionIndex.MostRecentWorkspaceSession(c.workspace.Key, c.sessionID)
-		if err != nil {
-			return false, err
-		}
-		if !ok || strings.TrimSpace(rec.SessionID) == "" {
-			return false, fmt.Errorf("no resumable session found in current workspace")
-		}
-		target = rec.SessionID
 	}
-	c.sessionID = target
-	if _, err := c.rt.ReconcileSession(c.baseCtx, runtime.ReconcileSessionRequest{
-		AppName:     c.appName,
-		UserID:      c.userID,
-		SessionID:   c.sessionID,
-		ExecRuntime: c.execRuntime,
-	}); err != nil {
+	loaded, err := gw.ResumeSession(c.baseCtx, appgateway.ResumeSessionRequest{
+		Channel:          c.gatewayChannel(),
+		SessionID:        target,
+		ExcludeSessionID: c.sessionID,
+	})
+	if err != nil {
 		return false, err
 	}
-	if err := c.restoreSessionMode(c.loadSessionMode()); err != nil {
+	if err := c.applyLoadedSession(loaded); err != nil {
 		return false, err
 	}
-	if err := c.renderResumedSessionEvents(); err != nil {
-		return false, err
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.SetHintMsg{Hint: c.sessionHint("resumed session"), ClearAfter: transientHintDuration})
 	}
 	return false, nil
 }
@@ -1818,6 +2156,37 @@ func (c *cliConsole) renderResumedSessionEvents() error {
 		return err
 	}
 	c.refreshContextUsageEstimate(extractLastUsage(events))
+	return c.renderSessionEvents(events)
+}
+
+func (c *cliConsole) applyLoadedSession(loaded sessionsvc.LoadedSession) error {
+	if c == nil {
+		return nil
+	}
+	c.sessionID = loaded.SessionID
+	if err := c.restoreSessionMode(sessionmode.LoadSnapshot(loaded.State)); err != nil {
+		return err
+	}
+	c.refreshContextUsageEstimate(extractLastUsage(loaded.Events))
+	return c.renderSessionEvents(loaded.Events)
+}
+
+func (c *cliConsole) sessionHint(prefix string) string {
+	prefix = strings.TrimSpace(prefix)
+	if c == nil {
+		return prefix
+	}
+	id := strings.TrimSpace(idutil.ShortDisplay(strings.TrimSpace(c.sessionID)))
+	if prefix == "" || id == "" {
+		return prefix
+	}
+	return prefix + ": " + id
+}
+
+func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
+	if c == nil {
+		return nil
+	}
 	if c.tuiSender == nil || len(events) == 0 {
 		return nil
 	}

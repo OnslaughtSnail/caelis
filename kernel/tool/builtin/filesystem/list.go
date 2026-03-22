@@ -115,3 +115,7 @@ func (t *ListTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		"count":   len(out),
 	}, nil
 }
+
+func (t *ListTool) WithRuntime(runtime toolexec.Runtime) (*ListTool, error) {
+	return NewListWithRuntime(runtime)
+}

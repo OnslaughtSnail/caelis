@@ -11,11 +11,8 @@ import (
 // ----- shouldPersistEvent tests -----
 
 func TestShouldPersistEvent_NilEvent(t *testing.T) {
-	if shouldPersistEvent(nil, false) {
+	if shouldPersistEvent(nil) {
 		t.Fatal("nil event must not be persisted")
-	}
-	if shouldPersistEvent(nil, true) {
-		t.Fatal("nil event must not be persisted even with persistPartial=true")
 	}
 }
 
@@ -25,11 +22,8 @@ func TestShouldPersistEvent_NormalEventPersists(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
 	}
-	if !shouldPersistEvent(ev, false) {
+	if !shouldPersistEvent(ev) {
 		t.Fatal("normal assistant event must be persisted")
-	}
-	if !shouldPersistEvent(ev, true) {
-		t.Fatal("normal assistant event must be persisted with persistPartial=true")
 	}
 }
 
@@ -39,46 +33,28 @@ func TestShouldPersistEvent_SkipsOverlayEvent(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleAssistant, Text: "ephemeral"},
 	})
-	if shouldPersistEvent(ev, false) {
+	if shouldPersistEvent(ev) {
 		t.Fatal("overlay event must not be persisted")
-	}
-	if shouldPersistEvent(ev, true) {
-		t.Fatal("overlay event must not be persisted even with persistPartial=true")
 	}
 }
 
 func TestShouldPersistEvent_SkipsLifecycleEvent(t *testing.T) {
 	sess := &session.Session{AppName: "app", UserID: "u", ID: "s"}
 	ev := lifecycleEvent(sess, RunLifecycleStatusRunning, "run", nil)
-	if shouldPersistEvent(ev, false) {
+	if shouldPersistEvent(ev) {
 		t.Fatal("lifecycle event must not be persisted")
 	}
-	if shouldPersistEvent(ev, true) {
-		t.Fatal("lifecycle event must not be persisted even with persistPartial=true")
-	}
 }
 
-func TestShouldPersistEvent_PartialWithFlagFalse(t *testing.T) {
+func TestShouldPersistEvent_PartialNeverPersists(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-partial",
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleAssistant, Text: "partial"},
 	}
 	session.SetEventType(ev, session.EventTypePartialAnswer)
-	if shouldPersistEvent(ev, false) {
-		t.Fatal("partial event must not be persisted when persistPartial=false")
-	}
-}
-
-func TestShouldPersistEvent_PartialWithFlagTrue(t *testing.T) {
-	ev := &session.Event{
-		ID:      "ev-partial",
-		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "partial"},
-	}
-	session.SetEventType(ev, session.EventTypePartialAnswer)
-	if !shouldPersistEvent(ev, true) {
-		t.Fatal("partial event must be persisted when persistPartial=true")
+	if shouldPersistEvent(ev) {
+		t.Fatal("partial event must never be persisted")
 	}
 }
 
@@ -89,8 +65,8 @@ func TestShouldPersistEvent_PartialReasoningWithFlagFalse(t *testing.T) {
 		Message: model.Message{Role: model.RoleAssistant, Text: "thinking"},
 	}
 	session.SetEventType(ev, session.EventTypePartialReasoning)
-	if shouldPersistEvent(ev, false) {
-		t.Fatal("partial reasoning event must not be persisted when persistPartial=false")
+	if shouldPersistEvent(ev) {
+		t.Fatal("partial reasoning event must never be persisted")
 	}
 }
 
@@ -101,8 +77,8 @@ func TestShouldPersistEvent_OverlayPartialNeverPersists(t *testing.T) {
 		Message: model.Message{Role: model.RoleAssistant, Text: "overlay partial"},
 	})
 	session.SetEventType(ev, session.EventTypeOverlayPartialAnswer)
-	if shouldPersistEvent(ev, true) {
-		t.Fatal("overlay partial event must not be persisted even with persistPartial=true")
+	if shouldPersistEvent(ev) {
+		t.Fatal("overlay partial event must not be persisted")
 	}
 }
 
@@ -112,7 +88,7 @@ func TestShouldPersistEvent_UserEventPersists(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleUser, Text: "question"},
 	}
-	if !shouldPersistEvent(ev, false) {
+	if !shouldPersistEvent(ev) {
 		t.Fatal("user event must be persisted")
 	}
 }
@@ -130,7 +106,7 @@ func TestShouldPersistEvent_ToolResponsePersists(t *testing.T) {
 			},
 		},
 	}
-	if !shouldPersistEvent(ev, false) {
+	if !shouldPersistEvent(ev) {
 		t.Fatal("tool response event must be persisted")
 	}
 }
@@ -138,11 +114,8 @@ func TestShouldPersistEvent_ToolResponsePersists(t *testing.T) {
 // ----- isDurableReplayEvent tests -----
 
 func TestIsDurableReplayEvent_NilEvent(t *testing.T) {
-	if isDurableReplayEvent(nil, false) {
+	if isDurableReplayEvent(nil) {
 		t.Fatal("nil event must not be durable replay")
-	}
-	if isDurableReplayEvent(nil, true) {
-		t.Fatal("nil event must not be durable replay with persistPartial=true")
 	}
 }
 
@@ -152,22 +125,20 @@ func TestIsDurableReplayEvent_NormalEventIsDurable(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
 	}
-	if !isDurableReplayEvent(ev, false) {
+	if !isDurableReplayEvent(ev) {
 		t.Fatal("normal assistant event must be durable replay")
 	}
 }
 
-func TestIsDurableReplayEvent_PartialFilteredEvenWhenPersisted(t *testing.T) {
+func TestIsDurableReplayEvent_PartialFiltered(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-partial",
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleAssistant, Text: "partial"},
 	}
 	session.SetEventType(ev, session.EventTypePartialAnswer)
-	// Even when persistPartial=true (shouldPersistEvent returns true),
-	// isDurableReplayEvent must still filter partials.
-	if isDurableReplayEvent(ev, true) {
-		t.Fatal("partial event must not be durable replay even when persistPartial=true")
+	if isDurableReplayEvent(ev) {
+		t.Fatal("partial event must not be durable replay")
 	}
 }
 
@@ -177,7 +148,7 @@ func TestIsDurableReplayEvent_UIOnlyNotDurable(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleSystem, Text: "notice"},
 	})
-	if isDurableReplayEvent(ev, false) {
+	if isDurableReplayEvent(ev) {
 		t.Fatal("ui-only event must not be durable replay")
 	}
 }
@@ -188,7 +159,7 @@ func TestIsDurableReplayEvent_OverlayNotDurable(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleAssistant, Text: "overlay"},
 	})
-	if isDurableReplayEvent(ev, false) {
+	if isDurableReplayEvent(ev) {
 		t.Fatal("overlay event must not be durable replay")
 	}
 }
@@ -196,7 +167,7 @@ func TestIsDurableReplayEvent_OverlayNotDurable(t *testing.T) {
 func TestIsDurableReplayEvent_LifecycleNotDurable(t *testing.T) {
 	sess := &session.Session{AppName: "app", UserID: "u", ID: "s"}
 	ev := lifecycleEvent(sess, RunLifecycleStatusCompleted, "run", nil)
-	if isDurableReplayEvent(ev, false) {
+	if isDurableReplayEvent(ev) {
 		t.Fatal("lifecycle event must not be durable replay")
 	}
 }
@@ -207,7 +178,7 @@ func TestIsDurableReplayEvent_UserEventIsDurable(t *testing.T) {
 		Time:    time.Now(),
 		Message: model.Message{Role: model.RoleUser, Text: "hello"},
 	}
-	if !isDurableReplayEvent(ev, false) {
+	if !isDurableReplayEvent(ev) {
 		t.Fatal("user event must be durable replay")
 	}
 }
@@ -225,7 +196,7 @@ func TestIsDurableReplayEvent_ToolResponseIsDurable(t *testing.T) {
 			},
 		},
 	}
-	if !isDurableReplayEvent(ev, false) {
+	if !isDurableReplayEvent(ev) {
 		t.Fatal("tool response event must be durable replay")
 	}
 }
@@ -251,7 +222,7 @@ func TestStreamResyncEvent_IsUIOnly(t *testing.T) {
 
 func TestStreamResyncEvent_NeverPersisted(t *testing.T) {
 	ev := streamResyncEvent()
-	if shouldPersistEvent(ev, true) {
+	if shouldPersistEvent(ev) {
 		t.Fatal("stream resync event must never be persisted")
 	}
 }

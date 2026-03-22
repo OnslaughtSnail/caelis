@@ -1,6 +1,7 @@
 package gitignorefilter
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,7 +163,7 @@ func (m *Matcher) loadRootPatterns() ([]gitignore.Pattern, error) {
 func (m *Matcher) loadGitignoreFile(path string, domainDir string) ([]gitignore.Pattern, error) {
 	data, err := m.fs.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if isMissingFileError(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -183,6 +184,17 @@ func (m *Matcher) loadGitignoreFile(path string, domainDir string) ([]gitignore.
 		patterns = append(patterns, gitignore.ParsePattern(line, domain))
 	}
 	return patterns, nil
+}
+
+func isMissingFileError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) || errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(text, "no such file or directory") || strings.Contains(text, "file does not exist")
 }
 
 func discoverRoot(fs FileSystem, path string) (string, error) {

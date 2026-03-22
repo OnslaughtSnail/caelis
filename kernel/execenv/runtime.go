@@ -614,16 +614,6 @@ func New(cfg Config) (Runtime, error) {
 	return runtime, nil
 }
 
-func defaultSandboxTypeForPlatform() string {
-	if runtimeGOOS == "darwin" {
-		return seatbeltSandboxType
-	}
-	if runtimeGOOS == "linux" {
-		return bwrapSandboxType
-	}
-	return bwrapSandboxType
-}
-
 func sandboxTypeCandidates(requested string) []string {
 	return sandboxTypeCandidatesForPlatform(requested, runtimeGOOS)
 }

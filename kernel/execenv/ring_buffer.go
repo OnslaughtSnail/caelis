@@ -16,6 +16,7 @@ type RingBuffer struct {
 	mu         sync.RWMutex
 	lastWrite  time.Time
 	totalBytes int64
+	dropped    int64
 }
 
 // NewRingBuffer creates a new ring buffer with the specified capacity.
@@ -44,6 +45,7 @@ func (rb *RingBuffer) Write(p []byte) (n int, err error) {
 
 	// If input is larger than capacity, only keep the tail
 	if len(p) >= rb.capacity {
+		rb.dropped += int64(rb.lenLocked() + len(p) - rb.capacity)
 		copy(rb.data, p[len(p)-rb.capacity:])
 		rb.writePos = 0
 		rb.readPos = 0
@@ -54,6 +56,7 @@ func (rb *RingBuffer) Write(p []byte) (n int, err error) {
 	for i := 0; i < len(p); i++ {
 		// Check if we're about to overwrite unread data
 		if rb.full && rb.writePos == rb.readPos {
+			rb.dropped++
 			rb.readPos = (rb.readPos + 1) % rb.capacity
 		}
 
@@ -140,6 +143,10 @@ func (rb *RingBuffer) Len() int {
 	rb.mu.RLock()
 	defer rb.mu.RUnlock()
 
+	return rb.lenLocked()
+}
+
+func (rb *RingBuffer) lenLocked() int {
 	if rb.full {
 		return rb.capacity
 	}
@@ -161,6 +168,21 @@ func (rb *RingBuffer) TotalWritten() int64 {
 	return rb.totalBytes
 }
 
+// DroppedBytes returns the total number of bytes discarded because the buffer
+// capacity was exceeded.
+func (rb *RingBuffer) DroppedBytes() int64 {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	return rb.dropped
+}
+
+// EarliestMarker returns the earliest total-bytes marker whose data is still retained.
+func (rb *RingBuffer) EarliestMarker() int64 {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	return rb.totalBytes - int64(rb.lenLocked())
+}
+
 // LastWriteTime returns the timestamp of the last write operation.
 func (rb *RingBuffer) LastWriteTime() time.Time {
 	rb.mu.RLock()
@@ -177,5 +199,6 @@ func (rb *RingBuffer) Reset() {
 	rb.readPos = 0
 	rb.full = false
 	rb.totalBytes = 0
+	rb.dropped = 0
 	rb.lastWrite = time.Now()
 }

@@ -25,6 +25,20 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if handled, changed := m.tryScrollPanelAtMouse(typed.Mouse()); handled {
+			if changed {
+				offset := m.viewport.YOffset()
+				keepScrolledUp := m.userScrolledUp
+				m.syncViewportContent()
+				maxOffset := maxInt(0, m.viewport.TotalLineCount()-m.viewport.Height())
+				if offset > maxOffset {
+					offset = maxOffset
+				}
+				m.viewport.SetYOffset(offset)
+				m.userScrolledUp = keepScrolledUp
+			}
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.userScrolledUp = !m.viewport.AtBottom()
@@ -58,6 +72,43 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleViewportMouseRelease(mouse)
 	default:
 		return m, nil
+	}
+}
+
+func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bool) {
+	vy := mouse.Y
+	if vy < 0 || vy >= m.viewport.Height() {
+		return false, false
+	}
+	contentLine := m.viewport.YOffset() + vy
+	if contentLine < 0 || contentLine >= len(m.viewportBlockIDs) {
+		return false, false
+	}
+	blockID := strings.TrimSpace(m.viewportBlockIDs[contentLine])
+	if blockID == "" {
+		return false, false
+	}
+	delta := 0
+	switch mouse.Button {
+	case tea.MouseWheelUp:
+		delta = -1
+	case tea.MouseWheelDown:
+		delta = 1
+	default:
+		return false, false
+	}
+	ctx := BlockRenderContext{
+		Width:     maxInt(1, m.viewport.Width()),
+		TermWidth: m.width,
+		Theme:     m.theme,
+	}
+	switch block := m.doc.Find(blockID).(type) {
+	case *BashPanelBlock:
+		return true, block.Scroll(delta, ctx)
+	case *SubagentPanelBlock:
+		return true, block.Scroll(delta, ctx)
+	default:
+		return false, false
 	}
 }
 
@@ -110,12 +161,75 @@ func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
 	m.selecting = false
 	text := m.selectionText()
 	if text == "" {
+		// No text selected — treat as a click; check for panel header toggle.
+		if m.tryTogglePanelAtClick(mouse) {
+			m.syncViewportContent()
+		}
 		m.clearSelection()
 		m.renderViewportContent()
 		return nil
 	}
+	// Copy selected text, then immediately clear selection so the viewport
+	// returns to styled content.  Keeping the viewport stuck in plain-text
+	// mode after copy can trigger CJK display artifacts in bubbletea's
+	// diff-based renderer when the styled↔plain content transition is large.
+	cmd := m.copySelectionToClipboard(text)
+	m.clearSelection()
 	m.renderViewportContent()
-	return m.copySelectionToClipboard(text)
+	return cmd
+}
+
+// tryTogglePanelAtClick checks if the click hit a BashPanelBlock header line
+// and toggles its Expanded state. Returns true if a toggle was performed.
+func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
+	vy := mouse.Y
+	if vy < 0 || vy >= m.viewport.Height() {
+		return false
+	}
+	contentLine := m.viewport.YOffset() + vy
+	if contentLine < 0 || contentLine >= len(m.viewportBlockIDs) {
+		return false
+	}
+	bid := m.viewportBlockIDs[contentLine]
+	if bid == "" {
+		return false
+	}
+	blk := m.doc.Find(bid)
+	if blk == nil {
+		return false
+	}
+	if _, ok := blk.(*TranscriptBlock); ok {
+		if panel := m.findInlineBashPanelByAnchorBlockID(bid); panel != nil {
+			panel.Expanded = !panel.Expanded
+			m.syncInlineBashAnchorState(panel)
+			return true
+		}
+		if panel := m.findInlineSubagentPanelByAnchorBlockID(bid); panel != nil {
+			panel.Expanded = !panel.Expanded
+			m.syncInlineSubagentAnchorState(panel)
+			return true
+		}
+	}
+	bp, ok := blk.(*BashPanelBlock)
+	if !ok {
+		if sp, ok := blk.(*SubagentPanelBlock); ok {
+			// Inline subagent panels toggle from the tool call line only.
+			_ = sp
+		}
+		return false
+	}
+	if isInlineBashPanel(bp) {
+		return false
+	}
+	// For collapsed panels, any click on the single header line toggles.
+	// For expanded panels, only the first viewport line of the block toggles.
+	if bp.Expanded {
+		if contentLine > 0 && m.viewportBlockIDs[contentLine-1] == bid {
+			return false
+		}
+	}
+	bp.Expanded = !bp.Expanded
+	return true
 }
 
 func (m *Model) handleInputAreaMouse(mouse tea.Mouse, phase mousePhase) (bool, tea.Cmd) {
@@ -242,8 +356,7 @@ func (m *Model) reportClipboardError(action string, err error) tea.Cmd {
 	if errLine == "" {
 		errLine = "clipboard operation failed"
 	}
-	colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
-	m.historyLines = append(m.historyLines, colored)
+	m.commitLine(errLine)
 	m.syncViewportContent()
 	return m.showHint(errLine, hintOptions{
 		priority:       tuievents.HintPriorityHigh,
@@ -520,8 +633,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			names, _, err := m.cfg.PasteClipboardImage()
 			if err != nil {
 				errLine := "paste: " + err.Error()
-				colored := tuikit.ColorizeLogLine(errLine, tuikit.LineStyleError, m.theme)
-				m.historyLines = append(m.historyLines, colored)
+				m.commitLine(errLine)
 				m.syncViewportContent()
 				return m, nil
 			}
@@ -755,12 +867,7 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 		normalizeUserDisplayLine(strings.TrimPrefix(strings.TrimSpace(m.lastCommittedRaw), ">")) == normalizeUserDisplayLine(displayLine) {
 		return
 	}
-	colored := tuikit.ColorizeLogLine(userLine, tuikit.LineStyleUser, m.theme)
-	m.historyLines = append(m.historyLines, colored)
-	m.hasCommittedLine = true
-	m.lastCommittedStyle = tuikit.LineStyleUser
-	m.lastCommittedRaw = userLine
-	m.lastFinalAnswer = ""
+	m.commitLine(userLine)
 }
 
 func normalizeUserDisplayLine(text string) string {

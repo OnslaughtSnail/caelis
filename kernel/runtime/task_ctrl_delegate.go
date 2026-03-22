@@ -18,6 +18,8 @@ type delegateTaskController struct {
 	delegationID string
 	cancel       context.CancelFunc
 	store        task.Store
+	agent        string
+	timeout      time.Duration
 }
 
 func (c *delegateTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
@@ -67,9 +69,13 @@ func (c *delegateTaskController) Cancel(ctx context.Context, record *task.Record
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"child_session_id": c.sessionID,
-			"delegation_id":    c.delegationID,
-			"state":            string(task.StateCancelled),
+			"_ui_child_session_id": c.sessionID,
+			"_ui_delegation_id":    c.delegationID,
+			"_ui_agent":            c.agent,
+			"progress_state":       string(task.StateCancelled),
+		}
+		if c.timeout > 0 {
+			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
 		snapshot = one.LockedSnapshot(task.Output{})
 	})
@@ -102,19 +108,10 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 	var output task.Output
 	var assistant string
 	record.WithLock(func(one *task.Record) {
-		if len(one.Result) > 0 {
-			if text, ok := one.Result["assistant"].(string); ok {
-				assistant = text
-			}
-		}
+		assistant, _ = one.Result["final_result"].(string)
 	})
-	for _, ev := range events {
-		if ev == nil {
-			continue
-		}
-		if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
-			assistant = text
-		}
+	if final := FinalAssistantText(events); final != "" {
+		assistant = final
 	}
 	record.WithLock(func(one *task.Record) {
 		start := one.EventCursor
@@ -136,14 +133,21 @@ func (c *delegateTaskController) inspect(ctx context.Context, record *task.Recor
 		}
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"child_session_id": c.sessionID,
-			"delegation_id":    c.delegationID,
-			"assistant":        assistant,
-			"summary":          assistant,
-			"state":            string(one.State),
+			"_ui_child_session_id": c.sessionID,
+			"_ui_delegation_id":    c.delegationID,
+			"_ui_agent":            c.agent,
+			"progress_state":       string(one.State),
 		}
-		if preview := delegatePreviewFromEvents(events); preview != "" {
-			one.Result["latest_output"] = preview
+		if c.timeout > 0 {
+			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
+		}
+		if one.State == task.StateWaitingApproval {
+			one.Result["approval_pending"] = true
+			one.Result["_ui_approval_pending"] = true
+		}
+		if !one.Running && assistant != "" {
+			one.Result["final_result"] = assistant
+			one.Result["final_summary"] = assistant
 		}
 		snapshot = one.LockedSnapshot(output)
 	})

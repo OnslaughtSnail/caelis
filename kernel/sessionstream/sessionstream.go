@@ -9,8 +9,9 @@ import (
 
 type contextKey struct{}
 
-// Update is one raw live session event emitted during runtime execution.
-// The event payload is preserved as-is so callers can project/filter it.
+// Update is one transient live session event emitted during runtime execution.
+// This stream is observational only; it must not be treated as canonical
+// durable history.
 type Update struct {
 	SessionID string
 	Event     *session.Event

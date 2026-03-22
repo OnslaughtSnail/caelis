@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
@@ -141,7 +142,10 @@ func TestLoopDetector_IgnoresStableTaskWaitPolling(t *testing.T) {
 			Role: model.RoleTool,
 			ToolResponse: &model.ToolResponse{
 				ID: "call_1", Name: "TASK",
-				Result: map[string]any{"task_id": "t-123", "running": true, "state": "running"},
+				Result: map[string]any{
+					"task_id": "t-123",
+					"message": "task yielded before completion; use TASK with task_id t-123",
+				},
 			},
 		}},
 	}
@@ -355,6 +359,51 @@ func TestRuntime_LoopDetection_TerminatesStuckAgent(t *testing.T) {
 	// The agent should have run exactly loopDetectorThreshold turns
 	if ag.turnCount != loopDetectorThreshold {
 		t.Fatalf("expected %d turns before loop detection, got %d", loopDetectorThreshold, ag.turnCount)
+	}
+}
+
+func TestRuntime_LoopDetection_EmitsVisibleWarningNotice(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := newRuntimeTestLLM("fake")
+	ag := &loopingAgent{}
+	var (
+		gotLoopErr bool
+		gotNotice  bool
+	)
+	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-loop-notice",
+		Input:     "hello",
+		Agent:     ag,
+		Model:     llm,
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			if errors.Is(runErr, errLoopDetected) {
+				gotLoopErr = true
+				continue
+			}
+			t.Fatalf("unexpected error: %v", runErr)
+		}
+		if ev == nil {
+			continue
+		}
+		if notice, ok := session.EventNotice(ev); ok {
+			if strings.Contains(strings.ToLower(notice.Text), "infinite tool loop") {
+				gotNotice = true
+			}
+		}
+	}
+	if !gotLoopErr {
+		t.Fatal("expected loop detection to terminate the stuck agent")
+	}
+	if !gotNotice {
+		t.Fatal("expected loop detection to emit a visible warning notice")
 	}
 }
 

@@ -34,6 +34,8 @@ type Runtime struct {
 	activeRuns         map[string]struct{}
 }
 
+type SubagentRunnerFactory func(*Runtime, *session.Session, RunRequest) agent.SubagentRunner
+
 func New(cfg Config) (*Runtime, error) {
 	if cfg.Store == nil {
 		return nil, fmt.Errorf("runtime: store is nil")
@@ -54,35 +56,53 @@ func New(cfg Config) (*Runtime, error) {
 }
 
 // RunRequest defines one invocation input.
+// RunRequest describes one agent turn. Fields are logically grouped:
+//   - Identity: AppName, UserID, SessionID
+//   - Input: Input, ContentParts
+//   - Capabilities: Agent, Model, Tools, CoreTools, Policies, ContextWindowTokens, SubagentRunnerFactory
 type RunRequest struct {
+	// Identity
 	AppName   string
 	UserID    string
 	SessionID string
-	Input     string
 
+	// Input
+	Input string
 	// ContentParts carries multimodal content (e.g. images) alongside Input.
 	// When non-empty, the runtime builds a user message with these parts
 	// instead of using Input as plain text.
 	ContentParts []model.ContentPart
 
-	Agent                agent.Agent
-	Model                model.LLM
-	Tools                []tool.Tool
-	CoreTools            tool.CoreToolsConfig
-	Policies             []policy.Hook
-	PersistPartialEvents bool
-	ContextWindowTokens  int
+	// Capabilities
+	Agent                 agent.Agent
+	Model                 model.LLM
+	Tools                 []tool.Tool
+	CoreTools             tool.CoreToolsConfig
+	Policies              []policy.Hook
+	ContextWindowTokens   int
+	SubagentRunnerFactory SubagentRunnerFactory
 }
 
 func validateRunRequest(req RunRequest) error {
+	if err := validateRunIdentity(req); err != nil {
+		return err
+	}
+	return validateRunCapabilities(req)
+}
+
+func validateRunIdentity(req RunRequest) error {
+	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
+		return fmt.Errorf("runtime: app_name, user_id and session_id are required")
+	}
+	return nil
+}
+
+func validateRunCapabilities(req RunRequest) error {
 	if req.Agent == nil {
 		return fmt.Errorf("runtime: agent is nil")
 	}
 	if req.Model == nil {
 		return fmt.Errorf("runtime: model is nil")
-	}
-	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
-		return fmt.Errorf("runtime: app_name, user_id and session_id are required")
 	}
 	return nil
 }
@@ -120,12 +140,8 @@ func (r *Runtime) buildInvocationContext(
 	req RunRequest,
 	allEvents []*session.Event,
 ) (*invocationContext, error) {
-	subagentRunner := newSubagentRunner(r, sess, req)
-	runnerImpl, _ := subagentRunner.(*runtimeSubagentRunner)
+	subagentRunner := r.newSubagentRunner(sess, req)
 	coreTools := req.CoreTools
-	if _, delegated := delegationLineageFromContext(ctx); delegated {
-		coreTools.DisableDelegate = true
-	}
 	taskManager := newTaskManager(
 		r,
 		coreTools.Runtime,
@@ -133,7 +149,7 @@ func (r *Runtime) buildInvocationContext(
 		r.taskStore,
 		&sessionContext{appName: req.AppName, userID: req.UserID, sessionID: sess.ID},
 		req,
-		runnerImpl,
+		subagentRunner,
 	)
 	ctx = task.WithManager(ctx, taskManager)
 	ctx = session.WithStateContext(ctx, sess, r.store)
@@ -163,8 +179,17 @@ func (r *Runtime) buildInvocationContext(
 	}, nil
 }
 
+func (r *Runtime) newSubagentRunner(sess *session.Session, req RunRequest) agent.SubagentRunner {
+	if req.SubagentRunnerFactory != nil {
+		if runner := req.SubagentRunnerFactory(r, sess, req); runner != nil {
+			return runner
+		}
+	}
+	return newSubagentRunner(r, sess, req)
+}
+
 func (r *Runtime) projectInvocationEvents(allEvents []*session.Event) session.Events {
-	return session.AgentVisibleView(allEvents)
+	return session.InvocationView(allEvents)
 }
 
 func (r *Runtime) snapshotReadonlyState(ctx context.Context, sess *session.Session) (session.ReadonlyState, error) {
@@ -253,6 +278,8 @@ func (r *Runtime) Compact(ctx context.Context, req CompactRequest) (*session.Eve
 	if err != nil {
 		return nil, err
 	}
+	ctx = withRequestTraceContext(ctx, r.store, sess, "")
+	req.Model = model.WrapRequestTrace(req.Model)
 	allEvents, err := r.listContextWindowEvents(ctx, sess)
 	if err != nil {
 		return nil, err
@@ -268,23 +295,8 @@ func (r *Runtime) Compact(ctx context.Context, req CompactRequest) (*session.Eve
 	})
 }
 
-func shouldPersistEvent(ev *session.Event, persistPartial bool) bool {
-	if ev == nil {
-		return false
-	}
-	if session.IsUIOnly(ev) {
-		return false
-	}
-	if session.IsOverlay(ev) {
-		return false
-	}
-	if isLifecycleEvent(ev) {
-		return false
-	}
-	if persistPartial {
-		return true
-	}
-	return !session.IsPartial(ev)
+func shouldPersistEvent(ev *session.Event) bool {
+	return session.IsCanonicalHistoryEvent(ev)
 }
 
 func eventID() string {

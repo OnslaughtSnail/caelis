@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
-	pluginbuiltin "github.com/OnslaughtSnail/caelis/kernel/plugin/builtin"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -38,7 +37,7 @@ func Assemble(ctx context.Context, spec AssembleSpec) (*ResolvedSpec, error) {
 		preg = plugin.NewRegistry()
 		// Keep backward-compatible behavior for non-CLI callsites (e.g. eval),
 		// while CLI can still inject a pre-registered registry explicitly.
-		if err := pluginbuiltin.RegisterAll(preg, pluginbuiltin.RegisterOptions{}); err != nil {
+		if err := RegisterBuiltinProviders(preg, RegisterOptions{}); err != nil {
 			return nil, err
 		}
 	}

@@ -185,6 +185,19 @@ func TruncateString(s string, policy TruncationPolicy) (string, int) {
 
 // TruncateText truncates text and includes total line count when truncated.
 func TruncateText(s string, policy TruncationPolicy) (string, int) {
+	if prefix, body, totalLines, ok := splitExistingTotalOutputHeader(s); ok {
+		prefixCost := estimateTextTokens(prefix)
+		if prefixCost >= policy.tokenBudget() && policy.tokenBudget() > 0 {
+			return TruncateString(s, policy)
+		}
+		bodyPolicy := subTruncationPolicy(policy, prefixCost, len(prefix))
+		truncatedBody, removed := TruncateString(body, bodyPolicy)
+		if removed == 0 {
+			return prefix + truncatedBody, removed
+		}
+		return fmt.Sprintf("Total output lines: %d\n\n%s", totalLines, truncatedBody), removed
+	}
+
 	truncated, removed := TruncateString(s, policy)
 	if removed == 0 {
 		return truncated, removed
@@ -335,6 +348,7 @@ func AddTruncationMeta(result map[string]any, info TruncationInfo) map[string]an
 	if result == nil {
 		result = map[string]any{}
 	}
+	markOutputMetaModelTruncated(result)
 	meta := map[string]any{
 		"truncated":        info.Truncated,
 		"policy":           info.Policy,
@@ -374,4 +388,54 @@ func compactMeta(meta map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func splitExistingTotalOutputHeader(s string) (prefix string, body string, totalLines int, ok bool) {
+	trimmed := strings.TrimSpace(s)
+	if !strings.HasPrefix(trimmed, "Total output lines: ") {
+		return "", "", 0, false
+	}
+	afterPrefix := strings.TrimPrefix(trimmed, "Total output lines: ")
+	lineText, rest, found := strings.Cut(afterPrefix, "\n")
+	if !found {
+		return "", "", 0, false
+	}
+	count := 0
+	if _, err := fmt.Sscanf(lineText, "%d", &count); err != nil {
+		return "", "", 0, false
+	}
+	rest = strings.TrimPrefix(rest, "\n")
+	return fmt.Sprintf("Total output lines: %d\n\n", count), rest, count, true
+}
+
+func subTruncationPolicy(policy TruncationPolicy, usedTokens, usedBytes int) TruncationPolicy {
+	next := policy
+	if next.MaxTokens > 0 {
+		next.MaxTokens -= usedTokens
+		if next.MaxTokens < 0 {
+			next.MaxTokens = 0
+		}
+	}
+	if next.MaxBytes > 0 {
+		next.MaxBytes -= usedBytes
+		if next.MaxBytes < 0 {
+			next.MaxBytes = 0
+		}
+	}
+	return next
+}
+
+func markOutputMetaModelTruncated(result map[string]any) {
+	if len(result) == 0 {
+		return
+	}
+	raw, ok := result["output_meta"]
+	if !ok || raw == nil {
+		return
+	}
+	meta, ok := raw.(map[string]any)
+	if !ok || meta == nil {
+		return
+	}
+	meta["model_truncated"] = true
 }

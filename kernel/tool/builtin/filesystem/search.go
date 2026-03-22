@@ -166,15 +166,17 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 	}
 
 	return map[string]any{
-		"path":          target,
-		"query":         query,
-		"count":         len(results),
-		"file_count":    len(filesWithHits),
-		"scanned_files": scannedFiles,
-		"limit":         limit,
-		"truncated":     truncated,
-		"hits":          results,
+		"path":       target,
+		"query":      query,
+		"count":      len(results),
+		"file_count": len(filesWithHits),
+		"truncated":  truncated,
+		"hits":       results,
 	}, nil
+}
+
+func (t *SearchTool) WithRuntime(runtime toolexec.Runtime) (*SearchTool, error) {
+	return NewSearchWithRuntime(runtime)
 }
 
 func searchInFile(fsys toolexec.FileSystem, path, query string, caseSensitive bool, appendMatch func(string, int, int, string) bool) (bool, bool) {

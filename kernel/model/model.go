@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"strings"
 )
@@ -121,11 +122,23 @@ type Usage struct {
 	TotalTokens      int
 }
 
+// FinishReason describes why a model turn ended.
+type FinishReason string
+
+const (
+	FinishReasonUnknown       FinishReason = ""
+	FinishReasonStop          FinishReason = "stop"
+	FinishReasonLength        FinishReason = "length"
+	FinishReasonToolCalls     FinishReason = "tool_calls"
+	FinishReasonContentFilter FinishReason = "content_filter"
+)
+
 // Response is a provider-agnostic model response chunk.
 type Response struct {
 	Message      Message
 	Partial      bool
 	TurnComplete bool
+	FinishReason FinishReason
 	Usage        Usage
 	Model        string
 	Provider     string
@@ -135,4 +148,27 @@ type Response struct {
 type LLM interface {
 	Name() string
 	Generate(context.Context, *Request) iter.Seq2[*Response, error]
+}
+
+// ContextOverflowError indicates the request exceeds the model's context
+// window. Providers should wrap vendor-specific overflow errors in this type
+// so the kernel can detect the condition structurally.
+type ContextOverflowError struct {
+	Cause error
+}
+
+func (e *ContextOverflowError) Error() string {
+	if e.Cause != nil {
+		return "model: context overflow: " + e.Cause.Error()
+	}
+	return "model: context overflow"
+}
+
+func (e *ContextOverflowError) Unwrap() error { return e.Cause }
+
+// IsContextOverflow reports whether err (or any error in its chain) is a
+// ContextOverflowError.
+func IsContextOverflow(err error) bool {
+	var coe *ContextOverflowError
+	return errors.As(err, &coe)
 }

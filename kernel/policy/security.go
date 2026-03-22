@@ -70,7 +70,7 @@ func NewSecurityBaseline(cfg SecurityBaselineConfig) Hook {
 		"READ", "LIST", "GLOB", "SEARCH",
 		"WRITE", "PATCH",
 		"PLAN",
-		"DELEGATE", "TASK",
+		"SPAWN", "TASK",
 		"BASH", // BASH host escalation is gated by execution runtime approval flow.
 	}
 	for _, one := range append(defaultAutoAllow, cfg.AutoAllowTools...) {
@@ -149,9 +149,6 @@ func (h securityBaselineHook) requiresToolAuthorization(toolName string) (bool, 
 	}
 	if strings.HasPrefix(name, "LSP_") {
 		return false, ""
-	}
-	if strings.HasPrefix(name, "MCP__") {
-		return true, "external MCP tool"
 	}
 	return true, "unknown tool type"
 }

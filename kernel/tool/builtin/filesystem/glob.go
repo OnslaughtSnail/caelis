@@ -107,3 +107,7 @@ func (t *GlobTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		"count":   len(matches),
 	}, nil
 }
+
+func (t *GlobTool) WithRuntime(runtime toolexec.Runtime) (*GlobTool, error) {
+	return NewGlobWithRuntime(runtime)
+}

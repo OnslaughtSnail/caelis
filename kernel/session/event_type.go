@@ -170,7 +170,7 @@ func inferEventType(ev *Event) EventType {
 		}
 		return EventTypeNotice
 	}
-	if isPartialLegacy(ev) {
+	if isPartialFromMeta(ev) {
 		if IsOverlay(ev) {
 			if PartialChannelOf(ev) == PartialChannelReasoning {
 				return EventTypeOverlayPartialReasoning
@@ -194,7 +194,9 @@ func inferEventType(ev *Event) EventType {
 	return EventTypeConversation
 }
 
-func isPartialLegacy(ev *Event) bool {
+// isPartialFromMeta checks whether an event is marked as partial via its Meta
+// map. This is the primary way llmagent tags streaming partial events.
+func isPartialFromMeta(ev *Event) bool {
 	if ev == nil || ev.Meta == nil {
 		return false
 	}

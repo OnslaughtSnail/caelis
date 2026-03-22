@@ -13,7 +13,9 @@ const (
 
 type contextKey struct{}
 
-// Event is one UI-facing task stream update for long-running work.
+// Event is one transient task progress update for long-running work. This side
+// channel is intended for live observation only and must not be treated as
+// canonical task state.
 type Event struct {
 	Label  string
 	TaskID string
@@ -117,10 +119,10 @@ func ensureMetadata(result map[string]any) map[string]any {
 	if result == nil {
 		result = map[string]any{}
 	}
-	meta, ok := result[toolResultMetadataKey].(map[string]any)
-	if ok {
+	if _, ok := result[toolResultMetadataKey].(map[string]any); ok {
 		return result
 	}
+	var meta map[string]any
 	if result[toolResultMetadataKey] != nil {
 		meta = map[string]any{
 			"raw_value": fmt.Sprint(result[toolResultMetadataKey]),

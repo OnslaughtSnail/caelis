@@ -18,7 +18,10 @@ type Session struct {
 	ID      string
 }
 
-// Event is the persisted unit of runtime history used to rebuild invocation context and state.
+// Event is the unit of runtime history. Only canonical history events belong in
+// durable session storage and future agent context; transient events such as
+// partials, overlays, notices, and UI-only signals must remain outside durable
+// history.
 type Event struct {
 	ID        string
 	SessionID string

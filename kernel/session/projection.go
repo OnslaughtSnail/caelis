@@ -27,7 +27,29 @@ func ContextWindowView(events []*Event) Events {
 
 // AgentVisible returns events visible to agent logic from full persisted history.
 func AgentVisible(events []*Event) []*Event {
-	return WithoutLifecycle(ContextWindowView(events))
+	return WithoutPartial(WithoutLifecycle(ContextWindowView(events)))
+}
+
+// InvocationVisible returns events visible to the current agent invocation.
+// Unlike AgentVisible, this includes overlay events that were injected only for
+// the current run and must not be persisted into future history.
+func InvocationVisible(events []*Event) []*Event {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]*Event, 0, len(events))
+	for _, ev := range events {
+		if !IsInvocationVisibleEvent(ev) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// InvocationView wraps the events visible to the current agent invocation.
+func InvocationView(events []*Event) Events {
+	return NewEvents(InvocationVisible(events))
 }
 
 // AgentVisibleView wraps the events visible to agent logic from full persisted history.
@@ -43,6 +65,21 @@ func WithoutLifecycle(events Events) []*Event {
 	out := make([]*Event, 0, events.Len())
 	for ev := range events.All() {
 		if ev == nil || IsLifecycle(ev) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// WithoutPartial returns only canonical persisted history suitable for agent input.
+func WithoutPartial(events []*Event) []*Event {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]*Event, 0, len(events))
+	for _, ev := range events {
+		if !IsCanonicalHistoryEvent(ev) {
 			continue
 		}
 		out = append(out, ev)
@@ -107,7 +144,7 @@ func PendingToolCalls(events Events) []PendingToolCall {
 	return out
 }
 
-// Messages projects persisted events into model input messages.
+// Messages projects invocation-visible events into model input messages.
 func Messages(events Events, systemPrompt string, sanitizer func(map[string]any) map[string]any) []model.Message {
 	if sanitizer == nil {
 		sanitizer = func(result map[string]any) map[string]any { return result }
@@ -124,10 +161,7 @@ func Messages(events Events, systemPrompt string, sanitizer func(map[string]any)
 		return out
 	}
 	for ev := range events.All() {
-		if ev == nil {
-			continue
-		}
-		if IsUIOnly(ev) || IsNotice(ev) {
+		if !IsInvocationVisibleEvent(ev) {
 			continue
 		}
 		msg := ev.Message

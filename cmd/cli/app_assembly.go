@@ -24,6 +24,7 @@ type buildAgentInput struct {
 	WorkspaceDir                string
 	EnableExperimentalLSPPrompt bool
 	BasePrompt                  string
+	FrozenPrompt                string
 	SkillDirs                   []string
 	StreamModel                 bool
 	ThinkingBudget              int
@@ -34,16 +35,9 @@ type buildAgentInput struct {
 }
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
-	promptInput, err := buildPromptAssembleSpec(in)
+	systemPrompt, err := resolveSystemPrompt(in)
 	if err != nil {
 		return nil, err
-	}
-	assembled, err := appprompting.Assemble(promptInput.Spec)
-	if err != nil {
-		return nil, err
-	}
-	for _, warn := range promptInput.Warnings {
-		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
 	}
 
 	reasoning, err := parseReasoningEffortForConfig(in.ReasoningEffort, in.ThinkingBudget, in.ModelProvider, in.ModelName, in.ModelConfig)
@@ -53,11 +47,29 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 
 	return llmagent.New(llmagent.Config{
 		Name:              "main",
-		SystemPrompt:      assembled.Prompt,
+		SystemPrompt:      systemPrompt,
 		StreamModel:       in.StreamModel,
 		Reasoning:         reasoning,
 		EmitPartialEvents: in.StreamModel,
 	})
+}
+
+func resolveSystemPrompt(in buildAgentInput) (string, error) {
+	if frozen := strings.TrimSpace(in.FrozenPrompt); frozen != "" {
+		return frozen, nil
+	}
+	promptInput, err := buildPromptAssembleSpec(in)
+	if err != nil {
+		return "", err
+	}
+	assembled, err := appprompting.Assemble(promptInput.Spec)
+	if err != nil {
+		return "", err
+	}
+	for _, warn := range promptInput.Warnings {
+		fmt.Fprintf(os.Stderr, "warn: %v\n", warn)
+	}
+	return assembled.Prompt, nil
 }
 
 func splitCSV(input string) []string {

@@ -3,8 +3,8 @@ package agent
 import (
 	"context"
 	"iter"
+	"time"
 
-	"github.com/OnslaughtSnail/caelis/kernel/delegation"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -48,7 +48,7 @@ type PolicyContext interface {
 // DelegationContext exposes child-run orchestration capabilities.
 type DelegationContext interface {
 	ReadonlyContext
-	SubagentRunner() delegation.Runner
+	SubagentRunner() SubagentRunner
 }
 
 // InvocationContext composes all kernel contexts used by one agent run.
@@ -57,4 +57,31 @@ type InvocationContext interface {
 	ToolContext
 	PolicyContext
 	DelegationContext
+}
+
+// SubagentRunRequest describes one delegated child run.
+type SubagentRunRequest struct {
+	Agent        string
+	SessionID    string
+	Task         string
+	ContentParts []model.ContentPart
+	Yield        time.Duration
+	Timeout      time.Duration
+}
+
+// SubagentRunResult captures the final delegated child run summary.
+type SubagentRunResult struct {
+	SessionID    string
+	DelegationID string
+	Agent        string
+	Assistant    string
+	State        string
+	Running      bool
+	Yielded      bool
+	Timeout      time.Duration
+}
+
+// SubagentRunner starts delegated child runs from the current invocation.
+type SubagentRunner interface {
+	RunSubagent(context.Context, SubagentRunRequest) (SubagentRunResult, error)
 }

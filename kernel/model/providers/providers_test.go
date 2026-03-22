@@ -231,6 +231,90 @@ func TestOpenAICompatStream_IncludesUsageRequestOptionAndPropagatesUsage(t *test
 	}
 }
 
+func TestOpenAICompatNonStream_PropagatesFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"model":"test-model","choices":[{"message":{"role":"assistant","content":"truncated"},"finish_reason":"length"}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`)
+	}))
+	defer server.Close()
+
+	llm := newOpenAICompat(Config{
+		Provider: "openai-compatible",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	var final *model.Response
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   false,
+	}) {
+		if err != nil {
+			t.Fatalf("expected no generate error, got %v", err)
+		}
+		if resp != nil {
+			final = resp
+		}
+	}
+	if final == nil {
+		t.Fatal("expected final response")
+	}
+	if !final.TurnComplete {
+		t.Fatal("expected turn complete on terminal non-stream response")
+	}
+	if final.FinishReason != model.FinishReasonLength {
+		t.Fatalf("expected finish reason length, got %q", final.FinishReason)
+	}
+}
+
+func TestOpenAICompatStream_PropagatesTerminalFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":\"length\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	llm := newOpenAICompat(Config{
+		Provider: "openai-compatible",
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	var final *model.Response
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   true,
+	}) {
+		if err != nil {
+			t.Fatalf("expected no stream error, got %v", err)
+		}
+		if resp != nil && resp.TurnComplete {
+			final = resp
+		}
+	}
+	if final == nil {
+		t.Fatal("expected final response")
+	}
+	if final.Message.Text != "hello world" {
+		t.Fatalf("unexpected final text %q", final.Message.Text)
+	}
+	if final.FinishReason != model.FinishReasonLength {
+		t.Fatalf("expected finish reason length, got %q", final.FinishReason)
+	}
+}
+
 func TestOpenAICompatRequest_IncludesMaxTokens(t *testing.T) {
 	var gotMax float64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +450,47 @@ func TestOpenRouterRequest_AppliesConfiguredHeaders(t *testing.T) {
 	}
 	if finalReasoning != "thinking..." {
 		t.Fatalf("expected native openrouter reasoning field, got %q", finalReasoning)
+	}
+}
+
+func TestOpenRouterStream_PropagatesTerminalFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\"step 1\"},\"finish_reason\":null}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\" done\"},\"finish_reason\":\"tool_calls\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	llm := newOpenRouter(Config{
+		Provider: "openrouter",
+		API:      APIOpenRouter,
+		Model:    "openrouter/test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+	}, "token")
+
+	var final *model.Response
+	for resp, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Stream:   true,
+	}) {
+		if err != nil {
+			t.Fatalf("expected no stream error, got %v", err)
+		}
+		if resp != nil && resp.TurnComplete {
+			final = resp
+		}
+	}
+	if final == nil {
+		t.Fatal("expected final response")
+	}
+	if final.FinishReason != model.FinishReasonToolCalls {
+		t.Fatalf("expected tool_calls finish reason, got %q", final.FinishReason)
 	}
 }
 

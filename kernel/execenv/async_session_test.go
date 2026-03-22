@@ -69,7 +69,9 @@ func TestAsyncSession_WriteInput(t *testing.T) {
 	})
 
 	// Terminate
-	session.Terminate()
+	if err := session.Terminate(); err != nil {
+		t.Fatalf("Terminate failed: %v", err)
+	}
 
 	stdout, _ := session.ReadAllOutput()
 	if !strings.Contains(stdout, "test input") {
@@ -103,7 +105,9 @@ func TestAsyncSession_Terminate(t *testing.T) {
 
 	if !session.HasExited() {
 		// Wait a bit more
-		session.WaitWithTimeout(time.Second)
+		if _, err := session.WaitWithTimeout(time.Second); err != nil {
+			t.Fatalf("WaitWithTimeout failed: %v", err)
+		}
 	}
 }
 
@@ -157,7 +161,9 @@ func TestSessionManager_StartAndGet(t *testing.T) {
 	}
 
 	// Wait for completion
-	sm.WaitSessionWithTimeout(session.ID, 5*time.Second)
+	if _, err := sm.WaitSessionWithTimeout(session.ID, 5*time.Second); err != nil {
+		t.Fatalf("WaitSessionWithTimeout failed: %v", err)
+	}
 }
 
 func TestSessionManager_ListSessions(t *testing.T) {
@@ -176,8 +182,12 @@ func TestSessionManager_ListSessions(t *testing.T) {
 	}
 
 	// Clean up
-	sm.WaitSessionWithTimeout(s1.ID, 2*time.Second)
-	sm.WaitSessionWithTimeout(s2.ID, 2*time.Second)
+	if _, err := sm.WaitSessionWithTimeout(s1.ID, 2*time.Second); err != nil {
+		t.Fatalf("WaitSessionWithTimeout s1 failed: %v", err)
+	}
+	if _, err := sm.WaitSessionWithTimeout(s2.ID, 2*time.Second); err != nil {
+		t.Fatalf("WaitSessionWithTimeout s2 failed: %v", err)
+	}
 }
 
 func TestSessionManager_Terminate(t *testing.T) {
@@ -265,7 +275,9 @@ func TestHostRunner_AsyncWriteRead(t *testing.T) {
 	})
 
 	// Terminate
-	runner.TerminateSession(sessionID)
+	if err := runner.TerminateSession(sessionID); err != nil {
+		t.Fatalf("TerminateSession failed: %v", err)
+	}
 }
 
 func TestHostRunner_AsyncTTYWriteRead(t *testing.T) {
@@ -319,5 +331,38 @@ func TestHostRunner_ListSessions(t *testing.T) {
 	sessions := runner.ListSessions()
 	if len(sessions) == 0 {
 		t.Fatal("Expected at least one session")
+	}
+}
+
+func TestAsyncSession_StatusConcurrentWithExit(t *testing.T) {
+	session := NewAsyncSession(AsyncSessionConfig{
+		Command: `printf "boom" >&2; exit 7`,
+	})
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for !session.HasExited() {
+			_ = session.Status()
+			time.Sleep(time.Millisecond)
+		}
+		_ = session.Status()
+	}()
+
+	exitCode, err := session.WaitWithTimeout(5 * time.Second)
+	if err != nil {
+		t.Fatalf("WaitWithTimeout failed: %v", err)
+	}
+	if exitCode != 7 {
+		t.Fatalf("expected exit code 7, got %d", exitCode)
+	}
+	<-done
+
+	status := session.Status()
+	if status.ExitCode != 7 {
+		t.Fatalf("expected status exit code 7, got %d", status.ExitCode)
 	}
 }

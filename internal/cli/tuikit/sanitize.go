@@ -96,7 +96,17 @@ func skipANSISequence(input string, start int) int {
 		}
 		return len(input)
 	default:
-		// Two-byte escape (e.g., ESC M).
+		// Two-byte escape (e.g., ESC M).  Skip ESC and the single following
+		// ASCII byte only.  If the following byte is the start of a multibyte
+		// UTF-8 sequence (e.g. a Chinese character), do NOT consume it —
+		// advancing only past ESC lets the main loop decode the rune correctly
+		// and avoids silently dropping the subsequent Unicode character.
+		nextByte := input[start+1]
+		if nextByte >= 0x80 {
+			// Non-ASCII byte follows ESC: skip ESC only, let the UTF-8
+			// decoder in the main loop handle the multibyte rune.
+			return start + 1
+		}
 		if start+2 <= len(input) {
 			return start + 2
 		}

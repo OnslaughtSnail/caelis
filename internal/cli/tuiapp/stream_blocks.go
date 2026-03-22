@@ -5,7 +5,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/OnslaughtSnail/caelis/internal/cli/tuidiff"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/charmbracelet/x/ansi"
@@ -20,13 +19,11 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Sanitize incoming text.
 	chunk = tuikit.SanitizeLogText(chunk)
 	normalized := strings.ReplaceAll(strings.ReplaceAll(chunk, "\r\n", "\n"), "\r", "\n")
 
 	m.streamLine += normalized
 
-	// Commit all complete lines (those terminated by \n).
 	for {
 		idx := strings.IndexByte(m.streamLine, '\n')
 		if idx < 0 {
@@ -34,7 +31,7 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 		}
 		line := m.streamLine[:idx]
 		m.streamLine = m.streamLine[idx+1:]
-		if strings.TrimSpace(line) != "" && m.transientLogIdx >= 0 && m.transientRemove && !isTransientWarningLine(line) {
+		if strings.TrimSpace(line) != "" && m.transientBlockID != "" && m.transientRemove && !isTransientWarningLine(line) {
 			m.removeTransientLogLine()
 		}
 		if m.tryMergeMutationSummaryLine(line) {
@@ -53,9 +50,6 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 			continue
 		}
 		if strings.TrimSpace(line) != "" {
-			// Non-stream log lines (tool calls/results/system lines) delimit
-			// assistant streaming blocks. Without this, reasoning can keep
-			// accumulating across tool turns.
 			m.finalizeAssistantBlock()
 			m.finalizeReasoningBlock()
 			m.lastFinalAnswer = ""
@@ -64,18 +58,25 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 	}
 
 	m.syncViewportContent()
-	return m, m.maybeStartClosingToolOutputFades()
+	return m, nil
 }
 
 func (m *Model) tryMergeMutationSummaryLine(line string) bool {
 	merged, ok := mergedMutationToolLine(m.lastCommittedRaw, line)
-	if !ok || len(m.historyLines) == 0 {
+	if !ok || m.doc.Len() == 0 {
+		return false
+	}
+	last := m.doc.Last()
+	if last == nil {
+		return false
+	}
+	tb, ok := last.(*TranscriptBlock)
+	if !ok {
 		return false
 	}
 	style := tuikit.DetectLineStyleWithContext(merged, m.lastCommittedStyle)
-	colored := tuikit.ColorizeLogLine(merged, style, m.theme)
-	colored = tuikit.LineExtraGutter(style) + colored
-	m.historyLines[len(m.historyLines)-1] = colored
+	tb.Raw = merged
+	tb.Style = style
 	m.lastCommittedStyle = style
 	m.lastCommittedRaw = merged
 	m.hasCommittedLine = true
@@ -114,21 +115,22 @@ func mergedMutationToolLine(previous string, current string) (string, bool) {
 }
 
 func (m *Model) finalizeAssistantBlock() {
-	if m.assistantBlock == nil {
-		return
-	}
-	m.assistantBlock = nil
+	m.activeAssistantID = ""
 }
 
 func (m *Model) discardActiveAssistantStream() {
 	m.streamLine = ""
 	m.lastFinalAnswer = ""
-	first, second := &m.assistantBlock, &m.reasoningBlock
-	if m.assistantBlock != nil && m.reasoningBlock != nil && m.reasoningBlock.start > m.assistantBlock.start {
-		first, second = &m.reasoningBlock, &m.assistantBlock
+	// Remove active assistant block from doc.
+	if m.activeAssistantID != "" {
+		m.doc.Remove(m.activeAssistantID)
+		m.activeAssistantID = ""
 	}
-	m.discardAssistantBlock(first)
-	m.discardAssistantBlock(second)
+	// Remove active reasoning block from doc.
+	if m.activeReasoningID != "" {
+		m.doc.Remove(m.activeReasoningID)
+		m.activeReasoningID = ""
+	}
 	m.syncViewportContent()
 }
 
@@ -143,89 +145,96 @@ func normalizeStreamKind(kind string) string {
 
 func (m *Model) handleStreamBlock(kind string, text string, final bool) (tea.Model, tea.Cmd) {
 	streamKind := normalizeStreamKind(kind)
-	if m.activityBlock != nil && streamKind == "answer" && strings.TrimSpace(text) != "" {
+	if m.activeActivityID != "" && streamKind == "answer" && strings.TrimSpace(text) != "" {
 		m.finalizeActivityBlock()
 	}
 	if text == "" && !(streamKind == "reasoning" && final) {
 		return m, nil
 	}
-	blockStyle := tuikit.LineStyleAssistant
-	blockMarker := "* "
-	renderAssistant := func(raw string) []string {
-		return m.renderAssistantBlockLines(raw)
-	}
 
-	var activeBlock **assistantBlockState
 	if streamKind == "reasoning" {
-		blockStyle = tuikit.LineStyleReasoning
-		blockMarker = "│ "
-		activeBlock = &m.reasoningBlock
-	} else {
-		activeBlock = &m.assistantBlock
+		return m.handleReasoningStream(text, final)
 	}
-	if streamKind == "answer" && final && *activeBlock == nil {
+	return m.handleAnswerStream(text, final)
+}
+
+func (m *Model) handleAnswerStream(text string, final bool) (tea.Model, tea.Cmd) {
+	if final && m.activeAssistantID == "" {
 		normalized := strings.TrimSpace(text)
 		if normalized != "" && normalized == m.lastFinalAnswer {
-			// Drop duplicated terminal answer events.
 			return m, nil
 		}
 	}
-	if streamKind == "reasoning" && final {
-		if *activeBlock != nil {
-			m.discardAssistantBlock(activeBlock)
+
+	if m.activeAssistantID == "" {
+		block := NewAssistantBlock()
+		block.Raw = text
+		m.doc.Append(block)
+		m.activeAssistantID = block.BlockID()
+		m.hasCommittedLine = true
+		m.lastCommittedStyle = tuikit.LineStyleAssistant
+		m.lastCommittedRaw = "* "
+		if final {
+			m.activeAssistantID = ""
+			m.lastFinalAnswer = strings.TrimSpace(text)
+		}
+		m.syncViewportContent()
+		return m, nil
+	}
+
+	block := m.doc.Find(m.activeAssistantID)
+	if block == nil {
+		m.activeAssistantID = ""
+		return m, nil
+	}
+	ab := block.(*AssistantBlock)
+	ab.Raw = mergeStreamChunk(ab.Raw, text, final)
+	if final {
+		m.activeAssistantID = ""
+		m.lastFinalAnswer = strings.TrimSpace(ab.Raw)
+	}
+	m.lastCommittedStyle = tuikit.LineStyleAssistant
+	m.lastCommittedRaw = "* "
+	m.syncViewportContent()
+	return m, nil
+}
+
+func (m *Model) handleReasoningStream(text string, final bool) (tea.Model, tea.Cmd) {
+	if final {
+		if m.activeReasoningID != "" {
+			m.doc.Remove(m.activeReasoningID)
+			m.activeReasoningID = ""
 			m.refreshHistoryTailState()
 			m.syncViewportContent()
 		}
-		return m, m.maybeStartClosingToolOutputFades()
+		return m, nil
 	}
-	if *activeBlock == nil {
-		start := len(m.historyLines)
-		lines := m.renderReasoningBlockLines(text)
-		if streamKind == "answer" {
-			lines = renderAssistant(text)
-		}
-		m.historyLines = append(m.historyLines, lines...)
-		*activeBlock = &assistantBlockState{
-			start: start,
-			end:   start + len(lines),
-			raw:   text,
-		}
+
+	if m.activeReasoningID == "" {
+		block := NewReasoningBlock()
+		block.Raw = text
+		m.doc.Append(block)
+		m.activeReasoningID = block.BlockID()
 		m.hasCommittedLine = true
-		m.lastCommittedStyle = blockStyle
-		m.lastCommittedRaw = blockMarker
-		if final {
-			*activeBlock = nil
-			if streamKind == "answer" {
-				m.lastFinalAnswer = strings.TrimSpace(text)
-			}
-		}
+		m.lastCommittedStyle = tuikit.LineStyleReasoning
+		m.lastCommittedRaw = "│ "
 		m.syncViewportContent()
-		return m, m.maybeStartClosingToolOutputFades()
+		return m, nil
 	}
-	block := *activeBlock
-	block.raw = mergeStreamChunk(block.raw, text, final)
-	lines := m.renderReasoningBlockLines(block.raw)
-	if streamKind == "answer" {
-		lines = renderAssistant(block.raw)
+
+	block := m.doc.Find(m.activeReasoningID)
+	if block == nil {
+		m.activeReasoningID = ""
+		return m, nil
 	}
-	m.replaceHistoryRange(block.start, block.end, lines)
-	block.end = block.start + len(lines)
-	if final {
-		*activeBlock = nil
-		if streamKind == "answer" {
-			m.lastFinalAnswer = strings.TrimSpace(block.raw)
-		}
-	}
-	m.lastCommittedStyle = blockStyle
-	m.lastCommittedRaw = blockMarker
+	rb := block.(*ReasoningBlock)
+	rb.Raw = mergeStreamChunk(rb.Raw, text, final)
+	m.lastCommittedStyle = tuikit.LineStyleReasoning
+	m.lastCommittedRaw = "│ "
 	m.syncViewportContent()
-	return m, m.maybeStartClosingToolOutputFades()
+	return m, nil
 }
 
-// minReplayLen is the minimum byte length for an incoming chunk to be
-// considered a replayed older cumulative snapshot.  Short delta tokens
-// (e.g. "#", "- ", "**", "\n") frequently coincide with the opening
-// characters of the accumulated text and must not be dropped.
 const minReplayLen = 16
 
 func mergeStreamChunk(existing string, incoming string, final bool) string {
@@ -242,50 +251,14 @@ func mergeStreamChunk(existing string, incoming string, final bool) string {
 	if existing == "" {
 		return incoming
 	}
-	if strings.HasPrefix(incoming, existing) {
-		// Cumulative stream chunk: incoming includes all previous text.
-		return incoming
-	}
-	// Only treat as a replayed older cumulative snapshot when the incoming
-	// text is long enough to be a credible replay, not a short delta token
-	// that coincidentally matches the opening characters of the buffer.
 	if len(incoming) >= minReplayLen && strings.HasPrefix(existing, incoming) {
 		return existing
 	}
 	return existing + incoming
 }
 
-func (m *Model) discardAssistantBlock(block **assistantBlockState) {
-	if block == nil || *block == nil {
-		return
-	}
-	current := *block
-	start := current.start
-	end := current.end
-	if start < 0 {
-		start = 0
-	}
-	if end < start {
-		end = start
-	}
-	if start > len(m.historyLines) {
-		start = len(m.historyLines)
-	}
-	if end > len(m.historyLines) {
-		end = len(m.historyLines)
-	}
-	if end > start {
-		m.replaceHistoryRange(start, end, nil)
-		m.shiftAnchoredBlocks(end, start-end, "")
-	}
-	*block = nil
-}
-
 func (m *Model) finalizeReasoningBlock() {
-	if m.reasoningBlock == nil {
-		return
-	}
-	m.reasoningBlock = nil
+	m.activeReasoningID = ""
 }
 
 func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd) {
@@ -293,19 +266,13 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	m.finalizeActivityBlock()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
-	start := len(m.historyLines)
-	lines := m.renderDiffBlockLines(msg)
-	m.historyLines = append(m.historyLines, lines...)
-	m.diffBlocks = append(m.diffBlocks, diffBlockState{
-		start: start,
-		end:   start + len(lines),
-		msg:   msg,
-	})
+	block := NewDiffBlock(msg)
+	m.doc.Append(block)
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.syncViewportContent()
-	return m, m.maybeStartClosingToolOutputFades()
+	return m, nil
 }
 
 func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea.Cmd) {
@@ -314,240 +281,94 @@ func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea
 	if toolName == "" {
 		toolName = strings.TrimSpace(msg.Tool)
 	}
+	if strings.EqualFold(toolName, "SPAWN") {
+		return m, nil
+	}
 	nextKey := m.toolOutputKey(msg)
-	panel := m.ensureToolOutputPanel(nextKey, toolName, strings.TrimSpace(msg.CallID), msg.Reset)
+
+	// When a TaskID is present and this isn't a fresh tool invocation
+	// (Reset=true), the message is a follow-up to an existing background
+	// task (watch, wait, write, cancel).  Only update the panel that was
+	// created by the original BASH call — never create a new one.
+	var panel *BashPanelBlock
+	if strings.TrimSpace(msg.TaskID) != "" && !msg.Reset {
+		panel = m.findBashPanelBlock(nextKey)
+	} else {
+		panel = m.ensureBashPanelBlock(nextKey, toolName, strings.TrimSpace(msg.CallID), msg.Reset)
+	}
 	if panel == nil {
 		return m, nil
 	}
-	m.applyToolOutputState(panel, msg.State, msg.Final)
-	if msg.Final {
-		cmd := m.beginFinalizeToolOutputBlock(panel)
-		if cmd == nil {
-			cmd = m.maybeStartClosingToolOutputFades()
-		}
-		return m, cmd
+	if strings.TrimSpace(msg.Chunk) != "" {
+		m.appendBashPanelChunk(panel, strings.TrimSpace(msg.Stream), msg.Chunk)
 	}
-	if strings.TrimSpace(msg.Chunk) == "" {
-		m.syncAnchoredToolOutputBlock(panel)
+	m.applyBashPanelState(panel, msg.State, msg.Final)
+	if msg.Final && isTerminalToolOutputState(panel.State) {
+		panel.Active = false
+		if isInlineBashPanel(panel) {
+			panel.Expanded = false
+			m.syncInlineBashAnchorState(panel)
+		}
+		m.syncViewportContent()
 		return m, nil
 	}
-	m.appendToolOutputChunk(panel, strings.TrimSpace(msg.Stream), msg.Chunk)
-	m.syncAnchoredToolOutputBlock(panel)
+	m.syncViewportContent()
 	return m, nil
 }
 
-func (m *Model) replaceHistoryRange(start int, end int, replacement []string) {
-	if start < 0 {
-		start = 0
-	}
-	if end < start {
-		end = start
-	}
-	if start > len(m.historyLines) {
-		start = len(m.historyLines)
-	}
-	if end > len(m.historyLines) {
-		end = len(m.historyLines)
-	}
-	head := append([]string(nil), m.historyLines[:start]...)
-	head = append(head, replacement...)
-	m.historyLines = append(head, m.historyLines[end:]...)
-}
-
-func (m *Model) shiftAnchoredBlocks(threshold, delta int, skipKey string) {
-	if delta == 0 {
-		return
-	}
-	if m.assistantBlock != nil && m.assistantBlock.start >= threshold {
-		m.assistantBlock.start += delta
-		m.assistantBlock.end += delta
-	}
-	if m.reasoningBlock != nil && m.reasoningBlock.start >= threshold {
-		m.reasoningBlock.start += delta
-		m.reasoningBlock.end += delta
-	}
-	for i := range m.diffBlocks {
-		if m.diffBlocks[i].start >= threshold {
-			m.diffBlocks[i].start += delta
-			m.diffBlocks[i].end += delta
-		}
-	}
-	if m.activityBlock != nil && m.activityBlock.start >= threshold {
-		m.activityBlock.start += delta
-		m.activityBlock.end += delta
-	}
-	for key, panel := range m.toolOutputs {
-		if key == skipKey || panel == nil {
-			continue
-		}
-		if panel.start >= threshold {
-			panel.start += delta
-			panel.end += delta
-		}
-	}
-}
-
+// renderAssistantBlockLines renders assistant content for use in block Render.
+// Kept as a Model method for access to theme and viewport width.
 func (m *Model) renderAssistantBlockLines(raw string) []string {
-	rendered, isMarkdown := renderNarrativeMarkdown(raw, maxInt(20, m.viewport.Width()), m.theme)
-	if rendered == "" {
+	nls, plainRows := buildNarrativeRows(raw)
+	if len(plainRows) == 0 {
 		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
 	}
-	if !isMarkdown {
-		rendered = normalizePlainBlockText(ansi.Strip(rendered))
-	}
-	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
-	if len(lines) > 0 {
-		lines[0] = tuikit.ColorizeLogLine("* "+lines[0], tuikit.LineStyleAssistant, m.theme)
-	}
-	if isMarkdown {
-		return lines
-	}
-	for i := range lines {
+	lines := make([]string, len(plainRows))
+	for i, pr := range plainRows {
+		plain := pr
 		if i == 0 {
-			continue
+			plain = "* " + pr
 		}
-		lines[i] = tuikit.ColorizeLogLine(lines[i], tuikit.LineStyleAssistant, m.theme)
-	}
-	return lines
-}
-
-func trimLeadingBlankLines(lines []string) []string {
-	for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
-		lines = lines[1:]
-	}
-	if len(lines) == 0 {
-		return []string{""}
+		lines[i] = styleNarrativeLine(plain, nls[i].Kind, tuikit.LineStyleAssistant, m.theme)
 	}
 	return lines
 }
 
 func (m *Model) renderReasoningBlockLines(raw string) []string {
-	rendered, isMarkdown := renderNarrativeMarkdown(raw, maxInt(20, m.viewport.Width()), m.theme)
-	if rendered == "" {
+	nls, plainRows := buildNarrativeRows(raw)
+	if len(plainRows) == 0 {
 		return []string{tuikit.ColorizeLogLine("· ", tuikit.LineStyleReasoning, m.theme)}
 	}
-	rendered = normalizePlainBlockText(ansi.Strip(rendered))
-	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
-	for i, line := range lines {
-		line = strings.TrimRight(line, "\r")
+	lines := make([]string, len(plainRows))
+	for i, pr := range plainRows {
 		prefix := "  "
 		if i == 0 {
 			prefix = "· "
 		}
-		line = prefix + line
-		if isMarkdown {
-			lines[i] = m.theme.ReasoningStyle().Render(tuikit.LinkifyText(line, m.theme.LinkStyle()))
-			continue
-		}
-		lines[i] = tuikit.ColorizeLogLine(line, tuikit.LineStyleReasoning, m.theme)
+		plain := prefix + pr
+		lines[i] = styleNarrativeLine(plain, nls[i].Kind, tuikit.LineStyleReasoning, m.theme)
 	}
 	return lines
 }
 
-func normalizePlainBlockText(rendered string) string {
-	lines := trimLeadingBlankLines(strings.Split(rendered, "\n"))
-	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
-		lines = lines[:len(lines)-1]
-	}
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m *Model) renderDiffBlockLines(msg tuievents.DiffBlockMsg) []string {
-	model := tuidiff.BuildModel(tuidiff.Payload{
-		Tool:      msg.Tool,
-		Path:      msg.Path,
-		Created:   msg.Created,
-		Hunk:      msg.Hunk,
-		Old:       msg.Old,
-		New:       msg.New,
-		Preview:   msg.Preview,
-		Truncated: msg.Truncated,
-	})
-	wrapWidth := maxInt(40, m.viewport.Width())
-	return tuidiff.Render(model, wrapWidth, m.theme)
-}
-
-func (m *Model) rerenderDiffBlocks() {
-	if len(m.diffBlocks) == 0 {
-		return
-	}
-	for i := range m.diffBlocks {
-		block := &m.diffBlocks[i]
-		lines := m.renderDiffBlockLines(block.msg)
-		oldLen := block.end - block.start
-		m.replaceHistoryRange(block.start, block.end, lines)
-		block.end = block.start + len(lines)
-		delta := len(lines) - oldLen
-		if delta == 0 {
-			continue
-		}
-		m.shiftAnchoredBlocks(block.end-delta, delta, "")
-	}
-}
-
-func (m *Model) recolorCommittedHistory() {
-	if m == nil {
-		return
-	}
-	prevStyle := tuikit.LineStyleDefault
-	hasCommitted := false
-	for i, line := range m.historyLines {
-		raw := ansi.Strip(line)
-		if strings.TrimSpace(raw) == "" {
-			m.historyLines[i] = ""
-			continue
-		}
-		style := tuikit.DetectLineStyleWithContext(raw, prevStyle)
-		colored := tuikit.ColorizeLogLine(raw, style, m.theme)
-		colored = tuikit.LineExtraGutter(style) + colored
-		m.historyLines[i] = colored
-		prevStyle = style
-		hasCommitted = true
-	}
-	m.hasCommittedLine = hasCommitted
-	if !hasCommitted {
-		m.lastCommittedStyle = tuikit.LineStyleDefault
-		m.lastCommittedRaw = ""
-		return
-	}
-	m.refreshHistoryTailState()
-}
-
-func (m *Model) rerenderStreamBlock(block *assistantBlockState, kind string) {
-	if m == nil || block == nil {
-		return
-	}
-	lines := m.renderReasoningBlockLines(block.raw)
-	if normalizeStreamKind(kind) == "answer" {
-		lines = m.renderAssistantBlockLines(block.raw)
-	}
-	oldLen := block.end - block.start
-	m.replaceHistoryRange(block.start, block.end, lines)
-	block.end = block.start + len(lines)
-	delta := len(lines) - oldLen
-	if delta != 0 {
-		m.shiftAnchoredBlocks(block.end-delta, delta, "")
-	}
-}
-
 func (m *Model) resetConversationView() {
 	m.flushStream()
-	m.assistantBlock = nil
-	m.reasoningBlock = nil
-	m.clearActivityBlock()
-	m.clearToolOutputPanels()
-	m.diffBlocks = m.diffBlocks[:0]
-	m.historyLines = m.historyLines[:0]
+	m.activeAssistantID = ""
+	m.activeReasoningID = ""
+	m.activeActivityID = ""
+	m.transientBlockID = ""
+	m.toolOutputBlockIDs = nil
+	m.subagentBlockIDs = nil
+	m.pendingToolAnchors = nil
+	m.callAnchorIndex = nil
+	m.taskOriginCallID = nil
+	m.doc.Clear()
 	m.viewportStyledLines = m.viewportStyledLines[:0]
 	m.viewportPlainLines = m.viewportPlainLines[:0]
 	m.hasCommittedLine = false
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.lastFinalAnswer = ""
-	m.transientLogIdx = -1
 	m.transientIsRetry = false
 	m.pendingQueue = nil
 	m.hintEntries = nil
@@ -573,8 +394,15 @@ func (m *Model) refreshHistoryTailState() {
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.hasCommittedLine = false
-	for i := len(m.historyLines) - 1; i >= 0; i-- {
-		raw := ansi.Strip(m.historyLines[i])
+	blocks := m.doc.Blocks()
+	for i := len(blocks) - 1; i >= 0; i-- {
+		tb, ok := blocks[i].(*TranscriptBlock)
+		if !ok {
+			// Non-transcript blocks (assistant, diff, etc.) count as committed content.
+			m.hasCommittedLine = true
+			continue
+		}
+		raw := tb.Raw
 		if strings.TrimSpace(raw) == "" {
 			continue
 		}
@@ -585,23 +413,10 @@ func (m *Model) refreshHistoryTailState() {
 	}
 }
 
-// commitLine colorizes one complete line and appends it to the history buffer.
-//
-// Transient log replacement rules:
-//   - Retry lines replace the previous retry line in-place (status-update style).
-//   - Consecutive warn lines replace the previous warn line in-place.
-//   - Error lines are always appended (never replaced).
-//   - Assistant narrative and other content are immutable.
-//
-// Spacing rules (from layout.go tokens):
-//   - Conversation turns: SpaceTurnGap
-//   - Log↔narrative boundary: SpaceLogBlockGap
-//   - Consecutive tool calls: SpaceToolGap
-//
-// User and log lines receive extra left gutter via LineExtraGutter().
+// commitLine colorizes one complete line and appends it to the document.
 func (m *Model) commitLine(line string) {
 	if strings.TrimSpace(line) == "" && !m.hasCommittedLine {
-		return // skip leading blank lines
+		return
 	}
 
 	style := tuikit.DetectLineStyleWithContext(line, m.lastCommittedStyle)
@@ -610,53 +425,59 @@ func (m *Model) commitLine(line string) {
 	isWarn := !isRetry && style == tuikit.LineStyleWarn
 
 	// --- Transient log replacement ---
-	if isRetry && m.transientLogIdx >= 0 && m.transientIsRetry {
-		// Replace previous retry in-place.
-		colored := tuikit.ColorizeLogLine(line, style, m.theme)
-		colored = tuikit.LineExtraGutter(style) + colored
-		m.historyLines[m.transientLogIdx] = colored
-		m.lastCommittedStyle = style
-		m.lastCommittedRaw = line
-		m.transientRemove = false
-		m.syncViewportContent()
-		return
+	if isRetry && m.transientBlockID != "" && m.transientIsRetry {
+		if tb := m.findTranscriptBlock(m.transientBlockID); tb != nil {
+			tb.Raw = line
+			tb.Style = style
+			m.lastCommittedStyle = style
+			m.lastCommittedRaw = line
+			m.transientRemove = false
+			m.syncViewportContent()
+			return
+		}
 	}
-	if isWarn && m.transientLogIdx >= 0 && !m.transientIsRetry {
-		// Replace previous consecutive warn in-place.
-		colored := tuikit.ColorizeLogLine(line, style, m.theme)
-		colored = tuikit.LineExtraGutter(style) + colored
-		m.historyLines[m.transientLogIdx] = colored
-		m.lastCommittedStyle = style
-		m.lastCommittedRaw = line
-		m.transientRemove = isEphemeralWarn
-		m.syncViewportContent()
-		return
+	if isWarn && m.transientBlockID != "" && !m.transientIsRetry {
+		if tb := m.findTranscriptBlock(m.transientBlockID); tb != nil {
+			tb.Raw = line
+			tb.Style = style
+			m.lastCommittedStyle = style
+			m.lastCommittedRaw = line
+			m.transientRemove = isEphemeralWarn
+			m.syncViewportContent()
+			return
+		}
 	}
 
-	if m.transientLogIdx >= 0 && m.transientRemove {
+	if m.transientBlockID != "" && m.transientRemove {
 		m.removeTransientLogLine()
 	}
 
-	// Leaving a transient slot — clear tracking.
-	m.transientLogIdx = -1
+	m.transientBlockID = ""
 	m.transientRemove = false
 
-	// Keep the transcript compact; region spacing is handled outside the viewport.
 	if m.hasCommittedLine {
 		m.insertSpacing(style, line)
 	}
 
-	colored := tuikit.ColorizeLogLine(line, style, m.theme)
-	colored = tuikit.LineExtraGutter(style) + colored
-	m.historyLines = append(m.historyLines, colored)
+	block := NewTranscriptBlock(line, style)
+	m.doc.Append(block)
 
-	// Mark new transient slot for retry or warn.
+	// Track tool call start lines as anchor points for panel insertion.
+	if style == tuikit.LineStyleTool {
+		if toolName, ok := extractToolCallName(line); ok && panelProducingTools[toolName] {
+			m.pendingToolAnchors = append(m.pendingToolAnchors, toolAnchor{
+				blockID:  block.BlockID(),
+				toolName: toolName,
+			})
+		}
+	}
+
 	if isRetry {
-		m.transientLogIdx = len(m.historyLines) - 1
+		m.transientBlockID = block.BlockID()
 		m.transientIsRetry = true
 		m.transientRemove = false
 	} else if isWarn {
-		m.transientLogIdx = len(m.historyLines) - 1
+		m.transientBlockID = block.BlockID()
 		m.transientIsRetry = false
 		m.transientRemove = isEphemeralWarn
 	}
@@ -664,6 +485,18 @@ func (m *Model) commitLine(line string) {
 	m.lastCommittedStyle = style
 	m.lastCommittedRaw = line
 	m.hasCommittedLine = true
+}
+
+func (m *Model) findTranscriptBlock(id string) *TranscriptBlock {
+	b := m.doc.Find(id)
+	if b == nil {
+		return nil
+	}
+	tb, ok := b.(*TranscriptBlock)
+	if !ok {
+		return nil
+	}
+	return tb
 }
 
 func isTransientWarningLine(line string) bool {
@@ -681,21 +514,17 @@ func isTransientWarningLine(line string) bool {
 }
 
 func (m *Model) removeTransientLogLine() {
-	idx := m.transientLogIdx
-	if idx < 0 || idx >= len(m.historyLines) {
+	if m.transientBlockID == "" {
 		return
 	}
-	m.replaceHistoryRange(idx, idx+1, nil)
-	if idx < len(m.historyLines) {
-		m.shiftAnchoredBlocks(idx+1, -1, "")
-	}
-	m.refreshHistoryTailState()
-	m.transientLogIdx = -1
+	m.doc.Remove(m.transientBlockID)
+	m.transientBlockID = ""
 	m.transientRemove = false
+	m.refreshHistoryTailState()
 }
 
 func (m *Model) insertSpacing(style tuikit.LineStyle, line string) {
-	if len(m.historyLines) == 0 {
+	if m.doc.Len() == 0 {
 		return
 	}
 	if strings.TrimSpace(line) == "" {
@@ -704,11 +533,15 @@ func (m *Model) insertSpacing(style tuikit.LineStyle, line string) {
 	if strings.TrimSpace(m.lastCommittedRaw) == "" {
 		return
 	}
-	if strings.TrimSpace(m.historyLines[len(m.historyLines)-1]) == "" {
-		return
+	// Check if last block already produces empty content.
+	last := m.doc.Last()
+	if last != nil {
+		if tb, ok := last.(*TranscriptBlock); ok && strings.TrimSpace(tb.Raw) == "" {
+			return
+		}
 	}
 	if shouldInsertBlockGap(m.lastCommittedStyle, style) {
-		m.historyLines = append(m.historyLines, "")
+		m.doc.Append(NewSpacerBlock())
 	}
 }
 

@@ -17,11 +17,10 @@ var (
 
 // SessionManager manages multiple async sessions.
 type SessionManager struct {
-	sessions     map[string]*AsyncSession
-	mu           sync.RWMutex
-	maxSessions  int
-	cleanupTimer *time.Timer
-	closed       bool
+	sessions    map[string]*AsyncSession
+	mu          sync.RWMutex
+	maxSessions int
+	closed      bool
 }
 
 // SessionManagerConfig configures the session manager.

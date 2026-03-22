@@ -67,7 +67,7 @@ func (h *runHandle) handleOverlaySubmission(baseInv *invocationContext, sub *Sub
 			continue
 		}
 		ev = session.MarkOverlay(ev)
-		if !h.appendOutput(ev, nil, shouldPersistEvent(ev, h.req.PersistPartialEvents)) {
+		if !h.appendOutput(ev, nil, shouldPersistEvent(ev)) {
 			_ = pump.respond(false)
 			return false
 		}
@@ -223,14 +223,14 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 		if ev == nil {
 			return true
 		}
-		return h.appendOutput(ev, nil, shouldPersistEvent(ev, h.req.PersistPartialEvents))
+		return h.appendOutput(ev, nil, shouldPersistEvent(ev))
 	})
 	if compactErr != nil {
 		h.emitTerminalError(compactErr)
 		return nil, false
 	}
 	if compactionEvent != nil {
-		if !h.appendOutput(compactionEvent, nil, shouldPersistEvent(compactionEvent, h.req.PersistPartialEvents)) {
+		if !h.appendOutput(compactionEvent, nil, shouldPersistEvent(compactionEvent)) {
 			return nil, false
 		}
 		allEvents, err = h.runtime.listContextWindowEvents(h.ctx, h.sess)

@@ -63,6 +63,10 @@ func (l *openAICompatLLM) Name() string {
 	return l.name
 }
 
+func (l *openAICompatLLM) ProviderName() string {
+	return l.provider
+}
+
 func (l *openAICompatLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }
@@ -139,6 +143,7 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			yield(&model.Response{
 				Message:      msg,
 				TurnComplete: true,
+				FinishReason: normalizeOpenAICompatFinishReason(out.Choices[0].FinishReason),
 				Model:        out.Model,
 				Provider:     l.provider,
 				Usage: model.Usage{
@@ -155,6 +160,7 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			toolCalls: map[int]*openAICompatToolCall{},
 		}
 		var usage model.Usage
+		finishReason := model.FinishReasonUnknown
 		stopped := false
 		if err := readSSE(resp.Body, func(data []byte) error {
 			var chunk openAICompatStreamChunk
@@ -170,6 +176,9 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			}
 			if len(chunk.Choices) == 0 {
 				return nil
+			}
+			if one := normalizeOpenAICompatFinishReason(chunk.Choices[0].FinishReason); one != model.FinishReasonUnknown {
+				finishReason = one
 			}
 			delta := chunk.Choices[0].Delta
 			if strings.TrimSpace(delta.Role) != "" {
@@ -238,6 +247,7 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			Message:      finalMsg,
 			Partial:      false,
 			TurnComplete: true,
+			FinishReason: finishReason,
 			Model:        l.name,
 			Provider:     l.provider,
 			Usage:        usage,
@@ -340,7 +350,8 @@ type openAIContentPart struct {
 type openAICompatResponse struct {
 	Model   string `json:"model"`
 	Choices []struct {
-		Message openAICompatMsg `json:"message"`
+		Message      openAICompatMsg `json:"message"`
+		FinishReason string          `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -352,7 +363,8 @@ type openAICompatResponse struct {
 type openAICompatStreamChunk struct {
 	Model   string `json:"model"`
 	Choices []struct {
-		Delta openAICompatMsg `json:"delta"`
+		Delta        openAICompatMsg `json:"delta"`
+		FinishReason string          `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -565,4 +577,21 @@ func toKernelMessage(m openAICompatMsg) (model.Message, error) {
 		})
 	}
 	return out, nil
+}
+
+func normalizeOpenAICompatFinishReason(raw string) model.FinishReason {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return model.FinishReasonUnknown
+	case "stop":
+		return model.FinishReasonStop
+	case "length", "max_tokens":
+		return model.FinishReasonLength
+	case "tool_calls", "function_call":
+		return model.FinishReasonToolCalls
+	case "content_filter":
+		return model.FinishReasonContentFilter
+	default:
+		return model.FinishReason(strings.ToLower(strings.TrimSpace(raw)))
+	}
 }

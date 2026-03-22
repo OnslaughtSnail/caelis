@@ -36,3 +36,30 @@ func TestTruncateMap_WithMeta(t *testing.T) {
 		t.Fatalf("expected truncated stdout marker, got: %q", stdout)
 	}
 }
+
+func TestTruncateText_DoesNotDuplicateExistingHeader(t *testing.T) {
+	in := "Total output lines: 400\n\n" + strings.Repeat("abcdef\n", 200)
+	out, removed := TruncateText(in, TruncationPolicy{MaxTokens: 50})
+	if removed == 0 {
+		t.Fatal("expected truncation")
+	}
+	if got := strings.Count(out, "Total output lines:"); got != 1 {
+		t.Fatalf("expected single total-lines header, got %d in %q", got, out)
+	}
+}
+
+func TestAddTruncationMeta_MarksOutputMeta(t *testing.T) {
+	long := strings.Repeat("abcdef", 3000)
+	in := map[string]any{
+		"stdout": long,
+		"output_meta": map[string]any{
+			"model_truncated": false,
+		},
+	}
+	out, info := TruncateMap(in, TruncationPolicy{MaxTokens: 100})
+	out = AddTruncationMeta(out, info)
+	meta, _ := out["output_meta"].(map[string]any)
+	if meta["model_truncated"] != true {
+		t.Fatalf("expected output_meta.model_truncated=true, got %#v", out)
+	}
+}

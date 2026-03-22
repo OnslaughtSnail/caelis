@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -420,5 +421,177 @@ func TestAppConfig_FailsOnUnresolvedEnvPlaceholder(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid config") || !strings.Contains(err.Error(), tokenEnv) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAppConfig_ResolvesAgentServerPlaceholdersAndBuildsRegistry(t *testing.T) {
+	const (
+		cmdEnv   = "CAELIS_AGENT_CMD"
+		tokenEnv = "CAELIS_AGENT_TOKEN"
+		dirEnv   = "CAELIS_AGENT_WORKDIR"
+	)
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	oldCmd := os.Getenv(cmdEnv)
+	oldToken := os.Getenv(tokenEnv)
+	oldDir := os.Getenv(dirEnv)
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(cmdEnv, "caelis-dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(tokenEnv, "secret-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(dirEnv, "/tmp/caelis-agent"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("HOME", oldHome)
+		_ = os.Setenv(cmdEnv, oldCmd)
+		_ = os.Setenv(tokenEnv, oldToken)
+		_ = os.Setenv(dirEnv, oldDir)
+	})
+
+	cfgPath, err := configPath("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+  "version": 1,
+  "agent_servers": {
+    "codex-acp": {
+      "type": "registry",
+      "env": {
+        "CODEX_API_KEY": "${` + tokenEnv + `}"
+      }
+    },
+    "Caelis CLI": {
+      "type": "custom",
+      "command": "${` + cmdEnv + `}",
+      "args": ["acp", "--stdio"],
+      "env": {
+        "CAELIS_AGENT_TOKEN": "${` + tokenEnv + `}"
+      },
+      "workDir": "${` + dirEnv + `}"
+    }
+  }
+}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := store.AgentRegistry()
+	if err != nil {
+		t.Fatalf("AgentRegistry: %v", err)
+	}
+	if _, ok := reg.Lookup("self"); !ok {
+		t.Fatal("expected builtin self agent")
+	}
+	descs := store.AgentDescriptors()
+	if len(descs) != 2 {
+		t.Fatalf("expected 2 configured agent descriptors, got %d", len(descs))
+	}
+	var custom appagents.Descriptor
+	var registryDesc appagents.Descriptor
+	for _, d := range descs {
+		switch d.ID {
+		case "Caelis CLI":
+			custom = d
+		case "codex-acp":
+			registryDesc = d
+		}
+	}
+	if custom.Type != appagents.TypeCustom || custom.Command != "caelis-dev" || custom.WorkDir != "/tmp/caelis-agent" {
+		t.Fatalf("unexpected custom agent descriptor: %+v", custom)
+	}
+	if custom.Env["CAELIS_AGENT_TOKEN"] != "secret-token" {
+		t.Fatalf("expected resolved custom env, got %+v", custom.Env)
+	}
+	if registryDesc.Type != appagents.TypeRegistry || registryDesc.Transport != appagents.TransportACP {
+		t.Fatalf("unexpected registry descriptor: %+v", registryDesc)
+	}
+	if registryDesc.Env["CODEX_API_KEY"] != "secret-token" {
+		t.Fatalf("expected resolved registry env, got %+v", registryDesc.Env)
+	}
+}
+
+func TestAppConfig_FailsOnUnresolvedAgentServerPlaceholder(t *testing.T) {
+	const tokenEnv = "CAELIS_AGENT_TOKEN_UNRESOLVED"
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("HOME", oldHome)
+	})
+
+	cfgPath, err := configPath("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+  "version": 1,
+  "agent_servers": {
+    "codex-acp": {
+      "type": "registry",
+      "env": {
+        "CODEX_API_KEY": "${` + tokenEnv + `}"
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = loadOrInitAppConfig("demo-app")
+	if err == nil {
+		t.Fatal("expected unresolved placeholder error")
+	}
+	if !strings.Contains(err.Error(), "invalid config") || !strings.Contains(err.Error(), tokenEnv) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAppConfig_AgentRegistryValidatesCustomAndRegistryTypes(t *testing.T) {
+	store := &appConfigStore{
+		path: filepath.Join(t.TempDir(), "config.json"),
+		data: appConfig{
+			AgentServers: map[string]agentRecord{
+				"codex-acp": {Type: "registry"},
+				"broken":    {Type: "custom"},
+			},
+		},
+	}
+	mergeAppConfigDefaults(&store.data)
+	_, err := store.AgentRegistry()
+	if err == nil {
+		t.Fatal("expected invalid custom agent config to fail validation")
+	}
+	if !strings.Contains(err.Error(), "requires an endpoint or command") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	delete(store.data.AgentServers, "broken")
+	mergeAppConfigDefaults(&store.data)
+	reg, err := store.AgentRegistry()
+	if err != nil {
+		t.Fatalf("registry-backed agent should validate: %v", err)
+	}
+	if _, ok := reg.Lookup("codex-acp"); !ok {
+		t.Fatal("expected codex-acp agent in registry")
 	}
 }

@@ -93,6 +93,10 @@ func (l *ollamaLLM) Name() string {
 	return l.name
 }
 
+func (l *ollamaLLM) ProviderName() string {
+	return l.provider
+}
+
 func (l *ollamaLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }

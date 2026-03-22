@@ -29,7 +29,6 @@ import (
 	sessionmem "github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolfs "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/filesystem"
-	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
 )
 
 type stubACPTool struct {
@@ -77,8 +76,7 @@ func TestServer_InitializeNewPromptAndLoad(t *testing.T) {
 
 	var newResp NewSessionResponse
 	if err := h.client.Call(context.Background(), MethodSessionNew, NewSessionRequest{
-		CWD:        h.workspace,
-		MCPServers: nil,
+		CWD: h.workspace,
 	}, &newResp); err != nil {
 		t.Fatalf("session/new: %v", err)
 	}
@@ -108,9 +106,8 @@ func TestServer_InitializeNewPromptAndLoad(t *testing.T) {
 
 	h.resetNotifications()
 	if err := h.client.Call(context.Background(), MethodSessionLoad, LoadSessionRequest{
-		SessionID:  newResp.SessionID,
-		CWD:        h.workspace,
-		MCPServers: nil,
+		SessionID: newResp.SessionID,
+		CWD:       h.workspace,
 	}, &LoadSessionResponse{}); err != nil {
 		t.Fatalf("session/load: %v", err)
 	}
@@ -343,16 +340,8 @@ func TestServer_InitializeSerializesSchemaFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected agentCapabilities object, got %#v", initResp["agentCapabilities"])
 	}
-	value, exists := rawCaps["mcpCapabilities"]
-	if !exists {
-		t.Fatalf("expected %q in agentCapabilities, got %#v", "mcpCapabilities", rawCaps)
-	}
-	item, ok := value.(map[string]any)
-	if !ok {
-		t.Fatalf("expected mcpCapabilities object, got %#v", value)
-	}
-	if item["http"] != true || item["sse"] != true {
-		t.Fatalf("expected mcpCapabilities to advertise http/sse, got %#v", item)
+	if _, exists := rawCaps["mcpCapabilities"]; exists {
+		t.Fatalf("did not expect mcpCapabilities in agentCapabilities, got %#v", rawCaps)
 	}
 	if _, exists := rawCaps["mcp"]; exists {
 		t.Fatalf("did not expect legacy mcp field, got %#v", rawCaps)
@@ -476,13 +465,13 @@ func TestServer_PromptForwardsDelegatedChildSessionUpdates(t *testing.T) {
 						Role: model.RoleAssistant,
 						ToolCalls: []model.ToolCall{{
 							ID:   "call_delegate_1",
-							Name: tool.DelegateTaskToolName,
-							Args: `{"task":"child task","yield_time_ms":0}`,
+							Name: tool.SpawnToolName,
+							Args: `{"task":"child task","yield_seconds":0}`,
 						}},
 					},
 				}},
 				{{Message: model.Message{Role: model.RoleAssistant, Text: "child done"}}},
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "delegated complete"}}},
+				{{Message: model.Message{Role: model.RoleAssistant, Text: "spawned complete"}}},
 			},
 		},
 	})
@@ -589,10 +578,10 @@ func TestServer_SessionModeAndConfigPersistAcrossLoad(t *testing.T) {
 				{Value: "on", Name: "on"},
 			},
 		}},
-		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = sessionCWD
 			captured = cfg
-			return newLLMAgentFactory(t)(stream, sessionCWD, cfg)
+			return newLLMAgentFactory(t)(stream, sessionCWD, "", cfg)
 		},
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
@@ -759,7 +748,7 @@ func TestServer_Prompt_DefaultSandboxBashDoesNotUseACPTerminal(t *testing.T) {
 
 func TestServer_Prompt_FiltersInternalToolMetadataFromACPUpdates(t *testing.T) {
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = stream
 			_ = sessionCWD
 			_ = cfg
@@ -1293,8 +1282,9 @@ func TestSummarizeToolCallTitle_TaskUsesFriendlyActionSummary(t *testing.T) {
 	if got := summarizeToolCallTitle("TASK", map[string]any{
 		"action":  "write",
 		"task_id": "t-1234567890ab",
-	}); got != "WRITE {task=t-12345678}" {
-		t.Fatalf("expected write summary with short task id, got %q", got)
+		"input":   "hello\n",
+	}); got != "WRITE hello\\n" {
+		t.Fatalf("expected write summary with input preview, got %q", got)
 	}
 }
 
@@ -1357,18 +1347,21 @@ func TestSupplementalToolCallUpdates_TaskCancelCompletesOriginBash(t *testing.T)
 	if !ok {
 		t.Fatalf("expected rawOutput map, got %#v", update.RawOutput)
 	}
-	if raw["state"] != "cancelled" || raw["cancelled"] != true {
-		t.Fatalf("expected cancelled markers, got %#v", raw)
+	if raw["state"] != "cancelled" || raw["msg"] != "cancelled" {
+		t.Fatalf("expected cancelled state/msg, got %#v", raw)
 	}
 	if raw["task_id"] != "t-1234567890ab" || raw["session_id"] != "term-123" {
 		t.Fatalf("expected task/session linkage preserved, got %#v", raw)
+	}
+	if raw["result"] != "5\n6\n" {
+		t.Fatalf("expected latest output promoted into result, got %#v", raw)
 	}
 }
 
 func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = sessionCWD
 			_ = cfg
 			return blockingAgent{name: "block", blocker: blocker}, nil
@@ -1410,7 +1403,7 @@ func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 func TestServer_SessionLoadKeepsCancelForActiveRun(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = sessionCWD
 			_ = cfg
 			return blockingAgent{name: "block", blocker: blocker}, nil
@@ -1468,9 +1461,8 @@ func TestServer_SessionLoadUnknownIDReturnsNotFound(t *testing.T) {
 
 	var loadResp LoadSessionResponse
 	err = h.client.Call(context.Background(), MethodSessionLoad, LoadSessionRequest{
-		SessionID:  "missing-session",
-		CWD:        h.workspace,
-		MCPServers: nil,
+		SessionID: "missing-session",
+		CWD:       h.workspace,
 	}, &loadResp)
 	if err == nil || !strings.Contains(err.Error(), session.ErrSessionNotFound.Error()) {
 		t.Fatalf("expected session not found error, got %v", err)
@@ -1572,6 +1564,8 @@ type harnessConfig struct {
 	sessionModes        []SessionMode
 	defaultModeID       string
 	sessionConfig       []SessionConfigOptionTemplate
+	sessionConfigState  SessionConfigStateFactory
+	normalizeConfig     SessionConfigNormalizer
 	listSessions        SessionListFactory
 	availableCommands   AvailableCommandsFactory
 	promptImageEnabled  func() bool
@@ -1657,47 +1651,20 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 	if modelImpl == nil {
 		modelImpl = &scriptedLLM{}
 	}
+	adapter := newHarnessAdapter(t, cfg, harnessAdapterConfig{
+		store:         store,
+		runtime:       rt,
+		baseRuntime:   baseRuntime,
+		serverConn:    serverConn,
+		workspaceRoot: workspaceRoot,
+		agentFactory:  agentFactory,
+		modelImpl:     modelImpl,
+	})
 	server, err := NewServer(ServerConfig{
-		Conn:                serverConn,
-		Runtime:             rt,
-		Store:               store,
-		Model:               modelImpl,
-		NewModel:            cfg.newModel,
-		AppName:             "caelis",
-		UserID:              "tester",
-		WorkspaceRoot:       workspaceRoot,
-		AuthMethods:         cfg.authMethods,
-		Authenticate:        cfg.authenticate,
-		SessionModes:        cfg.sessionModes,
-		DefaultModeID:       cfg.defaultModeID,
-		SessionConfig:       cfg.sessionConfig,
-		NewAgent:            agentFactory,
-		ListSessions:        cfg.listSessions,
-		AvailableCommands:   cfg.availableCommands,
-		PromptImageEnabled:  cfg.promptImageEnabled,
-		SupportsPromptImage: cfg.supportsPromptImage,
-		NewSessionResources: func(ctx context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, _ []MCPServer, modeResolver func() string) (*SessionResources, error) {
-			execRuntime := NewRuntime(baseRuntime, serverConn, sessionID, workspaceRoot, sessionCWD, caps, modeResolver)
-			tools := make([]tool.Tool, 0, 1)
-			bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: execRuntime})
-			if err != nil {
-				return nil, err
-			}
-			tools = append(tools, bashTool)
-			res := &SessionResources{
-				Runtime: execRuntime,
-				Tools:   tools,
-				Policies: []policy.Hook{
-					policy.DefaultSecurityBaseline(),
-				},
-			}
-			if cfg.customizeResources != nil {
-				if err := cfg.customizeResources(res); err != nil {
-					return nil, err
-				}
-			}
-			return res, nil
-		},
+		Conn:         serverConn,
+		AuthMethods:  cfg.authMethods,
+		Authenticate: cfg.authenticate,
+		Adapter:      adapter,
 	})
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -1713,6 +1680,27 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 		_ = toolexec.Close(baseRuntime)
 	})
 	return h
+}
+
+func pathWithinRoot(root string, path string) bool {
+	root = filepath.Clean(strings.TrimSpace(root))
+	path = filepath.Clean(strings.TrimSpace(path))
+	if root == "" || path == "" {
+		return false
+	}
+	rootResolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		rootResolved = root
+	}
+	pathResolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		pathResolved = path
+	}
+	rel, err := filepath.Rel(rootResolved, pathResolved)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func (h *harness) close() {
@@ -2002,12 +1990,15 @@ func TestServer_PlanModeInjectsHiddenPromptButLoadReplaysVisibleText(t *testing.
 
 func newLLMAgentFactory(t *testing.T) AgentFactory {
 	t.Helper()
-	return func(stream bool, sessionCWD string, cfg AgentSessionConfig) (agent.Agent, error) {
+	return func(stream bool, sessionCWD string, systemPrompt string, cfg AgentSessionConfig) (agent.Agent, error) {
 		_ = sessionCWD
 		_ = cfg
+		if strings.TrimSpace(systemPrompt) == "" {
+			systemPrompt = "test"
+		}
 		return llmagent.New(llmagent.Config{
 			Name:              "test",
-			SystemPrompt:      "test",
+			SystemPrompt:      systemPrompt,
 			StreamModel:       stream,
 			EmitPartialEvents: stream,
 		})
