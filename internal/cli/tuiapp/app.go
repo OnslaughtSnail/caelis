@@ -29,16 +29,8 @@ func NewModel(cfg Config) *Model {
 	theme := tuikit.ResolveThemeFromEnv()
 	themeAuto := tuikit.ThemeUsesAutoBackground()
 
-	items := make([]list.Item, 0, len(cfg.Commands))
-	for _, one := range cfg.Commands {
-		name := strings.TrimSpace(one)
-		if name == "" {
-			continue
-		}
-		items = append(items, commandItem{name: name})
-	}
 	delegate := list.NewDefaultDelegate()
-	palette := list.New(items, delegate, 20, 10)
+	palette := list.New(nil, delegate, 20, 10)
 	palette.SetShowHelp(false)
 	palette.SetShowStatusBar(false)
 	palette.SetFilteringEnabled(true)
@@ -47,7 +39,7 @@ func NewModel(cfg Config) *Model {
 	palette.Styles.HelpStyle = lipgloss.NewStyle().Foreground(theme.TextSecondary)
 
 	ta := textarea.New()
-	ta.Placeholder = "Type your message, @path/to/file or $skill"
+	ta.Placeholder = "Type your message, @agent, #path/to/file, or $skill"
 	ta.Prompt = "> "
 	ta.SetPromptFunc(2, func(info textarea.PromptInfo) string {
 		if info.LineNumber == 0 {
@@ -97,13 +89,13 @@ func NewModel(cfg Config) *Model {
 	vp.KeyMap.PageUp = key.NewBinding(key.WithKeys("pgup"))
 
 	m := &Model{
-		cfg:                 cfg,
-		theme:               theme,
-		themeAuto:           themeAuto,
-		keys:                defaultKeyMap(cliputil.IsWSL()),
-		spinner:             sp,
-		viewport:            vp,
-		doc:                 NewDocument(),
+		cfg:       cfg,
+		theme:     theme,
+		themeAuto: themeAuto,
+		keys:      defaultKeyMap(cliputil.IsWSL()),
+		spinner:   sp,
+		viewport:  vp,
+		doc:       NewDocument(),
 		Composer: Composer{
 			textarea:     ta,
 			historyIndex: -1,
@@ -134,8 +126,29 @@ func NewModel(cfg Config) *Model {
 	if strings.TrimSpace(m.statusModel) == "" {
 		m.statusModel = "not configured"
 	}
+	m.setCommands(cfg.Commands)
 	m.syncTextareaChrome()
 	return m
+}
+
+func (m *Model) setCommands(commands []string) {
+	if m == nil {
+		return
+	}
+	m.cfg.Commands = append([]string(nil), commands...)
+	items := make([]list.Item, 0, len(m.cfg.Commands))
+	for _, one := range m.cfg.Commands {
+		name := strings.TrimSpace(one)
+		if name == "" {
+			continue
+		}
+		items = append(items, commandItem{name: name})
+	}
+	if m.palette.Title == "" {
+		m.palette.Title = "Commands"
+	}
+	m.palette.SetItems(items)
+	m.refreshSlashCommands()
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -267,18 +280,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuievents.LogChunkMsg:
+		m.flushAllPendingStreamSmoothing()
 		m.dismissMessageHints()
 		return m.handleLogChunk(typed.Chunk)
 
 	case tuievents.AssistantStreamMsg:
 		m.dismissMessageHints()
-		return m.handleStreamBlock(typed.Kind, typed.Text, typed.Final)
+		if m.cfg.FrameBatchMainStream {
+			return m.enqueueMainDelta(typed.Kind, typed.Actor, typed.Text, typed.Final)
+		}
+		return m.handleStreamBlock(typed.Kind, typed.Actor, typed.Text, typed.Final)
+
+	case tuievents.RawDeltaMsg:
+		m.dismissMessageHints()
+		return m.handleRawDelta(typed)
 
 	case tuievents.ReasoningStreamMsg:
 		m.dismissMessageHints()
-		return m.handleStreamBlock("reasoning", typed.Text, typed.Final)
+		if m.cfg.FrameBatchMainStream {
+			return m.enqueueMainDelta("reasoning", typed.Actor, typed.Text, typed.Final)
+		}
+		return m.handleStreamBlock("reasoning", typed.Actor, typed.Text, typed.Final)
 
 	case tuievents.DiffBlockMsg:
+		m.flushAllPendingStreamSmoothing()
 		m.dismissMessageHints()
 		return m.handleDiffBlock(typed)
 
@@ -286,11 +311,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dismissMessageHints()
 		return m.handleToolStreamMsg(typed)
 
+	case tuievents.ParticipantTurnStartMsg:
+		m.flushAllPendingStreamSmoothing()
+		m.dismissMessageHints()
+		return m.handleParticipantTurnStart(typed)
+
+	case tuievents.ParticipantToolMsg:
+		m.dismissMessageHints()
+		return m.handleParticipantToolMsg(typed)
+
+	case tuievents.ParticipantStatusMsg:
+		m.dismissMessageHints()
+		return m.handleParticipantStatusMsg(typed)
+
 	case tuievents.SubagentStartMsg:
+		m.flushAllPendingStreamSmoothing()
 		m.dismissMessageHints()
 		return m.handleSubagentStart(typed)
 
 	case tuievents.SubagentStatusMsg:
+		m.flushAllPendingStreamSmoothing()
 		return m.handleSubagentStatus(typed)
 
 	case tuievents.SubagentStreamMsg:
@@ -298,13 +338,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSubagentStream(typed)
 
 	case tuievents.SubagentToolCallMsg:
+		m.flushAllPendingStreamSmoothing()
 		m.dismissMessageHints()
 		return m.handleSubagentToolCall(typed)
 
 	case tuievents.SubagentPlanMsg:
+		m.flushAllPendingStreamSmoothing()
 		return m.handleSubagentPlan(typed)
 
 	case tuievents.SubagentDoneMsg:
+		m.flushAllPendingStreamSmoothing()
 		return m.handleSubagentDone(typed)
 
 	case tuievents.PlanUpdateMsg:
@@ -327,6 +370,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !hasIncomplete {
 			m.planEntries = m.planEntries[:0]
 		}
+		m.ensureViewportLayout()
 		return m, nil
 
 	case tuievents.SetHintMsg:
@@ -394,6 +438,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusContext = strings.TrimSpace(typed.Context)
 		return m, nil
 
+	case tuievents.SetCommandsMsg:
+		m.setCommands(typed.Commands)
+		return m, nil
+
 	case tuievents.AttachmentCountMsg:
 		if typed.Count <= 0 {
 			m.clearInputAttachments()
@@ -402,6 +450,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncAttachmentSummary()
 		}
 		m.syncTextareaChrome()
+		m.ensureViewportLayout()
 		return m, nil
 
 	case tuievents.ClearHistoryMsg:
@@ -412,6 +461,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dismissMessageHints()
 		m.dequeuePendingUserMessage(typed.Text)
 		m.commitUserDisplayLine(typed.Text)
+		m.ensureViewportLayout()
 		m.syncViewportContent()
 		return m, nil
 
@@ -421,6 +471,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingQueue = nil
 				errLine := "error: " + typed.Err.Error()
 				m.commitLine(errLine)
+				m.ensureViewportLayout()
 				m.syncViewportContent()
 			}
 			return m, nil
@@ -432,6 +483,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flushStream()
 			m.finalizeAssistantBlock()
 			m.finalizeReasoningBlock()
+		}
+		if typed.SuppressTurnDivider {
+			m.finalizeActiveParticipantTurn(typed.Interrupted, typed.Err)
 		}
 		m.finalizeActivityBlock()
 		if !m.runStartedAt.IsZero() {
@@ -457,7 +511,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.commitLine(errLine)
 			}
 		}
-		if m.showTurnDivider && m.doc.Len() > 0 {
+		if m.showTurnDivider && !typed.SuppressTurnDivider && m.doc.Len() > 0 {
 			// Check if last block has non-empty content.
 			last := m.doc.Last()
 			hasContent := false
@@ -473,6 +527,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.showTurnDivider = false
+		m.ensureViewportLayout()
 		m.syncViewportContent()
 		if typed.ExitNow {
 			m.quit = true
@@ -481,36 +536,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuievents.BTWOverlayMsg:
-		if m.btwOverlay == nil && m.btwDismissed {
-			return m, nil
-		}
-		if m.btwOverlay == nil {
-			m.btwOverlay = &btwOverlayState{}
-		}
-		if typed.Final {
-			m.btwOverlay.Answer = strings.TrimSpace(typed.Text)
-			m.btwOverlay.Loading = false
-		} else {
-			m.btwOverlay.Answer += typed.Text
-		}
-		m.clampBTWScroll(len(m.btwContentLines()))
-		return m, nil
+		return m.handleBTWDelta(typed.Text, typed.Final)
 
 	case tuievents.BTWErrorMsg:
 		if m.btwOverlay == nil && m.btwDismissed {
 			return m, nil
 		}
-		if m.btwOverlay == nil {
-			m.btwOverlay = &btwOverlayState{}
-		}
-		m.btwOverlay.Answer = strings.TrimSpace(typed.Text)
-		m.btwOverlay.Loading = false
-		m.clampBTWScroll(len(m.btwContentLines()))
+		m.dropPendingStreamSmoothing(streamSmoothingKey("btw", "", "answer", ""))
+		m.applyBTWOverlayImmediate(typed.Text, true)
 		return m, nil
 
 	case tuievents.PromptRequestMsg:
 		m.enqueuePrompt(typed)
+		m.ensureViewportLayout()
 		return m, nil
+
+	case frameTickMsg:
+		return m, tea.Batch(
+			m.drainPendingStreamSmoothing(typed.at),
+			m.advancePanelAnimations(typed.at),
+		)
 
 	case tuievents.TickStatusMsg:
 		if m.cfg.RefreshStatus != nil {

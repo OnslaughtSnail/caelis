@@ -3,17 +3,27 @@ package main
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 )
 
 type testSender struct {
+	mu   sync.Mutex
 	msgs []any
 }
 
 func (s *testSender) Send(msg any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.msgs = append(s.msgs, msg)
+}
+
+func (s *testSender) Snapshot() []any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]any(nil), s.msgs...)
 }
 
 func TestHandleNew_StartsFreshSession(t *testing.T) {

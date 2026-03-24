@@ -71,16 +71,16 @@ func (l *openAICompatLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }
 
-func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		if req == nil {
 			yield(nil, fmt.Errorf("model: request is nil"))
 			return
 		}
 		payload := openAICompatRequest{
 			Model:     l.name,
-			Messages:  l.fromKernelMessages(req.Messages),
-			Tools:     fromKernelTools(req.Tools),
+			Messages:  l.fromKernelMessages(req.Instructions, req.Messages),
+			Tools:     fromKernelTools(model.FunctionToolDefinitions(req.Tools)),
 			Stream:    req.Stream,
 			MaxTokens: l.maxOutputTok,
 		}
@@ -140,16 +140,21 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 				yield(nil, err)
 				return
 			}
-			yield(&model.Response{
-				Message:      msg,
-				TurnComplete: true,
-				FinishReason: normalizeOpenAICompatFinishReason(out.Choices[0].FinishReason),
-				Model:        out.Model,
-				Provider:     l.provider,
-				Usage: model.Usage{
-					PromptTokens:     out.Usage.PromptTokens,
-					CompletionTokens: out.Usage.CompletionTokens,
-					TotalTokens:      out.Usage.TotalTokens,
+			yield(&model.StreamEvent{
+				Type: model.StreamEventTurnDone,
+				Response: &model.Response{
+					Message:      msg,
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       model.ResponseStatusCompleted,
+					FinishReason: normalizeOpenAICompatFinishReason(out.Choices[0].FinishReason),
+					Model:        out.Model,
+					Provider:     l.provider,
+					Usage: model.Usage{
+						PromptTokens:     out.Usage.PromptTokens,
+						CompletionTokens: out.Usage.CompletionTokens,
+						TotalTokens:      out.Usage.TotalTokens,
+					},
 				},
 			}, nil)
 			return
@@ -186,31 +191,19 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			}
 			if text, ok := delta.Content.(string); ok && text != "" {
 				acc.text.WriteString(text)
-				if !yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						Text: text,
-					},
-					Partial:      true,
-					TurnComplete: false,
-					Model:        chunk.Model,
-					Provider:     l.provider,
+				if !yield(&model.StreamEvent{
+					Type:      model.StreamEventPartDelta,
+					PartDelta: &model.PartDelta{Kind: model.PartKindText, TextDelta: text},
 				}, nil) {
 					stopped = true
 					return errStopSSE
 				}
 			}
-			if strings.TrimSpace(delta.ReasoningContent) != "" {
+			if delta.ReasoningContent != "" {
 				acc.reasoning.WriteString(delta.ReasoningContent)
-				if !yield(&model.Response{
-					Message: model.Message{
-						Role:      model.RoleAssistant,
-						Reasoning: delta.ReasoningContent,
-					},
-					Partial:      true,
-					TurnComplete: false,
-					Model:        chunk.Model,
-					Provider:     l.provider,
+				if !yield(&model.StreamEvent{
+					Type:      model.StreamEventPartDelta,
+					PartDelta: &model.PartDelta{Kind: model.PartKindReasoning, TextDelta: delta.ReasoningContent},
 				}, nil) {
 					stopped = true
 					return errStopSSE
@@ -243,14 +236,18 @@ func (l *openAICompatLLM) Generate(ctx context.Context, req *model.Request) iter
 			yield(nil, err)
 			return
 		}
-		yield(&model.Response{
-			Message:      finalMsg,
-			Partial:      false,
-			TurnComplete: true,
-			FinishReason: finishReason,
-			Model:        l.name,
-			Provider:     l.provider,
-			Usage:        usage,
+		yield(&model.StreamEvent{
+			Type: model.StreamEventTurnDone,
+			Response: &model.Response{
+				Message:      finalMsg,
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       model.ResponseStatusCompleted,
+				FinishReason: finishReason,
+				Model:        l.name,
+				Provider:     l.provider,
+				Usage:        usage,
+			},
 		}, nil)
 	}
 }
@@ -381,14 +378,11 @@ type openAIStreamAccumulator struct {
 }
 
 func (a *openAIStreamAccumulator) message() (model.Message, error) {
-	msg := model.Message{
-		Role:      a.role,
-		Text:      a.text.String(),
-		Reasoning: a.reasoning.String(),
+	role := a.role
+	if role == "" {
+		role = model.RoleAssistant
 	}
-	if len(a.toolCalls) == 0 {
-		return msg, nil
-	}
+	calls := make([]model.ToolCall, 0, len(a.toolCalls))
 	keys := make([]int, 0, len(a.toolCalls))
 	for idx := range a.toolCalls {
 		keys = append(keys, idx)
@@ -396,25 +390,28 @@ func (a *openAIStreamAccumulator) message() (model.Message, error) {
 	sort.Ints(keys)
 	for _, idx := range keys {
 		tc := a.toolCalls[idx]
-		msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
+		calls = append(calls, model.ToolCall{
 			ID:   tc.ID,
 			Name: tc.Function.Name,
 			Args: tc.Function.Arguments,
 		})
 	}
-	return msg, nil
+	return model.MessageFromAssistantParts(a.text.String(), a.reasoning.String(), calls), nil
 }
 
-func (l *openAICompatLLM) fromKernelMessages(messages []model.Message) []openAICompatReqMsg {
+func (l *openAICompatLLM) fromKernelMessages(instructions []model.Part, messages []model.Message) []openAICompatReqMsg {
+	if len(instructions) > 0 {
+		messages = append([]model.Message{model.NewMessage(model.RoleSystem, instructions...)}, messages...)
+	}
 	out := make([]openAICompatReqMsg, 0, len(messages))
 	seenToolCalls := map[string]struct{}{}
 	for _, m := range messages {
 		// OpenAI-compatible APIs reject role=tool messages that do not carry
 		// a tool_call_id. Skip malformed history entries.
-		if m.Role == model.RoleTool && m.ToolResponse == nil {
+		if m.Role == model.RoleTool && m.ToolResponse() == nil {
 			continue
 		}
-		for _, call := range m.ToolCalls {
+		for _, call := range m.ToolCalls() {
 			callID := strings.TrimSpace(call.ID)
 			if callID != "" {
 				seenToolCalls[callID] = struct{}{}
@@ -424,8 +421,8 @@ func (l *openAICompatLLM) fromKernelMessages(messages []model.Message) []openAIC
 		// tool_call_id that references a preceding assistant tool call.
 		// Resume/legacy histories may contain incomplete tool responses; skip
 		// these invalid entries to avoid hard request failures.
-		if m.ToolResponse != nil {
-			respID := strings.TrimSpace(m.ToolResponse.ID)
+		if resp := m.ToolResponse(); resp != nil {
+			respID := strings.TrimSpace(resp.ID)
 			if respID == "" {
 				continue
 			}
@@ -454,17 +451,17 @@ func fromKernelTools(tools []model.ToolDefinition) []openAICompatTool {
 }
 
 func (l *openAICompatLLM) fromKernelMessage(m model.Message) openAICompatReqMsg {
-	if m.ToolResponse != nil {
-		raw, _ := json.Marshal(m.ToolResponse.Result)
+	if resp := m.ToolResponse(); resp != nil {
+		raw, _ := json.Marshal(resp.Result)
 		return openAICompatReqMsg{
 			Role:       string(model.RoleTool),
-			ToolCallID: m.ToolResponse.ID,
+			ToolCallID: resp.ID,
 			Content:    string(raw),
 		}
 	}
-	if len(m.ToolCalls) > 0 {
-		calls := make([]openAICompatToolCall, 0, len(m.ToolCalls))
-		for _, c := range m.ToolCalls {
+	if callsIn := m.ToolCalls(); len(callsIn) > 0 {
+		calls := make([]openAICompatToolCall, 0, len(callsIn))
+		for _, c := range callsIn {
 			raw := strings.TrimSpace(c.Args)
 			if raw == "" {
 				raw = "{}"
@@ -479,38 +476,41 @@ func (l *openAICompatLLM) fromKernelMessage(m model.Message) openAICompatReqMsg 
 			})
 		}
 		content := any(nil)
-		if m.Text != "" {
-			content = m.Text
+		if text := m.TextContent(); text != "" {
+			content = text
 		}
 		return openAICompatReqMsg{
 			Role:             string(m.Role),
 			Content:          content,
-			ReasoningContent: l.reasoningContentField(m.Reasoning, true),
+			ReasoningContent: l.reasoningContentField(m.ReasoningText(), true),
 			ToolCalls:        calls,
 		}
 	}
-	if m.Role == model.RoleUser && len(m.ContentParts) > 0 {
-		parts := make([]openAIContentPart, 0, len(m.ContentParts))
-		for _, cp := range m.ContentParts {
-			switch cp.Type {
-			case model.ContentPartText:
-				parts = append(parts, openAIContentPart{Type: "text", Text: cp.Text})
-			case model.ContentPartImage:
-				parts = append(parts, openAIContentPart{
-					Type:     "image_url",
-					ImageURL: &openAIImageURL{URL: fmt.Sprintf("data:%s;base64,%s", cp.MimeType, cp.Data)},
-				})
+	if m.Role == model.RoleUser {
+		contentParts := model.ContentPartsFromParts(m.Parts)
+		if len(contentParts) > 0 {
+			parts := make([]openAIContentPart, 0, len(contentParts))
+			for _, cp := range contentParts {
+				switch cp.Type {
+				case model.ContentPartText:
+					parts = append(parts, openAIContentPart{Type: "text", Text: cp.Text})
+				case model.ContentPartImage:
+					parts = append(parts, openAIContentPart{
+						Type:     "image_url",
+						ImageURL: &openAIImageURL{URL: fmt.Sprintf("data:%s;base64,%s", cp.MimeType, cp.Data)},
+					})
+				}
 			}
-		}
-		return openAICompatReqMsg{
-			Role:    string(m.Role),
-			Content: parts,
+			return openAICompatReqMsg{
+				Role:    string(m.Role),
+				Content: parts,
+			}
 		}
 	}
 	return openAICompatReqMsg{
 		Role:             string(m.Role),
-		Content:          m.Text,
-		ReasoningContent: l.reasoningContentField(m.Reasoning, false),
+		Content:          m.TextContent(),
+		ReasoningContent: l.reasoningContentField(m.ReasoningText(), false),
 	}
 }
 
@@ -559,24 +559,30 @@ func applyOpenAIReasoning(payload *openAICompatRequest, cfg model.ReasoningConfi
 }
 
 func toKernelMessage(m openAICompatMsg) (model.Message, error) {
-	out := model.Message{
-		Role:      model.Role(m.Role),
-		Reasoning: m.ReasoningContent,
+	role := model.Role(m.Role)
+	if role == "" {
+		role = model.RoleAssistant
 	}
-	if text, ok := m.Content.(string); ok {
-		out.Text = text
+	text := ""
+	if contentText, ok := m.Content.(string); ok {
+		text = contentText
 	}
-	if len(m.ToolCalls) == 0 {
-		return out, nil
-	}
+	calls := make([]model.ToolCall, 0, len(m.ToolCalls))
 	for _, c := range m.ToolCalls {
-		out.ToolCalls = append(out.ToolCalls, model.ToolCall{
+		calls = append(calls, model.ToolCall{
 			ID:   c.ID,
 			Name: c.Function.Name,
 			Args: c.Function.Arguments,
 		})
 	}
-	return out, nil
+	if role == model.RoleAssistant {
+		return model.MessageFromAssistantParts(text, m.ReasoningContent, calls), nil
+	}
+	parts := make([]model.Part, 0, 1)
+	if strings.TrimSpace(text) != "" {
+		parts = append(parts, model.NewTextPart(text))
+	}
+	return model.NewMessage(role, parts...), nil
 }
 
 func normalizeOpenAICompatFinishReason(raw string) model.FinishReason {

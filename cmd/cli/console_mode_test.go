@@ -61,8 +61,8 @@ func TestNewCLIConsole_CommandSetRemovesLegacyUIAndModels(t *testing.T) {
 	if _, ok := console.commands["attach"]; ok {
 		t.Fatal("expected /attach command to be removed")
 	}
-	if _, ok := console.commands["back"]; !ok {
-		t.Fatal("expected /back command to exist")
+	if _, ok := console.commands["back"]; ok {
+		t.Fatal("expected /back command to be removed")
 	}
 	if _, ok := console.commands["quit"]; !ok {
 		t.Fatal("expected /quit command alias to exist")

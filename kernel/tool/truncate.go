@@ -431,10 +431,12 @@ func markOutputMetaModelTruncated(result map[string]any) {
 	}
 	raw, ok := result["output_meta"]
 	if !ok || raw == nil {
+		result["output_meta"] = map[string]any{"model_truncated": true}
 		return
 	}
 	meta, ok := raw.(map[string]any)
 	if !ok || meta == nil {
+		result["output_meta"] = map[string]any{"model_truncated": true}
 		return
 	}
 	meta["model_truncated"] = true

@@ -26,15 +26,15 @@ func (l *runtimeTestLLM) ContextWindowTokens() int {
 	return 64000
 }
 
-func (l *runtimeTestLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (l *runtimeTestLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	_ = ctx
 	_ = req
-	return func(yield func(*model.Response, error) bool) {
-		yield(&model.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Text: "ok"},
+	return func(yield func(*model.StreamEvent, error) bool) {
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "ok"),
 			Model:        l.name,
 			Provider:     "test-provider",
 			TurnComplete: true,
-		}, nil)
+		}), nil)
 	}
 }

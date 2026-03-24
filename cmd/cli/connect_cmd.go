@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,10 +86,18 @@ var providerTemplates = []providerTemplate{
 		label:               "anthropic",
 		api:                 modelproviders.APIAnthropic,
 		provider:            "anthropic",
-		defaultBaseURL:      "https://api.anthropic.com/v1",
+		defaultBaseURL:      "https://api.anthropic.com",
 		defaultContextToken: 200000,
 		defaultMaxOutputTok: 1024,
 		commonModels:        []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514"},
+	},
+	{
+		label:               "anthropic-compatible",
+		api:                 modelproviders.APIAnthropicCompatible,
+		provider:            "anthropic-compatible",
+		defaultBaseURL:      "https://api.anthropic.com",
+		defaultContextToken: 200000,
+		defaultMaxOutputTok: 1024,
 	},
 	{
 		label:               "deepseek",
@@ -105,6 +114,23 @@ var providerTemplates = []providerTemplate{
 		defaultBaseURL:      "https://api.xiaomimimo.com/v1",
 		defaultContextToken: 128000,
 		commonModels:        []string{"mimo-v2-flash", "mimo-v2-reasoner"},
+	},
+	{
+		label:               "minimax",
+		api:                 modelproviders.APIAnthropicCompatible,
+		provider:            "minimax",
+		defaultBaseURL:      "https://api.minimaxi.com/anthropic",
+		defaultContextToken: 204800,
+		defaultMaxOutputTok: 8192,
+		commonModels: []string{
+			"MiniMax-M2.7",
+			"MiniMax-M2.7-highspeed",
+			"MiniMax-M2.5",
+			"MiniMax-M2.5-highspeed",
+			"MiniMax-M2.1",
+			"MiniMax-M2.1-highspeed",
+			"MiniMax-M2",
+		},
 	},
 	{
 		label:               "volcengine",
@@ -144,7 +170,7 @@ func handleConnect(c *cliConsole, args []string) (bool, error) {
 	}
 
 	baseURL := strings.TrimSpace(tpl.defaultBaseURL)
-	if tpl.provider == "openai-compatible" {
+	if tpl.provider == "openai-compatible" || tpl.provider == "anthropic-compatible" {
 		baseURL, err = c.promptText("base_url", tpl.defaultBaseURL, false)
 		if err != nil {
 			return false, err
@@ -386,7 +412,7 @@ func fallbackConnectModels(tpl providerTemplate, remoteModels []modelproviders.R
 	if len(remoteModels) > 0 {
 		return nil
 	}
-	if tpl.api == modelproviders.APIVolcengineCoding && len(tpl.commonModels) > 0 {
+	if (tpl.api == modelproviders.APIVolcengineCoding || tpl.provider == "minimax") && len(tpl.commonModels) > 0 {
 		return append([]string(nil), tpl.commonModels...)
 	}
 	if models := listCatalogModels(tpl.provider); len(models) > 0 {
@@ -511,6 +537,9 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 
 	baseCaps, baseKnown := lookupDynamicCatalogCapabilities(baseCfg.Provider, modelName)
 	if !baseKnown {
+		baseCaps, baseKnown = lookupCatalogModelCapabilities(baseCfg.Provider, modelName)
+	}
+	if !baseKnown {
 		baseCaps = defaultCatalogModelCapabilities()
 	}
 	if baseCaps.ContextWindowTokens <= 0 {
@@ -532,26 +561,26 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 			baseCaps.MaxOutputTokens = remote.MaxOutputTokens
 			baseCaps.DefaultMaxOutputTokens = remote.MaxOutputTokens
 		}
-		if supportsToolCalls, supportsReasoning, supportsImages, supportsJSON, remoteKnown := connectRemoteCapabilities(remote); remoteKnown {
+		if _, supportsReasoning, _, _, remoteKnown := connectRemoteCapabilities(remote); remoteKnown {
 			baseKnown = true
-			if supportsToolCalls {
-				baseCaps.SupportsToolCalls = true
-			}
 			if supportsReasoning {
 				baseCaps.SupportsReasoning = true
-			}
-			if supportsImages {
-				baseCaps.SupportsImages = true
-			}
-			if supportsJSON {
-				baseCaps.SupportsJSONOutput = true
 			}
 		}
 	}
 
-	reasoningMode := normalizeCatalogReasoningMode(overlayCaps.ReasoningMode)
-	reasoningEfforts := normalizeReasoningLevels(overlayCaps.ReasoningEfforts)
-	defaultReasoningEffort := normalizeReasoningEffort(overlayCaps.DefaultReasoningEffort)
+	reasoningMode := normalizeCatalogReasoningMode(baseCaps.ReasoningMode)
+	if overlayMode := normalizeCatalogReasoningMode(overlayCaps.ReasoningMode); overlayMode != "" {
+		reasoningMode = overlayMode
+	}
+	reasoningEfforts := normalizeReasoningLevels(baseCaps.ReasoningEfforts)
+	if overlayEfforts := normalizeReasoningLevels(overlayCaps.ReasoningEfforts); len(overlayEfforts) > 0 {
+		reasoningEfforts = overlayEfforts
+	}
+	defaultReasoningEffort := normalizeReasoningEffort(baseCaps.DefaultReasoningEffort)
+	if overlayDefault := normalizeReasoningEffort(overlayCaps.DefaultReasoningEffort); overlayDefault != "" {
+		defaultReasoningEffort = overlayDefault
+	}
 	contextWindow := baseCaps.ContextWindowTokens
 	maxOutput := baseCaps.DefaultMaxOutputTokens
 	if maxOutput <= 0 {
@@ -1024,12 +1053,7 @@ func containsString(items []string, target string) bool {
 	if target == "" {
 		return false
 	}
-	for _, one := range items {
-		if one == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(items, target)
 }
 
 type promptChoiceItem struct {
@@ -1211,6 +1235,15 @@ func shouldSuppressDiscoverModelsError(cfg modelproviders.Config, err error) boo
 	}
 	if cfg.API == modelproviders.APIGemini && strings.Contains(err.Error(), "http status 400") {
 		return true
+	}
+	if cfg.Provider == "minimax" {
+		return true
+	}
+	if cfg.API == modelproviders.APIAnthropicCompatible {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "http status 404") || strings.Contains(lower, "http status 405") || strings.Contains(lower, "http status 501") || strings.Contains(lower, "not implemented") {
+			return true
+		}
 	}
 	if cfg.API == modelproviders.APIVolcengineCoding {
 		return true

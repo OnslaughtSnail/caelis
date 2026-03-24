@@ -181,6 +181,7 @@ func (m *Model) applyBashPanelState(panel *BashPanelBlock, state string, final b
 	case "running", "waiting_approval", "waiting_input":
 		panel.Active = true
 		panel.EndedAt = time.Time{}
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
 	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
 		panel.Active = false
 		if panel.EndedAt.IsZero() {
@@ -194,6 +195,23 @@ func (m *Model) applyBashPanelState(panel *BashPanelBlock, state string, final b
 		}
 	}
 	panel.UpdatedAt = now
+	m.syncInlineBashAnchorState(panel)
+}
+
+func (m *Model) scheduleInlineBashCollapse(panel *BashPanelBlock) {
+	if m == nil || !isInlineBashPanel(panel) || panel == nil {
+		return
+	}
+	scheduleInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.CollapseFor, &panel.VisibleLines, panel.StartedAt, toolOutputPreviewLines, time.Now())
+	m.syncInlineBashAnchorState(panel)
+}
+
+func (m *Model) toggleInlineBashPanel(panel *BashPanelBlock) {
+	if m == nil || panel == nil {
+		return
+	}
+	cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	panel.Expanded = !panel.Expanded
 	m.syncInlineBashAnchorState(panel)
 }
 
@@ -267,14 +285,11 @@ func inlineBashAnchorLabel(raw string, expanded bool) string {
 	return leading + next + " " + rest
 }
 
-func (m *Model) clearToolOutputPanels() {
-	m.toolOutputBlockIDs = nil
-}
-
 func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string) {
 	if panel == nil {
 		return
 	}
+	cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
 	normalized := tuikit.SanitizeLogText(chunk)
 	normalized = strings.ReplaceAll(strings.ReplaceAll(normalized, "\r\n", "\n"), "\r", "\n")
 	stream = strings.ToLower(strings.TrimSpace(stream))
@@ -282,13 +297,15 @@ func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string
 		stream = "stdout"
 	}
 	if isSpawnLikeTool(panel.ToolName) {
+		panelID := panel.BlockID()
+		m.flushSpawnPreviewSmoothingExcept(panelID, stream)
 		switch stream {
 		case "reasoning":
-			panel.ReasoningPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.ReasoningPartial, normalized, stream)
+			panel.ReasoningPartial = m.appendSpawnPreviewChunk(panel, panel.ReasoningPartial, normalized, stream)
 		case "assistant":
-			panel.AssistantPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.AssistantPartial, normalized, stream)
+			panel.AssistantPartial = m.appendSpawnPreviewChunk(panel, panel.AssistantPartial, normalized, stream)
 		case "stderr":
-			panel.StderrPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.StderrPartial, normalized, stream)
+			panel.StderrPartial = m.appendSpawnPreviewChunk(panel, panel.StderrPartial, normalized, stream)
 		default:
 			panel.StdoutPartial = m.consumeToolOutputChunkBlock(panel, panel.StdoutPartial, normalized, stream)
 		}
@@ -304,6 +321,37 @@ func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string
 	}
 	panel.LastStream = stream
 	panel.UpdatedAt = time.Now()
+}
+
+func (m *Model) appendSpawnPreviewChunk(panel *BashPanelBlock, partial, chunk, stream string) string {
+	if panel == nil || chunk == "" {
+		return partial
+	}
+	_ = m.enqueueStreamDelta("spawn_preview", panel.BlockID(), stream, "", chunk, false)
+	return partial
+}
+
+func (m *Model) applySpawnPreviewImmediate(panelID string, stream string, chunk string) {
+	if m == nil || strings.TrimSpace(panelID) == "" || chunk == "" {
+		return
+	}
+	panel, _ := m.doc.Find(panelID).(*BashPanelBlock)
+	if panel == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(stream)) {
+	case "reasoning":
+		panel.ReasoningPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.ReasoningPartial, chunk, stream)
+	case "assistant":
+		panel.AssistantPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.AssistantPartial, chunk, stream)
+	case "stderr":
+		panel.StderrPartial = m.consumeSubagentPreviewChunkBlock(panel, panel.StderrPartial, chunk, stream)
+	default:
+		panel.StdoutPartial = m.consumeToolOutputChunkBlock(panel, panel.StdoutPartial, chunk, stream)
+	}
+	panel.LastStream = strings.ToLower(strings.TrimSpace(stream))
+	panel.UpdatedAt = time.Now()
+	m.syncViewportContent()
 }
 
 func (m *Model) consumeSubagentPreviewChunkBlock(panel *BashPanelBlock, partial, chunk, stream string) string {
@@ -428,32 +476,6 @@ func normalizeToolOutputState(state string) string {
 	}
 }
 
-func subagentToolSummary(panel *BashPanelBlock) string {
-	if panel == nil {
-		return ""
-	}
-	hasReasoning := false
-	hasAssistant := false
-	for _, line := range panel.Lines {
-		switch strings.ToLower(strings.TrimSpace(line.stream)) {
-		case "reasoning":
-			hasReasoning = true
-		case "assistant":
-			hasAssistant = true
-		}
-	}
-	switch {
-	case hasReasoning && hasAssistant:
-		return "reasoning + answer"
-	case hasAssistant:
-		return "answer"
-	case hasReasoning:
-		return "reasoning"
-	default:
-		return "subagent"
-	}
-}
-
 func formatToolOutputAge(d time.Duration) string {
 	if d <= 0 {
 		return "now"
@@ -467,31 +489,6 @@ func formatToolOutputAge(d time.Duration) string {
 	minutes := int(d / time.Minute)
 	seconds := int((d % time.Minute) / time.Second)
 	return strconv.Itoa(minutes) + "m" + strconv.Itoa(seconds) + "s"
-}
-
-func prioritizeSubagentPreviewLines(content []toolOutputLine, limit int) []toolOutputLine {
-	if len(content) <= limit || limit <= 0 {
-		return content
-	}
-	selected := make([]toolOutputLine, 0, minInt(limit, len(content)))
-	used := make([]bool, len(content))
-	for i := len(content) - 1; i >= 0 && len(selected) < limit; i-- {
-		switch strings.ToLower(strings.TrimSpace(content[i].stream)) {
-		case "assistant", "stderr":
-			selected = append(selected, content[i])
-			used[i] = true
-		}
-	}
-	for i := len(content) - 1; i >= 0 && len(selected) < limit; i-- {
-		if used[i] {
-			continue
-		}
-		selected = append(selected, content[i])
-	}
-	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
-		selected[i], selected[j] = selected[j], selected[i]
-	}
-	return selected
 }
 
 func formatSubagentPreviewText(text string, stream string) string {

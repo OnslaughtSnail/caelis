@@ -1,9 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,7 +17,6 @@ import (
 )
 
 const defaultFriendlyWaitMS = 5000
-const defaultFriendlyDelegateWaitMS = 30000
 
 type runRenderConfig struct {
 	ShowReasoning bool
@@ -26,16 +25,6 @@ type runRenderConfig struct {
 	UI            *ui
 	OnUsage       func(int) // called with conservative usage floor after run completes
 	OnEvent       func(*session.Event) bool
-}
-
-func runOnce(ctx context.Context, rt *runtime.Runtime, req runtime.RunRequest, renderCfg runRenderConfig) error {
-	invokeCtx := ctx
-	runner, err := rt.Run(invokeCtx, req)
-	if err != nil {
-		return err
-	}
-	defer runner.Close()
-	return runRunner(runner, renderCfg)
 }
 
 func runRunner(runner runtime.Runner, renderCfg runRenderConfig) error {
@@ -113,9 +102,9 @@ func printEvent(ev *session.Event, state *renderState) {
 	}
 	if state != nil && eventIsPartial(ev) {
 		channel := eventChannel(ev)
-		chunk := ev.Message.Text
+		chunk := ev.Message.TextContent()
 		if channel == "reasoning" {
-			chunk = ev.Message.Reasoning
+			chunk = ev.Message.ReasoningText()
 			if !state.showReasoning {
 				return
 			}
@@ -170,7 +159,7 @@ func printEvent(ev *session.Event, state *renderState) {
 
 	msg := ev.Message
 	if msg.Role == model.RoleSystem {
-		text := strings.TrimSpace(msg.Text)
+		text := strings.TrimSpace(msg.TextContent())
 		if text == "" {
 			return
 		}
@@ -199,14 +188,15 @@ func printEvent(ev *session.Event, state *renderState) {
 		return
 	}
 	if msg.Role == model.RoleAssistant {
-		if state != nil && state.showReasoning && msg.Reasoning != "" && !state.seenReasoningPartial {
+		reasoning := strings.TrimSpace(msg.ReasoningText())
+		if state != nil && state.showReasoning && reasoning != "" && !state.seenReasoningPartial {
 			if state.ui != nil {
-				fmt.Fprintf(state.out, "%s%s\n", state.ui.ReasoningPrefix(), strings.TrimSpace(msg.Reasoning))
+				fmt.Fprintf(state.out, "%s%s\n", state.ui.ReasoningPrefix(), reasoning)
 			} else {
-				fmt.Fprintf(state.out, "│ %s\n", strings.TrimSpace(msg.Reasoning))
+				fmt.Fprintf(state.out, "│ %s\n", reasoning)
 			}
 		}
-		text := strings.TrimSpace(msg.Text)
+		text := strings.TrimSpace(msg.TextContent())
 		if state != nil && state.seenAnswerPartial {
 			if text == "" {
 				text = strings.TrimSpace(state.answerPartialBuffer.String())
@@ -226,8 +216,8 @@ func printEvent(ev *session.Event, state *renderState) {
 			state.answerPartialBuffer.Reset()
 		}
 	}
-	if len(msg.ToolCalls) > 0 {
-		for i, call := range msg.ToolCalls {
+	if calls := msg.ToolCalls(); len(calls) > 0 {
+		for i, call := range calls {
 			parsedArgs := parseToolArgsForDisplay(call.Args)
 			if state != nil && call.ID != "" {
 				if state.pendingToolCalls == nil {
@@ -238,7 +228,7 @@ func printEvent(ev *session.Event, state *renderState) {
 				}
 			}
 			displayName := displayToolCallName(call.Name, parsedArgs)
-			summary := summarizeToolArgs(call.Name, parsedArgs)
+			summary := formatToolCallSummary(state.ui, call.Name, parsedArgs, "")
 			if state.ui != nil {
 				fmt.Fprintf(state.out, "%s%s %s\n", state.ui.ToolCallPrefix(i+1), displayName, summary)
 			} else {
@@ -246,23 +236,23 @@ func printEvent(ev *session.Event, state *renderState) {
 			}
 		}
 	}
-	if msg.ToolResponse != nil {
+	if resp := msg.ToolResponse(); resp != nil {
 		var callArgs map[string]any
-		if state != nil && msg.ToolResponse.ID != "" && state.pendingToolCalls != nil {
-			if snapshot, ok := state.pendingToolCalls[msg.ToolResponse.ID]; ok {
+		if state != nil && resp.ID != "" && state.pendingToolCalls != nil {
+			if snapshot, ok := state.pendingToolCalls[resp.ID]; ok {
 				callArgs = snapshot.Args
-				delete(state.pendingToolCalls, msg.ToolResponse.ID)
+				delete(state.pendingToolCalls, resp.ID)
 			}
 		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).
-		if isReadOnlyFSTool(msg.ToolResponse.Name) && !hasToolError(msg.ToolResponse.Result) {
+		if isReadOnlyFSTool(resp.Name) && !hasToolError(resp.Result) {
 			return
 		}
-		summary := summarizeToolResponseWithCall(msg.ToolResponse.Name, msg.ToolResponse.Result, callArgs)
+		summary := summarizeToolResponseWithCall(resp.Name, resp.Result, callArgs)
 		if strings.TrimSpace(summary) == "" {
 			return
 		}
-		displayName := displayToolResponseName(msg.ToolResponse.Name, callArgs, msg.ToolResponse.Result)
+		displayName := displayToolResponseName(resp.Name, callArgs, resp.Result)
 		if state.ui != nil {
 			fmt.Fprint(state.out, formatToolResultLine(state.ui.ToolResultPrefix(), displayName, summary))
 		} else {
@@ -273,7 +263,7 @@ func printEvent(ev *session.Event, state *renderState) {
 	if msg.Role == model.RoleAssistant {
 		return
 	}
-	text := strings.TrimSpace(msg.Text)
+	text := strings.TrimSpace(msg.TextContent())
 	if text != "" {
 		switch msg.Role {
 		case model.RoleSystem:
@@ -401,9 +391,10 @@ func visibleUserText(msg model.Message) string {
 }
 
 func userMessageDisplayText(msg model.Message) string {
-	segments := make([]string, 0, max(1, len(msg.ContentParts)))
-	if len(msg.ContentParts) > 0 {
-		for _, part := range msg.ContentParts {
+	contentParts := model.ContentPartsFromParts(msg.Parts)
+	segments := make([]string, 0, max(1, len(contentParts)))
+	if len(contentParts) > 0 {
+		for _, part := range contentParts {
 			switch part.Type {
 			case model.ContentPartText:
 				text := strings.TrimSpace(part.Text)
@@ -422,16 +413,19 @@ func userMessageDisplayText(msg model.Message) string {
 			return strings.Join(segments, " ")
 		}
 	}
-	text := strings.TrimSpace(msg.Text)
+	text := strings.TrimSpace(msg.TextContent())
 	if text != "" {
 		return text
 	}
-	return userTextFromContentParts(msg.ContentParts)
+	return userTextFromContentParts(contentParts)
 }
 
 func summarizeToolArgs(toolName string, args map[string]any) string {
 	if len(args) == 0 {
 		return "{}"
+	}
+	if summary := summarizeACPToolArgs(toolName, args); summary != "" {
+		return summary
 	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
 	case "BASH":
@@ -490,9 +484,9 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 			return displayFileName(path)
 		}
 	case "SPAWN":
-		task := strings.TrimSpace(asString(args["task"]))
-		if task != "" {
-			return strings.Join(strings.Fields(task), " ")
+		prompt := strings.TrimSpace(asString(args["prompt"]))
+		if prompt != "" {
+			return strings.Join(strings.Fields(prompt), " ")
 		}
 	}
 	keys := make([]string, 0, len(args))
@@ -506,6 +500,28 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 		parts = append(parts, fmt.Sprintf("%s=%s", key, truncateInline(value, 72)))
 	}
 	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func formatToolCallSummary(ui *ui, toolName string, args map[string]any, defaultSpawnAgent string) string {
+	summary := summarizeToolArgs(toolName, args)
+	if !strings.EqualFold(strings.TrimSpace(toolName), "SPAWN") {
+		return summary
+	}
+	agentName := strings.TrimSpace(asString(args["agent"]))
+	if agentName == "" {
+		agentName = strings.TrimSpace(defaultSpawnAgent)
+	}
+	if agentName == "" {
+		return summary
+	}
+	agentTag := "[" + agentName + "]"
+	if ui != nil && ui.cmdColor != nil {
+		agentTag = ui.cmdColor.Sprint(agentTag)
+	}
+	if strings.TrimSpace(summary) == "" {
+		return agentTag
+	}
+	return agentTag + " " + summary
 }
 
 func displayToolCallName(toolName string, callArgs map[string]any) string {
@@ -569,6 +585,9 @@ func summarizeCompactToolResponseForTUI(toolName string, result map[string]any) 
 func summarizeToolResponseWithCall(toolName string, result map[string]any, callArgs map[string]any) string {
 	if len(result) == 0 {
 		return "{}"
+	}
+	if summary := summarizeACPToolResult(result); summary != "" {
+		return summary
 	}
 	switch strings.ToUpper(strings.TrimSpace(toolName)) {
 	case "BASH":
@@ -673,6 +692,67 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 	return fmt.Sprintf("{keys=%s}", strings.Join(keys, ","))
 }
 
+func summarizeACPToolArgs(toolName string, args map[string]any) string {
+	title := strings.TrimSpace(asString(args["_acp_title"]))
+	if title != "" {
+		fields := strings.Fields(title)
+		if len(fields) > 1 {
+			return strings.TrimSpace(strings.TrimPrefix(title, fields[0]))
+		}
+	}
+	parsed, _ := args["parsed_cmd"].(map[string]any)
+	parsedType := strings.ToLower(strings.TrimSpace(asString(parsed["type"])))
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "LIST":
+		if path := firstNonEmptyText(asString(parsed["path"]), asString(args["path"]), asString(args["cwd"])); path != "" {
+			return displayFileName(path)
+		}
+		if parsedType == "list_files" {
+			return "."
+		}
+	case "READ", "WRITE", "PATCH":
+		if path := firstNonEmptyText(asString(parsed["path"]), asString(args["path"]), asString(args["target"])); path != "" {
+			return displayFileName(path)
+		}
+	case "SEARCH":
+		path := firstNonEmptyText(asString(parsed["path"]), asString(args["path"]))
+		query := firstNonEmptyText(asString(parsed["query"]), asString(args["query"]), asString(args["pattern"]))
+		if path != "" || query != "" {
+			return fmt.Sprintf("%s {query=%s}", displayFileName(path), truncateInline(query, 60))
+		}
+	case "GLOB":
+		if pattern := firstNonEmptyText(asString(parsed["pattern"]), asString(args["pattern"])); pattern != "" {
+			return fmt.Sprintf("{pattern=%s}", pattern)
+		}
+	}
+	if command := strings.TrimSpace(asString(args["command"])); command != "" {
+		return truncateInline(command, 120)
+	}
+	if raw := args["_acp_raw_input"]; raw != nil {
+		return truncateInline(fmt.Sprint(raw), 120)
+	}
+	return ""
+}
+
+func summarizeACPToolResult(result map[string]any) string {
+	if len(result) == 0 {
+		return ""
+	}
+	if formatted := strings.TrimSpace(asString(result["formatted_output"])); formatted != "" {
+		return truncateInline(formatted, 160)
+	}
+	if aggregated := strings.TrimSpace(asString(result["aggregated_output"])); aggregated != "" {
+		return truncateInline(aggregated, 160)
+	}
+	if stdout := strings.TrimSpace(asString(result["stdout"])); stdout != "" {
+		return truncateInline(stdout, 160)
+	}
+	if stderr := strings.TrimSpace(asString(result["stderr"])); stderr != "" {
+		return truncateInline(stderr, 160)
+	}
+	return ""
+}
+
 func formatToolResultLine(prefix string, toolName string, summary string) string {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
@@ -691,6 +771,15 @@ func formatToolResultLine(prefix string, toolName string, summary string) string
 		return fmt.Sprintf("%s %s\n", prefix, toolName)
 	}
 	return fmt.Sprintf("%s %s %s\n", prefix, toolName, summary)
+}
+
+func firstNonEmptyText(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func mutationResultHasNoChanges(result map[string]any) bool {
@@ -747,7 +836,7 @@ func compactTaskPreview(text string) string {
 	return tailLines(strings.Join(preview, "\n"), 4)
 }
 
-func summarizeTaskAction(action string, callArgs map[string]any, result map[string]any) string {
+func summarizeTaskAction(action string, _ map[string]any, result map[string]any) string {
 	messageLine := firstTaskMessageLine(toolStatusMessage(result))
 	messagePreview := compactTaskPreview(userFacingTaskMessage(toolStatusMessage(result)))
 	output := compactTaskPreview(toolResultValue(result))
@@ -861,7 +950,7 @@ func userFacingTaskMessage(text string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-func displayToolResponseName(toolName string, callArgs map[string]any, result map[string]any) string {
+func displayToolResponseName(toolName string, callArgs map[string]any, _ map[string]any) string {
 	displayName := strings.TrimSpace(toolName)
 	if strings.EqualFold(displayName, "TASK") {
 		return taskActionResultDisplayName(strings.TrimSpace(asString(callArgs["action"])))
@@ -987,28 +1076,6 @@ func friendlyWaitLabel(waitMS int) string {
 	}
 }
 
-func friendlyYieldLabel(waitMS int) string {
-	if waited := friendlyWaitLabel(waitMS); waited != "" {
-		return "yielded after " + waited
-	}
-	return ""
-}
-
-func effectiveBashYieldMS(callArgs map[string]any) int {
-	if len(callArgs) == 0 {
-		return defaultFriendlyWaitMS
-	}
-	if rawWaitMS, ok := callArgs["yield_time_ms"]; ok && rawWaitMS != nil {
-		if waitMS, ok := asInt(rawWaitMS); ok && waitMS >= 0 {
-			if waitMS == 0 {
-				return defaultFriendlyWaitMS
-			}
-			return waitMS
-		}
-	}
-	return defaultFriendlyWaitMS
-}
-
 func effectiveTaskWaitMS(action string, args map[string]any) int {
 	if !strings.EqualFold(strings.TrimSpace(action), "wait") {
 		return -1
@@ -1030,14 +1097,6 @@ func effectiveTaskWaitMS(action string, args map[string]any) int {
 	return waitMS
 }
 
-func effectiveTaskWaitMSForResult(action string, callArgs map[string]any) (int, bool) {
-	waitMS := effectiveTaskWaitMS(action, callArgs)
-	if waitMS < 0 {
-		return 0, false
-	}
-	return waitMS, true
-}
-
 func sanitizeSpawnPreviewLine(line string, inFence *bool) string {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
@@ -1055,28 +1114,12 @@ func sanitizeSpawnPreviewLine(line string, inFence *bool) string {
 	return trimmed
 }
 
-func summarizeWebLikeTarget(args map[string]any) string {
-	for _, key := range []string{"url", "uri", "endpoint"} {
-		if value := strings.TrimSpace(asString(args[key])); value != "" {
-			return fmt.Sprintf("{url=%s}", truncateInline(value, 120))
-		}
-	}
-	for _, key := range []string{"query", "q"} {
-		if value := strings.TrimSpace(asString(args[key])); value != "" {
-			return fmt.Sprintf("{query=%s}", truncateInline(value, 120))
-		}
-	}
-	return ""
-}
-
 func cloneAnyMap(input map[string]any) map[string]any {
 	if len(input) == 0 {
 		return nil
 	}
 	out := make(map[string]any, len(input))
-	for key, value := range input {
-		out[key] = value
-	}
+	maps.Copy(out, input)
 	return out
 }
 
@@ -1145,29 +1188,6 @@ func truncateInline(input string, limit int) string {
 	return string(rs[:limit-3]) + "..."
 }
 
-func truncateInlineMiddle(input string, limit int) string {
-	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
-	rs := []rune(text)
-	if limit <= 0 || len(rs) <= limit {
-		return text
-	}
-	if limit <= 3 {
-		return string(rs[:limit])
-	}
-	head := (limit - 3) * 2 / 3
-	tail := (limit - 3) - head
-	if head <= 0 {
-		head = 1
-	}
-	if tail <= 0 {
-		tail = 1
-	}
-	if head+tail >= len(rs) {
-		return text
-	}
-	return string(rs[:head]) + "..." + string(rs[len(rs)-tail:])
-}
-
 func displayFileName(path string) string {
 	text := strings.TrimSpace(path)
 	if text == "" {
@@ -1214,9 +1234,9 @@ func summarizeBashToolError(result map[string]any) string {
 	lower := strings.ToLower(errText)
 	if idx := strings.Index(lower, strings.ToLower(failedPrefix)); idx >= 0 {
 		trimmed := errText[idx+len(failedPrefix):]
-		if closeIdx := strings.Index(trimmed, ")"); closeIdx >= 0 {
-			route := strings.TrimSpace(trimmed[:closeIdx])
-			rest := strings.TrimSpace(strings.TrimPrefix(trimmed[closeIdx+1:], ":"))
+		if routePart, afterClose, cutOK := strings.Cut(trimmed, ")"); cutOK {
+			route := strings.TrimSpace(routePart)
+			rest := strings.TrimSpace(strings.TrimPrefix(afterClose, ":"))
 			rest = strings.TrimPrefix(rest, "tool: ")
 			if route != "" && rest != "" {
 				errText = route + " route failed: " + rest

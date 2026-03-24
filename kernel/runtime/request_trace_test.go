@@ -51,11 +51,56 @@ type traceStreamingLLM struct {
 
 func (l *traceStreamingLLM) Name() string { return l.name }
 
-func (l *traceStreamingLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (l *traceStreamingLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	_ = ctx
-	return func(yield func(*model.Response, error) bool) {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		for _, item := range l.run(req) {
-			if !yield(item.resp, item.err) {
+			if item.err != nil {
+				if !yield(nil, item.err) {
+					return
+				}
+				continue
+			}
+			if item.resp != nil && !item.resp.TurnComplete {
+				// Emit non-final responses as PartDelta events
+				text := item.resp.Message.TextContent()
+				if text != "" {
+					evt := &model.StreamEvent{
+						Type: model.StreamEventPartDelta,
+						PartDelta: &model.PartDelta{
+							Kind:      model.PartKindText,
+							TextDelta: text,
+						},
+					}
+					if !yield(evt, nil) {
+						return
+					}
+					continue
+				}
+				reasoning := item.resp.Message.ReasoningText()
+				if reasoning != "" {
+					evt := &model.StreamEvent{
+						Type: model.StreamEventPartDelta,
+						PartDelta: &model.PartDelta{
+							Kind:      model.PartKindReasoning,
+							TextDelta: reasoning,
+						},
+					}
+					if !yield(evt, nil) {
+						return
+					}
+					continue
+				}
+			}
+			if item.resp != nil {
+				if item.resp.Model == "" {
+					item.resp.Model = l.name
+				}
+				if item.resp.Provider == "" {
+					item.resp.Provider = "test-provider"
+				}
+			}
+			if !yield(model.StreamEventFromResponse(item.resp), item.err) {
 				return
 			}
 		}
@@ -134,7 +179,7 @@ func (r *traceSpawnRunner) RunSubagent(ctx context.Context, req agent.SubagentRu
 		_ = r.runtime.store.AppendEvent(context.Background(), child, &session.Event{
 			ID:      "child-assistant",
 			Time:    time.Now(),
-			Message: model.Message{Role: model.RoleAssistant, Text: "child final output"},
+			Message: model.NewTextMessage(model.RoleAssistant, "child final output"),
 		})
 		_ = r.runtime.store.AppendEvent(context.Background(), child, lifecycleEvent(child, RunLifecycleStatusCompleted, "run", nil))
 	}()
@@ -146,6 +191,30 @@ func (r *traceSpawnRunner) RunSubagent(ctx context.Context, req agent.SubagentRu
 		Running:      true,
 		Yielded:      true,
 		Timeout:      time.Minute,
+	}, nil
+}
+
+func (r *traceSpawnRunner) InspectSubagent(ctx context.Context, sessionID string) (agent.SubagentRunResult, error) {
+	return r.runtimeSubagentInspect(ctx, sessionID)
+}
+
+func (r *traceSpawnRunner) runtimeSubagentInspect(ctx context.Context, sessionID string) (agent.SubagentRunResult, error) {
+	events, err := r.runtime.SessionEvents(ctx, SessionEventsRequest{
+		AppName:          r.appName,
+		UserID:           r.userID,
+		SessionID:        sessionID,
+		IncludeLifecycle: false,
+	})
+	if err != nil {
+		return agent.SubagentRunResult{}, err
+	}
+	return agent.SubagentRunResult{
+		SessionID:   sessionID,
+		Agent:       "self",
+		State:       string(RunLifecycleStatusCompleted),
+		Running:     false,
+		Assistant:   FinalAssistantText(events),
+		LogSnapshot: subagentPreviewFromEvents(events),
 	}, nil
 }
 
@@ -170,19 +239,16 @@ func TestRuntimeRequestTraceMatchesPersistedToolContext(t *testing.T) {
 			case 1:
 				args, _ := json.Marshal(map[string]any{"text": "payload"})
 				return &model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-echo",
-							Name: "TRACE_ECHO",
-							Args: string(args),
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-echo",
+						Name: "TRACE_ECHO",
+						Args: string(args),
+					}}, ""),
 					TurnComplete: true,
 				}, nil
 			case 2:
 				return &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "done"},
+					Message:      model.NewTextMessage(model.RoleAssistant, "done"),
 					TurnComplete: true,
 				}, nil
 			default:
@@ -245,36 +311,31 @@ func TestRuntimeRequestTraceExcludesPartialEventsFromNextRequest(t *testing.T) {
 				args, _ := json.Marshal(map[string]any{"text": "payload"})
 				return []traceSeqResult{
 					{resp: &model.Response{
-						Message:      model.Message{Role: model.RoleAssistant, Reasoning: "thinking"},
-						Partial:      true,
+						Message:      model.NewReasoningMessage(model.RoleAssistant, "thinking", model.ReasoningVisibilityVisible),
 						TurnComplete: false,
 					}},
 					{resp: &model.Response{
-						Message:      model.Message{Role: model.RoleAssistant, Text: "partial answer"},
-						Partial:      true,
+						Message:      model.NewTextMessage(model.RoleAssistant, "partial answer"),
 						TurnComplete: false,
 					}},
 					{resp: &model.Response{
-						Message: model.Message{
-							Role: model.RoleAssistant,
-							ToolCalls: []model.ToolCall{{
-								ID:   "call-echo-stream",
-								Name: "TRACE_ECHO",
-								Args: string(args),
-							}},
-						},
+						Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+							ID:   "call-echo-stream",
+							Name: "TRACE_ECHO",
+							Args: string(args),
+						}}, ""),
 						TurnComplete: true,
 					}},
 				}
 			case 2:
 				for _, msg := range req.Messages {
-					if strings.Contains(msg.TextContent(), "partial answer") || strings.Contains(msg.Reasoning, "thinking") {
+					if strings.Contains(msg.TextContent(), "partial answer") || strings.Contains(msg.ReasoningText(), "thinking") {
 						t.Fatalf("unexpected partial content leaked into second request: %+v", req.Messages)
 					}
 				}
 				return []traceSeqResult{{
 					resp: &model.Response{
-						Message:      model.Message{Role: model.RoleAssistant, Text: "done"},
+						Message:      model.NewTextMessage(model.RoleAssistant, "done"),
 						TurnComplete: true,
 					},
 				}}
@@ -344,14 +405,11 @@ func TestRuntimeRequestTraceBashYieldUsesLatestPersistedTaskResult(t *testing.T)
 					"yield_time_ms": 10,
 				})
 				return &model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-bash",
-							Name: "BASH",
-							Args: string(args),
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-bash",
+						Name: "BASH",
+						Args: string(args),
+					}}, ""),
 					TurnComplete: true,
 				}, nil
 			case 2:
@@ -359,7 +417,7 @@ func TestRuntimeRequestTraceBashYieldUsesLatestPersistedTaskResult(t *testing.T)
 					t.Fatalf("expected yielded BASH task_id in second request context, got %+v", req.Messages)
 				}
 				return &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "bash complete"},
+					Message:      model.NewTextMessage(model.RoleAssistant, "bash complete"),
 					TurnComplete: true,
 				}, nil
 			default:
@@ -425,18 +483,15 @@ func TestRuntimeRequestTraceSpawnYieldUsesLatestPersistedTaskResult(t *testing.T
 			switch calls {
 			case 1:
 				args, _ := json.Marshal(map[string]any{
-					"task":          "child task",
+					"prompt":        "child task",
 					"yield_seconds": 1,
 				})
 				return &model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-spawn",
-							Name: tool.SpawnToolName,
-							Args: string(args),
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-spawn",
+						Name: tool.SpawnToolName,
+						Args: string(args),
+					}}, ""),
 					TurnComplete: true,
 				}, nil
 			case 2:
@@ -444,7 +499,7 @@ func TestRuntimeRequestTraceSpawnYieldUsesLatestPersistedTaskResult(t *testing.T
 					t.Fatalf("expected yielded SPAWN task_id in second request context, got %+v", req.Messages)
 				}
 				return &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "spawn complete"},
+					Message:      model.NewTextMessage(model.RoleAssistant, "spawn complete"),
 					TurnComplete: true,
 				}, nil
 			default:
@@ -512,7 +567,7 @@ func TestRuntimeRequestTraceOverlayDoesNotPersistMainHistory(t *testing.T) {
 				t.Fatalf("expected overlay request to end with side question, got %+v", req.Messages)
 			}
 			return &model.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Text: "overlay answer"},
+				Message:      model.NewTextMessage(model.RoleAssistant, "overlay answer"),
 				TurnComplete: true,
 			}, nil
 		},
@@ -607,10 +662,10 @@ func readTraceRecords(t *testing.T, store *filestore.Store, sess *session.Sessio
 
 func indexOfToolResponse(events []*session.Event, name string) int {
 	for i, ev := range events {
-		if ev == nil || ev.Message.ToolResponse == nil {
+		if ev == nil || ev.Message.ToolResponse() == nil {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(ev.Message.ToolResponse.Name), strings.TrimSpace(name)) {
+		if strings.EqualFold(strings.TrimSpace(ev.Message.ToolResponse().Name), strings.TrimSpace(name)) {
 			return i
 		}
 	}
@@ -620,8 +675,8 @@ func indexOfToolResponse(events []*session.Event, name string) int {
 func lastToolResult(messages []model.Message) map[string]any {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		if msg.ToolResponse != nil {
-			return msg.ToolResponse.Result
+		if msg.ToolResponse() != nil {
+			return msg.ToolResponse().Result
 		}
 	}
 	return nil
@@ -630,13 +685,13 @@ func lastToolResult(messages []model.Message) map[string]any {
 func resultStringFromMessages(messages []model.Message, toolName string, key string) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
-		if msg.ToolResponse == nil {
+		if msg.ToolResponse() == nil {
 			continue
 		}
-		if !strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), strings.TrimSpace(toolName)) {
+		if !strings.EqualFold(strings.TrimSpace(msg.ToolResponse().Name), strings.TrimSpace(toolName)) {
 			continue
 		}
-		return strings.TrimSpace(fmt.Sprint(msg.ToolResponse.Result[key]))
+		return strings.TrimSpace(fmt.Sprint(msg.ToolResponse().Result[key]))
 	}
 	return ""
 }
@@ -644,7 +699,7 @@ func resultStringFromMessages(messages []model.Message, toolName string, key str
 func assertNoEmptyUserMessages(t *testing.T, messages []model.Message) {
 	t.Helper()
 	for _, msg := range messages {
-		if msg.Role == model.RoleUser && strings.TrimSpace(msg.TextContent()) == "" && len(msg.ContentParts) == 0 {
+		if msg.Role == model.RoleUser && strings.TrimSpace(msg.TextContent()) == "" && len(msg.Parts) == 0 {
 			t.Fatalf("unexpected empty user message in outbound request: %+v", messages)
 		}
 	}
@@ -663,27 +718,27 @@ func diffTraceMessages(expected, got []model.Message) string {
 		if left.TextContent() != right.TextContent() {
 			return fmt.Sprintf("message[%d] text mismatch expected=%q got=%q", i, left.TextContent(), right.TextContent())
 		}
-		if left.Reasoning != right.Reasoning {
-			return fmt.Sprintf("message[%d] reasoning mismatch expected=%q got=%q", i, left.Reasoning, right.Reasoning)
+		if left.ReasoningText() != right.ReasoningText() {
+			return fmt.Sprintf("message[%d] reasoning mismatch expected=%q got=%q", i, left.ReasoningText(), right.ReasoningText())
 		}
-		if len(left.ToolCalls) != len(right.ToolCalls) {
-			return fmt.Sprintf("message[%d] tool call count mismatch expected=%d got=%d", i, len(left.ToolCalls), len(right.ToolCalls))
+		if len(left.ToolCalls()) != len(right.ToolCalls()) {
+			return fmt.Sprintf("message[%d] tool call count mismatch expected=%d got=%d", i, len(left.ToolCalls()), len(right.ToolCalls()))
 		}
-		for j := range left.ToolCalls {
-			if left.ToolCalls[j] != right.ToolCalls[j] {
-				return fmt.Sprintf("message[%d] tool call[%d] mismatch expected=%+v got=%+v", i, j, left.ToolCalls[j], right.ToolCalls[j])
+		for j := range left.ToolCalls() {
+			if left.ToolCalls()[j] != right.ToolCalls()[j] {
+				return fmt.Sprintf("message[%d] tool call[%d] mismatch expected=%+v got=%+v", i, j, left.ToolCalls()[j], right.ToolCalls()[j])
 			}
 		}
 		switch {
-		case left.ToolResponse == nil && right.ToolResponse == nil:
-		case left.ToolResponse == nil || right.ToolResponse == nil:
+		case left.ToolResponse() == nil && right.ToolResponse() == nil:
+		case left.ToolResponse() == nil || right.ToolResponse() == nil:
 			return fmt.Sprintf("message[%d] tool response presence mismatch", i)
 		default:
-			if left.ToolResponse.ID != right.ToolResponse.ID || left.ToolResponse.Name != right.ToolResponse.Name {
-				return fmt.Sprintf("message[%d] tool response id/name mismatch expected=%+v got=%+v", i, left.ToolResponse, right.ToolResponse)
+			if left.ToolResponse().ID != right.ToolResponse().ID || left.ToolResponse().Name != right.ToolResponse().Name {
+				return fmt.Sprintf("message[%d] tool response id/name mismatch expected=%+v got=%+v", i, left.ToolResponse(), right.ToolResponse())
 			}
-			if normalizeJSONString(left.ToolResponse.Result) != normalizeJSONString(right.ToolResponse.Result) {
-				return fmt.Sprintf("message[%d] tool response result mismatch expected=%s got=%s", i, normalizeJSONString(left.ToolResponse.Result), normalizeJSONString(right.ToolResponse.Result))
+			if normalizeJSONString(left.ToolResponse().Result) != normalizeJSONString(right.ToolResponse().Result) {
+				return fmt.Sprintf("message[%d] tool response result mismatch expected=%s got=%s", i, normalizeJSONString(left.ToolResponse().Result), normalizeJSONString(right.ToolResponse().Result))
 			}
 		}
 	}

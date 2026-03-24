@@ -10,6 +10,7 @@ const (
 	metaVisibilityKey     = "visibility"
 	metaVisibilityUIOnly  = "ui_only"
 	metaVisibilityOverlay = "overlay"
+	metaVisibilityMirror  = "mirror"
 
 	metaNoticeLevelKey = "notice_level"
 	metaNoticeTextKey  = "notice_text"
@@ -76,6 +77,29 @@ func IsOverlay(ev *Event) bool {
 	return strings.TrimSpace(value) == metaVisibilityOverlay
 }
 
+// MarkMirror annotates an event as durable transcript-only state. Mirror events
+// are persisted and replayed in the UI, but excluded from model context and
+// future invocation state.
+func MarkMirror(ev *Event) *Event {
+	if ev == nil {
+		return nil
+	}
+	if ev.Meta == nil {
+		ev.Meta = map[string]any{}
+	}
+	ev.Meta[metaVisibilityKey] = metaVisibilityMirror
+	return SetEventType(ev, EventTypeOf(ev))
+}
+
+// IsMirror reports whether an event is transcript-only durable UI state.
+func IsMirror(ev *Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	value, _ := ev.Meta[metaVisibilityKey].(string)
+	return strings.TrimSpace(value) == metaVisibilityMirror
+}
+
 // MarkNotice annotates one event as a transient user-visible notice. Notices
 // are inherently UI-only and do not need a model message role.
 func MarkNotice(ev *Event, level string, text string) *Event {
@@ -92,8 +116,7 @@ func MarkNotice(ev *Event, level string, text string) *Event {
 	return SetEventType(MarkUIOnly(ev), EventTypeOf(ev))
 }
 
-// EventNotice returns the notice carried by one event, if any. It also
-// recognizes legacy RoleSystem warn:/note: messages for backward compatibility.
+// EventNotice returns the notice carried by one event, if any.
 func EventNotice(ev *Event) (Notice, bool) {
 	if ev == nil {
 		return Notice{}, false
@@ -104,12 +127,12 @@ func EventNotice(ev *Event) (Notice, bool) {
 	return MessageNotice(ev.Message)
 }
 
-// MessageNotice recognizes legacy RoleSystem warn:/note: runtime notices.
+// MessageNotice recognizes one system-message runtime notice.
 func MessageNotice(msg model.Message) (Notice, bool) {
 	if msg.Role != model.RoleSystem {
 		return Notice{}, false
 	}
-	text := strings.TrimSpace(msg.Text)
+	text := strings.TrimSpace(msg.TextContent())
 	if text == "" {
 		return Notice{}, false
 	}
@@ -154,7 +177,7 @@ func IsCanonicalHistoryEvent(ev *Event) bool {
 	if ev == nil {
 		return false
 	}
-	if IsTransient(ev) || IsLifecycle(ev) {
+	if IsTransient(ev) || IsLifecycle(ev) || IsMirror(ev) {
 		return false
 	}
 	return true
@@ -164,7 +187,7 @@ func IsCanonicalHistoryEvent(ev *Event) bool {
 // current agent invocation context. Overlay events are visible only to the
 // current run, while other transient events remain excluded.
 func IsInvocationVisibleEvent(ev *Event) bool {
-	if ev == nil || IsLifecycle(ev) || IsPartial(ev) || IsUIOnly(ev) || IsNotice(ev) {
+	if ev == nil || IsLifecycle(ev) || IsPartial(ev) || IsUIOnly(ev) || IsNotice(ev) || IsMirror(ev) {
 		return false
 	}
 	return true

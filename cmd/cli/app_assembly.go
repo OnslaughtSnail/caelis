@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appprompting "github.com/OnslaughtSnail/caelis/internal/app/prompting"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -26,6 +27,8 @@ type buildAgentInput struct {
 	BasePrompt                  string
 	FrozenPrompt                string
 	SkillDirs                   []string
+	DefaultAgent                string
+	AgentDescriptors            []appagents.Descriptor
 	StreamModel                 bool
 	ThinkingBudget              int
 	ReasoningEffort             string
@@ -359,10 +362,12 @@ func resolveModelAliasFromConfig(alias string, configStore *appConfigStore) stri
 }
 
 type sessionRuntimeResult struct {
-	Store     session.Store
-	TaskStore *taskfilestore.Store
-	Index     *sessionIndex
-	Runtime   *runtime.Runtime
+	Store      session.Store
+	TaskStore  *taskfilestore.Store
+	Index      *sessionIndex
+	Runtime    *runtime.Runtime
+	ACPStore   session.Store
+	ACPRuntime *runtime.Runtime
 }
 
 func setupSessionRuntime(storeDir, workspaceKey, appName, userID, sessionIndexFile string, compactWatermark float64, workspace workspaceContext) (*sessionRuntimeResult, error) {
@@ -395,10 +400,33 @@ func setupSessionRuntime(storeDir, workspaceKey, appName, userID, sessionIndexFi
 	if err != nil {
 		return nil, err
 	}
+	acpStoreDir := filepath.Join(eventStoreDir, ".acp_remote", "sessions")
+	acpStore, err := filestore.NewWithOptions(acpStoreDir, filestore.Options{
+		Layout: filestore.LayoutSessionOnly,
+	})
+	if err != nil {
+		return nil, err
+	}
+	acpTaskStore, err := taskfilestore.New(filepath.Join(eventStoreDir, ".acp_remote", "tasks"))
+	if err != nil {
+		return nil, err
+	}
+	acpRuntime, err := runtime.New(runtime.Config{
+		Store:     acpStore,
+		TaskStore: acpTaskStore,
+		Compaction: runtime.CompactionConfig{
+			WatermarkRatio: compactWatermark,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &sessionRuntimeResult{
-		Store:     store,
-		TaskStore: taskStoreImpl,
-		Index:     index,
-		Runtime:   rt,
+		Store:      store,
+		TaskStore:  taskStoreImpl,
+		Index:      index,
+		Runtime:    rt,
+		ACPStore:   acpStore,
+		ACPRuntime: acpRuntime,
 	}, nil
 }

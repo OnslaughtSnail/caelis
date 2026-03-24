@@ -20,9 +20,9 @@ import (
 
 func TestLoopDetector_NoLoop_DifferentTextEachTurn(t *testing.T) {
 	var d loopDetector
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		events := []*session.Event{
-			{Message: model.Message{Role: model.RoleAssistant, Text: fmt.Sprintf("response %d", i)}},
+			{Message: model.NewTextMessage(model.RoleAssistant, fmt.Sprintf("response %d", i))},
 		}
 		if d.observeTurn(events) {
 			t.Fatalf("false positive: detected loop on turn %d with different text", i)
@@ -33,9 +33,9 @@ func TestLoopDetector_NoLoop_DifferentTextEachTurn(t *testing.T) {
 func TestLoopDetector_DetectsIdenticalTextLoop(t *testing.T) {
 	var d loopDetector
 	events := []*session.Event{
-		{Message: model.Message{Role: model.RoleAssistant, Text: "I'm stuck"}},
+		{Message: model.NewTextMessage(model.RoleAssistant, "I'm stuck")},
 	}
-	for i := 0; i < loopDetectorThreshold; i++ {
+	for i := range loopDetectorThreshold {
 		detected := d.observeTurn(events)
 		if i < loopDetectorThreshold-1 && detected {
 			t.Fatalf("premature loop detection on turn %d", i)
@@ -50,21 +50,15 @@ func TestLoopDetector_DetectsIdenticalToolCallLoop(t *testing.T) {
 	var d loopDetector
 	args, _ := json.Marshal(map[string]any{"command": "ls -la"})
 	events := []*session.Event{
-		{Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "BASH", Args: string(args)},
-			},
-		}},
-		{Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID: "call_1", Name: "BASH",
-				Result: map[string]any{"output": "file1.txt\nfile2.txt"},
-			},
-		}},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_1", Name: "BASH", Args: string(args)},
+		}, "")},
+		{Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID: "call_1", Name: "BASH",
+			Result: map[string]any{"output": "file1.txt\nfile2.txt"},
+		})},
 	}
-	for i := 0; i < loopDetectorThreshold; i++ {
+	for i := range loopDetectorThreshold {
 		detected := d.observeTurn(events)
 		if i == loopDetectorThreshold-1 && !detected {
 			t.Fatal("expected loop detection for identical tool calls")
@@ -75,26 +69,20 @@ func TestLoopDetector_DetectsIdenticalToolCallLoop(t *testing.T) {
 func TestLoopDetector_NoFalsePositive_SameToolDifferentArgs(t *testing.T) {
 	// Reading the same file but different line ranges is legitimate
 	var d loopDetector
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		args, _ := json.Marshal(map[string]any{
 			"file":       "main.go",
 			"start_line": i * 50,
 			"end_line":   (i + 1) * 50,
 		})
 		events := []*session.Event{
-			{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: fmt.Sprintf("call_%d", i), Name: "READ", Args: string(args)},
-				},
-			}},
-			{Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID: fmt.Sprintf("call_%d", i), Name: "READ",
-					Result: map[string]any{"content": fmt.Sprintf("lines %d-%d", i*50, (i+1)*50)},
-				},
-			}},
+			{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: fmt.Sprintf("call_%d", i), Name: "READ", Args: string(args)},
+			}, "")},
+			{Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID: fmt.Sprintf("call_%d", i), Name: "READ",
+				Result: map[string]any{"content": fmt.Sprintf("lines %d-%d", i*50, (i+1)*50)},
+			})},
 		}
 		if d.observeTurn(events) {
 			t.Fatalf("false positive on turn %d: same tool but different args should not trigger", i)
@@ -106,21 +94,15 @@ func TestLoopDetector_NoFalsePositive_DifferentToolResults(t *testing.T) {
 	// Same tool call args but different results (e.g. polling a changing status)
 	var d loopDetector
 	args, _ := json.Marshal(map[string]any{"task_id": "t-123"})
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		events := []*session.Event{
-			{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call_1", Name: "TASK", Args: string(args)},
-				},
-			}},
-			{Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID: "call_1", Name: "TASK",
-					Result: map[string]any{"status": fmt.Sprintf("progress_%d", i)},
-				},
-			}},
+			{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call_1", Name: "TASK", Args: string(args)},
+			}, "")},
+			{Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID: "call_1", Name: "TASK",
+				Result: map[string]any{"status": fmt.Sprintf("progress_%d", i)},
+			})},
 		}
 		if d.observeTurn(events) {
 			t.Fatalf("false positive on turn %d: same args but different results should not trigger", i)
@@ -132,24 +114,18 @@ func TestLoopDetector_IgnoresStableTaskWaitPolling(t *testing.T) {
 	var d loopDetector
 	args, _ := json.Marshal(map[string]any{"action": "wait", "task_id": "t-123"})
 	events := []*session.Event{
-		{Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "TASK", Args: string(args)},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_1", Name: "TASK", Args: string(args)},
+		}, "")},
+		{Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID: "call_1", Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-123",
+				"message": "task yielded before completion; use TASK with task_id t-123",
 			},
-		}},
-		{Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID: "call_1", Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-123",
-					"message": "task yielded before completion; use TASK with task_id t-123",
-				},
-			},
-		}},
+		})},
 	}
-	for i := 0; i < loopDetectorThreshold+2; i++ {
+	for i := range loopDetectorThreshold + 2 {
 		if d.observeTurn(events) {
 			t.Fatalf("false positive on poll %d: running TASK wait should not trigger loop detection", i)
 		}
@@ -163,19 +139,13 @@ func TestLoopDetector_NoFalsePositive_SameToolDifferentFiles(t *testing.T) {
 	for i, file := range files {
 		args, _ := json.Marshal(map[string]any{"file": file})
 		events := []*session.Event{
-			{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: fmt.Sprintf("call_%d", i), Name: "READ", Args: string(args)},
-				},
-			}},
-			{Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID: fmt.Sprintf("call_%d", i), Name: "READ",
-					Result: map[string]any{"content": "package main"},
-				},
-			}},
+			{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: fmt.Sprintf("call_%d", i), Name: "READ", Args: string(args)},
+			}, "")},
+			{Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID: fmt.Sprintf("call_%d", i), Name: "READ",
+				Result: map[string]any{"content": "package main"},
+			})},
 		}
 		if d.observeTurn(events) {
 			t.Fatalf("false positive on turn %d: different file reads should not trigger", i)
@@ -186,14 +156,14 @@ func TestLoopDetector_NoFalsePositive_SameToolDifferentFiles(t *testing.T) {
 func TestLoopDetector_ResetOnDifferentTurn(t *testing.T) {
 	var d loopDetector
 	events := []*session.Event{
-		{Message: model.Message{Role: model.RoleAssistant, Text: "same"}},
+		{Message: model.NewTextMessage(model.RoleAssistant, "same")},
 	}
 	// Observe twice (almost at threshold)
 	d.observeTurn(events)
 	d.observeTurn(events)
 	// Different turn resets the counter
 	different := []*session.Event{
-		{Message: model.Message{Role: model.RoleAssistant, Text: "different"}},
+		{Message: model.NewTextMessage(model.RoleAssistant, "different")},
 	}
 	d.observeTurn(different)
 	// Now repeat the first events — should NOT trigger because counter was reset
@@ -206,7 +176,7 @@ func TestLoopDetector_ResetOnDifferentTurn(t *testing.T) {
 func TestLoopDetector_ResetMethod(t *testing.T) {
 	var d loopDetector
 	events := []*session.Event{
-		{Message: model.Message{Role: model.RoleAssistant, Text: "same"}},
+		{Message: model.NewTextMessage(model.RoleAssistant, "same")},
 	}
 	d.observeTurn(events)
 	d.observeTurn(events)
@@ -235,13 +205,9 @@ func TestLoopDetector_EmptyTurnIgnored(t *testing.T) {
 func TestLoopDetector_ConsidersReasoning(t *testing.T) {
 	var d loopDetector
 	// Same text but different reasoning is not a loop
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		events := []*session.Event{
-			{Message: model.Message{
-				Role:      model.RoleAssistant,
-				Text:      "same text",
-				Reasoning: fmt.Sprintf("reasoning %d", i),
-			}},
+			{Message: model.MessageFromAssistantParts("same text", fmt.Sprintf("reasoning %d", i), nil)},
 		}
 		if d.observeTurn(events) {
 			t.Fatalf("false positive on turn %d: different reasoning should produce different signature", i)
@@ -253,16 +219,10 @@ func TestTurnSignature_ArgOrderIndependent(t *testing.T) {
 	args1, _ := json.Marshal(map[string]any{"a": 1, "b": 2})
 	args2, _ := json.Marshal(map[string]any{"b": 2, "a": 1})
 	events1 := []*session.Event{
-		{Message: model.Message{
-			Role:      model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{Name: "TOOL", Args: string(args1)}},
-		}},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{Name: "TOOL", Args: string(args1)}}, "")},
 	}
 	events2 := []*session.Event{
-		{Message: model.Message{
-			Role:      model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{Name: "TOOL", Args: string(args2)}},
-		}},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{Name: "TOOL", Args: string(args2)}}, "")},
 	}
 	sig1 := turnSignature(events1)
 	sig2 := turnSignature(events2)
@@ -275,16 +235,10 @@ func TestTurnSignature_DifferentArgsProduceDifferentSig(t *testing.T) {
 	args1, _ := json.Marshal(map[string]any{"file": "a.go", "line": 1})
 	args2, _ := json.Marshal(map[string]any{"file": "a.go", "line": 100})
 	sig1 := turnSignature([]*session.Event{
-		{Message: model.Message{
-			Role:      model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{Name: "READ", Args: string(args1)}},
-		}},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{Name: "READ", Args: string(args1)}}, "")},
 	})
 	sig2 := turnSignature([]*session.Event{
-		{Message: model.Message{
-			Role:      model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{Name: "READ", Args: string(args2)}},
-		}},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{Name: "READ", Args: string(args2)}}, "")},
 	})
 	if sig1 == sig2 {
 		t.Fatal("expected different signatures for different tool args")
@@ -305,22 +259,16 @@ func (a *loopingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event
 		for {
 			a.turnCount++
 			// Assistant with tool call
-			if !yield(&session.Event{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call_1", Name: "BASH", Args: string(args)},
-				},
-			}}, nil) {
+			if !yield(&session.Event{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call_1", Name: "BASH", Args: string(args)},
+			}, "")}, nil) {
 				return
 			}
 			// Tool response
-			if !yield(&session.Event{Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID: "call_1", Name: "BASH",
-					Result: map[string]any{"output": "hello"},
-				},
-			}}, nil) {
+			if !yield(&session.Event{Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID: "call_1", Name: "BASH",
+				Result: map[string]any{"output": "hello"},
+			})}, nil) {
 				return
 			}
 		}
@@ -422,28 +370,20 @@ func (a *varyingToolArgsAgent) Run(ctx agent.InvocationContext) iter.Seq2[*sessi
 				"start_line": a.turn * 10,
 				"end_line":   a.turn*10 + 10,
 			})
-			if !yield(&session.Event{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: fmt.Sprintf("call_%d", a.turn), Name: "READ", Args: string(args)},
-				},
-			}}, nil) {
+			if !yield(&session.Event{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: fmt.Sprintf("call_%d", a.turn), Name: "READ", Args: string(args)},
+			}, "")}, nil) {
 				return
 			}
-			if !yield(&session.Event{Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID: fmt.Sprintf("call_%d", a.turn), Name: "READ",
-					Result: map[string]any{"content": fmt.Sprintf("lines %d-%d", a.turn*10, a.turn*10+10)},
-				},
-			}}, nil) {
+			if !yield(&session.Event{Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID: fmt.Sprintf("call_%d", a.turn), Name: "READ",
+				Result: map[string]any{"content": fmt.Sprintf("lines %d-%d", a.turn*10, a.turn*10+10)},
+			})}, nil) {
 				return
 			}
 		}
 		// Final response after reading
-		yield(&session.Event{Message: model.Message{
-			Role: model.RoleAssistant, Text: "done reading",
-		}}, nil)
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "done reading")}, nil)
 	}
 }
 

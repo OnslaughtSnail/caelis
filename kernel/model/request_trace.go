@@ -25,15 +25,16 @@ type RequestTraceContext struct {
 }
 
 type RequestTraceRecord struct {
-	SessionID string           `json:"session_id,omitempty"`
-	RunID     string           `json:"run_id,omitempty"`
-	Model     string           `json:"model,omitempty"`
-	Provider  string           `json:"provider,omitempty"`
-	Messages  []Message        `json:"messages,omitempty"`
-	Tools     []ToolDefinition `json:"tools,omitempty"`
-	Stream    bool             `json:"stream,omitempty"`
-	Reasoning ReasoningConfig  `json:"reasoning,omitempty"`
-	Time      time.Time        `json:"time"`
+	SessionID    string          `json:"session_id,omitempty"`
+	RunID        string          `json:"run_id,omitempty"`
+	Model        string          `json:"model,omitempty"`
+	Provider     string          `json:"provider,omitempty"`
+	Instructions []Part          `json:"instructions,omitempty"`
+	Messages     []Message       `json:"messages,omitempty"`
+	Tools        []ToolSpec      `json:"tools,omitempty"`
+	Output       *OutputSpec     `json:"output,omitempty"`
+	Reasoning    ReasoningConfig `json:"reasoning,omitempty"`
+	Time         time.Time       `json:"time"`
 }
 
 type requestTraceProvider interface {
@@ -111,9 +112,9 @@ func (l *requestTraceLLM) ContextWindowTokens() int {
 	return 0
 }
 
-func (l *requestTraceLLM) Generate(ctx context.Context, req *Request) iter.Seq2[*Response, error] {
+func (l *requestTraceLLM) Generate(ctx context.Context, req *Request) iter.Seq2[*StreamEvent, error] {
 	if l == nil || l.base == nil {
-		return func(yield func(*Response, error) bool) {
+		return func(yield func(*StreamEvent, error) bool) {
 			yield(nil, fmt.Errorf("model: request trace wrapper has nil base llm"))
 		}
 	}
@@ -129,19 +130,26 @@ func appendRequestTrace(ctx context.Context, llm LLM, req *Request) error {
 		return nil
 	}
 	record := RequestTraceRecord{
-		SessionID: strings.TrimSpace(info.SessionID),
-		RunID:     strings.TrimSpace(info.RunID),
-		Model:     strings.TrimSpace(llm.Name()),
-		Messages:  cloneMessagesForTrace(req),
-		Tools:     cloneToolsForTrace(req),
-		Time:      time.Now(),
+		SessionID:    strings.TrimSpace(info.SessionID),
+		RunID:        strings.TrimSpace(info.RunID),
+		Model:        strings.TrimSpace(llm.Name()),
+		Instructions: clonePartsForTrace(req),
+		Messages:     cloneMessagesForTrace(req),
+		Tools:        cloneToolsForTrace(req),
+		Time:         time.Now(),
 	}
 	if named, ok := llm.(requestTraceProvider); ok {
 		record.Provider = strings.TrimSpace(named.ProviderName())
 	}
 	if req != nil {
-		record.Stream = req.Stream
 		record.Reasoning = req.Reasoning
+		if req.Output != nil {
+			output := *req.Output
+			if len(output.JSONSchema) > 0 {
+				output.JSONSchema = cloneAnyMap(output.JSONSchema)
+			}
+			record.Output = &output
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(info.Path), 0o755); err != nil {
 		return err
@@ -163,60 +171,43 @@ func cloneMessagesForTrace(req *Request) []Message {
 	if req == nil || len(req.Messages) == 0 {
 		return nil
 	}
-	out := make([]Message, 0, len(req.Messages))
-	for _, msg := range req.Messages {
-		cp := msg
-		cp.ContentParts = append([]ContentPart(nil), msg.ContentParts...)
-		cp.ToolCalls = append([]ToolCall(nil), msg.ToolCalls...)
-		if msg.ToolResponse != nil {
-			resp := *msg.ToolResponse
-			if len(msg.ToolResponse.Result) > 0 {
-				resp.Result = cloneAnyMap(msg.ToolResponse.Result)
-			}
-			cp.ToolResponse = &resp
-		}
-		out = append(out, cp)
-	}
-	return out
+	return CloneMessages(req.Messages)
 }
 
-func cloneToolsForTrace(req *Request) []ToolDefinition {
+func clonePartsForTrace(req *Request) []Part {
+	if req == nil || len(req.Instructions) == 0 {
+		return nil
+	}
+	return CloneParts(req.Instructions)
+}
+
+func cloneToolsForTrace(req *Request) []ToolSpec {
 	if req == nil || len(req.Tools) == 0 {
 		return nil
 	}
-	out := make([]ToolDefinition, 0, len(req.Tools))
+	out := make([]ToolSpec, 0, len(req.Tools))
 	for _, def := range req.Tools {
 		cp := def
-		if len(def.Parameters) > 0 {
-			cp.Parameters = cloneAnyMap(def.Parameters)
+		if def.Function != nil {
+			fn := *def.Function
+			fn.Parameters = cloneAnyMap(def.Function.Parameters)
+			cp.Function = &fn
+		}
+		if def.ProviderDefined != nil {
+			pd := *def.ProviderDefined
+			pd.ProviderDetails = cloneRawMessageMap(def.ProviderDefined.ProviderDetails)
+			cp.ProviderDefined = &pd
+		}
+		if def.ProviderExecuted != nil {
+			pe := *def.ProviderExecuted
+			pe.ProviderDetails = cloneRawMessageMap(def.ProviderExecuted.ProviderDetails)
+			cp.ProviderExecuted = &pe
+		}
+		if def.MCP != nil {
+			mcp := *def.MCP
+			cp.MCP = &mcp
 		}
 		out = append(out, cp)
 	}
 	return out
-}
-
-func cloneAnyMap(input map[string]any) map[string]any {
-	if len(input) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(input))
-	for key, value := range input {
-		out[key] = cloneAnyValue(value)
-	}
-	return out
-}
-
-func cloneAnyValue(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		return cloneAnyMap(typed)
-	case []any:
-		out := make([]any, 0, len(typed))
-		for _, one := range typed {
-			out = append(out, cloneAnyValue(one))
-		}
-		return out
-	default:
-		return value
-	}
 }

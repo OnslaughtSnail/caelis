@@ -12,15 +12,15 @@ func TestFinalAssistantText_UsesTrailingAssistantRun(t *testing.T) {
 	events := []*session.Event{
 		{
 			Time:    time.Now(),
-			Message: model.Message{Role: model.RoleUser, Text: "start"},
+			Message: model.NewTextMessage(model.RoleUser, "start"),
 		},
 		{
 			Time:    time.Now(),
-			Message: model.Message{Role: model.RoleAssistant, Text: "first chunk"},
+			Message: model.NewTextMessage(model.RoleAssistant, "first chunk"),
 		},
 		{
 			Time:    time.Now(),
-			Message: model.Message{Role: model.RoleAssistant, Text: "second chunk"},
+			Message: model.NewTextMessage(model.RoleAssistant, "second chunk"),
 		},
 	}
 
@@ -32,7 +32,7 @@ func TestFinalAssistantText_UsesTrailingAssistantRun(t *testing.T) {
 func TestFinalAssistantText_IgnoresTransientAssistantEvents(t *testing.T) {
 	partial := &session.Event{
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "partial"},
+		Message: model.NewTextMessage(model.RoleAssistant, "partial"),
 		Meta: map[string]any{
 			"partial": true,
 			"channel": "answer",
@@ -40,7 +40,7 @@ func TestFinalAssistantText_IgnoresTransientAssistantEvents(t *testing.T) {
 	}
 	final := &session.Event{
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "final answer"},
+		Message: model.NewTextMessage(model.RoleAssistant, "final answer"),
 	}
 
 	if got := FinalAssistantText([]*session.Event{partial, final}); got != "final answer" {

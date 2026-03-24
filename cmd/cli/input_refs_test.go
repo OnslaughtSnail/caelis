@@ -59,8 +59,8 @@ func TestInputReferenceResolver_RewriteInput_FileMentionFuzzy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Notes) != 0 {
-		t.Fatalf("expected no unresolved notes, got %v", result.Notes)
+	if len(result.Notes) != 1 || !strings.Contains(result.Notes[0], "now use #") {
+		t.Fatalf("expected legacy @file migration note, got %v", result.Notes)
 	}
 	want := "请阅读文件: " + filepath.ToSlash(filepath.Join(workspace, "kernel", "tool", "schema.go"))
 	if !strings.Contains(result.Text, want) {
@@ -81,8 +81,8 @@ func TestInputReferenceResolver_RewriteInput_ImageMention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Notes) != 0 {
-		t.Fatalf("expected no unresolved notes, got %v", result.Notes)
+	if len(result.Notes) != 2 {
+		t.Fatalf("expected 2 legacy @file migration notes, got %v", result.Notes)
 	}
 	if len(result.ResolvedPaths) != 2 {
 		t.Fatalf("expected 2 resolved paths, got %d: %v", len(result.ResolvedPaths), result.ResolvedPaths)

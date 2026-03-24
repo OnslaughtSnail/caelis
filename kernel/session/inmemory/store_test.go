@@ -16,13 +16,13 @@ func TestStore_ListContextWindowEvents(t *testing.T) {
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "old",
-		Message: model.Message{Role: model.RoleUser, Text: "old"},
+		Message: model.NewTextMessage(model.RoleUser, "old"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "compact",
-		Message: model.Message{Role: model.RoleSystem, Text: "summary"},
+		Message: model.NewTextMessage(model.RoleSystem, "summary"),
 		Meta: map[string]any{
 			"kind": "compaction",
 		},
@@ -31,7 +31,7 @@ func TestStore_ListContextWindowEvents(t *testing.T) {
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "new",
-		Message: model.Message{Role: model.RoleUser, Text: "new"},
+		Message: model.NewTextMessage(model.RoleUser, "new"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -55,18 +55,18 @@ func TestStore_ListContextWindowEvents_UsesLatestCompactionWindow(t *testing.T) 
 		t.Fatal(err)
 	}
 	events := []*session.Event{
-		{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old user"}},
-		{ID: "old_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "old assistant"}},
-		{ID: "tail_user", Message: model.Message{Role: model.RoleUser, Text: "tail user"}},
-		{ID: "tail_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "tail assistant"}},
+		{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old user")},
+		{ID: "old_assistant", Message: model.NewTextMessage(model.RoleAssistant, "old assistant")},
+		{ID: "tail_user", Message: model.NewTextMessage(model.RoleUser, "tail user")},
+		{ID: "tail_assistant", Message: model.NewTextMessage(model.RoleAssistant, "tail assistant")},
 		{
 			ID:      "compact",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 			},
 		},
-		{ID: "new_user", Message: model.Message{Role: model.RoleUser, Text: "new user"}},
+		{ID: "new_user", Message: model.NewTextMessage(model.RoleUser, "new user")},
 	}
 	for _, ev := range events {
 		if err := store.AppendEvent(context.Background(), sess, ev); err != nil {

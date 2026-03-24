@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	appprompting "github.com/OnslaughtSnail/caelis/internal/app/prompting"
 )
 
-func TestBuildPromptAssembleSpec_UsesBuiltInIdentityAndAgentPolicies(t *testing.T) {
+func TestBuildPromptAssembleSpec_UsesStructuredSystemAndUserInstructions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	workspace := t.TempDir()
@@ -26,64 +28,107 @@ func TestBuildPromptAssembleSpec_UsesBuiltInIdentityAndAgentPolicies(t *testing.
 		AppName:                     "demo-app",
 		WorkspaceDir:                workspace,
 		BasePrompt:                  "session override",
+		DefaultAgent:                "self",
 		SkillDirs:                   []string{filepath.Join(t.TempDir(), "missing-skills-dir")},
 		EnableExperimentalLSPPrompt: true,
 	})
 	if err != nil {
 		t.Fatalf("buildPromptAssembleSpec failed: %v", err)
 	}
+
 	spec := result.Spec
-	if got := strings.TrimSpace(spec.IdentityPrompt); got != "# Agent Identity\n\nYou are demo-app." {
+	if got := strings.TrimSpace(spec.IdentityPrompt); !strings.Contains(got, "You are demo-app, a general-purpose assistant.") {
 		t.Fatalf("unexpected identity prompt: %q", got)
+	}
+	for _, required := range []string{
+		"parallelize independent tasks",
+		"Delegate specialized, high-complexity, or out-of-capability work",
+		"Integrate delegated results into one coherent, user-facing answer.",
+	} {
+		if !strings.Contains(spec.IdentityPrompt, required) {
+			t.Fatalf("identity prompt missing %q: %q", required, spec.IdentityPrompt)
+		}
 	}
 	if spec.IdentitySource != "cli:built-in-identity" {
 		t.Fatalf("unexpected identity source: %q", spec.IdentitySource)
 	}
 	if len(spec.Additional) != 4 {
-		t.Fatalf("expected active policies + session override + workspace context + experimental lsp, got %d", len(spec.Additional))
+		t.Fatalf("expected user instructions + agent delegation + environment context + experimental lsp, got %d", len(spec.Additional))
 	}
-	if !strings.Contains(spec.Additional[0].Content, "# Active Agent Policies") {
-		t.Fatalf("expected active policy heading, got %q", spec.Additional[0].Content)
+
+	userFragment := spec.Additional[0]
+	if userFragment.Kind != appprompting.PromptFragmentKindUser {
+		t.Fatalf("expected user fragment kind, got %+v", userFragment)
 	}
-	if !strings.Contains(spec.Additional[0].Content, "## Global User Policy") {
-		t.Fatalf("expected global policy section, got %q", spec.Additional[0].Content)
+	if userFragment.Source != "cli:user-custom-instructions" {
+		t.Fatalf("unexpected user fragment source: %+v", userFragment)
 	}
-	if !strings.Contains(spec.Additional[0].Content, "## Project Policy") {
-		t.Fatalf("expected project policy section, got %q", spec.Additional[0].Content)
+	for _, required := range []string{
+		"Session overrides workspace instructions, and workspace instructions override global instructions on conflict.",
+		"## Session Overrides",
+		"session override",
+		"## Workspace Instructions",
+		"# Workspace",
+		"## Global Instructions",
+		"# Global",
+	} {
+		if !strings.Contains(userFragment.Content, required) {
+			t.Fatalf("user instructions missing %q: %q", required, userFragment.Content)
+		}
 	}
-	if strings.Contains(spec.Additional[0].Content, "Source:") || strings.Contains(spec.Additional[0].Content, "Priority:") {
-		t.Fatalf("did not expect source/priority metadata, got %q", spec.Additional[0].Content)
+	if strings.Contains(userFragment.Content, "Source:") || strings.Contains(userFragment.Content, "Priority:") {
+		t.Fatalf("did not expect source/priority metadata, got %q", userFragment.Content)
 	}
-	if !strings.Contains(spec.Additional[0].Content, "Overrides conflicting global instructions.") {
-		t.Fatalf("expected workspace override note, got %q", spec.Additional[0].Content)
+
+	agentFragment := spec.Additional[1]
+	if agentFragment.Kind != appprompting.PromptFragmentKindSystem {
+		t.Fatalf("expected system fragment kind for delegation guidance, got %+v", agentFragment)
 	}
-	if spec.Additional[1].Content != "## Session Overrides\n\nsession override" {
-		t.Fatalf("unexpected session override fragment: %+v", spec.Additional[1])
+	for _, required := range []string{
+		"## Agent Delegation",
+		"- default_agent=self",
+		"- agent=self stability=stable",
+		"- Use SPAWN to start a delegated child session when the task benefits from delegation.",
+		"- Use TASK write with the SPAWN task_id to continue an existing child session.",
+	} {
+		if !strings.Contains(agentFragment.Content, required) {
+			t.Fatalf("delegation guidance missing %q: %q", required, agentFragment.Content)
+		}
 	}
-	if !strings.Contains(spec.Additional[2].Content, "<environment_context>") {
-		t.Fatalf("unexpected workspace context fragment: %+v", spec.Additional[2])
+
+	contextFragment := spec.Additional[2]
+	if contextFragment.Kind != appprompting.PromptFragmentKindContext {
+		t.Fatalf("expected context fragment kind, got %+v", contextFragment)
 	}
-	if !strings.Contains(spec.Additional[2].Content, "<cwd>"+workspace+"</cwd>") {
-		t.Fatalf("expected workspace context to include workspace cwd, got %+v", spec.Additional[2])
+	if !strings.Contains(contextFragment.Content, "<environment_context>") {
+		t.Fatalf("unexpected environment context fragment: %+v", contextFragment)
 	}
-	if !strings.Contains(spec.Additional[2].Content, "<shell>") {
-		t.Fatalf("expected workspace context to include shell, got %+v", spec.Additional[2])
+	if !strings.Contains(contextFragment.Content, "<cwd>"+workspace+"</cwd>") {
+		t.Fatalf("expected environment context to include workspace cwd, got %+v", contextFragment)
 	}
-	if !strings.Contains(spec.Additional[2].Content, "<current_date>") {
-		t.Fatalf("expected workspace context to include current_date, got %+v", spec.Additional[2])
+	if !strings.Contains(contextFragment.Content, "<shell>") {
+		t.Fatalf("expected environment context to include shell, got %+v", contextFragment)
 	}
-	if !strings.Contains(spec.Additional[2].Content, "<timezone>") {
-		t.Fatalf("expected workspace context to include timezone, got %+v", spec.Additional[2])
+	if !strings.Contains(contextFragment.Content, "<current_date>") {
+		t.Fatalf("expected environment context to include current_date, got %+v", contextFragment)
 	}
-	if !strings.Contains(spec.Additional[3].Content, "## Experimental LSP Routing") {
-		t.Fatalf("unexpected lsp fragment: %+v", spec.Additional[3])
+	if !strings.Contains(contextFragment.Content, "<timezone>") {
+		t.Fatalf("expected environment context to include timezone, got %+v", contextFragment)
+	}
+
+	lspFragment := spec.Additional[3]
+	if lspFragment.Kind != appprompting.PromptFragmentKindSystem {
+		t.Fatalf("expected system fragment kind for lsp routing, got %+v", lspFragment)
+	}
+	if !strings.Contains(lspFragment.Content, "## Experimental LSP Routing") {
+		t.Fatalf("unexpected lsp fragment: %+v", lspFragment)
 	}
 	if len(result.Warnings) != 0 {
 		t.Fatalf("expected no warnings for missing skill dir, got %v", result.Warnings)
 	}
 }
 
-func TestBuildPromptAssembleSpec_SkipsMissingAgentPolicies(t *testing.T) {
+func TestBuildPromptAssembleSpec_SkipsMissingUserInstructions(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	workspace := t.TempDir()
@@ -96,14 +141,14 @@ func TestBuildPromptAssembleSpec_SkipsMissingAgentPolicies(t *testing.T) {
 		t.Fatalf("buildPromptAssembleSpec failed: %v", err)
 	}
 	if len(result.Spec.Additional) != 1 {
-		t.Fatalf("expected only workspace context fragment, got %+v", result.Spec.Additional)
+		t.Fatalf("expected only environment context fragment, got %+v", result.Spec.Additional)
 	}
 	if got := result.Spec.Additional[0].Source; got != "cli:workspace-context" {
 		t.Fatalf("unexpected additional fragment source: %q", got)
 	}
 }
 
-func TestBuildPromptAssembleSpec_IncludesWorkspaceContextWithoutOptionalFragments(t *testing.T) {
+func TestBuildPromptAssembleSpec_IncludesEnvironmentContextWithoutOptionalFragments(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	workspace := t.TempDir()
@@ -116,15 +161,36 @@ func TestBuildPromptAssembleSpec_IncludesWorkspaceContextWithoutOptionalFragment
 		t.Fatalf("buildPromptAssembleSpec failed: %v", err)
 	}
 	if len(result.Spec.Additional) != 1 {
-		t.Fatalf("expected only workspace context fragment, got %+v", result.Spec.Additional)
+		t.Fatalf("expected only environment context fragment, got %+v", result.Spec.Additional)
 	}
 	if got := result.Spec.Additional[0].Source; got != "cli:workspace-context" {
-		t.Fatalf("unexpected workspace context source: %q", got)
+		t.Fatalf("unexpected environment context source: %q", got)
 	}
 	if !strings.Contains(result.Spec.Additional[0].Content, "<cwd>"+workspace+"</cwd>") {
-		t.Fatalf("expected workspace context to include workspace cwd, got %+v", result.Spec.Additional[0])
+		t.Fatalf("expected environment context to include workspace cwd, got %+v", result.Spec.Additional[0])
 	}
 	if !strings.Contains(result.Spec.Additional[0].Content, "<shell>") || !strings.Contains(result.Spec.Additional[0].Content, "<current_date>") || !strings.Contains(result.Spec.Additional[0].Content, "<timezone>") {
-		t.Fatalf("expected workspace context tags, got %+v", result.Spec.Additional[0])
+		t.Fatalf("expected environment context tags, got %+v", result.Spec.Additional[0])
+	}
+}
+
+func TestBuildUserCustomInstructionsPrompt_PreservesMarkdownAndSkipsEmptySections(t *testing.T) {
+	content := buildUserCustomInstructionsPrompt(
+		"",
+		"# Workspace\n\n- keep headings\n- keep lists",
+		"",
+	)
+	if strings.Contains(content, "## Session Overrides") || strings.Contains(content, "## Global Instructions") {
+		t.Fatalf("did not expect empty sections, got %q", content)
+	}
+	for _, required := range []string{
+		"## Workspace Instructions",
+		"# Workspace",
+		"- keep headings",
+		"- keep lists",
+	} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("markdown content missing %q: %q", required, content)
+		}
 	}
 }

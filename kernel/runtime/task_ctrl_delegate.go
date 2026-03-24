@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
@@ -17,10 +18,14 @@ type subagentTaskController struct {
 	sessionID    string
 	delegationID string
 	cancel       context.CancelFunc
+	runner       agent.SubagentRunner
 	store        task.Store
 	agent        string
+	childCWD     string
 	timeout      time.Duration
 }
+
+const subagentMissingStateGrace = 5 * time.Second
 
 func (c *subagentTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
 	deadline := time.Time{}
@@ -55,8 +60,57 @@ func (c *subagentTaskController) Status(ctx context.Context, record *task.Record
 	return c.inspect(ctx, record, false)
 }
 
-func (c *subagentTaskController) Write(context.Context, *task.Record, string, time.Duration) (task.Snapshot, error) {
-	return task.Snapshot{}, fmt.Errorf("task: subagent tasks do not accept input")
+func (c *subagentTaskController) Write(ctx context.Context, record *task.Record, input string, yield time.Duration) (task.Snapshot, error) {
+	if c == nil || c.runner == nil {
+		return task.Snapshot{}, fmt.Errorf("task: subagent runner is unavailable")
+	}
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return task.Snapshot{}, fmt.Errorf("task: input is required")
+	}
+	runResult, err := c.runner.RunSubagent(ctx, agent.SubagentRunRequest{
+		Agent:     c.agent,
+		Prompt:    input,
+		SessionID: c.sessionID,
+		ChildCWD:  c.childCWD,
+		Yield:     yield,
+		Timeout:   c.timeout,
+	})
+	if err != nil {
+		return task.Snapshot{}, err
+	}
+	if sessionID := strings.TrimSpace(runResult.SessionID); sessionID != "" {
+		c.sessionID = sessionID
+	}
+	if delegationID := strings.TrimSpace(runResult.DelegationID); delegationID != "" {
+		c.delegationID = delegationID
+	}
+	if agentName := strings.TrimSpace(runResult.Agent); agentName != "" {
+		c.agent = agentName
+	}
+	if childCWD := strings.TrimSpace(runResult.ChildCWD); childCWD != "" {
+		c.childCWD = childCWD
+	}
+	c.cancel = cancelSubagentFunc(c.runner, c.sessionID)
+	now := time.Now()
+	record.WithLock(func(one *task.Record) {
+		if one.Spec == nil {
+			one.Spec = map[string]any{}
+		}
+		one.Spec[taskSpecPrompt] = input
+		one.Spec[taskSpecChildSession] = c.sessionID
+		one.Spec[taskSpecDelegationID] = c.delegationID
+		one.Spec[taskSpecAgent] = c.agent
+		one.Spec[taskSpecChildCWD] = c.childCWD
+		if c.timeout > 0 {
+			one.Spec[taskSpecTimeout] = int(c.timeout / time.Second)
+		}
+		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, now)
+		if progressAt.After(one.HeartbeatAt) {
+			one.HeartbeatAt = progressAt
+		}
+	})
+	return c.inspect(ctx, record, true)
 }
 
 func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record) (task.Snapshot, error) {
@@ -69,6 +123,10 @@ func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
+			"child_session_id":     c.sessionID,
+			"delegation_id":        c.delegationID,
+			"agent":                c.agent,
+			"child_cwd":            c.childCWD,
 			"_ui_child_session_id": c.sessionID,
 			"_ui_delegation_id":    c.delegationID,
 			"_ui_agent":            c.agent,
@@ -84,25 +142,37 @@ func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record
 }
 
 func (c *subagentTaskController) inspect(ctx context.Context, record *task.Record, advance bool) (task.Snapshot, error) {
-	if c == nil || c.runtime == nil {
+	if c == nil || c.runner == nil {
 		return task.Snapshot{}, fmt.Errorf("task: subagent controller is unavailable")
 	}
-	state, err := c.runtime.RunState(ctx, RunStateRequest{
-		AppName:   c.appName,
-		UserID:    c.userID,
-		SessionID: c.sessionID,
-	})
+	now := time.Now()
+	runResult, err := c.runner.InspectSubagent(ctx, c.sessionID)
 	if err != nil {
-		return task.Snapshot{}, err
-	}
-	events, err := c.runtime.SessionEvents(ctx, SessionEventsRequest{
-		AppName:          c.appName,
-		UserID:           c.userID,
-		SessionID:        c.sessionID,
-		IncludeLifecycle: false,
-	})
-	if err != nil {
-		return task.Snapshot{}, err
+		if !isMissingSubagentStateErr(err) {
+			return task.Snapshot{}, err
+		}
+		lastSeen := subagentLastSeenAt(record)
+		if lastSeen.IsZero() || now.Sub(lastSeen) <= subagentMissingStateGrace {
+			runResult = agent.SubagentRunResult{
+				SessionID:    c.sessionID,
+				DelegationID: c.delegationID,
+				Agent:        c.agent,
+				ChildCWD:     c.childCWD,
+				State:        string(task.StateRunning),
+				Running:      true,
+				UpdatedAt:    lastSeen,
+			}
+		} else {
+			runResult = agent.SubagentRunResult{
+				SessionID:    c.sessionID,
+				DelegationID: c.delegationID,
+				Agent:        c.agent,
+				ChildCWD:     c.childCWD,
+				State:        string(task.StateInterrupted),
+				Running:      false,
+				UpdatedAt:    now,
+			}
+		}
 	}
 	var snapshot task.Snapshot
 	var output task.Output
@@ -110,29 +180,31 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 	record.WithLock(func(one *task.Record) {
 		assistant, _ = one.Result["final_result"].(string)
 	})
-	if final := FinalAssistantText(events); final != "" {
+	if final := strings.TrimSpace(runResult.Assistant); final != "" {
 		assistant = final
 	}
 	record.WithLock(func(one *task.Record) {
+		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, one.HeartbeatAt, one.CreatedAt)
+		if progressAt.After(one.HeartbeatAt) {
+			one.HeartbeatAt = progressAt
+		}
+		logSnapshot := runResult.LogSnapshot
 		start := one.EventCursor
-		if start < 0 || start > len(events) {
-			start = len(events)
+		if start < 0 || start > len(logSnapshot) {
+			start = len(logSnapshot)
 		}
 		if advance {
-			for _, ev := range events[start:] {
-				output.Log += subagentEventLogLine(ev)
-			}
-			one.EventCursor = len(events)
+			output.Log = logSnapshot[start:]
+			one.EventCursor = len(logSnapshot)
 		}
-		if !state.HasLifecycle {
-			one.State = task.StateRunning
-			one.Running = true
-		} else {
-			one.State = runtimeTaskState(state.Status)
-			one.Running = state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval
-		}
+		one.State = runtimeTaskStateName(runResult.State)
+		one.Running = runResult.Running
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
+			"child_session_id":     c.sessionID,
+			"delegation_id":        c.delegationID,
+			"agent":                c.agent,
+			"child_cwd":            c.childCWD,
 			"_ui_child_session_id": c.sessionID,
 			"_ui_delegation_id":    c.delegationID,
 			"_ui_agent":            c.agent,
@@ -141,9 +213,12 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		if c.timeout > 0 {
 			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
-		if one.State == task.StateWaitingApproval {
+		if runResult.ApprovalPending || one.State == task.StateWaitingApproval {
 			one.Result["approval_pending"] = true
 			one.Result["_ui_approval_pending"] = true
+		}
+		if one.State == task.StateInterrupted {
+			one.Result["interrupted"] = true
 		}
 		if !one.Running && assistant != "" {
 			one.Result["final_result"] = assistant
@@ -155,6 +230,35 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 	return snapshot, nil
 }
 
+func isMissingSubagentStateErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	errText := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(errText, "not found") || strings.Contains(errText, "not tracked")
+}
+
+func subagentLastSeenAt(record *task.Record) time.Time {
+	if record == nil {
+		return time.Time{}
+	}
+	var out time.Time
+	record.WithLock(func(one *task.Record) {
+		out = latestSubagentProgressTime(one.HeartbeatAt, one.UpdatedAt, one.CreatedAt)
+	})
+	return out
+}
+
+func latestSubagentProgressTime(values ...time.Time) time.Time {
+	var latest time.Time
+	for _, value := range values {
+		if value.After(latest) {
+			latest = value
+		}
+	}
+	return latest
+}
+
 func subagentPreviewFromEvents(events []*session.Event) string {
 	lines := make([]string, 0, 8)
 	inFence := false
@@ -162,8 +266,8 @@ func subagentPreviewFromEvents(events []*session.Event) string {
 		if ev == nil {
 			continue
 		}
-		if reasoning := strings.TrimSpace(ev.Message.Reasoning); reasoning != "" {
-			for _, line := range strings.Split(reasoning, "\n") {
+		if reasoning := strings.TrimSpace(ev.Message.ReasoningText()); reasoning != "" {
+			for line := range strings.SplitSeq(reasoning, "\n") {
 				line = subagentPreviewLine(line, &inFence)
 				if line == "" {
 					continue
@@ -172,7 +276,7 @@ func subagentPreviewFromEvents(events []*session.Event) string {
 			}
 		}
 		if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
-			for _, line := range strings.Split(text, "\n") {
+			for line := range strings.SplitSeq(text, "\n") {
 				line = subagentPreviewLine(line, &inFence)
 				if line == "" {
 					continue
@@ -207,33 +311,21 @@ func subagentPreviewLine(line string, inFence *bool) string {
 	return trimmed
 }
 
-func runtimeTaskState(status RunLifecycleStatus) task.State {
-	switch status {
-	case RunLifecycleStatusCompleted:
+func runtimeTaskStateName(status string) task.State {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case string(RunLifecycleStatusCompleted):
 		return task.StateCompleted
-	case RunLifecycleStatusFailed:
+	case string(RunLifecycleStatusFailed):
 		return task.StateFailed
-	case RunLifecycleStatusInterrupted:
+	case string(RunLifecycleStatusInterrupted):
 		return task.StateInterrupted
-	case RunLifecycleStatusWaitingApproval:
+	case string(RunLifecycleStatusWaitingApproval):
 		return task.StateWaitingApproval
+	case string(task.StateCancelled):
+		return task.StateCancelled
+	case string(task.StateWaitingInput):
+		return task.StateWaitingInput
 	default:
 		return task.StateRunning
 	}
-}
-
-func subagentEventLogLine(ev *session.Event) string {
-	if ev == nil {
-		return ""
-	}
-	var b strings.Builder
-	if reasoning := strings.TrimSpace(ev.Message.Reasoning); reasoning != "" {
-		b.WriteString(reasoning)
-		b.WriteByte('\n')
-	}
-	if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
-		b.WriteString(text)
-		b.WriteByte('\n')
-	}
-	return b.String()
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/internal/argparse"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
+	visiblemeta "github.com/OnslaughtSnail/caelis/kernel/tool/internal/outputmeta"
 )
 
 const (
@@ -469,11 +470,9 @@ func appendSnapshotMetaFields(result map[string]any, snapshot task.Snapshot) {
 	}
 	if raw, ok := snapshot.Result["output_meta"]; ok {
 		if meta, ok := raw.(map[string]any); ok && len(meta) > 0 {
-			copied := make(map[string]any, len(meta))
-			for key, value := range meta {
-				copied[key] = value
+			if compacted := visiblemeta.CompactVisible(meta); len(compacted) > 0 {
+				result["output_meta"] = compacted
 			}
-			result["output_meta"] = copied
 		}
 	}
 }

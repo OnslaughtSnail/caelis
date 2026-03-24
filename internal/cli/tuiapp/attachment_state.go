@@ -18,10 +18,7 @@ func cloneInputAttachments(items []inputAttachment) []inputAttachment {
 		if name == "" {
 			continue
 		}
-		offset := item.Offset
-		if offset < 0 {
-			offset = 0
-		}
+		offset := max(item.Offset, 0)
 		out = append(out, inputAttachment{Name: name, Offset: offset})
 	}
 	if len(out) == 0 {
@@ -132,14 +129,6 @@ func (m *Model) removeAttachmentAtCursor() bool {
 	return true
 }
 
-func (m *Model) attachmentDisplayToken(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	return "[" + name + "] "
-}
-
 func composeInputDisplay(value string, cursor int, attachments []inputAttachment) (string, int) {
 	valueRunes := []rune(value)
 	if cursor < 0 {
@@ -157,13 +146,7 @@ func composeInputDisplay(value string, cursor int, attachments []inputAttachment
 	cursorAssigned := false
 
 	for _, item := range items {
-		offset := item.Offset
-		if offset < 0 {
-			offset = 0
-		}
-		if offset > len(valueRunes) {
-			offset = len(valueRunes)
-		}
+		offset := min(max(item.Offset, 0), len(valueRunes))
 		if offset > textPos {
 			segment := valueRunes[textPos:offset]
 			out.WriteString(string(segment))
@@ -204,23 +187,36 @@ func composeDisplayWithToken(value string, attachments []inputAttachment, token 
 	var out strings.Builder
 	textPos := 0
 	for _, item := range items {
-		offset := item.Offset
-		if offset < 0 {
-			offset = 0
-		}
-		if offset > len(valueRunes) {
-			offset = len(valueRunes)
-		}
+		offset := min(max(item.Offset, 0), len(valueRunes))
 		if offset > textPos {
-			out.WriteString(string(valueRunes[textPos:offset]))
+			appendDisplaySegment(&out, string(valueRunes[textPos:offset]))
 			textPos = offset
 		}
-		out.WriteString(token(item.Name))
+		appendDisplaySegment(&out, token(item.Name))
 	}
 	if textPos < len(valueRunes) {
-		out.WriteString(string(valueRunes[textPos:]))
+		appendDisplaySegment(&out, string(valueRunes[textPos:]))
 	}
 	return strings.TrimSpace(out.String())
+}
+
+func appendDisplaySegment(out *strings.Builder, segment string) {
+	if out == nil {
+		return
+	}
+	segment = strings.TrimSpace(segment)
+	if segment == "" {
+		return
+	}
+	current := out.String()
+	if current != "" {
+		last, _ := lastRune(current)
+		first, _ := firstRune(segment)
+		if !unicode.IsSpace(last) && !unicode.IsSpace(first) {
+			out.WriteByte(' ')
+		}
+	}
+	out.WriteString(segment)
 }
 
 func submissionInput(value string, attachments []inputAttachment) (string, []inputAttachment) {
@@ -346,21 +342,6 @@ func (m *Model) restoreHistoryEntry(text string, attachments []inputAttachment) 
 	m.setInputAttachments(attachments)
 	m.syncBackendAttachments()
 	m.adjustTextareaHeight()
-}
-
-func attachmentsAtZeroOffset(names []string) []inputAttachment {
-	if len(names) == 0 {
-		return nil
-	}
-	out := make([]inputAttachment, 0, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		out = append(out, inputAttachment{Name: name, Offset: 0})
-	}
-	return out
 }
 
 func (m *Model) readClipboardText() (string, error) {

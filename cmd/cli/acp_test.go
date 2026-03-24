@@ -79,11 +79,8 @@ func TestBuildACPSessionList_UsesIndexedHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspace, "caelis", "tester", "s-1", &session.Event{
-		Time: now,
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: "inspect acp parity",
-		},
+		Time:    now,
+		Message: model.NewTextMessage(model.RoleUser, "inspect acp parity"),
 	}, now); err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +114,8 @@ func TestBuildACPSessionList_FiltersEmptySessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspace, "caelis", "tester", "s-live", &session.Event{
-		Time: now.Add(time.Second),
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: "non-empty session",
-		},
+		Time:    now.Add(time.Second),
+		Message: model.NewTextMessage(model.RoleUser, "non-empty session"),
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +126,85 @@ func TestBuildACPSessionList_FiltersEmptySessions(t *testing.T) {
 	}
 	if resp.Sessions[0].SessionID != "s-live" {
 		t.Fatalf("unexpected session list %+v", resp.Sessions)
+	}
+}
+
+func TestBuildACPSessionList_UsesIndexedSessions(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{Key: "ws-key", CWD: "/workspace"}
+	now := time.Date(2026, 3, 12, 4, 15, 5, 0, time.UTC)
+	if err := idx.UpsertSession(workspace, "caelis", "tester", "s-root", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.TouchEvent(workspace, "caelis", "tester", "s-root", &session.Event{
+		Time:    now,
+		Message: model.NewTextMessage(model.RoleUser, "visible root session"),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "caelis", "tester", "s-child", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.TouchEvent(workspace, "caelis", "tester", "s-child", &session.Event{
+		Time:    now.Add(time.Second),
+		Message: model.NewTextMessage(model.RoleAssistant, "hidden child session"),
+		Meta: map[string]any{
+			"parent_session_id": "s-root",
+			"child_session_id":  "s-child",
+			"delegation_id":     "dlg-1",
+		},
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := buildACPSessionList(idx, workspace, internalacp.SessionListRequest{})
+	if len(resp.Sessions) != 1 || resp.Sessions[0].SessionID != "s-root" {
+		t.Fatalf("expected delegated child sessions to be hidden from ACP list, got %+v", resp.Sessions)
+	}
+}
+
+func TestBuildACPSessionList_FiltersByCWD(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{Key: "ws-key", CWD: "/workspace"}
+	now := time.Date(2026, 3, 12, 4, 15, 5, 0, time.UTC)
+	other := workspaceContext{Key: "ws-key", CWD: "/workspace/other"}
+	if err := idx.UpsertSession(workspace, "caelis", "tester", "s-root", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.TouchEvent(workspace, "caelis", "tester", "s-root", &session.Event{
+		Time:    now,
+		Message: model.NewTextMessage(model.RoleUser, "root session"),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(other, "caelis", "tester", "s-other", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.TouchEvent(other, "caelis", "tester", "s-other", &session.Event{
+		Time:    now.Add(time.Second),
+		Message: model.NewTextMessage(model.RoleUser, "other session"),
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := buildACPSessionList(idx, workspace, internalacp.SessionListRequest{CWD: "/workspace"})
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("expected one cwd-filtered session, got %+v", resp.Sessions)
+	}
+	if resp.Sessions[0].SessionID != "s-root" {
+		t.Fatalf("unexpected filtered session %+v", resp.Sessions[0])
 	}
 }
 

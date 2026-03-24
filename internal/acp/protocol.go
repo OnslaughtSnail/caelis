@@ -45,13 +45,7 @@ const (
 	UpdatePlan          = "plan"
 	UpdateCurrentMode   = "current_mode_update"
 	UpdateConfigOption  = "config_option_update"
-
-	// Subagent lifecycle/streaming updates.
-	UpdateSubagentStart    = "subagent_start"
-	UpdateSubagentStream   = "subagent_stream"
-	UpdateSubagentToolCall = "subagent_tool_call"
-	UpdateSubagentPlan     = "subagent_plan"
-	UpdateSubagentDone     = "subagent_done"
+	UpdateSessionInfo   = "session_info_update"
 )
 
 const (
@@ -64,9 +58,13 @@ const (
 const (
 	ToolKindRead    = "read"
 	ToolKindEdit    = "edit"
+	ToolKindDelete  = "delete"
+	ToolKindMove    = "move"
 	ToolKindSearch  = "search"
 	ToolKindExecute = "execute"
+	ToolKindThink   = "think"
 	ToolKindFetch   = "fetch"
+	ToolKindSwitch  = "switch_mode"
 	ToolKindOther   = "other"
 )
 
@@ -126,10 +124,16 @@ type SessionCapabilities struct {
 	List *SessionListCapability `json:"list,omitempty"`
 }
 
+type MCPCapabilities struct {
+	HTTP bool `json:"http"`
+	SSE  bool `json:"sse"`
+}
+
 type AgentCapabilities struct {
-	LoadSession bool                `json:"loadSession"`
-	Prompt      PromptCapabilities  `json:"promptCapabilities"`
-	Session     SessionCapabilities `json:"sessionCapabilities"`
+	LoadSession     bool                `json:"loadSession"`
+	MCPCapabilities MCPCapabilities     `json:"mcpCapabilities"`
+	Prompt          PromptCapabilities  `json:"promptCapabilities"`
+	Session         SessionCapabilities `json:"sessionCapabilities"`
 }
 
 type ProtocolVersion uint16
@@ -177,9 +181,12 @@ type HTTPHeader struct {
 	Value string `json:"value"`
 }
 
+type MCPServer map[string]any
+
 type NewSessionRequest struct {
-	CWD       string `json:"cwd"`
-	SessionID string `json:"sessionId,omitempty"`
+	CWD        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
+	SessionID  string      `json:"sessionId,omitempty"`
 }
 
 type NewSessionResponse struct {
@@ -190,7 +197,7 @@ type NewSessionResponse struct {
 
 type SessionListRequest struct {
 	Cursor string `json:"cursor,omitempty"`
-	Limit  *int   `json:"limit,omitempty"`
+	CWD    string `json:"cwd,omitempty"`
 }
 
 type SessionSummary struct {
@@ -206,8 +213,9 @@ type SessionListResponse struct {
 }
 
 type LoadSessionRequest struct {
-	SessionID string `json:"sessionId"`
-	CWD       string `json:"cwd"`
+	SessionID  string      `json:"sessionId"`
+	CWD        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
 }
 
 type LoadSessionResponse struct {
@@ -241,6 +249,7 @@ type EmbeddedResourceData struct {
 	URI      string `json:"uri"`
 	Name     string `json:"name,omitempty"`
 	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
 	Data     string `json:"data,omitempty"`
 	MimeType string `json:"mimeType,omitempty"`
 }
@@ -319,6 +328,12 @@ type PlanUpdate struct {
 type ConfigOptionUpdate struct {
 	SessionUpdate string                `json:"sessionUpdate"`
 	ConfigOptions []SessionConfigOption `json:"configOptions"`
+}
+
+type SessionInfoUpdate struct {
+	SessionUpdate string  `json:"sessionUpdate"`
+	Title         *string `json:"title,omitempty"`
+	UpdatedAt     *string `json:"updatedAt,omitempty"`
 }
 
 type SetSessionModeRequest struct {
@@ -479,45 +494,3 @@ type WriteTextFileRequest struct {
 }
 
 type WriteTextFileResponse struct{}
-
-// SubagentStartUpdate notifies the client that a new subagent session has been spawned.
-type SubagentStartUpdate struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	Agent         string `json:"agent"`
-	CallID        string `json:"callId,omitempty"`
-}
-
-// SubagentStreamUpdate carries streaming content (assistant answer or reasoning) from a subagent.
-type SubagentStreamUpdate struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	Stream        string `json:"stream"` // "assistant" or "reasoning"
-	Chunk         string `json:"chunk"`
-}
-
-// SubagentToolCallUpdate carries tool call activity from a subagent.
-type SubagentToolCallUpdate struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	ToolName      string `json:"toolName"`
-	CallID        string `json:"callId,omitempty"`
-	Args          string `json:"args,omitempty"`
-	Stream        string `json:"stream,omitempty"` // "stdout", "stderr"
-	Chunk         string `json:"chunk,omitempty"`
-	Final         bool   `json:"final,omitempty"`
-}
-
-// SubagentPlanUpdate carries a plan snapshot from a subagent.
-type SubagentPlanUpdate struct {
-	SessionUpdate string      `json:"sessionUpdate"`
-	SpawnID       string      `json:"spawnId"`
-	Entries       []PlanEntry `json:"entries"`
-}
-
-// SubagentDoneUpdate notifies the client that a subagent session has completed.
-type SubagentDoneUpdate struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	State         string `json:"state"` // "completed", "failed", "interrupted"
-}

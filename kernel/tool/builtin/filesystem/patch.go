@@ -85,19 +85,6 @@ func (t *PatchTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	}, nil
 }
 
-func buildPatchMetadata(preview string, hunk string) map[string]any {
-	patchMeta := map[string]any{}
-	if strings.TrimSpace(preview) != "" {
-		patchMeta["preview"] = preview
-	}
-	if strings.TrimSpace(hunk) != "" {
-		patchMeta["hunk"] = hunk
-	}
-	return map[string]any{
-		"patch": patchMeta,
-	}
-}
-
 func buildPatchPreview(oldValue, newValue string) string {
 	oldLines, oldTruncated := buildPatchSide(oldValue, "-")
 	newLines, newTruncated := buildPatchSide(newValue, "+")
@@ -118,9 +105,7 @@ func buildPatchSide(content, prefix string) ([]string, bool) {
 	if content == "" {
 		return nil, false
 	}
-	if strings.HasSuffix(content, "\n") {
-		content = strings.TrimSuffix(content, "\n")
-	}
+	content = strings.TrimSuffix(content, "\n")
 	rawLines := strings.Split(content, "\n")
 	truncated := false
 	if len(rawLines) > patchPreviewSideLines {

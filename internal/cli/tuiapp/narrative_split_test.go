@@ -3,6 +3,9 @@ package tuiapp
 import (
 	"strings"
 	"testing"
+
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestSplitNarrativeBlocks_Plain(t *testing.T) {
@@ -198,6 +201,53 @@ func TestNarrativeToPlainRows_EmojiPreserved(t *testing.T) {
 	}
 	if !strings.Contains(rows[1], "👨\u200d👩\u200d👧") {
 		t.Fatalf("expected ZWJ emoji preserved, got %q", rows[1])
+	}
+}
+
+func TestSimplifyInlineMarkers_StripsBalancedInlineMarkdown(t *testing.T) {
+	line := "Use **bold**, *italic*, _more_, `code`, and ~~strike~~."
+	got := simplifyInlineMarkers(line)
+	want := "Use bold, italic, more, code, and strike."
+	if got != want {
+		t.Fatalf("simplifyInlineMarkers(%q) = %q, want %q", line, got, want)
+	}
+}
+
+func TestSimplifyInlineMarkers_PreservesUnmatchedMarkers(t *testing.T) {
+	line := "Pending **bold and `code"
+	got := simplifyInlineMarkers(line)
+	if got != line {
+		t.Fatalf("expected unmatched markers preserved, got %q", got)
+	}
+}
+
+func TestStyleNarrativeLine_ListItemRendersInlineMarkdown(t *testing.T) {
+	theme := tuikit.DefaultTheme()
+	raw := "- **bold** *italic* `code`"
+	plain := "- bold italic code"
+
+	got := styleNarrativeLine(raw, plain, NarrativeListItem, tuikit.LineStyleAssistant, theme)
+	if ansi.Strip(got) != plain {
+		t.Fatalf("expected styled/plain parity, got %q", ansi.Strip(got))
+	}
+	baseline := tuikit.ColorizeLogLine(plain, tuikit.LineStyleAssistant, theme)
+	if got == baseline {
+		t.Fatalf("expected list marker or inline markdown styling beyond baseline assistant rendering")
+	}
+}
+
+func TestStyleNarrativeLine_BlockquoteUsesDedicatedMarkerStyle(t *testing.T) {
+	theme := tuikit.DefaultTheme()
+	raw := "> quoted **text**"
+	plain := "> quoted text"
+
+	got := styleNarrativeLine(raw, plain, NarrativeBlockquote, tuikit.LineStyleAssistant, theme)
+	if ansi.Strip(got) != plain {
+		t.Fatalf("expected styled/plain parity, got %q", ansi.Strip(got))
+	}
+	baseline := tuikit.ColorizeLogLine(plain, tuikit.LineStyleAssistant, theme)
+	if got == baseline {
+		t.Fatalf("expected blockquote marker styling beyond baseline assistant rendering")
 	}
 }
 

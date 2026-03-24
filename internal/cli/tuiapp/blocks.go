@@ -53,25 +53,34 @@ func NewSpacerBlock() *TranscriptBlock {
 
 type AssistantBlock struct {
 	id        string
+	Actor     string
 	Raw       string
 	Streaming bool
 	LastFinal string // dedup for duplicate final events
 }
 
-func NewAssistantBlock() *AssistantBlock {
-	return &AssistantBlock{id: nextBlockID(), Streaming: true}
+func NewAssistantBlock(actor ...string) *AssistantBlock {
+	label := ""
+	if len(actor) > 0 {
+		label = strings.TrimSpace(actor[0])
+	}
+	return &AssistantBlock{id: nextBlockID(), Actor: label, Streaming: true}
 }
 
 func (b *AssistantBlock) BlockID() string { return b.id }
 func (b *AssistantBlock) Kind() BlockKind { return BlockAssistant }
 func (b *AssistantBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderAssistantRows(b.id, b.Raw, ctx)
+	return renderAssistantRows(b.id, b.Actor, b.Raw, ctx)
 }
 
-func renderAssistantRows(blockID, raw string, ctx BlockRenderContext) []RenderedRow {
+func renderAssistantRows(blockID, actor, raw string, ctx BlockRenderContext) []RenderedRow {
 	nls, plainRows := buildNarrativeRows(raw)
+	actorPrefix := ""
+	if actor = strings.TrimSpace(actor); actor != "" {
+		actorPrefix = actor + ": "
+	}
 	if len(plainRows) == 0 {
-		plain := "* "
+		plain := "* " + actorPrefix
 		styled := tuikit.ColorizeLogLine(plain, tuikit.LineStyleAssistant, ctx.Theme)
 		return []RenderedRow{StyledPlainRow(blockID, plain, styled)}
 	}
@@ -79,9 +88,9 @@ func renderAssistantRows(blockID, raw string, ctx BlockRenderContext) []Rendered
 	for i, pr := range plainRows {
 		plain := pr
 		if i == 0 {
-			plain = "* " + pr
+			plain = "* " + actorPrefix + pr
 		}
-		styled := styleNarrativeLine(plain, nls[i].Kind, tuikit.LineStyleAssistant, ctx.Theme)
+		styled := styleNarrativeLine(nls[i].Text, plain, nls[i].Kind, tuikit.LineStyleAssistant, ctx.Theme)
 		rows = append(rows, StyledPlainRow(blockID, plain, styled))
 	}
 	return rows
@@ -93,24 +102,33 @@ func renderAssistantRows(blockID, raw string, ctx BlockRenderContext) []Rendered
 
 type ReasoningBlock struct {
 	id        string
+	Actor     string
 	Raw       string
 	Streaming bool
 }
 
-func NewReasoningBlock() *ReasoningBlock {
-	return &ReasoningBlock{id: nextBlockID(), Streaming: true}
+func NewReasoningBlock(actor ...string) *ReasoningBlock {
+	label := ""
+	if len(actor) > 0 {
+		label = strings.TrimSpace(actor[0])
+	}
+	return &ReasoningBlock{id: nextBlockID(), Actor: label, Streaming: true}
 }
 
 func (b *ReasoningBlock) BlockID() string { return b.id }
 func (b *ReasoningBlock) Kind() BlockKind { return BlockReasoning }
 func (b *ReasoningBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderReasoningRows(b.id, b.Raw, ctx)
+	return renderReasoningRows(b.id, b.Actor, b.Raw, ctx)
 }
 
-func renderReasoningRows(blockID, raw string, ctx BlockRenderContext) []RenderedRow {
+func renderReasoningRows(blockID, actor, raw string, ctx BlockRenderContext) []RenderedRow {
 	nls, plainRows := buildNarrativeRows(raw)
+	actorPrefix := ""
+	if actor = strings.TrimSpace(actor); actor != "" {
+		actorPrefix = actor + ": "
+	}
 	if len(plainRows) == 0 {
-		plain := "· "
+		plain := "· " + actorPrefix
 		styled := tuikit.ColorizeLogLine(plain, tuikit.LineStyleReasoning, ctx.Theme)
 		return []RenderedRow{StyledPlainRow(blockID, plain, styled)}
 	}
@@ -118,13 +136,367 @@ func renderReasoningRows(blockID, raw string, ctx BlockRenderContext) []Rendered
 	for i, pr := range plainRows {
 		prefix := "  "
 		if i == 0 {
-			prefix = "· "
+			prefix = "· " + actorPrefix
 		}
 		plain := prefix + pr
-		styled := styleNarrativeLine(plain, nls[i].Kind, tuikit.LineStyleReasoning, ctx.Theme)
+		styled := styleNarrativeLine(nls[i].Text, plain, nls[i].Kind, tuikit.LineStyleReasoning, ctx.Theme)
 		rows = append(rows, StyledPlainRow(blockID, plain, styled))
 	}
 	return rows
+}
+
+// ---------------------------------------------------------------------------
+// ParticipantTurnBlock — inline external-agent turn inside the main transcript.
+// ---------------------------------------------------------------------------
+
+type ParticipantTurnBlock struct {
+	id        string
+	SessionID string
+	Actor     string
+	Status    string
+	Expanded  bool
+	StartedAt time.Time
+	EndedAt   time.Time
+	Events    []SubagentEvent
+}
+
+func NewParticipantTurnBlock(sessionID, actor string) *ParticipantTurnBlock {
+	return &ParticipantTurnBlock{
+		id:        nextBlockID(),
+		SessionID: strings.TrimSpace(sessionID),
+		Actor:     strings.TrimSpace(actor),
+		Status:    "running",
+		Expanded:  true,
+		StartedAt: time.Now(),
+	}
+}
+
+func (b *ParticipantTurnBlock) BlockID() string { return b.id }
+func (b *ParticipantTurnBlock) Kind() BlockKind { return BlockParticipantTurn }
+
+func (b *ParticipantTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+	if b == nil {
+		return
+	}
+	if len(b.Events) > 0 {
+		last := &b.Events[len(b.Events)-1]
+		if last.Kind == kind {
+			last.Text = collapseRepeatedNarrativeText(mergeSubagentStreamChunk(last.Text, chunk))
+			return
+		}
+	}
+	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+}
+
+func (b *ParticipantTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+	if b == nil {
+		return
+	}
+	chunk = strings.TrimSpace(chunk)
+	if chunk == "" {
+		return
+	}
+	for i := len(b.Events) - 1; i >= 0; i-- {
+		ev := &b.Events[i]
+		if ev.Kind != kind {
+			continue
+		}
+		ev.Text = collapseRepeatedNarrativeText(chunk)
+		return
+	}
+	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+}
+
+func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, final bool, err bool) {
+	if b == nil {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	if !final {
+		for i := len(b.Events) - 1; i >= 0; i-- {
+			ev := &b.Events[i]
+			if ev.Kind != SEToolCall || strings.TrimSpace(ev.CallID) != callID || ev.Done {
+				continue
+			}
+			if strings.TrimSpace(ev.Name) == "" {
+				ev.Name = strings.TrimSpace(name)
+			}
+			if strings.TrimSpace(ev.Args) == "" {
+				ev.Args = strings.TrimSpace(args)
+			}
+			return
+		}
+		b.Events = append(b.Events, SubagentEvent{
+			Kind:   SEToolCall,
+			CallID: callID,
+			Name:   strings.TrimSpace(name),
+			Args:   strings.TrimSpace(args),
+		})
+		return
+	}
+	finalEvent := SubagentEvent{
+		Kind:   SEToolCall,
+		CallID: callID,
+		Name:   strings.TrimSpace(name),
+		Args:   strings.TrimSpace(args),
+		Output: strings.TrimSpace(output),
+		Done:   true,
+		Err:    err,
+	}
+	for i := len(b.Events) - 1; i >= 0; i-- {
+		ev := &b.Events[i]
+		if ev.Kind != SEToolCall || strings.TrimSpace(ev.CallID) != callID {
+			continue
+		}
+		if strings.TrimSpace(finalEvent.Name) == "" {
+			finalEvent.Name = strings.TrimSpace(ev.Name)
+		}
+		if strings.TrimSpace(finalEvent.Args) == "" {
+			finalEvent.Args = strings.TrimSpace(ev.Args)
+		}
+		break
+	}
+	b.Events = append(b.Events, finalEvent)
+}
+
+func (b *ParticipantTurnBlock) SetStatus(state string, approvalTool string, approvalCommand string) {
+	if b == nil {
+		return
+	}
+	b.Status = strings.ToLower(strings.TrimSpace(state))
+	switch b.Status {
+	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+		if b.EndedAt.IsZero() {
+			b.EndedAt = time.Now()
+		}
+	default:
+		b.EndedAt = time.Time{}
+	}
+	if !strings.EqualFold(b.Status, "waiting_approval") {
+		return
+	}
+	if n := len(b.Events); n > 0 && b.Events[n-1].Kind == SEApproval {
+		b.Events[n-1].ApprovalTool = strings.TrimSpace(approvalTool)
+		b.Events[n-1].ApprovalCommand = strings.TrimSpace(approvalCommand)
+		return
+	}
+	b.Events = append(b.Events, SubagentEvent{
+		Kind:            SEApproval,
+		ApprovalTool:    strings.TrimSpace(approvalTool),
+		ApprovalCommand: strings.TrimSpace(approvalCommand),
+	})
+}
+
+func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
+	if b == nil {
+		return nil
+	}
+	rows := []RenderedRow{StyledRow(b.id, renderParticipantTurnHeader(b, ctx))}
+	if !b.Expanded {
+		return rows
+	}
+	contentWidth := maxInt(8, ctx.Width)
+	for _, ev := range b.Events {
+		switch ev.Kind {
+		case SEReasoning:
+			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleReasoning, contentWidth, ctx)...)
+		case SEAssistant:
+			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleAssistant, contentWidth, ctx)...)
+		case SEToolCall:
+			rows = append(rows, renderParticipantTurnToolRows(b.id, ev, contentWidth, ctx)...)
+		case SEApproval:
+			line := "⚠ waiting for user confirmation"
+			if ev.ApprovalTool != "" {
+				line = "⚠ approval needed: " + strings.TrimSpace(ev.ApprovalTool)
+				if cmd := strings.TrimSpace(ev.ApprovalCommand); cmd != "" {
+					line += " — " + truncateDisplayText(cmd, maxInt(12, contentWidth-displayColumns(line)-3))
+				}
+			}
+			rows = append(rows, StyledRow(b.id, ctx.Theme.WarnStyle().Render(line)))
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(b.Status)) {
+	case "failed":
+		rows = append(rows, StyledRow(b.id, ctx.Theme.ErrorStyle().Render("✗ failed")))
+	case "interrupted":
+		rows = append(rows, StyledRow(b.id, ctx.Theme.WarnStyle().Render("⊘ interrupted")))
+	}
+	if b.Expanded && participantTurnIsTerminal(b.Status) {
+		rows = append(rows, StyledRow(b.id, renderParticipantTurnFooter(b, ctx)))
+	}
+	return rows
+}
+
+func renderParticipantTurnHeader(b *ParticipantTurnBlock, ctx BlockRenderContext) string {
+	icon := "▾"
+	if b == nil || !b.Expanded {
+		icon = "▸"
+	}
+	actorText := strings.TrimSpace(b.Actor)
+	iconText := ctx.Theme.PromptStyle().Bold(true).Render(icon)
+	actor := ctx.Theme.CommandActiveStyle().Bold(true).Render(actorText)
+	switch strings.ToLower(strings.TrimSpace(b.Status)) {
+	case "waiting_approval":
+		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + ctx.Theme.WarnStyle().Bold(true).Render(actorText)
+	case "failed":
+		return ctx.Theme.ErrorStyle().Bold(true).Render(icon) + " " + ctx.Theme.ErrorStyle().Bold(true).Render(actorText)
+	case "interrupted":
+		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + ctx.Theme.WarnStyle().Bold(true).Render(actorText)
+	default:
+		return iconText + " " + actor
+	}
+}
+
+func renderParticipantTurnNarrativeRows(blockID string, raw string, lineStyle tuikit.LineStyle, width int, ctx BlockRenderContext) []RenderedRow {
+	nls, plainRows := buildNarrativeRows(raw)
+	if len(plainRows) == 0 {
+		return nil
+	}
+	out := make([]RenderedRow, 0, len(plainRows))
+	for i, plain := range plainRows {
+		prefix := ""
+		switch lineStyle {
+		case tuikit.LineStyleReasoning:
+			prefix = "· "
+			if i > 0 {
+				prefix = "  "
+			}
+		case tuikit.LineStyleAssistant:
+			if i == 0 {
+				prefix = "* "
+			}
+		}
+		fullPlain := prefix + plain
+		fullStyled := styleNarrativeLine(nls[i].Text, fullPlain, nls[i].Kind, lineStyle, ctx.Theme)
+		wrappedPlain := strings.Split(hardWrapDisplayLine(fullPlain, maxInt(1, width)), "\n")
+		wrappedStyled := strings.Split(hardWrapDisplayLine(fullStyled, maxInt(1, width)), "\n")
+		lineCount := maxInt(len(wrappedPlain), len(wrappedStyled))
+		for j := range lineCount {
+			plainSegment := ""
+			if j < len(wrappedPlain) {
+				plainSegment = wrappedPlain[j]
+			}
+			styledSegment := plainSegment
+			if j < len(wrappedStyled) {
+				styledSegment = wrappedStyled[j]
+			}
+			out = append(out, StyledPlainRow(blockID, plainSegment, styledSegment))
+		}
+	}
+	return out
+}
+
+func renderParticipantTurnToolRows(blockID string, ev SubagentEvent, width int, ctx BlockRenderContext) []RenderedRow {
+	text := "▸ " + strings.TrimSpace(ev.Name)
+	if text == "▸" || text == "▸ " {
+		text = "▸ TOOL"
+	}
+	if ev.Done {
+		prefix := "✓ "
+		if ev.Err {
+			prefix = "✗ "
+		}
+		text = prefix + strings.TrimSpace(ev.Name)
+		if summary := strings.TrimSpace(ev.Output); summary != "" {
+			text += " " + summary
+		}
+	}
+	if !ev.Done {
+		if args := strings.TrimSpace(ev.Args); args != "" {
+			text += " " + args
+		}
+	}
+	lines := wrapToolOutputText(text, maxInt(1, width))
+	if len(lines) == 0 {
+		lines = []string{text}
+	}
+	out := make([]RenderedRow, 0, len(lines))
+	style := ctx.Theme.TextStyle()
+	if ev.Done {
+		if ev.Err {
+			style = ctx.Theme.ErrorStyle()
+		} else {
+			style = ctx.Theme.HelpHintTextStyle()
+		}
+	}
+	for i, line := range lines {
+		if i > 0 {
+			line = "  " + line
+		}
+		out = append(out, StyledPlainRow(blockID, line, style.Render(line)))
+	}
+	return out
+}
+
+func truncateDisplayText(text string, width int) string {
+	if width <= 0 || displayColumns(text) <= width {
+		return text
+	}
+	if width == 1 {
+		return "…"
+	}
+	return sliceByDisplayColumns(text, 0, width-1) + "…"
+}
+
+func collapseRepeatedNarrativeText(text string) string {
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	parts := strings.Split(text, "\n\n")
+	filteredParts := make([]string, 0, len(parts))
+	lastPart := ""
+	for _, part := range parts {
+		part = collapseAdjacentDuplicateLines(part)
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if trimmed == lastPart && len([]rune(trimmed)) >= 16 {
+			continue
+		}
+		filteredParts = append(filteredParts, part)
+		lastPart = trimmed
+	}
+	if len(filteredParts) == 0 {
+		return ""
+	}
+	return strings.Join(filteredParts, "\n\n")
+}
+
+func collapseAdjacentDuplicateLines(text string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	last := ""
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && trimmed == last && len([]rune(trimmed)) >= 16 {
+			continue
+		}
+		out = append(out, line)
+		if trimmed != "" {
+			last = trimmed
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func participantTurnIsTerminal(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+		return true
+	default:
+		return false
+	}
+}
+
+func renderParticipantTurnFooter(b *ParticipantTurnBlock, ctx BlockRenderContext) string {
+	label := ""
+	if b != nil && !b.StartedAt.IsZero() && !b.EndedAt.IsZero() && !b.EndedAt.Before(b.StartedAt) {
+		label = formatTurnDuration(b.EndedAt.Sub(b.StartedAt))
+	}
+	width := maxInt(12, ctx.Width)
+	return ctx.Theme.HelpHintTextStyle().Render(centeredDivider(width, label))
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +568,10 @@ type BashPanelBlock struct {
 	UpdatedAt    time.Time
 	EndedAt      time.Time
 	Expanded     bool
+	CollapseAt   time.Time
+	CollapseFrom time.Time
+	CollapseFor  time.Duration
+	VisibleLines int
 	Active       bool
 	ScrollOffset int
 	FollowTail   bool
@@ -214,14 +590,15 @@ type BashPanelBlock struct {
 func NewBashPanelBlock(toolName, callID string) *BashPanelBlock {
 	now := time.Now()
 	return &BashPanelBlock{
-		id:         nextBlockID(),
-		ToolName:   toolName,
-		CallID:     callID,
-		StartedAt:  now,
-		UpdatedAt:  now,
-		Expanded:   true,
-		Active:     true,
-		FollowTail: true,
+		id:          nextBlockID(),
+		ToolName:    toolName,
+		CallID:      callID,
+		StartedAt:   now,
+		UpdatedAt:   now,
+		Expanded:    true,
+		CollapseFor: inlinePanelCollapseDuration,
+		Active:      true,
+		FollowTail:  true,
 	}
 }
 
@@ -303,7 +680,7 @@ func (b *BashPanelBlock) renderPanelLines(ctx BlockRenderContext, content []tool
 	boxWidth := maxInt(1, ctx.Width-4)
 	contentWidth, lines, overflow := b.panelRenderLines(ctx, content, boxWidth)
 	totalLines := len(lines)
-	start, end, _ := panelScrollWindow(len(lines), toolOutputPreviewLines, b.ScrollOffset, b.FollowTail)
+	start, end, _ := panelScrollWindow(len(lines), b.previewLines(), b.ScrollOffset, b.FollowTail)
 	lines = lines[start:end]
 	if overflow {
 		lines = addPanelScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme)
@@ -315,6 +692,16 @@ func (b *BashPanelBlock) renderPanelLines(ctx BlockRenderContext, content []tool
 		Padding(0, 1).
 		Width(boxWidth)
 	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
+}
+
+func (b *BashPanelBlock) previewLines() int {
+	if b == nil {
+		return toolOutputPreviewLines
+	}
+	if b.VisibleLines > 0 {
+		return b.VisibleLines
+	}
+	return toolOutputPreviewLines
 }
 
 func (b *BashPanelBlock) panelRenderLines(ctx BlockRenderContext, content []toolOutputLine, boxWidth int) (contentWidth int, lines []string, overflow bool) {
@@ -490,8 +877,153 @@ type SubagentEvent struct {
 	ApprovalCommand string
 }
 
+type SubagentSessionState struct {
+	SpawnID   string
+	AttachID  string
+	Agent     string
+	Status    string // "running", "completed", "failed", "interrupted", "waiting_approval"
+	StartedAt time.Time
+	Events    []SubagentEvent
+
+	// eventsGen is bumped on every Events mutation. Panels use it to
+	// detect staleness without reflect.DeepEqual.
+	eventsGen uint64
+}
+
+func NewSubagentSessionState(spawnID, attachID, agent string) *SubagentSessionState {
+	return &SubagentSessionState{
+		SpawnID:   strings.TrimSpace(spawnID),
+		AttachID:  strings.TrimSpace(attachID),
+		Agent:     strings.TrimSpace(agent),
+		Status:    "running",
+		StartedAt: time.Now(),
+	}
+}
+
+func (s *SubagentSessionState) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+	if s == nil {
+		return
+	}
+	if len(s.Events) > 0 {
+		last := &s.Events[len(s.Events)-1]
+		if last.Kind == kind {
+			last.Text = mergeSubagentStreamChunk(last.Text, chunk)
+			s.eventsGen++
+			return
+		}
+	}
+	s.Events = append(s.Events, SubagentEvent{Kind: kind, Text: chunk})
+	s.eventsGen++
+}
+
+func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, chunk string, final bool) {
+	if s == nil {
+		return
+	}
+	stream = strings.ToLower(strings.TrimSpace(stream))
+	if !final {
+		for i := len(s.Events) - 1; i >= 0; i-- {
+			e := &s.Events[i]
+			if e.Kind != SEToolCall || e.CallID != callID || e.Done || e.Err {
+				continue
+			}
+			if strings.TrimSpace(e.Name) == "" {
+				e.Name = toolName
+			}
+			if strings.TrimSpace(e.Args) == "" {
+				e.Args = args
+			}
+			if chunk != "" {
+				e.Output += chunk
+			}
+			s.eventsGen++
+			return
+		}
+		s.Events = append(s.Events, SubagentEvent{
+			Kind:   SEToolCall,
+			Name:   toolName,
+			CallID: callID,
+			Args:   args,
+			Output: chunk,
+		})
+		s.eventsGen++
+		return
+	}
+
+	finalEvent := SubagentEvent{
+		Kind:   SEToolCall,
+		Name:   toolName,
+		CallID: callID,
+		Args:   args,
+		Output: chunk,
+		Done:   true,
+		Err:    stream == "stderr",
+	}
+	for i := len(s.Events) - 1; i >= 0; i-- {
+		e := &s.Events[i]
+		if e.Kind != SEToolCall || e.CallID != callID {
+			continue
+		}
+		if strings.TrimSpace(finalEvent.Name) == "" {
+			finalEvent.Name = e.Name
+		}
+		if strings.TrimSpace(finalEvent.Args) == "" {
+			finalEvent.Args = e.Args
+		}
+		break
+	}
+	s.Events = append(s.Events, finalEvent)
+	s.eventsGen++
+}
+
+func (s *SubagentSessionState) UpdatePlan(entries []planEntryState) {
+	if s == nil {
+		return
+	}
+	if n := len(s.Events); n > 0 && s.Events[n-1].Kind == SEPlan {
+		s.Events[n-1].PlanEntries = entries
+		s.eventsGen++
+		return
+	}
+	s.Events = append(s.Events, SubagentEvent{
+		Kind:        SEPlan,
+		PlanEntries: entries,
+	})
+	s.eventsGen++
+}
+
+func (s *SubagentSessionState) AddApprovalEvent(tool, command string) {
+	if s == nil {
+		return
+	}
+	if tool == "" {
+		for i := len(s.Events) - 1; i >= 0; i-- {
+			e := &s.Events[i]
+			if e.Kind == SEToolCall && !e.Done {
+				tool = e.Name
+				command = e.Args
+				break
+			}
+		}
+	}
+	if n := len(s.Events); n > 0 && s.Events[n-1].Kind == SEApproval {
+		s.Events[n-1].ApprovalTool = tool
+		s.Events[n-1].ApprovalCommand = command
+		s.eventsGen++
+		return
+	}
+	s.Events = append(s.Events, SubagentEvent{
+		Kind:            SEApproval,
+		ApprovalTool:    tool,
+		ApprovalCommand: command,
+	})
+	s.eventsGen++
+}
+
 type SubagentPanelBlock struct {
 	id           string
+	session      *SubagentSessionState
+	localEvtGen  uint64 // tracks which session eventsGen was last copied
 	SpawnID      string
 	AttachID     string
 	Agent        string
@@ -499,6 +1031,10 @@ type SubagentPanelBlock struct {
 	Status       string // "running", "completed", "failed", "interrupted", "waiting_approval"
 	StartedAt    time.Time
 	Expanded     bool
+	CollapseAt   time.Time
+	CollapseFrom time.Time
+	CollapseFor  time.Duration
+	VisibleLines int
 	ScrollOffset int
 	FollowTail   bool
 
@@ -508,15 +1044,89 @@ type SubagentPanelBlock struct {
 
 func NewSubagentPanelBlock(spawnID, attachID, agent, callID string) *SubagentPanelBlock {
 	return &SubagentPanelBlock{
-		id:         nextBlockID(),
-		SpawnID:    spawnID,
-		AttachID:   attachID,
-		Agent:      agent,
-		CallID:     callID,
-		Status:     "running",
-		StartedAt:  time.Now(),
-		Expanded:   true,
-		FollowTail: true,
+		id:          nextBlockID(),
+		SpawnID:     spawnID,
+		AttachID:    attachID,
+		Agent:       agent,
+		CallID:      callID,
+		Status:      "running",
+		StartedAt:   time.Now(),
+		Expanded:    true,
+		CollapseFor: inlinePanelCollapseDuration,
+		FollowTail:  true,
+	}
+}
+
+func (b *SubagentPanelBlock) sessionState() *SubagentSessionState {
+	if b == nil {
+		return nil
+	}
+	if b.session == nil {
+		state := NewSubagentSessionState(b.SpawnID, b.AttachID, b.Agent)
+		state.Status = strings.TrimSpace(b.Status)
+		if state.Status == "" {
+			state.Status = "running"
+		}
+		if !b.StartedAt.IsZero() {
+			state.StartedAt = b.StartedAt
+		}
+		state.Events = append(state.Events, b.Events...)
+		state.eventsGen++
+		b.session = state
+		b.localEvtGen = state.eventsGen
+		return state
+	}
+	b.syncMirrorIntoSession()
+	return b.session
+}
+
+func (b *SubagentPanelBlock) bindSession(state *SubagentSessionState) {
+	if b == nil || state == nil {
+		return
+	}
+	b.session = state
+	b.syncSessionMirror()
+}
+
+func (b *SubagentPanelBlock) syncMirrorIntoSession() {
+	if b == nil || b.session == nil {
+		return
+	}
+	if strings.TrimSpace(b.SpawnID) != "" && b.SpawnID != b.session.SpawnID {
+		b.session.SpawnID = b.SpawnID
+	}
+	if strings.TrimSpace(b.AttachID) != "" && b.AttachID != b.session.AttachID {
+		b.session.AttachID = b.AttachID
+	}
+	if strings.TrimSpace(b.Agent) != "" && b.Agent != b.session.Agent {
+		b.session.Agent = b.Agent
+	}
+	if strings.TrimSpace(b.Status) != "" && b.Status != b.session.Status {
+		b.session.Status = b.Status
+	}
+	if !b.StartedAt.IsZero() && !b.StartedAt.Equal(b.session.StartedAt) {
+		b.session.StartedAt = b.StartedAt
+	}
+	if b.localEvtGen != b.session.eventsGen || len(b.Events) != len(b.session.Events) {
+		b.session.Events = append(b.session.Events[:0], b.Events...)
+		b.session.eventsGen++
+		b.localEvtGen = b.session.eventsGen
+	}
+}
+
+func (b *SubagentPanelBlock) syncSessionMirror() {
+	if b == nil || b.session == nil {
+		return
+	}
+	state := b.session
+	b.SpawnID = state.SpawnID
+	b.AttachID = state.AttachID
+	b.Agent = state.Agent
+	b.Status = state.Status
+	b.StartedAt = state.StartedAt
+	if b.localEvtGen != state.eventsGen {
+		b.Events = append(b.Events[:0], state.Events...)
+		b.localEvtGen = state.eventsGen
 	}
 }
 
@@ -524,84 +1134,74 @@ func NewSubagentPanelBlock(spawnID, attachID, agent, callID string) *SubagentPan
 // If the most recent event is the same kind, the chunk is concatenated;
 // otherwise a new event is created, preserving chronological ordering.
 func (b *SubagentPanelBlock) AppendStreamChunk(kind SubagentEventKind, chunk string) {
-	if len(b.Events) > 0 {
-		last := &b.Events[len(b.Events)-1]
-		if last.Kind == kind {
-			last.Text += chunk
-			return
+	state := b.sessionState()
+	state.AppendStreamChunk(kind, chunk)
+	b.syncSessionMirror()
+}
+
+func mergeSubagentStreamChunk(existing string, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if incoming == existing {
+		return existing
+	}
+
+	const stableReplayThreshold = 12
+	if runeCount(existing) >= stableReplayThreshold && strings.HasPrefix(incoming, existing) {
+		return incoming
+	}
+	if runeCount(incoming) >= stableReplayThreshold && strings.HasPrefix(existing, incoming) {
+		return existing
+	}
+	if suffix := overlappingSubagentSuffix(existing, incoming, 6); suffix != incoming {
+		return existing + suffix
+	}
+	return existing + incoming
+}
+
+func overlappingSubagentSuffix(existing string, incoming string, minOverlap int) string {
+	existingRunes := []rune(existing)
+	incomingRunes := []rune(incoming)
+	limit := minInt(len(existingRunes), len(incomingRunes))
+	for overlap := limit; overlap >= minOverlap; overlap-- {
+		if string(existingRunes[len(existingRunes)-overlap:]) == string(incomingRunes[:overlap]) {
+			return string(incomingRunes[overlap:])
 		}
 	}
-	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: chunk})
+	return incoming
+}
+
+func runeCount(text string) int {
+	return len([]rune(text))
 }
 
 // UpdateToolCall creates or updates a tool call event identified by callID.
 func (b *SubagentPanelBlock) UpdateToolCall(callID, toolName, args, stream, chunk string, final bool) {
-	for i := range b.Events {
-		e := &b.Events[i]
-		if e.Kind == SEToolCall && e.CallID == callID {
-			if chunk != "" {
-				e.Output += chunk
-			}
-			if final {
-				e.Done = true
-			}
-			if stream == "stderr" {
-				e.Err = true
-			}
-			return
-		}
-	}
-	b.Events = append(b.Events, SubagentEvent{
-		Kind:   SEToolCall,
-		Name:   toolName,
-		CallID: callID,
-		Args:   args,
-		Output: chunk,
-		Done:   final,
-		Err:    stream == "stderr",
-	})
+	state := b.sessionState()
+	state.UpdateToolCall(callID, toolName, args, stream, chunk, final)
+	b.syncSessionMirror()
 }
 
 // UpdatePlan appends a new plan event or coalesces with the last event if it
 // is also a plan (rapid consecutive plan updates). This preserves the
 // chronological interleaving: tool→plan→tool→plan shows two plan snapshots.
 func (b *SubagentPanelBlock) UpdatePlan(entries []planEntryState) {
-	if n := len(b.Events); n > 0 && b.Events[n-1].Kind == SEPlan {
-		b.Events[n-1].PlanEntries = entries
-		return
-	}
-	b.Events = append(b.Events, SubagentEvent{
-		Kind:        SEPlan,
-		PlanEntries: entries,
-	})
+	state := b.sessionState()
+	state.UpdatePlan(entries)
+	b.syncSessionMirror()
 }
 
 // AddApprovalEvent appends an approval event or coalesces with the last event
 // if it is also an approval (rapid consecutive status updates). This preserves
 // the chronological interleaving for multiple approval cycles.
 func (b *SubagentPanelBlock) AddApprovalEvent(tool, command string) {
-	// Derive context from last unfinished tool call if not provided.
-	if tool == "" {
-		for i := len(b.Events) - 1; i >= 0; i-- {
-			e := &b.Events[i]
-			if e.Kind == SEToolCall && !e.Done {
-				tool = e.Name
-				command = e.Args
-				break
-			}
-		}
-	}
-	// Coalesce with last event if it's also an approval (rapid update).
-	if n := len(b.Events); n > 0 && b.Events[n-1].Kind == SEApproval {
-		b.Events[n-1].ApprovalTool = tool
-		b.Events[n-1].ApprovalCommand = command
-		return
-	}
-	b.Events = append(b.Events, SubagentEvent{
-		Kind:            SEApproval,
-		ApprovalTool:    tool,
-		ApprovalCommand: command,
-	})
+	state := b.sessionState()
+	state.AddApprovalEvent(tool, command)
+	b.syncSessionMirror()
 }
 
 func (b *SubagentPanelBlock) BlockID() string { return b.id }
@@ -610,6 +1210,8 @@ func (b *SubagentPanelBlock) Render(ctx BlockRenderContext) []RenderedRow {
 	if b == nil || !b.Expanded {
 		return nil
 	}
+	_ = b.sessionState()
+	b.syncSessionMirror()
 	lines := renderSubagentPanelLines(b, ctx)
 	rows := make([]RenderedRow, len(lines))
 	for i, l := range lines {
@@ -632,7 +1234,7 @@ func renderSubagentPanelLines(panel *SubagentPanelBlock, ctx BlockRenderContext)
 	boxWidth := maxInt(20, baseWidth-4)
 	contentWidth, lines, overflow := subagentPanelRenderLines(panel, ctx, boxWidth)
 	totalLines := len(lines)
-	start, end, _ := panelScrollWindow(len(lines), subagentOutputPreviewLines, panel.ScrollOffset, panel.FollowTail)
+	start, end, _ := panelScrollWindow(len(lines), panel.previewLines(), panel.ScrollOffset, panel.FollowTail)
 	lines = lines[start:end]
 	if overflow {
 		lines = addPanelScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme)
@@ -643,6 +1245,16 @@ func renderSubagentPanelLines(panel *SubagentPanelBlock, ctx BlockRenderContext)
 		Padding(0, 1).
 		Width(boxWidth)
 	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
+}
+
+func (b *SubagentPanelBlock) previewLines() int {
+	if b == nil {
+		return subagentOutputPreviewLines
+	}
+	if b.VisibleLines > 0 {
+		return b.VisibleLines
+	}
+	return subagentOutputPreviewLines
 }
 
 func subagentPanelRenderLines(panel *SubagentPanelBlock, ctx BlockRenderContext, boxWidth int) (contentWidth int, lines []string, overflow bool) {
@@ -695,29 +1307,7 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 			}
 
 		case SEToolCall:
-			header := "▸ " + strings.TrimSpace(ev.Name)
-			if args := strings.TrimSpace(ev.Args); args != "" {
-				header += " " + args
-			}
-			if ev.Done {
-				header = "✓ " + strings.TrimSpace(ev.Name)
-			}
-			if ev.Err {
-				header = "✗ " + strings.TrimSpace(ev.Name)
-			}
-			lines = append(lines, tuikit.ColorizeLogLine(header, tuikit.LineStyleTool, ctx.Theme))
-			if output := strings.TrimSpace(ev.Output); output != "" {
-				outLines := wrapToolOutputText(output, maxInt(1, contentWidth-4))
-				for _, ol := range outLines {
-					prefix := "  "
-					style := ctx.Theme.HelpHintTextStyle()
-					if ev.Err {
-						prefix = "! "
-						style = ctx.Theme.ErrorStyle()
-					}
-					lines = append(lines, style.Width(contentWidth).Render(prefix+tuikit.LinkifyText(ol, ctx.Theme.LinkStyle())))
-				}
-			}
+			lines = append(lines, renderSubagentToolEvent(ev, ctx, contentWidth)...)
 			hasContent = true
 
 		case SEApproval:
@@ -749,6 +1339,69 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 		lines = append(lines, ctx.Theme.ErrorStyle().Width(contentWidth).Render("✗ failed"))
 	case "interrupted":
 		lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render("⊘ interrupted"))
+	}
+	return lines
+}
+
+func renderSubagentToolEvent(ev SubagentEvent, ctx BlockRenderContext, contentWidth int) []string {
+	name := strings.TrimSpace(ev.Name)
+	if name == "" {
+		name = "TOOL"
+	}
+	if !ev.Done && !ev.Err {
+		line := "▸ " + name
+		if args := strings.TrimSpace(ev.Args); args != "" {
+			line += " " + args
+		}
+		return wrapStyledSubagentToolText(line, "  ", tuikit.LineStyleTool, ctx, contentWidth)
+	}
+
+	prefix := "✓ "
+	style := ctx.Theme.HelpHintTextStyle()
+	if ev.Err {
+		prefix = "✗ "
+		style = ctx.Theme.ErrorStyle()
+	}
+	line := prefix + name
+	if summary := strings.TrimSpace(ev.Output); summary != "" {
+		parts := splitAndWrapToolSummary(summary, maxInt(1, contentWidth-displayColumns(prefix)-displayColumns(name)-1))
+		if len(parts) > 0 {
+			line += " " + tuikit.LinkifyText(parts[0], ctx.Theme.LinkStyle())
+			rows := []string{style.Width(contentWidth).Render(line)}
+			indent := strings.Repeat(" ", displayColumns(prefix))
+			for _, extra := range parts[1:] {
+				rows = append(rows, style.Width(contentWidth).Render(indent+tuikit.LinkifyText(extra, ctx.Theme.LinkStyle())))
+			}
+			return rows
+		}
+	}
+	return []string{style.Width(contentWidth).Render(line)}
+}
+
+func wrapStyledSubagentToolText(text string, continuation string, lineStyle tuikit.LineStyle, ctx BlockRenderContext, contentWidth int) []string {
+	wrapped := wrapToolOutputText(text, maxInt(1, contentWidth))
+	if len(wrapped) == 0 {
+		return nil
+	}
+	rows := make([]string, 0, len(wrapped))
+	for i, line := range wrapped {
+		if i > 0 {
+			line = continuation + line
+		}
+		rows = append(rows, tuikit.ColorizeLogLine(line, lineStyle, ctx.Theme))
+	}
+	return rows
+}
+
+func splitAndWrapToolSummary(text string, width int) []string {
+	width = maxInt(1, width)
+	var lines []string
+	for raw := range strings.SplitSeq(text, "\n") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		lines = append(lines, wrapToolOutputText(raw, width)...)
 	}
 	return lines
 }
@@ -811,12 +1464,8 @@ func scrollPanelState(offset *int, followTail *bool, total, visible, delta int) 
 		current = maxOffset
 	}
 	next := current + delta
-	if next < 0 {
-		next = 0
-	}
-	if next > maxOffset {
-		next = maxOffset
-	}
+	next = max(next, 0)
+	next = min(next, maxOffset)
 	changed := next != current || *followTail != (next == maxOffset)
 	*offset = next
 	*followTail = next == maxOffset
@@ -840,6 +1489,8 @@ func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 	if b == nil || !b.Expanded {
 		return 0
 	}
+	_ = b.sessionState()
+	b.syncSessionMirror()
 	baseWidth := ctx.Width
 	if baseWidth <= 0 {
 		baseWidth = ctx.TermWidth
@@ -854,45 +1505,6 @@ func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 
 func (b *SubagentPanelBlock) Scroll(delta int, ctx BlockRenderContext) bool {
 	return scrollPanelState(&b.ScrollOffset, &b.FollowTail, b.scrollableLineCount(ctx), subagentOutputPreviewLines, delta)
-}
-
-// wrapTextLines splits text into lines and truncates to reasonable viewport limits.
-func wrapTextLines(text string, width int) []string {
-	raw := strings.Split(text, "\n")
-	var result []string
-	for _, line := range raw {
-		line = strings.TrimRight(line, " \t\r")
-		if displayColumns(line) > width {
-			line = graphemeSlice(line, 0, width-3) + "..."
-		}
-		result = append(result, line)
-	}
-	return result
-}
-
-func subagentBlockHeader(panel *SubagentPanelBlock) string {
-	agentName := strings.TrimSpace(panel.Agent)
-	if agentName == "" {
-		agentName = "self"
-	}
-	status := strings.TrimSpace(panel.Status)
-	if status == "" {
-		status = "running"
-	}
-	icon := "⟳"
-	label := status
-	switch status {
-	case "waiting_approval":
-		icon = "!"
-		label = "waiting approval"
-	case "completed":
-		icon = "✓"
-	case "failed":
-		icon = "✗"
-	case "interrupted":
-		icon = "⊘"
-	}
-	return fmt.Sprintf("%s SPAWN(%s) %s", icon, agentName, label)
 }
 
 // ---------------------------------------------------------------------------

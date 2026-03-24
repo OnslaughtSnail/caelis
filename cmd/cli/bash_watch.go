@@ -14,7 +14,7 @@ import (
 
 const bashWatchPollInterval = 120 * time.Millisecond
 
-func (c *cliConsole) syncBashTaskWatch(respToolID string, respToolName string, result map[string]any) {
+func (c *cliConsole) syncBashTaskWatch(respToolID string, _ string, result map[string]any) {
 	if c == nil || c.tuiSender == nil || c.execRuntime == nil {
 		return
 	}

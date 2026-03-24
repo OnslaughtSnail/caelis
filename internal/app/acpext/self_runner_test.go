@@ -13,12 +13,14 @@ import (
 	"time"
 
 	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	"github.com/OnslaughtSnail/caelis/internal/app/acpadapter"
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	kernelpolicy "github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
@@ -57,7 +59,7 @@ func newTestACPAdapterFactory(rt *runtime.Runtime, store session.Store, execRT t
 	}
 }
 
-func TestSelfACPSpawnCreatesAttachableChildSession(t *testing.T) {
+func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{Store: store})
 	if err != nil {
@@ -130,31 +132,26 @@ func TestSelfACPSpawnCreatesAttachableChildSession(t *testing.T) {
 	if len(delegations) != 1 {
 		t.Fatalf("expected 1 delegation, got %d", len(delegations))
 	}
-	loaded, err := svc.AttachSession(context.Background(), sessionsvc.AttachSessionRequest{
-		SessionRef: sessionsvc.SessionRef{
-			AppName:      "app",
-			UserID:       "u",
-			SessionID:    "parent",
-			WorkspaceKey: "wk",
-		},
-		ChildSessionID: delegations[0].ChildSessionID,
-		CWD:            "/workspace",
+	events, err := store.ListEvents(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      delegations[0].ChildSessionID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.SessionID == "parent" || loaded.SessionID == "" {
-		t.Fatalf("expected attached child session, got %q", loaded.SessionID)
+	if delegations[0].ChildSessionID == "parent" || delegations[0].ChildSessionID == "" {
+		t.Fatalf("expected delegated child session id, got %q", delegations[0].ChildSessionID)
 	}
 	found := false
-	for _, ev := range loaded.Events {
+	for _, ev := range events {
 		if ev != nil && ev.Message.TextContent() == "child done" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("expected child assistant output in attached session, got %+v", loaded.Events)
+		t.Fatalf("expected child assistant output in canonical self session, got %+v", events)
 	}
 }
 
@@ -198,15 +195,68 @@ func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 		t.Fatal("expected self ACP subagent runner")
 	}
 	_, err = runner.RunSubagent(context.Background(), agent.SubagentRunRequest{
-		Agent: "self",
-		Task:  "child task",
-		Yield: time.Second,
+		Agent:  "self",
+		Prompt: "child task",
+		Yield:  time.Second,
 	})
 	if !factoryCalled {
 		t.Fatal("expected self ACP runner to use provided adapter factory")
 	}
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected adapter factory error %v, got %v", sentinel, err)
+	}
+}
+
+func TestPermissionRequestHandler_PrefersToolAuthorizerForFileEdits(t *testing.T) {
+	approver := &recordingApprover{allow: false}
+	authorizer := &recordingToolAuthorizer{allow: true}
+	ctx := toolexec.WithApprover(context.Background(), approver)
+	ctx = kernelpolicy.WithToolAuthorizer(ctx, authorizer)
+	title := "PATCH /tmp/demo.txt"
+	kind := internalacp.ToolKindEdit
+
+	runner := &selfACPSubagentRunner{}
+	handler := runner.permissionRequestHandler(ctx, "self", func() string { return "child" }, "delegation-1", "/workspace")
+	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child",
+		ToolCall: acpclient.ToolCallUpdate{
+			ToolCallID: "call-patch-1",
+			Title:      &title,
+			Kind:       &kind,
+			RawInput: map[string]any{
+				"path": "/tmp/demo.txt",
+			},
+		},
+		Options: []struct {
+			OptionID string `json:"optionId"`
+			Name     string `json:"name"`
+			Kind     string `json:"kind"`
+		}{
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if authorizer.calls != 1 {
+		t.Fatalf("expected tool authorizer to be used once, got %d", authorizer.calls)
+	}
+	if approver.calls != 0 {
+		t.Fatalf("expected command approver to be skipped, got %d calls", approver.calls)
+	}
+	if authorizer.last.Path != "/tmp/demo.txt" {
+		t.Fatalf("unexpected authorization path %q", authorizer.last.Path)
+	}
+	var outcome struct {
+		Outcome  string `json:"outcome"`
+		OptionID string `json:"optionId"`
+	}
+	if err := json.Unmarshal(resp.Outcome, &outcome); err != nil {
+		t.Fatalf("decode outcome: %v", err)
+	}
+	if outcome.Outcome != "selected" || outcome.OptionID != "allow_once" {
+		t.Fatalf("unexpected outcome %+v", outcome)
 	}
 }
 
@@ -305,6 +355,142 @@ func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 	}
 }
 
+func TestSelfACPSubagentRunner_PreservesOriginalSpawnLineageWhenReusingChildSession(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-existing"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-child-existing",
+		SessionID: child.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "child already ran"),
+		Meta: map[string]any{
+			"parent_session_id":   parent.ID,
+			"child_session_id":    child.ID,
+			"delegation_id":       "dlg-original",
+			"parent_tool_call_id": "call-spawn-original",
+			"parent_tool_name":    tool.SpawnToolName,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &selfACPSubagentRunner{
+		runtime: rt,
+		store:   store,
+		parent:  parent,
+	}
+	meta := runner.delegationMetadata(
+		toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write"),
+		child.ID,
+	)
+	if meta.ParentToolCall != "call-spawn-original" {
+		t.Fatalf("expected original spawn call id preserved, got %q", meta.ParentToolCall)
+	}
+	if meta.ParentToolName != tool.SpawnToolName {
+		t.Fatalf("expected original spawn tool preserved, got %q", meta.ParentToolName)
+	}
+	if meta.DelegationID != "dlg-original" {
+		t.Fatalf("expected original delegation id preserved, got %q", meta.DelegationID)
+	}
+}
+
+func TestSelfACPSubagentRunner_InspectFallsBackToPersistedState(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-running"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lifecycle := runtime.LifecycleEvent(child, runtime.RunLifecycleStatusWaitingApproval, "self_acp", nil)
+	if lifecycle == nil {
+		t.Fatal("expected lifecycle event")
+	}
+	lifecycle = annotateDelegationEvent(lifecycle, runtime.DelegationMetadata{
+		ParentSessionID: parent.ID,
+		ChildSessionID:  child.ID,
+		DelegationID:    "dlg-running",
+	})
+	if err := store.AppendEvent(context.Background(), child, lifecycle); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &selfACPSubagentRunner{
+		runtime: rt,
+		store:   store,
+		parent:  parent,
+		shared: &sharedACPSubagentState{
+			tracker: newRemoteSubagentTracker(),
+		},
+	}
+	got, err := runner.InspectSubagent(context.Background(), child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != string(runtime.RunLifecycleStatusWaitingApproval) || !got.Running || !got.ApprovalPending {
+		t.Fatalf("expected waiting approval fallback result, got %+v", got)
+	}
+	if got.DelegationID != "dlg-running" {
+		t.Fatalf("expected delegation id from persisted state, got %+v", got)
+	}
+}
+
+func TestSelfACPSubagentRunner_FailedResultPersistsLifecycle(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	runner := &selfACPSubagentRunner{
+		store:  store,
+		parent: parent,
+		shared: &sharedACPSubagentState{
+			tracker: newRemoteSubagentTracker(),
+		},
+	}
+	cause := errors.New("prompt failed")
+	_, err := runner.failedResult(context.Background(), "child-failed", true, runtime.DelegationMetadata{
+		ParentSessionID: parent.ID,
+		ChildSessionID:  "child-failed",
+		DelegationID:    "dlg-failed",
+	}, "self", 0, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("expected original cause, got %v", err)
+	}
+	events, err := store.ListEvents(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      "child-failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one persisted failure event, got %d", len(events))
+	}
+	info, ok := runtime.LifecycleFromEvent(events[0])
+	if !ok || info.Status != runtime.RunLifecycleStatusFailed {
+		t.Fatalf("expected failed lifecycle event, got %+v", events[0])
+	}
+	if meta, ok := runtime.DelegationMetadataFromEvent(events[0]); !ok || meta.DelegationID != "dlg-failed" {
+		t.Fatalf("expected delegation metadata on failure event, got %+v", events[0].Meta)
+	}
+}
+
 func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{Store: store})
@@ -394,26 +580,24 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	if len(delegations) != 1 {
 		t.Fatalf("expected 1 delegation, got %d", len(delegations))
 	}
-	loaded, err := svc.AttachSession(context.Background(), sessionsvc.AttachSessionRequest{
-		SessionRef: sessionsvc.SessionRef{
-			AppName:      "app",
-			UserID:       "u",
-			SessionID:    "parent",
-			WorkspaceKey: workspace,
-		},
-		ChildSessionID: delegations[0].ChildSessionID,
-		CWD:            workspace,
+	loadedEvents, err := store.ListEvents(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      delegations[0].ChildSessionID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var sawList, sawGlob bool
-	for _, ev := range loaded.Events {
-		if ev == nil || ev.Message.ToolResponse == nil {
+	for _, ev := range loadedEvents {
+		if ev == nil {
 			continue
 		}
-		resp := ev.Message.ToolResponse
+		resp := ev.Message.ToolResponse()
+		if resp == nil {
+			continue
+		}
 		switch resp.Name {
 		case toolfs.ListToolName:
 			if got := intValue(resp.Result["count"]); got < 2 {
@@ -435,127 +619,117 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	}
 }
 
+func TestSelectPermissionOptionIDPrefersAdvertisedAllowAndRejectOptions(t *testing.T) {
+	options := []struct {
+		OptionID string `json:"optionId"`
+		Name     string `json:"name"`
+		Kind     string `json:"kind"`
+	}{
+		{OptionID: "approve", Name: "Approve", Kind: "allow_once"},
+		{OptionID: "deny", Name: "Deny", Kind: "reject_once"},
+	}
+	if got := selectPermissionOptionID(options, true); got != "approve" {
+		t.Fatalf("expected approve option id, got %q", got)
+	}
+	if got := selectPermissionOptionID(options, false); got != "deny" {
+		t.Fatalf("expected deny option id, got %q", got)
+	}
+}
+
 type testACPSpawnLLM struct{}
 
 type testACPListGlobLLM struct{}
 
 func (l *testACPSpawnLLM) Name() string { return "test-acp-spawn" }
 
-func (l *testACPSpawnLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *testACPSpawnLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		last := req.Messages[len(req.Messages)-1]
 		switch last.Role {
 		case model.RoleUser:
 			switch last.TextContent() {
 			case "delegate please":
-				args, _ := json.Marshal(map[string]any{"task": "child task", "yield_seconds": 0})
-				yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-spawn-1",
-							Name: tool.SpawnToolName,
-							Args: string(args),
-						}},
-					},
+				args, _ := json.Marshal(map[string]any{"prompt": "child task", "yield_seconds": 0})
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case "child task":
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "child done"},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "child done"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			}
 		case model.RoleTool:
-			if last.ToolResponse != nil && last.ToolResponse.Name == tool.SpawnToolName {
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "delegated complete"},
+			if resp := last.ToolResponse(); resp != nil && resp.Name == tool.SpawnToolName {
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "delegated complete"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			}
 		}
-		yield(&model.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Text: "fallback"},
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
 			TurnComplete: true,
-		}, nil)
+		}), nil)
 	}
 }
 
 func (l *testACPListGlobLLM) Name() string { return "test-acp-list-glob" }
 
-func (l *testACPListGlobLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *testACPListGlobLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		last := req.Messages[len(req.Messages)-1]
 		switch last.Role {
 		case model.RoleUser:
 			switch last.TextContent() {
 			case "delegate list glob":
-				args, _ := json.Marshal(map[string]any{"task": "child list glob", "yield_seconds": 0})
-				yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-spawn-1",
-							Name: tool.SpawnToolName,
-							Args: string(args),
-						}},
-					},
+				args, _ := json.Marshal(map[string]any{"prompt": "child list glob", "yield_seconds": 0})
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case "child list glob":
-				yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-list-1",
-							Name: toolfs.ListToolName,
-							Args: `{"path":"."}`,
-						}},
-					},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-list-1", Name: toolfs.ListToolName, Args: `{"path":"."}`}}, ""),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			}
 		case model.RoleTool:
-			if last.ToolResponse == nil {
+			resp := last.ToolResponse()
+			if resp == nil {
 				break
 			}
-			switch last.ToolResponse.Name {
+			switch resp.Name {
 			case tool.SpawnToolName:
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "delegated complete"},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "delegated complete"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case toolfs.ListToolName:
-				yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-glob-1",
-							Name: toolfs.GlobToolName,
-							Args: `{"pattern":"*.txt"}`,
-						}},
-					},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-glob-1", Name: toolfs.GlobToolName, Args: `{"pattern":"*.txt"}`}}, ""),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case toolfs.GlobToolName:
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "child done"},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "child done"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			}
 		}
-		yield(&model.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Text: "fallback"},
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
 			TurnComplete: true,
-		}, nil)
+		}), nil)
 	}
 }
 
@@ -585,4 +759,28 @@ func drainTurn(seq iter.Seq2[*session.Event, error]) []error {
 		}
 	}
 	return errs
+}
+
+type recordingApprover struct {
+	allow bool
+	calls int
+	last  toolexec.ApprovalRequest
+}
+
+func (a *recordingApprover) Approve(_ context.Context, req toolexec.ApprovalRequest) (bool, error) {
+	a.calls++
+	a.last = req
+	return a.allow, nil
+}
+
+type recordingToolAuthorizer struct {
+	allow bool
+	calls int
+	last  kernelpolicy.ToolAuthorizationRequest
+}
+
+func (a *recordingToolAuthorizer) AuthorizeTool(_ context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
+	a.calls++
+	a.last = req
+	return a.allow, nil
 }

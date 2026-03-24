@@ -23,7 +23,7 @@ func TestServiceNewLoadAndRestoreState(t *testing.T) {
 	svc, cleanup := newTestService(t, testServiceConfig{
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "hello"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "hello")}},
 			},
 		},
 	})
@@ -129,7 +129,7 @@ func TestServiceListSessionsDelegates(t *testing.T) {
 func TestServiceStartPromptEmitsCanonicalEvents(t *testing.T) {
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "hello from adapter"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "hello from adapter")}},
 		},
 	}
 	svc, cleanup := newTestService(t, testServiceConfig{llm: llm})
@@ -235,8 +235,8 @@ func TestServiceStartPromptFreezesSystemPromptPerLoadedSession(t *testing.T) {
 
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "one"}}},
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "two"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "one")}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "two")}},
 		},
 	}
 	promptText := "prompt-one"
@@ -322,7 +322,7 @@ func newTestService(t *testing.T, cfg testServiceConfig) (*Service, func()) {
 	if llm == nil {
 		llm = &scriptedLLM{
 			calls: [][]*model.Response{
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "ok"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "ok")}},
 			},
 		}
 	}
@@ -402,7 +402,7 @@ type scriptedLLM struct {
 
 func (s *scriptedLLM) Name() string { return "scripted" }
 
-func (s *scriptedLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (s *scriptedLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	s.mu.Lock()
 	var batch []*model.Response
 	if len(s.calls) > 0 {
@@ -415,14 +415,14 @@ func (s *scriptedLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[
 		s.reqs = append(s.reqs, &clone)
 	}
 	s.mu.Unlock()
-	return func(yield func(*model.Response, error) bool) {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		for _, one := range batch {
-			if one != nil && !one.Partial && !one.TurnComplete {
+			if one != nil && !one.TurnComplete {
 				clone := *one
 				clone.TurnComplete = true
 				one = &clone
 			}
-			if !yield(one, nil) {
+			if !yield(model.StreamEventFromResponse(one), nil) {
 				return
 			}
 		}
@@ -436,8 +436,8 @@ type blockingLLM struct {
 
 func (b *blockingLLM) Name() string { return "blocking" }
 
-func (b *blockingLLM) Generate(ctx context.Context, _ *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (b *blockingLLM) Generate(ctx context.Context, _ *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		b.once.Do(func() { close(b.started) })
 		<-ctx.Done()
 		yield(nil, ctx.Err())

@@ -121,11 +121,11 @@ func TestPrintEventBuffersAnswerPartialsUntilFinal(t *testing.T) {
 	}
 
 	printEvent(&session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "## He"},
+		Message: model.NewTextMessage(model.RoleAssistant, "## He"),
 		Meta:    map[string]any{"partial": true, "channel": "answer"},
 	}, state)
 	printEvent(&session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "ading"},
+		Message: model.NewTextMessage(model.RoleAssistant, "ading"),
 		Meta:    map[string]any{"partial": true, "channel": "answer"},
 	}, state)
 
@@ -134,7 +134,7 @@ func TestPrintEventBuffersAnswerPartialsUntilFinal(t *testing.T) {
 	}
 
 	printEvent(&session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "## Heading\n\n- item"},
+		Message: model.NewTextMessage(model.RoleAssistant, "## Heading\n\n- item"),
 	}, state)
 
 	got := ansi.Strip(out.String())
@@ -154,13 +154,9 @@ func TestPrintEvent_AssistantReasoningRendersBeforeToolCall(t *testing.T) {
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
 	printEvent(&session.Event{
-		Message: model.Message{
-			Role:      model.RoleAssistant,
-			Reasoning: "think first",
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "LIST", Args: `{"path":"."}`},
-			},
-		},
+		Message: model.MessageFromAssistantParts("", "think first", []model.ToolCall{
+			{ID: "call_1", Name: "LIST", Args: `{"path":"."}`},
+		}),
 	}, state)
 
 	got := ansi.Strip(out.String())
@@ -210,13 +206,10 @@ func TestRenderNoticeText_CompactionNotice(t *testing.T) {
 }
 
 func TestVisibleUserTextCombinesImagesAndText(t *testing.T) {
-	msg := model.Message{
-		Role: model.RoleUser,
-		ContentParts: []model.ContentPart{
-			{Type: model.ContentPartImage, FileName: "clipboard.png"},
-			{Type: model.ContentPartText, Text: "猜猜这是什么 APP"},
-		},
-	}
+	msg := model.MessageFromContentParts(model.RoleUser, []model.ContentPart{
+		{Type: model.ContentPartImage, FileName: "clipboard.png"},
+		{Type: model.ContentPartText, Text: "猜猜这是什么 APP"},
+	})
 	if got := visibleUserText(msg); got != "[image: clipboard.png] 猜猜这是什么 APP" {
 		t.Fatalf("unexpected visible user text %q", got)
 	}

@@ -13,16 +13,13 @@ func TestBuildRecoveryEvents_GeneratesToolInterrupt(t *testing.T) {
 		{
 			ID:   "assistant_1",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{
-						ID:   "call_1",
-						Name: "READ",
-						Args: `{"path":"/tmp/a.txt"}`,
-					},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{
+					ID:   "call_1",
+					Name: "READ",
+					Args: `{"path":"/tmp/a.txt"}`,
 				},
-			},
+			}, ""),
 		},
 	}
 
@@ -34,8 +31,8 @@ func TestBuildRecoveryEvents_GeneratesToolInterrupt(t *testing.T) {
 	if ev.Message.Role != model.RoleTool {
 		t.Fatalf("expected role=tool, got %q", ev.Message.Role)
 	}
-	if ev.Message.ToolResponse == nil || ev.Message.ToolResponse.ID != "call_1" {
-		t.Fatalf("expected tool response for call_1, got %+v", ev.Message.ToolResponse)
+	if ev.Message.ToolResponse() == nil || ev.Message.ToolResponse().ID != "call_1" {
+		t.Fatalf("expected tool response for call_1, got %+v", ev.Message.ToolResponse())
 	}
 	if ev.Meta[metaKind] != metaKindRecovery {
 		t.Fatalf("expected meta kind %q, got %#v", metaKindRecovery, ev.Meta[metaKind])
@@ -47,30 +44,24 @@ func TestBuildRecoveryEvents_SkipsClosedToolCalls(t *testing.T) {
 		{
 			ID:   "assistant_1",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{
-						ID:   "call_1",
-						Name: "READ",
-						Args: `{"path":"/tmp/a.txt"}`,
-					},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{
+					ID:   "call_1",
+					Name: "READ",
+					Args: `{"path":"/tmp/a.txt"}`,
 				},
-			},
+			}, ""),
 		},
 		{
 			ID:   "tool_1",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:   "call_1",
-					Name: "READ",
-					Result: map[string]any{
-						"path": "/tmp/a.txt",
-					},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call_1",
+				Name: "READ",
+				Result: map[string]any{
+					"path": "/tmp/a.txt",
 				},
-			},
+			}),
 		},
 	}
 
@@ -85,35 +76,26 @@ func TestBuildRecoveryEvents_UsesLastCompactionWindow(t *testing.T) {
 		{
 			ID:   "assistant_old",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{
-						ID:   "call_old",
-						Name: "READ",
-						Args: `{"path":"/tmp/old.txt"}`,
-					},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{
+					ID:   "call_old",
+					Name: "READ",
+					Args: `{"path":"/tmp/old.txt"}`,
 				},
-			},
+			}, ""),
 		},
 		{
-			ID:   "compaction",
-			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "summary",
-			},
+			ID:      "compaction",
+			Time:    time.Now(),
+			Message: model.NewTextMessage(model.RoleAssistant, "summary"),
 			Meta: map[string]any{
 				metaKind: metaKindCompaction,
 			},
 		},
 		{
-			ID:   "assistant_new",
-			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "after compaction",
-			},
+			ID:      "assistant_new",
+			Time:    time.Now(),
+			Message: model.NewTextMessage(model.RoleAssistant, "after compaction"),
 		},
 	}
 

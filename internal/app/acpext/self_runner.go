@@ -22,25 +22,32 @@ import (
 )
 
 type AdapterFactory func(*internalacp.Conn) (internalacp.Adapter, error)
+type AgentRegistryResolver func() (*appagents.Registry, error)
 
 type Config struct {
-	Store         session.Store
-	WorkspaceRoot string
-	WorkspaceCWD  string
-	ClientRuntime toolexec.Runtime
-	AgentRegistry *appagents.Registry
-	NewAdapter    AdapterFactory
+	Store                session.Store
+	WorkspaceRoot        string
+	WorkspaceCWD         string
+	ClientRuntime        toolexec.Runtime
+	ResolveAgentRegistry AgentRegistryResolver
+	NewAdapter           AdapterFactory
 }
 
 func NewACPSubagentRunnerFactory(cfg Config) runtime.SubagentRunnerFactory {
 	if cfg.Store == nil {
 		return nil
 	}
+	snapshots := newAgentSnapshotCache(cfg.ResolveAgentRegistry)
+	shared := &sharedACPSubagentState{
+		tracker: newRemoteSubagentTracker(),
+		active:  map[string]context.CancelFunc{},
+	}
 	return func(rt *runtime.Runtime, parent *session.Session, req runtime.RunRequest) agent.SubagentRunner {
 		_ = req
 		if rt == nil || parent == nil {
 			return nil
 		}
+		snapshots.Warm(parent.ID)
 		return &selfACPSubagentRunner{
 			runtime:       rt,
 			store:         cfg.Store,
@@ -48,9 +55,9 @@ func NewACPSubagentRunnerFactory(cfg Config) runtime.SubagentRunnerFactory {
 			workspaceRoot: strings.TrimSpace(cfg.WorkspaceRoot),
 			workspaceCWD:  strings.TrimSpace(cfg.WorkspaceCWD),
 			clientRuntime: cfg.ClientRuntime,
-			agentRegistry: cfg.AgentRegistry,
+			snapshots:     snapshots,
 			newAdapter:    cfg.NewAdapter,
-			active:        map[string]context.CancelFunc{},
+			shared:        shared,
 		}
 	}
 }
@@ -66,11 +73,15 @@ type selfACPSubagentRunner struct {
 	workspaceRoot string
 	workspaceCWD  string
 	clientRuntime toolexec.Runtime
-	agentRegistry *appagents.Registry
+	snapshots     *agentSnapshotCache
 	newAdapter    AdapterFactory
+	shared        *sharedACPSubagentState
+}
 
-	mu     sync.Mutex
-	active map[string]context.CancelFunc
+type sharedACPSubagentState struct {
+	mu      sync.Mutex
+	active  map[string]context.CancelFunc
+	tracker *remoteSubagentTracker
 }
 
 type readyState struct {
@@ -78,23 +89,78 @@ type readyState struct {
 	meta      runtime.DelegationMetadata
 }
 
+type agentSnapshotCache struct {
+	mu      sync.Mutex
+	load    AgentRegistryResolver
+	entries map[string]agentSnapshotEntry
+}
+
+type agentSnapshotEntry struct {
+	reg *appagents.Registry
+	err error
+}
+
+func newAgentSnapshotCache(load AgentRegistryResolver) *agentSnapshotCache {
+	return &agentSnapshotCache{
+		load:    load,
+		entries: map[string]agentSnapshotEntry{},
+	}
+}
+
+func (c *agentSnapshotCache) Warm(parentSessionID string) {
+	_, _ = c.snapshot(parentSessionID)
+}
+
+func (c *agentSnapshotCache) snapshot(parentSessionID string) (*appagents.Registry, error) {
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	if parentSessionID == "" {
+		return c.loadCurrent()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.entries[parentSessionID]; ok {
+		return entry.reg, entry.err
+	}
+	reg, err := c.loadCurrent()
+	c.entries[parentSessionID] = agentSnapshotEntry{reg: reg, err: err}
+	return reg, err
+}
+
+func (c *agentSnapshotCache) loadCurrent() (*appagents.Registry, error) {
+	if c == nil || c.load == nil {
+		return appagents.NewRegistry(), nil
+	}
+	reg, err := c.load()
+	if err != nil {
+		return nil, err
+	}
+	if reg == nil {
+		return appagents.NewRegistry(), nil
+	}
+	return appagents.NewRegistry(reg.List()...), nil
+}
+
 func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
 	agentName := strings.TrimSpace(req.Agent)
 	if agentName == "" {
 		agentName = "self"
 	}
-	if strings.TrimSpace(req.Task) == "" {
-		return agent.SubagentRunResult{}, fmt.Errorf("acpext: child task is required")
+	if strings.TrimSpace(req.Prompt) == "" {
+		return agent.SubagentRunResult{}, fmt.Errorf("acpext: child prompt is required")
 	}
+	explicitSessionID := strings.TrimSpace(req.SessionID)
 	desc, err := r.resolveAgentDescriptor(agentName)
 	if err != nil {
 		return agent.SubagentRunResult{}, err
 	}
-	requestedSessionID, err := runtime.ResolveChildSessionID(r.parent.ID, req.SessionID)
+	target, err := r.resolveSessionTarget(explicitSessionID)
 	if err != nil {
 		return agent.SubagentRunResult{}, err
 	}
-	metaBase := r.delegationMetadata(ctx, "")
+	if cwd := strings.TrimSpace(req.ChildCWD); cwd != "" {
+		target.childCWD = cwd
+	}
+	metaBase := r.delegationMetadata(ctx, target.requestedSessionID)
 	runCtx, cancel := context.WithCancel(runtime.DetachDelegationContext(ctx, metaBase))
 	if req.Timeout > 0 {
 		runCtx, cancel = context.WithTimeout(runtime.DetachDelegationContext(ctx, metaBase), req.Timeout)
@@ -128,7 +194,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	done := make(chan runOutcome, 1)
 	go func() {
 		outcome := runOutcome{}
-		outcome.sessionID, outcome.meta, outcome.created, outcome.err = r.runACPSubagent(runCtx, desc, requestedSessionID, req.Task, metaBase, func(created *acpclient.Client) {
+		outcome.sessionID, outcome.meta, outcome.created, outcome.err = r.runACPSubagent(runCtx, desc, target, req.Prompt, metaBase, func(created *acpclient.Client) {
 			clientMu.Lock()
 			client = created
 			clientMu.Unlock()
@@ -166,11 +232,12 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		}
 		childSessionID = strings.TrimSpace(outcome.sessionID)
 		meta = outcome.meta
-		result, inspectErr := r.inspect(ctx, childSessionID)
+		result, inspectErr := r.InspectSubagent(ctx, childSessionID)
 		if inspectErr != nil {
 			return agent.SubagentRunResult{}, inspectErr
 		}
 		result.Agent = agentName
+		result.ChildCWD = firstNonEmpty(result.ChildCWD, target.childCWD)
 		result.Timeout = req.Timeout
 		if result.DelegationID == "" {
 			result.DelegationID = meta.DelegationID
@@ -209,17 +276,19 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 			SessionID:    childSessionID,
 			DelegationID: meta.DelegationID,
 			Agent:        agentName,
+			ChildCWD:     target.childCWD,
 			State:        string(runtime.RunLifecycleStatusRunning),
 			Running:      true,
 			Yielded:      true,
 			Timeout:      req.Timeout,
 		}, nil
 	}
-	result, err := r.inspect(ctx, childSessionID)
+	result, err := r.InspectSubagent(ctx, childSessionID)
 	if err != nil {
 		return agent.SubagentRunResult{}, err
 	}
 	result.Agent = agentName
+	result.ChildCWD = firstNonEmpty(result.ChildCWD, target.childCWD)
 	result.Timeout = req.Timeout
 	if result.DelegationID == "" {
 		result.DelegationID = meta.DelegationID
@@ -232,9 +301,12 @@ func (r *selfACPSubagentRunner) CancelSubagent(sessionID string) bool {
 	if sessionID == "" {
 		return false
 	}
-	r.mu.Lock()
-	cancel, ok := r.active[sessionID]
-	r.mu.Unlock()
+	if r == nil || r.shared == nil {
+		return false
+	}
+	r.shared.mu.Lock()
+	cancel, ok := r.shared.active[sessionID]
+	r.shared.mu.Unlock()
 	if ok && cancel != nil {
 		cancel()
 		return true
@@ -242,10 +314,16 @@ func (r *selfACPSubagentRunner) CancelSubagent(sessionID string) bool {
 	return false
 }
 
-func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagents.Descriptor, requestedSessionID string, taskText string, metaBase runtime.DelegationMetadata, onClient func(*acpclient.Client), onReady func(readyState)) (string, runtime.DelegationMetadata, bool, error) {
+type subagentSessionTarget struct {
+	requestedSessionID string
+	childCWD           string
+}
+
+func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagents.Descriptor, target subagentSessionTarget, promptText string, metaBase runtime.DelegationMetadata, onClient func(*acpclient.Client), onReady func(readyState)) (string, runtime.DelegationMetadata, bool, error) {
 	var (
-		bridgeMu sync.RWMutex
-		bridge   *acpSessionUpdateBridge
+		bridgeMu                sync.RWMutex
+		bridge                  *acpSessionUpdateBridge
+		sessionIDForPermissions string
 	)
 	onUpdate := func(env acpclient.UpdateEnvelope) {
 		bridgeMu.RLock()
@@ -268,7 +346,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 
 	startClient := func() (*acpclient.Client, func(), error) {
 		if desc.Transport == appagents.TransportSelf {
-			return r.startLoopbackClient(ctx, requestedSessionID, metaBase, onUpdate, onClient)
+			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient)
 		}
 		client, err := acpclient.Start(ctx, acpclient.Config{
 			Command:             strings.TrimSpace(desc.Command),
@@ -279,7 +357,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 			Workspace:           r.resolveWorkspaceRoot(),
 			ClientInfo:          nil,
 			OnUpdate:            onUpdate,
-			OnPermissionRequest: permissionRequestHandler(ctx),
+			OnPermissionRequest: r.permissionRequestHandler(ctx, strings.TrimSpace(desc.ID), func() string { return strings.TrimSpace(sessionIDForPermissions) }, metaBase.DelegationID, target.childCWD),
 		})
 		if err != nil {
 			return nil, nil, err
@@ -299,27 +377,60 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	if _, err := client.Initialize(ctx); err != nil {
 		return "", metaBase, false, err
 	}
-	newResp, err := client.NewSession(ctx, r.resolveWorkspaceCWD(), requestedSessionID)
-	if err != nil {
-		return "", metaBase, false, err
+	actualSessionID := ""
+	created := false
+	requestedSessionID := strings.TrimSpace(target.requestedSessionID)
+	if requestedSessionID != "" {
+		loadResp, loadErr := client.LoadSession(ctx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()))
+		if loadErr == nil {
+			_ = loadResp
+			actualSessionID = requestedSessionID
+		} else {
+			return "", metaBase, false, fmt.Errorf("acpext: load child session %q: %w", requestedSessionID, loadErr)
+		}
+	} else {
+		sessionCWD := firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD())
+		newResp, err := client.NewSession(ctx, sessionCWD)
+		if err != nil {
+			return "", metaBase, false, err
+		}
+		actualSessionID = strings.TrimSpace(newResp.SessionID)
+		created = true
 	}
-	actualSessionID := strings.TrimSpace(newResp.SessionID)
 	if actualSessionID == "" {
-		actualSessionID = strings.TrimSpace(requestedSessionID)
+		return "", metaBase, false, fmt.Errorf("acpext: child session id is empty")
 	}
+	sessionIDForPermissions = actualSessionID
 	meta := metaBase
 	meta.ChildSessionID = actualSessionID
+	if target.childCWD == "" {
+		target.childCWD = r.resolveWorkspaceCWD()
+	}
 	bridgeMu.Lock()
-	bridge = newACPSessionUpdateBridge(meta, actualSessionID)
+	bridge = newACPSessionUpdateBridge(meta, desc.ID, actualSessionID, target.childCWD, r.shared.tracker)
 	bridgeMu.Unlock()
+	r.shared.tracker.markRunning(desc.ID, actualSessionID, meta.DelegationID, target.childCWD)
 	if onReady != nil {
 		onReady(readyState{sessionID: actualSessionID, meta: meta})
 	}
-	_, err = client.Prompt(ctx, actualSessionID, taskText)
-	return actualSessionID, meta, true, err
+	_, err = client.Prompt(ctx, actualSessionID, promptText)
+	bridgeMu.RLock()
+	activeBridge := bridge
+	bridgeMu.RUnlock()
+	if activeBridge != nil {
+		activeBridge.FlushAssistant(ctx)
+	}
+	if err == nil {
+		if snapshot, ok := r.shared.tracker.inspect(desc.ID, actualSessionID); ok {
+			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), snapshot.Assistant)
+		} else {
+			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), "")
+		}
+	}
+	return actualSessionID, meta, created, err
 }
 
-func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client)) (*acpclient.Client, func(), error) {
+func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, childCWD string, sessionIDProvider func() string, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client)) (*acpclient.Client, func(), error) {
 	serverReader, clientWriter := io.Pipe()
 	clientReader, serverWriter := io.Pipe()
 	serverConn := internalacp.NewConn(serverReader, serverWriter)
@@ -328,7 +439,7 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		Workspace:           r.resolveWorkspaceRoot(),
 		WorkDir:             r.resolveWorkspaceCWD(),
 		OnUpdate:            onUpdate,
-		OnPermissionRequest: permissionRequestHandler(ctx),
+		OnPermissionRequest: r.permissionRequestHandler(ctx, "self", sessionIDProvider, meta.DelegationID, firstNonEmpty(childCWD, r.resolveWorkspaceCWD())),
 	}, clientReader, clientWriter)
 	if err != nil {
 		return nil, nil, err
@@ -388,41 +499,179 @@ func (r *selfACPSubagentRunner) newACPAdapter(conn *internalacp.Conn) (internala
 
 func (r *selfACPSubagentRunner) delegationMetadata(ctx context.Context, childSessionID string) runtime.DelegationMetadata {
 	callInfo, _ := toolexec.ToolCallInfoFromContext(ctx)
-	return runtime.DelegationMetadata{
+	meta := runtime.DelegationMetadata{
 		ParentSessionID: r.parent.ID,
 		ChildSessionID:  childSessionID,
 		ParentToolCall:  strings.TrimSpace(callInfo.ID),
 		ParentToolName:  strings.TrimSpace(callInfo.Name),
 		DelegationID:    idutil.NewDelegationID(),
 	}
+	if existing, ok := r.existingChildDelegation(ctx, childSessionID); ok {
+		if existing.ParentSessionID != "" {
+			meta.ParentSessionID = existing.ParentSessionID
+		}
+		if existing.ChildSessionID != "" {
+			meta.ChildSessionID = existing.ChildSessionID
+		}
+		if existing.ParentToolCall != "" {
+			meta.ParentToolCall = existing.ParentToolCall
+		}
+		if existing.ParentToolName != "" {
+			meta.ParentToolName = existing.ParentToolName
+		}
+		if existing.DelegationID != "" {
+			meta.DelegationID = existing.DelegationID
+		}
+	}
+	return meta
 }
 
-func (r *selfACPSubagentRunner) inspect(ctx context.Context, childSessionID string) (agent.SubagentRunResult, error) {
+func (r *selfACPSubagentRunner) existingChildDelegation(ctx context.Context, childSessionID string) (runtime.DelegationMetadata, bool) {
+	if r == nil || r.runtime == nil || r.parent == nil {
+		return runtime.DelegationMetadata{}, false
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return runtime.DelegationMetadata{}, false
+	}
+	events, err := r.runtime.SessionEvents(ctx, runtime.SessionEventsRequest{
+		AppName:          r.parent.AppName,
+		UserID:           r.parent.UserID,
+		SessionID:        childSessionID,
+		Limit:            200,
+		IncludeLifecycle: true,
+	})
+	if err != nil {
+		return runtime.DelegationMetadata{}, false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		meta, ok := runtime.DelegationMetadataFromEvent(events[i])
+		if !ok {
+			continue
+		}
+		if meta.ChildSessionID != "" && !strings.EqualFold(strings.TrimSpace(meta.ChildSessionID), childSessionID) {
+			continue
+		}
+		if meta.ParentSessionID == "" {
+			meta.ParentSessionID = r.parent.ID
+		}
+		if meta.ChildSessionID == "" {
+			meta.ChildSessionID = childSessionID
+		}
+		return meta, true
+	}
+	return runtime.DelegationMetadata{}, false
+}
+
+func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessionID string) (agent.SubagentRunResult, error) {
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return agent.SubagentRunResult{}, fmt.Errorf("acpext: delegated child session_id is required")
+	}
+	if r == nil || r.shared == nil || r.shared.tracker == nil {
+		return agent.SubagentRunResult{}, fmt.Errorf("acpext: subagent tracker is unavailable")
+	}
+	agentName := "self"
+	if state, ok := r.shared.tracker.inspect("self", childSessionID); ok {
+		return agent.SubagentRunResult{
+			SessionID:       state.SessionID,
+			DelegationID:    state.DelegationID,
+			Agent:           firstNonEmpty(state.Agent, "self"),
+			ChildCWD:        state.ChildCWD,
+			Assistant:       state.Assistant,
+			State:           state.State,
+			Running:         state.Running,
+			ApprovalPending: state.ApprovalPending,
+			LogSnapshot:     state.LogSnapshot,
+			UpdatedAt:       state.UpdatedAt,
+		}, nil
+	}
+	for _, descAgent := range r.knownAgents() {
+		agentName = descAgent
+		if state, ok := r.shared.tracker.inspect(agentName, childSessionID); ok {
+			return agent.SubagentRunResult{
+				SessionID:       state.SessionID,
+				DelegationID:    state.DelegationID,
+				Agent:           firstNonEmpty(state.Agent, agentName),
+				ChildCWD:        state.ChildCWD,
+				Assistant:       state.Assistant,
+				State:           state.State,
+				Running:         state.Running,
+				ApprovalPending: state.ApprovalPending,
+				LogSnapshot:     state.LogSnapshot,
+				UpdatedAt:       state.UpdatedAt,
+			}, nil
+		}
+	}
+	if result, ok, err := r.inspectPersisted(ctx, childSessionID); err != nil {
+		return agent.SubagentRunResult{}, err
+	} else if ok {
+		return result, nil
+	}
+	return agent.SubagentRunResult{}, fmt.Errorf("acpext: delegated child session %q is not tracked in this process", childSessionID)
+}
+
+func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID string, childCreated bool, meta runtime.DelegationMetadata, agentName string, timeout time.Duration, cause error) (agent.SubagentRunResult, error) {
+	status := runtime.RunLifecycleStatusFailed
+	if strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(cause))), "context canceled") {
+		status = runtime.RunLifecycleStatusInterrupted
+	}
+	if strings.TrimSpace(childSessionID) != "" && r != nil && r.shared != nil && r.shared.tracker != nil {
+		r.shared.tracker.finish(agentName, childSessionID, meta.DelegationID, "", string(status), "")
+	}
+	if childCreated || strings.TrimSpace(childSessionID) != "" {
+		r.persistFailureState(ctx, childSessionID, meta, status, cause)
+	}
+	return agent.SubagentRunResult{
+		SessionID:    strings.TrimSpace(childSessionID),
+		DelegationID: meta.DelegationID,
+		Agent:        agentName,
+		State:        string(status),
+		Timeout:      timeout,
+	}, cause
+}
+
+func (r *selfACPSubagentRunner) inspectPersisted(ctx context.Context, childSessionID string) (agent.SubagentRunResult, bool, error) {
+	if r == nil || r.runtime == nil || r.parent == nil {
+		return agent.SubagentRunResult{}, false, nil
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return agent.SubagentRunResult{}, false, nil
+	}
 	state, err := r.runtime.RunState(ctx, runtime.RunStateRequest{
 		AppName:   r.parent.AppName,
 		UserID:    r.parent.UserID,
 		SessionID: childSessionID,
 	})
 	if err != nil {
-		return agent.SubagentRunResult{}, err
+		return agent.SubagentRunResult{}, false, err
 	}
 	events, err := r.runtime.SessionEvents(ctx, runtime.SessionEventsRequest{
 		AppName:          r.parent.AppName,
 		UserID:           r.parent.UserID,
 		SessionID:        childSessionID,
-		IncludeLifecycle: false,
+		IncludeLifecycle: true,
 	})
 	if err != nil {
-		return agent.SubagentRunResult{}, err
+		return agent.SubagentRunResult{}, false, err
+	}
+	if !state.HasLifecycle && len(events) == 0 {
+		return agent.SubagentRunResult{}, false, nil
 	}
 	result := agent.SubagentRunResult{
-		SessionID: childSessionID,
-		State:     string(state.Status),
-		Running:   state.Status == runtime.RunLifecycleStatusRunning || state.Status == runtime.RunLifecycleStatusWaitingApproval,
+		SessionID:       childSessionID,
+		State:           string(state.Status),
+		Running:         state.Status == runtime.RunLifecycleStatusRunning || state.Status == runtime.RunLifecycleStatusWaitingApproval,
+		ApprovalPending: state.Status == runtime.RunLifecycleStatusWaitingApproval,
+		UpdatedAt:       state.UpdatedAt,
 	}
 	for _, ev := range events {
 		if ev == nil {
 			continue
+		}
+		if ev.Time.After(result.UpdatedAt) {
+			result.UpdatedAt = ev.Time
 		}
 		if result.DelegationID == "" {
 			if meta, ok := runtime.DelegationMetadataFromEvent(ev); ok {
@@ -435,29 +684,30 @@ func (r *selfACPSubagentRunner) inspect(ctx context.Context, childSessionID stri
 		result.State = string(runtime.RunLifecycleStatusRunning)
 		result.Running = true
 	}
-	return result, nil
+	return result, true, nil
 }
 
-func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID string, childCreated bool, meta runtime.DelegationMetadata, agentName string, timeout time.Duration, cause error) (agent.SubagentRunResult, error) {
-	if childCreated && strings.TrimSpace(childSessionID) != "" {
-		childSession := &session.Session{
-			AppName: r.parent.AppName,
-			UserID:  r.parent.UserID,
-			ID:      childSessionID,
-		}
-		ev := runtime.LifecycleEvent(childSession, runtime.RunLifecycleStatusFailed, "self_acp", cause)
-		if ev != nil {
-			ev = annotateDelegationEvent(ev, meta)
-			_ = r.store.AppendEvent(ctx, childSession, ev)
-		}
+func (r *selfACPSubagentRunner) persistFailureState(ctx context.Context, childSessionID string, meta runtime.DelegationMetadata, status runtime.RunLifecycleStatus, cause error) {
+	if r == nil || r.store == nil || r.parent == nil {
+		return
 	}
-	return agent.SubagentRunResult{
-		SessionID:    strings.TrimSpace(childSessionID),
-		DelegationID: meta.DelegationID,
-		Agent:        agentName,
-		State:        string(runtime.RunLifecycleStatusFailed),
-		Timeout:      timeout,
-	}, cause
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return
+	}
+	childSession := &session.Session{
+		AppName: r.parent.AppName,
+		UserID:  r.parent.UserID,
+		ID:      childSessionID,
+	}
+	if _, err := r.store.GetOrCreate(ctx, childSession); err != nil {
+		return
+	}
+	ev := runtime.LifecycleEvent(childSession, status, "self_acp", cause)
+	if ev == nil {
+		return
+	}
+	_ = r.store.AppendEvent(ctx, childSession, annotateDelegationEvent(ev, meta))
 }
 
 func annotateDelegationEvent(ev *session.Event, meta runtime.DelegationMetadata) *session.Event {
@@ -485,37 +735,83 @@ func annotateDelegationEvent(ev *session.Event, meta runtime.DelegationMetadata)
 	return ev
 }
 
-func permissionRequestHandler(ctx context.Context) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, agentName string, sessionID func() string, delegationID string, childCWD string) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
 	return func(reqCtx context.Context, req acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+		if r != nil && r.shared != nil && r.shared.tracker != nil && sessionID != nil {
+			r.shared.tracker.markApprovalPending(agentName, sessionID(), delegationID, childCWD)
+		}
+		defer func() {
+			if r != nil && r.shared != nil && r.shared.tracker != nil && sessionID != nil {
+				r.shared.tracker.clearApproval(agentName, sessionID())
+			}
+		}()
+		isToolAuthorization := requestLooksLikeToolAuthorization(req)
+		if isToolAuthorization {
+			if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
+				allowed, err := authorizer.AuthorizeTool(reqCtx, authorizationRequestFromACP(req))
+				if err != nil {
+					return acpclient.RequestPermissionResponse{}, err
+				}
+				return permissionOutcome(req, allowed), nil
+			}
+		}
 		if approver, ok := toolexec.ApproverFromContext(ctx); ok {
 			allowed, err := approver.Approve(reqCtx, approvalRequestFromACP(req))
 			if err != nil {
 				return acpclient.RequestPermissionResponse{}, err
 			}
-			return permissionOutcome(allowed), nil
+			return permissionOutcome(req, allowed), nil
 		}
-		if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
-			allowed, err := authorizer.AuthorizeTool(reqCtx, authorizationRequestFromACP(req))
-			if err != nil {
-				return acpclient.RequestPermissionResponse{}, err
+		if !isToolAuthorization {
+			if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
+				allowed, err := authorizer.AuthorizeTool(reqCtx, authorizationRequestFromACP(req))
+				if err != nil {
+					return acpclient.RequestPermissionResponse{}, err
+				}
+				return permissionOutcome(req, allowed), nil
 			}
-			return permissionOutcome(allowed), nil
 		}
-		return permissionOutcome(true), nil
+		return permissionOutcome(req, true), nil
 	}
 }
 
-func permissionOutcome(allowed bool) acpclient.RequestPermissionResponse {
-	optionID := "reject_once"
-	if allowed {
-		optionID = "allow_once"
-	}
+func permissionOutcome(req acpclient.RequestPermissionRequest, allowed bool) acpclient.RequestPermissionResponse {
+	optionID := selectPermissionOptionID(req.Options, allowed)
 	return acpclient.RequestPermissionResponse{
 		Outcome: mustMarshalRaw(map[string]any{
 			"outcome":  "selected",
 			"optionId": optionID,
 		}),
 	}
+}
+
+func selectPermissionOptionID(options []struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+}, allowed bool) string {
+	wantKind := "reject"
+	fallback := "reject_once"
+	if allowed {
+		wantKind = "allow"
+		fallback = "allow_once"
+	}
+	for _, option := range options {
+		kind := strings.ToLower(strings.TrimSpace(option.Kind))
+		if strings.Contains(kind, wantKind) && strings.TrimSpace(option.OptionID) != "" {
+			return strings.TrimSpace(option.OptionID)
+		}
+	}
+	for _, option := range options {
+		candidate := strings.ToLower(strings.TrimSpace(option.OptionID + " " + option.Name))
+		if strings.Contains(candidate, wantKind) && strings.TrimSpace(option.OptionID) != "" {
+			return strings.TrimSpace(option.OptionID)
+		}
+	}
+	if len(options) > 0 && strings.TrimSpace(options[0].OptionID) != "" {
+		return strings.TrimSpace(options[0].OptionID)
+	}
+	return fallback
 }
 
 func approvalRequestFromACP(req acpclient.RequestPermissionRequest) toolexec.ApprovalRequest {
@@ -545,6 +841,11 @@ func authorizationRequestFromACP(req acpclient.RequestPermissionRequest) policy.
 		Target:   target,
 		ScopeKey: firstNonEmpty(path, target, strings.TrimSpace(rawStringField(req.ToolCall.RawInput, "command"))),
 	}
+}
+
+func requestLooksLikeToolAuthorization(req acpclient.RequestPermissionRequest) bool {
+	return strings.TrimSpace(rawStringField(req.ToolCall.RawInput, "path")) != "" ||
+		strings.TrimSpace(rawStringField(req.ToolCall.RawInput, "target")) != ""
 }
 
 func rawStringField(raw any, key string) string {
@@ -589,22 +890,22 @@ func derefString(value *string) string {
 
 func (r *selfACPSubagentRunner) registerCancel(sessionID string, cancel context.CancelFunc) {
 	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" || cancel == nil {
+	if sessionID == "" || cancel == nil || r == nil || r.shared == nil {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.active[sessionID] = cancel
+	r.shared.mu.Lock()
+	defer r.shared.mu.Unlock()
+	r.shared.active[sessionID] = cancel
 }
 
 func (r *selfACPSubagentRunner) unregisterCancel(sessionID string) {
 	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
+	if sessionID == "" || r == nil || r.shared == nil {
 		return
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.active, sessionID)
+	r.shared.mu.Lock()
+	defer r.shared.mu.Unlock()
+	delete(r.shared.active, sessionID)
 }
 
 func (r *selfACPSubagentRunner) resolveWorkspaceRoot() string {
@@ -644,17 +945,35 @@ func (r *selfACPSubagentRunner) resolveAgentDescriptor(agentName string) (appage
 	if agentName == "" {
 		agentName = "self"
 	}
-	if r.agentRegistry == nil {
-		if strings.EqualFold(agentName, "self") {
-			return appagents.SelfDescriptor(), nil
-		}
-		return appagents.Descriptor{}, fmt.Errorf("acpext: unknown agent %q", agentName)
+	registry, err := r.snapshots.snapshot(r.parent.ID)
+	if err != nil {
+		return appagents.Descriptor{}, err
 	}
-	desc, ok := r.agentRegistry.Lookup(agentName)
+	if registry == nil {
+		registry = appagents.NewRegistry()
+	}
+	desc, ok := registry.Lookup(agentName)
 	if !ok {
 		return appagents.Descriptor{}, fmt.Errorf("acpext: unknown agent %q", agentName)
 	}
 	return desc, nil
+}
+
+func (r *selfACPSubagentRunner) resolveSessionTarget(explicitSessionID string) (subagentSessionTarget, error) {
+	explicitSessionID = strings.TrimSpace(explicitSessionID)
+	if explicitSessionID != "" {
+		requested, err := runtime.ResolveChildSessionID(r.parent.ID, explicitSessionID)
+		if err != nil {
+			return subagentSessionTarget{}, err
+		}
+		return subagentSessionTarget{
+			requestedSessionID: requested,
+			childCWD:           r.resolveWorkspaceCWD(),
+		}, nil
+	}
+	return subagentSessionTarget{
+		childCWD: r.resolveWorkspaceCWD(),
+	}, nil
 }
 
 func (r *selfACPSubagentRunner) resolveAgentWorkDir(desc appagents.Descriptor) string {
@@ -675,6 +994,29 @@ func copyStringMap(values map[string]string) map[string]string {
 	out := make(map[string]string, len(values))
 	for key, value := range values {
 		out[key] = value
+	}
+	return out
+}
+
+func (r *selfACPSubagentRunner) knownAgents() []string {
+	if r == nil || r.snapshots == nil || r.parent == nil {
+		return []string{"self"}
+	}
+	registry, err := r.snapshots.snapshot(r.parent.ID)
+	if err != nil || registry == nil {
+		return []string{"self"}
+	}
+	items := registry.List()
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			continue
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return []string{"self"}
 	}
 	return out
 }

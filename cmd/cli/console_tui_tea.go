@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -18,7 +19,9 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -215,18 +218,23 @@ func (c *cliConsole) loopTUITea() error {
 		c.ui = previousUI
 		c.prompter = previousPrompter
 		c.approver = previousApprover
+		if previousOut != nil {
+			_, _ = io.WriteString(previousOut, ansi.ResetModeAltScreenSaveCursor+ansi.ShowCursor)
+		}
 		if closeErr := toolexec.Close(c.execRuntime); closeErr != nil {
 			c.printf("warn: close execution runtime failed: %v\n", closeErr)
 		}
 	}()
 
 	model := tuiapp.NewModel(tuiapp.Config{
-		Version:         strings.TrimSpace(c.version),
-		Workspace:       c.workspaceLine,
-		ModelAlias:      c.modelAlias,
-		ShowWelcomeCard: true,
-		Commands:        commandNames(c.commands),
-		Wizards:         buildWizardDefs(),
+		Version:              strings.TrimSpace(c.version),
+		Workspace:            c.workspaceLine,
+		ModelAlias:           c.modelAlias,
+		ShowWelcomeCard:      true,
+		FrameBatchMainStream: true,
+		StreamTickInterval:   33 * time.Millisecond,
+		Commands:             c.availableCommandNames(),
+		Wizards:              buildWizardDefs(),
 		ExecuteLine: func(submission tuiapp.Submission) tuievents.TaskResultMsg {
 			line := strings.TrimSpace(submission.Text)
 			if submission.Mode == tuiapp.SubmissionModeOverlay {
@@ -234,15 +242,33 @@ func (c *cliConsole) loopTUITea() error {
 				if err != nil {
 					if c.tuiSender != nil {
 						c.tuiSender.Send(tuievents.BTWErrorMsg{Text: err.Error()})
-						c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
+						if c.currentRunKind() == runOccupancyNone {
+							c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
+						}
 					}
-					return tuievents.TaskResultMsg{ContinueRunning: true}
+					return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
 				}
 				return tuievents.TaskResultMsg{ContinueRunning: true}
 			}
 			if c.shouldHandleAsSlashCommand(line) {
 				exitNow, err := c.handleSlash(line)
+				if err == nil && c.currentRunKind() == runOccupancyExternalAgent {
+					return tuievents.TaskResultMsg{ContinueRunning: true}
+				}
 				return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}
+			}
+			if c.currentRunKind() == runOccupancyExternalAgent {
+				return tuievents.TaskResultMsg{Err: errExternalAgentRunBusy, ContinueRunning: true}
+			}
+			if alias, prompt, ok := parseParticipantRouteInput(line); ok {
+				if prompt == "" {
+					return tuievents.TaskResultMsg{Err: fmt.Errorf("usage: @%s <prompt>", alias), ContinueRunning: true}
+				}
+				err := c.routeExternalParticipant(alias, prompt)
+				if err == nil {
+					return tuievents.TaskResultMsg{ContinueRunning: true}
+				}
+				return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
 			}
 			if c.getActiveRunner() != nil {
 				err := c.runPromptWithAttachments(line, submission.Attachments)
@@ -268,14 +294,17 @@ func (c *cliConsole) loopTUITea() error {
 		},
 		MentionComplete: func(query string, limit int) ([]string, error) {
 			begin := time.Now()
-			if c.inputRefs == nil {
-				return nil, nil
-			}
-			candidates, err := c.inputRefs.CompleteFiles(query, limit)
+			candidates, err := c.participantAliases(query, limit)
 			if c.tuiDiag != nil {
 				c.tuiDiag.ObserveMentionLatency(time.Since(begin))
 			}
 			return candidates, err
+		},
+		FileComplete: func(query string, limit int) ([]string, error) {
+			if c.inputRefs == nil {
+				return nil, nil
+			}
+			return c.inputRefs.CompleteFiles(query, limit)
 		},
 		SkillComplete: func(query string, limit int) ([]string, error) {
 			discovered := appskills.DiscoverMeta(c.skillDirs)
@@ -335,7 +364,7 @@ func (c *cliConsole) loopTUITea() error {
 		},
 	})
 
-	program := tea.NewProgram(model)
+	program := tea.NewProgram(model, tea.WithFPS(30))
 	sender.set(func(msg any) { program.Send(msg) })
 
 	sigCh := make(chan os.Signal, 1)
@@ -496,7 +525,7 @@ func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp
 	out := make([]tuiapp.ResumeCandidate, 0, limit)
 	for _, rec := range records {
 		sid := strings.TrimSpace(rec.SessionID)
-		if sid == "" || sid == c.sessionID {
+		if sid == "" || sid == c.sessionID || rec.EventCount <= 0 {
 			continue
 		}
 		prompt := sessionIndexPreview(rec, 100)
@@ -551,6 +580,15 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 			actionQuery += " " + query
 		}
 		return c.completeModelCommandCandidates(actionQuery, limit), nil
+	case strings.HasPrefix(cmd, "agent "):
+		actionQuery := strings.TrimSpace(strings.TrimPrefix(rawCmd, "agent"))
+		if actionQuery == "" {
+			return c.completeAgentCommandCandidates(query, limit), nil
+		}
+		if query != "" {
+			actionQuery += " " + query
+		}
+		return c.completeAgentCommandCandidates(actionQuery, limit), nil
 	case strings.HasPrefix(cmd, "connect-model:"):
 		payload := strings.TrimPrefix(rawCmd, "connect-model:")
 		provider, baseURL, timeoutSeconds, apiKey, hasRemoteContext := parseConnectModelPayload(payload)
@@ -578,6 +616,8 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 	switch cmd {
 	case "model":
 		return c.completeModelCommandCandidates(query, limit), nil
+	case "agent":
+		return c.completeAgentCommandCandidates(query, limit), nil
 	case "sandbox":
 		return c.completeSandboxCandidates(query, limit), nil
 	case "connect":
@@ -820,6 +860,128 @@ func completeModelActionCandidates(query string, limit int) []tuiapp.SlashArgCan
 			continue
 		}
 		out = append(out, one)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (c *cliConsole) completeAgentCommandCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	raw := strings.TrimLeft(query, " \t")
+	hasTrailingSpace := strings.HasSuffix(query, " ") || strings.HasSuffix(query, "\t")
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return completeAgentActionCandidates("", limit)
+	}
+	action := strings.ToLower(strings.TrimSpace(fields[0]))
+	if !hasTrailingSpace && len(fields) == 1 {
+		switch action {
+		case "list", "add", "rm":
+		default:
+			return completeAgentActionCandidates(action, limit)
+		}
+	}
+	switch action {
+	case "list":
+		return nil
+	case "add":
+		if len(fields) == 1 {
+			return completeAgentBuiltinCandidates("", limit)
+		}
+		if len(fields) == 2 && !hasTrailingSpace {
+			return completeAgentBuiltinCandidates(fields[1], limit)
+		}
+		return nil
+	case "rm":
+		if len(fields) == 1 {
+			return c.completeConfiguredAgentCandidates("", limit)
+		}
+		if len(fields) == 2 && !hasTrailingSpace {
+			return c.completeConfiguredAgentCandidates(fields[1], limit)
+		}
+		return nil
+	default:
+		return completeAgentActionCandidates(action, limit)
+	}
+}
+
+func completeAgentActionCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	actions := []tuiapp.SlashArgCandidate{
+		{Value: "list", Display: "list"},
+		{Value: "add", Display: "add"},
+		{Value: "rm", Display: "rm"},
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	out := make([]tuiapp.SlashArgCandidate, 0, len(actions))
+	for _, one := range actions {
+		if q != "" && !strings.Contains(strings.ToLower(one.Value), q) {
+			continue
+		}
+		out = append(out, one)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func completeAgentBuiltinCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	builtins := appagents.KnownBuiltins()
+	out := make([]tuiapp.SlashArgCandidate, 0, minInt(limit, len(builtins)))
+	for _, one := range builtins {
+		text := strings.ToLower(strings.TrimSpace(one.ID) + " " + strings.TrimSpace(one.Stability) + " " + strings.TrimSpace(one.Description))
+		if q != "" && !strings.Contains(text, q) {
+			continue
+		}
+		display := one.ID
+		if one.Stability != "" {
+			display = fmt.Sprintf("%s (%s)", one.ID, one.Stability)
+		}
+		out = append(out, tuiapp.SlashArgCandidate{
+			Value:   one.ID,
+			Display: display,
+			Detail:  strings.TrimSpace(one.Description),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (c *cliConsole) completeConfiguredAgentCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	if c == nil || c.configStore == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	records := c.configStore.normalizedAgentRecords()
+	out := make([]tuiapp.SlashArgCandidate, 0, minInt(limit, len(records)))
+	for _, rec := range records {
+		stability := appagents.NormalizeStability(rec.Stability)
+		text := strings.ToLower(strings.TrimSpace(rec.Name) + " " + stability + " " + strings.TrimSpace(rec.Command) + " " + strings.TrimSpace(rec.Description))
+		if q != "" && !strings.Contains(text, q) {
+			continue
+		}
+		display := rec.Name
+		if stability != "" {
+			display = fmt.Sprintf("%s (%s)", rec.Name, stability)
+		}
+		out = append(out, tuiapp.SlashArgCandidate{
+			Value:   rec.Name,
+			Display: display,
+			Detail:  strings.TrimSpace(rec.Command),
+		})
 		if len(out) >= limit {
 			break
 		}

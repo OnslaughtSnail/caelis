@@ -547,6 +547,117 @@ func TestHandleConnect_NoDiscoveredModelsPromptsManualInputAndStripsProviderPref
 	}
 }
 
+func TestHandleConnect_AnthropicCompatiblePromptsBaseURLAndManualModel(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return []modelproviders.RemoteModel{{
+			Name:                "test-model",
+			ContextWindowTokens: 200000,
+			MaxOutputTokens:     8192,
+			Capabilities:        []string{"reasoning", "tools"},
+		}}, nil
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"anthropic-compatible", "test-model", reasoningModeNone},
+		lines:   []string{"https://example.invalid/anthropic", "sk-test"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v", err)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("anthropic-compatible/test-model")
+	if !ok {
+		t.Fatal("expected anthropic-compatible model to be registered")
+	}
+	if cfg.API != modelproviders.APIAnthropicCompatible {
+		t.Fatalf("expected anthropic-compatible api, got %q", cfg.API)
+	}
+	if cfg.BaseURL != "https://example.invalid/anthropic" {
+		t.Fatalf("unexpected base_url %q", cfg.BaseURL)
+	}
+	if cfg.Model != "test-model" {
+		t.Fatalf("unexpected model %q", cfg.Model)
+	}
+	if len(prompter.readPrompts) < 2 || !strings.HasPrefix(prompter.readPrompts[0], "base_url") || !strings.HasPrefix(prompter.readPrompts[1], "api_key") {
+		t.Fatalf("expected base_url then api_key prompts, got %q", prompter.readPrompts)
+	}
+}
+
+func TestHandleConnect_MiniMaxUsesBundledModelsWhenDiscoveryFails(t *testing.T) {
+	prevDiscover := discoverModelsFn
+	prevInit := initModelCatalogFn
+	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+		return nil, fmt.Errorf("http status 404")
+	}
+	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.CatalogInitStatus{}
+	}
+	t.Cleanup(func() {
+		discoverModelsFn = prevDiscover
+		initModelCatalogFn = prevInit
+	})
+
+	tpl, ok := findProviderTemplate("minimax")
+	if !ok || len(tpl.commonModels) == 0 {
+		t.Fatal("expected minimax provider template with bundled models")
+	}
+	selectedModel := tpl.commonModels[0]
+
+	prompter := &stubChoicePrompter{
+		choices: []string{"minimax", selectedModel, "yes", "low,medium,high"},
+		lines:   []string{"sk-test", "204800", "8192"},
+	}
+	var out bytes.Buffer
+	c := &cliConsole{
+		baseCtx:      context.Background(),
+		modelFactory: modelproviders.NewFactory(),
+		prompter:     prompter,
+		ui:           newUI(&out, true, false),
+		out:          &out,
+	}
+
+	_, err := handleConnect(c, nil)
+	if err != nil {
+		t.Fatalf("handleConnect failed: %v (choiceI=%d lineI=%d choicePrompts=%q multiPrompts=%q readPrompts=%q)", err, prompter.choiceI, prompter.lineI, prompter.choicePrompts, prompter.multiPrompts, prompter.readPrompts)
+	}
+	cfg, ok := c.modelFactory.ConfigForAlias("minimax/" + strings.ToLower(selectedModel))
+	if !ok {
+		t.Fatal("expected minimax model to be registered")
+	}
+	if cfg.API != modelproviders.APIAnthropicCompatible {
+		t.Fatalf("expected minimax to use anthropic-compatible api, got %q", cfg.API)
+	}
+	if cfg.BaseURL != "https://api.minimaxi.com/anthropic" {
+		t.Fatalf("unexpected minimax base_url %q", cfg.BaseURL)
+	}
+	if cfg.Model != selectedModel {
+		t.Fatalf("unexpected minimax model %q", cfg.Model)
+	}
+	for _, prompt := range prompter.readPrompts {
+		if prompt == "base_url" {
+			t.Fatalf("did not expect minimax to prompt for base_url: %q", prompter.readPrompts)
+		}
+	}
+}
+
 func TestHandleConnect_OpenRouterUsesDefaultBaseURL(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn

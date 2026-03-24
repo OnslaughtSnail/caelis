@@ -133,10 +133,13 @@ func hasReadEvidenceInEvents(ctx context.Context, readToolName string, targetPat
 		return false
 	}
 	for ev := range h.Events().All() {
-		if ev == nil || ev.Message.ToolResponse == nil {
+		if ev == nil {
 			continue
 		}
-		resp := ev.Message.ToolResponse
+		resp := ev.Message.ToolResponse()
+		if resp == nil {
+			continue
+		}
 		if strings.TrimSpace(resp.Name) != readToolName {
 			continue
 		}
@@ -232,10 +235,13 @@ func collectReadPaths(events []*session.Event, readToolName string) []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, len(events))
 	for _, ev := range events {
-		if ev == nil || ev.Message.ToolResponse == nil {
+		if ev == nil {
 			continue
 		}
-		resp := ev.Message.ToolResponse
+		resp := ev.Message.ToolResponse()
+		if resp == nil {
+			continue
+		}
 		if strings.TrimSpace(resp.Name) != readToolName || resp.Result == nil {
 			continue
 		}

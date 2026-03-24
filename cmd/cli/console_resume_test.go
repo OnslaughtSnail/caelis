@@ -2,13 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 )
@@ -22,7 +29,7 @@ func TestHandleResumeEmitsSessionHintInTUI(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), target, &session.Event{
 		ID:        "ev-1",
 		SessionID: target.ID,
-		Message:   model.Message{Role: model.RoleAssistant, Text: "hello again"},
+		Message:   model.NewTextMessage(model.RoleAssistant, "hello again"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -68,9 +75,373 @@ func TestHandleResumeEmitsSessionHintInTUI(t *testing.T) {
 	}
 }
 
+func lastHint(msgs []any) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msg, ok := msgs[i].(tuievents.SetHintMsg); ok {
+			return msg.Hint
+		}
+	}
+	return ""
+}
+
+func TestHandleResume_ReplaysSpawnedSubagentPanelsFromChildSessions(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	ag, err := llmagent.New(llmagent.Config{Name: "resume-test-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &consoleFlowLLM{}
+
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.AppendEvent(context.Background(), parent, &session.Event{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "self",
+				"state":            "running",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    child.ID,
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+	}
+	if err := store.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-child-1",
+		SessionID: child.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "child reply"),
+		Meta:      childMeta,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-child-done",
+		SessionID: child.ID,
+		Message:   model.Message{Role: model.RoleSystem},
+		Meta: map[string]any{
+			"kind":                "lifecycle",
+			"lifecycle":           map[string]any{"status": "completed"},
+			"parent_session_id":   parent.ID,
+			"child_session_id":    child.ID,
+			"delegation_id":       "dlg-1",
+			"parent_tool_call_id": "call-spawn-1",
+			"parent_tool_name":    "SPAWN",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: "resume-parent",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "current",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(conn *internalacp.Conn) (internalacp.Adapter, error) {
+			return newConsoleFlowAdapterFactory(rt, store, execRT, ag, llm)(conn)
+		},
+	}
+
+	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, raw := range sender.Snapshot() {
+			if msg, ok := raw.(tuievents.RawDeltaMsg); ok && msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.Text, "child reply") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected resumed replay to restore child subagent stream")
+}
+
+func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), parent, &session.Event{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "self",
+				"state":            "running",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: "resume-parent",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "current",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			return blockingResumeAdapter{
+				loadDelay: 200 * time.Millisecond,
+				events: []*session.Event{{
+					ID:        "ev-child-1",
+					SessionID: "child-1",
+					Message:   model.NewTextMessage(model.RoleAssistant, "child reply"),
+				}},
+			}, nil
+		},
+	}
+
+	start := time.Now()
+	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed >= 150*time.Millisecond {
+		t.Fatalf("expected handleResume to return before ACP load replay finishes, took %s", elapsed)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, raw := range sender.Snapshot() {
+			if msg, ok := raw.(tuievents.RawDeltaMsg); ok && msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.Text, "child reply") {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected async ACP load replay to populate subagent panel")
+}
+
+func TestHandleResume_SkipsACPReplayForCompletedSpawn(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.AppendEvent(context.Background(), parent, &session.Event{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "self",
+				"state":            "completed",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-child-1",
+		SessionID: child.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "child reply"),
+		Meta: map[string]any{
+			"parent_session_id":   parent.ID,
+			"child_session_id":    child.ID,
+			"delegation_id":       "dlg-1",
+			"parent_tool_call_id": "call-spawn-1",
+			"parent_tool_name":    "SPAWN",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-child-done",
+		SessionID: child.ID,
+		Message:   model.Message{Role: model.RoleSystem},
+		Meta: map[string]any{
+			"kind":                "lifecycle",
+			"lifecycle":           map[string]any{"status": "completed"},
+			"parent_session_id":   parent.ID,
+			"child_session_id":    child.ID,
+			"delegation_id":       "dlg-1",
+			"parent_tool_call_id": "call-spawn-1",
+			"parent_tool_name":    "SPAWN",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: "resume-parent",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adapterCalls atomic.Int32
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "current",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			adapterCalls.Add(1)
+			return blockingResumeAdapter{}, nil
+		},
+	}
+
+	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := adapterCalls.Load(); got != 0 {
+		t.Fatalf("expected completed spawn to skip ACP replay, got %d adapter calls", got)
+	}
+}
+
+func TestResumedSubagentLoadTimeoutForAgent(t *testing.T) {
+	if got := resumedSubagentLoadTimeoutForAgent("self"); got != resumedSubagentSelfLoadTimeout {
+		t.Fatalf("expected self timeout %v, got %v", resumedSubagentSelfLoadTimeout, got)
+	}
+	if got := resumedSubagentLoadTimeoutForAgent("codex"); got != resumedSubagentACPLoadTimeout {
+		t.Fatalf("expected ACP timeout %v, got %v", resumedSubagentACPLoadTimeout, got)
+	}
+	if resumedSubagentACPLoadTimeout <= 5*time.Second {
+		t.Fatalf("expected ACP resume timeout to exceed cold-start window, got %v", resumedSubagentACPLoadTimeout)
+	}
+}
+
 type resumeIndexStub struct {
 	resolveID string
 }
+
+type blockingResumeAdapter struct {
+	loadDelay time.Duration
+	events    []*session.Event
+}
+
+func (a blockingResumeAdapter) Capabilities() internalacp.AdapterCapabilities {
+	return internalacp.AdapterCapabilities{}
+}
+
+func (a blockingResumeAdapter) NewSession(context.Context, internalacp.NewSessionRequest, internalacp.ClientCapabilities) (internalacp.AdapterSessionState, error) {
+	return internalacp.AdapterSessionState{}, errors.New("not implemented")
+}
+
+func (a blockingResumeAdapter) ListSessions(context.Context, internalacp.SessionListRequest) (internalacp.SessionListResponse, error) {
+	return internalacp.SessionListResponse{}, errors.New("not implemented")
+}
+
+func (a blockingResumeAdapter) LoadSession(ctx context.Context, req internalacp.LoadSessionRequest, _ internalacp.ClientCapabilities) (internalacp.LoadedSessionState, error) {
+	select {
+	case <-ctx.Done():
+		return internalacp.LoadedSessionState{}, ctx.Err()
+	case <-time.After(a.loadDelay):
+	}
+	return internalacp.LoadedSessionState{
+		Session: internalacp.AdapterSessionState{
+			SessionID: strings.TrimSpace(req.SessionID),
+			CWD:       strings.TrimSpace(req.CWD),
+		},
+		Events: a.events,
+	}, nil
+}
+
+func (a blockingResumeAdapter) SetMode(context.Context, internalacp.SetSessionModeRequest) (internalacp.AdapterSessionState, error) {
+	return internalacp.AdapterSessionState{}, errors.New("not implemented")
+}
+
+func (a blockingResumeAdapter) SetConfigOption(context.Context, internalacp.SetSessionConfigOptionRequest) (internalacp.AdapterSessionState, error) {
+	return internalacp.AdapterSessionState{}, errors.New("not implemented")
+}
+
+func (a blockingResumeAdapter) StartPrompt(context.Context, internalacp.StartPromptRequest) (internalacp.StartPromptResult, error) {
+	return internalacp.StartPromptResult{}, errors.New("not implemented")
+}
+
+func (a blockingResumeAdapter) CancelPrompt(string) {}
+
+func (a blockingResumeAdapter) SessionFS(string) toolexec.FileSystem { return nil }
 
 func (s resumeIndexStub) ResolveWorkspaceSessionID(workspaceKey, prefix string) (string, bool, error) {
 	if strings.TrimSpace(prefix) == strings.TrimSpace(s.resolveID) {

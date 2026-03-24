@@ -15,13 +15,9 @@ func TestNewEvents_DeepCopyIsolation(t *testing.T) {
 	src := &Event{
 		ID:   "ev-1",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			Text: "hello",
-			ToolCalls: []model.ToolCall{
-				{ID: "tc-1", Name: "READ", Args: `{"path":"a.txt"}`},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "tc-1", Name: "READ", Args: `{"path":"a.txt"}`},
+		}, "hello"),
 		Meta: meta,
 	}
 	view := NewEvents([]*Event{src})
@@ -29,7 +25,7 @@ func TestNewEvents_DeepCopyIsolation(t *testing.T) {
 	// Mutate source Meta — view must not see changes.
 	src.Meta["key"] = "mutated"
 	src.Meta["nested"].(map[string]any)["inner"] = "mutated"
-	src.Message.ToolCalls[0].Name = "WRITE"
+	src.Message.Parts[1].ToolUse.Name = "WRITE"
 
 	got := view.At(0)
 	if got == nil {
@@ -42,8 +38,8 @@ func TestNewEvents_DeepCopyIsolation(t *testing.T) {
 	if !ok || nested["inner"] != "v1" {
 		t.Fatalf("view.Meta['nested']['inner'] = %v, want 'v1'", nested["inner"])
 	}
-	if got.Message.ToolCalls[0].Name != "READ" {
-		t.Fatalf("view.ToolCalls[0].Name = %v, want 'READ'", got.Message.ToolCalls[0].Name)
+	if got.Message.ToolCalls()[0].Name != "READ" {
+		t.Fatalf("view.ToolCalls[0].Name = %v, want 'READ'", got.Message.ToolCalls()[0].Name)
 	}
 }
 
@@ -51,10 +47,7 @@ func TestNewEvents_AtReturnsIndependentCopies(t *testing.T) {
 	src := &Event{
 		ID:   "ev-1",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			Text: "hello",
-		},
+		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 		Meta: map[string]any{"key": "original"},
 	}
 	view := NewEvents([]*Event{src})
@@ -72,27 +65,24 @@ func TestNewEvents_MutateViewDoesNotAffectSource(t *testing.T) {
 	src := &Event{
 		ID:   "ev-1",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     "call-1",
-				Name:   "READ",
-				Result: map[string]any{"output": "data", "nested": map[string]any{"a": "b"}},
-			},
-		},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "call-1",
+			Name:   "READ",
+			Result: map[string]any{"output": "data", "nested": map[string]any{"a": "b"}},
+		}),
 		Meta: map[string]any{"m": "v"},
 	}
 	view := NewEvents([]*Event{src})
 
 	got := view.At(0)
 	got.Meta["m"] = "mutated"
-	got.Message.ToolResponse.Result["output"] = "mutated"
+	got.Message.ToolResponse().Result["output"] = "mutated"
 
 	if src.Meta["m"] != "v" {
 		t.Fatalf("source.Meta['m'] = %v, want 'v'", src.Meta["m"])
 	}
-	if src.Message.ToolResponse.Result["output"] != "data" {
-		t.Fatalf("source.ToolResponse.Result['output'] = %v, want 'data'", src.Message.ToolResponse.Result["output"])
+	if src.Message.ToolResponse().Result["output"] != "data" {
+		t.Fatalf("source.ToolResponse.Result['output'] = %v, want 'data'", src.Message.ToolResponse().Result["output"])
 	}
 }
 

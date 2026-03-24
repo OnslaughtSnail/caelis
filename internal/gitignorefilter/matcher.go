@@ -194,7 +194,9 @@ func isMissingFileError(err error) bool {
 		return true
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(text, "no such file or directory") || strings.Contains(text, "file does not exist")
+	return strings.Contains(text, "no such file or directory") ||
+		strings.Contains(text, "file does not exist") ||
+		strings.Contains(text, "resource not found")
 }
 
 func discoverRoot(fs FileSystem, path string) (string, error) {

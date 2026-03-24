@@ -194,7 +194,7 @@ func jsonArgs(v map[string]any) string {
 }
 
 func TestLLMAgent_ToolLoop(t *testing.T) {
-	echoTool, err := tool.NewFunction[echoArgs, echoResp]("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
+	echoTool, err := tool.NewFunction("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
 		_ = ctx
 		return echoResp{Echo: args.Text}, nil
 	})
@@ -205,12 +205,12 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "c1", Name: "echo", Args: jsonArgs(map[string]any{"text": "hello"})}}}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "c1", Name: "echo", Args: jsonArgs(map[string]any{"text": "hello"})}}, "")}, nil
 		}
 		if last.Role == model.RoleTool {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "fallback"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "fallback")}, nil
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -220,7 +220,7 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{"echo": echoTool},
@@ -236,11 +236,11 @@ func TestLLMAgent_ToolLoop(t *testing.T) {
 	if len(events) < 3 {
 		t.Fatalf("expected >= 3 events, got %d", len(events))
 	}
-	if events[1].Message.ToolResponse == nil {
+	if events[1].Message.ToolResponse() == nil {
 		t.Fatalf("expected tool response event")
 	}
-	if events[len(events)-1].Message.Text != "done" {
-		t.Fatalf("unexpected final text: %q", events[len(events)-1].Message.Text)
+	if events[len(events)-1].Message.TextContent() != "done" {
+		t.Fatalf("unexpected final text: %q", events[len(events)-1].Message.TextContent())
 	}
 }
 
@@ -269,13 +269,13 @@ func TestLLMAgent_ConcurrentNonMutatingToolCallsRunTogether(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
 				{ID: "c1", Name: "READ", Args: "{}"},
 				{ID: "c2", Name: "BASH", Args: "{}"},
 				{ID: "c3", Name: "SPAWN", Args: "{}"},
-			}}}, nil
+			}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -285,7 +285,7 @@ func TestLLMAgent_ConcurrentNonMutatingToolCallsRunTogether(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{ID: "s"},
-		history: []*session.Event{{ID: "u1", Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{ID: "u1", Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools: []tool.Tool{
 			newConcurrentTool("READ"),
@@ -303,7 +303,7 @@ func TestLLMAgent_ConcurrentNonMutatingToolCallsRunTogether(t *testing.T) {
 		if runErr != nil {
 			t.Fatalf("unexpected run error: %v", runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolResponses++
 		}
 	}
@@ -341,12 +341,12 @@ func TestLLMAgent_WriteStaysSequentialAgainstConcurrentBatch(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
 				{ID: "c1", Name: "WRITE", Args: "{}"},
 				{ID: "c2", Name: "BASH", Args: "{}"},
-			}}}, nil
+			}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -356,7 +356,7 @@ func TestLLMAgent_WriteStaysSequentialAgainstConcurrentBatch(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{ID: "s"},
-		history: []*session.Event{{ID: "u1", Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{ID: "u1", Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{writeTool, bashTool},
 		toolMap: map[string]tool.Tool{"WRITE": writeTool, "BASH": bashTool},
@@ -370,7 +370,7 @@ func TestLLMAgent_WriteStaysSequentialAgainstConcurrentBatch(t *testing.T) {
 }
 
 func TestLLMAgent_OverlayPreservesToolDeclarations(t *testing.T) {
-	echoTool, err := tool.NewFunction[echoArgs, echoResp]("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
+	echoTool, err := tool.NewFunction("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
 		_ = ctx
 		return echoResp{Echo: args.Text}, nil
 	})
@@ -378,10 +378,10 @@ func TestLLMAgent_OverlayPreservesToolDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
-		if len(req.Tools) != 1 || req.Tools[0].Name != "echo" {
+		if len(req.Tools) != 1 || req.Tools[0].Function == nil || req.Tools[0].Function.Name != "echo" {
 			return nil, fmt.Errorf("expected overlay request to preserve tool declarations, got %+v", req.Tools)
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "side answer"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "side answer")}, nil
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -391,7 +391,7 @@ func TestLLMAgent_OverlayPreservesToolDeclarations(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{"echo": echoTool},
@@ -408,8 +408,8 @@ func TestLLMAgent_OverlayPreservesToolDeclarations(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected single overlay assistant event, got %#v", events)
 	}
-	if events[0].Message.Text != "side answer" {
-		t.Fatalf("unexpected overlay text %q", events[0].Message.Text)
+	if events[0].Message.TextContent() != "side answer" {
+		t.Fatalf("unexpected overlay text %q", events[0].Message.TextContent())
 	}
 }
 
@@ -432,16 +432,13 @@ func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "cap_tool",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "cap_tool",
+				Args: "{}",
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 	ag, err := New(Config{Name: "test"})
 	if err != nil {
@@ -450,7 +447,7 @@ func TestLLMAgent_ExposesToolCapabilityToPolicies(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{capTool},
 		toolMap: map[string]tool.Tool{"cap_tool": capTool},
@@ -491,16 +488,13 @@ func TestLLMAgent_ExposesToolCallInfoAcrossPolicyLifecycle(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "call-info-1",
-					Name: "info_tool",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "call-info-1",
+				Name: "info_tool",
+				Args: "{}",
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 	ag, err := New(Config{Name: "test"})
 	if err != nil {
@@ -509,7 +503,7 @@ func TestLLMAgent_ExposesToolCallInfoAcrossPolicyLifecycle(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{infoTool},
 		toolMap: map[string]tool.Tool{"info_tool": infoTool},
@@ -568,7 +562,7 @@ func TestLLMAgent_RetriesModelRequestAndSucceeds(t *testing.T) {
 		if attempts <= 2 {
 			return nil, errors.New("temporary upstream failure")
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 	ag, err := New(Config{Name: "test"})
 	if err != nil {
@@ -577,7 +571,7 @@ func TestLLMAgent_RetriesModelRequestAndSucceeds(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   nil,
 		toolMap: map[string]tool.Tool{},
@@ -605,7 +599,7 @@ func TestLLMAgent_RetriesModelRequestAndSucceeds(t *testing.T) {
 	if !strings.Contains(retryWarnings[0], "retrying in") {
 		t.Fatalf("expected retry warning text, got %v", retryWarnings)
 	}
-	if last == nil || strings.TrimSpace(last.Message.Text) != "done" {
+	if last == nil || strings.TrimSpace(last.Message.TextContent()) != "done" {
 		t.Fatalf("unexpected final message: %#v", last)
 	}
 }
@@ -645,7 +639,7 @@ func TestLLMAgent_RetryExhaustedReturnsError(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   nil,
 		toolMap: map[string]tool.Tool{},
@@ -693,7 +687,7 @@ func TestLLMAgent_RateLimitRetriesUseDedicatedPolicy(t *testing.T) {
 		if attempts <= 2 {
 			return nil, errors.New(`model: http status 429 body={"detail":"用户请求TPM超限，请减少tokens后重试","error":{"type":"USER_TPM_RATELIMITING"}}`)
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 	ag, err := New(Config{Name: "test"})
 	if err != nil {
@@ -702,7 +696,7 @@ func TestLLMAgent_RateLimitRetriesUseDedicatedPolicy(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   nil,
 		toolMap: map[string]tool.Tool{},
@@ -828,7 +822,7 @@ func TestLLMAgent_NonRetryableHTTP400SkipsAutomaticRetry(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 	}
@@ -864,8 +858,7 @@ func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
 		return []seqResult{
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "hello"},
-					Partial:      true,
+					Message:      model.NewTextMessage(model.RoleAssistant, "hello"),
 					TurnComplete: false,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -881,7 +874,7 @@ func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 	}
@@ -902,7 +895,7 @@ func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
 			warnings = append(warnings, notice.Text)
 		}
 		if eventIsPartialEvent(ev) {
-			partials = append(partials, ev.Message.Text)
+			partials = append(partials, ev.Message.TextContent())
 		}
 	}
 	if gotErr == nil {
@@ -930,8 +923,7 @@ func TestLLMAgent_PartialStreamCancellationStaysSilent(t *testing.T) {
 		return []seqResult{
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "hello"},
-					Partial:      true,
+					Message:      model.NewTextMessage(model.RoleAssistant, "hello"),
 					TurnComplete: false,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -947,7 +939,7 @@ func TestLLMAgent_PartialStreamCancellationStaysSilent(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 	}
@@ -983,8 +975,7 @@ func TestLLMAgent_FinishReasonLengthWarnsAndSkipsRetry(t *testing.T) {
 		return []seqResult{
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "partial answer"},
-					Partial:      true,
+					Message:      model.NewTextMessage(model.RoleAssistant, "partial answer"),
 					TurnComplete: false,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -992,7 +983,7 @@ func TestLLMAgent_FinishReasonLengthWarnsAndSkipsRetry(t *testing.T) {
 			},
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "partial answer"},
+					Message:      model.NewTextMessage(model.RoleAssistant, "partial answer"),
 					TurnComplete: true,
 					FinishReason: model.FinishReasonLength,
 					Model:        "fake",
@@ -1008,7 +999,7 @@ func TestLLMAgent_FinishReasonLengthWarnsAndSkipsRetry(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 	}
@@ -1049,8 +1040,7 @@ func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
 		return []seqResult{
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "## Heading"},
-					Partial:      true,
+					Message:      model.NewTextMessage(model.RoleAssistant, "## Heading"),
 					TurnComplete: false,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -1058,8 +1048,7 @@ func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
 			},
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "\n\n"},
-					Partial:      true,
+					Message:      model.NewTextMessage(model.RoleAssistant, "\n\n"),
 					TurnComplete: false,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -1067,8 +1056,7 @@ func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
 			},
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "- item"},
-					Partial:      true,
+					Message:      model.NewTextMessage(model.RoleAssistant, "- item"),
 					TurnComplete: false,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -1076,7 +1064,7 @@ func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
 			},
 			{
 				resp: &model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "## Heading\n\n- item"},
+					Message:      model.NewTextMessage(model.RoleAssistant, "## Heading\n\n- item"),
 					TurnComplete: true,
 					Model:        "fake",
 					Provider:     "test-provider",
@@ -1091,7 +1079,7 @@ func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 	}
@@ -1104,12 +1092,12 @@ func TestLLMAgent_EmitsWhitespaceOnlyPartialChunks(t *testing.T) {
 		if ev == nil || !eventIsPartialEvent(ev) {
 			continue
 		}
-		partials = append(partials, ev.Message.Text)
+		partials = append(partials, ev.Message.TextContent())
 	}
 
 	want := []string{"## Heading", "\n\n", "- item"}
 	if len(partials) != len(want) {
-		t.Fatalf("expected %d partials, got %#v", len(want), partials)
+		t.Fatalf("expected %d partials (whitespace-only deltas are preserved in V2), got %#v", len(want), partials)
 	}
 	for i := range want {
 		if partials[i] != want[i] {
@@ -1140,7 +1128,7 @@ func TestLLMAgent_EmptyResponseRetriesWhenNothingWasShown(t *testing.T) {
 		}
 		return []seqResult{{
 			resp: &model.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Text: "done"},
+				Message:      model.NewTextMessage(model.RoleAssistant, "done"),
 				TurnComplete: true,
 				Model:        "fake",
 				Provider:     "test-provider",
@@ -1154,7 +1142,7 @@ func TestLLMAgent_EmptyResponseRetriesWhenNothingWasShown(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 	}
@@ -1192,16 +1180,13 @@ func TestLLMAgent_InvalidRawToolArgsFailsRun(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "",
-					Name: "echo",
-					Args: `not valid json`,
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "",
+				Name: "echo",
+				Args: `not valid json`,
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -1211,7 +1196,7 @@ func TestLLMAgent_InvalidRawToolArgsFailsRun(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{"echo": echoTool},
@@ -1250,22 +1235,19 @@ func TestLLMAgent_InvalidArgsWithIDReturnedAsToolResponse(t *testing.T) {
 		last := req.Messages[len(req.Messages)-1]
 		switch last.Role {
 		case model.RoleUser:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: `not valid json`,
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "echo",
+				Args: `not valid json`,
+			}}, "")}, nil
 		case model.RoleTool:
-			errText := fmt.Sprint(last.ToolResponse.Result["error"])
+			errText := fmt.Sprint(last.ToolResponse().Result["error"])
 			if !strings.Contains(errText, `invalid tool call "echo" arguments`) {
 				return nil, fmt.Errorf("unexpected error: %q", errText)
 			}
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "recovered"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "recovered")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -1276,7 +1258,7 @@ func TestLLMAgent_InvalidArgsWithIDReturnedAsToolResponse(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{"echo": echoTool},
@@ -1293,7 +1275,7 @@ func TestLLMAgent_InvalidArgsWithIDReturnedAsToolResponse(t *testing.T) {
 	}
 	foundRecovery := false
 	for _, ev := range events {
-		if ev != nil && strings.TrimSpace(ev.Message.Text) == "recovered" {
+		if ev != nil && strings.TrimSpace(ev.Message.TextContent()) == "recovered" {
 			foundRecovery = true
 			break
 		}
@@ -1321,25 +1303,22 @@ func TestLLMAgent_AnyToolTruncatedArgsReturnedAsToolResponse(t *testing.T) {
 		last := req.Messages[len(req.Messages)-1]
 		switch last.Role {
 		case model.RoleUser:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "BASH",
-					Args: `{"command":"echo hello`,
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "BASH",
+				Args: `{"command":"echo hello`,
+			}}, "")}, nil
 		case model.RoleTool:
-			if last.ToolResponse == nil {
+			if last.ToolResponse() == nil {
 				return nil, fmt.Errorf("expected tool response from agent")
 			}
-			errText := fmt.Sprint(last.ToolResponse.Result["error"])
+			errText := fmt.Sprint(last.ToolResponse().Result["error"])
 			if !strings.Contains(errText, `invalid tool call "BASH" arguments`) {
 				return nil, fmt.Errorf("unexpected tool error text: %q", errText)
 			}
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "ok, retrying differently"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "ok, retrying differently")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -1350,7 +1329,7 @@ func TestLLMAgent_AnyToolTruncatedArgsReturnedAsToolResponse(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{bashTool},
 		toolMap: map[string]tool.Tool{"BASH": bashTool},
@@ -1367,13 +1346,13 @@ func TestLLMAgent_AnyToolTruncatedArgsReturnedAsToolResponse(t *testing.T) {
 	}
 	foundToolResult := false
 	for _, ev := range events {
-		if ev == nil || ev.Message.ToolResponse == nil {
+		if ev == nil || ev.Message.ToolResponse() == nil {
 			continue
 		}
-		if ev.Message.ToolResponse.Name != "BASH" {
+		if ev.Message.ToolResponse().Name != "BASH" {
 			continue
 		}
-		errText := fmt.Sprint(ev.Message.ToolResponse.Result["error"])
+		errText := fmt.Sprint(ev.Message.ToolResponse().Result["error"])
 		if strings.Contains(errText, `invalid tool call "BASH" arguments`) {
 			foundToolResult = true
 			break
@@ -1402,25 +1381,22 @@ func TestLLMAgent_WriteTruncatedArgsReturnedAsToolResponse(t *testing.T) {
 		last := req.Messages[len(req.Messages)-1]
 		switch last.Role {
 		case model.RoleUser:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "WRITE",
-					Args: `{"path":"index.html","content":"<html>`,
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "WRITE",
+				Args: `{"path":"index.html","content":"<html>`,
+			}}, "")}, nil
 		case model.RoleTool:
-			if last.ToolResponse == nil {
+			if last.ToolResponse() == nil {
 				return nil, fmt.Errorf("expected tool response from agent")
 			}
-			errText := fmt.Sprint(last.ToolResponse.Result["error"])
+			errText := fmt.Sprint(last.ToolResponse().Result["error"])
 			if !strings.Contains(errText, `invalid tool call "WRITE" arguments`) {
 				return nil, fmt.Errorf("unexpected tool error text: %q", errText)
 			}
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "switching to chunked strategy"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "switching to chunked strategy")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -1431,7 +1407,7 @@ func TestLLMAgent_WriteTruncatedArgsReturnedAsToolResponse(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{writeTool},
 		toolMap: map[string]tool.Tool{"WRITE": writeTool},
@@ -1448,13 +1424,13 @@ func TestLLMAgent_WriteTruncatedArgsReturnedAsToolResponse(t *testing.T) {
 	}
 	foundToolResult := false
 	for _, ev := range events {
-		if ev == nil || ev.Message.ToolResponse == nil {
+		if ev == nil || ev.Message.ToolResponse() == nil {
 			continue
 		}
-		if ev.Message.ToolResponse.Name != "WRITE" {
+		if ev.Message.ToolResponse().Name != "WRITE" {
 			continue
 		}
-		errText := fmt.Sprint(ev.Message.ToolResponse.Result["error"])
+		errText := fmt.Sprint(ev.Message.ToolResponse().Result["error"])
 		if strings.Contains(errText, `invalid tool call "WRITE" arguments`) {
 			foundToolResult = true
 			break
@@ -1483,16 +1459,13 @@ func TestLLMAgent_RawToolArgsCompatibilityParsing(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		step++
 		if step == 1 {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: "```json\n{\"text\":\"hello\"}\n```",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "echo",
+				Args: "```json\n{\"text\":\"hello\"}\n```",
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -1502,7 +1475,7 @@ func TestLLMAgent_RawToolArgsCompatibilityParsing(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{"echo": echoTool},
@@ -1517,7 +1490,7 @@ func TestLLMAgent_RawToolArgsCompatibilityParsing(t *testing.T) {
 	if !toolCalled {
 		t.Fatal("expected tool to be called")
 	}
-	if last == nil || strings.TrimSpace(last.Message.Text) != "done" {
+	if last == nil || strings.TrimSpace(last.Message.TextContent()) != "done" {
 		t.Fatalf("unexpected final event: %#v", last)
 	}
 }
@@ -1548,16 +1521,13 @@ func TestLLMAgent_PropagatesPolicyDecisionToToolContext(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "check_ctx",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "check_ctx",
+				Args: "{}",
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 	ag, err := New(Config{Name: "test"})
 	if err != nil {
@@ -1566,7 +1536,7 @@ func TestLLMAgent_PropagatesPolicyDecisionToToolContext(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{checkTool},
 		toolMap: map[string]tool.Tool{"check_ctx": checkTool},
@@ -1605,16 +1575,13 @@ func TestLLMAgent_DenyDecisionSkipsToolExecution(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "check_ctx",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "check_ctx",
+				Args: "{}",
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
 	ag, err := New(Config{Name: "test"})
 	if err != nil {
@@ -1623,7 +1590,7 @@ func TestLLMAgent_DenyDecisionSkipsToolExecution(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{checkTool},
 		toolMap: map[string]tool.Tool{"check_ctx": checkTool},
@@ -1636,17 +1603,17 @@ func TestLLMAgent_DenyDecisionSkipsToolExecution(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolEvent = ev
 		}
 	}
 	if toolCalled {
 		t.Fatal("expected tool execution to be skipped by deny decision")
 	}
-	if toolEvent == nil || toolEvent.Message.ToolResponse == nil {
+	if toolEvent == nil || toolEvent.Message.ToolResponse() == nil {
 		t.Fatal("expected tool response event")
 	}
-	if got := fmt.Sprint(toolEvent.Message.ToolResponse.Result["error"]); !strings.Contains(got, "denied by policy") {
+	if got := fmt.Sprint(toolEvent.Message.ToolResponse().Result["error"]); !strings.Contains(got, "denied by policy") {
 		t.Fatalf("expected denial error in tool response, got %q", got)
 	}
 }
@@ -1662,14 +1629,11 @@ func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "needs_approval",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "needs_approval",
+				Args: "{}",
+			}}, "")}, nil
 		}
 		t.Fatalf("agent should stop after approval cancel, got last role=%s", last.Role)
 		return nil, nil
@@ -1682,7 +1646,7 @@ func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{cancelTool},
 		toolMap: map[string]tool.Tool{"needs_approval": cancelTool},
@@ -1695,8 +1659,8 @@ func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
 			}
 			return
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
-			t.Fatalf("expected no tool response after cancel, got %+v", ev.Message.ToolResponse)
+		if ev != nil && ev.Message.ToolResponse() != nil {
+			t.Fatalf("expected no tool response after cancel, got %+v", ev.Message.ToolResponse())
 		}
 	}
 	t.Fatal("expected run to fail with approval canceled error")
@@ -1709,23 +1673,20 @@ func TestLLMAgent_UnknownToolReturnsErrorWithoutAuthorization(t *testing.T) {
 		step++
 		switch step {
 		case 1:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "GREP",
-					Args: jsonArgs(map[string]any{"pattern": "quota"}),
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "GREP",
+				Args: jsonArgs(map[string]any{"pattern": "quota"}),
+			}}, "")}, nil
 		case 2:
 			last := req.Messages[len(req.Messages)-1]
-			if last.Role != model.RoleTool || last.ToolResponse == nil {
+			if last.Role != model.RoleTool || last.ToolResponse() == nil {
 				t.Fatalf("expected tool error response, got %+v", last)
 			}
-			if got := fmt.Sprint(last.ToolResponse.Result["error"]); !strings.Contains(got, `unknown tool "GREP"`) {
+			if got := fmt.Sprint(last.ToolResponse().Result["error"]); !strings.Contains(got, `unknown tool "GREP"`) {
 				t.Fatalf("expected unknown tool error, got %q", got)
 			}
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		default:
 			t.Fatalf("unexpected llm step %d", step)
 			return nil, nil
@@ -1739,7 +1700,7 @@ func TestLLMAgent_UnknownToolReturnsErrorWithoutAuthorization(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		toolMap: map[string]tool.Tool{},
 		policies: []policy.Hook{
@@ -1753,14 +1714,14 @@ func TestLLMAgent_UnknownToolReturnsErrorWithoutAuthorization(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolEvent = ev
 		}
 	}
-	if toolEvent == nil || toolEvent.Message.ToolResponse == nil {
+	if toolEvent == nil || toolEvent.Message.ToolResponse() == nil {
 		t.Fatal("expected tool response event")
 	}
-	if got := fmt.Sprint(toolEvent.Message.ToolResponse.Result["error"]); !strings.Contains(got, `unknown tool "GREP"`) {
+	if got := fmt.Sprint(toolEvent.Message.ToolResponse().Result["error"]); !strings.Contains(got, `unknown tool "GREP"`) {
 		t.Fatalf("expected unknown tool error in emitted response, got %q", got)
 	}
 	if len(hook.before) != 0 || len(hook.after) != 0 {
@@ -1769,9 +1730,7 @@ func TestLLMAgent_UnknownToolReturnsErrorWithoutAuthorization(t *testing.T) {
 }
 
 func TestLLMAgent_ToolResultTruncation(t *testing.T) {
-	echoTool, err := tool.NewFunction[struct{}, struct {
-		Out string `json:"out"`
-	}]("echo_big", "echo big", func(ctx context.Context, args struct{}) (struct {
+	echoTool, err := tool.NewFunction("echo_big", "echo big", func(ctx context.Context, args struct{}) (struct {
 		Out string `json:"out"`
 	}, error) {
 		_ = ctx
@@ -1787,19 +1746,16 @@ func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		last := req.Messages[len(req.Messages)-1]
 		if last.Role == model.RoleUser {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo_big",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "echo_big",
+				Args: "{}",
+			}}, "")}, nil
 		}
 		if last.Role == model.RoleTool {
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "fallback"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "fallback")}, nil
 	})
 
 	ag, err := New(Config{
@@ -1812,7 +1768,7 @@ func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "hi"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{"echo_big": echoTool},
@@ -1823,7 +1779,7 @@ func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolEvent = ev
 			break
 		}
@@ -1831,49 +1787,46 @@ func TestLLMAgent_ToolResultTruncation(t *testing.T) {
 	if toolEvent == nil {
 		t.Fatal("expected tool response event")
 	}
-	meta, ok := toolEvent.Message.ToolResponse.Result["_tool_truncation"].(map[string]any)
+	meta, ok := toolEvent.Message.ToolResponse().Result["_tool_truncation"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected _tool_truncation meta, got: %#v", toolEvent.Message.ToolResponse.Result)
+		t.Fatalf("expected _tool_truncation meta, got: %#v", toolEvent.Message.ToolResponse().Result)
 	}
 	if meta["truncated"] != true {
 		t.Fatalf("expected truncated meta true, got: %#v", meta["truncated"])
 	}
-	if _, exists := toolEvent.Message.ToolResponse.Result["truncation_notice"]; exists {
-		t.Fatalf("did not expect visible truncation notice, got %#v", toolEvent.Message.ToolResponse.Result)
+	if _, exists := toolEvent.Message.ToolResponse().Result["truncation_notice"]; exists {
+		t.Fatalf("did not expect visible truncation notice, got %#v", toolEvent.Message.ToolResponse().Result)
 	}
-	if _, exists := toolEvent.Message.ToolResponse.Result["full_result_path"]; exists {
-		t.Fatalf("did not expect full_result_path, got %#v", toolEvent.Message.ToolResponse.Result)
+	if _, exists := toolEvent.Message.ToolResponse().Result["full_result_path"]; exists {
+		t.Fatalf("did not expect full_result_path, got %#v", toolEvent.Message.ToolResponse().Result)
 	}
 }
 
 func TestToMessages_StripsUIOnlyToolResultKeys(t *testing.T) {
 	history := []*session.Event{
 		{
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:   "call_1",
-					Name: "PATCH",
-					Result: map[string]any{
-						"path":        "a.txt",
-						"_ui_preview": "--- old\n+++ new",
-						"metadata": map[string]any{
-							"preview": "hidden",
-						},
-						"nested": map[string]any{
-							"_ui_note": "internal",
-							"ok":       true,
-						},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call_1",
+				Name: "PATCH",
+				Result: map[string]any{
+					"path":        "a.txt",
+					"_ui_preview": "--- old\n+++ new",
+					"metadata": map[string]any{
+						"preview": "hidden",
+					},
+					"nested": map[string]any{
+						"_ui_note": "internal",
+						"ok":       true,
 					},
 				},
-			},
+			}),
 		},
 	}
 	msgs := toMessages(history, "sys")
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
-	result := msgs[1].ToolResponse.Result
+	result := msgs[0].ToolResponse().Result
 	if _, exists := result["_ui_preview"]; exists {
 		t.Fatalf("expected _ui_preview to be stripped, got %#v", result)
 	}
@@ -1889,27 +1842,24 @@ func TestToMessages_StripsUIOnlyToolResultKeys(t *testing.T) {
 func TestToMessagesWithSanitizer_UsesCustomSanitizer(t *testing.T) {
 	history := []*session.Event{
 		{
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:   "call_1",
-					Name: "PATCH",
-					Result: map[string]any{
-						"path":     "a.txt",
-						"metadata": map[string]any{"preview": "visible"},
-					},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call_1",
+				Name: "PATCH",
+				Result: map[string]any{
+					"path":     "a.txt",
+					"metadata": map[string]any{"preview": "visible"},
 				},
-			},
+			}),
 		},
 	}
 	keepAll := func(input map[string]any) map[string]any {
 		return input
 	}
 	msgs := toMessagesWithSanitizer(history, "sys", keepAll)
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
 	}
-	if _, exists := msgs[1].ToolResponse.Result["metadata"]; !exists {
+	if _, exists := msgs[0].ToolResponse().Result["metadata"]; !exists {
 		t.Fatalf("expected metadata to be preserved with custom sanitizer")
 	}
 }
@@ -1933,28 +1883,25 @@ func TestLLMAgent_DoesNotSendUIOnlyToolFieldsToModel(t *testing.T) {
 		step++
 		switch step {
 		case 1:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "preview_tool",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "preview_tool",
+				Args: "{}",
+			}}, "")}, nil
 		case 2:
 			last := req.Messages[len(req.Messages)-1]
-			if last.ToolResponse == nil {
+			if last.ToolResponse() == nil {
 				return nil, fmt.Errorf("expected tool response in second request")
 			}
-			if _, exists := last.ToolResponse.Result["_ui_preview"]; exists {
+			if _, exists := last.ToolResponse().Result["_ui_preview"]; exists {
 				return nil, fmt.Errorf("unexpected _ui_preview in model-visible tool response")
 			}
-			if _, exists := last.ToolResponse.Result["metadata"]; exists {
+			if _, exists := last.ToolResponse().Result["metadata"]; exists {
 				return nil, fmt.Errorf("unexpected metadata in model-visible tool response")
 			}
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -1965,7 +1912,7 @@ func TestLLMAgent_DoesNotSendUIOnlyToolFieldsToModel(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{previewTool},
 		toolMap: map[string]tool.Tool{"preview_tool": previewTool},
@@ -1991,16 +1938,13 @@ func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 		step++
 		switch step {
 		case 1:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "minimal_tool",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "minimal_tool",
+				Args: "{}",
+			}}, "")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -2011,7 +1955,7 @@ func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{toolWithMinimalResult},
 		toolMap: map[string]tool.Tool{"minimal_tool": toolWithMinimalResult},
@@ -2022,16 +1966,16 @@ func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolEvent = ev
 		}
 	}
 	if toolEvent == nil {
 		t.Fatal("expected tool response event")
 	}
-	meta, ok := toolEvent.Message.ToolResponse.Result["metadata"].(map[string]any)
+	meta, ok := toolEvent.Message.ToolResponse().Result["metadata"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected metadata map in tool result, got %#v", toolEvent.Message.ToolResponse.Result["metadata"])
+		t.Fatalf("expected metadata map in tool result, got %#v", toolEvent.Message.ToolResponse().Result["metadata"])
 	}
 	if len(meta) != 0 {
 		t.Fatalf("expected empty default metadata map, got %#v", meta)
@@ -2053,16 +1997,13 @@ func TestLLMAgent_AddsErrorCodeToToolResultMetadata(t *testing.T) {
 		step++
 		switch step {
 		case 1:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "coded_tool",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "coded_tool",
+				Args: "{}",
+			}}, "")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -2073,7 +2014,7 @@ func TestLLMAgent_AddsErrorCodeToToolResultMetadata(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{codedErrTool},
 		toolMap: map[string]tool.Tool{"coded_tool": codedErrTool},
@@ -2084,16 +2025,16 @@ func TestLLMAgent_AddsErrorCodeToToolResultMetadata(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolEvent = ev
 		}
 	}
 	if toolEvent == nil {
 		t.Fatal("expected tool response event")
 	}
-	meta, ok := toolEvent.Message.ToolResponse.Result["metadata"].(map[string]any)
+	meta, ok := toolEvent.Message.ToolResponse().Result["metadata"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected metadata map, got %#v", toolEvent.Message.ToolResponse.Result["metadata"])
+		t.Fatalf("expected metadata map, got %#v", toolEvent.Message.ToolResponse().Result["metadata"])
 	}
 	if meta["error_code"] != string(toolexec.ErrorCodeApprovalRequired) {
 		t.Fatalf("expected error_code %q, got %#v", toolexec.ErrorCodeApprovalRequired, meta["error_code"])
@@ -2115,16 +2056,13 @@ func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
 		step++
 		switch step {
 		case 1:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "plain_tool",
-					Args: "{}",
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "plain_tool",
+				Args: "{}",
+			}}, "")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -2135,7 +2073,7 @@ func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{plainErrTool},
 		toolMap: map[string]tool.Tool{"plain_tool": plainErrTool},
@@ -2146,16 +2084,16 @@ func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.ToolResponse != nil {
+		if ev != nil && ev.Message.ToolResponse() != nil {
 			toolEvent = ev
 		}
 	}
 	if toolEvent == nil {
 		t.Fatal("expected tool response event")
 	}
-	meta, ok := toolEvent.Message.ToolResponse.Result["metadata"].(map[string]any)
+	meta, ok := toolEvent.Message.ToolResponse().Result["metadata"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected metadata map, got %#v", toolEvent.Message.ToolResponse.Result["metadata"])
+		t.Fatalf("expected metadata map, got %#v", toolEvent.Message.ToolResponse().Result["metadata"])
 	}
 	if _, exists := meta["error_code"]; exists {
 		t.Fatalf("expected no error_code for plain errors, got %#v", meta["error_code"])
@@ -2182,18 +2120,15 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 		step++
 		switch step {
 		case 1:
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "activate_1",
-					Name: "ENABLE_EXTRA_TOOLS",
-					Args: jsonArgs(map[string]any{}),
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "activate_1",
+				Name: "ENABLE_EXTRA_TOOLS",
+				Args: jsonArgs(map[string]any{}),
+			}}, "")}, nil
 		case 2:
 			foundDynamic := false
 			for _, one := range req.Tools {
-				if one.Name == "LSP_DIAGNOSTICS" {
+				if one.Function.Name == "LSP_DIAGNOSTICS" {
 					foundDynamic = true
 					break
 				}
@@ -2201,9 +2136,9 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 			if !foundDynamic {
 				return nil, fmt.Errorf("dynamic tool schema not found in second model request")
 			}
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		default:
-			return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		}
 	})
 
@@ -2214,7 +2149,7 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "activate lsp"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "activate lsp")}},
 		llm:     llm,
 		tools:   []tool.Tool{activationTool},
 		toolMap: map[string]tool.Tool{activationTool.Name(): activationTool},
@@ -2227,7 +2162,7 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 		}
 		last = ev
 	}
-	if last == nil || last.Message.Text != "done" {
+	if last == nil || last.Message.TextContent() != "done" {
 		t.Fatalf("unexpected final event: %#v", last)
 	}
 }
@@ -2237,20 +2172,15 @@ func TestLLMAgent_CompletesMultiTurnToolLoop(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		turn++
 		if turn == 1 {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: jsonArgs(map[string]any{"text": "loop"}),
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "echo",
+				Args: jsonArgs(map[string]any{"text": "loop"}),
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{
-			Role: model.RoleAssistant, Text: "done",
-		}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
-	echoTool, err := tool.NewFunction[echoArgs, echoResp]("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
+	echoTool, err := tool.NewFunction("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
 		_ = ctx
 		return echoResp{Echo: args.Text}, nil
 	})
@@ -2264,7 +2194,7 @@ func TestLLMAgent_CompletesMultiTurnToolLoop(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{echoTool.Name(): echoTool},
@@ -2276,7 +2206,7 @@ func TestLLMAgent_CompletesMultiTurnToolLoop(t *testing.T) {
 		}
 		last = ev
 	}
-	if last == nil || last.Message.Text != "done" {
+	if last == nil || last.Message.TextContent() != "done" {
 		t.Fatalf("unexpected last event: %#v", last)
 	}
 }
@@ -2286,18 +2216,15 @@ func TestLLMAgent_AllowsUnlimitedToolLoopByDefault(t *testing.T) {
 	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
 		turn++
 		if turn == 1 {
-			return &model.Response{Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: jsonArgs(map[string]any{"text": "ok"}),
-				}},
-			}}, nil
+			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "echo",
+				Args: jsonArgs(map[string]any{"text": "ok"}),
+			}}, "")}, nil
 		}
-		return &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 	})
-	echoTool, err := tool.NewFunction[echoArgs, echoResp]("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
+	echoTool, err := tool.NewFunction("echo", "echo", func(ctx context.Context, args echoArgs) (echoResp, error) {
 		_ = ctx
 		return echoResp{Echo: args.Text}, nil
 	})
@@ -2311,7 +2238,7 @@ func TestLLMAgent_AllowsUnlimitedToolLoopByDefault(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   []tool.Tool{echoTool},
 		toolMap: map[string]tool.Tool{echoTool.Name(): echoTool},
@@ -2323,7 +2250,7 @@ func TestLLMAgent_AllowsUnlimitedToolLoopByDefault(t *testing.T) {
 		}
 		last = ev
 	}
-	if last == nil || last.Message.Text != "done" {
+	if last == nil || last.Message.TextContent() != "done" {
 		t.Fatalf("unexpected last event: %#v", last)
 	}
 }
@@ -2332,7 +2259,7 @@ func TestLLMAgent_PersistsModelUsageMeta(t *testing.T) {
 	llm := newTestLLM("fake-provider", func(req *model.Request) (*model.Response, error) {
 		_ = req
 		return &model.Response{
-			Message:  model.Message{Role: model.RoleAssistant, Text: "done"},
+			Message:  model.NewTextMessage(model.RoleAssistant, "done"),
 			Model:    "demo-model",
 			Provider: "demo-provider",
 			Usage: model.Usage{
@@ -2349,7 +2276,7 @@ func TestLLMAgent_PersistsModelUsageMeta(t *testing.T) {
 	ctx := &testCtx{
 		Context: context.Background(),
 		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
-		history: []*session.Event{{Message: model.Message{Role: model.RoleUser, Text: "run"}}},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "run")}},
 		llm:     llm,
 		tools:   nil,
 		toolMap: map[string]tool.Tool{},

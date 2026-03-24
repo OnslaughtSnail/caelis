@@ -148,23 +148,22 @@ func (s *MapReduceCompactionStrategy) callCompactionModel(
 	userPrompt string,
 ) (string, error) {
 	req := &model.Request{
+		Instructions: []model.Part{model.NewTextPart(s.systemPrompt)},
 		Messages: []model.Message{
-			{Role: model.RoleSystem, Text: s.systemPrompt},
-			{Role: model.RoleUser, Text: userPrompt},
+			model.NewTextMessage(model.RoleUser, userPrompt),
 		},
-		Stream: false,
 	}
 	var last *model.Response
-	for res, err := range llm.Generate(ctx, req) {
+	for event, err := range llm.Generate(ctx, req) {
 		if err != nil {
 			return "", err
 		}
-		if res != nil {
-			last = res
+		if event != nil && event.Response != nil {
+			last = event.Response
 		}
 	}
 	if last == nil {
 		return "", fmt.Errorf("runtime: compaction got empty model response")
 	}
-	return strings.TrimSpace(last.Message.Text), nil
+	return strings.TrimSpace(last.Message.TextContent()), nil
 }

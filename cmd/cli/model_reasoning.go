@@ -320,7 +320,7 @@ func reasoningProfileForModel(provider string, model string) reasoningProfile {
 	return fallback
 }
 
-func inferredReasoningProfile(provider string, model string) reasoningProfile {
+func inferredReasoningProfile(provider string, _ string) reasoningProfile {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch {
 	case usesCanonicalOpenAICompatibleEfforts(provider):

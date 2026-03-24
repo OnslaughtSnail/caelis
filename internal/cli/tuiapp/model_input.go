@@ -16,11 +16,11 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseWheelMsg:
 		if m.btwOverlay != nil {
 			mouse := typed.Mouse()
-			switch {
-			case mouse.Button == tea.MouseWheelUp:
+			switch mouse.Button {
+			case tea.MouseWheelUp:
 				m.scrollBTW(-1)
 				return m, nil
-			case mouse.Button == tea.MouseWheelDown:
+			case tea.MouseWheelDown:
 				m.scrollBTW(1)
 				return m, nil
 			}
@@ -200,18 +200,23 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	}
 	if _, ok := blk.(*TranscriptBlock); ok {
 		if panel := m.findInlineBashPanelByAnchorBlockID(bid); panel != nil {
-			panel.Expanded = !panel.Expanded
-			m.syncInlineBashAnchorState(panel)
+			m.toggleInlineBashPanel(panel)
 			return true
 		}
 		if panel := m.findInlineSubagentPanelByAnchorBlockID(bid); panel != nil {
-			panel.Expanded = !panel.Expanded
-			m.syncInlineSubagentAnchorState(panel)
+			m.toggleInlineSubagentPanel(panel)
 			return true
 		}
 	}
 	bp, ok := blk.(*BashPanelBlock)
 	if !ok {
+		if turn, ok := blk.(*ParticipantTurnBlock); ok {
+			if contentLine > 0 && m.viewportBlockIDs[contentLine-1] == bid {
+				return false
+			}
+			turn.Expanded = !turn.Expanded
+			return true
+		}
 		if sp, ok := blk.(*SubagentPanelBlock); ok {
 			// Inline subagent panels toggle from the tool call line only.
 			_ = sp
@@ -744,6 +749,7 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine string, attachments []Attachment) (tea.Model, tea.Cmd) {
 	alreadyRunning := m.running
 	mode := submissionModeForLine(execLine)
+	layoutMayChange := mode == SubmissionModeOverlay || alreadyRunning
 	attachments = cloneAttachments(attachments)
 	displayLine = strings.TrimSpace(displayLine)
 	replacedPending := alreadyRunning && m.pendingQueue != nil && mode != SubmissionModeOverlay
@@ -780,6 +786,9 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	m.cursor = 0
 	m.clearInputAttachments()
 	m.clearInputOverlays()
+	if layoutMayChange {
+		m.ensureViewportLayout()
+	}
 
 	m.running = true
 	if !alreadyRunning {
@@ -837,8 +846,10 @@ func (m *Model) handleBTWOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch {
 	case key.Matches(msg, m.keys.Back):
+		m.dropPendingStreamSmoothing(streamSmoothingKey("btw", "", "answer", ""))
 		m.btwOverlay = nil
 		m.btwDismissed = true
+		m.ensureViewportLayout()
 		return m, nil
 	case key.Matches(msg, m.keys.HistoryPrev):
 		m.scrollBTW(-1)
@@ -972,7 +983,7 @@ func (m *Model) tryOpenSlashArgPicker(line string) bool {
 			return m.slashArgActive
 		}
 		switch text {
-		case "/model", "/sandbox":
+		case "/agent", "/model", "/sandbox":
 			m.openSlashArgPicker(cmd)
 			return len(m.slashArgCandidates) > 0
 		}

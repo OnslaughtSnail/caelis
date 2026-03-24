@@ -10,7 +10,7 @@ import (
 // ModelInput is the mutable request envelope for BeforeModel hooks.
 type ModelInput struct {
 	Messages []model.Message
-	Tools    []model.ToolDefinition
+	Tools    []model.ToolSpec
 }
 
 // ToolInput is the mutable request envelope for BeforeTool hooks.

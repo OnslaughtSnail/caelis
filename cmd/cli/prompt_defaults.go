@@ -14,15 +14,22 @@ Use LSP_SYMBOLS to discover exact symbol names before semantic lookups.
 Use SEARCH and GLOB for text-level fallback when semantic lookup is unnecessary or unavailable.`
 )
 
-func builtInIdentityPrompt(appName string) string {
+func builtInSystemIdentityPrompt(appName string) string {
 	name := strings.TrimSpace(appName)
 	if name == "" {
 		name = "caelis"
 	}
-	return "# Agent Identity\n\nYou are " + name + "."
+	return strings.Join([]string{
+		"## Identity",
+		"",
+		"You are " + name + ", a general-purpose assistant.",
+		"Decompose work into clear steps and parallelize independent tasks when useful.",
+		"Delegate specialized, high-complexity, or out-of-capability work to suitable agents when available.",
+		"Integrate delegated results into one coherent, user-facing answer.",
+	}, "\n")
 }
 
-func builtInWorkspaceContextPrompt(workspaceDir string) string {
+func builtInEnvironmentContextPrompt(workspaceDir string) string {
 	workspaceDir = strings.TrimSpace(workspaceDir)
 	if workspaceDir == "" {
 		return ""

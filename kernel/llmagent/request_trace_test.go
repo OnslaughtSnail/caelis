@@ -17,33 +17,24 @@ func TestAgentOutboundTraceMatchesSanitizedMessages(t *testing.T) {
 	t.Setenv(model.RequestTraceEnvVar, "1")
 	tracePath := filepath.Join(t.TempDir(), model.RequestTraceFileName)
 	history := []*session.Event{
-		{Message: model.Message{Role: model.RoleUser, Text: "first question"}},
-		{Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call-1",
-				Name: "READ",
-				Args: `{"path":"README.md"}`,
-			}},
-		}},
-		{Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call-1",
-				Name: "READ",
-				Result: map[string]any{
-					"snippet":        "hello",
-					"_ui_hidden_key": "ignore me",
-				},
+		{Message: model.NewTextMessage(model.RoleUser, "first question")},
+		{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call-1",
+			Name: "READ",
+			Args: `{"path":"README.md"}`,
+		}}, "")},
+		{Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-1",
+			Name: "READ",
+			Result: map[string]any{
+				"snippet":        "hello",
+				"_ui_hidden_key": "ignore me",
 			},
-		}},
+		})},
 	}
 	llm := model.WrapRequestTrace(newTestLLM("trace-llm", func(req *model.Request) (*model.Response, error) {
 		return &model.Response{
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "answer",
-			},
+			Message:      model.NewTextMessage(model.RoleAssistant, "answer"),
 			TurnComplete: true,
 		}, nil
 	}))

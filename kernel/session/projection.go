@@ -99,8 +99,8 @@ func PendingToolCalls(events Events) []PendingToolCall {
 		if ev == nil {
 			continue
 		}
-		if len(ev.Message.ToolCalls) > 0 {
-			for _, call := range ev.Message.ToolCalls {
+		if calls := ev.Message.ToolCalls(); len(calls) > 0 {
+			for _, call := range calls {
 				if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
 					continue
 				}
@@ -116,8 +116,8 @@ func PendingToolCalls(events Events) []PendingToolCall {
 				order = append(order, call.ID)
 			}
 		}
-		if ev.Message.ToolResponse != nil && strings.TrimSpace(ev.Message.ToolResponse.ID) != "" {
-			delete(pending, ev.Message.ToolResponse.ID)
+		if resp := ev.Message.ToolResponse(); resp != nil && strings.TrimSpace(resp.ID) != "" {
+			delete(pending, resp.ID)
 		}
 	}
 	if len(pending) == 0 {
@@ -154,9 +154,6 @@ func Messages(events Events, systemPrompt string, sanitizer func(map[string]any)
 		capHint = events.Len()
 	}
 	out := make([]model.Message, 0, capHint+1)
-	if strings.TrimSpace(systemPrompt) != "" {
-		out = append(out, model.Message{Role: model.RoleSystem, Text: systemPrompt})
-	}
 	if events == nil {
 		return out
 	}
@@ -165,10 +162,10 @@ func Messages(events Events, systemPrompt string, sanitizer func(map[string]any)
 			continue
 		}
 		msg := ev.Message
-		if msg.ToolResponse != nil {
-			resp := *msg.ToolResponse
-			resp.Result = sanitizer(resp.Result)
-			msg.ToolResponse = &resp
+		if resp := msg.ToolResponse(); resp != nil {
+			sanitized := *resp
+			sanitized.Result = sanitizer(resp.Result)
+			msg = model.MessageFromToolResponse(&sanitized)
 		}
 		out = append(out, msg)
 	}

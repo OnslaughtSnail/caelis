@@ -58,12 +58,8 @@ func assertBashOutput(t *testing.T, out map[string]any, want string) {
 	if _, exists := out["result"]; exists {
 		t.Fatalf("expected no compact result field, got %#v", out)
 	}
-	meta, ok := out["output_meta"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected output_meta, got %#v", out)
-	}
-	if got, ok := meta["model_truncated"].(bool); !ok || got {
-		t.Fatalf("expected model_truncated=false, got %#v", meta)
+	if _, exists := out["output_meta"]; exists {
+		t.Fatalf("expected uninformative output_meta to be omitted, got %#v", out)
 	}
 }
 
@@ -342,12 +338,8 @@ func TestBash_SyncTTYKeepsTranscriptOutOfResultFields(t *testing.T) {
 	if got := strings.TrimSpace(out["result"].(string)); !strings.Contains(got, "hello alice") {
 		t.Fatalf("expected tty preview in result, got %#v", out)
 	}
-	meta, _ := out["output_meta"].(map[string]any)
-	if got := meta["streamed"]; got != false {
-		t.Fatalf("expected sync tty command to report streamed=false, got %#v", out)
-	}
-	if got := meta["tty"]; got != true {
-		t.Fatalf("expected tty=true in output_meta, got %#v", out)
+	if _, exists := out["output_meta"]; exists {
+		t.Fatalf("expected tty bookkeeping output_meta to be omitted from visible result, got %#v", out)
 	}
 }
 

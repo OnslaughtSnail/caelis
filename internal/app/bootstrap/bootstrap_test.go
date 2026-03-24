@@ -117,11 +117,11 @@ type bootstrapScriptedLLM struct{}
 
 func (l *bootstrapScriptedLLM) Name() string { return "bootstrap-scripted" }
 
-func (l *bootstrapScriptedLLM) Generate(context.Context, *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
-		yield(&model.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Text: "ok"},
+func (l *bootstrapScriptedLLM) Generate(context.Context, *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "ok"),
 			TurnComplete: true,
-		}, nil)
+		}), nil)
 	}
 }

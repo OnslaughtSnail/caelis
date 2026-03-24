@@ -19,6 +19,7 @@ type ServiceConfig struct {
 	Runtime               *runtime.Runtime
 	AppName               string
 	UserID                string
+	DefaultAgent          string
 	WorkspaceRoot         string
 	WorkspaceCWD          string
 	Execution             toolexec.Runtime
@@ -34,6 +35,7 @@ type Service struct {
 	runtime               *runtime.Runtime
 	appName               string
 	userID                string
+	defaultAgent          string
 	workspaceRoot         string
 	workspaceCWD          string
 	execution             toolexec.Runtime
@@ -70,6 +72,7 @@ func New(cfg ServiceConfig) (*Service, error) {
 		runtime:               cfg.Runtime,
 		appName:               strings.TrimSpace(cfg.AppName),
 		userID:                strings.TrimSpace(cfg.UserID),
+		defaultAgent:          strings.TrimSpace(cfg.DefaultAgent),
 		workspaceRoot:         strings.TrimSpace(cfg.WorkspaceRoot),
 		workspaceCWD:          strings.TrimSpace(cfg.WorkspaceCWD),
 		execution:             cfg.Execution,
@@ -95,7 +98,7 @@ func (s *Service) AssembleTools() ([]tool.Tool, error) {
 		out = append(out, planTool)
 	}
 	if s.enableSelfSpawn && !hasToolNamed(out, tool.SpawnToolName) {
-		spawnTool, err := NewSelfSpawnTool()
+		spawnTool, err := NewSelfSpawnTool(s.defaultAgent)
 		if err != nil {
 			return nil, err
 		}

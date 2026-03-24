@@ -70,11 +70,8 @@ func lifecycleEvent(sess *session.Session, status RunLifecycleStatus, phase stri
 		ID:        eventID(),
 		SessionID: sess.ID,
 		Time:      time.Now(),
-		Message: model.Message{
-			Role: model.RoleSystem,
-			Text: "",
-		},
-		Meta: meta,
+		Message:   model.Message{Role: model.RoleSystem},
+		Meta:      meta,
 	}
 }
 

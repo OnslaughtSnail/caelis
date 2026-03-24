@@ -15,7 +15,7 @@ import (
 // below the viewport as temporary UI and communicate results via Submission
 // or callback messages.
 type OverlayState struct {
-	btwOverlay  *btwOverlayState
+	btwOverlay   *btwOverlayState
 	btwDismissed bool
 
 	activePrompt  *promptState
@@ -27,6 +27,7 @@ type OverlayState struct {
 	paletteAnimating bool
 
 	mentionQuery      string
+	mentionPrefix     string
 	mentionCandidates []string
 	mentionIndex      int
 	mentionStart      int

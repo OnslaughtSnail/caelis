@@ -105,14 +105,14 @@ func TestOpenAICompatStream_PropagatesSSEErrorsWithoutTurnComplete(t *testing.T)
 		turnComplete bool
 	)
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			gotErr = err
 			continue
 		}
-		if resp != nil && resp.TurnComplete {
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
 			turnComplete = true
 		}
 	}
@@ -157,15 +157,15 @@ func TestOpenAICompatStream_DoesNotApplyRequestTimeout(t *testing.T) {
 		finalText string
 	)
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			gotErr = err
 			continue
 		}
-		if resp != nil && resp.TurnComplete {
-			finalText = resp.Message.Text
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			finalText = resp.Response.Message.TextContent()
 		}
 	}
 	if gotErr != nil {
@@ -209,14 +209,14 @@ func TestOpenAICompatStream_IncludesUsageRequestOptionAndPropagatesUsage(t *test
 		usage  model.Usage
 	)
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			gotErr = err
 			continue
 		}
-		if resp != nil && resp.TurnComplete {
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
 			usage = resp.Usage
 		}
 	}
@@ -251,14 +251,14 @@ func TestOpenAICompatNonStream_PropagatesFinishReason(t *testing.T) {
 
 	var final *model.Response
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 	}) {
 		if err != nil {
 			t.Fatalf("expected no generate error, got %v", err)
 		}
-		if resp != nil {
-			final = resp
+		if resp != nil && resp.Response != nil {
+			final = resp.Response
 		}
 	}
 	if final == nil {
@@ -294,21 +294,21 @@ func TestOpenAICompatStream_PropagatesTerminalFinishReason(t *testing.T) {
 
 	var final *model.Response
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			t.Fatalf("expected no stream error, got %v", err)
 		}
-		if resp != nil && resp.TurnComplete {
-			final = resp
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			final = resp.Response
 		}
 	}
 	if final == nil {
 		t.Fatal("expected final response")
 	}
-	if final.Message.Text != "hello world" {
-		t.Fatalf("unexpected final text %q", final.Message.Text)
+	if final.Message.TextContent() != "hello world" {
+		t.Fatalf("unexpected final text %q", final.Message.TextContent())
 	}
 	if final.FinishReason != model.FinishReasonLength {
 		t.Fatalf("expected finish reason length, got %q", final.FinishReason)
@@ -343,7 +343,7 @@ func TestOpenAICompatRequest_IncludesMaxTokens(t *testing.T) {
 
 	var gotErr error
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 	}) {
 		if err != nil {
@@ -414,14 +414,14 @@ func TestOpenRouterRequest_AppliesConfiguredHeaders(t *testing.T) {
 
 	var finalReasoning string
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 	}) {
 		if err != nil {
 			t.Fatalf("expected no generate error, got %v", err)
 		}
-		if resp != nil && resp.TurnComplete {
-			finalReasoning = resp.Message.Reasoning
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			finalReasoning = resp.Response.Message.ReasoningText()
 		}
 	}
 	if gotReferer != "https://example.com/app" || gotTitle != "caelis" {
@@ -476,14 +476,14 @@ func TestOpenRouterStream_PropagatesTerminalFinishReason(t *testing.T) {
 
 	var final *model.Response
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			t.Fatalf("expected no stream error, got %v", err)
 		}
-		if resp != nil && resp.TurnComplete {
-			final = resp
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			final = resp.Response
 		}
 	}
 	if final == nil {
@@ -515,7 +515,7 @@ func TestOpenAICompatNonStream_AppliesRequestTimeout(t *testing.T) {
 
 	var gotErr error
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 	}) {
 		if err != nil {
@@ -562,15 +562,15 @@ func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
 		finalText string
 	)
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			gotErr = err
 			continue
 		}
-		if resp != nil && resp.TurnComplete {
-			finalText = resp.Message.Text
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			finalText = resp.Response.Message.TextContent()
 		}
 	}
 	if gotErr != nil {
@@ -613,7 +613,7 @@ func TestGeminiStream_EmitsReasoningChunks(t *testing.T) {
 		finalText       string
 	)
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 		Reasoning: model.ReasoningConfig{
 			Effort: "high",
@@ -625,12 +625,12 @@ func TestGeminiStream_EmitsReasoningChunks(t *testing.T) {
 		if resp == nil {
 			continue
 		}
-		if resp.Partial && strings.TrimSpace(resp.Message.Reasoning) != "" {
-			reasoningChunks = append(reasoningChunks, strings.TrimSpace(resp.Message.Reasoning))
+		if resp.PartDelta != nil && resp.PartDelta.Kind == model.PartKindReasoning && strings.TrimSpace(resp.PartDelta.TextDelta) != "" {
+			reasoningChunks = append(reasoningChunks, strings.TrimSpace(resp.PartDelta.TextDelta))
 		}
-		if resp.TurnComplete {
-			finalReasoning = strings.TrimSpace(resp.Message.Reasoning)
-			finalText = strings.TrimSpace(resp.Message.Text)
+		if resp.Response != nil && resp.TurnComplete {
+			finalReasoning = strings.TrimSpace(resp.Response.Message.ReasoningText())
+			finalText = strings.TrimSpace(resp.Response.Message.TextContent())
 		}
 	}
 	if strings.Join(reasoningChunks, "|") != "think-1|think-2" {
@@ -681,7 +681,7 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 
 	var gotErr error
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 		Reasoning: model.ReasoningConfig{
 			Effort: "high",
@@ -741,7 +741,7 @@ func TestGeminiRequest_Pre3UsesThinkingBudget(t *testing.T) {
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:    false,
 		Reasoning: model.ReasoningConfig{Effort: "high"},
 	}) {
@@ -788,7 +788,7 @@ func TestGeminiRequest_Pre3DisableReasoningUsesZeroBudget(t *testing.T) {
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 		Reasoning: model.ReasoningConfig{
 			Effort: "none",
@@ -824,7 +824,7 @@ func TestGeminiRequest_BaseURLWithVersionPath(t *testing.T) {
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 	}) {
 		if err != nil {
@@ -862,7 +862,7 @@ func TestGeminiRequest_XHighEffortFallsBackToHighLevel(t *testing.T) {
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:    false,
 		Reasoning: model.ReasoningConfig{Effort: "xhigh"},
 	}) {
@@ -883,15 +883,11 @@ func TestFromToOpenAIMessage(t *testing.T) {
 		BaseURL:  "https://api.openai.com/v1",
 		Timeout:  time.Second,
 	}, "token")
-	in := model.Message{
-		Role:      model.RoleAssistant,
-		Reasoning: "thinking...",
-		ToolCalls: []model.ToolCall{{
-			ID:   "c1",
-			Name: "echo",
-			Args: jsonArgs(map[string]any{"text": "hello"}),
-		}},
-	}
+	in := model.MessageFromAssistantParts("", "thinking...", []model.ToolCall{{
+		ID:   "c1",
+		Name: "echo",
+		Args: jsonArgs(map[string]any{"text": "hello"}),
+	}})
 	raw := llm.fromKernelMessage(in)
 	if raw.ReasoningContent != nil {
 		t.Fatalf("did not expect reasoning_content in generic openai-compatible request")
@@ -911,14 +907,14 @@ func TestFromToOpenAIMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(back.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(back.ToolCalls))
+	if len(back.ToolCalls()) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(back.ToolCalls()))
 	}
-	if back.ToolCalls[0].Name != "echo" {
-		t.Fatalf("unexpected tool name %q", back.ToolCalls[0].Name)
+	if back.ToolCalls()[0].Name != "echo" {
+		t.Fatalf("unexpected tool name %q", back.ToolCalls()[0].Name)
 	}
-	if back.Reasoning != "" {
-		t.Fatalf("expected no reasoning in generic openai-compatible roundtrip, got %q", back.Reasoning)
+	if back.ReasoningText() != "" {
+		t.Fatalf("expected no reasoning in generic openai-compatible roundtrip, got %q", back.ReasoningText())
 	}
 }
 
@@ -939,11 +935,11 @@ func TestToKernelMessage_OpenAICompatKeepsRawToolArgsOnDecodeFailure(t *testing.
 	if err != nil {
 		t.Fatalf("expected no hard parse error, got %v", err)
 	}
-	if len(msg.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	if len(msg.ToolCalls()) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls()))
 	}
-	if got := strings.TrimSpace(msg.ToolCalls[0].Args); got == "" {
-		t.Fatalf("expected raw args kept, got %#v", msg.ToolCalls[0])
+	if got := strings.TrimSpace(msg.ToolCalls()[0].Args); got == "" {
+		t.Fatalf("expected raw args kept, got %#v", msg.ToolCalls()[0])
 	}
 }
 
@@ -956,20 +952,17 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 	}, "token").(*openAICompatLLM)
 	req := &model.Request{
 		Messages: []model.Message{
-			{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{{
-					ID:   "c1",
-					Name: "echo",
-					Args: jsonArgs(map[string]any{"text": "hi"}),
-				}},
-			},
+			model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "c1",
+				Name: "echo",
+				Args: jsonArgs(map[string]any{"text": "hi"}),
+			}}, ""),
 		},
 		Reasoning: model.ReasoningConfig{Effort: "high"},
 	}
 	payload := openAICompatRequest{
 		Model:    "deepseek-reasoner",
-		Messages: llm.fromKernelMessages(req.Messages),
+		Messages: llm.fromKernelMessages(nil, req.Messages),
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
 	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
@@ -1001,12 +994,12 @@ func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
 		MaxOutputTok: 8192, // smaller than thinking min – must be bumped
 	}, "token").(*openAICompatLLM)
 	req := &model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Reasoning: model.ReasoningConfig{Effort: "medium"},
 	}
 	payload := openAICompatRequest{
 		Model:     "deepseek-reasoner",
-		Messages:  llm.fromKernelMessages(req.Messages),
+		Messages:  llm.fromKernelMessages(nil, req.Messages),
 		MaxTokens: llm.maxOutputTok, // 8192 from config
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
@@ -1028,12 +1021,12 @@ func TestDeepSeekThinkingPayload_AdaptiveUsesReasonerRange(t *testing.T) {
 		MaxOutputTok: 70000,
 	}, "token").(*openAICompatLLM)
 	req := &model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Reasoning: model.ReasoningConfig{},
 	}
 	payload := openAICompatRequest{
 		Model:     "deepseek-reasoner",
-		Messages:  llm.fromKernelMessages(req.Messages),
+		Messages:  llm.fromKernelMessages(nil, req.Messages),
 		MaxTokens: llm.maxOutputTok,
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
@@ -1054,12 +1047,12 @@ func TestDeepSeekThinkingPayload_DisabledCapsToChatRange(t *testing.T) {
 		MaxOutputTok: 32768,
 	}, "token").(*openAICompatLLM)
 	req := &model.Request{
-		Messages:  []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Reasoning: model.ReasoningConfig{Effort: "none"},
 	}
 	payload := openAICompatRequest{
 		Model:     "deepseek-reasoner",
-		Messages:  llm.fromKernelMessages(req.Messages),
+		Messages:  llm.fromKernelMessages(nil, req.Messages),
 		MaxTokens: llm.maxOutputTok,
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
@@ -1081,7 +1074,7 @@ func TestDeepSeekChatIgnoresReasoningAndCapsTokens(t *testing.T) {
 	}, "token").(*openAICompatLLM)
 	payload := openAICompatRequest{
 		Model:     "deepseek-chat",
-		Messages:  llm.fromKernelMessages([]model.Message{{Role: model.RoleUser, Text: "hi"}}),
+		Messages:  llm.fromKernelMessages(nil, []model.Message{model.NewTextMessage(model.RoleUser, "hi")}),
 		MaxTokens: llm.maxOutputTok,
 	}
 	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
@@ -1102,8 +1095,8 @@ func TestMimoProviderUsesThinkingPayload(t *testing.T) {
 	}, "token").(*openAICompatLLM)
 	payload := openAICompatRequest{
 		Model: "mimo",
-		Messages: llm.fromKernelMessages([]model.Message{
-			{Role: model.RoleUser, Text: "hello"},
+		Messages: llm.fromKernelMessages(nil, []model.Message{
+			model.NewTextMessage(model.RoleUser, "hello"),
 		}),
 	}
 	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
@@ -1124,8 +1117,8 @@ func TestVolcengineCodingPlanReasoningDisabledSendsThinkingDisabled(t *testing.T
 	}, "token").(*openAICompatLLM)
 	payload := openAICompatRequest{
 		Model: "doubao-seed-2.0-pro",
-		Messages: llm.fromKernelMessages([]model.Message{
-			{Role: model.RoleUser, Text: "hello"},
+		Messages: llm.fromKernelMessages(nil, []model.Message{
+			model.NewTextMessage(model.RoleUser, "hello"),
 		}),
 	}
 	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "none"})
@@ -1147,8 +1140,8 @@ func TestOpenAICompatEffortReasoningUsesOpenAIReasoningPayload(t *testing.T) {
 	}, "token")
 	payload := openAICompatRequest{
 		Model: "gpt-5",
-		Messages: llm.fromKernelMessages([]model.Message{
-			{Role: model.RoleUser, Text: "hello"},
+		Messages: llm.fromKernelMessages(nil, []model.Message{
+			model.NewTextMessage(model.RoleUser, "hello"),
 		}),
 	}
 	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
@@ -1170,39 +1163,27 @@ func TestOpenAICompatMessageTransform_SkipsInvalidToolResponses(t *testing.T) {
 		BaseURL:  "https://example.com/v1",
 		Timeout:  time.Second,
 	}, "token")
-	messages := llm.fromKernelMessages([]model.Message{
-		{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_1",
-				Name: "echo",
-				Args: jsonArgs(map[string]any{"text": "x"}),
-			}},
-		},
-		{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     "",
-				Name:   "echo",
-				Result: map[string]any{"echo": "missing-id"},
-			},
-		},
-		{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     "call_2",
-				Name:   "echo",
-				Result: map[string]any{"echo": "unmatched-id"},
-			},
-		},
-		{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     "call_1",
-				Name:   "echo",
-				Result: map[string]any{"echo": "ok"},
-			},
-		},
+	messages := llm.fromKernelMessages(nil, []model.Message{
+		model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_1",
+			Name: "echo",
+			Args: jsonArgs(map[string]any{"text": "x"}),
+		}}, ""),
+		model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "",
+			Name:   "echo",
+			Result: map[string]any{"echo": "missing-id"},
+		}),
+		model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "call_2",
+			Name:   "echo",
+			Result: map[string]any{"echo": "unmatched-id"},
+		}),
+		model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "call_1",
+			Name:   "echo",
+			Result: map[string]any{"echo": "ok"},
+		}),
 		{
 			Role: model.RoleTool,
 		},
@@ -1219,39 +1200,339 @@ func TestOpenAICompatMessageTransform_SkipsInvalidToolResponses(t *testing.T) {
 }
 
 func TestAnthropicMessageTransform(t *testing.T) {
-	system, msgs := toAnthropicMessages([]model.Message{
-		{Role: model.RoleSystem, Text: "sys"},
-		{Role: model.RoleUser, Text: "u"},
-		{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call1",
-				Name: "echo",
-				Args: jsonArgs(map[string]any{"text": "x"}),
-			}},
-		},
+	system := toAnthropicSystem([]model.Part{model.NewTextPart("sys")})
+	msgs := toAnthropicMessages([]model.Message{
+		model.NewTextMessage(model.RoleSystem, "sys"),
+		model.NewTextMessage(model.RoleUser, "u"),
+		model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call1",
+			Name: "echo",
+			Args: jsonArgs(map[string]any{"text": "x"}),
+		}}, ""),
 	})
-	if system != "sys" {
-		t.Fatalf("unexpected system text: %q", system)
+	if len(system) != 1 || system[0].Text != "sys" {
+		t.Fatalf("unexpected system blocks: %+v", system)
 	}
 	if len(msgs) < 2 {
 		t.Fatalf("expected >= 2 messages, got %d", len(msgs))
 	}
 }
 
-func TestGeminiMessageTransform(t *testing.T) {
-	system, msgs, err := toGeminiContents([]model.Message{
-		{Role: model.RoleSystem, Text: "sys"},
-		{Role: model.RoleUser, Text: "u"},
-		{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:               "call1",
-				Name:             "echo",
-				Args:             jsonArgs(map[string]any{"text": "x"}),
-				ThoughtSignature: "sig-1",
-			}},
+func TestAnthropicSDKNonStream_NormalizesBaseURLAndMapsParts(t *testing.T) {
+	var sawCustomTool bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "sk-anthropic" {
+			t.Fatalf("expected x-api-key header, got %q", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got == "" {
+			t.Fatal("expected anthropic-version header")
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request payload: %v", err)
+		}
+		system, _ := payload["system"].([]any)
+		if len(system) != 1 {
+			t.Fatalf("expected one system block, got %+v", payload["system"])
+		}
+		sys0, _ := system[0].(map[string]any)
+		if sys0["text"] != "system instruction" {
+			t.Fatalf("unexpected system block %+v", sys0)
+		}
+		messages, _ := payload["messages"].([]any)
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %+v", payload["messages"])
+		}
+		assistant, _ := messages[1].(map[string]any)
+		assistantContent, _ := assistant["content"].([]any)
+		if len(assistantContent) != 3 {
+			t.Fatalf("expected assistant thinking/text/tool_use blocks, got %+v", assistantContent)
+		}
+		thinking, _ := assistantContent[0].(map[string]any)
+		if thinking["type"] != "thinking" || thinking["signature"] != "sig-prev" || thinking["thinking"] != "prior reasoning" {
+			t.Fatalf("unexpected thinking block %+v", thinking)
+		}
+		toolUse, _ := assistantContent[2].(map[string]any)
+		if toolUse["type"] != "tool_use" || toolUse["id"] != "call-prev" || toolUse["name"] != "echo" {
+			t.Fatalf("unexpected tool_use block %+v", toolUse)
+		}
+		toolMessage, _ := messages[2].(map[string]any)
+		toolContent, _ := toolMessage["content"].([]any)
+		if len(toolContent) != 1 {
+			t.Fatalf("expected single tool_result block, got %+v", toolMessage)
+		}
+		toolResult, _ := toolContent[0].(map[string]any)
+		if toolResult["type"] != "tool_result" || toolResult["tool_use_id"] != "call-prev" {
+			t.Fatalf("unexpected tool_result block %+v", toolResult)
+		}
+		tools, _ := payload["tools"].([]any)
+		if len(tools) != 1 {
+			t.Fatalf("expected one declared tool, got %+v", payload["tools"])
+		}
+		toolDecl, _ := tools[0].(map[string]any)
+		if toolDecl["name"] == "lookup" {
+			sawCustomTool = true
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"test-model","stop_reason":"tool_use","stop_sequence":"","content":[{"type":"thinking","thinking":"I'll call the tool.","signature":"sig-final"},{"type":"text","text":"Let me check."},{"type":"tool_use","id":"call_2","name":"lookup","input":{"q":"weather"}}],"usage":{"input_tokens":11,"output_tokens":7}}`)
+	}))
+	defer server.Close()
+
+	llm := newAnthropic(Config{
+		Provider: "anthropic",
+		API:      APIAnthropic,
+		Model:    "test-model",
+		BaseURL:  server.URL + "/v1",
+		Timeout:  2 * time.Second,
+		Auth: AuthConfig{
+			Type:  AuthAPIKey,
+			Token: "sk-anthropic",
 		},
+	}, "sk-anthropic")
+
+	priorReasoning := model.NewReasoningPart("prior reasoning", model.ReasoningVisibilityVisible)
+	priorReasoning.Reasoning.Replay = &model.ReplayMeta{Provider: "anthropic", Kind: anthropicReplayKindThinkingSignature, Token: "sig-prev"}
+
+	var final *model.Response
+	for event, err := range llm.Generate(context.Background(), &model.Request{
+		Instructions: []model.Part{model.NewTextPart("system instruction")},
+		Messages: []model.Message{
+			model.NewTextMessage(model.RoleUser, "hello"),
+			model.NewMessage(
+				model.RoleAssistant,
+				priorReasoning,
+				model.NewTextPart("Working."),
+				model.NewToolUsePart("call-prev", "echo", json.RawMessage(`{"text":"x"}`)),
+			),
+			model.MessageFromToolResponse(&model.ToolResponse{
+				ID:     "call-prev",
+				Name:   "echo",
+				Result: map[string]any{"echo": "x"},
+			}),
+		},
+		Tools: []model.ToolSpec{
+			model.NewFunctionToolSpec("lookup", "Look up weather.", map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"q": map[string]any{"type": "string"},
+				},
+				"required": []string{"q"},
+			}),
+		},
+	}) {
+		if err != nil {
+			t.Fatalf("generate failed: %v", err)
+		}
+		if event != nil && event.Response != nil && event.TurnComplete {
+			final = event.Response
+		}
+	}
+	if !sawCustomTool {
+		t.Fatal("expected tool declaration in anthropic request")
+	}
+	if final == nil {
+		t.Fatal("expected final response")
+	}
+	if final.FinishReason != model.FinishReasonToolCalls {
+		t.Fatalf("expected tool_calls finish reason, got %q", final.FinishReason)
+	}
+	if got := final.Message.TextContent(); got != "Let me check." {
+		t.Fatalf("unexpected final text %q", got)
+	}
+	if got := final.Message.ReasoningText(); got != "I'll call the tool." {
+		t.Fatalf("unexpected reasoning text %q", got)
+	}
+	reasoningParts := final.Message.ReasoningParts()
+	if len(reasoningParts) != 1 || reasoningParts[0].Replay == nil || reasoningParts[0].Replay.Token != "sig-final" {
+		t.Fatalf("expected thinking signature replay token, got %+v", reasoningParts)
+	}
+	toolCalls := final.Message.ToolCalls()
+	if len(toolCalls) != 1 || toolCalls[0].Name != "lookup" || toolCalls[0].Args != `{"q":"weather"}` {
+		t.Fatalf("unexpected tool calls %+v", toolCalls)
+	}
+}
+
+func TestAnthropicSDKStream_MapsThinkingDeltasAndSignature(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("x-minimax-api-key"); got != "compat-token" {
+			t.Fatalf("expected custom auth header, got %q", got)
+		}
+		if got := r.Header.Get("x-extra-header"); got != "1" {
+			t.Fatalf("expected configured header, got %q", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test-model\",\"content\":[],\"stop_reason\":\"\",\"stop_sequence\":\"\",\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_start\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"I should think first. \"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-stream\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_stop\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_start\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello world\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_stop\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_delta\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":\"\"},\"usage\":{\"input_tokens\":11,\"output_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"server_tool_use\":{\"web_fetch_requests\":0,\"web_search_requests\":0}}}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_stop\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	llm := newAnthropic(Config{
+		Provider: "anthropic-compatible",
+		API:      APIAnthropicCompatible,
+		Model:    "test-model",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+		Auth: AuthConfig{
+			Type:      AuthAPIKey,
+			Token:     "compat-token",
+			HeaderKey: "x-minimax-api-key",
+		},
+		Headers: map[string]string{"x-extra-header": "1"},
+	}, "compat-token")
+
+	var (
+		reasoningDelta string
+		textDelta      string
+		final          *model.Response
+	)
+	for event, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hello")},
+		Stream:   true,
+	}) {
+		if err != nil {
+			t.Fatalf("generate failed: %v", err)
+		}
+		if event == nil {
+			continue
+		}
+		if event.PartDelta != nil {
+			switch event.PartDelta.Kind {
+			case model.PartKindReasoning:
+				reasoningDelta += event.PartDelta.TextDelta
+			case model.PartKindText:
+				textDelta += event.PartDelta.TextDelta
+			}
+		}
+		if event.Response != nil && event.TurnComplete {
+			final = event.Response
+		}
+	}
+	if reasoningDelta != "I should think first. " {
+		t.Fatalf("unexpected reasoning delta %q", reasoningDelta)
+	}
+	if textDelta != "Hello world" {
+		t.Fatalf("unexpected text delta %q", textDelta)
+	}
+	if final == nil {
+		t.Fatal("expected final streamed response")
+	}
+	if final.FinishReason != model.FinishReasonStop {
+		t.Fatalf("expected stop finish reason, got %q", final.FinishReason)
+	}
+	if got := final.Message.TextContent(); got != "Hello world" {
+		t.Fatalf("unexpected final text %q", got)
+	}
+	reasoningParts := final.Message.ReasoningParts()
+	if len(reasoningParts) != 1 || reasoningParts[0].Replay == nil || reasoningParts[0].Replay.Token != "sig-stream" {
+		t.Fatalf("expected streamed signature replay token, got %+v", reasoningParts)
+	}
+}
+
+func TestMiniMaxStream_EmitsStartBlockTextWithoutSmoothingAtProviderLayer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" && r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"MiniMax-M2.5\",\"content\":[],\"stop_reason\":\"\",\"stop_sequence\":\"\",\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_start\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"MiniMax streaming \"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_delta\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"should feel much smoother in the terminal output.\"}}\n\n")
+		_, _ = fmt.Fprint(w, "event: content_block_stop\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_delta\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":\"\"},\"usage\":{\"input_tokens\":11,\"output_tokens\":12}}\n\n")
+		_, _ = fmt.Fprint(w, "event: message_stop\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	llm := newAnthropic(Config{
+		Provider: "minimax",
+		API:      APIAnthropicCompatible,
+		Model:    "MiniMax-M2.5",
+		BaseURL:  server.URL,
+		Timeout:  2 * time.Second,
+		Auth: AuthConfig{
+			Type:      AuthAPIKey,
+			Token:     "compat-token",
+			HeaderKey: "x-minimax-api-key",
+		},
+	}, "compat-token")
+
+	var (
+		textChunks []string
+		final      *model.Response
+	)
+	for event, err := range llm.Generate(context.Background(), &model.Request{
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hello")},
+		Stream:   true,
+	}) {
+		if err != nil {
+			t.Fatalf("generate failed: %v", err)
+		}
+		if event == nil {
+			continue
+		}
+		if event.PartDelta != nil && event.PartDelta.Kind == model.PartKindText && event.PartDelta.TextDelta != "" {
+			textChunks = append(textChunks, event.PartDelta.TextDelta)
+		}
+		if event.Response != nil && event.TurnComplete {
+			final = event.Response
+		}
+	}
+
+	if len(textChunks) != 2 {
+		t.Fatalf("expected start block text plus one delta, got %v", textChunks)
+	}
+	if got := strings.Join(textChunks, ""); got != "MiniMax streaming should feel much smoother in the terminal output." {
+		t.Fatalf("unexpected streamed text %q", got)
+	}
+	if final == nil {
+		t.Fatal("expected final streamed response")
+	}
+	if got := final.Message.TextContent(); got != "MiniMax streaming should feel much smoother in the terminal output." {
+		t.Fatalf("unexpected final text %q", got)
+	}
+}
+
+func TestGeminiMessageTransform(t *testing.T) {
+	system, msgs, err := toGeminiContents(nil, []model.Message{
+		model.NewTextMessage(model.RoleSystem, "sys"),
+		model.NewTextMessage(model.RoleUser, "u"),
+		model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:               "call1",
+			Name:             "echo",
+			Args:             jsonArgs(map[string]any{"text": "x"}),
+			ThoughtSignature: "sig-1",
+		}}, ""),
 	})
 	if err != nil {
 		t.Fatalf("toGeminiContents: %v", err)
@@ -1272,16 +1553,12 @@ func TestGeminiMessageTransform(t *testing.T) {
 }
 
 func TestGeminiMessageTransform_SkipsToolCallWithoutThoughtSignature(t *testing.T) {
-	_, msgs, err := toGeminiContents([]model.Message{
-		{
-			Role: model.RoleAssistant,
-			Text: "tool planned",
-			ToolCalls: []model.ToolCall{{
-				ID:   "call1",
-				Name: "BASH",
-				Args: jsonArgs(map[string]any{"command": "ls"}),
-			}},
-		},
+	_, msgs, err := toGeminiContents(nil, []model.Message{
+		model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call1",
+			Name: "BASH",
+			Args: jsonArgs(map[string]any{"command": "ls"}),
+		}}, "tool planned"),
 	})
 	if err != nil {
 		t.Fatalf("toGeminiContents: %v", err)
@@ -1318,13 +1595,13 @@ func TestGeminiResponseToMessage_PreservesThoughtSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(msg.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	if len(msg.ToolCalls()) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls()))
 	}
-	if msg.ToolCalls[0].ThoughtSignature == "sig-call-1" {
-		t.Fatalf("expected thought signature to be encoded for lossless persistence, got raw %q", msg.ToolCalls[0].ThoughtSignature)
+	if msg.ToolCalls()[0].ThoughtSignature == "sig-call-1" {
+		t.Fatalf("expected thought signature to be encoded for lossless persistence, got raw %q", msg.ToolCalls()[0].ThoughtSignature)
 	}
-	if got := decodeGeminiThoughtSignature(msg.ToolCalls[0].ThoughtSignature); string(got) != "sig-call-1" {
+	if got := decodeGeminiThoughtSignature(msg.ToolCalls()[0].ThoughtSignature); string(got) != "sig-call-1" {
 		t.Fatalf("expected decoded thought signature kept, got %q", string(got))
 	}
 }
@@ -1346,11 +1623,11 @@ func TestGeminiResponseToMessage_ExtractsReasoningText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Text != "answer" {
-		t.Fatalf("unexpected answer text %q", msg.Text)
+	if msg.TextContent() != "answer" {
+		t.Fatalf("unexpected answer text %q", msg.TextContent())
 	}
-	if msg.Reasoning != "thought-1\nthought-2" {
-		t.Fatalf("unexpected reasoning text %q", msg.Reasoning)
+	if msg.ReasoningText() != "thought-1\nthought-2" {
+		t.Fatalf("unexpected reasoning text %q", msg.ReasoningText())
 	}
 }
 
@@ -1370,11 +1647,11 @@ func TestGeminiResponseToMessage_DoesNotClassifyAnswerTextAsReasoningByThoughtSi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Text != "thought-signature\nanswer" {
-		t.Fatalf("unexpected answer text %q", msg.Text)
+	if msg.TextContent() != "thought-signature\nanswer" {
+		t.Fatalf("unexpected answer text %q", msg.TextContent())
 	}
-	if msg.Reasoning != "" {
-		t.Fatalf("unexpected reasoning text %q", msg.Reasoning)
+	if msg.ReasoningText() != "" {
+		t.Fatalf("unexpected reasoning text %q", msg.ReasoningText())
 	}
 }
 
@@ -1401,10 +1678,10 @@ func TestGeminiResponseDecode_PartLevelThoughtSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(msg.ToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	if len(msg.ToolCalls()) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls()))
 	}
-	if got := decodeGeminiThoughtSignature(msg.ToolCalls[0].ThoughtSignature); string(got) != "sig-part-1" {
+	if got := decodeGeminiThoughtSignature(msg.ToolCalls()[0].ThoughtSignature); string(got) != "sig-part-1" {
 		t.Fatalf("expected part-level thought signature, got %q", string(got))
 	}
 }

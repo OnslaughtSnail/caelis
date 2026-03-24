@@ -41,7 +41,14 @@ const (
 	taskSpecExecSessionID = "exec_session_id"
 	taskSpecChildSession  = "child_session_id"
 	taskSpecDelegationID  = "delegation_id"
-	taskSpecPrompt        = "task"
+	taskSpecAgent         = "agent"
+	taskSpecChildCWD      = "child_cwd"
+	taskSpecPrompt        = "prompt"
+	taskSpecTimeout       = "timeout_seconds"
+
+	// taskSpecLegacyPrompt is the pre-rename key for the spawn prompt text.
+	// Kept for backward-compatible reads of persisted task records.
+	taskSpecLegacyPrompt = "task"
 )
 
 func newTaskManager(r *Runtime, execRuntime toolexec.Runtime, registry *task.Registry, store task.Store, parent *sessionContext, req RunRequest, runner agent.SubagentRunner) *runtimeTaskManager {
@@ -113,8 +120,8 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 }
 
 func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStartRequest) (task.Snapshot, error) {
-	if strings.TrimSpace(req.Task) == "" {
-		return task.Snapshot{}, fmt.Errorf("task: child task is required")
+	if strings.TrimSpace(req.Prompt) == "" {
+		return task.Snapshot{}, fmt.Errorf("task: child prompt is required")
 	}
 	if m.subagents == nil {
 		return task.Snapshot{}, fmt.Errorf("task: child session runtime is unavailable")
@@ -131,14 +138,17 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 		return task.Snapshot{}, err
 	}
 	label := strings.ToUpper(string(kind))
-	record := m.registry.Create(kind, req.Task, nil, false, true)
+	record := m.registry.Create(kind, req.Prompt, nil, true, true)
+	record.CleanupOnTurnEnd = false
+	record.HeartbeatAt = time.Now()
 	m.trackTurnTask(record.ID)
 	runResult, err := m.subagents.RunSubagent(ctx, agent.SubagentRunRequest{
-		Agent:        agentName,
-		Task:         req.Task,
-		ContentParts: append([]model.ContentPart(nil), req.ContentParts...),
-		Yield:        req.Yield,
-		Timeout:      req.Timeout,
+		Agent:    agentName,
+		Prompt:   req.Prompt,
+		ChildCWD: "",
+		Parts:    model.CloneParts(req.Parts),
+		Yield:    req.Yield,
+		Timeout:  req.Timeout,
 	})
 	if err != nil {
 		return task.Snapshot{}, err
@@ -151,20 +161,23 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 		sessionID:    runResult.SessionID,
 		delegationID: runResult.DelegationID,
 		cancel:       cancel,
+		runner:       m.subagents,
 		store:        m.store,
 		agent:        runResult.Agent,
+		childCWD:     runResult.ChildCWD,
 		timeout:      runResult.Timeout,
 	}
 	record.Backend = controller
 	record.Session = task.SessionRef{AppName: m.parent.appName, UserID: m.parent.userID, SessionID: m.parent.sessionID}
 	record.Spec = map[string]any{
-		taskSpecPrompt:       req.Task,
+		taskSpecPrompt:       req.Prompt,
 		taskSpecChildSession: runResult.SessionID,
 		taskSpecDelegationID: runResult.DelegationID,
-		"agent":              runResult.Agent,
+		taskSpecAgent:        runResult.Agent,
+		taskSpecChildCWD:     runResult.ChildCWD,
 	}
 	if runResult.Timeout > 0 {
-		record.Spec["timeout_seconds"] = int(runResult.Timeout / time.Second)
+		record.Spec[taskSpecTimeout] = int(runResult.Timeout / time.Second)
 	}
 	if err := m.persistRecord(ctx, record); err != nil {
 		if cancel != nil {
@@ -232,12 +245,13 @@ func (m *runtimeTaskManager) cleanupTurn(ctx context.Context) {
 		if err != nil || record == nil || record.Backend == nil {
 			continue
 		}
-		var running, supportsCancel bool
+		var running, supportsCancel, cleanupOnTurnEnd bool
 		record.WithLock(func(one *task.Record) {
 			running = one.Running
 			supportsCancel = one.SupportsCancel
+			cleanupOnTurnEnd = one.CleanupOnTurnEnd
 		})
-		if !running || !supportsCancel {
+		if !running || !supportsCancel || !cleanupOnTurnEnd {
 			continue
 		}
 		_, _ = record.Backend.Cancel(ctx, record)

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
@@ -21,15 +22,14 @@ type Update interface {
 	UpdateKind() string
 }
 
-func (c ContentChunk) UpdateKind() string           { return c.SessionUpdate }
-func (t ToolCall) UpdateKind() string               { return t.SessionUpdate }
-func (t ToolCallUpdate) UpdateKind() string         { return t.SessionUpdate }
-func (p PlanUpdate) UpdateKind() string             { return p.SessionUpdate }
-func (s SubagentStartUpdate) UpdateKind() string    { return s.SessionUpdate }
-func (s SubagentStreamUpdate) UpdateKind() string   { return s.SessionUpdate }
-func (s SubagentToolCallUpdate) UpdateKind() string { return s.SessionUpdate }
-func (s SubagentPlanUpdate) UpdateKind() string     { return s.SessionUpdate }
-func (s SubagentDoneUpdate) UpdateKind() string     { return s.SessionUpdate }
+func (c ContentChunk) UpdateKind() string            { return c.SessionUpdate }
+func (t ToolCall) UpdateKind() string                { return t.SessionUpdate }
+func (t ToolCallUpdate) UpdateKind() string          { return t.SessionUpdate }
+func (p PlanUpdate) UpdateKind() string              { return p.SessionUpdate }
+func (u AvailableCommandsUpdate) UpdateKind() string { return u.SessionUpdate }
+func (u CurrentModeUpdate) UpdateKind() string       { return u.SessionUpdate }
+func (u ConfigOptionUpdate) UpdateKind() string      { return u.SessionUpdate }
+func (u SessionInfoUpdate) UpdateKind() string       { return u.SessionUpdate }
 
 type UpdateEnvelope struct {
 	SessionID string
@@ -41,6 +41,7 @@ type Config struct {
 	Args                []string
 	Env                 map[string]string
 	WorkDir             string
+	MCPServers          []MCPServer
 	Runtime             toolexec.Runtime
 	Workspace           string
 	ClientInfo          *Implementation
@@ -57,9 +58,14 @@ type Client struct {
 	done   chan error
 
 	terminalMu sync.Mutex
-	terminals  map[string]string
+	terminals  map[string]clientTerminal
 	stderrMu   sync.Mutex
 	stderrBuf  bytes.Buffer
+}
+
+type clientTerminal struct {
+	sessionID       string
+	outputByteLimit int
 }
 
 func Start(ctx context.Context, cfg Config) (*Client, error) {
@@ -103,7 +109,7 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 		cmd:       cmd,
 		cancel:    cancel,
 		done:      make(chan error, 1),
-		terminals: map[string]string{},
+		terminals: map[string]clientTerminal{},
 	}
 	go func() {
 		err := client.conn.Serve(serveCtx, client.handleRequest, client.handleNotification)
@@ -141,11 +147,11 @@ func (c *Client) Initialize(ctx context.Context) (InitializeResponse, error) {
 	return resp, nil
 }
 
-func (c *Client) NewSession(ctx context.Context, cwd string, sessionID string) (NewSessionResponse, error) {
+func (c *Client) NewSession(ctx context.Context, cwd string) (NewSessionResponse, error) {
 	var resp NewSessionResponse
 	err := c.conn.Call(ctx, MethodSessionNew, NewSessionRequest{
-		CWD:       cwd,
-		SessionID: strings.TrimSpace(sessionID),
+		CWD:        cwd,
+		MCPServers: c.mcpServers(),
 	}, &resp)
 	return resp, err
 }
@@ -153,8 +159,9 @@ func (c *Client) NewSession(ctx context.Context, cwd string, sessionID string) (
 func (c *Client) LoadSession(ctx context.Context, sessionID string, cwd string) (LoadSessionResponse, error) {
 	var resp LoadSessionResponse
 	err := c.conn.Call(ctx, MethodSessionLoad, LoadSessionRequest{
-		SessionID: sessionID,
-		CWD:       cwd,
+		SessionID:  sessionID,
+		CWD:        cwd,
+		MCPServers: c.mcpServers(),
 	}, &resp)
 	return resp, err
 }
@@ -222,11 +229,21 @@ func (c *Client) handleNotification(ctx context.Context, msg Message) {
 	if err != nil {
 		return
 	}
+	if update == nil {
+		return
+	}
 	c.cfg.OnUpdate(UpdateEnvelope{
 		SessionID: strings.TrimSpace(note.SessionID),
 		Update:    update,
 	})
 	_ = ctx
+}
+
+func (c *Client) mcpServers() []MCPServer {
+	if c == nil || len(c.cfg.MCPServers) == 0 {
+		return []MCPServer{}
+	}
+	return append([]MCPServer(nil), c.cfg.MCPServers...)
 }
 
 type stderrBufferWriter struct {
@@ -308,7 +325,7 @@ func (c *Client) handleReadTextFile(msg Message) (any, *RPCError) {
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
-	return ReadTextFileResponse{Content: string(data)}, nil
+	return ReadTextFileResponse{Content: sliceTextByLines(string(data), req.Line, req.Limit)}, nil
 }
 
 func (c *Client) handleWriteTextFile(msg Message) (any, *RPCError) {
@@ -345,7 +362,14 @@ func (c *Client) handleTerminalCreate(ctx context.Context, msg Message) (any, *R
 	}
 	terminalID := "term-" + sessionID
 	c.terminalMu.Lock()
-	c.terminals[terminalID] = sessionID
+	limit := 0
+	if req.OutputByteLimit != nil && *req.OutputByteLimit > 0 {
+		limit = *req.OutputByteLimit
+	}
+	c.terminals[terminalID] = clientTerminal{
+		sessionID:       sessionID,
+		outputByteLimit: limit,
+	}
 	c.terminalMu.Unlock()
 	return CreateTerminalResponse{TerminalID: terminalID}, nil
 }
@@ -359,22 +383,26 @@ func (c *Client) handleTerminalOutput(msg Message) (any, *RPCError) {
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
-	sessionID, ok := c.lookupTerminal(req.TerminalID)
+	terminal, ok := c.lookupTerminal(req.TerminalID)
 	if !ok {
 		return nil, &RPCError{Code: -32000, Message: "unknown terminal"}
 	}
-	stdout, stderr, _, _, err := runner.ReadOutput(sessionID, 0, 0)
+	stdout, stderr, _, _, err := runner.ReadOutput(terminal.sessionID, 0, 0)
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
-	status, _ := runner.GetSessionStatus(sessionID)
+	status, _ := runner.GetSessionStatus(terminal.sessionID)
 	output := string(stdout)
 	if len(stderr) > 0 {
 		output += string(stderr)
 	}
+	truncated := false
+	if terminal.outputByteLimit > 0 {
+		output, truncated = truncateFromStartAtRuneBoundary(output, terminal.outputByteLimit)
+	}
 	return TerminalOutputResponse{
 		Output:     output,
-		Truncated:  false,
+		Truncated:  truncated,
 		ExitStatus: exitStatusForSession(status),
 	}, nil
 }
@@ -388,11 +416,11 @@ func (c *Client) handleTerminalWait(ctx context.Context, msg Message) (any, *RPC
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
-	sessionID, ok := c.lookupTerminal(req.TerminalID)
+	terminal, ok := c.lookupTerminal(req.TerminalID)
 	if !ok {
 		return nil, &RPCError{Code: -32000, Message: "unknown terminal"}
 	}
-	result, err := runner.WaitSession(ctx, sessionID, 0)
+	result, err := runner.WaitSession(ctx, terminal.sessionID, 0)
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
@@ -409,11 +437,11 @@ func (c *Client) handleTerminalKill(msg Message) (any, *RPCError) {
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
-	sessionID, ok := c.lookupTerminal(req.TerminalID)
+	terminal, ok := c.lookupTerminal(req.TerminalID)
 	if !ok {
 		return map[string]any{}, nil
 	}
-	if err := runner.TerminateSession(sessionID); err != nil {
+	if err := runner.TerminateSession(terminal.sessionID); err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
 	return map[string]any{}, nil
@@ -430,11 +458,11 @@ func (c *Client) handleTerminalRelease(msg Message) (any, *RPCError) {
 	return map[string]any{}, nil
 }
 
-func (c *Client) lookupTerminal(id string) (string, bool) {
+func (c *Client) lookupTerminal(id string) (clientTerminal, bool) {
 	c.terminalMu.Lock()
 	defer c.terminalMu.Unlock()
-	sessionID, ok := c.terminals[strings.TrimSpace(id)]
-	return sessionID, ok
+	terminal, ok := c.terminals[strings.TrimSpace(id)]
+	return terminal, ok
 }
 
 func decodeParams(raw json.RawMessage, out any) error {
@@ -476,39 +504,65 @@ func decodeUpdate(raw json.RawMessage) (Update, error) {
 			return nil, err
 		}
 		return plan, nil
-	case UpdateSubagentStart:
-		var update SubagentStartUpdate
+	case UpdateAvailableCmds:
+		var update AvailableCommandsUpdate
 		if err := json.Unmarshal(raw, &update); err != nil {
 			return nil, err
 		}
 		return update, nil
-	case UpdateSubagentStream:
-		var update SubagentStreamUpdate
+	case UpdateCurrentMode:
+		var update CurrentModeUpdate
 		if err := json.Unmarshal(raw, &update); err != nil {
 			return nil, err
 		}
 		return update, nil
-	case UpdateSubagentToolCall:
-		var update SubagentToolCallUpdate
+	case UpdateConfigOption:
+		var update ConfigOptionUpdate
 		if err := json.Unmarshal(raw, &update); err != nil {
 			return nil, err
 		}
 		return update, nil
-	case UpdateSubagentPlan:
-		var update SubagentPlanUpdate
-		if err := json.Unmarshal(raw, &update); err != nil {
-			return nil, err
-		}
-		return update, nil
-	case UpdateSubagentDone:
-		var update SubagentDoneUpdate
+	case UpdateSessionInfo:
+		var update SessionInfoUpdate
 		if err := json.Unmarshal(raw, &update); err != nil {
 			return nil, err
 		}
 		return update, nil
 	default:
-		return nil, fmt.Errorf("unknown session update %q", probe.SessionUpdate)
+		return nil, nil
 	}
+}
+
+func sliceTextByLines(content string, line *int, limit *int) string {
+	lines := strings.Split(content, "\n")
+	start := 0
+	if line != nil && *line > 1 {
+		start = *line - 1
+		if start > len(lines) {
+			start = len(lines)
+		}
+	}
+	end := len(lines)
+	if limit != nil && *limit >= 0 {
+		if max := start + *limit; max < end {
+			end = max
+		}
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func truncateFromStartAtRuneBoundary(text string, limit int) (string, bool) {
+	if limit <= 0 || len(text) <= limit {
+		return text, false
+	}
+	start := len(text) - limit
+	for start < len(text) && !utf8.RuneStart(text[start]) {
+		start++
+	}
+	if start >= len(text) {
+		return "", true
+	}
+	return text[start:], true
 }
 
 func envSliceToMap(items []EnvVariable) map[string]string {

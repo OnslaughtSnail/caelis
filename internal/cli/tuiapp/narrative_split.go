@@ -3,6 +3,7 @@ package tuiapp
 import (
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
 
@@ -10,12 +11,12 @@ import (
 type NarrativeBlockKind int
 
 const (
-	NarrativePlain      NarrativeBlockKind = iota
-	NarrativeHeading                       // "# …" through "###### …"
-	NarrativeCodeFence                     // lines inside ``` … ```
-	NarrativeCodeFenceDelim                // the ``` line itself
-	NarrativeListItem                      // "- …", "* …", "1. …"
-	NarrativeBlockquote                    // "> …"
+	NarrativePlain          NarrativeBlockKind = iota
+	NarrativeHeading                           // "# …" through "###### …"
+	NarrativeCodeFence                         // lines inside ``` … ```
+	NarrativeCodeFenceDelim                    // the ``` line itself
+	NarrativeListItem                          // "- …", "* …", "1. …"
+	NarrativeBlockquote                        // "> …"
 )
 
 // NarrativeLine is one output line from the block splitter, carrying both
@@ -169,12 +170,13 @@ func isOrderedListPrefix(trimmed string) bool {
 func countNarrativeLeadingSpaces(s string) int {
 	n := 0
 	for _, ch := range s {
-		if ch == ' ' {
+		switch ch {
+		case ' ':
 			n++
-		} else if ch == '\t' {
+		case '\t':
 			n += 4
-		} else {
-			break
+		default:
+			return n
 		}
 	}
 	return n
@@ -310,27 +312,54 @@ func buildNarrativeRows(raw string) ([]NarrativeLine, []string) {
 // styleNarrativeLine applies minimal theme styling to a plain-text narrative
 // line based on its structural kind. The roleStyle controls the role-level
 // colorization (assistant vs reasoning).
-func styleNarrativeLine(plain string, kind NarrativeBlockKind, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
-	switch kind {
-	case NarrativeHeading:
-		return styleHeadingLine(plain, roleStyle, theme)
-	case NarrativeCodeFence, NarrativeCodeFenceDelim:
-		return theme.TextStyle().Render(plain)
-	default:
-		return tuikit.ColorizeLogLine(plain, roleStyle, theme)
-	}
-}
-
-// styleHeadingLine renders a heading in bold TextPrimary, keeping the role
-// prefix (e.g. "* ") styled with the role color if present.
-func styleHeadingLine(plain string, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
-	prefix, body := splitRolePrefix(plain)
-	var styledPrefix string
+func styleNarrativeLine(raw, plain string, kind NarrativeBlockKind, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
+	prefix, _ := splitRolePrefix(plain)
+	styledPrefix := ""
 	if prefix != "" {
 		styledPrefix = tuikit.ColorizeLogLine(prefix, roleStyle, theme)
 	}
-	styledBody := theme.TextStyle().Bold(true).Render(body)
-	return styledPrefix + styledBody
+	bodyRaw := strings.TrimRight(raw, " \t")
+	switch kind {
+	case NarrativeHeading:
+		return styledPrefix + styleHeadingLine(bodyRaw, theme)
+	case NarrativeCodeFence, NarrativeCodeFenceDelim:
+		return styledPrefix + theme.TextStyle().Render(bodyRaw)
+	case NarrativeListItem:
+		return styledPrefix + styleListItemLine(bodyRaw, roleStyle, theme)
+	case NarrativeBlockquote:
+		return styledPrefix + styleBlockquoteLine(bodyRaw, roleStyle, theme)
+	default:
+		return styledPrefix + renderInlineMarkdown(bodyRaw, narrativeBodyStyle(roleStyle, theme), theme)
+	}
+}
+
+func narrativeBodyStyle(roleStyle tuikit.LineStyle, theme tuikit.Theme) lipgloss.Style {
+	if roleStyle == tuikit.LineStyleReasoning {
+		return theme.ReasoningStyle()
+	}
+	return theme.TextStyle()
+}
+
+func styleHeadingLine(raw string, theme tuikit.Theme) string {
+	body := stripHeadingMarker(raw)
+	return renderInlineMarkdown(body, theme.TextStyle().Bold(true), theme)
+}
+
+func styleListItemLine(raw string, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
+	indent, marker, body, ok := splitListMarker(raw)
+	if !ok {
+		return renderInlineMarkdown(raw, narrativeBodyStyle(roleStyle, theme), theme)
+	}
+	markerStyle := lipgloss.NewStyle().Foreground(theme.Accent).Bold(true)
+	return indent + markerStyle.Render(marker) + renderInlineMarkdown(body, narrativeBodyStyle(roleStyle, theme), theme)
+}
+
+func styleBlockquoteLine(raw string, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
+	indent, marker, body, ok := splitBlockquoteMarker(raw)
+	if !ok {
+		return renderInlineMarkdown(raw, narrativeBodyStyle(roleStyle, theme), theme)
+	}
+	return indent + theme.NoteStyle().Render(marker) + renderInlineMarkdown(body, narrativeBodyStyle(roleStyle, theme), theme)
 }
 
 // splitRolePrefix splits known role prefixes ("* ", "· ", "  ") from body text.
@@ -343,15 +372,50 @@ func splitRolePrefix(plain string) (prefix, body string) {
 	return "", plain
 }
 
-// simplifyInlineMarkers strips bold, italic, and strikethrough markers from
-// a line. This does not attempt full markdown inline parsing — it simply
-// removes the symmetrical delimiters **, __, ~~ and un-backticks inline code.
+// simplifyInlineMarkers strips balanced inline markdown markers from a line
+// while leaving unmatched delimiters visible in partial streaming output.
 func simplifyInlineMarkers(line string) string {
-	if line == "" {
-		return ""
+	return stripInlineMarkdown(line)
+}
+
+func splitListMarker(raw string) (indent, marker, body string, ok bool) {
+	indentWidth := len(raw) - len(strings.TrimLeft(raw, " \t"))
+	indent = raw[:indentWidth]
+	rest := raw[indentWidth:]
+	switch {
+	case strings.HasPrefix(rest, "- "):
+		return indent, "- ", rest[2:], true
+	case rest == "-":
+		return indent, "-", "", true
+	case strings.HasPrefix(rest, "* "):
+		return indent, "* ", rest[2:], true
+	case rest == "*":
+		return indent, "*", "", true
 	}
-	line = strings.ReplaceAll(line, "**", "")
-	line = strings.ReplaceAll(line, "__", "")
-	line = strings.ReplaceAll(line, "~~", "")
-	return line
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(rest) && rest[i] == '.' {
+		if i+1 < len(rest) && rest[i+1] == ' ' {
+			return indent, rest[:i+2], rest[i+2:], true
+		}
+		if i+1 == len(rest) {
+			return indent, rest, "", true
+		}
+	}
+	return "", "", "", false
+}
+
+func splitBlockquoteMarker(raw string) (indent, marker, body string, ok bool) {
+	indentWidth := len(raw) - len(strings.TrimLeft(raw, " \t"))
+	indent = raw[:indentWidth]
+	rest := raw[indentWidth:]
+	if strings.HasPrefix(rest, "> ") {
+		return indent, "> ", rest[2:], true
+	}
+	if rest == ">" {
+		return indent, ">", "", true
+	}
+	return "", "", "", false
 }

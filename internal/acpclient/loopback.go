@@ -16,7 +16,7 @@ func StartLoopback(ctx context.Context, cfg Config, reader io.Reader, writer io.
 		conn:      NewConn(reader, writer),
 		cancel:    cancel,
 		done:      make(chan error, 1),
-		terminals: map[string]string{},
+		terminals: map[string]clientTerminal{},
 	}
 	go func() {
 		err := client.conn.Serve(serveCtx, client.handleRequest, client.handleNotification)

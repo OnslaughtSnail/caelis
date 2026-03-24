@@ -10,11 +10,11 @@ import (
 func TestAgentVisible_UsesLatestContextWindowWithoutLifecycle(t *testing.T) {
 	now := time.Now()
 	events := []*Event{
-		{ID: "old-user", Time: now, Message: model.Message{Role: model.RoleUser, Text: "old"}},
+		{ID: "old-user", Time: now, Message: model.NewTextMessage(model.RoleUser, "old")},
 		{ID: "life-1", Time: now, Message: model.Message{Role: model.RoleSystem}, Meta: map[string]any{"kind": "lifecycle"}},
-		{ID: "compact", Time: now, Message: model.Message{Role: model.RoleUser, Text: "summary"}, Meta: map[string]any{"kind": "compaction"}},
+		{ID: "compact", Time: now, Message: model.NewTextMessage(model.RoleUser, "summary"), Meta: map[string]any{"kind": "compaction"}},
 		{ID: "life-2", Time: now, Message: model.Message{Role: model.RoleSystem}, Meta: map[string]any{"kind": "lifecycle"}},
-		{ID: "new-user", Time: now, Message: model.Message{Role: model.RoleUser, Text: "new"}},
+		{ID: "new-user", Time: now, Message: model.NewTextMessage(model.RoleUser, "new")},
 	}
 
 	got := AgentVisible(events)
@@ -33,25 +33,22 @@ func TestMessages_SkipsUIOnlyAndRuntimeSystemNotices(t *testing.T) {
 		Time: now,
 	}, NoticeLevelWarn, "retrying in 1s")
 	events := NewEvents([]*Event{
-		{ID: "user", Time: now, Message: model.Message{Role: model.RoleUser, Text: "hi"}},
+		{ID: "user", Time: now, Message: model.NewTextMessage(model.RoleUser, "hi")},
 		uiOnly,
-		{ID: "warn-old", Time: now, Message: model.Message{Role: model.RoleSystem, Text: "warn: old persisted warning"}},
-		{ID: "note-old", Time: now, Message: model.Message{Role: model.RoleSystem, Text: "note: old persisted note"}},
-		{ID: "assistant", Time: now, Message: model.Message{Role: model.RoleAssistant, Text: "done"}},
+		{ID: "warn-old", Time: now, Message: model.NewTextMessage(model.RoleSystem, "warn: old persisted warning")},
+		{ID: "note-old", Time: now, Message: model.NewTextMessage(model.RoleSystem, "note: old persisted note")},
+		{ID: "assistant", Time: now, Message: model.NewTextMessage(model.RoleAssistant, "done")},
 	})
 
 	got := Messages(events, "sys", nil)
-	if len(got) != 3 {
-		t.Fatalf("expected system prompt + user + assistant only, got %+v", got)
+	if len(got) != 2 {
+		t.Fatalf("expected user + assistant only, got %+v", got)
 	}
-	if got[0].Role != model.RoleSystem || got[0].Text != "sys" {
-		t.Fatalf("unexpected system prompt: %+v", got[0])
+	if got[0].Role != model.RoleUser || got[0].TextContent() != "hi" {
+		t.Fatalf("unexpected user message: %+v", got[0])
 	}
-	if got[1].Role != model.RoleUser || got[1].Text != "hi" {
-		t.Fatalf("unexpected user message: %+v", got[1])
-	}
-	if got[2].Role != model.RoleAssistant || got[2].Text != "done" {
-		t.Fatalf("unexpected assistant message: %+v", got[2])
+	if got[1].Role != model.RoleAssistant || got[1].TextContent() != "done" {
+		t.Fatalf("unexpected assistant message: %+v", got[1])
 	}
 }
 
@@ -61,31 +58,22 @@ func TestPendingToolCalls_ReturnsOnlyUnmatchedCallsInOrder(t *testing.T) {
 		{
 			ID:   "assistant-1",
 			Time: now,
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call-b", Name: "BASH", Args: "{\"cmd\":\"pwd\"}"},
-					{ID: "call-a", Name: "READ", Args: "{\"path\":\"a.txt\"}"},
-				},
-			},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call-b", Name: "BASH", Args: "{\"cmd\":\"pwd\"}"},
+				{ID: "call-a", Name: "READ", Args: "{\"path\":\"a.txt\"}"},
+			}, ""),
 		},
 		{
 			ID:   "tool-a",
 			Time: now,
-			Message: model.Message{
-				Role:         model.RoleTool,
-				ToolResponse: &model.ToolResponse{ID: "call-a", Name: "READ", Result: map[string]any{"ok": true}},
-			},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{ID: "call-a", Name: "READ", Result: map[string]any{"ok": true}}),
 		},
 		{
 			ID:   "assistant-2",
 			Time: now,
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call-c", Name: "WRITE", Args: "{\"path\":\"b.txt\"}"},
-				},
-			},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call-c", Name: "WRITE", Args: "{\"path\":\"b.txt\"}"},
+			}, ""),
 		},
 	}
 

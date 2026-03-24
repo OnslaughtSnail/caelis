@@ -8,6 +8,7 @@ const (
 	MethodInitialize           = "initialize"
 	MethodAuthenticate         = "authenticate"
 	MethodSessionNew           = "session/new"
+	MethodSessionList          = "session/list"
 	MethodSessionLoad          = "session/load"
 	MethodSessionPrompt        = "session/prompt"
 	MethodSessionCancel        = "session/cancel"
@@ -23,17 +24,16 @@ const (
 )
 
 const (
-	UpdateUserMessage      = "user_message_chunk"
-	UpdateAgentMessage     = "agent_message_chunk"
-	UpdateAgentThought     = "agent_thought_chunk"
-	UpdateToolCall         = "tool_call"
-	UpdateToolCallState    = "tool_call_update"
-	UpdatePlan             = "plan"
-	UpdateSubagentStart    = "subagent_start"
-	UpdateSubagentStream   = "subagent_stream"
-	UpdateSubagentToolCall = "subagent_tool_call"
-	UpdateSubagentPlan     = "subagent_plan"
-	UpdateSubagentDone     = "subagent_done"
+	UpdateUserMessage   = "user_message_chunk"
+	UpdateAgentMessage  = "agent_message_chunk"
+	UpdateAgentThought  = "agent_thought_chunk"
+	UpdateToolCall      = "tool_call"
+	UpdateToolCallState = "tool_call_update"
+	UpdateAvailableCmds = "available_commands_update"
+	UpdatePlan          = "plan"
+	UpdateCurrentMode   = "current_mode_update"
+	UpdateConfigOption  = "config_option_update"
+	UpdateSessionInfo   = "session_info_update"
 )
 
 type Message struct {
@@ -73,6 +73,30 @@ type AuthMethod struct {
 	Description string `json:"description,omitempty"`
 }
 
+type PromptCapabilities struct {
+	Audio           bool `json:"audio"`
+	EmbeddedContext bool `json:"embeddedContext"`
+	Image           bool `json:"image"`
+}
+
+type SessionListCapability struct{}
+
+type SessionCapabilities struct {
+	List *SessionListCapability `json:"list,omitempty"`
+}
+
+type MCPCapabilities struct {
+	HTTP bool `json:"http"`
+	SSE  bool `json:"sse"`
+}
+
+type AgentCapabilities struct {
+	LoadSession     bool                `json:"loadSession"`
+	MCPCapabilities MCPCapabilities     `json:"mcpCapabilities"`
+	Prompt          PromptCapabilities  `json:"promptCapabilities"`
+	Session         SessionCapabilities `json:"sessionCapabilities"`
+}
+
 type ProtocolVersion uint16
 
 type InitializeRequest struct {
@@ -82,8 +106,10 @@ type InitializeRequest struct {
 }
 
 type InitializeResponse struct {
-	ProtocolVersion ProtocolVersion `json:"protocolVersion"`
-	AuthMethods     []AuthMethod    `json:"authMethods,omitempty"`
+	ProtocolVersion   ProtocolVersion   `json:"protocolVersion"`
+	AgentCapabilities AgentCapabilities `json:"agentCapabilities"`
+	AgentInfo         *Implementation   `json:"agentInfo,omitempty"`
+	AuthMethods       []AuthMethod      `json:"authMethods,omitempty"`
 }
 
 type AuthenticateRequest struct {
@@ -92,9 +118,11 @@ type AuthenticateRequest struct {
 
 type AuthenticateResponse struct{}
 
+type MCPServer map[string]any
+
 type NewSessionRequest struct {
-	CWD       string `json:"cwd"`
-	SessionID string `json:"sessionId,omitempty"`
+	CWD        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
 }
 
 type NewSessionResponse struct {
@@ -102,11 +130,29 @@ type NewSessionResponse struct {
 }
 
 type LoadSessionRequest struct {
-	SessionID string `json:"sessionId"`
-	CWD       string `json:"cwd"`
+	SessionID  string      `json:"sessionId"`
+	CWD        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
 }
 
 type LoadSessionResponse struct{}
+
+type SessionListRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+	CWD    string `json:"cwd,omitempty"`
+}
+
+type SessionSummary struct {
+	SessionID string `json:"sessionId"`
+	CWD       string `json:"cwd"`
+	Title     string `json:"title,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
+}
+
+type SessionListResponse struct {
+	Sessions   []SessionSummary `json:"sessions"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+}
 
 type TextContent struct {
 	Type string `json:"type"`
@@ -144,23 +190,38 @@ type TextChunk struct {
 }
 
 type ToolCall struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	ToolCallID    string `json:"toolCallId"`
-	Title         string `json:"title"`
-	Kind          string `json:"kind,omitempty"`
-	Status        string `json:"status,omitempty"`
-	RawInput      any    `json:"rawInput,omitempty"`
-	RawOutput     any    `json:"rawOutput,omitempty"`
+	SessionUpdate string             `json:"sessionUpdate"`
+	ToolCallID    string             `json:"toolCallId"`
+	Title         string             `json:"title"`
+	Kind          string             `json:"kind,omitempty"`
+	Status        string             `json:"status,omitempty"`
+	RawInput      any                `json:"rawInput,omitempty"`
+	RawOutput     any                `json:"rawOutput,omitempty"`
+	Content       []ToolCallContent  `json:"content,omitempty"`
+	Locations     []ToolCallLocation `json:"locations,omitempty"`
 }
 
 type ToolCallUpdate struct {
-	SessionUpdate string  `json:"sessionUpdate"`
-	ToolCallID    string  `json:"toolCallId"`
-	Title         *string `json:"title,omitempty"`
-	Kind          *string `json:"kind,omitempty"`
-	Status        *string `json:"status,omitempty"`
-	RawInput      any     `json:"rawInput,omitempty"`
-	RawOutput     any     `json:"rawOutput,omitempty"`
+	SessionUpdate string             `json:"sessionUpdate"`
+	ToolCallID    string             `json:"toolCallId"`
+	Title         *string            `json:"title,omitempty"`
+	Kind          *string            `json:"kind,omitempty"`
+	Status        *string            `json:"status,omitempty"`
+	RawInput      any                `json:"rawInput,omitempty"`
+	RawOutput     any                `json:"rawOutput,omitempty"`
+	Content       []ToolCallContent  `json:"content,omitempty"`
+	Locations     []ToolCallLocation `json:"locations,omitempty"`
+}
+
+type ToolCallLocation struct {
+	Path string `json:"path"`
+	Line *int   `json:"line,omitempty"`
+}
+
+type ToolCallContent struct {
+	Type       string `json:"type"`
+	Content    any    `json:"content,omitempty"`
+	TerminalID string `json:"terminalId,omitempty"`
 }
 
 type PlanEntry struct {
@@ -173,41 +234,25 @@ type PlanUpdate struct {
 	Entries       []PlanEntry `json:"entries"`
 }
 
-type SubagentStartUpdate struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	Agent         string `json:"agent"`
-	CallID        string `json:"callId,omitempty"`
+type AvailableCommandsUpdate struct {
+	SessionUpdate     string           `json:"sessionUpdate"`
+	AvailableCommands []map[string]any `json:"availableCommands"`
 }
 
-type SubagentStreamUpdate struct {
+type CurrentModeUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	Stream        string `json:"stream"`
-	Chunk         string `json:"chunk"`
+	CurrentModeID string `json:"currentModeId"`
 }
 
-type SubagentToolCallUpdate struct {
+type ConfigOptionUpdate struct {
 	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	ToolName      string `json:"toolName"`
-	CallID        string `json:"callId,omitempty"`
-	Args          string `json:"args,omitempty"`
-	Stream        string `json:"stream,omitempty"`
-	Chunk         string `json:"chunk,omitempty"`
-	Final         bool   `json:"final,omitempty"`
+	ConfigOptions any    `json:"configOptions"`
 }
 
-type SubagentPlanUpdate struct {
-	SessionUpdate string      `json:"sessionUpdate"`
-	SpawnID       string      `json:"spawnId"`
-	Entries       []PlanEntry `json:"entries"`
-}
-
-type SubagentDoneUpdate struct {
-	SessionUpdate string `json:"sessionUpdate"`
-	SpawnID       string `json:"spawnId"`
-	State         string `json:"state"`
+type SessionInfoUpdate struct {
+	SessionUpdate string  `json:"sessionUpdate"`
+	Title         *string `json:"title,omitempty"`
+	UpdatedAt     *string `json:"updatedAt,omitempty"`
 }
 
 type RequestPermissionRequest struct {
@@ -230,11 +275,12 @@ type EnvVariable struct {
 }
 
 type CreateTerminalRequest struct {
-	SessionID string        `json:"sessionId"`
-	Command   string        `json:"command"`
-	Args      []string      `json:"args,omitempty"`
-	CWD       string        `json:"cwd,omitempty"`
-	Env       []EnvVariable `json:"env,omitempty"`
+	SessionID       string        `json:"sessionId"`
+	Command         string        `json:"command"`
+	Args            []string      `json:"args,omitempty"`
+	CWD             string        `json:"cwd,omitempty"`
+	Env             []EnvVariable `json:"env,omitempty"`
+	OutputByteLimit *int          `json:"outputByteLimit,omitempty"`
 }
 
 type CreateTerminalResponse struct {
@@ -280,6 +326,8 @@ type ReleaseTerminalRequest struct {
 type ReadTextFileRequest struct {
 	SessionID string `json:"sessionId"`
 	Path      string `json:"path"`
+	Line      *int   `json:"line,omitempty"`
+	Limit     *int   `json:"limit,omitempty"`
 }
 
 type ReadTextFileResponse struct {

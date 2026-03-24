@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -14,6 +15,45 @@ import (
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 )
+
+type stubSubagentRunner struct {
+	runResult     agent.SubagentRunResult
+	inspectResult agent.SubagentRunResult
+	inspectErr    error
+}
+
+type stubTaskController struct {
+	cancelCalls int
+}
+
+func (s stubSubagentRunner) RunSubagent(context.Context, agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
+	return s.runResult, nil
+}
+
+func (s stubSubagentRunner) InspectSubagent(context.Context, string) (agent.SubagentRunResult, error) {
+	return s.inspectResult, s.inspectErr
+}
+
+func (s *stubTaskController) Wait(context.Context, *task.Record, time.Duration) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskController) Status(context.Context, *task.Record) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskController) Write(context.Context, *task.Record, string, time.Duration) (task.Snapshot, error) {
+	return task.Snapshot{}, nil
+}
+
+func (s *stubTaskController) Cancel(_ context.Context, record *task.Record) (task.Snapshot, error) {
+	s.cancelCalls++
+	record.WithLock(func(one *task.Record) {
+		one.Running = false
+		one.State = task.StateCancelled
+	})
+	return task.Snapshot{State: task.StateCancelled}, nil
+}
 
 func TestTaskManager_StatusReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) {
 	store := taskinmemory.New()
@@ -78,6 +118,43 @@ func TestTaskManager_WaitReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) 
 	}
 	if snapshot.State != task.StateCancelled || snapshot.Running {
 		t.Fatalf("expected persisted cancelled snapshot from wait, got state=%q running=%v", snapshot.State, snapshot.Running)
+	}
+}
+
+func TestTaskManager_CleanupTurnSkipsDetachedSpawnTasks(t *testing.T) {
+	registry := task.NewRegistry(task.RegistryConfig{})
+	controller := &stubTaskController{}
+	record := registry.Create(task.KindSpawn, "spawned child", controller, true, true)
+	record.CleanupOnTurnEnd = false
+	record.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"}
+
+	manager := newTaskManager(nil, nil, registry, nil, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	manager.trackTurnTask(record.ID)
+	manager.cleanupTurn(context.Background())
+
+	if controller.cancelCalls != 0 {
+		t.Fatalf("expected detached spawn task to survive turn cleanup, got %d cancel calls", controller.cancelCalls)
+	}
+	if !record.Running {
+		t.Fatalf("expected detached spawn task to remain running after cleanup, got state=%q", record.State)
+	}
+}
+
+func TestTaskManager_CleanupTurnCancelsAttachedTasks(t *testing.T) {
+	registry := task.NewRegistry(task.RegistryConfig{})
+	controller := &stubTaskController{}
+	record := registry.Create(task.KindBash, "sleep 30", controller, true, true)
+	record.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"}
+
+	manager := newTaskManager(nil, nil, registry, nil, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	manager.trackTurnTask(record.ID)
+	manager.cleanupTurn(context.Background())
+
+	if controller.cancelCalls != 1 {
+		t.Fatalf("expected attached task to be cancelled once during cleanup, got %d", controller.cancelCalls)
+	}
+	if record.Running {
+		t.Fatalf("expected attached task to stop running after cleanup, got state=%q", record.State)
 	}
 }
 
@@ -318,7 +395,7 @@ func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 		t.Fatal(err)
 	}
 	if err := sessStore.AppendEvent(context.Background(), childSess, &session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "still working"},
+		Message: model.NewTextMessage(model.RoleAssistant, "still working"),
 		Time:    time.Now(),
 	}); err != nil {
 		t.Fatal(err)
@@ -338,6 +415,17 @@ func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 		userID:       "u",
 		sessionID:    "child-1",
 		delegationID: "d-1",
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID:    "child-1",
+				DelegationID: "d-1",
+				Agent:        "self",
+				State:        string(task.StateRunning),
+				Running:      true,
+				Assistant:    "still working",
+				LogSnapshot:  "still working\n",
+			},
+		},
 	}
 
 	start := time.Now()
@@ -458,7 +546,15 @@ func TestTaskManager_StatusRebuildsPersistedSpawnController(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manager := newTaskManager(rt, nil, nil, taskStore, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	manager := newTaskManager(rt, nil, nil, taskStore, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, stubSubagentRunner{
+		inspectResult: agent.SubagentRunResult{
+			SessionID:    "child",
+			DelegationID: "dlg-1",
+			Agent:        "self",
+			State:        string(task.StateRunning),
+			Running:      true,
+		},
+	})
 	snapshot, err := manager.Status(context.Background(), task.ControlRequest{TaskID: "t-spawn-persisted"})
 	if err != nil {
 		t.Fatal(err)
@@ -473,6 +569,111 @@ func TestTaskManager_StatusRebuildsPersistedSpawnController(t *testing.T) {
 		t.Fatalf("expected child session metadata, got %#v", snapshot.Result)
 	}
 }
+
+func TestSubagentTaskController_StatusInterruptsStaleTrackerLoss(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-stale-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-2 * time.Minute),
+		HeartbeatAt: time.Now().Add(-2 * time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "gemini",
+		childCWD:     "/tmp",
+		runner: stubSubagentRunner{
+			inspectErr: context.DeadlineExceeded, // overwritten below
+		},
+	}
+	controller.runner = stubSubagentRunner{
+		inspectErr: assertErrString("acpext: delegated child session \"child-1\" is not tracked in this process"),
+	}
+
+	snapshot, err := controller.Status(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Running || snapshot.State != task.StateInterrupted {
+		t.Fatalf("expected stale tracker loss to interrupt task, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+	if got := snapshot.Result["interrupted"]; got != true {
+		t.Fatalf("expected interrupted marker in result, got %#v", snapshot.Result)
+	}
+}
+
+func TestSubagentTaskController_StatusKeepsRecentTrackerLossRunning(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-recent-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now(),
+		HeartbeatAt: time.Now(),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "gemini",
+		childCWD:     "/tmp",
+		runner: stubSubagentRunner{
+			inspectErr: assertErrString("runtime: delegated child session \"child-1\" not found"),
+		},
+	}
+
+	snapshot, err := controller.Status(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Running || snapshot.State != task.StateRunning {
+		t.Fatalf("expected recent tracker loss to stay running during grace window, got state=%q running=%v", snapshot.State, snapshot.Running)
+	}
+}
+
+func TestSubagentTaskController_StatusKeepsStaleSilentRunRunning(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-silent-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-2 * time.Minute),
+		HeartbeatAt: time.Now().Add(-2 * time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "gemini",
+		childCWD:     "/tmp",
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID: "child-1",
+				State:     string(task.StateRunning),
+				Running:   true,
+				UpdatedAt: time.Now().Add(-2 * time.Minute),
+			},
+		},
+	}
+
+	snapshot, err := controller.Status(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Running || snapshot.State != task.StateRunning {
+		t.Fatalf("expected quiet running subagent to remain running, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+}
+
+type assertErrString string
+
+func (e assertErrString) Error() string { return string(e) }
 
 type taskTestRuntime struct {
 	host toolexec.AsyncCommandRunner

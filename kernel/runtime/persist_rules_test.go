@@ -20,7 +20,7 @@ func TestShouldPersistEvent_NormalEventPersists(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-1",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 	}
 	if !shouldPersistEvent(ev) {
 		t.Fatal("normal assistant event must be persisted")
@@ -31,7 +31,7 @@ func TestShouldPersistEvent_SkipsOverlayEvent(t *testing.T) {
 	ev := session.MarkOverlay(&session.Event{
 		ID:      "ev-overlay",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "ephemeral"},
+		Message: model.NewTextMessage(model.RoleAssistant, "ephemeral"),
 	})
 	if shouldPersistEvent(ev) {
 		t.Fatal("overlay event must not be persisted")
@@ -50,7 +50,7 @@ func TestShouldPersistEvent_PartialNeverPersists(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-partial",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "partial"},
+		Message: model.NewTextMessage(model.RoleAssistant, "partial"),
 	}
 	session.SetEventType(ev, session.EventTypePartialAnswer)
 	if shouldPersistEvent(ev) {
@@ -62,7 +62,7 @@ func TestShouldPersistEvent_PartialReasoningWithFlagFalse(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-partial-reasoning",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "thinking"},
+		Message: model.NewTextMessage(model.RoleAssistant, "thinking"),
 	}
 	session.SetEventType(ev, session.EventTypePartialReasoning)
 	if shouldPersistEvent(ev) {
@@ -74,7 +74,7 @@ func TestShouldPersistEvent_OverlayPartialNeverPersists(t *testing.T) {
 	ev := session.MarkOverlay(&session.Event{
 		ID:      "ev-overlay-partial",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "overlay partial"},
+		Message: model.NewTextMessage(model.RoleAssistant, "overlay partial"),
 	})
 	session.SetEventType(ev, session.EventTypeOverlayPartialAnswer)
 	if shouldPersistEvent(ev) {
@@ -86,7 +86,7 @@ func TestShouldPersistEvent_UserEventPersists(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-user",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleUser, Text: "question"},
+		Message: model.NewTextMessage(model.RoleUser, "question"),
 	}
 	if !shouldPersistEvent(ev) {
 		t.Fatal("user event must be persisted")
@@ -97,14 +97,11 @@ func TestShouldPersistEvent_ToolResponsePersists(t *testing.T) {
 	ev := &session.Event{
 		ID:   "ev-tool",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     "call-1",
-				Name:   "read",
-				Result: map[string]any{"content": "file data"},
-			},
-		},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "call-1",
+			Name:   "read",
+			Result: map[string]any{"content": "file data"},
+		}),
 	}
 	if !shouldPersistEvent(ev) {
 		t.Fatal("tool response event must be persisted")
@@ -123,7 +120,7 @@ func TestIsDurableReplayEvent_NormalEventIsDurable(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-1",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 	}
 	if !isDurableReplayEvent(ev) {
 		t.Fatal("normal assistant event must be durable replay")
@@ -134,7 +131,7 @@ func TestIsDurableReplayEvent_PartialFiltered(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-partial",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "partial"},
+		Message: model.NewTextMessage(model.RoleAssistant, "partial"),
 	}
 	session.SetEventType(ev, session.EventTypePartialAnswer)
 	if isDurableReplayEvent(ev) {
@@ -146,7 +143,7 @@ func TestIsDurableReplayEvent_UIOnlyNotDurable(t *testing.T) {
 	ev := session.MarkUIOnly(&session.Event{
 		ID:      "ev-ui",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleSystem, Text: "notice"},
+		Message: model.NewTextMessage(model.RoleSystem, "notice"),
 	})
 	if isDurableReplayEvent(ev) {
 		t.Fatal("ui-only event must not be durable replay")
@@ -157,7 +154,7 @@ func TestIsDurableReplayEvent_OverlayNotDurable(t *testing.T) {
 	ev := session.MarkOverlay(&session.Event{
 		ID:      "ev-overlay",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleAssistant, Text: "overlay"},
+		Message: model.NewTextMessage(model.RoleAssistant, "overlay"),
 	})
 	if isDurableReplayEvent(ev) {
 		t.Fatal("overlay event must not be durable replay")
@@ -176,7 +173,7 @@ func TestIsDurableReplayEvent_UserEventIsDurable(t *testing.T) {
 	ev := &session.Event{
 		ID:      "ev-user",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleUser, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleUser, "hello"),
 	}
 	if !isDurableReplayEvent(ev) {
 		t.Fatal("user event must be durable replay")
@@ -187,14 +184,11 @@ func TestIsDurableReplayEvent_ToolResponseIsDurable(t *testing.T) {
 	ev := &session.Event{
 		ID:   "ev-tool",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     "call-1",
-				Name:   "read",
-				Result: map[string]any{"content": "data"},
-			},
-		},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "call-1",
+			Name:   "read",
+			Result: map[string]any{"content": "data"},
+		}),
 	}
 	if !isDurableReplayEvent(ev) {
 		t.Fatal("tool response event must be durable replay")
@@ -234,14 +228,11 @@ func TestBuildRecoveryEvents_MultipleDanglingCalls(t *testing.T) {
 		{
 			ID:   "assistant_multi",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call_a", Name: "READ", Args: `{"path":"/a"}`},
-					{ID: "call_b", Name: "WRITE", Args: `{"path":"/b","content":"x"}`},
-					{ID: "call_c", Name: "BASH", Args: `{"command":"ls"}`},
-				},
-			},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call_a", Name: "READ", Args: `{"path":"/a"}`},
+				{ID: "call_b", Name: "WRITE", Args: `{"path":"/b","content":"x"}`},
+				{ID: "call_c", Name: "BASH", Args: `{"command":"ls"}`},
+			}, ""),
 		},
 	}
 	recovery := buildRecoveryEvents(input)
@@ -253,11 +244,11 @@ func TestBuildRecoveryEvents_MultipleDanglingCalls(t *testing.T) {
 		if ev.Message.Role != model.RoleTool {
 			t.Fatalf("expected role=tool, got %q", ev.Message.Role)
 		}
-		if ev.Message.ToolResponse == nil {
+		if ev.Message.ToolResponse() == nil {
 			t.Fatal("expected non-nil tool response")
 		}
-		seen[ev.Message.ToolResponse.ID] = true
-		result := ev.Message.ToolResponse.Result
+		seen[ev.Message.ToolResponse().ID] = true
+		result := ev.Message.ToolResponse().Result
 		if result == nil {
 			t.Fatal("expected non-nil result map")
 		}
@@ -280,33 +271,27 @@ func TestBuildRecoveryEvents_PartiallyResolvedCalls(t *testing.T) {
 		{
 			ID:   "assistant_1",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call_1", Name: "READ", Args: `{"path":"/a"}`},
-					{ID: "call_2", Name: "WRITE", Args: `{"path":"/b","content":"x"}`},
-				},
-			},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call_1", Name: "READ", Args: `{"path":"/a"}`},
+				{ID: "call_2", Name: "WRITE", Args: `{"path":"/b","content":"x"}`},
+			}, ""),
 		},
 		{
 			ID:   "tool_1",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:     "call_1",
-					Name:   "READ",
-					Result: map[string]any{"content": "data"},
-				},
-			},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:     "call_1",
+				Name:   "READ",
+				Result: map[string]any{"content": "data"},
+			}),
 		},
 	}
 	recovery := buildRecoveryEvents(input)
 	if len(recovery) != 1 {
 		t.Fatalf("expected 1 recovery event for 1 dangling call, got %d", len(recovery))
 	}
-	if recovery[0].Message.ToolResponse.ID != "call_2" {
-		t.Fatalf("expected recovery for call_2, got %q", recovery[0].Message.ToolResponse.ID)
+	if recovery[0].Message.ToolResponse().ID != "call_2" {
+		t.Fatalf("expected recovery for call_2, got %q", recovery[0].Message.ToolResponse().ID)
 	}
 }
 
@@ -324,12 +309,9 @@ func TestBuildRecoveryEvents_RecoveryEventCarriesToolMeta(t *testing.T) {
 		{
 			ID:   "assistant_1",
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "call_x", Name: "BASH", Args: `{"command":"sleep 30"}`},
-				},
-			},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "call_x", Name: "BASH", Args: `{"command":"sleep 30"}`},
+			}, ""),
 		},
 	}
 	recovery := buildRecoveryEvents(input)

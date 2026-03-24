@@ -124,8 +124,7 @@ func runACP(ctx context.Context, args []string) error {
 		{ID: "full_access", Name: "Full Access", Description: "Execute changes directly without interactive approval, while still blocking dangerous destructive commands."},
 	}
 	sessionConfig := buildACPSessionConfigOptions(sessionModes, factory, configStore, alias)
-	agentReg, err := configStore.AgentRegistry()
-	if err != nil {
+	if _, err := configStore.AgentRegistry(); err != nil {
 		return fmt.Errorf("invalid agent config: %w", err)
 	}
 
@@ -144,11 +143,11 @@ func runACP(ctx context.Context, args []string) error {
 	conn := internalacp.NewConn(os.Stdin, os.Stdout)
 	var newACPAdapter appbootstrap.ACPAdapterFactory
 	subagentRunnerFactory := acpext.NewACPSubagentRunnerFactory(acpext.Config{
-		Store:         store,
-		WorkspaceRoot: resolvedWorkspaceRoot,
-		WorkspaceCWD:  workspace.CWD,
-		ClientRuntime: baseRuntime,
-		AgentRegistry: agentReg,
+		Store:                store,
+		WorkspaceRoot:        resolvedWorkspaceRoot,
+		WorkspaceCWD:         workspace.CWD,
+		ClientRuntime:        baseRuntime,
+		ResolveAgentRegistry: configStore.AgentRegistry,
 		NewAdapter: func(conn *internalacp.Conn) (internalacp.Adapter, error) {
 			if newACPAdapter == nil {
 				return nil, fmt.Errorf("self acp adapter is not initialized")
@@ -159,8 +158,11 @@ func runACP(ctx context.Context, args []string) error {
 	serviceSet, err := appbootstrap.Build(appbootstrap.Config{
 		Runtime:               rt,
 		Store:                 store,
+		ACPRuntime:            sessionRT.ACPRuntime,
+		ACPStore:              sessionRT.ACPStore,
 		AppName:               *appName,
 		UserID:                *userID,
+		DefaultAgent:          configStore.DefaultAgent(),
 		WorkspaceCWD:          workspace.CWD,
 		EnablePlan:            true,
 		EnableSelfSpawn:       true,
@@ -178,6 +180,8 @@ func runACP(ctx context.Context, args []string) error {
 					EnableExperimentalLSPPrompt: *experimentalLSP,
 					BasePrompt:                  *systemPrompt,
 					SkillDirs:                   skillDirList,
+					DefaultAgent:                configStore.DefaultAgent(),
+					AgentDescriptors:            configStore.AgentDescriptors(),
 				})
 			},
 			SessionConfigState: func(sessionCfg internalacp.AgentSessionConfig, templates []internalacp.SessionConfigOptionTemplate) []internalacp.SessionConfigOption {
@@ -215,6 +219,8 @@ func runACP(ctx context.Context, args []string) error {
 					BasePrompt:                  *systemPrompt,
 					FrozenPrompt:                frozenPrompt,
 					SkillDirs:                   skillDirList,
+					DefaultAgent:                configStore.DefaultAgent(),
+					AgentDescriptors:            configStore.AgentDescriptors(),
 					StreamModel:                 stream,
 					ThinkingBudget:              sessionRuntime.ThinkingBudget,
 					ReasoningEffort:             resolvedReasoningEffort,

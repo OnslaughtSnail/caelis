@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -440,8 +441,15 @@ func buildACPSessionList(index *sessionIndex, workspace workspaceContext, req in
 		return internalacp.SessionListResponse{Sessions: []internalacp.SessionSummary{}}
 	}
 	filtered := make([]sessionIndexRecord, 0, len(records))
+	filterCWD := strings.TrimSpace(req.CWD)
+	if filterCWD != "" {
+		filterCWD = filepath.Clean(filterCWD)
+	}
 	for _, rec := range records {
 		if rec.EventCount <= 0 {
+			continue
+		}
+		if filterCWD != "" && filepath.Clean(rec.WorkspaceCWD) != filterCWD {
 			continue
 		}
 		filtered = append(filtered, rec)
@@ -457,9 +465,6 @@ func buildACPSessionList(index *sessionIndex, workspace workspaceContext, req in
 		}
 	}
 	limit := 20
-	if req.Limit != nil && *req.Limit > 0 {
-		limit = *req.Limit
-	}
 	end := start + limit
 	if end > len(filtered) {
 		end = len(filtered)

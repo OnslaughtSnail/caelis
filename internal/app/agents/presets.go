@@ -6,56 +6,150 @@ import (
 	"strings"
 )
 
-var registryPresets = map[string]Descriptor{
-	"claude-acp": {
-		ID:          "claude-acp",
-		Name:        "Claude Agent",
+var builtinCatalog = map[string]Descriptor{
+	"pi": {
+		ID:          "pi",
+		Name:        "pi",
+		Description: "Pi ACP agent.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "npx",
+		Args:        []string{"pi-acp"},
+		Builtin:     true,
+	},
+	"openclaw": {
+		ID:          "openclaw",
+		Name:        "openclaw",
+		Description: "OpenClaw ACP bridge.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "openclaw",
+		Args:        []string{"acp"},
+		Builtin:     true,
+	},
+	"codex": {
+		ID:          "codex",
+		Name:        "codex",
+		Description: "Codex CLI ACP adapter maintained by Zed.",
+		Stability:   StabilityStable,
+		Transport:   TransportACP,
+		Command:     "npx",
+		Args:        []string{"@zed-industries/codex-acp"},
+		Builtin:     true,
+	},
+	"claude": {
+		ID:          "claude",
+		Name:        "claude",
 		Description: "Claude Agent ACP adapter maintained by Zed.",
-		Type:        TypeRegistry,
+		Stability:   StabilityExperimental,
 		Transport:   TransportACP,
 		Command:     "npx",
 		Args:        []string{"-y", "@zed-industries/claude-agent-acp"},
-	},
-	"codex-acp": {
-		ID:          "codex-acp",
-		Name:        "Codex CLI",
-		Description: "Codex ACP adapter maintained by Zed.",
-		Type:        TypeRegistry,
-		Transport:   TransportACP,
-		Command:     "npx",
-		Args:        []string{"-y", "@zed-industries/codex-acp"},
+		Builtin:     true,
 	},
 	"gemini": {
 		ID:          "gemini",
-		Name:        "Gemini CLI",
-		Description: "Gemini CLI in ACP mode.",
-		Type:        TypeRegistry,
+		Name:        "gemini",
+		Description: "Gemini CLI ACP server.",
+		Stability:   StabilityExperimental,
 		Transport:   TransportACP,
 		Command:     "gemini",
-		Args:        []string{"--experimental-acp"},
+		Args:        []string{"--acp"},
+		Builtin:     true,
 	},
-	"github-copilot-cli": {
-		ID:          "github-copilot-cli",
-		Name:        "GitHub Copilot CLI",
-		Description: "GitHub Copilot CLI ACP server mode.",
-		Type:        TypeRegistry,
+	"cursor": {
+		ID:          "cursor",
+		Name:        "cursor",
+		Description: "Cursor CLI ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "cursor-agent",
+		Args:        []string{"acp"},
+		Builtin:     true,
+	},
+	"copilot": {
+		ID:          "copilot",
+		Name:        "copilot",
+		Description: "GitHub Copilot CLI ACP server.",
+		Stability:   StabilityStable,
 		Transport:   TransportACP,
 		Command:     "copilot",
+		Args:        []string{"--acp", "--stdio"},
+		Builtin:     true,
+	},
+	"droid": {
+		ID:          "droid",
+		Name:        "droid",
+		Description: "Factory Droid ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "droid",
+		Args:        []string{"exec", "--output-format", "acp"},
+		Builtin:     true,
+	},
+	"kimi": {
+		ID:          "kimi",
+		Name:        "kimi",
+		Description: "Kimi CLI ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "kimi",
+		Args:        []string{"acp"},
+		Builtin:     true,
+	},
+	"opencode": {
+		ID:          "opencode",
+		Name:        "opencode",
+		Description: "OpenCode ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "npx",
+		Args:        []string{"-y", "opencode-ai", "acp"},
+		Builtin:     true,
+	},
+	"kiro": {
+		ID:          "kiro",
+		Name:        "kiro",
+		Description: "Kiro CLI ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "kiro-cli",
+		Args:        []string{"acp"},
+		Builtin:     true,
+	},
+	"kilocode": {
+		ID:          "kilocode",
+		Name:        "kilocode",
+		Description: "Kilocode CLI ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "npx",
+		Args:        []string{"-y", "@kilocode/cli", "acp"},
+		Builtin:     true,
+	},
+	"qwen": {
+		ID:          "qwen",
+		Name:        "qwen",
+		Description: "Qwen Code ACP server.",
+		Stability:   StabilityExperimental,
+		Transport:   TransportACP,
+		Command:     "qwen",
 		Args:        []string{"--acp"},
+		Builtin:     true,
 	},
 }
 
-func KnownRegistryPresets() []Descriptor {
-	out := make([]Descriptor, 0, len(registryPresets))
-	for _, preset := range registryPresets {
+func KnownBuiltins() []Descriptor {
+	out := make([]Descriptor, 0, len(builtinCatalog))
+	for _, preset := range builtinCatalog {
 		out = append(out, cloneDescriptor(preset))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
-func LookupRegistryPreset(id string) (Descriptor, bool) {
-	preset, ok := registryPresets[strings.TrimSpace(strings.ToLower(id))]
+func LookupBuiltin(id string) (Descriptor, bool) {
+	preset, ok := builtinCatalog[strings.TrimSpace(strings.ToLower(id))]
 	if !ok {
 		return Descriptor{}, false
 	}
@@ -63,48 +157,12 @@ func LookupRegistryPreset(id string) (Descriptor, bool) {
 }
 
 func ResolveDescriptor(d Descriptor) (Descriptor, error) {
-	d.ID = strings.TrimSpace(d.ID)
-	d.Name = strings.TrimSpace(d.Name)
-	d.Description = strings.TrimSpace(d.Description)
-	d.Type = strings.TrimSpace(strings.ToLower(d.Type))
-	d.Endpoint = strings.TrimSpace(d.Endpoint)
-	d.Command = strings.TrimSpace(d.Command)
-	d.WorkDir = strings.TrimSpace(d.WorkDir)
-	d.Args = append([]string(nil), d.Args...)
-	d.Env = cloneStringMap(d.Env)
-	if d.Transport == "" {
-		d.Transport = TransportACP
-	}
-	if d.Type != TypeRegistry {
+	d = normalizeDescriptor(d)
+	if d.Transport == TransportSelf {
 		return d, nil
 	}
-	preset, ok := LookupRegistryPreset(d.ID)
-	if !ok {
-		return Descriptor{}, fmt.Errorf("agents: unknown registry preset %q", d.ID)
-	}
-	if d.Name == "" {
-		d.Name = preset.Name
-	}
-	if d.Description == "" {
-		d.Description = preset.Description
-	}
-	if d.Transport == "" {
-		d.Transport = preset.Transport
-	}
-	if d.Endpoint == "" {
-		d.Endpoint = preset.Endpoint
-	}
-	if d.Command == "" {
-		d.Command = preset.Command
-	}
-	if len(d.Args) == 0 {
-		d.Args = append([]string(nil), preset.Args...)
-	}
-	if len(d.Env) == 0 && len(preset.Env) > 0 {
-		d.Env = cloneStringMap(preset.Env)
-	}
-	if d.WorkDir == "" {
-		d.WorkDir = preset.WorkDir
+	if strings.TrimSpace(d.Command) == "" {
+		return Descriptor{}, fmt.Errorf("agents: acp agent %q requires a command", d.ID)
 	}
 	return d, nil
 }

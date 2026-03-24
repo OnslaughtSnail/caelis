@@ -78,14 +78,14 @@ func TestOllamaRegisterAndCreate(t *testing.T) {
 	var gotText string
 	var gotUsage model.Usage
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 	}) {
 		if err != nil {
 			t.Fatalf("generate error: %v", err)
 		}
-		if resp != nil && resp.TurnComplete {
-			gotText = resp.Message.Text
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			gotText = resp.Response.Message.TextContent()
 			gotUsage = resp.Usage
 		}
 	}
@@ -138,7 +138,7 @@ func TestOllamaBaseURLGetsV1Suffix(t *testing.T) {
 	}, "")
 
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 	}) {
 		if err != nil {
 			t.Fatalf("generate error: %v", err)
@@ -166,7 +166,7 @@ func TestOllamaBaseURLDoesNotDoubleV1(t *testing.T) {
 	}, "")
 
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 	}) {
 		if err != nil {
 			t.Fatalf("generate error: %v", err)
@@ -317,16 +317,16 @@ func TestOllamaStream(t *testing.T) {
 	var parts []string
 	var finalUsage model.Usage
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   true,
 	}) {
 		if err != nil {
 			t.Fatalf("stream error: %v", err)
 		}
-		if resp != nil && resp.Partial {
-			parts = append(parts, resp.Message.Text)
+		if resp != nil && resp.PartDelta != nil {
+			parts = append(parts, resp.PartDelta.TextDelta)
 		}
-		if resp != nil && resp.TurnComplete {
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
 			finalUsage = resp.Usage
 		}
 	}
@@ -366,7 +366,7 @@ func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
 	}, "")
 	var gotResp *model.Response
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
-		Messages: []model.Message{{Role: model.RoleUser, Text: "hi"}},
+		Messages: []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Stream:   false,
 		Reasoning: model.ReasoningConfig{
 			Effort: "medium",
@@ -375,8 +375,8 @@ func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
 		if err != nil {
 			t.Fatalf("generate error: %v", err)
 		}
-		if resp != nil && resp.TurnComplete {
-			gotResp = resp
+		if resp != nil && resp.Response != nil && resp.TurnComplete {
+			gotResp = resp.Response
 		}
 	}
 
@@ -386,8 +386,8 @@ func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
 	if gotResp == nil {
 		t.Fatal("expected final response")
 	}
-	if gotResp.Message.Reasoning != "step by step" {
-		t.Fatalf("unexpected reasoning: %q", gotResp.Message.Reasoning)
+	if gotResp.Message.ReasoningText() != "step by step" {
+		t.Fatalf("unexpected reasoning: %q", gotResp.Message.ReasoningText())
 	}
 	if gotResp.Usage.PromptTokens != 11 || gotResp.Usage.CompletionTokens != 6 || gotResp.Usage.TotalTokens != 17 {
 		t.Fatalf("unexpected usage: %+v", gotResp.Usage)

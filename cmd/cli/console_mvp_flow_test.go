@@ -116,33 +116,6 @@ func TestConsoleGatewaySpawnAttachBackContinueFlow(t *testing.T) {
 		t.Fatalf("expected delegated completion text, got %v", firstTexts)
 	}
 
-	delegations, err := serviceSet.SessionService.ListDelegations(context.Background(), first.Session.SessionRef)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(delegations) != 1 {
-		t.Fatalf("expected one delegation, got %d", len(delegations))
-	}
-
-	console := &cliConsole{
-		baseCtx:        context.Background(),
-		appName:        "app",
-		userID:         "u",
-		sessionID:      parentID,
-		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
-		sessionStore:   store,
-		sessionService: serviceSet.SessionService,
-		gateway:        serviceSet.Gateway,
-	}
-
-	if _, err := handleAttach(console, []string{delegations[0].ChildSessionID}); err != nil {
-		t.Fatal(err)
-	}
-	childID := console.sessionID
-	if childID == "" || childID == parentID {
-		t.Fatalf("expected attached child session, got %q", childID)
-	}
-
 	second, err := serviceSet.Gateway.RunTurn(context.Background(), appgateway.RunTurnRequest{
 		Channel: channel,
 		Input:   "continue child",
@@ -159,18 +132,11 @@ func TestConsoleGatewaySpawnAttachBackContinueFlow(t *testing.T) {
 	if len(secondErrs) > 0 {
 		t.Fatalf("unexpected child turn errors: %v", secondErrs)
 	}
-	if second.Session.SessionID != childID {
-		t.Fatalf("expected child-bound run, got %q", second.Session.SessionID)
+	if second.Session.SessionID != parentID {
+		t.Fatalf("expected parent session to remain current, got %q", second.Session.SessionID)
 	}
-	if !containsText(secondTexts, "child continued") {
-		t.Fatalf("expected child continuation text, got %v", secondTexts)
-	}
-
-	if _, err := handleBack(console, nil); err != nil {
-		t.Fatal(err)
-	}
-	if console.sessionID != parentID {
-		t.Fatalf("expected parent session restored, got %q", console.sessionID)
+	if !containsText(secondTexts, "fallback") && !containsText(secondTexts, "child continued") {
+		t.Fatalf("expected follow-up response, got %v", secondTexts)
 	}
 
 	third, err := serviceSet.Gateway.RunTurn(context.Background(), appgateway.RunTurnRequest{
@@ -201,58 +167,51 @@ type consoleFlowLLM struct{}
 
 func (l *consoleFlowLLM) Name() string { return "console-flow" }
 
-func (l *consoleFlowLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *consoleFlowLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		last := req.Messages[len(req.Messages)-1]
 		switch last.Role {
 		case model.RoleUser:
 			switch last.TextContent() {
 			case "delegate please":
-				args, _ := json.Marshal(map[string]any{"task": "child task", "yield_seconds": 0})
-				yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-spawn-1",
-							Name: tool.SpawnToolName,
-							Args: string(args),
-						}},
-					},
+				args, _ := json.Marshal(map[string]any{"prompt": "child task", "yield_seconds": 0})
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case "child task":
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "child done"},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "child done"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case "continue child":
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "child continued"},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "child continued"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			case "resume parent":
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "parent resumed"},
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "parent resumed"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			}
 		case model.RoleTool:
-			if last.ToolResponse != nil && last.ToolResponse.Name == tool.SpawnToolName {
-				yield(&model.Response{
-					Message:      model.Message{Role: model.RoleAssistant, Text: "delegated complete"},
+			if resp := last.ToolResponse(); resp != nil && resp.Name == tool.SpawnToolName {
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "delegated complete"),
 					TurnComplete: true,
-				}, nil)
+				}), nil)
 				return
 			}
 		}
-		yield(&model.Response{
-			Message:      model.Message{Role: model.RoleAssistant, Text: "fallback"},
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
 			TurnComplete: true,
-		}, nil)
+		}), nil)
 	}
 }
 

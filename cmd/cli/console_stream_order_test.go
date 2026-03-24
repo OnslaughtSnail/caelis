@@ -20,11 +20,7 @@ func TestEmitAssistantEventToTUI_FinalReasoningThenText(t *testing.T) {
 		showReasoning: true,
 	}
 	ev := &session.Event{
-		Message: model.Message{
-			Role:      model.RoleAssistant,
-			Reasoning: "think",
-			Text:      "answer",
-		},
+		Message: model.MessageFromAssistantParts("answer", "think", nil),
 	}
 
 	c.emitAssistantEventToTUI(ev)
@@ -32,18 +28,18 @@ func TestEmitAssistantEventToTUI_FinalReasoningThenText(t *testing.T) {
 	if len(sender.msgs) != 2 {
 		t.Fatalf("expected 2 stream messages, got %d", len(sender.msgs))
 	}
-	first, ok := sender.msgs[0].(tuievents.AssistantStreamMsg)
+	first, ok := sender.msgs[0].(tuievents.RawDeltaMsg)
 	if !ok {
-		t.Fatalf("expected first msg AssistantStreamMsg, got %T", sender.msgs[0])
+		t.Fatalf("expected first msg RawDeltaMsg, got %T", sender.msgs[0])
 	}
-	second, ok := sender.msgs[1].(tuievents.AssistantStreamMsg)
+	second, ok := sender.msgs[1].(tuievents.RawDeltaMsg)
 	if !ok {
-		t.Fatalf("expected second msg AssistantStreamMsg, got %T", sender.msgs[1])
+		t.Fatalf("expected second msg RawDeltaMsg, got %T", sender.msgs[1])
 	}
-	if first.Kind != "reasoning" || first.Text != "think" || !first.Final {
+	if first.Target != tuievents.RawDeltaTargetAssistant || first.Stream != "reasoning" || first.Text != "think" || !first.Final {
 		t.Fatalf("unexpected first msg: %+v", first)
 	}
-	if second.Kind != "answer" || second.Text != "answer" || !second.Final {
+	if second.Target != tuievents.RawDeltaTargetAssistant || second.Stream != "answer" || second.Text != "answer" || !second.Final {
 		t.Fatalf("unexpected second msg: %+v", second)
 	}
 }
@@ -55,10 +51,7 @@ func TestEmitAssistantEventToTUI_FinalReasoningOnly_NoAnswerFallback(t *testing.
 		showReasoning: true,
 	}
 	ev := &session.Event{
-		Message: model.Message{
-			Role:      model.RoleAssistant,
-			Reasoning: "think only",
-		},
+		Message: model.NewReasoningMessage(model.RoleAssistant, "think only", model.ReasoningVisibilityVisible),
 	}
 
 	c.emitAssistantEventToTUI(ev)
@@ -66,11 +59,11 @@ func TestEmitAssistantEventToTUI_FinalReasoningOnly_NoAnswerFallback(t *testing.
 	if len(sender.msgs) != 1 {
 		t.Fatalf("expected exactly one reasoning message, got %d", len(sender.msgs))
 	}
-	msg, ok := sender.msgs[0].(tuievents.AssistantStreamMsg)
+	msg, ok := sender.msgs[0].(tuievents.RawDeltaMsg)
 	if !ok {
-		t.Fatalf("expected AssistantStreamMsg, got %T", sender.msgs[0])
+		t.Fatalf("expected RawDeltaMsg, got %T", sender.msgs[0])
 	}
-	if msg.Kind != "reasoning" || msg.Text != "think only" || !msg.Final {
+	if msg.Target != tuievents.RawDeltaTargetAssistant || msg.Stream != "reasoning" || msg.Text != "think only" || !msg.Final {
 		t.Fatalf("unexpected msg: %+v", msg)
 	}
 }
@@ -82,11 +75,7 @@ func TestEmitAssistantEventToTUI_PartialMixedReasoningAndText(t *testing.T) {
 		showReasoning: true,
 	}
 	ev := &session.Event{
-		Message: model.Message{
-			Role:      model.RoleAssistant,
-			Reasoning: "r",
-			Text:      "a",
-		},
+		Message: model.MessageFromAssistantParts("a", "r", nil),
 		Meta: map[string]any{
 			"partial": true,
 			"channel": "answer",
@@ -98,12 +87,18 @@ func TestEmitAssistantEventToTUI_PartialMixedReasoningAndText(t *testing.T) {
 	if len(sender.msgs) != 2 {
 		t.Fatalf("expected 2 stream messages, got %d", len(sender.msgs))
 	}
-	first := sender.msgs[0].(tuievents.AssistantStreamMsg)
-	second := sender.msgs[1].(tuievents.AssistantStreamMsg)
-	if first.Kind != "reasoning" || first.Final {
+	first, ok := sender.msgs[0].(tuievents.RawDeltaMsg)
+	if !ok {
+		t.Fatalf("expected first msg RawDeltaMsg, got %T", sender.msgs[0])
+	}
+	second, ok := sender.msgs[1].(tuievents.RawDeltaMsg)
+	if !ok {
+		t.Fatalf("expected second msg RawDeltaMsg, got %T", sender.msgs[1])
+	}
+	if first.Target != tuievents.RawDeltaTargetAssistant || first.Stream != "reasoning" || first.Final {
 		t.Fatalf("unexpected first msg: %+v", first)
 	}
-	if second.Kind != "answer" || second.Final {
+	if second.Target != tuievents.RawDeltaTargetAssistant || second.Stream != "answer" || second.Final {
 		t.Fatalf("unexpected second msg: %+v", second)
 	}
 }
@@ -115,11 +110,7 @@ func TestEmitAssistantEventToTUI_HideReasoningWhenDisabled(t *testing.T) {
 		showReasoning: false,
 	}
 	ev := &session.Event{
-		Message: model.Message{
-			Role:      model.RoleAssistant,
-			Reasoning: "hidden",
-			Text:      "shown",
-		},
+		Message: model.MessageFromAssistantParts("shown", "hidden", nil),
 	}
 
 	c.emitAssistantEventToTUI(ev)
@@ -127,8 +118,8 @@ func TestEmitAssistantEventToTUI_HideReasoningWhenDisabled(t *testing.T) {
 	if len(sender.msgs) != 1 {
 		t.Fatalf("expected one answer message, got %d", len(sender.msgs))
 	}
-	msg := sender.msgs[0].(tuievents.AssistantStreamMsg)
-	if msg.Kind != "answer" || msg.Text != "shown" || !msg.Final {
+	msg := sender.msgs[0].(tuievents.RawDeltaMsg)
+	if msg.Target != tuievents.RawDeltaTargetAssistant || msg.Stream != "answer" || msg.Text != "shown" || !msg.Final {
 		t.Fatalf("unexpected msg: %+v", msg)
 	}
 }
@@ -140,13 +131,9 @@ func TestForwardEventToTUI_AssistantReasoningBeforeToolCall(t *testing.T) {
 		showReasoning: true,
 	}
 	ev := &session.Event{
-		Message: model.Message{
-			Role:      model.RoleAssistant,
-			Reasoning: "think first",
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "LIST", Args: `{"path":"."}`},
-			},
-		},
+		Message: model.MessageFromAssistantParts("", "think first", []model.ToolCall{
+			{ID: "call_1", Name: "LIST", Args: `{"path":"."}`},
+		}),
 	}
 
 	handled := c.forwardEventToTUI(ev, map[string]toolCallSnapshot{})
@@ -156,11 +143,11 @@ func TestForwardEventToTUI_AssistantReasoningBeforeToolCall(t *testing.T) {
 	if len(sender.msgs) != 2 {
 		t.Fatalf("expected reasoning then tool call messages, got %d", len(sender.msgs))
 	}
-	reasoningMsg, ok := sender.msgs[0].(tuievents.AssistantStreamMsg)
+	reasoningMsg, ok := sender.msgs[0].(tuievents.RawDeltaMsg)
 	if !ok {
-		t.Fatalf("expected first message AssistantStreamMsg, got %T", sender.msgs[0])
+		t.Fatalf("expected first message RawDeltaMsg, got %T", sender.msgs[0])
 	}
-	if reasoningMsg.Kind != "reasoning" || reasoningMsg.Text != "think first" || !reasoningMsg.Final {
+	if reasoningMsg.Target != tuievents.RawDeltaTargetAssistant || reasoningMsg.Stream != "reasoning" || reasoningMsg.Text != "think first" || !reasoningMsg.Final {
 		t.Fatalf("unexpected reasoning message: %+v", reasoningMsg)
 	}
 	callMsg, ok := sender.msgs[1].(tuievents.LogChunkMsg)
@@ -184,12 +171,9 @@ func TestForwardEventToTUI_FileToolCallEmitsDiffPreviewBeforeToolResponse(t *tes
 		execRuntime: previewTestRuntime{cwd: ws},
 	}
 	ev := &session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "WRITE", Args: fmt.Sprintf(`{"path":%q,"content":"new\n"}`, path)},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_1", Name: "WRITE", Args: fmt.Sprintf(`{"path":%q,"content":"new\n"}`, path)},
+		}, ""),
 	}
 
 	handled := c.forwardEventToTUI(ev, map[string]toolCallSnapshot{})
@@ -227,12 +211,9 @@ func TestForwardEventToTUI_FileToolResponseEmitsCompactSummaryWhenDiffSkipped(t 
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "WRITE", Args: fmt.Sprintf(`{"path":%q,"content":%q}`, path, newContent)},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_1", Name: "WRITE", Args: fmt.Sprintf(`{"path":%q,"content":%q}`, path, newContent)},
+		}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected tool call to be handled")
@@ -242,18 +223,15 @@ func TestForwardEventToTUI_FileToolResponseEmitsCompactSummaryWhenDiffSkipped(t 
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_1",
-				Name: "WRITE",
-				Result: map[string]any{
-					"path":       path,
-					"created":    false,
-					"line_count": 500,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_1",
+			Name: "WRITE",
+			Result: map[string]any{
+				"path":       path,
+				"created":    false,
+				"line_count": 500,
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected tool response to be handled")
@@ -267,6 +245,82 @@ func TestForwardEventToTUI_FileToolResponseEmitsCompactSummaryWhenDiffSkipped(t 
 	}
 	if !strings.Contains(logMsg.Chunk, "✓ WRITE +500 -500") {
 		t.Fatalf("unexpected compact WRITE summary: %q", logMsg.Chunk)
+	}
+}
+
+func TestForwardEventToTUI_ParticipantMirrorToolCallEmitsStructuredTurnToolMsg(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+	ev := &session.Event{
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_1", Name: "SEARCHING", Args: `{"_acp_kind":"search","query":"Shanghai weather"}`},
+		}, ""),
+		Meta: map[string]any{
+			"visibility":           "mirror",
+			metaParticipantDisplay: "luna(gemini)",
+			metaChildSessionID:     "child-1",
+		},
+	}
+
+	if !c.forwardEventToTUI(ev, map[string]toolCallSnapshot{}) {
+		t.Fatal("expected participant mirror event to be handled")
+	}
+	if len(sender.msgs) != 1 {
+		t.Fatalf("expected one structured participant tool message, got %d", len(sender.msgs))
+	}
+	msg, ok := sender.msgs[0].(tuievents.ParticipantToolMsg)
+	if !ok {
+		t.Fatalf("expected ParticipantToolMsg, got %T", sender.msgs[0])
+	}
+	if msg.SessionID != "child-1" || msg.CallID != "call_1" || msg.ToolName != "SEARCHING" {
+		t.Fatalf("unexpected participant tool message: %+v", msg)
+	}
+	if !strings.Contains(msg.Args, "Shanghai weather") {
+		t.Fatalf("expected user-facing ACP args summary, got %+v", msg)
+	}
+}
+
+func TestForwardEventToTUI_BashReplayEmitsOutputChunksBeforeFinal(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-bash-1",
+			Name: "BASH",
+			Result: map[string]any{
+				"stdout":    "hello\nworld\n",
+				"stderr":    "warn\n",
+				"exit_code": 0,
+			},
+		}),
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected bash tool response to be handled")
+	}
+	if len(sender.msgs) < 3 {
+		t.Fatalf("expected replayed stdout/stderr chunks and final panel event, got %d", len(sender.msgs))
+	}
+	first, ok := sender.msgs[0].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected first msg TaskStreamMsg, got %T", sender.msgs[0])
+	}
+	second, ok := sender.msgs[1].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected second msg TaskStreamMsg, got %T", sender.msgs[1])
+	}
+	last, ok := sender.msgs[len(sender.msgs)-1].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected final msg TaskStreamMsg, got %T", sender.msgs[len(sender.msgs)-1])
+	}
+	if first.Stream != "stdout" || !strings.Contains(first.Chunk, "hello") {
+		t.Fatalf("expected stdout replay chunk, got %+v", first)
+	}
+	if second.Stream != "stderr" || !strings.Contains(second.Chunk, "warn") {
+		t.Fatalf("expected stderr replay chunk, got %+v", second)
+	}
+	if !last.Final {
+		t.Fatalf("expected final bash panel event, got %+v", last)
 	}
 }
 
@@ -284,12 +338,9 @@ func TestForwardEventToTUI_PatchUsesDiffStatsForInsertedLineSummary(t *testing.T
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUIWithOptions(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_patch_insert", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"a\nb","new":"a\nx\nb"}`, path)},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_patch_insert", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"a\nb","new":"a\nx\nb"}`, path)},
+		}, ""),
 	}, pending, tuiForwardOptions{ShowMutationDiff: false})
 	if !handled {
 		t.Fatal("expected tool call to be handled")
@@ -300,21 +351,18 @@ func TestForwardEventToTUI_PatchUsesDiffStatsForInsertedLineSummary(t *testing.T
 	sender.msgs = nil
 
 	handled = c.forwardEventToTUIWithOptions(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_patch_insert",
-				Name: "PATCH",
-				Result: map[string]any{
-					"path":          path,
-					"created":       false,
-					"replaced":      1,
-					"old_count":     1,
-					"added_lines":   1,
-					"removed_lines": 0,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_patch_insert",
+			Name: "PATCH",
+			Result: map[string]any{
+				"path":          path,
+				"created":       false,
+				"replaced":      1,
+				"old_count":     1,
+				"added_lines":   1,
+				"removed_lines": 0,
 			},
-		},
+		}),
 	}, pending, tuiForwardOptions{ShowMutationDiff: false})
 	if !handled {
 		t.Fatal("expected tool response to be handled")
@@ -351,12 +399,9 @@ func TestForwardEventToTUI_LargeFileSmallPatchStillEmitsRichDiff(t *testing.T) {
 	}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_patch_large", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":%q,"new":%q}`, path, oldSnippet, newSnippet)},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_patch_large", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":%q,"new":%q}`, path, oldSnippet, newSnippet)},
+		}, ""),
 	}, map[string]toolCallSnapshot{})
 	if !handled {
 		t.Fatal("expected tool call to be handled")
@@ -382,13 +427,10 @@ func TestForwardEventToTUI_StagesEarlierPatchForLaterPreviewInSameEvent(t *testi
 	}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_1", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"one\ntwo","new":"one\nmid\ntwo"}`, path)},
-				{ID: "call_2", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"one\nmid\ntwo","new":"one\nmid\ntwo\nend"}`, path)},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_1", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"one\ntwo","new":"one\nmid\ntwo"}`, path)},
+			{ID: "call_2", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":"one\nmid\ntwo","new":"one\nmid\ntwo\nend"}`, path)},
+		}, ""),
 	}, map[string]toolCallSnapshot{})
 	if !handled {
 		t.Fatal("expected tool calls to be handled")
@@ -410,31 +452,25 @@ func TestForwardEventToTUI_ReadResponseEmitsCompactSummary(t *testing.T) {
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_read_1", Name: "READ", Args: `{"path":"state.go"}`},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_read_1", Name: "READ", Args: `{"path":"state.go"}`},
+		}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected READ call to be handled")
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_read_1",
-				Name: "READ",
-				Result: map[string]any{
-					"path":       "state.go",
-					"line_count": 120,
-					"start_line": 1,
-					"end_line":   120,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_read_1",
+			Name: "READ",
+			Result: map[string]any{
+				"path":       "state.go",
+				"line_count": 120,
+				"start_line": 1,
+				"end_line":   120,
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected READ response to be handled")
@@ -456,16 +492,9 @@ func TestForwardEventToTUI_BashSuccessWithoutOutputDoesNotEmitExitCodeLine(t *te
 	c := &cliConsole{tuiSender: sender}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_bash",
-				Name: "BASH",
-				Result: map[string]any{
-					"exit_code": 0,
-				},
-			},
-		},
+		Message: model.NewMessage(model.RoleAssistant, model.NewToolResultJSONPart("call_bash", "BASH", map[string]any{
+			"exit_code": 0,
+		}, false)),
 	}, map[string]toolCallSnapshot{})
 	if !handled {
 		t.Fatal("expected bash tool response to be handled")
@@ -487,16 +516,9 @@ func TestForwardEventToTUI_BashErrorWithoutOutputEmitsToolResultSummary(t *testi
 	c := &cliConsole{tuiSender: sender}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_bash",
-				Name: "BASH",
-				Result: map[string]any{
-					"error": "tool: BASH failed (route=sandbox): tool: sandbox runner is unavailable",
-				},
-			},
-		},
+		Message: model.NewMessage(model.RoleAssistant, model.NewToolResultJSONPart("call_bash", "BASH", map[string]any{
+			"error": "tool: BASH failed (route=sandbox): tool: sandbox runner is unavailable",
+		}, false)),
 	}, map[string]toolCallSnapshot{})
 	if !handled {
 		t.Fatal("expected bash tool response to be handled")
@@ -529,14 +551,11 @@ func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) 
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_plan",
-				Name: tool.PlanToolName,
-				Args: `{"entries":[{"content":"Inspect repo","status":"in_progress"},{"content":"Run tests","status":"pending"}]}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_plan",
+			Name: tool.PlanToolName,
+			Args: `{"entries":[{"content":"Inspect repo","status":"in_progress"},{"content":"Run tests","status":"pending"}]}`,
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected plan tool call to be handled")
@@ -546,16 +565,13 @@ func TestForwardEventToTUI_PlanSkipsTranscriptAndOnlyUpdatesPanel(t *testing.T) 
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_plan",
-				Name: tool.PlanToolName,
-				Result: map[string]any{
-					"message": "Plan updated",
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_plan",
+			Name: tool.PlanToolName,
+			Result: map[string]any{
+				"message": "Plan updated",
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected plan tool response to be handled")
@@ -588,14 +604,11 @@ func TestForwardEventToTUI_NoOpWriteSkipsRichDiffAndUsesUnchangedSummary(t *test
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_write",
-				Name: "WRITE",
-				Args: fmt.Sprintf(`{"path":%q,"content":%q}`, path, content),
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_write",
+			Name: "WRITE",
+			Args: fmt.Sprintf(`{"path":%q,"content":%q}`, path, content),
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected write tool call to be handled")
@@ -608,20 +621,17 @@ func TestForwardEventToTUI_NoOpWriteSkipsRichDiffAndUsesUnchangedSummary(t *test
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_write",
-				Name: "WRITE",
-				Result: map[string]any{
-					"path":          path,
-					"created":       false,
-					"line_count":    2,
-					"added_lines":   0,
-					"removed_lines": 0,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_write",
+			Name: "WRITE",
+			Result: map[string]any{
+				"path":          path,
+				"created":       false,
+				"line_count":    2,
+				"added_lines":   0,
+				"removed_lines": 0,
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected write tool response to be handled")
@@ -643,19 +653,12 @@ func TestForwardEventToTUI_SpawnYieldDoesNotEmitTranscriptResultLine(t *testing.
 	c := &cliConsole{tuiSender: sender}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_spawn",
-				Name: tool.SpawnToolName,
-				Result: map[string]any{
-					"task_id":              "t-1234567890ab",
-					"_ui_child_session_id": "s-child-1",
-					"_ui_agent":            "self",
-					"state":                "running",
-				},
-			},
-		},
+		Message: model.NewMessage(model.RoleAssistant, model.NewToolResultJSONPart("call_spawn", tool.SpawnToolName, map[string]any{
+			"task_id":              "t-1234567890ab",
+			"_ui_child_session_id": "s-child-1",
+			"_ui_agent":            "self",
+			"state":                "running",
+		}, false)),
 	}, map[string]toolCallSnapshot{})
 	if !handled {
 		t.Fatal("expected spawn tool response to be handled")
@@ -673,33 +676,27 @@ func TestForwardEventToTUI_TaskWaitEmitsVirtualCallAndFriendlySummary(t *testing
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_task_1",
-				Name: "TASK",
-				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_task_1",
+			Name: "TASK",
+			Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait call to be handled")
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_task_1",
-				Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-1234567890ab",
-					"state":   "running",
-					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
-					"result":  "still running",
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_1",
+			Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-1234567890ab",
+				"state":   "running",
+				"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+				"result":  "still running",
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait response to be handled")
@@ -729,32 +726,26 @@ func TestForwardEventToTUI_TaskWaitWithoutYieldUsesDefaultSummary(t *testing.T) 
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_task_default",
-				Name: "TASK",
-				Args: `{"action":"wait","task_id":"t-1234567890ab"}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_task_default",
+			Name: "TASK",
+			Args: `{"action":"wait","task_id":"t-1234567890ab"}`,
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait call to be handled")
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_task_default",
-				Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-1234567890ab",
-					"state":   "running",
-					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_default",
+			Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-1234567890ab",
+				"state":   "running",
+				"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait response to be handled")
@@ -784,32 +775,26 @@ func TestForwardEventToTUI_TaskWaitImmediateReturnPrefersState(t *testing.T) {
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_task_fast",
-				Name: "TASK",
-				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":30000}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_task_fast",
+			Name: "TASK",
+			Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":30000}`,
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait call to be handled")
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_task_fast",
-				Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-1234567890ab",
-					"state":   "running",
-					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_fast",
+			Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-1234567890ab",
+				"state":   "running",
+				"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait response to be handled")
@@ -832,32 +817,26 @@ func TestForwardEventToTUI_TaskWaitWaitingInputEmitsSyntheticPanelState(t *testi
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_task_input",
-				Name: "TASK",
-				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_task_input",
+			Name: "TASK",
+			Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait call to be handled")
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_task_input",
-				Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-1234567890ab",
-					"state":   "waiting_input",
-					"msg":     "waiting for input; use TASK write with task_id t-1234567890ab",
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_input",
+			Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-1234567890ab",
+				"state":   "waiting_input",
+				"msg":     "waiting for input; use TASK write with task_id t-1234567890ab",
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait response to be handled")
@@ -890,30 +869,24 @@ func TestForwardEventToTUI_TaskWaitErrorStillUsesFriendlyLabel(t *testing.T) {
 	pending := map[string]toolCallSnapshot{}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_task_err",
-				Name: "TASK",
-				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_task_err",
+			Name: "TASK",
+			Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
+		}}, ""),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait call to be handled")
 	}
 
 	handled = c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_task_err",
-				Name: "TASK",
-				Result: map[string]any{
-					"error": "task manager is unavailable",
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_err",
+			Name: "TASK",
+			Result: map[string]any{
+				"error": "task manager is unavailable",
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK wait error response to be handled")
@@ -945,19 +918,16 @@ func TestForwardEventToTUI_TaskListEmitsFriendlySummary(t *testing.T) {
 	}
 
 	handled := c.forwardEventToTUI(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_task_list",
-				Name: "TASK",
-				Result: map[string]any{
-					"tasks": []any{
-						map[string]any{"task_id": "t-1", "state": "running", "summary": "task yielded before completion"},
-						map[string]any{"task_id": "t-2", "state": "cancelled", "summary": "cancelled"},
-					},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_list",
+			Name: "TASK",
+			Result: map[string]any{
+				"tasks": []any{
+					map[string]any{"task_id": "t-1", "state": "running", "summary": "task yielded before completion"},
+					map[string]any{"task_id": "t-2", "state": "cancelled", "summary": "cancelled"},
 				},
 			},
-		},
+		}),
 	}, pending)
 	if !handled {
 		t.Fatal("expected TASK list response to be handled")

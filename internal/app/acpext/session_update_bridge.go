@@ -20,6 +20,9 @@ import (
 type acpSessionUpdateBridge struct {
 	meta           runtime.DelegationMetadata
 	childSessionID string
+	agentName      string
+	childCWD       string
+	tracker        *remoteSubagentTracker
 
 	mu        sync.Mutex
 	assistant string
@@ -33,10 +36,13 @@ type acpToolCall struct {
 	rawInput any
 }
 
-func newACPSessionUpdateBridge(meta runtime.DelegationMetadata, childSessionID string) *acpSessionUpdateBridge {
+func newACPSessionUpdateBridge(meta runtime.DelegationMetadata, agentName string, childSessionID string, childCWD string, tracker *remoteSubagentTracker) *acpSessionUpdateBridge {
 	return &acpSessionUpdateBridge{
 		meta:           meta,
 		childSessionID: strings.TrimSpace(childSessionID),
+		agentName:      strings.TrimSpace(agentName),
+		childCWD:       strings.TrimSpace(childCWD),
+		tracker:        tracker,
 		toolCalls:      map[string]acpToolCall{},
 	}
 }
@@ -64,27 +70,31 @@ func (b *acpSessionUpdateBridge) emitContent(ctx context.Context, sessionID stri
 	if text == "" {
 		return
 	}
-	ev := &session.Event{
-		Message: model.Message{Role: model.RoleAssistant},
-		Meta: map[string]any{
-			"partial": true,
-		},
-	}
+	ev := runtimeEventWithPartialMeta()
 	b.mu.Lock()
 	switch strings.TrimSpace(update.SessionUpdate) {
 	case acpclient.UpdateAgentMessage:
 		b.assistant += text
-		ev.Message.Text = b.assistant
-		ev.Meta["channel"] = string(session.PartialChannelAnswer)
+		ev.Message = model.NewTextMessage(model.RoleAssistant, b.assistant)
+		ev.Meta["channel"] = "answer"
+		if b.tracker != nil {
+			b.tracker.updateAssistant(b.agentName, sessionID, b.assistant)
+		}
 	case acpclient.UpdateAgentThought:
 		b.reasoning += text
-		ev.Message.Reasoning = b.reasoning
-		ev.Meta["channel"] = string(session.PartialChannelReasoning)
+		ev.Message = model.NewReasoningMessage(model.RoleAssistant, b.reasoning, model.ReasoningVisibilityVisible)
+		ev.Meta["channel"] = "reasoning"
+		if b.tracker != nil {
+			b.tracker.updateReasoning(b.agentName, sessionID, b.reasoning)
+		}
 	default:
 		b.mu.Unlock()
 		return
 	}
 	b.mu.Unlock()
+	if b.tracker != nil {
+		b.tracker.markRunning(b.agentName, sessionID, b.meta.DelegationID, b.childCWD)
+	}
 	sessionstream.Emit(ctx, sessionID, annotateDelegationEvent(ev, b.meta))
 }
 
@@ -101,16 +111,17 @@ func (b *acpSessionUpdateBridge) emitToolCall(ctx context.Context, sessionID str
 	}
 	b.mu.Unlock()
 	ev := &session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolCalls: []model.ToolCall{{
-				ID:   callID,
-				Name: acpToolDisplayName(update.Title, update.Kind),
-				Args: marshalACPValue(update.RawInput),
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   callID,
+			Name: acpToolDisplayName(update.Title, update.Kind),
+			Args: marshalACPToolInput(update.Title, update.Kind, update.RawInput),
+		}}, ""),
 	}
-	sessionstream.Emit(ctx, sessionID, annotateDelegationEvent(ev, b.meta))
+	if b.tracker != nil {
+		b.tracker.markRunning(b.agentName, sessionID, b.meta.DelegationID, b.childCWD)
+		b.tracker.updateTool(b.agentName, sessionID, acpToolDisplayName(update.Title, update.Kind))
+	}
+	b.emitCanonical(ctx, sessionID, ev)
 }
 
 func (b *acpSessionUpdateBridge) emitToolCallUpdate(ctx context.Context, sessionID string, update acpclient.ToolCallUpdate) {
@@ -129,16 +140,54 @@ func (b *acpSessionUpdateBridge) emitToolCallUpdate(ctx context.Context, session
 	title := firstNonEmpty(strings.TrimSpace(derefString(update.Title)), snap.title)
 	kind := firstNonEmpty(strings.TrimSpace(derefString(update.Kind)), snap.kind)
 	ev := &session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     callID,
-				Name:   acpToolDisplayName(title, kind),
-				Result: acpRawOutputResult(update.RawOutput),
-			},
-		},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     callID,
+			Name:   acpToolDisplayName(title, kind),
+			Result: acpRawOutputResult(update.RawOutput),
+		}),
+	}
+	if b.tracker != nil {
+		b.tracker.markRunning(b.agentName, sessionID, b.meta.DelegationID, b.childCWD)
+		b.tracker.updateTool(b.agentName, sessionID, acpToolDisplayName(title, kind))
+	}
+	b.emitCanonical(ctx, sessionID, ev)
+}
+
+func (b *acpSessionUpdateBridge) FlushAssistant(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	text := b.assistant
+	reasoning := b.reasoning
+	b.mu.Unlock()
+	if text == "" && reasoning == "" {
+		return
+	}
+	if b.tracker != nil {
+		if text != "" {
+			b.tracker.updateAssistant(b.agentName, b.childSessionID, text)
+		}
+		if reasoning != "" {
+			b.tracker.updateReasoning(b.agentName, b.childSessionID, reasoning)
+		}
+	}
+}
+
+func (b *acpSessionUpdateBridge) emitCanonical(ctx context.Context, sessionID string, ev *session.Event) {
+	if ev == nil {
+		return
 	}
 	sessionstream.Emit(ctx, sessionID, annotateDelegationEvent(ev, b.meta))
+}
+
+func runtimeEventWithPartialMeta() *session.Event {
+	return &session.Event{
+		Message: model.Message{Role: model.RoleAssistant},
+		Meta: map[string]any{
+			"partial": true,
+		},
+	}
 }
 
 func decodeACPTextChunk(raw json.RawMessage) string {
@@ -179,6 +228,33 @@ func marshalACPValue(value any) string {
 		return text
 	}
 	raw, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func marshalACPToolInput(title string, kind string, value any) string {
+	payload := map[string]any{}
+	if title = strings.TrimSpace(title); title != "" {
+		payload["_acp_title"] = title
+	}
+	if kind = strings.TrimSpace(kind); kind != "" {
+		payload["_acp_kind"] = kind
+	}
+	switch typed := value.(type) {
+	case nil:
+	case map[string]any:
+		for key, one := range typed {
+			payload[key] = one
+		}
+	default:
+		payload["_acp_raw_input"] = typed
+	}
+	if len(payload) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return ""
 	}

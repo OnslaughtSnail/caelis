@@ -15,18 +15,16 @@ const (
 )
 
 const (
-	TypeBuiltin  = "builtin"
-	TypeRegistry = "registry"
-	TypeCustom   = "custom"
+	StabilityStable       = "stable"
+	StabilityExperimental = "experimental"
 )
 
 type Descriptor struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name"`
 	Description string            `json:"description,omitempty"`
-	Type        string            `json:"type,omitempty"`
+	Stability   string            `json:"stability,omitempty"`
 	Transport   Transport         `json:"transport"`
-	Endpoint    string            `json:"endpoint,omitempty"`
 	Command     string            `json:"command,omitempty"`
 	Args        []string          `json:"args,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
@@ -38,11 +36,12 @@ const selfAgentID = "self"
 
 func SelfDescriptor() Descriptor {
 	return Descriptor{
-		ID:        selfAgentID,
-		Name:      "self",
-		Type:      TypeBuiltin,
-		Transport: TransportSelf,
-		Builtin:   true,
+		ID:          selfAgentID,
+		Name:        "self",
+		Description: "Built-in local child session.",
+		Stability:   StabilityStable,
+		Transport:   TransportSelf,
+		Builtin:     true,
 	}
 }
 
@@ -56,6 +55,7 @@ func NewRegistry(extra ...Descriptor) *Registry {
 	self := SelfDescriptor()
 	r.agents[self.ID] = self
 	for _, d := range extra {
+		d = normalizeDescriptor(d)
 		id := strings.TrimSpace(d.ID)
 		if id == "" || id == selfAgentID {
 			continue
@@ -87,6 +87,7 @@ func (r *Registry) Register(d Descriptor) error {
 	if id == selfAgentID {
 		return fmt.Errorf("agents: %q is a reserved builtin agent", selfAgentID)
 	}
+	d = normalizeDescriptor(d)
 	d.ID = id
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -135,21 +136,38 @@ func (r *Registry) Validate() error {
 		if strings.TrimSpace(id) == "" {
 			return fmt.Errorf("agents: empty id in registry")
 		}
-		kind := strings.ToLower(strings.TrimSpace(d.Type))
-		if d.Transport != TransportACP {
-			continue
-		}
-		switch kind {
-		case "", TypeCustom:
-			if strings.TrimSpace(d.Endpoint) == "" && strings.TrimSpace(d.Command) == "" {
-				return fmt.Errorf("agents: acp agent %q requires an endpoint or command", id)
-			}
-		case TypeRegistry:
-		case TypeBuiltin:
-			return fmt.Errorf("agents: acp agent %q cannot use builtin type", id)
-		default:
-			return fmt.Errorf("agents: unsupported type %q for %q", d.Type, id)
+		if d.Transport == TransportACP && strings.TrimSpace(d.Command) == "" {
+			return fmt.Errorf("agents: acp agent %q requires a command", id)
 		}
 	}
 	return nil
+}
+
+func normalizeDescriptor(d Descriptor) Descriptor {
+	d.ID = strings.TrimSpace(d.ID)
+	d.Name = strings.TrimSpace(d.Name)
+	if d.Name == "" {
+		d.Name = d.ID
+	}
+	d.Description = strings.TrimSpace(d.Description)
+	d.Stability = NormalizeStability(d.Stability)
+	if d.Transport == "" {
+		d.Transport = TransportACP
+	}
+	d.Command = strings.TrimSpace(d.Command)
+	d.WorkDir = strings.TrimSpace(d.WorkDir)
+	d.Args = append([]string(nil), d.Args...)
+	d.Env = cloneStringMap(d.Env)
+	return d
+}
+
+func NormalizeStability(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", StabilityExperimental:
+		return StabilityExperimental
+	case StabilityStable:
+		return StabilityStable
+	default:
+		return StabilityExperimental
+	}
 }

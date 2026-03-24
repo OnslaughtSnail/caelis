@@ -57,6 +57,30 @@ func mouseWheel(x int, y int, button tea.MouseButton) tea.MouseWheelMsg {
 	return tea.MouseWheelMsg(tea.Mouse{X: x, Y: y, Button: button})
 }
 
+func driveBashPanelCollapse(m *Model, panel *BashPanelBlock) {
+	if m == nil || panel == nil || panel.CollapseAt.IsZero() {
+		return
+	}
+	collapseFor := panel.CollapseFor
+	if collapseFor <= 0 {
+		collapseFor = inlinePanelCollapseDuration
+	}
+	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt})
+	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt.Add(collapseFor)})
+}
+
+func driveSubagentPanelCollapse(m *Model, panel *SubagentPanelBlock) {
+	if m == nil || panel == nil || panel.CollapseAt.IsZero() {
+		return
+	}
+	collapseFor := panel.CollapseFor
+	if collapseFor <= 0 {
+		collapseFor = inlinePanelCollapseDuration
+	}
+	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt})
+	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt.Add(collapseFor)})
+}
+
 func TestMentionQueryAtCursor(t *testing.T) {
 	input := []rune("check @kernel/to")
 	start, end, query, ok := mentionQueryAtCursor(input, len(input))
@@ -118,6 +142,24 @@ func TestSlashArgQueryAtCursor(t *testing.T) {
 	_, _, ok = slashArgQueryAtCursor([]rune("/mouse capture"), len([]rune("/mouse capture")))
 	if ok {
 		t.Fatal("did not expect slash-arg query for removed /mouse command")
+	}
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/agent add cod"), len([]rune("/agent add cod")))
+	if !ok {
+		t.Fatal("expected slash-arg query for /agent add builtin")
+	}
+	if cmd != "agent add" || query != "cod" {
+		t.Fatalf("unexpected agent add parse: cmd=%q query=%q", cmd, query)
+	}
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/agent rm claude"), len([]rune("/agent rm claude")))
+	if !ok {
+		t.Fatal("expected slash-arg query for /agent rm configured agent")
+	}
+	if cmd != "agent rm" || query != "claude" {
+		t.Fatalf("unexpected agent rm parse: cmd=%q query=%q", cmd, query)
+	}
+	_, _, ok = slashArgQueryAtCursor([]rune("/agent list "), len([]rune("/agent list ")))
+	if ok {
+		t.Fatal("did not expect picker parse for /agent list")
 	}
 }
 
@@ -780,6 +822,74 @@ func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
 	}
 	if len(m.slashArgCandidates) != 2 {
 		t.Fatalf("expected 2 alias candidates, got %d", len(m.slashArgCandidates))
+	}
+}
+
+func TestAgentSlashArgOpensOnTrailingSpaceAndAdvancesToBuiltinStep(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			switch command {
+			case "agent":
+				return []SlashArgCandidate{
+					{Value: "list", Display: "list"},
+					{Value: "add", Display: "add"},
+					{Value: "rm", Display: "rm"},
+				}, nil
+			case "agent add":
+				return []SlashArgCandidate{
+					{Value: "codex", Display: "codex"},
+					{Value: "copilot", Display: "copilot"},
+				}, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/agent ")
+	if !m.slashArgActive {
+		t.Fatal("expected slash-arg active for /agent")
+	}
+	if len(m.slashArgCandidates) != 3 {
+		t.Fatalf("expected agent action candidates, got %d", len(m.slashArgCandidates))
+	}
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	if got := strings.TrimSpace(m.slashArgCommand); got != "agent add" {
+		t.Fatalf("expected builtin step command 'agent add', got %q", got)
+	}
+	if len(m.slashArgCandidates) != 2 {
+		t.Fatalf("expected builtin candidates after selecting add, got %d", len(m.slashArgCandidates))
+	}
+}
+
+func TestAgentAddExecutesOnSingleEnterWhenBuiltinAlreadyComplete(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(submission.Text)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			if command != "agent add" {
+				return nil, nil
+			}
+			return []SlashArgCandidate{{Value: "codex", Display: "codex"}}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/agent add codex")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected command for exact /agent add builtin")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/agent add codex" {
+		t.Fatalf("expected '/agent add codex', got %q", called)
 	}
 }
 
@@ -2580,18 +2690,33 @@ func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 	})
 
 	view := stripModelView(m)
-	if !strings.Contains(view, "BASH date") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
-		t.Fatalf("expected bash panel to auto-collapse back into the call line after final, got:\n%s", view)
+	if !strings.Contains(view, "BASH date") || !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected final bash panel to stay visible through the minimum display window, got:\n%s", view)
 	}
-	// In the document model, panels persist permanently after completion.
 	blockID := m.toolOutputBlockIDs["call-1"]
 	if blockID == "" {
 		t.Fatal("expected bash panel to exist in doc after final")
 	}
-	if b := m.doc.Find(blockID); b == nil {
+	b := m.doc.Find(blockID)
+	if b == nil {
 		t.Fatal("expected bash panel block to exist in document")
-	} else if bp, ok := b.(*BashPanelBlock); !ok || bp.Expanded {
-		t.Fatal("expected final BASH panel to be collapsed")
+	}
+	bp, ok := b.(*BashPanelBlock)
+	if !ok {
+		t.Fatalf("expected bash panel block, got %T", b)
+	}
+	if !bp.Expanded {
+		t.Fatal("expected final BASH panel to remain expanded before animation finishes")
+	}
+	_, _ = m.Update(frameTickMsg{at: bp.CollapseAt})
+	_, _ = m.Update(frameTickMsg{at: bp.CollapseAt.Add(bp.CollapseFor / 2)})
+	if !bp.Expanded || bp.VisibleLines >= toolOutputPreviewLines {
+		t.Fatalf("expected bash panel to be mid-collapse during animation, got expanded=%v visible=%d", bp.Expanded, bp.VisibleLines)
+	}
+	driveBashPanelCollapse(m, bp)
+	view = stripModelView(m)
+	if !strings.Contains(view, "BASH date") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
+		t.Fatalf("expected bash panel to collapse back into the call line after animation, got:\n%s", view)
 	}
 }
 
@@ -2619,6 +2744,8 @@ func TestBashFinalKeepsPanelAfterDivider(t *testing.T) {
 	if blockID == "" {
 		t.Fatal("expected bash panel to exist after final")
 	}
+	bp := m.doc.Find(blockID).(*BashPanelBlock)
+	driveBashPanelCollapse(m, bp)
 	view := stripModelView(m)
 	if !strings.Contains(view, "BASH done") || strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
 		t.Fatalf("expected bash panel to persist but stay collapsed, got:\n%s", view)
@@ -2643,6 +2770,12 @@ func TestBashPanelPersistsAfterNewContent(t *testing.T) {
 		State:  "completed",
 		Final:  true,
 	})
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to persist in document")
+	}
+	bp := m.doc.Find(blockID).(*BashPanelBlock)
+	driveBashPanelCollapse(m, bp)
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* next block\n"})
 
 	view := stripModelView(m)
@@ -2656,10 +2789,6 @@ func TestBashPanelPersistsAfterNewContent(t *testing.T) {
 		}
 	}
 
-	blockID := m.toolOutputBlockIDs["call-1"]
-	if blockID == "" {
-		t.Fatal("expected bash panel to persist in document")
-	}
 }
 
 func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
@@ -3199,7 +3328,7 @@ func TestSubmitLineIncludesAttachmentDisplayTokens(t *testing.T) {
 		t.Fatal("expected committed user history line")
 	}
 	got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1]))
-	want := "> [image: clipboard-a.png] Hi豆包[image: clipboard-b.png] 这两个是什么APP?"
+	want := "> [image: clipboard-a.png] Hi豆包 [image: clipboard-b.png] 这两个是什么APP?"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
@@ -3524,6 +3653,100 @@ func TestUserMessageMsgCommitsPendingUserLine(t *testing.T) {
 	got := strings.TrimSpace(ansi.Strip(m.renderedStyledLines()[len(m.renderedStyledLines())-1]))
 	if got != "> queued message" {
 		t.Fatalf("expected committed user line, got %q", got)
+	}
+}
+
+func TestUserMessageMsgDoesNotDuplicateCommittedAttachmentLine(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	m.textarea.SetValue("在你的回答中加一点emoji类似于这样的")
+	m.syncInputFromTextarea()
+	m.setInputAttachments([]inputAttachment{{
+		Name:   "clipboard-demo.png",
+		Offset: len([]rune("在你的回答中加一点emoji")),
+	}})
+
+	_, _ = m.submitLine("在你的回答中加一点emoji类似于这样的")
+	_, _ = m.Update(tuievents.UserMessageMsg{
+		Text: "在你的回答中加一点emoji [image: clipboard-demo.png] 类似于这样的",
+	})
+
+	var userLines []string
+	for _, line := range m.renderedStyledLines() {
+		plain := strings.TrimSpace(ansi.Strip(line))
+		if strings.HasPrefix(plain, "> ") {
+			userLines = append(userLines, plain)
+		}
+	}
+	if len(userLines) != 1 {
+		t.Fatalf("expected a single committed user line after runtime replay, got %+v", userLines)
+	}
+}
+
+func TestSubmitWhileRunningReconcilesViewportForPendingQueue(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	m.running = true
+	before := m.viewport.Height()
+	typeRunes(m, "queued follow-up")
+
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	if m.pendingQueue == nil {
+		t.Fatal("expected pending queue entry")
+	}
+
+	want, _ := m.computeLayout()
+	if got := m.viewport.Height(); got != want {
+		t.Fatalf("expected viewport height %d after pending queue open, got %d", want, got)
+	}
+	if m.viewport.Height() >= before {
+		t.Fatalf("expected pending queue to shrink viewport, before=%d after=%d", before, m.viewport.Height())
+	}
+}
+
+func TestBTWSubmitReconcilesViewportLayout(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	before := m.viewport.Height()
+	typeRunes(m, "/btw config file?")
+
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	if m.btwOverlay == nil {
+		t.Fatal("expected btw overlay to open")
+	}
+
+	want, _ := m.computeLayout()
+	if got := m.viewport.Height(); got != want {
+		t.Fatalf("expected viewport height %d after btw open, got %d", want, got)
+	}
+	if m.viewport.Height() >= before {
+		t.Fatalf("expected btw drawer to shrink viewport, before=%d after=%d", before, m.viewport.Height())
+	}
+}
+
+func TestTaskResultReconcilesViewportAfterDrawerClose(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	m.running = true
+	m.pendingQueue = &pendingPrompt{execLine: "queued", displayLine: "queued"}
+	m.planEntries = []planEntryState{{Content: "step", Status: "pending"}}
+	m.ensureViewportLayout()
+	before := m.viewport.Height()
+
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	want, _ := m.computeLayout()
+	if got := m.viewport.Height(); got != want {
+		t.Fatalf("expected viewport height %d after drawers close, got %d", want, got)
+	}
+	if m.viewport.Height() <= before {
+		t.Fatalf("expected viewport to grow after drawers close, before=%d after=%d", before, m.viewport.Height())
 	}
 }
 

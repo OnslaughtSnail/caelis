@@ -136,10 +136,7 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 		ID:        eventID(),
 		SessionID: in.Session.ID,
 		Time:      time.Now(),
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: compiledSummary,
-		},
+		Message:   model.NewTextMessage(model.RoleUser, compiledSummary),
 		Meta: map[string]any{
 			metaKind: metaKindCompaction,
 			metaCompaction: map[string]any{
@@ -337,15 +334,15 @@ func eventToText(ev *session.Event) string {
 		return ""
 	}
 	msg := ev.Message
-	if msg.ToolResponse != nil {
-		raw, _ := json.Marshal(msg.ToolResponse.Result)
-		return fmt.Sprintf("tool_response name=%s result=%s", msg.ToolResponse.Name, string(raw))
+	if resp := msg.ToolResponse(); resp != nil {
+		raw, _ := json.Marshal(resp.Result)
+		return fmt.Sprintf("tool_response name=%s result=%s", resp.Name, string(raw))
 	}
-	if len(msg.ToolCalls) > 0 {
-		raw, _ := json.Marshal(msg.ToolCalls)
-		return fmt.Sprintf("tool_calls=%s text=%s", string(raw), msg.Text)
+	if calls := msg.ToolCalls(); len(calls) > 0 {
+		raw, _ := json.Marshal(calls)
+		return fmt.Sprintf("tool_calls=%s text=%s", string(raw), msg.TextContent())
 	}
-	return msg.Text
+	return msg.TextContent()
 }
 
 func eventsToTranscript(events []*session.Event) string {

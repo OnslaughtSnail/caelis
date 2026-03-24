@@ -27,12 +27,12 @@ func (f *Factory) Register(cfg Config) error {
 	if alias == "" {
 		return fmt.Errorf("providers: alias is required")
 	}
-	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIOpenRouter && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIDeepSeek && cfg.API != APIMimo && cfg.API != APIVolcengine && cfg.API != APIVolcengineCoding && cfg.API != APIOllama {
+	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIOpenRouter && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIAnthropicCompatible && cfg.API != APIDeepSeek && cfg.API != APIMimo && cfg.API != APIVolcengine && cfg.API != APIVolcengineCoding && cfg.API != APIOllama {
 		return fmt.Errorf("providers: unsupported api type %q", cfg.API)
 	}
 	authType := strings.TrimSpace(string(cfg.Auth.Type))
-	if authType != "" && cfg.Auth.Type != AuthAPIKey && cfg.Auth.Type != AuthNone {
-		return fmt.Errorf("providers: unsupported auth type %q (only api_key and none are supported now)", cfg.Auth.Type)
+	if authType != "" && cfg.Auth.Type != AuthAPIKey && cfg.Auth.Type != AuthBearerToken && cfg.Auth.Type != AuthOAuthToken && cfg.Auth.Type != AuthNone {
+		return fmt.Errorf("providers: unsupported auth type %q", cfg.Auth.Type)
 	}
 	if cfg.Auth.Type == "" {
 		if cfg.API == APIOllama {
@@ -79,7 +79,7 @@ func (f *Factory) NewByAlias(alias string) (model.LLM, error) {
 		return newOpenRouter(cfg, token), nil
 	case APIOpenAI:
 		return newOpenAICompat(cfg, token), nil
-	case APIAnthropic:
+	case APIAnthropic, APIAnthropicCompatible:
 		return newAnthropic(cfg, token), nil
 	case APIGemini:
 		return newGemini(cfg, token), nil

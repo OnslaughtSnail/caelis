@@ -198,10 +198,7 @@ func TestRefreshContextUsageFromEvent_FallsBackToRuntimeEstimateWithoutUsage(t *
 		ID:        "ev-user",
 		SessionID: sid,
 		Time:      time.Now(),
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: "please summarize the current repo state and pending edits",
-		},
+		Message:   model.NewTextMessage(model.RoleUser, "please summarize the current repo state and pending edits"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -209,10 +206,7 @@ func TestRefreshContextUsageFromEvent_FallsBackToRuntimeEstimateWithoutUsage(t *
 		ID:        "ev-assistant",
 		SessionID: sid,
 		Time:      time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			Text: "I reviewed the repo and found two pending edit areas.",
-		},
+		Message:   model.NewTextMessage(model.RoleAssistant, "I reviewed the repo and found two pending edit areas."),
 	}
 	if err := store.AppendEvent(context.Background(), sess, assistantEvent); err != nil {
 		t.Fatal(err)

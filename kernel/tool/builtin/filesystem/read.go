@@ -165,22 +165,20 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		}
 		line := scanner.Text()
 		tokens := estimateToken(line)
-		if usedToken+tokens > maxTokens {
+		usedToken += tokens
+		if usedToken > maxTokens {
 			if len(lines) == 0 {
-				budget := maxTokens - usedToken
+				budget := maxTokens - (usedToken - tokens)
 				if budget <= 0 {
 					budget = 1
 				}
 				line = truncateByTokenBudget(line, budget)
-				tokens = estimateToken(line)
 				lines = append(lines, line)
-				usedToken += tokens
 			}
 			hasMore = true
 			break
 		}
 		lines = append(lines, line)
-		usedToken += tokens
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err

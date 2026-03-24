@@ -69,7 +69,7 @@ type ollamaChatResponse struct {
 }
 
 // newOllama returns a native Ollama /api/chat client.
-func newOllama(cfg Config, token string) model.LLM {
+func newOllama(cfg Config, _ string) model.LLM {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -101,8 +101,8 @@ func (l *ollamaLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }
 
-func (l *ollamaLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *ollamaLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		if req == nil {
 			yield(nil, fmt.Errorf("model: request is nil"))
 			return
@@ -110,8 +110,8 @@ func (l *ollamaLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 
 		payload := ollamaChatRequest{
 			Model:    l.name,
-			Messages: l.fromKernelMessages(req.Messages),
-			Tools:    fromKernelTools(req.Tools),
+			Messages: l.fromKernelMessages(req.Instructions, req.Messages),
+			Tools:    fromKernelTools(model.FunctionToolDefinitions(req.Tools)),
 			Stream:   req.Stream,
 		}
 		if think := ollamaThinkValue(req.Reasoning); think != nil {
@@ -162,19 +162,23 @@ func (l *ollamaLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 				yield(nil, err)
 				return
 			}
-			yield(&model.Response{
-				Message:      msg,
-				TurnComplete: true,
-				Model:        out.Model,
-				Provider:     l.provider,
-				Usage:        ollamaUsage(out),
+			yield(&model.StreamEvent{
+				Type: model.StreamEventTurnDone,
+				Response: &model.Response{
+					Message:      msg,
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       model.ResponseStatusCompleted,
+					Model:        out.Model,
+					Provider:     l.provider,
+					Usage:        ollamaUsage(out),
+				},
 			}, nil)
 			return
 		}
 
 		dec := json.NewDecoder(resp.Body)
 		acc := ollamaAccumulator{
-			role:      model.RoleAssistant,
 			toolCalls: []model.ToolCall{},
 		}
 		var (
@@ -196,32 +200,20 @@ func (l *ollamaLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 			if one := ollamaUsage(chunk); one.TotalTokens > 0 || one.PromptTokens > 0 || one.CompletionTokens > 0 {
 				usage = one
 			}
-			if text := strings.TrimSpace(chunk.Message.Thinking); text != "" {
+			if text := chunk.Message.Thinking; text != "" {
 				acc.reasoning.WriteString(text)
-				if !yield(&model.Response{
-					Message: model.Message{
-						Role:      model.RoleAssistant,
-						Reasoning: text,
-					},
-					Partial:      true,
-					TurnComplete: false,
-					Model:        modelID,
-					Provider:     l.provider,
+				if !yield(&model.StreamEvent{
+					Type:      model.StreamEventPartDelta,
+					PartDelta: &model.PartDelta{Kind: model.PartKindReasoning, TextDelta: text},
 				}, nil) {
 					return
 				}
 			}
-			if text := chunk.Message.Content; strings.TrimSpace(text) != "" {
+			if text := chunk.Message.Content; text != "" {
 				acc.text.WriteString(text)
-				if !yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						Text: text,
-					},
-					Partial:      true,
-					TurnComplete: false,
-					Model:        modelID,
-					Provider:     l.provider,
+				if !yield(&model.StreamEvent{
+					Type:      model.StreamEventPartDelta,
+					PartDelta: &model.PartDelta{Kind: model.PartKindText, TextDelta: text},
 				}, nil) {
 					return
 				}
@@ -236,30 +228,31 @@ func (l *ollamaLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 			}
 		}
 
-		yield(&model.Response{
-			Message: model.Message{
-				Role:      acc.role,
-				Text:      acc.text.String(),
-				Reasoning: acc.reasoning.String(),
-				ToolCalls: dedupToolCalls(acc.toolCalls),
+		yield(&model.StreamEvent{
+			Type: model.StreamEventTurnDone,
+			Response: &model.Response{
+				Message:      model.MessageFromAssistantParts(acc.text.String(), acc.reasoning.String(), dedupToolCalls(acc.toolCalls)),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       model.ResponseStatusCompleted,
+				Model:        modelID,
+				Provider:     l.provider,
+				Usage:        usage,
 			},
-			Partial:      false,
-			TurnComplete: true,
-			Model:        modelID,
-			Provider:     l.provider,
-			Usage:        usage,
 		}, nil)
 	}
 }
 
 type ollamaAccumulator struct {
-	role      model.Role
 	text      strings.Builder
 	reasoning strings.Builder
 	toolCalls []model.ToolCall
 }
 
-func (l *ollamaLLM) fromKernelMessages(messages []model.Message) []ollamaChatMessage {
+func (l *ollamaLLM) fromKernelMessages(instructions []model.Part, messages []model.Message) []ollamaChatMessage {
+	if len(instructions) > 0 {
+		messages = append([]model.Message{model.NewMessage(model.RoleSystem, instructions...)}, messages...)
+	}
 	out := make([]ollamaChatMessage, 0, len(messages))
 	for _, msg := range messages {
 		out = append(out, l.fromKernelMessage(msg))
@@ -268,33 +261,35 @@ func (l *ollamaLLM) fromKernelMessages(messages []model.Message) []ollamaChatMes
 }
 
 func (l *ollamaLLM) fromKernelMessage(msg model.Message) ollamaChatMessage {
-	if msg.ToolResponse != nil {
-		raw, _ := json.Marshal(msg.ToolResponse.Result)
+	if resp := msg.ToolResponse(); resp != nil {
+		raw, _ := json.Marshal(resp.Result)
 		return ollamaChatMessage{
 			Role:     string(model.RoleTool),
 			Content:  string(raw),
-			ToolName: msg.ToolResponse.Name,
+			ToolName: resp.Name,
 		}
 	}
 
 	chat := ollamaChatMessage{
 		Role:     string(msg.Role),
 		Content:  msg.TextContent(),
-		Thinking: strings.TrimSpace(msg.Reasoning),
+		Thinking: strings.TrimSpace(msg.ReasoningText()),
 	}
-	if msg.Role == model.RoleUser && len(msg.ContentParts) > 0 {
+	if msg.Role == model.RoleUser {
+		contentParts := model.ContentPartsFromParts(msg.Parts)
 		chat.Content = msg.TextContent()
-		for _, part := range msg.ContentParts {
+		for _, part := range contentParts {
 			if part.Type == model.ContentPartImage && strings.TrimSpace(part.Data) != "" {
 				chat.Images = append(chat.Images, part.Data)
 			}
 		}
 	}
-	if len(msg.ToolCalls) == 0 {
+	calls := msg.ToolCalls()
+	if len(calls) == 0 {
 		return chat
 	}
-	chat.ToolCalls = make([]ollamaToolCall, 0, len(msg.ToolCalls))
-	for _, call := range msg.ToolCalls {
+	chat.ToolCalls = make([]ollamaToolCall, 0, len(calls))
+	for _, call := range calls {
 		args := strings.TrimSpace(call.Args)
 		if args == "" {
 			args = "{}"
@@ -328,20 +323,14 @@ func ollamaUsage(resp ollamaChatResponse) model.Usage {
 }
 
 func ollamaToKernelMessage(msg ollamaChatMessage) (model.Message, error) {
-	out := model.Message{
-		Role:      model.Role(msg.Role),
-		Text:      msg.Content,
-		Reasoning: msg.Thinking,
-	}
 	if len(msg.ToolCalls) == 0 {
-		return out, nil
+		return model.MessageFromAssistantParts(msg.Content, msg.Thinking, nil), nil
 	}
 	calls, err := ollamaToolCallsToKernel(msg.ToolCalls)
 	if err != nil {
 		return model.Message{}, err
 	}
-	out.ToolCalls = calls
-	return out, nil
+	return model.MessageFromAssistantParts(msg.Content, msg.Thinking, calls), nil
 }
 
 func ollamaToolCallsToKernel(calls []ollamaToolCall) ([]model.ToolCall, error) {

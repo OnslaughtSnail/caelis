@@ -15,19 +15,7 @@ func CloneEvent(ev *Event) *Event {
 }
 
 func CloneMessage(msg model.Message) model.Message {
-	cp := msg
-	if len(msg.ContentParts) > 0 {
-		cp.ContentParts = append([]model.ContentPart(nil), msg.ContentParts...)
-	}
-	if len(msg.ToolCalls) > 0 {
-		cp.ToolCalls = append([]model.ToolCall(nil), msg.ToolCalls...)
-	}
-	if msg.ToolResponse != nil {
-		resp := *msg.ToolResponse
-		resp.Result = cloneMap(msg.ToolResponse.Result)
-		cp.ToolResponse = &resp
-	}
-	return cp
+	return model.CloneMessage(msg)
 }
 
 func cloneMap(in map[string]any) map[string]any {

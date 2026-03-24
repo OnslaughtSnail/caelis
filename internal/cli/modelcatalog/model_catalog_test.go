@@ -136,6 +136,28 @@ func TestLookupModelCapabilities_Gemini(t *testing.T) {
 	}
 }
 
+func TestLookupModelCapabilities_MiniMax(t *testing.T) {
+	caps, found := LookupModelCapabilities("minimax", "MiniMax-M2.5-highspeed")
+	if !found {
+		t.Fatal("expected match for minimax model")
+	}
+	if caps.ContextWindowTokens != 204800 {
+		t.Fatalf("expected context 204800, got %d", caps.ContextWindowTokens)
+	}
+	if !caps.SupportsToolCalls {
+		t.Fatal("minimax should support tool calls")
+	}
+	if !caps.SupportsJSONOutput {
+		t.Fatal("minimax should support json output")
+	}
+	if caps.SupportsImages {
+		t.Fatal("minimax should not be treated as an image model")
+	}
+	if !caps.SupportsReasoning || caps.ReasoningMode != ReasoningModeFixed {
+		t.Fatalf("expected fixed reasoning support, got %+v", caps)
+	}
+}
+
 func TestLookupModelCapabilities_MimoPro(t *testing.T) {
 	caps, found := LookupModelCapabilities("xiaomi", "mimo-v2-pro")
 	if !found {

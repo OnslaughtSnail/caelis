@@ -102,10 +102,7 @@ func (h *runHandle) buildOverlayInvocation(baseInv *invocationContext, sub *Subm
 		}
 		allEvents = append(allEvents, session.MarkOverlay(recoveryEvent))
 	}
-	userMsg := model.Message{Role: model.RoleUser, Text: sub.Text}
-	if len(sub.ContentParts) > 0 {
-		userMsg.ContentParts = prepareUserContentParts(sub.Text, sub.ContentParts)
-	}
+	userMsg := model.MessageFromTextAndContentParts(model.RoleUser, sub.Text, prepareUserContentParts(sub.Text, sub.ContentParts))
 	allEvents = append(allEvents, session.MarkOverlay(&session.Event{
 		ID:      eventID(),
 		Time:    now(),
@@ -139,12 +136,9 @@ func (h *runHandle) emitOverlayError(err error) bool {
 		return true
 	}
 	ev := session.MarkOverlay(&session.Event{
-		ID:   eventID(),
-		Time: now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			Text: fmt.Sprintf("error: %v", err),
-		},
+		ID:      eventID(),
+		Time:    now(),
+		Message: model.NewTextMessage(model.RoleAssistant, fmt.Sprintf("error: %v", err)),
 	})
 	return h.appendOutput(ev, nil, false)
 }
@@ -194,10 +188,7 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 			return nil, false
 		}
 	}
-	userMsg := model.Message{Role: model.RoleUser, Text: sub.Text}
-	if len(sub.ContentParts) > 0 {
-		userMsg.ContentParts = prepareUserContentParts(sub.Text, sub.ContentParts)
-	}
+	userMsg := model.MessageFromTextAndContentParts(model.RoleUser, sub.Text, prepareUserContentParts(sub.Text, sub.ContentParts))
 	userEvent := &session.Event{Message: userMsg}
 	prepareEvent(h.ctx, h.sess, userEvent)
 	if err := h.runtime.store.AppendEvent(h.ctx, h.sess, userEvent); err != nil {

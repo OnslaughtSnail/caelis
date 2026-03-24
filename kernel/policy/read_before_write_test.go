@@ -68,16 +68,13 @@ func TestRequireReadBeforeWrite_AllowsWithReadEvidence(t *testing.T) {
 			{
 				ID:   "read_1",
 				Time: time.Now(),
-				Message: model.Message{
-					Role: model.RoleTool,
-					ToolResponse: &model.ToolResponse{
-						ID:   "call_read_1",
-						Name: "READ",
-						Result: map[string]any{
-							"path": target,
-						},
+				Message: model.MessageFromToolResponse(&model.ToolResponse{
+					ID:   "call_read_1",
+					Name: "READ",
+					Result: map[string]any{
+						"path": target,
 					},
-				},
+				}),
 			},
 		},
 	}
@@ -253,16 +250,13 @@ func TestRequireReadBeforeWrite_BackfillsReadIndexFromPersistedEvents(t *testing
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "read_1",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_read_1",
-				Name: "READ",
-				Result: map[string]any{
-					"path": target,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_read_1",
+			Name: "READ",
+			Result: map[string]any{
+				"path": target,
 			},
-		},
+		}),
 	}); err != nil {
 		t.Fatal(err)
 	}

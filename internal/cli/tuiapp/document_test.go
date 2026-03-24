@@ -166,8 +166,12 @@ func TestBashPanelStateTransitions(t *testing.T) {
 	if bp.Active {
 		t.Fatal("expected panel to be inactive (not receiving updates) after completion")
 	}
+	if !bp.Expanded {
+		t.Fatal("expected completed bash panel to remain visible through the collapse delay")
+	}
+	driveBashPanelCollapse(m, bp)
 	if bp.Expanded {
-		t.Fatal("expected completed bash panel to auto-collapse")
+		t.Fatal("expected completed bash panel to auto-collapse after the animation")
 	}
 	// Panel should still exist in the document (no fade/removal).
 	if m.doc.Find(bid) == nil {
@@ -285,6 +289,7 @@ func TestBashPanelFailedState(t *testing.T) {
 	if bp.State != "failed" {
 		t.Fatalf("expected failed state, got %q", bp.State)
 	}
+	driveBashPanelCollapse(m, bp)
 	view := stripModelView(m)
 	if !strings.Contains(view, "BASH fail") || strings.Contains(view, "error occurred") {
 		t.Fatalf("expected failed bash panel to collapse back to the call line, got:\n%s", view)
@@ -382,6 +387,40 @@ func TestSubagentPanelShowsToolCalls(t *testing.T) {
 	view := stripModelView(m)
 	if !strings.Contains(view, "BASH") {
 		t.Fatalf("expected child tool call BASH, got:\n%s", view)
+	}
+}
+
+func TestSubagentPanelKeepsToolResultsInChronologicalOrder(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", Agent: "self", CallID: "c1"})
+	_, _ = m.Update(tuievents.SubagentToolCallMsg{
+		SpawnID:  "s1",
+		ToolName: "LIST",
+		CallID:   "child-tool-1",
+		Args:     ".",
+	})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "s1", Stream: "assistant", Chunk: "after tool call"})
+	_, _ = m.Update(tuievents.SubagentToolCallMsg{
+		SpawnID:  "s1",
+		ToolName: "LIST",
+		CallID:   "child-tool-1",
+		Stream:   "stdout",
+		Chunk:    "listed 0 entries in .",
+		Final:    true,
+	})
+
+	view := stripModelView(m)
+	startIdx := strings.Index(view, "▸ LIST .")
+	assistantIdx := strings.Index(view, "after tool call")
+	resultIdx := strings.Index(view, "✓ LIST listed 0 entries in .")
+	if startIdx < 0 || assistantIdx < 0 || resultIdx < 0 {
+		t.Fatalf("expected start, assistant, and result lines in view, got:\n%s", view)
+	}
+	if !(startIdx < assistantIdx && assistantIdx < resultIdx) {
+		t.Fatalf("expected chronological order start < assistant < result, got:\n%s", view)
 	}
 }
 
@@ -515,7 +554,7 @@ func TestMultiplePanelsUpdateIndependently(t *testing.T) {
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "c2", Reset: true, State: "running"})
 
 	// Stream to c1 only.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		_, _ = m.Update(tuievents.ToolStreamMsg{
 			Tool: "BASH", CallID: "c1", Stream: "stdout",
 			Chunk: fmt.Sprintf("c1-line-%d\n", i),
@@ -523,7 +562,7 @@ func TestMultiplePanelsUpdateIndependently(t *testing.T) {
 	}
 
 	// Stream to c2 only.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, _ = m.Update(tuievents.ToolStreamMsg{
 			Tool: "BASH", CallID: "c2", Stream: "stdout",
 			Chunk: fmt.Sprintf("c2-line-%d\n", i),
@@ -613,7 +652,7 @@ func TestBashPanelWheelScrollUsesInternalViewport(t *testing.T) {
 
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH seq 0 7\n"})
 	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "c1", Reset: true, State: "running"})
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		_, _ = m.Update(tuievents.ToolStreamMsg{
 			Tool:   "BASH",
 			CallID: "c1",
@@ -673,7 +712,7 @@ func TestSubagentPanelWheelScrollUsesInternalViewport(t *testing.T) {
 
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
 	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", CallID: "spawn-call", Agent: "self"})
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		_, _ = m.Update(tuievents.SubagentToolCallMsg{
 			SpawnID:  "s1",
 			CallID:   fmt.Sprintf("tool-%d", i),
@@ -716,15 +755,62 @@ func TestSubagentPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelAutoCollapseCanBeReopenedFromAnchor(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", AttachTarget: "child-1", Agent: "self", CallID: "spawn-call"})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "s1", Stream: "assistant", Chunk: "child output"})
+	_, _ = m.Update(tuievents.SubagentDoneMsg{SpawnID: "s1", State: "completed"})
+
+	bid := m.subagentBlockIDs["s1"]
+	panel := m.doc.Find(bid).(*SubagentPanelBlock)
+	if !panel.Expanded {
+		t.Fatal("expected subagent panel to remain visible through the collapse delay")
+	}
+	driveSubagentPanelCollapse(m, panel)
+	if panel.Expanded {
+		t.Fatal("expected subagent panel to collapse after the animation")
+	}
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "SPAWN demo task") || strings.Contains(view, "child output") {
+		t.Fatalf("expected collapsed subagent panel to hide body content, got:\n%s", view)
+	}
+
+	headerLine := -1
+	for i, id := range m.viewportBlockIDs {
+		if tb, ok := m.doc.Find(id).(*TranscriptBlock); ok && strings.Contains(tb.Raw, "SPAWN demo task") {
+			headerLine = i
+			break
+		}
+	}
+	if headerLine < 0 {
+		t.Fatal("could not find spawn tool call anchor in viewport")
+	}
+	vy := headerLine - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+
+	if !panel.Expanded {
+		t.Fatal("expected collapsed subagent panel to reopen from the anchor")
+	}
+	view = stripModelView(m)
+	if !strings.Contains(view, "child output") {
+		t.Fatalf("expected reopened subagent panel to show content, got:\n%s", view)
+	}
+}
+
 func TestPanelWheelScrollDoesNotMoveMainViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* intro-%d\n", i)})
 	}
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
 	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", CallID: "spawn-call", Agent: "self"})
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		_, _ = m.Update(tuievents.SubagentToolCallMsg{
 			SpawnID:  "s1",
 			CallID:   fmt.Sprintf("tool-%d", i),
@@ -755,12 +841,12 @@ func TestPanelWheelScrollDoesNotMoveMainViewport(t *testing.T) {
 func TestPanelWheelAtPanelBoundaryDoesNotMoveMainViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* intro-%d\n", i)})
 	}
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
 	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", CallID: "spawn-call", Agent: "self"})
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		_, _ = m.Update(tuievents.SubagentToolCallMsg{
 			SpawnID:  "s1",
 			CallID:   fmt.Sprintf("tool-%d", i),
@@ -1279,7 +1365,7 @@ func TestPanelDoesNotDriftOnAppend(t *testing.T) {
 	doc.InsertAfter("call", panel)
 
 	// Append more content after — panel position shouldn't change.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		doc.Append(&TranscriptBlock{id: fmt.Sprintf("extra-%d", i), Raw: fmt.Sprintf("extra %d", i)})
 	}
 
@@ -1504,6 +1590,36 @@ func TestSubagentPanelStreamChunkCoalescing(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelStreamChunkCoalescingHandlesCumulativeReplay(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+
+	panel.AppendStreamChunk(SEAssistant, "我建议默认删 2 个 log 文件给你。")
+	panel.AppendStreamChunk(SEAssistant, "我建议默认删 2 个 log 文件给你。\n如果想进一步身瘦，再额外删 node_modules。")
+
+	if len(panel.Events) != 1 {
+		t.Fatalf("expected 1 assistant event, got %d", len(panel.Events))
+	}
+	want := "我建议默认删 2 个 log 文件给你。\n如果想进一步身瘦，再额外删 node_modules。"
+	if panel.Events[0].Text != want {
+		t.Fatalf("expected cumulative replay to replace existing text,\n got: %q\nwant: %q", panel.Events[0].Text, want)
+	}
+}
+
+func TestSubagentPanelStreamChunkCoalescingDeduplicatesOverlap(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+
+	panel.AppendStreamChunk(SEAssistant, "如果想进一步身瘦，再额外删")
+	panel.AppendStreamChunk(SEAssistant, "进一步身瘦，再额外删 node_modules。")
+
+	if len(panel.Events) != 1 {
+		t.Fatalf("expected 1 assistant event, got %d", len(panel.Events))
+	}
+	want := "如果想进一步身瘦，再额外删 node_modules。"
+	if panel.Events[0].Text != want {
+		t.Fatalf("expected overlap merge result,\n got: %q\nwant: %q", panel.Events[0].Text, want)
+	}
+}
+
 func TestSubagentPanelApprovalWithToolContext(t *testing.T) {
 	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
 	panel.Status = "running"
@@ -1712,13 +1828,15 @@ func TestResetClearsAnchorState(t *testing.T) {
 	m.callAnchorIndex = map[string]string{"old-call": "old-block"}
 	m.toolOutputBlockIDs = map[string]string{"k": "v"}
 	m.subagentBlockIDs = map[string]string{"s": "v"}
+	m.subagentSessions = map[string]*SubagentSessionState{"s": NewSubagentSessionState("s", "child", "self")}
+	m.subagentSessionRefs = map[string][]string{"s": {"v"}}
 
 	m.resetConversationView()
 
 	if len(m.pendingToolAnchors) != 0 {
 		t.Fatalf("expected pendingToolAnchors cleared, got %d", len(m.pendingToolAnchors))
 	}
-	if m.callAnchorIndex != nil && len(m.callAnchorIndex) != 0 {
+	if len(m.callAnchorIndex) != 0 {
 		t.Fatalf("expected callAnchorIndex cleared, got %v", m.callAnchorIndex)
 	}
 	if m.toolOutputBlockIDs != nil {
@@ -1726,6 +1844,12 @@ func TestResetClearsAnchorState(t *testing.T) {
 	}
 	if m.subagentBlockIDs != nil {
 		t.Fatal("expected subagentBlockIDs nil")
+	}
+	if m.subagentSessions != nil {
+		t.Fatal("expected subagentSessions nil")
+	}
+	if m.subagentSessionRefs != nil {
+		t.Fatal("expected subagentSessionRefs nil")
 	}
 }
 
@@ -1821,7 +1945,7 @@ func TestSubagentPanelHeightStableWhileScrolling(t *testing.T) {
 		Expanded:   true,
 		FollowTail: true,
 	}
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		b.Events = append(b.Events, SubagentEvent{
 			Kind: SEAssistant,
 			Text: fmt.Sprintf("line %02d with enough extra text to force wrapping inside the subagent panel viewport", i),
@@ -1846,7 +1970,7 @@ func TestBashPanelHeightStableWhileScrolling(t *testing.T) {
 	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
 	b := NewBashPanelBlock("BASH", "call-1")
 	b.Expanded = true
-	for i := 0; i < 18; i++ {
+	for i := range 18 {
 		b.Lines = append(b.Lines, toolOutputLine{
 			text:   fmt.Sprintf("stdout line %02d with enough extra text to overflow the bash panel width and keep wrapping stable", i),
 			stream: "stdout",

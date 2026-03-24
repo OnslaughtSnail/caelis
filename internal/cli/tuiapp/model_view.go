@@ -18,12 +18,10 @@ func (m *Model) View() tea.View {
 		return view
 	}
 
-	// Recalculate layout in case bottom section height changed.
-	vpHeight, bottomHeight := m.computeLayout()
-	if m.viewport.Height() != vpHeight {
-		m.viewport.SetHeight(vpHeight)
-		m.syncViewportContent()
-	}
+	// Compute layout; bottomHeight is needed for overlay positioning.
+	// Viewport height is reconciled in Update() via ensureViewportLayout(),
+	// so we intentionally do NOT mutate viewport state here.
+	_, bottomHeight := m.computeLayout()
 
 	var sections []string
 
@@ -60,7 +58,7 @@ func (m *Model) View() tea.View {
 	}
 
 	// 5. Composer top padding before input.
-	for i := 0; i < tuikit.ComposerPadTop; i++ {
+	for range tuikit.ComposerPadTop {
 		sections = append(sections, "")
 	}
 
@@ -68,7 +66,7 @@ func (m *Model) View() tea.View {
 	sections = append(sections, m.renderInputBar())
 
 	// 7. Composer bottom padding before footer separator.
-	for i := 0; i < tuikit.ComposerPadBottom; i++ {
+	for range tuikit.ComposerPadBottom {
 		sections = append(sections, "")
 	}
 
@@ -80,7 +78,7 @@ func (m *Model) View() tea.View {
 	sections = append(sections, m.renderStatusFooter())
 
 	// 9. Status bar bottom padding.
-	for i := 0; i < tuikit.StatusBarPadBottom; i++ {
+	for range tuikit.StatusBarPadBottom {
 		sections = append(sections, "")
 	}
 

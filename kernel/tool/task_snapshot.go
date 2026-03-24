@@ -6,6 +6,7 @@ import (
 
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
+	visiblemeta "github.com/OnslaughtSnail/caelis/kernel/tool/internal/outputmeta"
 )
 
 const outputMetaKey = "output_meta"
@@ -150,6 +151,11 @@ func CompactTaskListItem(snapshot task.Snapshot) map[string]any {
 func snapshotUIFields(snapshot task.Snapshot) map[string]any {
 	result := map[string]any{}
 	for _, key := range []string{
+		"child_session_id",
+		"delegation_id",
+		"agent",
+		"child_cwd",
+		"approval_pending",
 		"_ui_child_session_id",
 		"_ui_delegation_id",
 		"_ui_agent",
@@ -295,7 +301,9 @@ func appendSnapshotOutputMetadata(result map[string]any, snapshot task.Snapshot)
 	}
 	if raw, ok := snapshot.Result[outputMetaKey]; ok {
 		if meta := cloneAnyMap(raw); len(meta) > 0 {
-			result[outputMetaKey] = meta
+			if compacted := visiblemeta.CompactVisible(meta); len(compacted) > 0 {
+				result[outputMetaKey] = compacted
+			}
 		}
 	}
 }

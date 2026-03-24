@@ -68,12 +68,12 @@ type BashStartRequest struct {
 }
 
 type SpawnStartRequest struct {
-	Agent        string
-	Task         string
-	ContentParts []model.ContentPart
-	Yield        time.Duration
-	Timeout      time.Duration
-	Kind         Kind // defaults to KindSpawn if empty
+	Agent   string
+	Prompt  string
+	Parts   []model.Part
+	Yield   time.Duration
+	Timeout time.Duration
+	Kind    Kind // defaults to KindSpawn if empty
 }
 
 type ControlRequest struct {
@@ -133,18 +133,20 @@ type Controller interface {
 type Record struct {
 	mu sync.Mutex
 
-	ID             string
-	Kind           Kind
-	Title          string
-	State          State
-	Running        bool
-	SupportsInput  bool
-	SupportsCancel bool
-	Result         map[string]any
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	Session        SessionRef
-	Spec           map[string]any
+	ID               string
+	Kind             Kind
+	Title            string
+	State            State
+	Running          bool
+	SupportsInput    bool
+	SupportsCancel   bool
+	CleanupOnTurnEnd bool
+	Result           map[string]any
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	HeartbeatAt      time.Time
+	Session          SessionRef
+	Spec             map[string]any
 
 	StdoutCursor int64
 	StderrCursor int64
@@ -216,16 +218,17 @@ func NewRegistry(cfg RegistryConfig) *Registry {
 
 func (r *Registry) Create(kind Kind, title string, backend Controller, supportsInput, supportsCancel bool) *Record {
 	record := &Record{
-		ID:             idutil.NewTaskID(),
-		Kind:           kind,
-		Title:          strings.TrimSpace(title),
-		State:          StateRunning,
-		Running:        true,
-		SupportsInput:  supportsInput,
-		SupportsCancel: supportsCancel,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-		Backend:        backend,
+		ID:               idutil.NewTaskID(),
+		Kind:             kind,
+		Title:            strings.TrimSpace(title),
+		State:            StateRunning,
+		Running:          true,
+		SupportsInput:    supportsInput,
+		SupportsCancel:   supportsCancel,
+		CleanupOnTurnEnd: true,
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+		Backend:          backend,
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

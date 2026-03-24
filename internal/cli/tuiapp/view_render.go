@@ -143,7 +143,7 @@ func (m *Model) btwContentLines() []string {
 		rawLines = append(rawLines, m.theme.HelpHintTextStyle().Render(question), "")
 	}
 	if answer != "" {
-		for _, line := range strings.Split(answer, "\n") {
+		for line := range strings.SplitSeq(answer, "\n") {
 			rawLines = append(rawLines, m.theme.TextStyle().Render(strings.TrimRight(line, "\r")))
 		}
 	}
@@ -195,12 +195,8 @@ func (m *Model) scrollBTW(delta int) {
 	m.clampBTWScroll(total)
 	maxScroll := m.btwMaxScroll(total)
 	next := m.btwOverlay.Scroll + delta
-	if next < 0 {
-		next = 0
-	}
-	if next > maxScroll {
-		next = maxScroll
-	}
+	next = max(next, 0)
+	next = min(next, maxScroll)
 	m.btwOverlay.Scroll = next
 }
 
@@ -210,10 +206,7 @@ func (m *Model) renderBTWDrawer() string {
 	}
 	lines := m.btwContentLines()
 	m.clampBTWScroll(len(lines))
-	start := m.btwOverlay.Scroll
-	if start < 0 {
-		start = 0
-	}
+	start := max(m.btwOverlay.Scroll, 0)
 	end := minInt(len(lines), start+m.btwVisibleBudget())
 	if start > end {
 		start = end
@@ -290,10 +283,7 @@ func visiblePlanEntries(entries []planEntryState, limit int) ([]planEntryState, 
 	if limit >= 3 {
 		beforeContext = 1
 	}
-	start := anchor - beforeContext
-	if start < 0 {
-		start = 0
-	}
+	start := max(anchor-beforeContext, 0)
 	maxStart := len(entries) - limit
 	if start > maxStart {
 		start = maxStart
@@ -394,13 +384,6 @@ func (m *Model) pendingQueueHintText() string {
 	return "1 pending message"
 }
 
-func (m *Model) pendingQueueShortText() string {
-	if m.pendingQueue == nil {
-		return ""
-	}
-	return "1 queued"
-}
-
 func (m *Model) renderPendingQueueDrawer() string {
 	if m.pendingQueue == nil || m.width <= 0 {
 		return ""
@@ -417,7 +400,7 @@ func (m *Model) renderPendingQueueDrawer() string {
 	return insetRenderedBlock(strings.Join(lines, "\n"), inputHorizontalInset)
 }
 
-func (m *Model) dequeuePendingUserMessage(displayLine string) {
+func (m *Model) dequeuePendingUserMessage(_ string) {
 	if m.pendingQueue == nil {
 		return
 	}
@@ -471,10 +454,7 @@ func (m *Model) applyTextareaChrome(ta *textarea.Model) {
 	})
 	ta.SetWidth(m.composerContentWidth())
 	displayValue, _ := composeInputDisplay(ta.Value(), len([]rune(ta.Value())), m.inputAttachments)
-	height := desiredComposerRows(displayValue, "", ta.Width(), maxInputBarRows)
-	if height < tuikit.ComposerMinHeight {
-		height = tuikit.ComposerMinHeight
-	}
+	height := max(desiredComposerRows(displayValue, "", ta.Width(), maxInputBarRows), tuikit.ComposerMinHeight)
 	ta.SetHeight(height)
 }
 
@@ -749,10 +729,7 @@ func composeStyledFooter(width int, left string, right string) string {
 		}
 		return left + strings.Repeat(" ", width-leftWidth)
 	}
-	gap := width - leftWidth - rightWidth
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(width-leftWidth-rightWidth, 1)
 	return left + strings.Repeat(" ", gap) + right
 }
 
@@ -784,18 +761,13 @@ func (m *Model) renderPromptModal() string {
 	}
 	const maxVisiblePromptChoices = 8
 	m.syncPromptChoiceWindow()
-	start := m.activePrompt.scrollOffset
-	if start < 0 {
-		start = 0
-	}
-	if start > len(visible) {
-		start = len(visible)
-	}
+	start := max(m.activePrompt.scrollOffset, 0)
+	start = min(start, len(visible))
 	end := minInt(len(visible), start+maxVisiblePromptChoices)
 	window := visible[start:end]
 	maxItems := len(window)
 	lines := make([]string, 0, maxItems+1)
-	for i := 0; i < maxItems; i++ {
+	for i := range maxItems {
 		choice := window[i]
 		actualIndex := start + i
 		marker := ""
@@ -980,41 +952,13 @@ func (m *Model) promptHintText() string {
 
 func (m *Model) adjustTextareaHeight() {
 	displayValue, _ := composeInputDisplay(m.textarea.Value(), len([]rune(m.textarea.Value())), m.inputAttachments)
-	height := desiredComposerRows(displayValue, "", m.textarea.Width(), maxInputBarRows)
-	if height < tuikit.ComposerMinHeight {
-		height = tuikit.ComposerMinHeight
-	}
+	height := max(desiredComposerRows(displayValue, "", m.textarea.Width(), maxInputBarRows), tuikit.ComposerMinHeight)
 	if m.textarea.Height() != height {
 		m.textarea.SetHeight(height)
+		// Textarea height change affects bottomSectionHeight; reconcile
+		// the viewport so View() doesn't need to mutate state.
+		m.ensureViewportLayout()
 	}
-}
-
-func desiredInputRows(value string, width int, maxRows int) int {
-	if width <= 0 {
-		width = 1
-	}
-	if maxRows <= 0 {
-		maxRows = maxInputBarRows
-	}
-	if strings.TrimSpace(value) == "" {
-		return 1
-	}
-	rows := 0
-	for _, line := range strings.Split(value, "\n") {
-		wrapped := ansi.Hardwrap(line, width, true)
-		if wrapped == "" {
-			rows++
-			continue
-		}
-		rows += strings.Count(wrapped, "\n") + 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	if rows > maxRows {
-		rows = maxRows
-	}
-	return rows
 }
 
 func hardWrapDisplayLine(line string, width int) string {
@@ -1031,7 +975,7 @@ func (m *Model) renderMentionList() string {
 	}
 	maxItems := minInt(8, len(m.mentionCandidates))
 	var lines []string
-	for i := 0; i < maxItems; i++ {
+	for i := range maxItems {
 		prefix := "  "
 		if i == m.mentionIndex {
 			prefix = m.theme.PromptStyle().Render("▸ ")
@@ -1045,5 +989,9 @@ func (m *Model) renderMentionList() string {
 			fmt.Sprintf("  … and %d more", len(m.mentionCandidates)-maxItems),
 		))
 	}
-	return m.renderCompletionOverlay("Files", lines)
+	title := "Agents"
+	if m.mentionPrefix == "#" {
+		title = "Files"
+	}
+	return m.renderCompletionOverlay(title, lines)
 }

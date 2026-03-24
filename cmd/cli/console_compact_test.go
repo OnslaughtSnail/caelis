@@ -28,8 +28,8 @@ func (s stubCompactStrategy) Summarize(ctx context.Context, llm model.LLM, in ru
 type compactOnlyLLM struct{}
 
 func (l compactOnlyLLM) Name() string { return "fake" }
-func (l compactOnlyLLM) Generate(context.Context, *model.Request) iter.Seq2[*model.Response, error] {
-	return func(func(*model.Response, error) bool) {}
+func (l compactOnlyLLM) Generate(context.Context, *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(func(*model.StreamEvent, error) bool) {}
 }
 
 func TestHandleCompact_ShowsTokenDeltaAndRefreshesStatus(t *testing.T) {
@@ -50,8 +50,8 @@ func TestHandleCompact_ShowsTokenDeltaAndRefreshesStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, ev := range []*session.Event{
-		{Message: model.Message{Role: model.RoleUser, Text: strings.Repeat("user context ", 120)}},
-		{Message: model.Message{Role: model.RoleAssistant, Text: strings.Repeat("assistant context ", 120)}},
+		{Message: model.NewTextMessage(model.RoleUser, strings.Repeat("user context ", 120))},
+		{Message: model.NewTextMessage(model.RoleAssistant, strings.Repeat("assistant context ", 120))},
 	} {
 		if err := store.AppendEvent(context.Background(), sess, ev); err != nil {
 			t.Fatal(err)

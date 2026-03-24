@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -150,6 +151,52 @@ func TestCompleteSlashArgCandidates_ModelUseReturnsAliasCandidates(t *testing.T)
 	}
 	if len(got) != 1 || got[0].Value != "deepseek/deepseek-chat" {
 		t.Fatalf("unexpected alias candidates: %+v", got)
+	}
+}
+
+func TestCompleteAgentCommandCandidates_UsesSubcommands(t *testing.T) {
+	c := &cliConsole{}
+	got := c.completeAgentCommandCandidates("r", 10)
+	if len(got) != 1 || got[0].Value != "rm" {
+		t.Fatalf("unexpected agent action candidates: %+v", got)
+	}
+}
+
+func TestCompleteSlashArgCandidates_AgentAddReturnsBuiltinCandidates(t *testing.T) {
+	c := &cliConsole{}
+	got, err := c.completeSlashArgCandidates("agent add", "", 20)
+	if err != nil {
+		t.Fatalf("completeSlashArgCandidates failed: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("expected builtin agent candidates")
+	}
+	values := make([]string, 0, len(got))
+	for _, one := range got {
+		values = append(values, one.Value)
+	}
+	if !containsString(values, "codex") || !containsString(values, "copilot") {
+		t.Fatalf("expected builtin candidates to include codex and copilot, got %v", values)
+	}
+}
+
+func TestCompleteSlashArgCandidates_AgentRmReturnsConfiguredCandidates(t *testing.T) {
+	store := &appConfigStore{data: appConfig{
+		Agents: map[string]agentRecord{
+			"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}, Stability: appagents.StabilityStable},
+			"claude":  {Command: "npx", Args: []string{"-y", "@zed-industries/claude-agent-acp"}},
+		},
+	}}
+	c := &cliConsole{configStore: store}
+	got, err := c.completeSlashArgCandidates("agent rm", "", 10)
+	if err != nil {
+		t.Fatalf("completeSlashArgCandidates failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 configured agent candidates, got %d", len(got))
+	}
+	if got[0].Value != "claude" || got[1].Value != "copilot" {
+		t.Fatalf("unexpected configured agent candidates: %+v", got)
 	}
 }
 

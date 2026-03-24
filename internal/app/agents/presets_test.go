@@ -2,20 +2,25 @@ package agents
 
 import "testing"
 
-func TestLookupRegistryPreset(t *testing.T) {
-	preset, ok := LookupRegistryPreset("codex-acp")
+func TestLookupBuiltin(t *testing.T) {
+	preset, ok := LookupBuiltin("codex")
 	if !ok {
-		t.Fatal("expected codex-acp preset")
+		t.Fatal("expected codex builtin")
 	}
 	if preset.Command == "" || len(preset.Args) == 0 {
 		t.Fatalf("expected command defaults, got %+v", preset)
 	}
+	if preset.Stability != StabilityStable {
+		t.Fatalf("expected stable builtin, got %+v", preset)
+	}
 }
 
-func TestResolveDescriptor_RegistryPreset(t *testing.T) {
+func TestResolveDescriptor_CommandBackedACP(t *testing.T) {
 	desc, err := ResolveDescriptor(Descriptor{
-		ID:   "github-copilot-cli",
-		Type: TypeRegistry,
+		ID:        "copilot",
+		Transport: TransportACP,
+		Command:   "copilot",
+		Args:      []string{"--acp", "--stdio"},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	sessionstore "github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
@@ -133,6 +134,83 @@ func TestRuntime_ReconcileSession_KeepsRunningSpawnChild(t *testing.T) {
 	}
 	if gotTask.Result["progress_state"] != string(task.StateRunning) {
 		t.Fatalf("expected running progress_state, got %#v", gotTask.Result)
+	}
+}
+
+func TestRuntime_ReconcileSession_RecoversCompletedSpawnChild(t *testing.T) {
+	sessions := sessionstore.New()
+	tasks := taskstore.New()
+	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child"}
+	if _, err := sessions.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.GetOrCreate(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.ReplaceState(context.Background(), child, runStateSnapshot(RunState{
+		HasLifecycle: true,
+		Status:       RunLifecycleStatusCompleted,
+		Phase:        "done",
+		UpdatedAt:    time.Now(),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-child-final",
+		SessionID: child.ID,
+		Time:      time.Now(),
+		Message:   model.NewTextMessage(model.RoleAssistant, "done"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-spawn-complete",
+		Kind:           task.KindSpawn,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "inspect repo",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecPrompt:       "inspect repo",
+			taskSpecChildSession: "child",
+			taskSpecDelegationID: "dlg-1",
+		},
+		Result: map[string]any{
+			"child_session_id": "child",
+			"delegation_id":    "dlg-1",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := rt.ReconcileSession(context.Background(), ReconcileSessionRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "parent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 task entry, got %d", len(entries))
+	}
+	gotTask, err := tasks.Get(context.Background(), "t-spawn-complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTask.State != task.StateCompleted || gotTask.Running {
+		t.Fatalf("expected completed spawn task to be recovered, got state=%q running=%v", gotTask.State, gotTask.Running)
+	}
+	if gotTask.Result["final_result"] != "done" {
+		t.Fatalf("expected final result recovered from child session, got %#v", gotTask.Result)
 	}
 }
 
@@ -324,5 +402,86 @@ func TestRuntime_ReconcileSession_InterruptsLegacyDelegateTask(t *testing.T) {
 	}
 	if gotTask.State != task.StateInterrupted || gotTask.Running {
 		t.Fatalf("expected legacy delegate task to be interrupted, got state=%q running=%v", gotTask.State, gotTask.Running)
+	}
+}
+
+func TestRuntime_ReconcileSession_LegacySpawnSpecFallback(t *testing.T) {
+	// Old persisted spawn records stored agent and child_cwd only in Result,
+	// not in Spec. Verify reconcilation still picks them up.
+	sessions := sessionstore.New()
+	tasks := taskstore.New()
+	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child"}
+	if _, err := sessions.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.GetOrCreate(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	if err := sessions.ReplaceState(context.Background(), child, runStateSnapshot(RunState{
+		HasLifecycle: true,
+		Status:       RunLifecycleStatusRunning,
+		Phase:        "run",
+		UpdatedAt:    time.Now(),
+	})); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a legacy entry: Spec has old "task" key instead of "prompt",
+	// and agent/child_cwd are only in Result.
+	if err := tasks.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-spawn-legacy",
+		Kind:           task.KindSpawn,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "old prompt",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecLegacyPrompt: "old prompt",
+			taskSpecChildSession: "child",
+			taskSpecDelegationID: "dlg-1",
+			// No taskSpecAgent, no taskSpecChildCWD, no taskSpecTimeout — old format.
+		},
+		Result: map[string]any{
+			"child_session_id":     "child",
+			"delegation_id":        "dlg-1",
+			"_ui_agent":            "code-review",
+			"_ui_child_session_id": "child",
+			"child_cwd":            "/tmp/work",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := rt.ReconcileSession(context.Background(), ReconcileSessionRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "parent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 task entry, got %d", len(entries))
+	}
+	gotTask, err := tasks.Get(context.Background(), "t-spawn-legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTask.State != task.StateRunning || !gotTask.Running {
+		t.Fatalf("expected legacy spawn task to remain recoverable, got state=%q running=%v", gotTask.State, gotTask.Running)
+	}
+	// Verify agent and child_cwd were recovered from Result fallback.
+	if got := gotTask.Result["agent"]; got != "code-review" {
+		t.Fatalf("expected agent recovered from Result fallback, got %q", got)
+	}
+	if got := gotTask.Result["child_cwd"]; got != "/tmp/work" {
+		t.Fatalf("expected child_cwd recovered from Result fallback, got %q", got)
 	}
 }

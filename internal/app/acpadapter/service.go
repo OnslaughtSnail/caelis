@@ -35,6 +35,7 @@ type Config struct {
 	NewModel              internalacp.ModelFactory
 	AppName               string
 	UserID                string
+	DefaultAgent          string
 	WorkspaceRoot         string
 	SessionModes          []internalacp.SessionMode
 	DefaultModeID         string
@@ -61,6 +62,7 @@ type Service struct {
 	newModel               internalacp.ModelFactory
 	appName                string
 	userID                 string
+	defaultAgent           string
 	workspaceRoot          string
 	sessionModes           []internalacp.SessionMode
 	defaultModeID          string
@@ -143,6 +145,7 @@ func New(cfg Config) (*Service, error) {
 		newModel:               cfg.NewModel,
 		appName:                strings.TrimSpace(cfg.AppName),
 		userID:                 strings.TrimSpace(cfg.UserID),
+		defaultAgent:           strings.TrimSpace(cfg.DefaultAgent),
 		workspaceRoot:          workspaceRoot,
 		sessionModes:           append([]internalacp.SessionMode(nil), cfg.SessionModes...),
 		defaultModeID:          strings.TrimSpace(cfg.DefaultModeID),
@@ -492,10 +495,7 @@ func (s *Service) appendAssistantText(ctx context.Context, sessionID string, tex
 		ID:        fmt.Sprintf("ev_%d", time.Now().UnixNano()),
 		SessionID: sessionID,
 		Time:      time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			Text: text,
-		},
+		Message:   model.NewTextMessage(model.RoleAssistant, text),
 	}
 	if err := s.store.AppendEvent(ctx, s.sessionRef(sessionID), ev); err != nil {
 		return nil, err
@@ -560,6 +560,7 @@ func (s *Service) sessionService(sess *managedSession) (*sessionsvc.Service, err
 		Store:                 s.store,
 		AppName:               s.appName,
 		UserID:                s.userID,
+		DefaultAgent:          s.defaultAgent,
 		WorkspaceRoot:         s.workspaceRoot,
 		TaskRegistry:          s.taskRegistry,
 		EnablePlan:            s.enablePlan,
@@ -1231,10 +1232,14 @@ func filterImageContentParts(parts []model.ContentPart, keepImages bool) []model
 }
 
 func planEntriesFromStateEvent(ev *session.Event) []internalacp.PlanEntry {
-	if ev == nil || ev.Message.ToolResponse == nil || !strings.EqualFold(strings.TrimSpace(ev.Message.ToolResponse.Name), tool.PlanToolName) {
+	if ev == nil {
 		return nil
 	}
-	return normalizePlanEntries(ev.Message.ToolResponse.Result["entries"])
+	resp := ev.Message.ToolResponse()
+	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.PlanToolName) {
+		return nil
+	}
+	return normalizePlanEntries(resp.Result["entries"])
 }
 
 func pathWithinRoot(root string, path string) bool {

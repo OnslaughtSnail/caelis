@@ -116,11 +116,11 @@ func runHeadlessOnce(ctx context.Context, svc *sessionsvc.Service, req sessionsv
 		}
 		if eventIsPartial(ev) {
 			if eventChannel(ev) == "answer" {
-				answerPartial.WriteString(msg.Text)
+				answerPartial.WriteString(msg.TextContent())
 			}
 			continue
 		}
-		text := strings.TrimSpace(msg.Text)
+		text := strings.TrimSpace(msg.TextContent())
 		if text == "" {
 			continue
 		}

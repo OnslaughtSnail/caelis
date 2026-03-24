@@ -29,7 +29,7 @@ type fixedAgent struct{}
 func (a fixedAgent) Name() string { return "fixed" }
 func (a fixedAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "ok"}}, nil)
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "ok")}, nil)
 	}
 }
 
@@ -72,7 +72,7 @@ func (a assertReadAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Eve
 		if !foundRead {
 			a.t.Fatalf("expected runtime to inject READ tool")
 		}
-		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "ok"}}, nil)
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "ok")}, nil)
 	}
 }
 
@@ -93,10 +93,10 @@ func (a overlayInspectAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session
 			a.t.Fatalf("expected overlay context to expose FAKE_TOOL")
 		}
 		last := ctx.Events().At(ctx.Events().Len() - 1)
-		if last == nil || last.Message.Role != model.RoleUser || strings.TrimSpace(last.Message.Text) != "side question" {
+		if last == nil || last.Message.Role != model.RoleUser || strings.TrimSpace(last.Message.TextContent()) != "side question" {
 			a.t.Fatalf("expected overlay user event appended to context, got %#v", last)
 		}
-		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "overlay answer"}}, nil)
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "overlay answer")}, nil)
 	}
 }
 
@@ -121,10 +121,10 @@ func (t testSelfSpawnTool) Run(ctx context.Context, args map[string]any) (map[st
 	if !ok || manager == nil {
 		return nil, fmt.Errorf("task manager unavailable")
 	}
-	taskText, _ := args["task"].(string)
+	taskText, _ := args["prompt"].(string)
 	snapshot, err := manager.StartSpawn(ctx, task.SpawnStartRequest{
-		Task: strings.TrimSpace(taskText),
-		Kind: task.KindSpawn,
+		Prompt: strings.TrimSpace(taskText),
+		Kind:   task.KindSpawn,
 	})
 	if err != nil {
 		return nil, err
@@ -153,7 +153,7 @@ func (a overlayErrorAgent) Name() string { return "overlay-error" }
 func (a overlayErrorAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if !ctx.Overlay() {
-			yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "ok"}}, nil)
+			yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "ok")}, nil)
 			return
 		}
 		yield(nil, a.err)
@@ -203,7 +203,7 @@ func (a *blockingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 			close(a.started)
 		})
 		<-a.release
-		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}, nil)
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil)
 	}
 }
 
@@ -226,16 +226,28 @@ func (a *backgroundBashAgent) Run(ctx agent.InvocationContext) iter.Seq2[*sessio
 			return
 		}
 		a.taskID = snapshot.TaskID
-		yield(&session.Event{Message: model.Message{Role: model.RoleAssistant, Text: "scheduled"}}, nil)
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "scheduled")}, nil)
 	}
 }
 
 func (l *scriptedRuntimeLLM) Name() string { return l.name }
-func (l *scriptedRuntimeLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (l *scriptedRuntimeLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	_ = ctx
-	return func(yield func(*model.Response, error) bool) {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		resp, err := l.run(req)
-		yield(resp, err)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if resp != nil {
+			if resp.Model == "" {
+				resp.Model = l.name
+			}
+			if resp.Provider == "" {
+				resp.Provider = "test-provider"
+			}
+		}
+		yield(model.StreamEventFromResponse(resp), nil)
 	}
 }
 
@@ -245,10 +257,7 @@ func (a manyAssistantEventsAgent) Run(ctx agent.InvocationContext) iter.Seq2[*se
 	return func(yield func(*session.Event, error) bool) {
 		for i := 0; i < a.count; i++ {
 			if !yield(&session.Event{
-				Message: model.Message{
-					Role: model.RoleAssistant,
-					Text: fmt.Sprintf("msg-%04d", i),
-				},
+				Message: model.NewTextMessage(model.RoleAssistant, fmt.Sprintf("msg-%04d", i)),
 			}, nil) {
 				return
 			}
@@ -364,7 +373,7 @@ func TestRuntimeRunnerEvents_ReplaysAllDroppedDurablePages(t *testing.T) {
 		if runErr != nil {
 			t.Fatal(runErr)
 		}
-		if ev != nil && ev.Message.Role == model.RoleAssistant && strings.HasPrefix(ev.Message.Text, "msg-") {
+		if ev != nil && ev.Message.Role == model.RoleAssistant && strings.HasPrefix(ev.Message.TextContent(), "msg-") {
 			gotAssistant++
 		}
 	}
@@ -409,12 +418,13 @@ func TestRuntimeRunPreservesProvidedContentPartOrder(t *testing.T) {
 	if len(listed) == 0 || listed[0] == nil {
 		t.Fatal("expected persisted user event")
 	}
-	if got := listed[0].Message.ContentParts; len(got) != len(reqParts) {
-		t.Fatalf("expected %d content parts, got %+v", len(reqParts), got)
+	expectedParts := model.PartsFromContentParts(reqParts)
+	if got := listed[0].Message.Parts; len(got) != len(expectedParts) {
+		t.Fatalf("expected %d content parts, got %+v", len(expectedParts), got)
 	}
-	for i := range reqParts {
-		if listed[0].Message.ContentParts[i] != reqParts[i] {
-			t.Fatalf("expected content part %d to remain in place, want %+v got %+v", i, reqParts[i], listed[0].Message.ContentParts[i])
+	for i := range expectedParts {
+		if listed[0].Message.Parts[i].Kind != expectedParts[i].Kind {
+			t.Fatalf("expected content part %d kind to match, want %+v got %+v", i, expectedParts[i], listed[0].Message.Parts[i])
 		}
 	}
 }
@@ -452,14 +462,14 @@ func TestRuntimeRunPrependsInputWhenContentPartsHaveNoText(t *testing.T) {
 	if len(listed) == 0 || listed[0] == nil {
 		t.Fatal("expected persisted user event")
 	}
-	got := listed[0].Message.ContentParts
+	got := listed[0].Message.Parts
 	if len(got) != 2 {
 		t.Fatalf("expected text+image content parts, got %+v", got)
 	}
-	if got[0].Type != model.ContentPartText || got[0].Text != "what is in this image?" {
+	if got[0].Kind != model.PartKindText || got[0].Text == nil || got[0].Text.Text != "what is in this image?" {
 		t.Fatalf("expected input text prepended, got %+v", got[0])
 	}
-	if got[1] != reqParts[0] {
+	if got[1].Kind != model.PartKindMedia || got[1].Media == nil {
 		t.Fatalf("expected original image preserved, got %+v", got[1])
 	}
 }
@@ -546,7 +556,7 @@ func TestRuntime_OverlaySubmission_IsEphemeral(t *testing.T) {
 		if ev == nil || ev.Message.Role != model.RoleAssistant {
 			continue
 		}
-		if strings.TrimSpace(ev.Message.Text) == "overlay answer" {
+		if strings.TrimSpace(ev.Message.TextContent()) == "overlay answer" {
 			foundOverlay = true
 			if !session.IsOverlay(ev) {
 				t.Fatalf("expected assistant overlay event to be marked overlay")
@@ -565,7 +575,7 @@ func TestRuntime_OverlaySubmission_IsEphemeral(t *testing.T) {
 		t.Fatalf("expected overlay submission not persisted, got %d events", len(listed))
 	}
 	for _, ev := range listed {
-		if ev != nil && strings.Contains(ev.Message.Text, "side question") {
+		if ev != nil && strings.Contains(ev.Message.TextContent(), "side question") {
 			t.Fatalf("did not expect overlay question to persist: %#v", ev)
 		}
 	}
@@ -618,7 +628,7 @@ func TestRuntime_OverlaySubmission_PropagatesStandaloneFailure(t *testing.T) {
 		if ev == nil || ev.Message.Role != model.RoleAssistant {
 			continue
 		}
-		if strings.Contains(ev.Message.Text, "overlay boom") {
+		if strings.Contains(ev.Message.TextContent(), "overlay boom") {
 			t.Fatalf("expected standalone overlay failure to propagate as an error, got assistant event %#v", ev)
 		}
 	}
@@ -758,34 +768,31 @@ func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 			case model.RoleUser:
 				switch last.TextContent() {
 				case "delegate please":
-					args, _ := json.Marshal(map[string]any{"task": "child task", "yield_seconds": 0})
+					args, _ := json.Marshal(map[string]any{"prompt": "child task", "yield_seconds": 0})
 					return &model.Response{
-						Message: model.Message{
-							Role: model.RoleAssistant,
-							ToolCalls: []model.ToolCall{{
-								ID:   "call_delegate_1",
-								Name: tool.SpawnToolName,
-								Args: string(args),
-							}},
-						},
+						Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+							ID:   "call_delegate_1",
+							Name: tool.SpawnToolName,
+							Args: string(args),
+						}}, ""),
 						TurnComplete: true,
 					}, nil
 				case "child task":
 					return &model.Response{
-						Message:      model.Message{Role: model.RoleAssistant, Text: "child done"},
+						Message:      model.NewTextMessage(model.RoleAssistant, "child done"),
 						TurnComplete: true,
 					}, nil
 				}
 			case model.RoleTool:
-				if last.ToolResponse != nil && last.ToolResponse.Name == tool.SpawnToolName {
+				if last.ToolResponse() != nil && last.ToolResponse().Name == tool.SpawnToolName {
 					return &model.Response{
-						Message:      model.Message{Role: model.RoleAssistant, Text: "delegated complete"},
+						Message:      model.NewTextMessage(model.RoleAssistant, "delegated complete"),
 						TurnComplete: true,
 					}, nil
 				}
 			}
 			return &model.Response{
-				Message:      model.Message{Role: model.RoleAssistant, Text: "fallback"},
+				Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
 				TurnComplete: true,
 			}, nil
 		},
@@ -826,10 +833,16 @@ func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 	}
 	var childSessionID string
 	for _, ev := range parentStored {
-		if ev == nil || ev.Message.ToolResponse == nil || ev.Message.ToolResponse.Name != tool.SpawnToolName {
+		if ev == nil || ev.Message.ToolResponse() == nil || ev.Message.ToolResponse().Name != tool.SpawnToolName {
 			continue
 		}
-		childSessionID, _ = ev.Message.ToolResponse.Result["_ui_child_session_id"].(string)
+		childSessionID, _ = ev.Message.ToolResponse().Result["_ui_child_session_id"].(string)
+		if childSessionID == "" {
+			childSessionID, _ = ev.Message.ToolResponse().Result["child_session_id"].(string)
+		}
+		if childSessionID == "" {
+			t.Logf("spawn result payload: %#v", ev.Message.ToolResponse().Result)
+		}
 	}
 	if childSessionID == "" {
 		t.Fatal("expected delegated child session reference in parent tool response")
@@ -960,7 +973,7 @@ func TestAttachSubagentContext_DoesNotInheritTaskStreamer(t *testing.T) {
 
 func TestDelegatePreviewFromEvents_SkipsFencedCodeBlockContent(t *testing.T) {
 	events := []*session.Event{
-		{Message: model.Message{Role: model.RoleAssistant, Text: "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone."}},
+		{Message: model.NewTextMessage(model.RoleAssistant, "working...\n```text\n12\n-rw-r--r-- demo.html\n```\ndone.")},
 	}
 	got := subagentPreviewFromEvents(events)
 	if strings.Contains(got, "demo.html") || strings.Contains(got, "\n12\n") {
@@ -1151,7 +1164,7 @@ func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := newRuntimeTestLLM("fake")
-	badToolA, err := tool.NewFunction[struct{}, struct{}](
+	badToolA, err := tool.NewFunction(
 		"DUPLICATE_TOOL",
 		"duplicate-a",
 		func(ctx context.Context, args struct{}) (struct{}, error) {
@@ -1163,7 +1176,7 @@ func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	badToolB, err := tool.NewFunction[struct{}, struct{}](
+	badToolB, err := tool.NewFunction(
 		"DUPLICATE_TOOL",
 		"duplicate-b",
 		func(ctx context.Context, args struct{}) (struct{}, error) {
@@ -1363,6 +1376,65 @@ func TestDetachedSubagentStartupFailurePersistsFailedLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(state.Error, "runtime: agent is nil") {
 		t.Fatalf("expected startup failure recorded, got %+v", state)
+	}
+}
+
+func TestPrepareChildRunPreservesOriginalSpawnLineageForExistingSession(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-existing"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetOrCreate(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), child, &session.Event{
+		ID:        "ev-1",
+		SessionID: child.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "first child output"),
+		Meta: map[string]any{
+			"parent_session_id":   parent.ID,
+			"child_session_id":    child.ID,
+			"parent_tool_call_id": "call-spawn-original",
+			"parent_tool_name":    tool.SpawnToolName,
+			"delegation_id":       "dlg-original",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &runtimeSubagentRunner{
+		runtime: rt,
+		parent:  parent,
+		req: RunRequest{
+			AppName:   "app",
+			UserID:    "u",
+			Model:     newRuntimeTestLLM("fake"),
+			CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+		},
+	}
+
+	ctx := toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write")
+	_, lineage, err := runner.prepareChildRun(ctx, agent.SubagentRunRequest{
+		SessionID: child.ID,
+		Prompt:    "follow up",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lineage.ParentToolCall != "call-spawn-original" {
+		t.Fatalf("expected original spawn call id preserved, got %q", lineage.ParentToolCall)
+	}
+	if lineage.ParentToolName != tool.SpawnToolName {
+		t.Fatalf("expected original spawn tool preserved, got %q", lineage.ParentToolName)
+	}
+	if lineage.DelegationID != "dlg-original" {
+		t.Fatalf("expected original delegation id preserved, got %q", lineage.DelegationID)
 	}
 }
 

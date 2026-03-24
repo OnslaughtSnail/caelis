@@ -30,19 +30,6 @@ func normalizeTerminalMarkdown(input string) string {
 	return replaceInlineMath(output)
 }
 
-func containsInlineMath(text string) bool {
-	matches := inlineMathPattern.FindAllStringSubmatch(text, -1)
-	for _, match := range matches {
-		if len(match) < 3 {
-			continue
-		}
-		if isInlineMathBody(match[2]) {
-			return true
-		}
-	}
-	return false
-}
-
 func replaceInlineMath(text string) string {
 	indexes := inlineMathPattern.FindAllStringSubmatchIndex(text, -1)
 	if len(indexes) == 0 {

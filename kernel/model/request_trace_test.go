@@ -17,9 +17,9 @@ func (l *traceTestLLM) Name() string { return "trace-test-model" }
 
 func (l *traceTestLLM) ProviderName() string { return "trace-test-provider" }
 
-func (l *traceTestLLM) Generate(context.Context, *Request) iter.Seq2[*Response, error] {
-	return func(yield func(*Response, error) bool) {
-		yield(&Response{Message: Message{Role: RoleAssistant, Text: "ok"}, TurnComplete: true}, nil)
+func (l *traceTestLLM) Generate(context.Context, *Request) iter.Seq2[*StreamEvent, error] {
+	return func(yield func(*StreamEvent, error) bool) {
+		yield(StreamEventFromResponse(&Response{Message: NewTextMessage(RoleAssistant, "ok"), TurnComplete: true}), nil)
 	}
 }
 
@@ -33,9 +33,9 @@ func TestRequestTraceWrapperWritesOneOutboundRecord(t *testing.T) {
 	})
 	llm := WrapRequestTrace(&traceTestLLM{})
 	req := &Request{
+		Instructions: []Part{NewTextPart("system")},
 		Messages: []Message{
-			{Role: RoleSystem, Text: "system"},
-			{Role: RoleUser, Text: "hello"},
+			NewTextMessage(RoleUser, "hello"),
 		},
 		Stream: true,
 		Reasoning: ReasoningConfig{
@@ -63,10 +63,13 @@ func TestRequestTraceWrapperWritesOneOutboundRecord(t *testing.T) {
 	if record.Model != "trace-test-model" || record.Provider != "trace-test-provider" {
 		t.Fatalf("unexpected trace model metadata: %+v", record)
 	}
-	if len(record.Messages) != 2 || record.Messages[1].TextContent() != "hello" {
+	if len(record.Instructions) != 1 || record.Instructions[0].Text.Text != "system" {
+		t.Fatalf("unexpected traced instructions: %+v", record.Instructions)
+	}
+	if len(record.Messages) != 1 || record.Messages[0].TextContent() != "hello" {
 		t.Fatalf("unexpected traced messages: %+v", record.Messages)
 	}
-	if !record.Stream || record.Reasoning.Effort != "high" {
+	if record.Reasoning.Effort != "high" {
 		t.Fatalf("unexpected trace request flags: %+v", record)
 	}
 	var extra RequestTraceRecord

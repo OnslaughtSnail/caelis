@@ -157,17 +157,35 @@ func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) 
 		entry.State = task.StateRunning
 		entry.Running = true
 	} else {
-		entry.State = runtimeTaskState(state.Status)
+		entry.State = runtimeTaskStateName(string(state.Status))
 		entry.Running = entry.State == task.StateRunning || entry.State == task.StateWaitingApproval
 	}
 	entry.UpdatedAt = time.Now()
+	entry.HeartbeatAt = time.Now()
 	if entry.Result == nil {
 		entry.Result = map[string]any{}
 	}
+	entry.Result["child_session_id"] = childSessionID
 	entry.Result["_ui_child_session_id"] = childSessionID
-	if delegationID := strings.TrimSpace(stringValue(entry.Spec, "delegation_id")); delegationID != "" {
+	if delegationID := strings.TrimSpace(stringValue(entry.Spec, taskSpecDelegationID)); delegationID != "" {
+		entry.Result["delegation_id"] = delegationID
 		entry.Result["_ui_delegation_id"] = delegationID
 	}
+	agentName := strings.TrimSpace(stringValue(entry.Spec, taskSpecAgent))
+	if agentName == "" {
+		agentName = strings.TrimSpace(stringValue(entry.Result, "agent"))
+	}
+	if agentName == "" {
+		agentName = strings.TrimSpace(stringValue(entry.Result, "_ui_agent"))
+	}
+	if agentName != "" {
+		entry.Result["agent"] = agentName
+		entry.Result["_ui_agent"] = agentName
+	}
+	if childCWD := strings.TrimSpace(stringValueFallback(entry.Spec, taskSpecChildCWD, entry.Result)); childCWD != "" {
+		entry.Result["child_cwd"] = childCWD
+	}
+	entry.Result["state"] = string(entry.State)
 	entry.Result["progress_state"] = string(entry.State)
 	if entry.State == task.StateWaitingApproval {
 		entry.Result["approval_pending"] = true
@@ -179,8 +197,12 @@ func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) 
 	if !entry.Running && assistant != "" {
 		entry.Result["final_result"] = assistant
 		entry.Result["final_summary"] = assistant
+	} else {
+		delete(entry.Result, "final_result")
+		delete(entry.Result, "final_summary")
 	}
-	entry.HeartbeatAt = time.Now()
+	delete(entry.Result, "interrupted")
+	delete(entry.Result, "error")
 	if err := r.taskStore.Upsert(ctx, task.CloneEntry(entry)); err != nil {
 		return nil, err
 	}
@@ -203,6 +225,7 @@ func (r *Runtime) markTaskInterrupted(ctx context.Context, entry *task.Entry, re
 	}
 	entry.Result["interrupted"] = true
 	entry.Result["state"] = string(entry.State)
+	entry.Result["progress_state"] = string(entry.State)
 	if err := r.taskStore.Upsert(ctx, task.CloneEntry(entry)); err != nil {
 		return nil, err
 	}
@@ -231,6 +254,20 @@ func stringValue(values map[string]any, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(fmt.Sprint(raw))
+}
+
+// stringValueFallback looks up key in primary, then in fallbacks (maps and
+// alternate keys). Used for backward-compatible reads of renamed spec keys.
+func stringValueFallback(primary map[string]any, key string, fallbacks ...map[string]any) string {
+	if v := stringValue(primary, key); v != "" {
+		return v
+	}
+	for _, m := range fallbacks {
+		if v := stringValue(m, key); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func boolValue(values map[string]any, key string) bool {

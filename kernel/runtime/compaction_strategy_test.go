@@ -43,18 +43,18 @@ func TestRuntime_Compact_UsesWindowEventsAndCustomStrategy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	appendEvent(&session.Event{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old user"}})
-	appendEvent(&session.Event{ID: "old_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "old assistant"}})
+	appendEvent(&session.Event{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old user")})
+	appendEvent(&session.Event{ID: "old_assistant", Message: model.NewTextMessage(model.RoleAssistant, "old assistant")})
 	appendEvent(&session.Event{
 		ID:      "compact_1",
-		Message: model.Message{Role: model.RoleSystem, Text: "summary 1"},
+		Message: model.NewTextMessage(model.RoleSystem, "summary 1"),
 		Meta: map[string]any{
 			metaKind: metaKindCompaction,
 		},
 	})
-	appendEvent(&session.Event{ID: "new_user_1", Message: model.Message{Role: model.RoleUser, Text: "new user 1"}})
-	appendEvent(&session.Event{ID: "new_assistant_1", Message: model.Message{Role: model.RoleAssistant, Text: "new assistant 1"}})
-	appendEvent(&session.Event{ID: "new_user_2", Message: model.Message{Role: model.RoleUser, Text: "new user 2"}})
+	appendEvent(&session.Event{ID: "new_user_1", Message: model.NewTextMessage(model.RoleUser, "new user 1")})
+	appendEvent(&session.Event{ID: "new_assistant_1", Message: model.NewTextMessage(model.RoleAssistant, "new assistant 1")})
+	appendEvent(&session.Event{ID: "new_user_2", Message: model.NewTextMessage(model.RoleUser, "new user 2")})
 
 	strategy := &captureCompactionStrategy{text: "custom summary"}
 	rt, err := New(Config{
@@ -82,8 +82,8 @@ func TestRuntime_Compact_UsesWindowEventsAndCustomStrategy(t *testing.T) {
 	if ev.Message.Role != model.RoleUser {
 		t.Fatalf("expected compaction role=user, got %q", ev.Message.Role)
 	}
-	if !strings.Contains(ev.Message.Text, "custom summary") {
-		t.Fatalf("expected custom summary body in compaction text, got %q", ev.Message.Text)
+	if !strings.Contains(ev.Message.TextContent(), "custom summary") {
+		t.Fatalf("expected custom summary body in compaction text, got %q", ev.Message.TextContent())
 	}
 	if strategy.calls != 1 {
 		t.Fatalf("expected strategy called once, got %d", strategy.calls)
@@ -110,8 +110,8 @@ func TestRuntime_Compact_UsesCustomSummaryFormatter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	appendEvent(&session.Event{ID: "new_user_1", Message: model.Message{Role: model.RoleUser, Text: "new user 1"}})
-	appendEvent(&session.Event{ID: "new_assistant_1", Message: model.Message{Role: model.RoleAssistant, Text: "new assistant 1"}})
+	appendEvent(&session.Event{ID: "new_user_1", Message: model.NewTextMessage(model.RoleUser, "new user 1")})
+	appendEvent(&session.Event{ID: "new_assistant_1", Message: model.NewTextMessage(model.RoleAssistant, "new assistant 1")})
 
 	strategy := &captureCompactionStrategy{text: "custom summary"}
 	rt, err := New(Config{
@@ -143,7 +143,7 @@ func TestRuntime_Compact_UsesCustomSummaryFormatter(t *testing.T) {
 	if ev == nil {
 		t.Fatal("expected compaction event")
 	}
-	if !strings.HasPrefix(ev.Message.Text, "CHECKPOINT:\n\n") {
-		t.Fatalf("expected formatter prefix, got %q", ev.Message.Text)
+	if !strings.HasPrefix(ev.Message.TextContent(), "CHECKPOINT:\n\n") {
+		t.Fatalf("expected formatter prefix, got %q", ev.Message.TextContent())
 	}
 }

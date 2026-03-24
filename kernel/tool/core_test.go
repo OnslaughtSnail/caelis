@@ -11,7 +11,7 @@ import (
 )
 
 func TestEnsureCoreTools_AddRead(t *testing.T) {
-	echoTool, err := NewFunction[struct{}, struct{}]("echo", "echo", func(ctx context.Context, args struct{}) (struct{}, error) {
+	echoTool, err := NewFunction("echo", "echo", func(ctx context.Context, args struct{}) (struct{}, error) {
 		_ = ctx
 		_ = args
 		return struct{}{}, nil
@@ -89,7 +89,7 @@ func TestEnsureCoreTools_AddKernelCoreTools(t *testing.T) {
 }
 
 func TestEnsureCoreTools_RejectsReservedNames(t *testing.T) {
-	readTool, err := NewFunction[struct{}, struct{}](ReadToolName, "shadow read", func(ctx context.Context, args struct{}) (struct{}, error) {
+	readTool, err := NewFunction(ReadToolName, "shadow read", func(ctx context.Context, args struct{}) (struct{}, error) {
 		_ = ctx
 		_ = args
 		return struct{}{}, nil

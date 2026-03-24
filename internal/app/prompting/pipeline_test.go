@@ -7,7 +7,7 @@ import (
 
 func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 	result, err := Assemble(AssembleSpec{
-		IdentityPrompt:        "# Identity\n\nKernel identity rule.",
+		IdentityPrompt:        "## Identity\n\nKernel identity rule.",
 		IdentitySource:        "identity.md",
 		GlobalAgentsPrompt:    "# Global\n\nGlobal rule.",
 		GlobalAgentsSource:    "agents.md",
@@ -15,18 +15,28 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 		WorkspaceAgentsSource: "workspace/AGENTS.md",
 		Additional: []PromptFragment{
 			{
+				Kind:    PromptFragmentKindSystem,
 				Stage:   "runtime_context",
 				Title:   "Runtime Context",
 				Source:  "runtime",
 				Content: "## Runtime Execution\n- permission_mode=default sandbox_type=seatbelt",
 			},
 			{
+				Kind:    PromptFragmentKindUser,
 				Stage:   "user_custom",
 				Title:   "User Custom Instructions",
 				Source:  "user.md",
 				Content: "# User\n\nLong lived preferences.\n\n## Session Overrides\n\nSession says: be concise.",
 			},
 			{
+				Kind:    PromptFragmentKindContext,
+				Stage:   "workspace_context",
+				Title:   "Environment Context",
+				Source:  "runtime",
+				Content: "<environment_context>\n  <cwd>/tmp/demo</cwd>\n</environment_context>",
+			},
+			{
+				Kind:    PromptFragmentKindSystem,
 				Stage:   "experimental_lsp",
 				Title:   "Experimental LSP Routing",
 				Source:  "cli:lsp",
@@ -39,55 +49,58 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
 	}
+
 	text := result.Prompt
 	for _, required := range []string{
-		"Priority rule: earlier sections override later sections.",
-		"# Identity",
+		"<system_instructions>",
+		"</system_instructions>",
+		"<user_custom_instructions>",
+		"</user_custom_instructions>",
+		"Kernel identity rule.",
+		"## Runtime Execution",
+		"Use LSP_SYMBOLS first.",
+		"Session overrides workspace instructions, and workspace instructions override global instructions on conflict.",
 		"# Global",
 		"# Workspace",
-		"## Runtime Execution",
 		"# User",
-		"Use LSP_SYMBOLS first.",
-		"Session says: be concise.",
+		"<environment_context>",
 		"Skills Metadata (auto-loaded, all active):",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("assembled prompt missing %q:\n%s", required, text)
 		}
 	}
-
+	if strings.Contains(text, "Priority rule: earlier sections override later sections.") {
+		t.Fatalf("did not expect legacy priority header:\n%s", text)
+	}
 	if strings.Contains(text, "source: ") {
 		t.Fatalf("did not expect source metadata in assembled prompt:\n%s", text)
 	}
 
-	idxIdentity := strings.Index(text, "# Identity")
-	idxGlobal := strings.Index(text, "# Global")
-	idxWorkspace := strings.Index(text, "# Workspace")
-	idxRuntime := strings.Index(text, "## Runtime Execution")
-	idxUser := strings.Index(text, "# User")
-	idxLSP := strings.Index(text, "Use LSP_SYMBOLS first.")
+	idxSystem := strings.Index(text, "<system_instructions>")
+	idxUser := strings.Index(text, "<user_custom_instructions>")
+	idxContext := strings.Index(text, "<environment_context>")
 	idxSkills := strings.Index(text, "Skills Metadata (auto-loaded, all active):")
-	if !(idxIdentity < idxGlobal &&
-		idxGlobal < idxWorkspace &&
-		idxWorkspace < idxRuntime &&
-		idxRuntime < idxUser &&
-		idxUser < idxLSP &&
-		idxLSP < idxSkills) {
-		t.Fatalf("unexpected section order: identity=%d global=%d workspace=%d runtime=%d user=%d lsp=%d skills=%d",
-			idxIdentity, idxGlobal, idxWorkspace, idxRuntime, idxUser, idxLSP, idxSkills)
+	if !(idxSystem >= 0 && idxSystem < idxUser && idxUser < idxContext && idxContext < idxSkills) {
+		t.Fatalf("unexpected section order: system=%d user=%d context=%d skills=%d", idxSystem, idxUser, idxContext, idxSkills)
 	}
 }
 
 func TestAssembleSkipsOptionalAdditionalFragmentsWhenEmpty(t *testing.T) {
 	result, err := Assemble(AssembleSpec{
-		IdentityPrompt:     "identity",
-		GlobalAgentsPrompt: "global",
+		IdentityPrompt: "identity",
 	})
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
 	}
 	if strings.Contains(result.Prompt, "Experimental LSP Routing") {
 		t.Fatalf("did not expect optional fragment section:\n%s", result.Prompt)
+	}
+	if !strings.Contains(result.Prompt, "<system_instructions>") {
+		t.Fatalf("expected system wrapper:\n%s", result.Prompt)
+	}
+	if strings.Contains(result.Prompt, "<user_custom_instructions>") {
+		t.Fatalf("did not expect empty user wrapper:\n%s", result.Prompt)
 	}
 }
 
@@ -96,7 +109,7 @@ func TestAssembleHandlesEmptyInputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble failed: %v", err)
 	}
-	if !strings.Contains(result.Prompt, "Priority rule: earlier sections override later sections.") {
-		t.Fatalf("expected prompt header in empty assemble output, got:\n%s", result.Prompt)
+	if got := strings.TrimSpace(result.Prompt); got != "" {
+		t.Fatalf("expected empty prompt, got:\n%s", got)
 	}
 }

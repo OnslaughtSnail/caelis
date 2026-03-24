@@ -26,6 +26,15 @@ const inputHorizontalInset = tuikit.InputInset
 const paletteAnimationInterval = 16 * time.Millisecond
 const paletteAnimationStep = 3
 const systemHintDuration = 1800 * time.Millisecond
+const streamSmoothingTickIntervalDefault = 16 * time.Millisecond
+const streamSmoothingWarmDelayDefault = 40 * time.Millisecond
+const streamSmoothingTargetLagDefault = 160 * time.Millisecond
+const streamSmoothingNormalCPSDefault = 68.0
+const streamSmoothingCatchupCPSDefault = 128.0
+const streamSmoothingNormalMaxPerFrameDefault = 5
+const streamSmoothingCatchupMaxPerFrameDefault = 12
+const inlinePanelMinVisibleDuration = 600 * time.Millisecond
+const inlinePanelCollapseDuration = 180 * time.Millisecond
 
 type hintEntry struct {
 	id             uint64
@@ -38,7 +47,7 @@ var runningSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 
 var runningCarouselLines = []string{
 	"Send follow-up guidance while the current run is still active.",
-	"Use @path to anchor the model on exact files.",
+	"Use #path to anchor the model on exact files.",
 	"/model can switch both model and reasoning level.",
 	"Press Esc to interrupt, Enter to submit another message.",
 	"Review the latest tool output before sending follow-up guidance.",
@@ -64,28 +73,38 @@ type Diagnostics struct {
 }
 
 type Config struct {
-	Version             string
-	Workspace           string
-	ModelAlias          string
-	ShowWelcomeCard     bool
-	InitialLogs         []string
-	Commands            []string
-	Wizards             []WizardDef
-	ExecuteLine         func(Submission) tuievents.TaskResultMsg
-	CancelRunning       func() bool
-	ToggleMode          func() (string, error)
-	ModeLabel           func() string
-	RefreshStatus       func() (string, string)
-	MentionComplete     func(string, int) ([]string, error)
-	SkillComplete       func(string, int) ([]string, error)
-	ResumeComplete      func(string, int) ([]ResumeCandidate, error)
-	SlashArgComplete    func(command string, query string, limit int) ([]SlashArgCandidate, error)
-	ReadClipboardText   func() (string, error)
-	WriteClipboardText  func(string) error
-	PasteClipboardImage func() ([]string, string, error)
-	ClearAttachments    func() []string
-	SetAttachments      func([]string) []string
-	OnDiagnostics       func(Diagnostics)
+	Version              string
+	Workspace            string
+	ModelAlias           string
+	ShowWelcomeCard      bool
+	InitialLogs          []string
+	Commands             []string
+	Wizards              []WizardDef
+	ExecuteLine          func(Submission) tuievents.TaskResultMsg
+	CancelRunning        func() bool
+	ToggleMode           func() (string, error)
+	ModeLabel            func() string
+	RefreshStatus        func() (string, string)
+	MentionComplete      func(string, int) ([]string, error)
+	FileComplete         func(string, int) ([]string, error)
+	SkillComplete        func(string, int) ([]string, error)
+	ResumeComplete       func(string, int) ([]ResumeCandidate, error)
+	SlashArgComplete     func(command string, query string, limit int) ([]SlashArgCandidate, error)
+	ReadClipboardText    func() (string, error)
+	WriteClipboardText   func(string) error
+	PasteClipboardImage  func() ([]string, string, error)
+	ClearAttachments     func() []string
+	SetAttachments       func([]string) []string
+	OnDiagnostics        func(Diagnostics)
+	FrameBatchMainStream bool
+	StreamTickInterval   time.Duration
+	StreamWarmDelay      time.Duration
+	StreamNormalCPS      float64
+	StreamCatchupCPS     float64
+	StreamTargetLag      time.Duration
+	StreamThreshold      int
+	StreamNormalMaxTick  int
+	StreamCatchupMaxTick int
 }
 
 type ResumeCandidate struct {
@@ -108,6 +127,31 @@ type commandItem struct {
 func (i commandItem) Title() string       { return "/" + i.name }
 func (i commandItem) Description() string { return "Run slash command " + i.name }
 func (i commandItem) FilterValue() string { return i.name }
+
+type streamSmoothingState struct {
+	targetKind   string
+	streamKind   string
+	sessionKey   string
+	actor        string
+	pending      []string
+	firstSeen    time.Time
+	firstPaint   time.Time
+	pendingSince time.Time
+	lastTick     time.Time
+	budget       float64
+	upstreamDone bool
+	rendered     int
+}
+
+type streamPlaybackMetrics struct {
+	FirstByteLatency     time.Duration
+	BacklogRunes         int
+	MaxBacklogRunes      int
+	LastFrameAppendRunes int
+	LastFrameRenderCost  time.Duration
+	LastFrameAt          time.Time
+	Frames               uint64
+}
 
 type promptState struct {
 	title              string
@@ -159,21 +203,6 @@ type inputAttachment struct {
 	Offset int
 }
 
-// assistantBlockState is kept only for the test migration period.
-// New code uses AssistantBlock / ReasoningBlock in Document.
-type assistantBlockState struct {
-	start int
-	end   int
-	raw   string
-}
-
-// diffBlockState is kept only for the test migration period.
-type diffBlockState struct {
-	start int
-	end   int
-	msg   tuievents.DiffBlockMsg
-}
-
 type activityBlockKind string
 
 const (
@@ -193,8 +222,6 @@ type activityEntry struct {
 
 type foldedActivityBlockState struct {
 	kind      activityBlockKind
-	start     int
-	end       int
 	active    bool
 	finalized bool
 	entries   []activityEntry
@@ -245,13 +272,19 @@ type Model struct {
 	doc *Document
 
 	// Active block tracking IDs (empty string means no active block).
-	activeAssistantID string
-	activeReasoningID string
-	activeActivityID  string
+	activeAssistantID    string
+	activeAssistantActor string
+	activeReasoningID    string
+	activeReasoningActor string
+	activeActivityID     string
 
 	// Maps external keys to doc block IDs.
-	toolOutputBlockIDs map[string]string
-	subagentBlockIDs   map[string]string
+	toolOutputBlockIDs             map[string]string
+	subagentBlockIDs               map[string]string
+	subagentSessions               map[string]*SubagentSessionState
+	subagentSessionRefs            map[string][]string
+	participantTurnIDs             map[string]string
+	activeParticipantTurnSessionID string
 
 	// pendingToolAnchors tracks tool-style TranscriptBlocks ("▸ BASH ...",
 	// "▸ SPAWN ...") that haven't yet been claimed by a panel. FIFO order.
@@ -332,4 +365,12 @@ type Model struct {
 	ctrlCArmed  bool
 	lastCtrlCAt time.Time
 	ctrlCArmSeq uint64
+
+	streamSmoothing              map[string]*streamSmoothingState
+	streamSmoothingTickScheduled bool
+	panelAnimationTickScheduled  bool
+	streamPlayback               streamPlaybackMetrics
+	lastViewportContent          string
+	viewportSyncDepth            int
+	viewportDirty                bool
 }

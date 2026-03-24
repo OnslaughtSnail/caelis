@@ -14,18 +14,18 @@ func TestEventTypeOf_Inference(t *testing.T) {
 	}{
 		{
 			name: "conversation",
-			ev:   &Event{Message: model.Message{Role: model.RoleUser, Text: "hi"}},
+			ev:   &Event{Message: model.NewTextMessage(model.RoleUser, "hi")},
 			want: EventTypeConversation,
 		},
 		{
 			name: "system message",
-			ev:   &Event{Message: model.Message{Role: model.RoleSystem, Text: "internal note"}},
+			ev:   &Event{Message: model.NewTextMessage(model.RoleSystem, "internal note")},
 			want: EventTypeSystemMessage,
 		},
 		{
 			name: "partial answer",
 			ev: &Event{
-				Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+				Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 				Meta:    map[string]any{"partial": true, "channel": "answer"},
 			},
 			want: EventTypePartialAnswer,
@@ -33,7 +33,7 @@ func TestEventTypeOf_Inference(t *testing.T) {
 		{
 			name: "partial reasoning",
 			ev: &Event{
-				Message: model.Message{Role: model.RoleAssistant, Reasoning: "thinking"},
+				Message: model.NewReasoningMessage(model.RoleAssistant, "thinking", model.ReasoningVisibilityVisible),
 				Meta:    map[string]any{"partial": true, "channel": "reasoning"},
 			},
 			want: EventTypePartialReasoning,
@@ -41,14 +41,14 @@ func TestEventTypeOf_Inference(t *testing.T) {
 		{
 			name: "overlay",
 			ev: MarkOverlay(&Event{
-				Message: model.Message{Role: model.RoleAssistant, Text: "side answer"},
+				Message: model.NewTextMessage(model.RoleAssistant, "side answer"),
 			}),
 			want: EventTypeOverlay,
 		},
 		{
 			name: "overlay partial answer",
 			ev: MarkOverlay(&Event{
-				Message: model.Message{Role: model.RoleAssistant, Text: "side chunk"},
+				Message: model.NewTextMessage(model.RoleAssistant, "side chunk"),
 				Meta:    map[string]any{"partial": true, "channel": "answer"},
 			}),
 			want: EventTypeOverlayPartialAnswer,
@@ -56,7 +56,7 @@ func TestEventTypeOf_Inference(t *testing.T) {
 		{
 			name: "overlay partial reasoning",
 			ev: MarkOverlay(&Event{
-				Message: model.Message{Role: model.RoleAssistant, Reasoning: "side thinking"},
+				Message: model.NewReasoningMessage(model.RoleAssistant, "side thinking", model.ReasoningVisibilityVisible),
 				Meta:    map[string]any{"partial": true, "channel": "reasoning"},
 			}),
 			want: EventTypeOverlayPartialReasoning,
@@ -77,7 +77,7 @@ func TestEventTypeOf_Inference(t *testing.T) {
 		{
 			name: "compaction",
 			ev: &Event{
-				Message: model.Message{Role: model.RoleUser, Text: "summary"},
+				Message: model.NewTextMessage(model.RoleUser, "summary"),
 				Meta:    map[string]any{"kind": "compaction"},
 			},
 			want: EventTypeCompaction,
@@ -122,7 +122,7 @@ func TestEventTypeOf_Inference(t *testing.T) {
 
 func TestEnsureEventType_AnnotatesLegacyEvent(t *testing.T) {
 	ev := &Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 		Meta:    map[string]any{"partial": true, "channel": "answer"},
 	}
 

@@ -34,6 +34,37 @@ func TestSummarizeToolResponse_ReadTruncatedReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolArgs_ACPTitleUsesFriendlySuffix(t *testing.T) {
+	got := summarizeToolArgs("LIST", map[string]any{
+		"_acp_title": "LIST /tmp/demo",
+		"cwd":        "/tmp/demo",
+		"command":    "/bin/zsh -lc ls -la",
+	})
+	if got != "/tmp/demo" {
+		t.Fatalf("expected ACP title suffix summary, got %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_ACPTransportFallsBackToCommand(t *testing.T) {
+	got := summarizeToolArgs("RUN", map[string]any{
+		"command": "/bin/zsh -lc du -sh node_modules",
+		"cwd":     "/tmp/demo",
+	})
+	if !strings.Contains(got, "du -sh node_modules") {
+		t.Fatalf("expected ACP command summary, got %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_ACPFormattedOutputWins(t *testing.T) {
+	got := summarizeToolResponse("TOOL", map[string]any{
+		"formatted_output": "listed 0 entries in .",
+		"stdout":           "too noisy",
+	})
+	if got != "listed 0 entries in ." {
+		t.Fatalf("expected formatted_output summary, got %q", got)
+	}
+}
+
 func TestSummarizeToolResponse_BashErrorPrefersErrorOverMissingExitCode(t *testing.T) {
 	got := summarizeToolResponse("BASH", map[string]any{
 		"error": "tool: BASH failed (route=sandbox): tool: sandbox runner is unavailable",
@@ -137,7 +168,7 @@ func TestSummarizeToolResponse_SpawnRunningShowsYieldOnly(t *testing.T) {
 		"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
 		"result":  "subagent is running",
 	}, map[string]any{
-		"task":          "inspect repo",
+		"prompt":        "inspect repo",
 		"yield_time_ms": 30000,
 	})
 	if !strings.Contains(got, "task yielded before completion") {
@@ -174,13 +205,32 @@ func TestSummarizeToolArgs_BashOmitsCommandWrapper(t *testing.T) {
 
 func TestSummarizeToolArgs_SpawnOmitsTaskWrapper(t *testing.T) {
 	got := summarizeToolArgs("SPAWN", map[string]any{
-		"task": "sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"This task simulated a long-running delegate with a deliberately verbose payload for summary truncation\"; python3 -c \"print('tail marker')\"",
+		"prompt": "sleep 8; echo \"Task 1 completed at $(date)\" > task1_result.txt; echo \"This task simulated a long-running delegate with a deliberately verbose payload for summary truncation\"; python3 -c \"print('tail marker')\"",
 	})
 	if strings.Contains(got, "{task=") {
 		t.Fatalf("expected raw spawn task text without wrapper, got %q", got)
 	}
 	if !strings.Contains(got, "sleep 8;") || !strings.Contains(got, "tail marker") || !strings.Contains(got, "deliberately verbose payload") {
 		t.Fatalf("expected spawn summary to keep full normalized text for display-layer truncation, got %q", got)
+	}
+}
+
+func TestFormatToolCallSummary_SpawnIncludesAgent(t *testing.T) {
+	got := formatToolCallSummary(nil, "SPAWN", map[string]any{
+		"agent":  "codex",
+		"prompt": "请计算1+1并返回结果",
+	}, "")
+	if got != "[codex] 请计算1+1并返回结果" {
+		t.Fatalf("unexpected spawn call summary: %q", got)
+	}
+}
+
+func TestFormatToolCallSummary_SpawnFallsBackToDefaultAgent(t *testing.T) {
+	got := formatToolCallSummary(nil, "SPAWN", map[string]any{
+		"prompt": "请计算1+1并返回结果",
+	}, "copilot")
+	if got != "[copilot] 请计算1+1并返回结果" {
+		t.Fatalf("unexpected spawn call summary with default agent: %q", got)
 	}
 }
 
@@ -340,31 +390,25 @@ func TestPrintEvent_TaskResponseRendersFriendlyLine(t *testing.T) {
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
 	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{
-					ID:   "call_task_1",
-					Name: "TASK",
-					Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
-				},
-			},
-		},
-	}, state)
-	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{
 				ID:   "call_task_1",
 				Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-1234567890ab",
-					"state":   "running",
-					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
-					"result":  "line-1\nline-2",
-				},
+				Args: `{"action":"wait","task_id":"t-1234567890ab","yield_time_ms":5000}`,
 			},
-		},
+		}, ""),
+	}, state)
+	printEvent(&session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_1",
+			Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-1234567890ab",
+				"state":   "running",
+				"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+				"result":  "line-1\nline-2",
+			},
+		}),
 	}, state)
 	rendered := out.String()
 	if !strings.Contains(rendered, "▸ WAIT 5 s") {
@@ -385,30 +429,24 @@ func TestPrintEvent_TaskResponseWithoutYieldUsesDefaultFriendlyWait(t *testing.T
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
 	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{
-					ID:   "call_task_2",
-					Name: "TASK",
-					Args: `{"action":"wait","task_id":"t-1234567890ab"}`,
-				},
-			},
-		},
-	}, state)
-	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{
 				ID:   "call_task_2",
 				Name: "TASK",
-				Result: map[string]any{
-					"task_id": "t-1234567890ab",
-					"state":   "running",
-					"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
-				},
+				Args: `{"action":"wait","task_id":"t-1234567890ab"}`,
 			},
-		},
+		}, ""),
+	}, state)
+	printEvent(&session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_task_2",
+			Name: "TASK",
+			Result: map[string]any{
+				"task_id": "t-1234567890ab",
+				"state":   "running",
+				"msg":     "task yielded before completion; use TASK with task_id t-1234567890ab",
+			},
+		}),
 	}, state)
 	rendered := out.String()
 	if !strings.Contains(rendered, "▸ WAIT 5 s") || !strings.Contains(rendered, "✓ WAITED task yielded before completion") {
@@ -423,13 +461,10 @@ func TestPrintEvent_TaskStatusAndCancelHideRawArgs(t *testing.T) {
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
 	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{ID: "call_task_status", Name: "TASK", Args: `{"action":"status","task_id":"t-1234567890ab"}`},
-				{ID: "call_task_cancel", Name: "TASK", Args: `{"action":"cancel","task_id":"t-1234567890ab"}`},
-			},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_task_status", Name: "TASK", Args: `{"action":"status","task_id":"t-1234567890ab"}`},
+			{ID: "call_task_cancel", Name: "TASK", Args: `{"action":"cancel","task_id":"t-1234567890ab"}`},
+		}, ""),
 	}, state)
 	rendered := out.String()
 	if !strings.Contains(rendered, "▸ CHECK") || !strings.Contains(rendered, "▸ CANCEL") {
@@ -491,31 +526,25 @@ func TestPrintEvent_PatchResponseUsesRecordedToolCallArgs(t *testing.T) {
 		pendingToolCalls: map[string]toolCallSnapshot{},
 	}
 	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{
-					ID:   "call_1",
-					Name: "PATCH",
-					Args: `{"path":"a.txt","old":"alpha","new":"beta"}`,
-				},
-			},
-		},
-	}, state)
-	printEvent(&session.Event{
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{
 				ID:   "call_1",
 				Name: "PATCH",
-				Result: map[string]any{
-					"path":      "a.txt",
-					"replaced":  1,
-					"old_count": 1,
-					"created":   false,
-				},
+				Args: `{"path":"a.txt","old":"alpha","new":"beta"}`,
 			},
-		},
+		}, ""),
+	}, state)
+	printEvent(&session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_1",
+			Name: "PATCH",
+			Result: map[string]any{
+				"path":      "a.txt",
+				"replaced":  1,
+				"old_count": 1,
+				"created":   false,
+			},
+		}),
 	}, state)
 	rendered := out.String()
 	if !strings.Contains(rendered, "edited a.txt") {

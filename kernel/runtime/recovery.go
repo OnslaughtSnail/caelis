@@ -21,17 +21,14 @@ func buildRecoveryEvents(events []*session.Event) []*session.Event {
 		out = append(out, &session.Event{
 			ID:   eventID(),
 			Time: time.Now(),
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:   call.ID,
-					Name: call.Name,
-					Result: map[string]any{
-						"error":       "tool call interrupted before completion",
-						"interrupted": true,
-					},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   call.ID,
+				Name: call.Name,
+				Result: map[string]any{
+					"error":       "tool call interrupted before completion",
+					"interrupted": true,
 				},
-			},
+			}),
 			Meta: map[string]any{
 				metaKind: metaKindRecovery,
 				metaKindRecovery: map[string]any{

@@ -147,6 +147,55 @@ func TestSanitizeToolResultForACP_ArrayRecursion(t *testing.T) {
 	}
 }
 
+func TestSanitizeToolResultForACP_PrunesUninformativeOutputMeta(t *testing.T) {
+	got := sanitizeToolResultForACP(map[string]any{
+		"stdout": "hello",
+		"output_meta": map[string]any{
+			"capture_cap_bytes":      262144,
+			"capture_truncated":      false,
+			"model_truncated":        false,
+			"stderr_cap_reached":     false,
+			"stderr_captured_bytes":  0,
+			"stderr_dropped_bytes":   0,
+			"stderr_earliest_marker": 0,
+			"stdout_cap_reached":     false,
+			"stdout_captured_bytes":  651,
+			"stdout_dropped_bytes":   0,
+			"stdout_earliest_marker": 0,
+			"tty":                    false,
+		},
+	})
+	if _, ok := got["output_meta"]; ok {
+		t.Fatalf("expected uninformative output_meta to be removed, got %#v", got["output_meta"])
+	}
+}
+
+func TestSanitizeToolResultForACP_KeepsMeaningfulOutputMeta(t *testing.T) {
+	got := sanitizeToolResultForACP(map[string]any{
+		"output_meta": map[string]any{
+			"capture_cap_bytes":    262144,
+			"capture_truncated":    true,
+			"stdout_cap_reached":   true,
+			"stdout_dropped_bytes": 128,
+			"model_truncated":      true,
+		},
+	})
+	meta, ok := got["output_meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected output_meta to survive when meaningful, got %#v", got)
+	}
+	want := map[string]any{
+		"capture_cap_bytes":    262144,
+		"capture_truncated":    true,
+		"stdout_cap_reached":   true,
+		"stdout_dropped_bytes": 128,
+		"model_truncated":      true,
+	}
+	if !reflect.DeepEqual(meta, want) {
+		t.Fatalf("unexpected sanitized output_meta: got %#v want %#v", meta, want)
+	}
+}
+
 func TestSanitizeToolResultForACP_ScalarResultPreserved(t *testing.T) {
 	input := map[string]any{
 		"status":  "ok",

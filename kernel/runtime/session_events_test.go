@@ -23,7 +23,7 @@ func TestRuntime_SessionEvents_FilterLifecycleAndLimit(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "user-1",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleUser, Text: "hi"},
+		Message: model.NewTextMessage(model.RoleUser, "hi"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestRuntime_SessionEvents_FilterLifecycleAndLimit(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "assistant-1",
 		Time:    time.Now().Add(time.Second),
-		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"strings"
 	"time"
 
@@ -181,10 +182,11 @@ func (a *Agent) runOneTurn(
 	if err != nil {
 		return false, err
 	}
-	if len(assistantMsg.ToolCalls) == 0 {
+	toolCalls := assistantMsg.ToolCalls()
+	if len(toolCalls) == 0 {
 		return true, nil
 	}
-	if err := a.executeToolCalls(ctx, state, assistantMsg.ToolCalls, yield); err != nil {
+	if err := a.executeToolCalls(ctx, state, toolCalls, yield); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -206,8 +208,11 @@ func (a *Agent) generateTurnResponse(
 	req := &model.Request{
 		Messages:  in.Messages,
 		Tools:     in.Tools,
-		Stream:    a.cfg.StreamModel,
 		Reasoning: a.cfg.Reasoning,
+		Stream:    a.cfg.StreamModel,
+	}
+	if prompt := strings.TrimSpace(a.cfg.SystemPrompt); prompt != "" {
+		req.Instructions = []model.Part{model.NewTextPart(prompt)}
 	}
 	resp, err := a.generateWithRetry(ctx, req, func(partial *model.Response) error {
 		return a.emitPartialResponse(partial, yield)
@@ -237,17 +242,14 @@ func (a *Agent) generateTurnResponse(
 }
 
 func (a *Agent) emitPartialResponse(partial *model.Response, yield func(*session.Event, error) bool) error {
-	if partial == nil || !a.cfg.EmitPartialEvents || !partial.Partial {
+	if partial == nil || !a.cfg.EmitPartialEvents {
 		return nil
 	}
-	if partial.Message.Reasoning != "" {
+	if reasoning := partial.Message.ReasoningText(); reasoning != "" {
 		ev := &session.Event{
-			ID:   newEventID(),
-			Time: time.Now(),
-			Message: model.Message{
-				Role:      model.RoleAssistant,
-				Reasoning: partial.Message.Reasoning,
-			},
+			ID:      newEventID(),
+			Time:    time.Now(),
+			Message: model.NewReasoningMessage(model.RoleAssistant, reasoning, model.ReasoningVisibilityVisible),
 			Meta: map[string]any{
 				"partial": true,
 				"channel": "reasoning",
@@ -257,11 +259,11 @@ func (a *Agent) emitPartialResponse(partial *model.Response, yield func(*session
 			return errYieldStopped
 		}
 	}
-	if partial.Message.Text != "" {
+	if text := partial.Message.TextContent(); text != "" {
 		ev := &session.Event{
 			ID:      newEventID(),
 			Time:    time.Now(),
-			Message: model.Message{Role: model.RoleAssistant, Text: partial.Message.Text},
+			Message: model.NewTextMessage(model.RoleAssistant, text),
 			Meta: map[string]any{
 				"partial": true,
 				"channel": "answer",
@@ -414,14 +416,7 @@ func (a *Agent) executeToolCall(
 			return fmt.Errorf("llmagent: invalid tool call %q arguments: %w", call.Name, argErr)
 		}
 		result := toolArgParseErrorResult(call, argErr)
-		toolMsg := model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     call.ID,
-				Name:   call.Name,
-				Result: result,
-			},
-		}
+		toolMsg := model.MessageFromToolResponse(&model.ToolResponse{ID: call.ID, Name: call.Name, Result: result})
 		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
 		if !yield(ev, nil) {
 			return errYieldStopped
@@ -432,20 +427,11 @@ func (a *Agent) executeToolCall(
 	t, ok := ctx.Tool(call.Name)
 	if !ok {
 		execOut := policy.ToolOutput{
-			Call: call,
-			Args: cloneArgs(args),
-			Err:  fmt.Errorf("llmagent: unknown tool %q", call.Name),
+			Err: fmt.Errorf("llmagent: unknown tool %q", call.Name),
 		}
 		execOut.Result = map[string]any{"error": execOut.Err.Error()}
 		finalResult := annotateToolResultMetadata(execOut.Result, execOut.Err)
-		toolMsg := model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:     call.ID,
-				Name:   call.Name,
-				Result: finalResult,
-			},
-		}
+		toolMsg := model.MessageFromToolResponse(&model.ToolResponse{ID: call.ID, Name: call.Name, Result: finalResult})
 		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
 		if !yield(ev, nil) {
 			return errYieldStopped
@@ -512,10 +498,7 @@ func (a *Agent) executeToolCall(
 	truncatedResult, truncationInfo := tool.TruncateMap(afterOut.Result, a.cfg.ToolTruncation)
 	finalResult := tool.AddTruncationMeta(truncatedResult, truncationInfo)
 	finalResult = annotateToolResultMetadata(finalResult, afterOut.Err)
-	toolMsg := model.Message{
-		Role:         model.RoleTool,
-		ToolResponse: &model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult},
-	}
+	toolMsg := model.MessageFromToolResponse(&model.ToolResponse{ID: afterOut.Call.ID, Name: afterOut.Call.Name, Result: finalResult})
 	ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
 	if !yield(ev, nil) {
 		return errYieldStopped
@@ -632,9 +615,7 @@ func cloneArgs(input map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(input))
-	for k, v := range input {
-		out[k] = v
-	}
+	maps.Copy(out, input)
 	return out
 }
 
@@ -688,9 +669,49 @@ func (e *interruptedModelResponseError) Unwrap() error {
 	return e.cause
 }
 
-func collectLast(ctx context.Context, seq iter.Seq2[*model.Response, error], onPartial func(*model.Response) error) (*model.Response, error) {
+func responseFromStreamEvent(event *model.StreamEvent) *model.Response {
+	if event == nil {
+		return nil
+	}
+	if event.Response != nil {
+		cp := *event.Response
+		cp.Message = model.CloneMessage(event.Response.Message)
+		return &cp
+	}
+	if event.Message == nil {
+		return nil
+	}
+	return &model.Response{
+		Message:      model.CloneMessage(*event.Message),
+		StepComplete: event.Type == model.StreamEventStepDone || event.Type == model.StreamEventTurnDone,
+		TurnComplete: event.Type == model.StreamEventTurnDone,
+	}
+}
+
+func partialResponseFromStreamEvent(event *model.StreamEvent) *model.Response {
+	if event == nil || event.PartDelta == nil {
+		return nil
+	}
+	delta := event.PartDelta
+	switch delta.Kind {
+	case model.PartKindReasoning:
+		if delta.TextDelta == "" {
+			return nil
+		}
+		return &model.Response{Message: model.NewReasoningMessage(model.RoleAssistant, delta.TextDelta, model.ReasoningVisibilityVisible)}
+	case model.PartKindText:
+		if delta.TextDelta == "" {
+			return nil
+		}
+		return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, delta.TextDelta)}
+	default:
+		return nil
+	}
+}
+
+func collectLast(ctx context.Context, seq iter.Seq2[*model.StreamEvent, error], onPartial func(*model.Response) error) (*model.Response, error) {
 	var last *model.Response
-	for res, err := range seq {
+	for event, err := range seq {
 		if err != nil {
 			return nil, err
 		}
@@ -699,12 +720,12 @@ func collectLast(ctx context.Context, seq iter.Seq2[*model.Response, error], onP
 			return nil, ctx.Err()
 		default:
 		}
-		if res != nil {
-			if res.Partial && onPartial != nil {
-				if err := onPartial(res); err != nil {
-					return nil, err
-				}
+		if partial := partialResponseFromStreamEvent(event); partial != nil && onPartial != nil {
+			if err := onPartial(partial); err != nil {
+				return nil, err
 			}
+		}
+		if res := responseFromStreamEvent(event); res != nil {
 			last = res
 		}
 	}
@@ -721,7 +742,7 @@ func (a *Agent) generateWithRetry(
 	for {
 		emittedPartial := false
 		resp, err := collectLast(ctx, ctx.Model().Generate(ctx, req), func(partial *model.Response) error {
-			if partial != nil && partial.Partial {
+			if partial != nil {
 				emittedPartial = true
 			}
 			if onPartial == nil {
@@ -733,7 +754,7 @@ func (a *Agent) generateWithRetry(
 			switch {
 			case resp == nil:
 				err = errEmptyModelResponse
-			case resp.Partial || !resp.TurnComplete:
+			case !resp.TurnComplete:
 				err = &interruptedModelResponseError{
 					cause:          fmt.Errorf("model returned without completing the turn"),
 					partialEmitted: emittedPartial,
@@ -918,12 +939,12 @@ func summarizeRetryCause(err error) string {
 	if text == "" {
 		return "unknown error"
 	}
-	bodyIndex := strings.Index(text, " body=")
-	if bodyIndex < 0 {
+	prefix, body, found := strings.Cut(text, " body=")
+	if !found {
 		return text
 	}
-	prefix := strings.TrimSpace(text[:bodyIndex])
-	body := strings.TrimSpace(text[bodyIndex+len(" body="):])
+	prefix = strings.TrimSpace(prefix)
+	body = strings.TrimSpace(body)
 	bodySummary := summarizeRetryBody(body)
 	switch {
 	case bodySummary == "":

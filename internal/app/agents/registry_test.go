@@ -25,7 +25,7 @@ func TestRegisterAndLookup(t *testing.T) {
 		ID:        "codex",
 		Name:      "Codex Agent",
 		Transport: TransportACP,
-		Endpoint:  "http://localhost:9000",
+		Command:   "/usr/bin/codex-acp",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -62,13 +62,13 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestValidateACPMissingEndpoint(t *testing.T) {
+func TestValidateACPMissingCommand(t *testing.T) {
 	r := NewRegistry(Descriptor{
 		ID:        "remote",
 		Transport: TransportACP,
 	})
 	if err := r.Validate(); err == nil {
-		t.Fatal("expected validation error for ACP agent without endpoint or command")
+		t.Fatal("expected validation error for ACP agent without command")
 	}
 }
 
@@ -86,8 +86,8 @@ func TestValidateACPWithCommand(t *testing.T) {
 
 func TestNewRegistryWithExtra(t *testing.T) {
 	r := NewRegistry(
-		Descriptor{ID: "codex", Name: "Codex", Transport: TransportACP, Endpoint: "http://x"},
-		Descriptor{ID: "gemini", Name: "Gemini", Transport: TransportACP, Endpoint: "http://y"},
+		Descriptor{ID: "codex", Name: "Codex", Transport: TransportACP, Command: "/bin/codex"},
+		Descriptor{ID: "gemini", Name: "Gemini", Transport: TransportACP, Command: "/bin/gemini"},
 	)
 	ids := r.IDs()
 	if len(ids) != 3 {
@@ -97,9 +97,9 @@ func TestNewRegistryWithExtra(t *testing.T) {
 
 func TestIDsSorted(t *testing.T) {
 	r := NewRegistry(
-		Descriptor{ID: "zeta", Name: "Zeta", Transport: TransportACP, Endpoint: "http://z"},
-		Descriptor{ID: "alpha", Name: "Alpha", Transport: TransportACP, Endpoint: "http://a"},
-		Descriptor{ID: "mid", Name: "Mid", Transport: TransportACP, Endpoint: "http://m"},
+		Descriptor{ID: "zeta", Name: "Zeta", Transport: TransportACP, Command: "/bin/zeta"},
+		Descriptor{ID: "alpha", Name: "Alpha", Transport: TransportACP, Command: "/bin/alpha"},
+		Descriptor{ID: "mid", Name: "Mid", Transport: TransportACP, Command: "/bin/mid"},
 	)
 	ids := r.IDs()
 	expected := []string{"alpha", "mid", "self", "zeta"}
@@ -115,8 +115,8 @@ func TestIDsSorted(t *testing.T) {
 
 func TestListSorted(t *testing.T) {
 	r := NewRegistry(
-		Descriptor{ID: "zeta", Name: "Zeta", Transport: TransportACP, Endpoint: "http://z"},
-		Descriptor{ID: "alpha", Name: "Alpha", Transport: TransportACP, Endpoint: "http://a"},
+		Descriptor{ID: "zeta", Name: "Zeta", Transport: TransportACP, Command: "/bin/zeta"},
+		Descriptor{ID: "alpha", Name: "Alpha", Transport: TransportACP, Command: "/bin/alpha"},
 	)
 	list := r.List()
 	expected := []string{"alpha", "self", "zeta"}

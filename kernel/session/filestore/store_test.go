@@ -23,7 +23,7 @@ func TestStore_AppendAndList(t *testing.T) {
 	if _, err := store.GetOrCreate(context.Background(), s); err != nil {
 		t.Fatal(err)
 	}
-	ev := &session.Event{ID: "e1", Message: model.Message{Role: model.RoleUser, Text: "hi"}}
+	ev := &session.Event{ID: "e1", Message: model.NewTextMessage(model.RoleUser, "hi")}
 	if err := store.AppendEvent(context.Background(), s, ev); err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestStore_ListEvents_CompatibleWithConcatenatedJSONObjects(t *testing.T) {
 	}
 
 	eventsPath := filepath.Join(root, "app", "u", "s", "events.jsonl")
-	raw := `{"ID":"e1","SessionID":"s","Message":{"Role":"user","Text":"a"}}{"ID":"e2","SessionID":"s","Message":{"Role":"assistant","Text":"b"}}`
+	raw := `{"ID":"e1","SessionID":"s","Message":{"role":"user","parts":[{"kind":"text","text":{"text":"a"}}]}}{"ID":"e2","SessionID":"s","Message":{"role":"assistant","parts":[{"kind":"text","text":{"text":"b"}}]}}`
 	if err := os.WriteFile(eventsPath, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestStore_ListEvents_CompatibleWithConcatenatedJSONObjects(t *testing.T) {
 	}
 }
 
-func TestStore_AppendEvent_PersistsCamelCaseMessageFields(t *testing.T) {
+func TestStore_AppendEvent_PersistsV2MessageSchema(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	store, err := New(root)
 	if err != nil {
@@ -78,14 +78,11 @@ func TestStore_AppendEvent_PersistsCamelCaseMessageFields(t *testing.T) {
 
 	ev := &session.Event{
 		ID: "e1",
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{{
-				ID:   "call_1",
-				Name: "BASH",
-				Args: `{"command":"echo hi"}`,
-			}},
-		},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call_1",
+			Name: "BASH",
+			Args: `{"command":"echo hi"}`,
+		}}, ""),
 	}
 	if err := store.AppendEvent(context.Background(), s, ev); err != nil {
 		t.Fatal(err)
@@ -96,14 +93,14 @@ func TestStore_AppendEvent_PersistsCamelCaseMessageFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	if !strings.Contains(text, `"Message":{"Role":"assistant"`) {
-		t.Fatalf("expected Role in persisted event, got %s", text)
+	if !strings.Contains(text, `"Message":{"role":"assistant"`) {
+		t.Fatalf("expected role in persisted event, got %s", text)
 	}
-	if !strings.Contains(text, `"ToolCalls":[{"ID":"call_1"`) {
-		t.Fatalf("expected ToolCalls in persisted event, got %s", text)
+	if !strings.Contains(text, `"tool_use":{"id":"call_1","name":"BASH","input":{"command":"echo hi"}}`) {
+		t.Fatalf("expected tool_use part in persisted event, got %s", text)
 	}
-	if strings.Contains(text, `"tool_calls"`) || strings.Contains(text, `"tool_response"`) || strings.Contains(text, `"content_parts"`) {
-		t.Fatalf("expected camel-case message fields only, got %s", text)
+	if strings.Contains(text, `"ToolCalls"`) || strings.Contains(text, `"ToolResponse"`) || strings.Contains(text, `"ContentParts"`) {
+		t.Fatalf("expected V2 message fields only, got %s", text)
 	}
 }
 
@@ -117,7 +114,7 @@ func TestStore_SessionOnlyLayout(t *testing.T) {
 	if _, err := store.GetOrCreate(context.Background(), s); err != nil {
 		t.Fatal(err)
 	}
-	ev := &session.Event{ID: "e1", Message: model.Message{Role: model.RoleUser, Text: "hi"}}
+	ev := &session.Event{ID: "e1", Message: model.NewTextMessage(model.RoleUser, "hi")}
 	if err := store.AppendEvent(context.Background(), s, ev); err != nil {
 		t.Fatal(err)
 	}
@@ -179,8 +176,7 @@ func TestStore_ReplaceState_IsAtomicAcrossStoreInstances(t *testing.T) {
 	const writers = 32
 	var wg sync.WaitGroup
 	wg.Add(writers)
-	for i := 0; i < writers; i++ {
-		i := i
+	for i := range writers {
 		go func() {
 			defer wg.Done()
 			store := storeA
@@ -283,7 +279,7 @@ func TestStore_RejectsPathTraversalInSessionKeys(t *testing.T) {
 	}
 	if err := store.AppendEvent(context.Background(), bad, &session.Event{
 		ID:      "e1",
-		Message: model.Message{Role: model.RoleUser, Text: "x"},
+		Message: model.NewTextMessage(model.RoleUser, "x"),
 	}); err == nil {
 		t.Fatalf("expected append with path traversal session id to fail")
 	}
@@ -306,15 +302,15 @@ func TestStore_ListContextWindowEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := []*session.Event{
-		{ID: "old", Message: model.Message{Role: model.RoleUser, Text: "old"}},
+		{ID: "old", Message: model.NewTextMessage(model.RoleUser, "old")},
 		{
 			ID:      "compact",
-			Message: model.Message{Role: model.RoleSystem, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleSystem, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 			},
 		},
-		{ID: "new", Message: model.Message{Role: model.RoleUser, Text: "new"}},
+		{ID: "new", Message: model.NewTextMessage(model.RoleUser, "new")},
 	}
 	for _, ev := range events {
 		if err := store.AppendEvent(context.Background(), s, ev); err != nil {
@@ -345,18 +341,18 @@ func TestStore_ListContextWindowEvents_UsesLatestCompactionWindow(t *testing.T) 
 		t.Fatal(err)
 	}
 	events := []*session.Event{
-		{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old user"}},
-		{ID: "old_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "old assistant"}},
-		{ID: "tail_user", Message: model.Message{Role: model.RoleUser, Text: "tail user"}},
-		{ID: "tail_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "tail assistant"}},
+		{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old user")},
+		{ID: "old_assistant", Message: model.NewTextMessage(model.RoleAssistant, "old assistant")},
+		{ID: "tail_user", Message: model.NewTextMessage(model.RoleUser, "tail user")},
+		{ID: "tail_assistant", Message: model.NewTextMessage(model.RoleAssistant, "tail assistant")},
 		{
 			ID:      "compact",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 			},
 		},
-		{ID: "new_user", Message: model.Message{Role: model.RoleUser, Text: "new user"}},
+		{ID: "new_user", Message: model.NewTextMessage(model.RoleUser, "new user")},
 	}
 	for _, ev := range events {
 		if err := store.AppendEvent(context.Background(), s, ev); err != nil {

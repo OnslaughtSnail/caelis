@@ -77,7 +77,7 @@ func (c *Conn) Serve(ctx context.Context, onRequest requestHandler, onNotificati
 		}
 		if msg.ID == nil {
 			if onNotification != nil {
-				go onNotification(ctx, msg)
+				onNotification(ctx, msg)
 			}
 			continue
 		}
@@ -139,7 +139,7 @@ func (c *Conn) Call(ctx context.Context, method string, params any, out any) err
 		return ctx.Err()
 	case resp := <-pending.ch:
 		if resp.Error != nil {
-			return fmt.Errorf("acp rpc error %d: %s", resp.Error.Code, resp.Error.Message)
+			return formatRPCError(resp.Error)
 		}
 		if out == nil {
 			return nil
@@ -150,6 +150,33 @@ func (c *Conn) Call(ctx context.Context, method string, params any, out any) err
 		}
 		return json.Unmarshal(raw, out)
 	}
+}
+
+func formatRPCError(rpcErr *RPCError) error {
+	if rpcErr == nil {
+		return nil
+	}
+	msg := fmt.Sprintf("acp rpc error %d: %s", rpcErr.Code, rpcErr.Message)
+	if rpcErr.Data != nil {
+		if data := formatRPCErrorData(rpcErr.Data); data != "" && data != "null" {
+			msg += " (data: " + data + ")"
+		}
+	}
+	return errors.New(msg)
+}
+
+func formatRPCErrorData(data any) string {
+	if data == nil {
+		return ""
+	}
+	if text, ok := data.(string); ok {
+		return text
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprint(data)
+	}
+	return string(raw)
 }
 
 func (c *Conn) resolvePending(msg Message) {

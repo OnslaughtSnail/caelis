@@ -1,6 +1,7 @@
 package tuiapp
 
 import (
+	"strings"
 	"sync/atomic"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
@@ -42,15 +43,16 @@ func PlainRow(blockID, text string) RenderedRow {
 type BlockKind string
 
 const (
-	BlockTranscript BlockKind = "transcript"
-	BlockAssistant  BlockKind = "assistant"
-	BlockReasoning  BlockKind = "reasoning"
-	BlockDiff       BlockKind = "diff"
-	BlockDivider    BlockKind = "divider"
-	BlockBashPanel  BlockKind = "bash_panel"
-	BlockSubagent   BlockKind = "subagent"
-	BlockActivity   BlockKind = "activity"
-	BlockWelcome    BlockKind = "welcome"
+	BlockTranscript      BlockKind = "transcript"
+	BlockAssistant       BlockKind = "assistant"
+	BlockReasoning       BlockKind = "reasoning"
+	BlockDiff            BlockKind = "diff"
+	BlockDivider         BlockKind = "divider"
+	BlockBashPanel       BlockKind = "bash_panel"
+	BlockSubagent        BlockKind = "subagent"
+	BlockParticipantTurn BlockKind = "participant_turn"
+	BlockActivity        BlockKind = "activity"
+	BlockWelcome         BlockKind = "welcome"
 )
 
 // ---------------------------------------------------------------------------
@@ -143,6 +145,25 @@ func (d *Document) InsertAfter(anchorID string, b Block) int {
 	d.blocks[insertAt] = b
 	d.rebuildIndex()
 	return insertAt
+}
+
+// MoveAfter repositions an existing block immediately after anchorID. If either
+// blockID or anchorID cannot be resolved, the document is left unchanged.
+// Returns the resulting index and whether a move occurred.
+func (d *Document) MoveAfter(blockID string, anchorID string) (int, bool) {
+	blockID = strings.TrimSpace(blockID)
+	anchorID = strings.TrimSpace(anchorID)
+	if d == nil || blockID == "" || anchorID == "" || blockID == anchorID {
+		return -1, false
+	}
+	block := d.Find(blockID)
+	if block == nil {
+		return -1, false
+	}
+	if !d.Remove(blockID) {
+		return -1, false
+	}
+	return d.InsertAfter(anchorID, block), true
 }
 
 func (d *Document) Find(id string) Block {

@@ -78,8 +78,13 @@ func (m *Model) observeInputLatency() {
 // ---------------------------------------------------------------------------
 
 func mentionQueryAtCursor(input []rune, cursor int) (int, int, string, bool) {
+	start, end, query, _, ok := mentionQueryAtCursorWithPrefix(input, cursor)
+	return start, end, query, ok
+}
+
+func mentionQueryAtCursorWithPrefix(input []rune, cursor int) (int, int, string, string, bool) {
 	if len(input) == 0 {
-		return 0, 0, "", false
+		return 0, 0, "", "", false
 	}
 	if cursor < 0 {
 		cursor = 0
@@ -91,21 +96,22 @@ func mentionQueryAtCursor(input []rune, cursor int) (int, int, string, bool) {
 	for start > 0 && isMentionQueryRune(input[start-1]) {
 		start--
 	}
-	if start == 0 || input[start-1] != '@' {
-		return 0, 0, "", false
+	if start == 0 || (input[start-1] != '@' && input[start-1] != '#') {
+		return 0, 0, "", "", false
 	}
 	at := start - 1
+	prefix := string(input[at])
 	if at > 0 {
 		prev := input[at-1]
 		if prev != ' ' && prev != '\t' && prev != '(' && prev != '[' && prev != '{' && prev != ',' && prev != ';' && prev != ':' && prev != '"' && prev != '\'' {
-			return 0, 0, "", false
+			return 0, 0, "", "", false
 		}
 	}
 	end := cursor
 	for end < len(input) && isMentionQueryRune(input[end]) {
 		end++
 	}
-	return at, end, string(input[start:end]), true
+	return at, end, string(input[start:end]), prefix, true
 }
 
 func resumeQueryAtCursor(input []rune, cursor int) (string, bool) {
@@ -206,6 +212,47 @@ func slashArgQueryAtCursor(input []rune, cursor int) (string, string, bool) {
 			return "model use", alias, true
 		}
 		return "model use " + alias, strings.TrimSpace(strings.Join(fields[3:], " ")), true
+	case "agent":
+		if len(fields) == 1 {
+			if !hasTrailingDelimiter {
+				return "", "", false
+			}
+			return command, "", true
+		}
+		action := strings.ToLower(strings.TrimSpace(fields[1]))
+		if len(fields) == 2 {
+			if hasTrailingDelimiter {
+				switch action {
+				case "add", "rm":
+					return "agent " + action, "", true
+				case "list":
+					return "", "", false
+				default:
+					return "", "", false
+				}
+			}
+			if action == "" {
+				return "", "", false
+			}
+			switch action {
+			case "list", "add", "rm":
+			default:
+				return "agent", action, true
+			}
+			return "agent", action, true
+		}
+		switch action {
+		case "add", "rm":
+		default:
+			return "", "", false
+		}
+		if len(fields) == 3 {
+			if hasTrailingDelimiter {
+				return "", "", false
+			}
+			return "agent " + action, strings.TrimSpace(fields[2]), true
+		}
+		return "", "", false
 	case "sandbox":
 		if len(fields) == 1 {
 			if !hasTrailingDelimiter {

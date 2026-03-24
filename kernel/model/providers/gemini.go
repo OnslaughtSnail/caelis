@@ -58,21 +58,21 @@ func (l *geminiLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }
 
-func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		if req == nil {
 			yield(nil, fmt.Errorf("model: request is nil"))
 			return
 		}
 
-		system, contents, err := toGeminiContents(req.Messages)
+		system, contents, err := toGeminiContents(req.Instructions, req.Messages)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
 		cfg := &genai.GenerateContentConfig{
-			Tools: toGeminiTools(req.Tools),
+			Tools: toGeminiTools(model.FunctionToolDefinitions(req.Tools)),
 		}
 		if strings.TrimSpace(system) != "" {
 			cfg.SystemInstruction = &genai.Content{
@@ -111,12 +111,17 @@ func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 				yield(nil, err)
 				return
 			}
-			yield(&model.Response{
-				Message:      msg,
-				TurnComplete: true,
-				Model:        l.name,
-				Provider:     l.provider,
-				Usage:        usage,
+			yield(&model.StreamEvent{
+				Type: model.StreamEventTurnDone,
+				Response: &model.Response{
+					Message:      msg,
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       model.ResponseStatusCompleted,
+					Model:        l.name,
+					Provider:     l.provider,
+					Usage:        usage,
+				},
 			}, nil)
 			return
 		}
@@ -148,53 +153,40 @@ func (l *geminiLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[
 			if msg.Role != "" {
 				acc.role = msg.Role
 			}
-			if strings.TrimSpace(msg.Reasoning) != "" {
-				acc.reasoning.WriteString(msg.Reasoning)
-				if !yield(&model.Response{
-					Message: model.Message{
-						Role:      model.RoleAssistant,
-						Reasoning: msg.Reasoning,
-					},
-					Partial:      true,
-					TurnComplete: false,
-					Model:        l.name,
-					Provider:     l.provider,
+			if reasoning := msg.ReasoningText(); reasoning != "" {
+				acc.reasoning.WriteString(reasoning)
+				if !yield(&model.StreamEvent{
+					Type:      model.StreamEventPartDelta,
+					PartDelta: &model.PartDelta{Kind: model.PartKindReasoning, TextDelta: reasoning},
 				}, nil) {
 					return
 				}
 			}
-			if strings.TrimSpace(msg.Text) != "" {
-				acc.text.WriteString(msg.Text)
-				if !yield(&model.Response{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						Text: msg.Text,
-					},
-					Partial:      true,
-					TurnComplete: false,
-					Model:        l.name,
-					Provider:     l.provider,
+			if text := msg.TextContent(); text != "" {
+				acc.text.WriteString(text)
+				if !yield(&model.StreamEvent{
+					Type:      model.StreamEventPartDelta,
+					PartDelta: &model.PartDelta{Kind: model.PartKindText, TextDelta: text},
 				}, nil) {
 					return
 				}
 			}
-			if len(msg.ToolCalls) > 0 {
-				acc.toolCalls = append(acc.toolCalls, msg.ToolCalls...)
+			if calls := msg.ToolCalls(); len(calls) > 0 {
+				acc.toolCalls = append(acc.toolCalls, calls...)
 			}
 		}
 
-		yield(&model.Response{
-			Message: model.Message{
-				Role:      acc.role,
-				Reasoning: acc.reasoning.String(),
-				Text:      acc.text.String(),
-				ToolCalls: dedupToolCalls(acc.toolCalls),
+		yield(&model.StreamEvent{
+			Type: model.StreamEventTurnDone,
+			Response: &model.Response{
+				Message:      model.MessageFromAssistantParts(acc.text.String(), acc.reasoning.String(), dedupToolCalls(acc.toolCalls)),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       model.ResponseStatusCompleted,
+				Model:        l.name,
+				Provider:     l.provider,
+				Usage:        usage,
 			},
-			Partial:      false,
-			TurnComplete: true,
-			Model:        l.name,
-			Provider:     l.provider,
-			Usage:        usage,
 		}, nil)
 	}
 }
@@ -342,11 +334,10 @@ func geminiMajorVersion(modelName string) (int, bool) {
 	if slash := strings.LastIndex(name, "/"); slash >= 0 {
 		name = name[slash+1:]
 	}
-	pos := strings.Index(name, "gemini-")
-	if pos < 0 {
+	_, tail, found := strings.Cut(name, "gemini-")
+	if !found {
 		return 0, false
 	}
-	tail := name[pos+len("gemini-"):]
 	end := 0
 	for end < len(tail) && tail[end] >= '0' && tail[end] <= '9' {
 		end++
@@ -409,7 +400,7 @@ func geminiResponseToMessage(out *genai.GenerateContentResponse) (model.Message,
 		return model.Message{}, usage, errGeminiNoCandidates
 	}
 
-	msg := model.Message{Role: model.RoleAssistant}
+	calls := make([]model.ToolCall, 0, len(out.Candidates[0].Content.Parts))
 	textParts := make([]string, 0, len(out.Candidates[0].Content.Parts))
 	reasoningParts := make([]string, 0, len(out.Candidates[0].Content.Parts))
 	for _, part := range out.Candidates[0].Content.Parts {
@@ -421,7 +412,7 @@ func geminiResponseToMessage(out *genai.GenerateContentResponse) (model.Message,
 			if callID == "" {
 				callID = part.FunctionCall.Name
 			}
-			msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
+			calls = append(calls, model.ToolCall{
 				ID:               callID,
 				Name:             part.FunctionCall.Name,
 				Args:             toolArgsRaw(part.FunctionCall.Args),
@@ -437,25 +428,27 @@ func geminiResponseToMessage(out *genai.GenerateContentResponse) (model.Message,
 			}
 		}
 	}
-	msg.Text = strings.TrimSpace(strings.Join(textParts, "\n"))
-	msg.Reasoning = strings.TrimSpace(strings.Join(reasoningParts, "\n"))
-	return msg, usage, nil
+	return model.MessageFromAssistantParts(strings.TrimSpace(strings.Join(textParts, "\n")), strings.TrimSpace(strings.Join(reasoningParts, "\n")), calls), usage, nil
 }
 
-func toGeminiContents(messages []model.Message) (string, []*genai.Content, error) {
+func toGeminiContents(instructions []model.Part, messages []model.Message) (string, []*genai.Content, error) {
 	systemLines := make([]string, 0, 2)
+	if system := strings.TrimSpace(model.NewMessage(model.RoleSystem, instructions...).TextContent()); system != "" {
+		systemLines = append(systemLines, system)
+	}
 	out := make([]*genai.Content, 0, len(messages))
 
 	for _, m := range messages {
 		switch m.Role {
 		case model.RoleSystem:
-			if strings.TrimSpace(m.Text) != "" {
-				systemLines = append(systemLines, m.Text)
+			if text := strings.TrimSpace(m.TextContent()); text != "" {
+				systemLines = append(systemLines, text)
 			}
 		case model.RoleUser:
-			parts := make([]*genai.Part, 0, max(1, len(m.ContentParts)))
-			if len(m.ContentParts) > 0 {
-				for _, cp := range m.ContentParts {
+			contentParts := model.ContentPartsFromParts(m.Parts)
+			parts := make([]*genai.Part, 0, max(1, len(contentParts)))
+			if len(contentParts) > 0 {
+				for _, cp := range contentParts {
 					switch cp.Type {
 					case model.ContentPartText:
 						parts = append(parts, genai.NewPartFromText(cp.Text))
@@ -473,15 +466,16 @@ func toGeminiContents(messages []model.Message) (string, []*genai.Content, error
 					}
 				}
 			} else {
-				parts = append(parts, genai.NewPartFromText(m.Text))
+				parts = append(parts, genai.NewPartFromText(m.TextContent()))
 			}
 			out = append(out, &genai.Content{Role: "user", Parts: parts})
 		case model.RoleAssistant:
-			parts := make([]*genai.Part, 0, len(m.ToolCalls)+1)
-			if strings.TrimSpace(m.Text) != "" {
-				parts = append(parts, genai.NewPartFromText(m.Text))
+			calls := m.ToolCalls()
+			parts := make([]*genai.Part, 0, len(calls)+1)
+			if text := strings.TrimSpace(m.TextContent()); text != "" {
+				parts = append(parts, genai.NewPartFromText(text))
 			}
-			for _, call := range m.ToolCalls {
+			for _, call := range calls {
 				// Gemini tool loop requires thought signature in functionCall parts.
 				// Skip legacy tool calls without signature to avoid request rejection.
 				if call.ThoughtSignature == "" {
@@ -495,12 +489,13 @@ func toGeminiContents(messages []model.Message) (string, []*genai.Content, error
 				out = append(out, &genai.Content{Role: "model", Parts: parts})
 			}
 		case model.RoleTool:
-			if m.ToolResponse == nil {
+			resp := m.ToolResponse()
+			if resp == nil {
 				continue
 			}
-			part := genai.NewPartFromFunctionResponse(m.ToolResponse.Name, m.ToolResponse.Result)
-			if strings.TrimSpace(m.ToolResponse.ID) != "" && part != nil && part.FunctionResponse != nil {
-				part.FunctionResponse.ID = m.ToolResponse.ID
+			part := genai.NewPartFromFunctionResponse(resp.Name, resp.Result)
+			if strings.TrimSpace(resp.ID) != "" && part != nil && part.FunctionResponse != nil {
+				part.FunctionResponse.ID = resp.ID
 			}
 			out = append(out, &genai.Content{Role: "user", Parts: []*genai.Part{part}})
 		}
@@ -600,8 +595,7 @@ func decodeGeminiThoughtSignature(encoded string) []byte {
 	if encoded == "" {
 		return nil
 	}
-	if strings.HasPrefix(encoded, geminiThoughtSignaturePrefix) {
-		payload := strings.TrimPrefix(encoded, geminiThoughtSignaturePrefix)
+	if payload, ok := strings.CutPrefix(encoded, geminiThoughtSignaturePrefix); ok {
 		data, err := base64.StdEncoding.DecodeString(payload)
 		if err == nil {
 			return data

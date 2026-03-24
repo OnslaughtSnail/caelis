@@ -24,10 +24,7 @@ func TestAssistantBody_NotGreenColor(t *testing.T) {
 	}
 	// The body text (after the "* " prefix) should use TextPrimary, not green.
 	for _, line := range lines {
-		body := ansi.Strip(line)
-		if strings.HasPrefix(body, "* ") {
-			body = body[len("* "):]
-		}
+		body := strings.TrimPrefix(ansi.Strip(line), "* ")
 		if body == "" {
 			continue
 		}
@@ -288,18 +285,21 @@ func TestReasoningBlock_PlainStyledConsistent(t *testing.T) {
 func TestAssistantBlock_InlineMarkdownStripped(t *testing.T) {
 	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
 	block := NewAssistantBlock()
-	block.Raw = "这是 **加粗** 和 ~~删除~~ 的文本"
+	block.Raw = "这是 **加粗**、*斜体* 和 `代码` 的文本"
 	rows := block.Render(ctx)
 
 	for _, r := range rows {
 		if strings.Contains(r.Plain, "**") {
 			t.Fatalf("bold markers not stripped from plain, got %q", r.Plain)
 		}
-		if strings.Contains(r.Plain, "~~") {
-			t.Fatalf("strikethrough markers not stripped from plain, got %q", r.Plain)
+		if strings.Contains(r.Plain, "*斜体*") || strings.Contains(r.Plain, "`代码`") {
+			t.Fatalf("inline markdown markers not stripped from plain, got %q", r.Plain)
 		}
-		if !strings.Contains(r.Plain, "加粗") {
-			t.Fatalf("bold content missing, got %q", r.Plain)
+		if ansi.Strip(r.Styled) != r.Plain {
+			t.Fatalf("expected styled/plain parity, got styled=%q plain=%q", ansi.Strip(r.Styled), r.Plain)
+		}
+		if !strings.Contains(r.Plain, "加粗") || !strings.Contains(r.Plain, "斜体") || !strings.Contains(r.Plain, "代码") {
+			t.Fatalf("inline markdown content missing, got %q", r.Plain)
 		}
 	}
 }

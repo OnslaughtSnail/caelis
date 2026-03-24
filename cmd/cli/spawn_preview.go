@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -19,11 +21,254 @@ func (c *cliConsole) forwardSessionEventToTUI(rootSessionID string, update sessi
 	if strings.TrimSpace(update.SessionID) == "" || strings.TrimSpace(update.SessionID) == strings.TrimSpace(rootSessionID) {
 		return
 	}
-	if c.spawnPreviewer != nil {
-		for _, msg := range c.spawnPreviewer.Project(update) {
-			c.tuiSender.Send(msg)
+	for _, msg := range c.projectSubagentUpdate(update) {
+		c.tuiSender.Send(msg)
+	}
+}
+
+type subagentProjectionTarget struct {
+	RootSessionID string
+	SpawnID       string
+	AttachTarget  string
+	CallID        string
+	Agent         string
+}
+
+type subagentDomainUpdateKind string
+
+const (
+	subagentDomainBootstrap subagentDomainUpdateKind = "bootstrap"
+	subagentDomainEvent     subagentDomainUpdateKind = "event"
+	subagentDomainPlan      subagentDomainUpdateKind = "plan"
+	subagentDomainTerminal  subagentDomainUpdateKind = "terminal"
+	subagentDomainStatus    subagentDomainUpdateKind = "status"
+	subagentDomainStream    subagentDomainUpdateKind = "stream"
+	subagentDomainToolCall  subagentDomainUpdateKind = "tool_call"
+)
+
+type subagentDomainUpdate struct {
+	Kind            subagentDomainUpdateKind
+	Target          subagentProjectionTarget
+	Event           *session.Event
+	Status          string
+	ApprovalTool    string
+	ApprovalCommand string
+	Entries         []tuievents.PlanEntry
+	Stream          string
+	Chunk           string
+	ToolName        string
+	ToolCallID      string
+	Args            string
+	Final           bool
+}
+
+func (c *cliConsole) projectSubagentUpdate(update sessionstream.Update) []any {
+	if c == nil || c.spawnPreviewer == nil || update.Event == nil {
+		return nil
+	}
+	return renderSubagentDomainUpdates(c.spawnPreviewer.ProjectDomain(update))
+}
+
+func (c *cliConsole) projectSubagentDomainUpdate(update subagentDomainUpdate) []any {
+	if c == nil {
+		return nil
+	}
+	target := update.Target
+	if strings.TrimSpace(target.SpawnID) == "" {
+		return nil
+	}
+	switch update.Kind {
+	case subagentDomainBootstrap:
+		msgs := []any{tuievents.SubagentStartMsg{
+			SpawnID:      target.SpawnID,
+			AttachTarget: target.AttachTarget,
+			Agent:        target.Agent,
+			CallID:       target.CallID,
+		}}
+		if status := strings.TrimSpace(update.Status); status != "" {
+			msgs = append(msgs, tuievents.SubagentStatusMsg{
+				SpawnID:         target.SpawnID,
+				State:           status,
+				ApprovalTool:    update.ApprovalTool,
+				ApprovalCommand: update.ApprovalCommand,
+			})
+		}
+		return msgs
+	case subagentDomainEvent:
+		if update.Event == nil {
+			return nil
+		}
+		if c.spawnPreviewer == nil {
+			return nil
+		}
+		return renderSubagentDomainUpdates(c.spawnPreviewer.ProjectDomain(syntheticSubagentUpdate(target, update.Event)))
+	default:
+		return renderSubagentDomainUpdates([]subagentDomainUpdate{update})
+	}
+}
+
+func renderSubagentDomainUpdates(updates []subagentDomainUpdate) []any {
+	if len(updates) == 0 {
+		return nil
+	}
+	msgs := make([]any, 0, len(updates))
+	for _, update := range updates {
+		target := update.Target
+		if strings.TrimSpace(target.SpawnID) == "" {
+			continue
+		}
+		switch update.Kind {
+		case subagentDomainBootstrap:
+			msgs = append(msgs, tuievents.SubagentStartMsg{
+				SpawnID:      target.SpawnID,
+				AttachTarget: target.AttachTarget,
+				Agent:        target.Agent,
+				CallID:       target.CallID,
+			})
+			if status := strings.TrimSpace(update.Status); status != "" {
+				msgs = append(msgs, tuievents.SubagentStatusMsg{
+					SpawnID:         target.SpawnID,
+					State:           status,
+					ApprovalTool:    update.ApprovalTool,
+					ApprovalCommand: update.ApprovalCommand,
+				})
+			}
+		case subagentDomainStatus:
+			msgs = append(msgs, tuievents.SubagentStatusMsg{
+				SpawnID:         target.SpawnID,
+				State:           strings.TrimSpace(update.Status),
+				ApprovalTool:    update.ApprovalTool,
+				ApprovalCommand: update.ApprovalCommand,
+			})
+		case subagentDomainStream:
+			msgs = append(msgs, tuievents.SubagentStreamMsg{
+				SpawnID: target.SpawnID,
+				Stream:  update.Stream,
+				Chunk:   update.Chunk,
+			})
+		case subagentDomainToolCall:
+			msgs = append(msgs, tuievents.SubagentToolCallMsg{
+				SpawnID:  target.SpawnID,
+				ToolName: update.ToolName,
+				CallID:   update.ToolCallID,
+				Args:     update.Args,
+				Stream:   update.Stream,
+				Chunk:    update.Chunk,
+				Final:    update.Final,
+			})
+		case subagentDomainPlan:
+			msgs = append(msgs, tuievents.SubagentPlanMsg{
+				SpawnID: target.SpawnID,
+				Entries: append([]tuievents.PlanEntry(nil), update.Entries...),
+			})
+		case subagentDomainTerminal:
+			msgs = append(msgs, tuievents.SubagentDoneMsg{
+				SpawnID: target.SpawnID,
+				State:   strings.TrimSpace(update.Status),
+			})
 		}
 	}
+	return msgs
+}
+
+func (c *cliConsole) dispatchSubagentDomainUpdate(ctx context.Context, update subagentDomainUpdate) {
+	if c == nil || c.tuiSender == nil {
+		return
+	}
+	for _, msg := range c.projectSubagentDomainUpdate(update) {
+		c.sendSubagentProjectionMsg(ctx, update.Target.RootSessionID, msg)
+	}
+}
+
+func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model.ToolResponse) (subagentDomainUpdate, bool) {
+	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName) {
+		return subagentDomainUpdate{}, false
+	}
+	spawnID := strings.TrimSpace(firstNonEmpty(
+		resp.Result,
+		"_ui_child_session_id",
+		"child_session_id",
+		"task_id",
+	))
+	if spawnID == "" {
+		return subagentDomainUpdate{}, false
+	}
+	attachTarget := strings.TrimSpace(firstNonEmpty(
+		resp.Result,
+		"_ui_child_session_id",
+		"child_session_id",
+		"_ui_delegation_id",
+		"delegation_id",
+	))
+	state := "running"
+	var approvalTool, approvalCmd string
+	if fmt.Sprint(resp.Result["_ui_approval_pending"]) == "true" || fmt.Sprint(resp.Result["approval_pending"]) == "true" {
+		state = "waiting_approval"
+		if v, ok := resp.Result["_ui_approval_tool"].(string); ok {
+			approvalTool = v
+		}
+		if v, ok := resp.Result["_ui_approval_command"].(string); ok {
+			approvalCmd = v
+		}
+	}
+	if explicit := strings.ToLower(strings.TrimSpace(asString(resp.Result["state"]))); explicit != "" {
+		state = explicit
+	}
+	target := subagentProjectionTarget{
+		RootSessionID: strings.TrimSpace(rootSessionID),
+		SpawnID:       spawnID,
+		AttachTarget:  attachTarget,
+		CallID:        strings.TrimSpace(resp.ID),
+		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+	}
+	return subagentDomainUpdate{
+		Kind:            subagentDomainBootstrap,
+		Target:          target,
+		Status:          state,
+		ApprovalTool:    approvalTool,
+		ApprovalCommand: approvalCmd,
+	}, true
+}
+
+func syntheticSubagentDomainUpdate(target subagentProjectionTarget, ev *session.Event) subagentDomainUpdate {
+	return subagentDomainUpdate{
+		Kind:   subagentDomainEvent,
+		Target: target,
+		Event:  ev,
+	}
+}
+
+func syntheticSubagentUpdate(target subagentProjectionTarget, ev *session.Event) sessionstream.Update {
+	return sessionstream.Update{
+		SessionID: strings.TrimSpace(target.SpawnID),
+		Event:     annotateSyntheticSubagentEvent(ev, target),
+	}
+}
+
+func annotateSyntheticSubagentEvent(ev *session.Event, target subagentProjectionTarget) *session.Event {
+	if ev == nil {
+		return nil
+	}
+	if ev.Meta == nil {
+		ev.Meta = map[string]any{}
+	}
+	if root := strings.TrimSpace(target.RootSessionID); root != "" {
+		ev.Meta["parent_session_id"] = root
+	}
+	if child := strings.TrimSpace(target.SpawnID); child != "" {
+		ev.Meta["child_session_id"] = child
+	}
+	if attach := strings.TrimSpace(target.AttachTarget); attach != "" {
+		ev.Meta["delegation_id"] = attach
+	}
+	if callID := strings.TrimSpace(target.CallID); callID != "" {
+		ev.Meta["parent_tool_call_id"] = callID
+	}
+	if agent := strings.TrimSpace(target.Agent); agent != "" {
+		ev.Meta["_ui_agent"] = agent
+	}
+	ev.Meta["parent_tool_name"] = tool.SpawnToolName
+	return ev
 }
 
 // spawnPreviewProjector maps child session events from SPAWN subagents
@@ -51,6 +296,12 @@ func newSpawnPreviewProjector() *spawnPreviewProjector {
 // Project converts a child session event into subagent-specific TUI messages.
 // Returns nil if the event is not from a SPAWN child session.
 func (p *spawnPreviewProjector) Project(update sessionstream.Update) []any {
+	return renderSubagentDomainUpdates(p.ProjectDomain(update))
+}
+
+// ProjectDomain converts a child session event into normalized subagent domain
+// updates. Returns nil if the event is not from a SPAWN child session.
+func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []subagentDomainUpdate {
 	if p == nil || update.Event == nil {
 		return nil
 	}
@@ -78,30 +329,34 @@ func (p *spawnPreviewProjector) Project(update sessionstream.Update) []any {
 	// Handle lifecycle transitions (done/failed/interrupted).
 	if info, ok := runtime.LifecycleFromEvent(update.Event); ok {
 		if !isTerminalSpawnStatus(info.Status) {
-			statusMsg := tuievents.SubagentStatusMsg{
-				SpawnID: spawnID,
-				State:   string(info.Status),
-			}
-			if info.Status == runtime.RunLifecycleStatusWaitingApproval {
-				statusMsg.ApprovalTool, statusMsg.ApprovalCommand = resolveApprovalContext(p, spawnID, info)
-			}
-			return []any{
-				tuievents.SubagentStartMsg{
+			status := subagentDomainUpdate{
+				Kind: subagentDomainBootstrap,
+				Target: subagentProjectionTarget{
 					SpawnID:      spawnID,
 					AttachTarget: attachTarget,
 					Agent:        "self",
 					CallID:       meta.ParentToolCall,
 				},
-				statusMsg,
+				Status: string(info.Status),
 			}
+			if info.Status == runtime.RunLifecycleStatusWaitingApproval {
+				status.ApprovalTool, status.ApprovalCommand = resolveApprovalContext(p, spawnID, info)
+			}
+			return []subagentDomainUpdate{status}
 		}
 		if isTerminalSpawnStatus(info.Status) {
 			p.mu.Lock()
 			delete(p.states, spawnID)
 			p.mu.Unlock()
-			return []any{tuievents.SubagentDoneMsg{
-				SpawnID: spawnID,
-				State:   string(info.Status),
+			return []subagentDomainUpdate{{
+				Kind: subagentDomainTerminal,
+				Target: subagentProjectionTarget{
+					SpawnID:      spawnID,
+					AttachTarget: attachTarget,
+					Agent:        "self",
+					CallID:       meta.ParentToolCall,
+				},
+				Status: string(info.Status),
 			}}
 		}
 	}
@@ -117,47 +372,53 @@ func (p *spawnPreviewProjector) Project(update sessionstream.Update) []any {
 		p.states[spawnID] = state
 	}
 
-	msgs := make([]any, 0, 4)
+	updates := make([]subagentDomainUpdate, 0, 4)
+	target := subagentProjectionTarget{
+		SpawnID:      spawnID,
+		AttachTarget: attachTarget,
+		Agent:        state.agent,
+		CallID:       meta.ParentToolCall,
+	}
 
 	// Emit SubagentStartMsg on first event for this spawn.
 	if len(state.toolCalls) == 0 && state.assistant == "" && state.reasoning == "" {
-		msgs = append(msgs, tuievents.SubagentStartMsg{
-			SpawnID:      spawnID,
-			AttachTarget: attachTarget,
-			Agent:        state.agent,
-			CallID:       meta.ParentToolCall,
+		updates = append(updates, subagentDomainUpdate{
+			Kind:   subagentDomainBootstrap,
+			Target: target,
 		})
 	}
 
 	// Project tool calls.
-	if toolMsgs := projectSpawnToolActivity(state, spawnID, update.Event); len(toolMsgs) > 0 {
-		msgs = append(msgs, toolMsgs...)
+	if toolUpdates := projectSpawnToolActivity(state, target, update.Event); len(toolUpdates) > 0 {
+		updates = append(updates, toolUpdates...)
 	}
 
 	if update.Event.Message.Role != model.RoleAssistant {
-		return msgs
+		return updates
 	}
 	partial := eventIsPartial(update.Event)
 
 	// Project reasoning.
 	if chunk := projectSpawnReasoning(state, update.Event, partial); chunk != "" {
-		msgs = append(msgs, tuievents.SubagentStreamMsg{
-			SpawnID: spawnID,
-			Stream:  "reasoning",
-			Chunk:   chunk,
+		updates = append(updates, subagentDomainUpdate{
+			Kind:   subagentDomainStream,
+			Target: target,
+			Stream: "reasoning",
+			Chunk:  chunk,
 		})
 	}
 
 	// Project assistant answer.
 	if chunk := projectSpawnAssistant(state, update.Event, partial); chunk != "" {
-		msgs = append(msgs, tuievents.SubagentStreamMsg{
-			SpawnID: spawnID,
-			Stream:  "assistant",
-			Chunk:   chunk,
+		updates = append(updates, subagentDomainUpdate{
+			Kind:   subagentDomainStream,
+			Target: target,
+			Stream: "assistant",
+			Chunk:  chunk,
 		})
 	}
 
-	return msgs
+	return updates
 }
 
 func isTerminalSpawnStatus(status runtime.RunLifecycleStatus) bool {
@@ -169,113 +430,142 @@ func isTerminalSpawnStatus(status runtime.RunLifecycleStatus) bool {
 	}
 }
 
-func projectSpawnReasoning(state *spawnPreviewState, ev *session.Event, partial bool) string {
-	if state == nil || ev == nil {
-		return ""
-	}
-	text := ev.Message.Reasoning
-	if strings.TrimSpace(text) == "" {
+func projectSubagentSnapshotText(slot *string, text string, partial bool) string {
+	if slot == nil || text == "" {
 		return ""
 	}
 	if partial {
-		delta := previewDelta(state.reasoning, text)
-		state.reasoning = text
+		delta := previewDelta(*slot, text)
+		*slot = text
 		return delta
 	}
-	chunk := previewDelta(state.reasoning, text)
-	state.reasoning = text
-	if strings.TrimSpace(chunk) == "" {
-		return ""
-	}
-	return chunk + "\n"
-}
-
-func projectSpawnAssistant(state *spawnPreviewState, ev *session.Event, partial bool) string {
-	if state == nil || ev == nil {
-		return ""
-	}
-	text := ev.Message.TextContent()
-	if partial {
-		delta := previewDelta(state.assistant, text)
-		state.assistant = text
-		return delta
-	}
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	chunk := previewDelta(state.assistant, text)
-	state.assistant = text
+	chunk := previewDelta(*slot, text)
+	*slot = text
 	if chunk == "" {
 		return ""
 	}
 	return chunk + "\n"
 }
 
+func replaceSubagentReplayText(slot *string, text string) string {
+	if slot == nil {
+		return ""
+	}
+	*slot = text
+	return *slot
+}
+
+func appendSubagentReplayText(slot *string, text string) string {
+	if slot == nil {
+		return ""
+	}
+	*slot += text
+	return *slot
+}
+
+func rememberSubagentToolSnapshot(toolCalls map[string]toolCallSnapshot, callID, name string, args map[string]any) map[string]toolCallSnapshot {
+	if strings.TrimSpace(callID) == "" {
+		return toolCalls
+	}
+	if toolCalls == nil {
+		toolCalls = map[string]toolCallSnapshot{}
+	}
+	toolCalls[callID] = toolCallSnapshot{Name: name, Args: args}
+	return toolCalls
+}
+
+func consumeSubagentToolSnapshot(toolCalls map[string]toolCallSnapshot, callID string) (map[string]toolCallSnapshot, toolCallSnapshot, bool) {
+	if toolCalls == nil || strings.TrimSpace(callID) == "" {
+		return toolCalls, toolCallSnapshot{}, false
+	}
+	snapshot, ok := toolCalls[callID]
+	if ok {
+		delete(toolCalls, callID)
+	}
+	return toolCalls, snapshot, ok
+}
+
+func projectSpawnReasoning(state *spawnPreviewState, ev *session.Event, partial bool) string {
+	if state == nil || ev == nil {
+		return ""
+	}
+	return projectSubagentSnapshotText(&state.reasoning, ev.Message.ReasoningText(), partial)
+}
+
+func projectSpawnAssistant(state *spawnPreviewState, ev *session.Event, partial bool) string {
+	if state == nil || ev == nil {
+		return ""
+	}
+	return projectSubagentSnapshotText(&state.assistant, ev.Message.TextContent(), partial)
+}
+
 func previewDelta(existing string, incoming string) string {
 	if strings.HasPrefix(incoming, existing) {
 		return incoming[len(existing):]
 	}
+	if strings.HasPrefix(existing, incoming) {
+		return ""
+	}
 	return incoming
 }
 
-func projectSpawnToolActivity(state *spawnPreviewState, spawnID string, ev *session.Event) []any {
+func projectSpawnToolActivity(state *spawnPreviewState, target subagentProjectionTarget, ev *session.Event) []subagentDomainUpdate {
 	if state == nil || ev == nil {
 		return nil
 	}
-	msgs := make([]any, 0, len(ev.Message.ToolCalls)+1)
-	for _, call := range ev.Message.ToolCalls {
+	calls := ev.Message.ToolCalls()
+	updates := make([]subagentDomainUpdate, 0, len(calls)+1)
+	for _, call := range calls {
 		args := parseToolArgsForDisplay(call.Args)
-		if state.toolCalls == nil {
-			state.toolCalls = map[string]toolCallSnapshot{}
-		}
 		callID := strings.TrimSpace(call.ID)
-		if callID != "" {
-			state.toolCalls[callID] = toolCallSnapshot{Name: call.Name, Args: args}
-		}
+		state.toolCalls = rememberSubagentToolSnapshot(state.toolCalls, callID, call.Name, args)
 		state.lastToolCallName = call.Name
 		state.lastToolCallArgs = strings.TrimSpace(summarizeToolArgs(call.Name, args))
-		msgs = append(msgs, tuievents.SubagentToolCallMsg{
-			SpawnID:  spawnID,
-			ToolName: call.Name,
-			CallID:   callID,
-			Args:     strings.TrimSpace(summarizeToolArgs(call.Name, args)),
+		updates = append(updates, subagentDomainUpdate{
+			Kind:       subagentDomainToolCall,
+			Target:     target,
+			ToolName:   call.Name,
+			ToolCallID: callID,
+			Args:       strings.TrimSpace(summarizeToolArgs(call.Name, args)),
 		})
 	}
-	if resp := ev.Message.ToolResponse; resp != nil {
+	if resp := ev.Message.ToolResponse(); resp != nil {
 		respID := strings.TrimSpace(resp.ID)
 		stream := "stdout"
 		if hasToolError(resp.Result) {
 			stream = "stderr"
 		}
 		var callArgs map[string]any
-		if state.toolCalls != nil && respID != "" {
-			if snapshot, ok := state.toolCalls[respID]; ok {
-				callArgs = snapshot.Args
-				delete(state.toolCalls, respID)
-			}
+		if toolCalls, snapshot, ok := consumeSubagentToolSnapshot(state.toolCalls, respID); ok {
+			state.toolCalls = toolCalls
+			callArgs = snapshot.Args
 		}
 		summary := summarizeToolResponseWithCall(resp.Name, resp.Result, callArgs)
-		msgs = append(msgs, tuievents.SubagentToolCallMsg{
-			SpawnID:  spawnID,
-			ToolName: resp.Name,
-			CallID:   respID,
-			Chunk:    summary,
-			Stream:   stream,
-			Final:    true,
+		updates = append(updates, subagentDomainUpdate{
+			Kind:       subagentDomainToolCall,
+			Target:     target,
+			ToolName:   resp.Name,
+			ToolCallID: respID,
+			Chunk:      summary,
+			Stream:     stream,
+			Final:      true,
 		})
 		// Detect PLAN tool result and emit SubagentPlanMsg.
 		if isPlanToolName(resp.Name) && !hasToolError(resp.Result) {
-			planMsg := subagentPlanMsgFromToolPayload(spawnID, callArgs, resp.Result)
-			if len(planMsg.Entries) > 0 {
-				msgs = append(msgs, planMsg)
+			entries := subagentPlanEntriesFromToolPayload(callArgs, resp.Result)
+			if len(entries) > 0 {
+				updates = append(updates, subagentDomainUpdate{
+					Kind:    subagentDomainPlan,
+					Target:  target,
+					Entries: entries,
+				})
 			}
 		}
 	}
-	return msgs
+	return updates
 }
 
-func subagentPlanMsgFromToolPayload(spawnID string, callArgs map[string]any, result map[string]any) tuievents.SubagentPlanMsg {
+func subagentPlanEntriesFromToolPayload(callArgs map[string]any, result map[string]any) []tuievents.PlanEntry {
 	var entries []tuievents.PlanEntry
 	for _, source := range []any{callArgs["entries"], result["entries"]} {
 		if err := decodePlanEntries(source, &entries); err == nil {
@@ -283,16 +573,16 @@ func subagentPlanMsgFromToolPayload(spawnID string, callArgs map[string]any, res
 		}
 		entries = nil
 	}
-	msg := tuievents.SubagentPlanMsg{SpawnID: spawnID}
+	out := make([]tuievents.PlanEntry, 0, len(entries))
 	for _, item := range entries {
 		content := strings.TrimSpace(item.Content)
 		status := strings.TrimSpace(item.Status)
 		if content == "" || status == "" {
 			continue
 		}
-		msg.Entries = append(msg.Entries, tuievents.PlanEntry{Content: content, Status: status})
+		out = append(out, tuievents.PlanEntry{Content: content, Status: status})
 	}
-	return msg
+	return out
 }
 
 // resolveApprovalContext determines the tool name and command for an approval

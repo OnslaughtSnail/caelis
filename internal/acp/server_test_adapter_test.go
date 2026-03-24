@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -400,7 +401,7 @@ func (a *harnessAdapter) handleSlash(ctx context.Context, sess *harnessAdapterSe
 			return StartPromptResult{}, err
 		}
 		if ev != nil {
-			if entries := planEntriesFromResult(ev.Message.ToolResponse.Result); len(entries) > 0 {
+			if entries := planEntriesFromResult(ev.Message.ToolResponse().Result); len(entries) > 0 {
 				sess.setPlans(entries)
 			}
 		}
@@ -418,7 +419,7 @@ func (a *harnessAdapter) staticResult(ctx context.Context, sessionID string, tex
 		ID:        fmt.Sprintf("ev_%d", time.Now().UnixNano()),
 		SessionID: sessionID,
 		Time:      time.Now(),
-		Message:   model.Message{Role: model.RoleAssistant, Text: strings.TrimSpace(text)},
+		Message:   model.NewTextMessage(model.RoleAssistant, strings.TrimSpace(text)),
 	}
 	if err := a.store.AppendEvent(ctx, &session.Session{AppName: "caelis", UserID: "tester", ID: sessionID}, ev); err != nil {
 		return StartPromptResult{}, err
@@ -544,7 +545,7 @@ func (a *harnessAdapter) restoreState(state map[string]any) (string, map[string]
 	return modeID, values, filepath.Clean(strings.TrimSpace(cwd)), loadPlanEntries(state["plan"])
 }
 
-func (a *harnessAdapter) newResources(ctx context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, modeResolver func() string) (*SessionResources, error) {
+func (a *harnessAdapter) newResources(_ context.Context, sessionID string, sessionCWD string, caps ClientCapabilities, modeResolver func() string) (*SessionResources, error) {
 	execRuntime := NewRuntime(a.baseRuntime, a.serverConn, sessionID, a.workspaceRoot, sessionCWD, caps, modeResolver)
 	tools := make([]tool.Tool, 0, 1)
 	bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: execRuntime})
@@ -745,8 +746,8 @@ func (h *harnessPromptHandle) Events() iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		defer h.finish()
 		for ev, err := range seq {
-			if ev != nil && ev.Message.ToolResponse != nil && strings.EqualFold(strings.TrimSpace(ev.Message.ToolResponse.Name), tool.PlanToolName) {
-				if entries := planEntriesFromResult(ev.Message.ToolResponse.Result); len(entries) > 0 {
+			if ev != nil && ev.Message.ToolResponse() != nil && strings.EqualFold(strings.TrimSpace(ev.Message.ToolResponse().Name), tool.PlanToolName) {
+				if entries := planEntriesFromResult(ev.Message.ToolResponse().Result); len(entries) > 0 {
 					h.session.setPlans(entries)
 				}
 			}
@@ -804,8 +805,6 @@ func cloneStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
+	maps.Copy(out, values)
 	return out
 }

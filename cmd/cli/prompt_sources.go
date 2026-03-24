@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appprompting "github.com/OnslaughtSnail/caelis/internal/app/prompting"
 	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 )
@@ -49,22 +50,25 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	warnings = append(warnings, discovered.Warnings...)
 
 	additional := make([]appprompting.PromptFragment, 0, 4)
-	if activePolicies := buildActiveAgentPoliciesPrompt(globalAgents, workspaceAgents, workspaceAgentsPath); activePolicies != "" {
+	if userInstructions := buildUserCustomInstructionsPrompt(in.BasePrompt, workspaceAgents, globalAgents); userInstructions != "" {
 		additional = append(additional, appprompting.PromptFragment{
-			Stage:   "active_agent_policies",
-			Source:  "cli:active-agent-policies",
-			Content: activePolicies,
+			Kind:    appprompting.PromptFragmentKindUser,
+			Stage:   "user_custom_instructions",
+			Source:  "cli:user-custom-instructions",
+			Content: userInstructions,
 		})
 	}
-	if sessionOverrides := buildSessionOverridePrompt(in.BasePrompt); sessionOverrides != "" {
+	if agentSupport := buildSystemAgentDelegationPrompt(in.DefaultAgent, in.AgentDescriptors); agentSupport != "" {
 		additional = append(additional, appprompting.PromptFragment{
-			Stage:   "session_overrides",
-			Source:  "cli:session-overrides",
-			Content: sessionOverrides,
+			Kind:    appprompting.PromptFragmentKindSystem,
+			Stage:   "acp_agents",
+			Source:  "cli:acp-agent-support",
+			Content: agentSupport,
 		})
 	}
-	if workspaceContext := builtInWorkspaceContextPrompt(workspaceDir); workspaceContext != "" {
+	if workspaceContext := builtInEnvironmentContextPrompt(workspaceDir); workspaceContext != "" {
 		additional = append(additional, appprompting.PromptFragment{
+			Kind:    appprompting.PromptFragmentKindContext,
 			Stage:   "workspace_context",
 			Source:  "cli:workspace-context",
 			Content: workspaceContext,
@@ -72,6 +76,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 	if in.EnableExperimentalLSPPrompt {
 		additional = append(additional, appprompting.PromptFragment{
+			Kind:    appprompting.PromptFragmentKindSystem,
 			Stage:   "experimental_lsp",
 			Source:  "cli:experimental-lsp-routing",
 			Content: "## Experimental LSP Routing\n\n" + defaultExperimentalLSPRoutingPrompt,
@@ -80,7 +85,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 
 	return promptSpecResult{
 		Spec: appprompting.AssembleSpec{
-			IdentityPrompt:   builtInIdentityPrompt(in.AppName),
+			IdentityPrompt:   builtInSystemIdentityPrompt(in.AppName),
 			IdentitySource:   "cli:built-in-identity",
 			SkillsMetaPrompt: appskills.BuildMetaPrompt(discovered.Metas),
 			SkillsMetaSource: "skills metadata",
@@ -141,20 +146,25 @@ func normalizePromptText(input string) string {
 	return strings.TrimSpace(input)
 }
 
-func buildActiveAgentPoliciesPrompt(globalAgents string, workspaceAgents string, workspaceAgentsPath string) string {
-	_ = workspaceAgentsPath
-	sections := make([]string, 0, 2)
-	if text := normalizePromptText(globalAgents); text != "" {
+func buildUserCustomInstructionsPrompt(sessionPrompt string, workspaceAgents string, globalAgents string) string {
+	sections := make([]string, 0, 3)
+	if text := normalizePromptText(sessionPrompt); text != "" {
 		sections = append(sections, strings.Join([]string{
-			"## Global User Policy",
+			"## Session Overrides",
 			"",
 			text,
 		}, "\n"))
 	}
 	if text := normalizePromptText(workspaceAgents); text != "" {
 		sections = append(sections, strings.Join([]string{
-			"## Project Policy",
-			"Overrides conflicting global instructions.",
+			"## Workspace Instructions",
+			"",
+			text,
+		}, "\n"))
+	}
+	if text := normalizePromptText(globalAgents); text != "" {
+		sections = append(sections, strings.Join([]string{
+			"## Global Instructions",
 			"",
 			text,
 		}, "\n"))
@@ -162,13 +172,54 @@ func buildActiveAgentPoliciesPrompt(globalAgents string, workspaceAgents string,
 	if len(sections) == 0 {
 		return ""
 	}
-	return "# Active Agent Policies\n\n" + strings.Join(sections, "\n\n")
+
+	lines := []string{}
+	if len(sections) > 1 {
+		lines = append(lines, "Session overrides workspace instructions, and workspace instructions override global instructions on conflict.")
+		lines = append(lines, "")
+	}
+	lines = append(lines, sections...)
+	return strings.Join(lines, "\n\n")
 }
 
-func buildSessionOverridePrompt(basePrompt string) string {
-	value := normalizePromptText(basePrompt)
-	if value == "" {
+func buildSystemAgentDelegationPrompt(defaultAgent string, configured []appagents.Descriptor) string {
+	if strings.TrimSpace(defaultAgent) == "" && len(configured) == 0 {
 		return ""
 	}
-	return "## Session Overrides\n\n" + value
+	agents := make([]appagents.Descriptor, 0, len(configured)+1)
+	agents = append(agents, appagents.SelfDescriptor())
+	seen := map[string]struct{}{"self": {}}
+	for _, desc := range configured {
+		id := strings.TrimSpace(desc.ID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		agents = append(agents, desc)
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i].ID < agents[j].ID })
+	lines := []string{"## Agent Delegation"}
+	if value := strings.TrimSpace(defaultAgent); value != "" {
+		lines = append(lines, "- default_agent="+value)
+	}
+	for _, desc := range agents {
+		stability := strings.TrimSpace(desc.Stability)
+		if stability == "" {
+			stability = appagents.StabilityExperimental
+		}
+		line := fmt.Sprintf("- agent=%s stability=%s", desc.ID, stability)
+		if text := strings.TrimSpace(desc.Description); text != "" {
+			line += " desc=" + text
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines,
+		"- Use SPAWN to start a delegated child session when the task benefits from delegation.",
+		"- SPAWN accepts prompt(required), agent, yield_seconds, timeout_seconds.",
+		"- Use TASK write with the SPAWN task_id to continue an existing child session.",
+	)
+	return strings.Join(lines, "\n")
 }

@@ -112,8 +112,19 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 			Timeout:      req.Timeout,
 		}, nil
 	}
-	result, err := r.inspectSubagent(ctx, childReq.SessionID)
+	result, err := r.InspectSubagent(ctx, childReq.SessionID)
 	if err != nil {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(err.Error())), "not found") {
+			return agent.SubagentRunResult{
+				SessionID:    childReq.SessionID,
+				DelegationID: lineage.DelegationID,
+				Agent:        req.Agent,
+				State:        string(RunLifecycleStatusRunning),
+				Running:      true,
+				Yielded:      true,
+				Timeout:      req.Timeout,
+			}, nil
+		}
 		return agent.SubagentRunResult{}, err
 	}
 	result.Agent = req.Agent
@@ -318,11 +329,72 @@ func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req agent.S
 		ParentToolName:  strings.TrimSpace(callInfo.Name),
 		DelegationID:    delegationID,
 	}
+	if existing, ok := r.existingChildLineage(ctx, childSessionID); ok {
+		if existing.ParentSessionID != "" {
+			lineage.ParentSessionID = existing.ParentSessionID
+		}
+		if existing.ParentToolCall != "" {
+			lineage.ParentToolCall = existing.ParentToolCall
+		}
+		if existing.ParentToolName != "" {
+			lineage.ParentToolName = existing.ParentToolName
+		}
+		if existing.DelegationID != "" {
+			lineage.DelegationID = existing.DelegationID
+		}
+	}
 	childReq := r.req
 	childReq.SessionID = childSessionID
-	childReq.Input = req.Task
-	childReq.ContentParts = append([]model.ContentPart(nil), req.ContentParts...)
+	childReq.Input = req.Prompt
+	childReq.ContentParts = model.ContentPartsFromParts(req.Parts)
 	return childReq, lineage, nil
+}
+
+func (r *runtimeSubagentRunner) existingChildLineage(ctx context.Context, childSessionID string) (delegationLineage, bool) {
+	if r == nil || r.runtime == nil {
+		return delegationLineage{}, false
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return delegationLineage{}, false
+	}
+	events, err := r.runtime.SessionEvents(ctx, SessionEventsRequest{
+		AppName:          r.req.AppName,
+		UserID:           r.req.UserID,
+		SessionID:        childSessionID,
+		Limit:            200,
+		IncludeLifecycle: true,
+	})
+	if err != nil {
+		return delegationLineage{}, false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		meta, ok := DelegationMetadataFromEvent(events[i])
+		if !ok {
+			continue
+		}
+		if meta.ChildSessionID != "" && meta.ChildSessionID != childSessionID {
+			continue
+		}
+		return delegationLineage{
+			ParentSessionID: meta.ParentSessionID,
+			ChildSessionID:  firstNonEmptyString(meta.ChildSessionID, childSessionID),
+			ParentToolCall:  meta.ParentToolCall,
+			ParentToolName:  meta.ParentToolName,
+			DelegationID:    meta.DelegationID,
+		}, true
+	}
+	return delegationLineage{}, false
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, lineage delegationLineage) {
@@ -367,7 +439,7 @@ func (r *runtimeSubagentRunner) persistDetachedSubagentFailure(ctx context.Conte
 	})
 }
 
-func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID string) (agent.SubagentRunResult, error) {
+func (r *runtimeSubagentRunner) InspectSubagent(ctx context.Context, sessionID string) (agent.SubagentRunResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return agent.SubagentRunResult{}, fmt.Errorf("runtime: delegated child session_id is required")
@@ -394,6 +466,7 @@ func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID s
 		SessionID: sessionID,
 		State:     string(state.Status),
 		Running:   state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval,
+		UpdatedAt: state.UpdatedAt,
 	}
 	if !state.HasLifecycle && len(events) == 0 {
 		return agent.SubagentRunResult{}, fmt.Errorf("runtime: delegated child session %q not found", sessionID)
@@ -401,6 +474,9 @@ func (r *runtimeSubagentRunner) inspectSubagent(ctx context.Context, sessionID s
 	for _, ev := range events {
 		if ev == nil {
 			continue
+		}
+		if ev.Time.After(result.UpdatedAt) {
+			result.UpdatedAt = ev.Time
 		}
 		if result.DelegationID == "" {
 			result.DelegationID = strings.TrimSpace(subagentStringValue(ev.Meta[metaDelegationID]))

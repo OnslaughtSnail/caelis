@@ -40,7 +40,7 @@ func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 		return discoverOpenAIModels(ctx, client, cfg, token)
 	case APIGemini:
 		return discoverGeminiModels(ctx, client, cfg, token)
-	case APIAnthropic:
+	case APIAnthropic, APIAnthropicCompatible:
 		return discoverAnthropicModels(ctx, client, cfg, token)
 	case APIOllama:
 		return discoverOllamaModels(ctx, client, cfg)
@@ -197,12 +197,13 @@ func discoverGeminiModels(ctx context.Context, client *http.Client, cfg Config, 
 }
 
 func discoverAnthropicModels(ctx context.Context, client *http.Client, cfg Config, token string) ([]RemoteModel, error) {
-	endpoint := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/") + "/models"
+	endpoint := anthropicSDKBaseURL(cfg.BaseURL) + "/v1/models"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 	applyDefaultAuthHeader(req, cfg, token, false)
+	applyConfiguredHeaders(req, cfg.Headers)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	resp, err := client.Do(req)
 	if err != nil {
@@ -321,7 +322,7 @@ func applyDefaultAuthHeader(req *http.Request, cfg Config, token string, geminiB
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		return
-	case APIAnthropic:
+	case APIAnthropic, APIAnthropicCompatible:
 		if auth.Type == AuthOAuthToken || auth.Type == AuthBearerToken {
 			req.Header.Set("Authorization", "Bearer "+token)
 			return
@@ -331,6 +332,22 @@ func applyDefaultAuthHeader(req *http.Request, cfg Config, token string, geminiB
 	default:
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+func anthropicSDKBaseURL(raw string) string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return "https://api.anthropic.com"
+	}
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(strings.ToLower(base), "/v1") {
+		base = strings.TrimSpace(base[:len(base)-len("/v1")])
+		base = strings.TrimRight(base, "/")
+	}
+	if base == "" {
+		return "https://api.anthropic.com"
+	}
+	return base
 }
 
 func applyConfiguredHeaders(req *http.Request, headers map[string]string) {

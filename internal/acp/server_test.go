@@ -9,10 +9,12 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
 	stdruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -52,7 +54,7 @@ func TestServer_InitializeNewPromptAndLoad(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "hello from acp"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "hello from acp")}},
 			},
 		},
 	})
@@ -151,7 +153,7 @@ func TestServer_InitializeAdvertisesImagePromptCapability(t *testing.T) {
 func TestServer_PromptWithImageBlockForwardsImageContentParts(t *testing.T) {
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "seen"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "seen")}},
 		},
 	}
 	h := newHarness(t, harnessConfig{
@@ -189,13 +191,14 @@ func TestServer_PromptWithImageBlockForwardsImageContentParts(t *testing.T) {
 		if msg.Role != model.RoleUser {
 			continue
 		}
-		if len(msg.ContentParts) != 2 {
+		contentParts := model.ContentPartsFromParts(msg.Parts)
+		if len(contentParts) != 2 {
 			continue
 		}
-		if msg.ContentParts[0].Type != model.ContentPartImage || strings.TrimSpace(msg.ContentParts[0].Data) == "" {
+		if contentParts[0].Type != model.ContentPartImage || strings.TrimSpace(contentParts[0].Data) == "" {
 			continue
 		}
-		if msg.ContentParts[1].Type != model.ContentPartText || !strings.Contains(msg.ContentParts[1].Text, "guess the app") {
+		if contentParts[1].Type != model.ContentPartText || !strings.Contains(contentParts[1].Text, "guess the app") {
 			continue
 		}
 		found = true
@@ -209,7 +212,7 @@ func TestServer_PromptWithImageBlockForwardsImageContentParts(t *testing.T) {
 func TestServer_PromptSilentlyDropsImagesWhenModelDoesNotSupportIt(t *testing.T) {
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "text only"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "text only")}},
 		},
 	}
 	h := newHarness(t, harnessConfig{
@@ -247,8 +250,9 @@ func TestServer_PromptSilentlyDropsImagesWhenModelDoesNotSupportIt(t *testing.T)
 		if msg.Role != model.RoleUser {
 			continue
 		}
-		if len(msg.ContentParts) != 1 || msg.ContentParts[0].Type != model.ContentPartText {
-			t.Fatalf("expected text-only content parts for unsupported model, got %+v", msg.ContentParts)
+		contentParts := model.ContentPartsFromParts(msg.Parts)
+		if len(contentParts) != 1 || contentParts[0].Type != model.ContentPartText {
+			t.Fatalf("expected text-only content parts for unsupported model, got %+v", contentParts)
 		}
 		if !strings.Contains(msg.TextContent(), "only keep this") {
 			t.Fatalf("expected prompt text to survive image filtering, got %+v", msg)
@@ -263,7 +267,7 @@ func TestServer_PromptSilentlyDropsImagesWhenModelDoesNotSupportIt(t *testing.T)
 func TestServer_PromptPreservesInterleavedTextImageOrder(t *testing.T) {
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "ordered"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "ordered")}},
 		},
 	}
 	h := newHarness(t, harnessConfig{
@@ -301,17 +305,18 @@ func TestServer_PromptPreservesInterleavedTextImageOrder(t *testing.T) {
 		if msg.Role != model.RoleUser {
 			continue
 		}
-		if len(msg.ContentParts) != 3 {
-			t.Fatalf("expected 3 ordered content parts, got %+v", msg.ContentParts)
+		contentParts := model.ContentPartsFromParts(msg.Parts)
+		if len(contentParts) != 3 {
+			t.Fatalf("expected 3 ordered content parts, got %+v", contentParts)
 		}
-		if msg.ContentParts[0].Type != model.ContentPartText || msg.ContentParts[0].Text != "before" {
-			t.Fatalf("expected first text part preserved, got %+v", msg.ContentParts[0])
+		if contentParts[0].Type != model.ContentPartText || contentParts[0].Text != "before" {
+			t.Fatalf("expected first text part preserved, got %+v", contentParts[0])
 		}
-		if msg.ContentParts[1].Type != model.ContentPartImage {
-			t.Fatalf("expected image to remain in the middle, got %+v", msg.ContentParts[1])
+		if contentParts[1].Type != model.ContentPartImage {
+			t.Fatalf("expected image to remain in the middle, got %+v", contentParts[1])
 		}
-		if msg.ContentParts[2].Type != model.ContentPartText || msg.ContentParts[2].Text != "after" {
-			t.Fatalf("expected trailing text part preserved, got %+v", msg.ContentParts[2])
+		if contentParts[2].Type != model.ContentPartText || contentParts[2].Text != "after" {
+			t.Fatalf("expected trailing text part preserved, got %+v", contentParts[2])
 		}
 		return
 	}
@@ -340,8 +345,8 @@ func TestServer_InitializeSerializesSchemaFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected agentCapabilities object, got %#v", initResp["agentCapabilities"])
 	}
-	if _, exists := rawCaps["mcpCapabilities"]; exists {
-		t.Fatalf("did not expect mcpCapabilities in agentCapabilities, got %#v", rawCaps)
+	if _, exists := rawCaps["mcpCapabilities"]; !exists {
+		t.Fatalf("expected mcpCapabilities in agentCapabilities, got %#v", rawCaps)
 	}
 	if _, exists := rawCaps["mcp"]; exists {
 		t.Fatalf("did not expect legacy mcp field, got %#v", rawCaps)
@@ -389,7 +394,7 @@ func TestServer_NewSessionAndPromptUseDynamicModelState(t *testing.T) {
 			captured = cfg
 			return &scriptedLLM{
 				calls: [][]*model.Response{
-					{{Message: model.Message{Role: model.RoleAssistant, Text: "hello from selected model"}}},
+					{{Message: model.NewTextMessage(model.RoleAssistant, "hello from selected model")}},
 				},
 			}, nil
 		},
@@ -461,17 +466,14 @@ func TestServer_PromptForwardsDelegatedChildSessionUpdates(t *testing.T) {
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call_delegate_1",
-							Name: tool.SpawnToolName,
-							Args: `{"task":"child task","yield_seconds":0}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call_delegate_1",
+						Name: tool.SpawnToolName,
+						Args: `{"prompt":"child task","yield_seconds":0}`,
+					}}, ""),
 				}},
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "child done"}}},
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "spawned complete"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "child done")}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "spawned complete")}},
 			},
 		},
 	})
@@ -508,16 +510,22 @@ func TestServer_PromptForwardsDelegatedChildSessionUpdates(t *testing.T) {
 
 	h.waitNotifications(t, 5)
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	notes := append([]SessionNotification(nil), h.notifications...)
+	h.mu.Unlock()
 	var childSessionIDs []string
-	for _, note := range h.notifications {
+	for _, note := range notes {
 		if strings.TrimSpace(note.SessionID) == "" || note.SessionID == newResp.SessionID {
 			continue
 		}
 		childSessionIDs = append(childSessionIDs, note.SessionID)
 	}
 	if len(childSessionIDs) == 0 {
-		t.Fatalf("expected delegated child session notifications, got %+v", h.notifications)
+		t.Fatalf("expected delegated child session notifications, got %+v", notes)
+	}
+	for _, updateType := range h.notificationTypes() {
+		if strings.HasPrefix(updateType, "subagent_") {
+			t.Fatalf("did not expect non-standard subagent update on public ACP wire, got %q", updateType)
+		}
 	}
 }
 
@@ -585,7 +593,7 @@ func TestServer_SessionModeAndConfigPersistAcrossLoad(t *testing.T) {
 		},
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "configured"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "configured")}},
 			},
 		},
 	})
@@ -663,16 +671,13 @@ func TestServer_Prompt_UsesACPFileSystemRead(t *testing.T) {
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-read",
-							Name: "READ",
-							Args: `{"path":"/workspace/app.txt"}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-read",
+						Name: "READ",
+						Args: `{"path":"/workspace/app.txt"}`,
+					}}, ""),
 				}},
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "done")}},
 			},
 		},
 	})
@@ -704,7 +709,7 @@ func TestServer_Prompt_UsesACPFileSystemRead(t *testing.T) {
 	}
 }
 
-func TestServer_Prompt_DefaultSandboxBashDoesNotUseACPTerminal(t *testing.T) {
+func TestServer_Prompt_BashUsesACPTerminalWhenClientSupportsIt(t *testing.T) {
 	h := newHarness(t, harnessConfig{
 		clientCaps: ClientCapabilities{
 			Terminal: true,
@@ -712,16 +717,13 @@ func TestServer_Prompt_DefaultSandboxBashDoesNotUseACPTerminal(t *testing.T) {
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-bash",
-							Name: "BASH",
-							Args: `{"command":"echo hi"}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-bash",
+						Name: "BASH",
+						Args: `{"command":"echo hi"}`,
+					}}, ""),
 				}},
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "done"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "done")}},
 			},
 		},
 	})
@@ -741,8 +743,41 @@ func TestServer_Prompt_DefaultSandboxBashDoesNotUseACPTerminal(t *testing.T) {
 	if promptResp.StopReason != StopReasonEndTurn {
 		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
 	}
-	if h.terminalCreates != 0 {
-		t.Fatalf("did not expect terminal/create call for sandboxed bash, got %d", h.terminalCreates)
+	if h.terminalCreates != 1 {
+		t.Fatalf("expected terminal/create call for ACP bash, got %d", h.terminalCreates)
+	}
+	h.waitNotificationTypes(t, UpdateToolCall, UpdateToolCallState, UpdateAgentMessage)
+	foundTerminal := false
+	h.mu.Lock()
+	notes := append([]SessionNotification(nil), h.notifications...)
+	h.mu.Unlock()
+	for _, note := range notes {
+		raw, err := json.Marshal(note.Update)
+		if err != nil {
+			continue
+		}
+		var update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			ToolCallID    string `json:"toolCallId"`
+			Content       []struct {
+				Type       string `json:"type"`
+				TerminalID string `json:"terminalId"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(raw, &update); err != nil {
+			continue
+		}
+		if update.SessionUpdate != UpdateToolCallState || update.ToolCallID != "call-bash" {
+			continue
+		}
+		for _, item := range update.Content {
+			if item.Type == "terminal" && item.TerminalID == "term-1" {
+				foundTerminal = true
+			}
+		}
+	}
+	if !foundTerminal {
+		t.Fatalf("expected BASH tool update to attach ACP terminal content, got %+v", notes)
 	}
 }
 
@@ -755,30 +790,27 @@ func TestServer_Prompt_FiltersInternalToolMetadataFromACPUpdates(t *testing.T) {
 			return scriptedAgent{
 				name: "metadata-filter",
 				events: []*session.Event{{
-					Message: model.Message{
-						Role: model.RoleTool,
-						ToolResponse: &model.ToolResponse{
-							ID:   "call_patch_1",
-							Name: "PATCH",
-							Result: map[string]any{
-								"path":        "demo.txt",
-								"ok":          true,
-								"_ui_preview": "--- old\n+++ new",
-								"metadata": map[string]any{
-									"patch": map[string]any{
-										"preview": "--- old\n+++ new",
-									},
-								},
-								"payload": map[string]any{
-									"metadata": map[string]any{
-										"keep": "yes",
-									},
-									"_ui_note": "internal",
-									"value":    "ok",
+					Message: model.MessageFromToolResponse(&model.ToolResponse{
+						ID:   "call_patch_1",
+						Name: "PATCH",
+						Result: map[string]any{
+							"path":        "demo.txt",
+							"ok":          true,
+							"_ui_preview": "--- old\n+++ new",
+							"metadata": map[string]any{
+								"patch": map[string]any{
+									"preview": "--- old\n+++ new",
 								},
 							},
+							"payload": map[string]any{
+								"metadata": map[string]any{
+									"keep": "yes",
+								},
+								"_ui_note": "internal",
+								"value":    "ok",
+							},
 						},
-					},
+					}),
 				}},
 			}, nil
 		},
@@ -848,9 +880,9 @@ func TestServer_Prompt_CoalescesAssistantPartialsIntoFinalMessage(t *testing.T) 
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{
-					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: "hel"}},
-					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: "lo"}},
-					{Message: model.Message{Role: model.RoleAssistant, Text: "hello"}},
+					{Message: model.NewTextMessage(model.RoleAssistant, "hel")},
+					{Message: model.NewTextMessage(model.RoleAssistant, "lo")},
+					{Message: model.NewTextMessage(model.RoleAssistant, "hello")},
 				},
 			},
 		},
@@ -887,9 +919,9 @@ func TestServer_Prompt_FinalMessageOnlyEmitsUnsentSuffixAfterFlush(t *testing.T)
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{
-					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: prefix}},
-					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: suffix}},
-					{Message: model.Message{Role: model.RoleAssistant, Text: prefix + suffix}},
+					{Message: model.NewTextMessage(model.RoleAssistant, prefix)},
+					{Message: model.NewTextMessage(model.RoleAssistant, suffix)},
+					{Message: model.NewTextMessage(model.RoleAssistant, prefix+suffix)},
 				},
 			},
 		},
@@ -925,9 +957,9 @@ func TestServer_Prompt_FlushesReasoningBeforeAnswerOnChannelSwitch(t *testing.T)
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{
-					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Reasoning: "reasoning first"}},
-					{Partial: true, Message: model.Message{Role: model.RoleAssistant, Text: answer}},
-					{Message: model.Message{Role: model.RoleAssistant, Reasoning: "reasoning first", Text: answer}},
+					{Message: model.NewReasoningMessage(model.RoleAssistant, "reasoning first", model.ReasoningVisibilityVisible)},
+					{Message: model.NewTextMessage(model.RoleAssistant, answer)},
+					{Message: model.MessageFromAssistantParts(answer, "reasoning first", nil)},
 				},
 			},
 		},
@@ -976,18 +1008,18 @@ func TestServer_LoadSessionSuppressesPersistedPartialChunks(t *testing.T) {
 		t.Fatalf("get or create session: %v", err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
-		Message: model.Message{Role: model.RoleUser, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleUser, "hello"),
 	}); err != nil {
 		t.Fatalf("append user event: %v", err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "hel"},
+		Message: model.NewTextMessage(model.RoleAssistant, "hel"),
 		Meta:    map[string]any{"partial": true, "channel": "answer"},
 	}); err != nil {
 		t.Fatalf("append partial event: %v", err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 	}); err != nil {
 		t.Fatalf("append final event: %v", err)
 	}
@@ -1026,16 +1058,13 @@ func TestServer_PlanToolEmitsPlanUpdate(t *testing.T) {
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-plan",
-							Name: tool.PlanToolName,
-							Args: `{"entries":[{"content":"Inspect repo","status":"completed"},{"content":"Implement fix","status":"in_progress"},{"content":"Run tests","status":"pending"}]}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-plan",
+						Name: tool.PlanToolName,
+						Args: `{"entries":[{"content":"Inspect repo","status":"completed"},{"content":"Implement fix","status":"in_progress"},{"content":"Run tests","status":"pending"}]}`,
+					}}, ""),
 				}},
-				{{Message: model.Message{Role: model.RoleAssistant, Text: "planned"}}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "planned")}},
 			},
 		},
 	})
@@ -1068,14 +1097,11 @@ func TestServer_Prompt_PermissionRejectReturnsCancelled(t *testing.T) {
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-bash",
-							Name: "BASH",
-							Args: `{"command":"echo hi","require_escalated":true}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-bash",
+						Name: "BASH",
+						Args: `{"command":"echo hi","require_escalated":true}`,
+					}}, ""),
 				}},
 			},
 		},
@@ -1112,14 +1138,11 @@ func TestServer_Prompt_UnknownToolAuthorizationUsesOriginalToolCallID(t *testing
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-custom-auth",
-							Name: "CUSTOM_MUTATE",
-							Args: `{"path":"/tmp/custom.txt"}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-custom-auth",
+						Name: "CUSTOM_MUTATE",
+						Args: `{"path":"/tmp/custom.txt"}`,
+					}}, ""),
 				}},
 			},
 		},
@@ -1166,14 +1189,11 @@ func TestServer_Prompt_WorkspaceBoundaryAuthorizationUsesOriginalToolCallID(t *t
 		llm: &scriptedLLM{
 			calls: [][]*model.Response{
 				{{
-					Message: model.Message{
-						Role: model.RoleAssistant,
-						ToolCalls: []model.ToolCall{{
-							ID:   "call-write-boundary",
-							Name: toolfs.WriteToolName,
-							Args: `{"path":"/outside/workspace.txt","content":"hello"}`,
-						}},
-					},
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-write-boundary",
+						Name: toolfs.WriteToolName,
+						Args: `{"path":"/outside/workspace.txt","content":"hello"}`,
+					}}, ""),
 				}},
 			},
 		},
@@ -1222,10 +1242,309 @@ func TestServer_Prompt_WorkspaceBoundaryAuthorizationUsesOriginalToolCallID(t *t
 	}
 }
 
+func TestServer_Prompt_ExternalWriteApprovalCompletesOriginalToolCall(t *testing.T) {
+	targetPath := "/outside/workspace-write.txt"
+	h := newHarness(t, harnessConfig{
+		clientCaps: ClientCapabilities{
+			FS: FileSystemCapabilities{WriteTextFile: true},
+		},
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-write-boundary",
+						Name: toolfs.WriteToolName,
+						Args: fmt.Sprintf(`{"path":%q,"content":"hello"}`, targetPath),
+					}}, ""),
+				}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "done")}},
+			},
+		},
+		customizeResources: func(res *SessionResources) error {
+			writeTool, err := toolfs.NewWriteWithRuntime(res.Runtime)
+			if err != nil {
+				return err
+			}
+			res.Tools = append(res.Tools, writeTool)
+			res.Policies = append(res.Policies, policy.WorkspaceBoundary(policy.WorkspaceBoundaryConfig{
+				Runtime: res.Runtime,
+			}))
+			return nil
+		},
+	})
+	defer h.close()
+	h.permissionResponse = RequestPermissionResponse{
+		Outcome: mustRaw(t, SelectedPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: "allow_once",
+		}),
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion:    CurrentProtocolVersion,
+		ClientCapabilities: h.clientCaps,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	h.resetNotifications()
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "write outside workspace"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+	if h.permissionRequests != 1 {
+		t.Fatalf("expected one permission request, got %d", h.permissionRequests)
+	}
+	if got := h.files[targetPath]; got != "hello" {
+		t.Fatalf("expected ACP client fs write %q, got %q", "hello", got)
+	}
+	if h.lastPermissionRequest == nil {
+		t.Fatal("expected captured permission request")
+	}
+	if h.lastPermissionRequest.ToolCall.ToolCallID != "call-write-boundary" {
+		t.Fatalf("expected permission request to reuse original tool call id, got %q", h.lastPermissionRequest.ToolCall.ToolCallID)
+	}
+	if h.lastPermissionRequest.ToolCall.Status == nil || *h.lastPermissionRequest.ToolCall.Status != ToolStatusPending {
+		t.Fatalf("expected permission request to keep pending status, got %#v", h.lastPermissionRequest.ToolCall.Status)
+	}
+	if h.lastPermissionRequest.ToolCall.Kind == nil || *h.lastPermissionRequest.ToolCall.Kind != ToolKindEdit {
+		t.Fatalf("expected permission request kind %q, got %#v", ToolKindEdit, h.lastPermissionRequest.ToolCall.Kind)
+	}
+	rawInput, ok := h.lastPermissionRequest.ToolCall.RawInput.(map[string]any)
+	if !ok {
+		t.Fatalf("expected rawInput map, got %#v", h.lastPermissionRequest.ToolCall.RawInput)
+	}
+	if rawInput["path"] != targetPath {
+		t.Fatalf("expected request rawInput path %q, got %#v", targetPath, rawInput["path"])
+	}
+	if _, ok := rawInput["preview"]; ok {
+		t.Fatalf("did not expect private preview field in rawInput, got %#v", rawInput)
+	}
+	if _, ok := rawInput["reason"]; ok {
+		t.Fatalf("did not expect private reason field in rawInput, got %#v", rawInput)
+	}
+
+	h.waitNotificationTypes(t, UpdateToolCall, UpdateToolCallState, UpdateAgentMessage)
+	lifecycle := h.toolCallNotifications("call-write-boundary")
+	if len(lifecycle) != 2 {
+		t.Fatalf("expected one tool call and one update, got %+v", lifecycle)
+	}
+	if lifecycle[0].UpdateType != UpdateToolCall || lifecycle[0].Status != ToolStatusPending {
+		t.Fatalf("unexpected initial lifecycle event %+v", lifecycle[0])
+	}
+	if lifecycle[1].UpdateType != UpdateToolCallState || lifecycle[1].Status != ToolStatusCompleted {
+		t.Fatalf("unexpected completion lifecycle event %+v", lifecycle[1])
+	}
+	if ids := h.allToolCallIDs(); !slices.Equal(ids, []string{"call-write-boundary"}) {
+		t.Fatalf("expected only original tool call id in notifications, got %v", ids)
+	}
+}
+
+func TestServer_Prompt_ExternalPatchApprovalCompletesOriginalToolCall(t *testing.T) {
+	workDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	hostFile, err := os.CreateTemp(workDir, "acp-external-patch-*.txt")
+	if err != nil {
+		t.Fatalf("create host patch target: %v", err)
+	}
+	targetPath := hostFile.Name()
+	if err := hostFile.Close(); err != nil {
+		t.Fatalf("close host patch target: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(targetPath) })
+	h := newHarness(t, harnessConfig{
+		clientCaps: ClientCapabilities{
+			FS: FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true},
+		},
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-patch-boundary",
+						Name: toolfs.PatchToolName,
+						Args: fmt.Sprintf(`{"path":%q,"old":"hello","new":"hello patched"}`, targetPath),
+					}}, ""),
+				}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "done")}},
+			},
+		},
+		customizeResources: func(res *SessionResources) error {
+			patchTool, err := toolfs.NewPatchWithRuntime(res.Runtime)
+			if err != nil {
+				return err
+			}
+			res.Tools = append(res.Tools, patchTool)
+			res.Policies = append(res.Policies, policy.WorkspaceBoundary(policy.WorkspaceBoundaryConfig{
+				Runtime: res.Runtime,
+			}))
+			return nil
+		},
+	})
+	defer h.close()
+	if err := os.WriteFile(targetPath, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("seed host patch target: %v", err)
+	}
+	h.files[targetPath] = "hello"
+	h.permissionResponse = RequestPermissionResponse{
+		Outcome: mustRaw(t, SelectedPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: "allow_once",
+		}),
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion:    CurrentProtocolVersion,
+		ClientCapabilities: h.clientCaps,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	h.resetNotifications()
+	var promptResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "patch outside workspace"})},
+	}, &promptResp)
+	if promptResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected end_turn, got %q", promptResp.StopReason)
+	}
+	if h.permissionRequests != 1 {
+		t.Fatalf("expected one permission request, got %d", h.permissionRequests)
+	}
+	if got := h.files[targetPath]; got != "hello patched" {
+		t.Fatalf("expected patched content %q, got %q", "hello patched", got)
+	}
+	if h.lastPermissionRequest == nil {
+		t.Fatal("expected captured permission request")
+	}
+	if h.lastPermissionRequest.ToolCall.ToolCallID != "call-patch-boundary" {
+		t.Fatalf("expected permission request to reuse original tool call id, got %q", h.lastPermissionRequest.ToolCall.ToolCallID)
+	}
+	if h.lastPermissionRequest.ToolCall.Status == nil || *h.lastPermissionRequest.ToolCall.Status != ToolStatusPending {
+		t.Fatalf("expected permission request to keep pending status, got %#v", h.lastPermissionRequest.ToolCall.Status)
+	}
+	rawInput, ok := h.lastPermissionRequest.ToolCall.RawInput.(map[string]any)
+	if !ok {
+		t.Fatalf("expected rawInput map, got %#v", h.lastPermissionRequest.ToolCall.RawInput)
+	}
+	if rawInput["path"] != targetPath {
+		t.Fatalf("expected request rawInput path %q, got %#v", targetPath, rawInput["path"])
+	}
+	if _, ok := rawInput["preview"]; ok {
+		t.Fatalf("did not expect private preview field in rawInput, got %#v", rawInput)
+	}
+
+	h.waitNotificationTypes(t, UpdateToolCall, UpdateToolCallState, UpdateAgentMessage)
+	lifecycle := h.toolCallNotifications("call-patch-boundary")
+	if len(lifecycle) != 2 {
+		t.Fatalf("expected one tool call and one update, got %+v", lifecycle)
+	}
+	if lifecycle[0].UpdateType != UpdateToolCall || lifecycle[0].Status != ToolStatusPending {
+		t.Fatalf("unexpected initial lifecycle event %+v", lifecycle[0])
+	}
+	if lifecycle[1].UpdateType != UpdateToolCallState || lifecycle[1].Status != ToolStatusCompleted {
+		t.Fatalf("unexpected completion lifecycle event %+v", lifecycle[1])
+	}
+	if ids := h.allToolCallIDs(); !slices.Equal(ids, []string{"call-patch-boundary"}) {
+		t.Fatalf("expected only original tool call id in notifications, got %v", ids)
+	}
+}
+
+func TestServer_Prompt_ExternalWriteAllowAlwaysCachesDirectoryScope(t *testing.T) {
+	firstPath := "/outside/shared/one.txt"
+	secondPath := "/outside/shared/two.txt"
+	h := newHarness(t, harnessConfig{
+		clientCaps: ClientCapabilities{
+			FS: FileSystemCapabilities{WriteTextFile: true},
+		},
+		llm: &scriptedLLM{
+			calls: [][]*model.Response{
+				{{
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-write-first",
+						Name: toolfs.WriteToolName,
+						Args: fmt.Sprintf(`{"path":%q,"content":"one"}`, firstPath),
+					}}, ""),
+				}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "first done")}},
+				{{
+					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+						ID:   "call-write-second",
+						Name: toolfs.WriteToolName,
+						Args: fmt.Sprintf(`{"path":%q,"content":"two"}`, secondPath),
+					}}, ""),
+				}},
+				{{Message: model.NewTextMessage(model.RoleAssistant, "second done")}},
+			},
+		},
+		customizeResources: func(res *SessionResources) error {
+			writeTool, err := toolfs.NewWriteWithRuntime(res.Runtime)
+			if err != nil {
+				return err
+			}
+			res.Tools = append(res.Tools, writeTool)
+			res.Policies = append(res.Policies, policy.WorkspaceBoundary(policy.WorkspaceBoundaryConfig{
+				Runtime: res.Runtime,
+			}))
+			return nil
+		},
+	})
+	defer h.close()
+	h.permissionResponse = RequestPermissionResponse{
+		Outcome: mustRaw(t, SelectedPermissionOutcome{
+			Outcome:  "selected",
+			OptionID: "allow_always",
+		}),
+	}
+
+	mustCall(t, h.client, MethodInitialize, InitializeRequest{
+		ProtocolVersion:    CurrentProtocolVersion,
+		ClientCapabilities: h.clientCaps,
+	}, &InitializeResponse{})
+	var newResp NewSessionResponse
+	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
+
+	var firstResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "first external write"})},
+	}, &firstResp)
+	if firstResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected first prompt end_turn, got %q", firstResp.StopReason)
+	}
+	if h.permissionRequests != 1 {
+		t.Fatalf("expected one permission request after first write, got %d", h.permissionRequests)
+	}
+
+	var secondResp PromptResponse
+	mustCall(t, h.client, MethodSessionPrompt, PromptRequest{
+		SessionID: newResp.SessionID,
+		Prompt:    []json.RawMessage{mustRaw(t, TextContent{Type: "text", Text: "second external write"})},
+	}, &secondResp)
+	if secondResp.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected second prompt end_turn, got %q", secondResp.StopReason)
+	}
+	if h.permissionRequests != 1 {
+		t.Fatalf("expected directory scope cache to suppress second approval, got %d requests", h.permissionRequests)
+	}
+	if got := h.files[firstPath]; got != "one" {
+		t.Fatalf("expected first write %q, got %q", "one", got)
+	}
+	if got := h.files[secondPath]; got != "two" {
+		t.Fatalf("expected second write %q, got %q", "two", got)
+	}
+}
+
 func TestServer_Prompt_AdvertisedCustomSlashCommandHandledWithoutModelFallback(t *testing.T) {
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "model should not run"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "model should not run")}},
 		},
 	}
 	h := newHarness(t, harnessConfig{
@@ -1297,6 +1616,33 @@ func TestToolCallContentForResult_UsesTerminalSessionID(t *testing.T) {
 	}
 	if got[0].Type != "terminal" || got[0].TerminalID != "term-123" {
 		t.Fatalf("unexpected terminal content %#v", got[0])
+	}
+}
+
+func TestToolStatusForResult_BashRunningUsesInProgress(t *testing.T) {
+	if got := toolStatusForResult("BASH", map[string]any{
+		"state":      "running",
+		"session_id": "term-123",
+	}); got != ToolStatusInProgress {
+		t.Fatalf("expected in_progress, got %q", got)
+	}
+}
+
+func TestToolStatusForResult_BashNonZeroExitFails(t *testing.T) {
+	if got := toolStatusForResult("BASH", map[string]any{
+		"exit_code": 1,
+	}); got != ToolStatusFailed {
+		t.Fatalf("expected failed, got %q", got)
+	}
+}
+
+func TestNormalizeToolArgsForACP_CanonicalizesPathInputs(t *testing.T) {
+	fsys := &stubHarnessFS{cwd: "/workspace/demo", home: "/Users/demo"}
+	got := normalizeToolArgsForACP("WRITE", map[string]any{
+		"path": "~/notes/todo.md",
+	}, fsys)
+	if got["path"] != "/Users/demo/notes/todo.md" {
+		t.Fatalf("expected canonical path, got %#v", got["path"])
 	}
 }
 
@@ -1594,6 +1940,11 @@ type harness struct {
 	lastPermissionRequest *RequestPermissionRequest
 }
 
+type stubHarnessFS struct {
+	cwd  string
+	home string
+}
+
 func newHarness(t *testing.T, cfg harnessConfig) *harness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1730,6 +2081,16 @@ func resolvePathForContainment(path string) string {
 		return filepath.Clean(resolved)
 	}
 }
+
+func (f *stubHarnessFS) Getwd() (string, error)                      { return f.cwd, nil }
+func (f *stubHarnessFS) UserHomeDir() (string, error)                { return f.home, nil }
+func (f *stubHarnessFS) Open(string) (*os.File, error)               { return nil, os.ErrNotExist }
+func (f *stubHarnessFS) ReadDir(string) ([]os.DirEntry, error)       { return nil, os.ErrNotExist }
+func (f *stubHarnessFS) Stat(string) (os.FileInfo, error)            { return nil, os.ErrNotExist }
+func (f *stubHarnessFS) ReadFile(string) ([]byte, error)             { return nil, os.ErrNotExist }
+func (f *stubHarnessFS) WriteFile(string, []byte, os.FileMode) error { return nil }
+func (f *stubHarnessFS) Glob(string) ([]string, error)               { return nil, nil }
+func (f *stubHarnessFS) WalkDir(string, fs.WalkDirFunc) error        { return nil }
 
 func (h *harness) close() {
 	h.cancel()
@@ -1888,10 +2249,82 @@ func (h *harness) notificationTexts(updateType string) []string {
 	return out
 }
 
+type observedToolCallNotification struct {
+	UpdateType string
+	ToolCallID string
+	Status     string
+}
+
+func (h *harness) toolCallNotifications(callID string) []observedToolCallNotification {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]observedToolCallNotification, 0, len(h.notifications))
+	for _, note := range h.notifications {
+		raw, err := json.Marshal(note.Update)
+		if err != nil {
+			continue
+		}
+		var update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			ToolCallID    string `json:"toolCallId"`
+			Status        string `json:"status"`
+		}
+		if err := json.Unmarshal(raw, &update); err != nil {
+			continue
+		}
+		if strings.TrimSpace(update.ToolCallID) != strings.TrimSpace(callID) {
+			continue
+		}
+		if update.SessionUpdate != UpdateToolCall && update.SessionUpdate != UpdateToolCallState {
+			continue
+		}
+		out = append(out, observedToolCallNotification{
+			UpdateType: update.SessionUpdate,
+			ToolCallID: update.ToolCallID,
+			Status:     update.Status,
+		})
+	}
+	return out
+}
+
+func (h *harness) allToolCallIDs() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(h.notifications))
+	for _, note := range h.notifications {
+		raw, err := json.Marshal(note.Update)
+		if err != nil {
+			continue
+		}
+		var update struct {
+			SessionUpdate string `json:"sessionUpdate"`
+			ToolCallID    string `json:"toolCallId"`
+		}
+		if err := json.Unmarshal(raw, &update); err != nil {
+			continue
+		}
+		if update.SessionUpdate != UpdateToolCall && update.SessionUpdate != UpdateToolCallState {
+			continue
+		}
+		callID := strings.TrimSpace(update.ToolCallID)
+		if callID == "" {
+			continue
+		}
+		if _, ok := seen[callID]; ok {
+			continue
+		}
+		seen[callID] = struct{}{}
+		out = append(out, callID)
+	}
+	slices.Sort(out)
+	return out
+}
+
 func makeACPTestPNG() []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
-	for y := 0; y < 4; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 4 {
+		for x := range 4 {
 			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 		}
 	}
@@ -1910,7 +2343,7 @@ type scriptedLLM struct {
 
 func (s *scriptedLLM) Name() string { return "scripted" }
 
-func (s *scriptedLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (s *scriptedLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	s.mu.Lock()
 	var batch []*model.Response
 	if len(s.calls) > 0 {
@@ -1923,16 +2356,47 @@ func (s *scriptedLLM) Generate(ctx context.Context, req *model.Request) iter.Seq
 		s.reqs = append(s.reqs, &clone)
 	}
 	s.mu.Unlock()
-	return func(yield func(*model.Response, error) bool) {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		_ = ctx
 		_ = req
-		for _, one := range batch {
-			if one != nil && !one.Partial && !one.TurnComplete {
+		for i, one := range batch {
+			isFinal := (i == len(batch)-1)
+			if one != nil && !isFinal {
+				// Emit intermediate responses as PartDelta events so the
+				// ACP streaming infrastructure recognises them as partial output.
+				if text := one.Message.TextContent(); text != "" {
+					evt := &model.StreamEvent{
+						Type: model.StreamEventPartDelta,
+						PartDelta: &model.PartDelta{
+							Kind:      model.PartKindText,
+							TextDelta: text,
+						},
+					}
+					if !yield(evt, nil) {
+						return
+					}
+					continue
+				}
+				if reasoning := one.Message.ReasoningText(); reasoning != "" {
+					evt := &model.StreamEvent{
+						Type: model.StreamEventPartDelta,
+						PartDelta: &model.PartDelta{
+							Kind:      model.PartKindReasoning,
+							TextDelta: reasoning,
+						},
+					}
+					if !yield(evt, nil) {
+						return
+					}
+					continue
+				}
+			}
+			if one != nil && !one.TurnComplete {
 				clone := *one
 				clone.TurnComplete = true
 				one = &clone
 			}
-			if !yield(one, nil) {
+			if !yield(model.StreamEventFromResponse(one), nil) {
 				return
 			}
 		}
@@ -1942,7 +2406,7 @@ func (s *scriptedLLM) Generate(ctx context.Context, req *model.Request) iter.Seq
 func TestServer_PlanModeInjectsHiddenPromptButLoadReplaysVisibleText(t *testing.T) {
 	llm := &scriptedLLM{
 		calls: [][]*model.Response{
-			{{Message: model.Message{Role: model.RoleAssistant, Text: "planned"}}},
+			{{Message: model.NewTextMessage(model.RoleAssistant, "planned")}},
 		},
 	}
 	h := newHarness(t, harnessConfig{
@@ -2115,12 +2579,7 @@ func indexOfString(items []string, target string) int {
 }
 
 func containsText(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(items, want)
 }
 
 func testSandboxType() string {

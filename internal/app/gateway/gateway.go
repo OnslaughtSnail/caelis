@@ -74,15 +74,8 @@ type RunTurnResult struct {
 	Handle  sessionsvc.TurnHandle
 }
 
-type AttachSessionRequest struct {
-	Channel        ChannelRef
-	ChildSessionID string
-	DelegationID   string
-}
-
 type channelBinding struct {
 	current sessionsvc.SessionRef
-	history []sessionsvc.SessionRef
 }
 
 type Gateway struct {
@@ -218,49 +211,6 @@ func (g *Gateway) InterruptSession(ctx context.Context, channel ChannelRef, reas
 	})
 }
 
-func (g *Gateway) AttachSession(ctx context.Context, req AttachSessionRequest) (sessionsvc.LoadedSession, error) {
-	if g == nil || g.service == nil {
-		return sessionsvc.LoadedSession{}, fmt.Errorf("gateway: service is unavailable")
-	}
-	parent, ok := g.CurrentSession(req.Channel.ID)
-	if !ok {
-		return sessionsvc.LoadedSession{}, fmt.Errorf("gateway: no bound session for channel")
-	}
-	loaded, err := g.service.AttachSession(ctx, sessionsvc.AttachSessionRequest{
-		SessionRef:     parent,
-		ChildSessionID: strings.TrimSpace(req.ChildSessionID),
-		DelegationID:   strings.TrimSpace(req.DelegationID),
-		CWD:            req.Channel.WorkspaceCWD,
-		Limit:          200,
-	})
-	if err != nil {
-		return sessionsvc.LoadedSession{}, err
-	}
-	g.attach(req.Channel.ID, loaded.SessionRef)
-	return loaded, nil
-}
-
-func (g *Gateway) BackToParent(ctx context.Context, channel ChannelRef) (sessionsvc.LoadedSession, error) {
-	if g == nil || g.service == nil {
-		return sessionsvc.LoadedSession{}, fmt.Errorf("gateway: service is unavailable")
-	}
-	parent, ok := g.pop(channel.ID)
-	if !ok {
-		return sessionsvc.LoadedSession{}, fmt.Errorf("gateway: no parent session for channel")
-	}
-	loaded, err := g.service.LoadSession(ctx, sessionsvc.LoadSessionRequest{
-		SessionRef:       parent,
-		CWD:              channel.WorkspaceCWD,
-		Limit:            200,
-		IncludeLifecycle: false,
-	})
-	if err != nil {
-		return sessionsvc.LoadedSession{}, err
-	}
-	g.bind(channel.ID, loaded.SessionRef)
-	return loaded, nil
-}
-
 func (g *Gateway) VisibleTools() ([]string, error) {
 	if g == nil || g.service == nil {
 		return nil, fmt.Errorf("gateway: service is unavailable")
@@ -301,21 +251,6 @@ func (g *Gateway) bind(channelID string, ref sessionsvc.SessionRef) {
 	g.bindings[strings.TrimSpace(channelID)] = channelBinding{current: ref}
 }
 
-func (g *Gateway) attach(channelID string, ref sessionsvc.SessionRef) {
-	if g == nil || strings.TrimSpace(channelID) == "" || strings.TrimSpace(ref.SessionID) == "" {
-		return
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	key := strings.TrimSpace(channelID)
-	binding := g.bindings[key]
-	if strings.TrimSpace(binding.current.SessionID) != "" && binding.current.SessionID != ref.SessionID {
-		binding.history = append(binding.history, binding.current)
-	}
-	binding.current = ref
-	g.bindings[key] = binding
-}
-
 func (g *Gateway) setCurrent(channelID string, ref sessionsvc.SessionRef) {
 	if g == nil || strings.TrimSpace(channelID) == "" || strings.TrimSpace(ref.SessionID) == "" {
 		return
@@ -326,24 +261,6 @@ func (g *Gateway) setCurrent(channelID string, ref sessionsvc.SessionRef) {
 	binding := g.bindings[key]
 	binding.current = ref
 	g.bindings[key] = binding
-}
-
-func (g *Gateway) pop(channelID string) (sessionsvc.SessionRef, bool) {
-	if g == nil || strings.TrimSpace(channelID) == "" {
-		return sessionsvc.SessionRef{}, false
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	key := strings.TrimSpace(channelID)
-	binding, ok := g.bindings[key]
-	if !ok || len(binding.history) == 0 {
-		return sessionsvc.SessionRef{}, false
-	}
-	parent := binding.history[len(binding.history)-1]
-	binding.history = binding.history[:len(binding.history)-1]
-	binding.current = parent
-	g.bindings[key] = binding
-	return parent, true
 }
 
 func (g *Gateway) boundOrExplicit(channel ChannelRef, sessionID string) (sessionsvc.SessionRef, bool) {

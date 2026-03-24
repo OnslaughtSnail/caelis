@@ -17,7 +17,7 @@ func TestSpawnPreviewProjector_IgnoresNonSpawnEvents(t *testing.T) {
 	msgs := proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Text: "hello"},
+			Message: model.NewTextMessage(model.RoleAssistant, "hello"),
 			Meta: map[string]any{
 				"parent_session_id":   "parent",
 				"child_session_id":    "child-1",
@@ -37,7 +37,7 @@ func TestSpawnPreviewProjector_ProjectsAssistantStream(t *testing.T) {
 	msgs := proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Text: "hello world"},
+			Message: model.NewTextMessage(model.RoleAssistant, "hello world"),
 			Meta: map[string]any{
 				"parent_session_id":   "parent",
 				"child_session_id":    "child-1",
@@ -71,12 +71,85 @@ func TestSpawnPreviewProjector_ProjectsAssistantStream(t *testing.T) {
 	}
 }
 
+func TestProjectSubagentDomainUpdate_UsesCommonSpawnProjectorPath(t *testing.T) {
+	console := &cliConsole{
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	msgs := console.projectSubagentDomainUpdate(syntheticSubagentDomainUpdate(subagentProjectionTarget{
+		RootSessionID: "parent",
+		SpawnID:       "child-1",
+		AttachTarget:  "dlg-1",
+		CallID:        "call-spawn-1",
+		Agent:         "self",
+	}, &session.Event{
+		Message: model.NewTextMessage(model.RoleAssistant, "hello world"),
+	}))
+
+	var startFound, streamFound bool
+	for _, raw := range msgs {
+		switch msg := raw.(type) {
+		case tuievents.SubagentStartMsg:
+			if msg.SpawnID != "child-1" || msg.AttachTarget != "child-1" || msg.CallID != "call-spawn-1" {
+				t.Fatalf("unexpected start msg: %+v", msg)
+			}
+			startFound = true
+		case tuievents.SubagentStreamMsg:
+			if msg.Stream != "assistant" || !strings.Contains(msg.Chunk, "hello") {
+				t.Fatalf("unexpected stream msg: %+v", msg)
+			}
+			streamFound = true
+		}
+	}
+	if !startFound {
+		t.Fatal("expected SubagentStartMsg from common synthetic projector path")
+	}
+	if !streamFound {
+		t.Fatal("expected SubagentStreamMsg from common synthetic projector path")
+	}
+}
+
+func TestSubagentDomainUpdateFromSpawnToolResponse(t *testing.T) {
+	update, ok := subagentDomainUpdateFromSpawnToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"child_session_id":     "child-1",
+			"delegation_id":        "dlg-1",
+			"agent":                "self",
+			"approval_pending":     true,
+			"_ui_approval_tool":    "BASH",
+			"_ui_approval_command": "rm -rf /tmp/demo",
+		},
+	})
+	if !ok {
+		t.Fatal("expected spawn bootstrap to be extracted")
+	}
+	if update.Kind != subagentDomainBootstrap {
+		t.Fatalf("expected bootstrap kind, got %q", update.Kind)
+	}
+	if update.Target.RootSessionID != "parent-1" {
+		t.Fatalf("unexpected root session id: %+v", update.Target)
+	}
+	if update.Target.SpawnID != "child-1" || update.Target.AttachTarget != "child-1" {
+		t.Fatalf("unexpected target ids: %+v", update.Target)
+	}
+	if update.Target.CallID != "call-spawn-1" || update.Target.Agent != "self" {
+		t.Fatalf("unexpected target metadata: %+v", update.Target)
+	}
+	if update.Status != "waiting_approval" {
+		t.Fatalf("expected waiting_approval status, got %q", update.Status)
+	}
+	if update.ApprovalTool != "BASH" || update.ApprovalCommand != "rm -rf /tmp/demo" {
+		t.Fatalf("unexpected approval context: %+v", update)
+	}
+}
+
 func TestSpawnPreviewProjector_UsesAgentIDFromMeta(t *testing.T) {
 	proj := newSpawnPreviewProjector()
 	msgs := proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Text: "hi"},
+			Message: model.NewTextMessage(model.RoleAssistant, "hi"),
 			Meta: map[string]any{
 				"parent_session_id":   "parent",
 				"child_session_id":    "child-1",
@@ -104,7 +177,7 @@ func TestSpawnPreviewProjector_ProjectsReasoningStream(t *testing.T) {
 	msgs := proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Reasoning: "thinking about it"},
+			Message: model.MessageFromAssistantParts("", "thinking about it", nil),
 			Meta: map[string]any{
 				"partial":             true,
 				"parent_session_id":   "parent",
@@ -135,14 +208,11 @@ func TestSpawnPreviewProjector_ProjectsToolCallAndResult(t *testing.T) {
 	msgs := proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolCalls: []model.ToolCall{{
-					ID:   "tc-1",
-					Name: "READ",
-					Args: `{"path":"test.txt"}`,
-				}},
-			},
+			Message: model.MessageFromToolCalls(model.RoleTool, []model.ToolCall{{
+				ID:   "tc-1",
+				Name: "READ",
+				Args: `{"path":"test.txt"}`,
+			}}, ""),
 			Meta: map[string]any{
 				"parent_session_id":   "parent",
 				"child_session_id":    "child-1",
@@ -169,14 +239,11 @@ func TestSpawnPreviewProjector_ProjectsToolCallAndResult(t *testing.T) {
 	msgs = proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{
-				Role: model.RoleTool,
-				ToolResponse: &model.ToolResponse{
-					ID:     "tc-1",
-					Name:   "READ",
-					Result: map[string]any{"content": "file content"},
-				},
-			},
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:     "tc-1",
+				Name:   "READ",
+				Result: map[string]any{"content": "file content"},
+			}),
 			Meta: map[string]any{
 				"parent_session_id":   "parent",
 				"child_session_id":    "child-1",
@@ -206,7 +273,7 @@ func TestSpawnPreviewProjector_ProjectsDoneOnLifecycleEvent(t *testing.T) {
 	proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Text: "working"},
+			Message: model.NewTextMessage(model.RoleAssistant, "working"),
 			Meta: map[string]any{
 				"parent_session_id":   "parent",
 				"child_session_id":    "child-1",
@@ -296,7 +363,7 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
 		SessionID: "child-session",
 		Event: &session.Event{
-			Message: model.Message{Role: model.RoleAssistant, Text: "subagent answer"},
+			Message: model.NewTextMessage(model.RoleAssistant, "subagent answer"),
 			Meta: map[string]any{
 				"parent_session_id":   "parent-session",
 				"child_session_id":    "child-session",
@@ -340,12 +407,9 @@ func TestSpawnPreviewProjector_ApprovalForwardsToolContext(t *testing.T) {
 	proj.Project(sessionstream.Update{
 		SessionID: "child-1",
 		Event: &session.Event{
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				ToolCalls: []model.ToolCall{
-					{ID: "tc-1", Name: "BASH", Args: `{"command":"rm -rf /tmp/foo"}`},
-				},
-			},
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+				{ID: "tc-1", Name: "BASH", Args: `{"command":"rm -rf /tmp/foo"}`},
+			}, ""),
 			Meta: spawnMeta,
 		},
 	})

@@ -21,6 +21,10 @@ type SetStatusMsg struct {
 	Context string
 }
 
+type SetCommandsMsg struct {
+	Commands []string
+}
+
 type SetHintMsg struct {
 	Hint           string
 	ClearAfter     time.Duration
@@ -33,10 +37,11 @@ type SetRunningMsg struct {
 }
 
 type TaskResultMsg struct {
-	ExitNow         bool
-	Err             error
-	Interrupted     bool
-	ContinueRunning bool
+	ExitNow             bool
+	Err                 error
+	Interrupted         bool
+	ContinueRunning     bool
+	SuppressTurnDivider bool
 }
 
 type PromptRequestMsg struct {
@@ -84,6 +89,25 @@ type MentionCandidatesMsg struct {
 
 type TickStatusMsg struct{}
 
+type RawDeltaTarget string
+
+const (
+	RawDeltaTargetAssistant RawDeltaTarget = "assistant"
+	RawDeltaTargetBTW       RawDeltaTarget = "btw"
+	RawDeltaTargetSubagent  RawDeltaTarget = "subagent"
+)
+
+// RawDeltaMsg carries upstream raw stream payloads into the Bubble Tea event
+// loop. Presentation smoothing and playback happen inside the model.
+type RawDeltaMsg struct {
+	Target  RawDeltaTarget
+	ScopeID string
+	Stream  string
+	Actor   string
+	Text    string
+	Final   bool
+}
+
 type AttachmentCountMsg struct {
 	Count int
 }
@@ -95,10 +119,33 @@ type UserMessageMsg struct {
 	Text string
 }
 
+type ParticipantTurnStartMsg struct {
+	SessionID string
+	Actor     string
+}
+
+type ParticipantToolMsg struct {
+	SessionID string
+	CallID    string
+	ToolName  string
+	Args      string
+	Output    string
+	Final     bool
+	Err       bool
+}
+
+type ParticipantStatusMsg struct {
+	SessionID       string
+	State           string
+	ApprovalTool    string
+	ApprovalCommand string
+}
+
 // AssistantStreamMsg carries assistant answer chunks for TUI block rendering.
 // When Final is true, Text is the full finalized assistant answer.
 type AssistantStreamMsg struct {
 	Kind  string
+	Actor string
 	Text  string
 	Final bool
 }
@@ -106,6 +153,7 @@ type AssistantStreamMsg struct {
 // ReasoningStreamMsg carries assistant reasoning chunks for TUI block rendering.
 // When Final is true, Text is the full finalized reasoning text.
 type ReasoningStreamMsg struct {
+	Actor string
 	Text  string
 	Final bool
 }

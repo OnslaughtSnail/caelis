@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.0.26 - 2026-03-24
+
+### External ACP Agents, Resume, And Delegation
+- Added configurable ACP-backed agent presets and dynamic slash routing so configured agents such as `/codex`, `/gemini`, and `/claude` can run as external participants directly from the console.
+- Added persisted external participant metadata plus resume-time ACP stream reattachment, keeping mirrored participant turns, tool activity, and approval state visible after reopening a session.
+- Tightened ACP subagent recovery so `SPAWN` children keep durable lifecycle/session references for task tracking, including persisted failure state and fallback inspection from stored runtime/session data after restart.
+
+### Runtime, ACP, And Task Tracking
+- Reworked ACP/self subagent execution around reusable child sessions, child working-directory tracking, richer permission-option handling, and preserved delegation lineage when reusing existing child sessions.
+- Improved task reconciliation, subagent inspection, and resumed-session replay so live child sessions remain controllable across process restarts instead of falling back to stale interrupted state.
+- Added new ACP client/server coverage around connection lifecycle, session load/new semantics, permission negotiation, and resumed child-session projections.
+
+### TUI Streaming, Panels, And Model Plumbing
+- Expanded Bubble Tea streaming/rendering with smoother raw-delta playback, inline panel collapse animation, richer participant/subagent status blocks, and better replay behavior for resumed child sessions and tool streams.
+- Improved spawn/subagent previews so only live child sessions trigger automatic ACP reload on resume, avoiding duplicate replay for completed historical delegates while keeping canonical transcript rendering intact.
+- Refreshed model/provider request plumbing and multimodal message-part handling across provider adapters, runtime traces, and prompt assembly to support the updated ACP/session flow safely.
+
 ## v0.0.25 - 2026-03-17
 
 ### Internal Architecture Refactor

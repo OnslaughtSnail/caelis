@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/rivo/uniseg"
@@ -96,4 +97,77 @@ func graphemeHardWrap(s string, width int) []string {
 		return []string{""}
 	}
 	return lines
+}
+
+func splitGraphemeClusters(s string) []string {
+	if s == "" {
+		return nil
+	}
+	clusters := make([]string, 0, len(s))
+	state := -1
+	remaining := s
+	for len(remaining) > 0 {
+		cluster, rest, _, newState := uniseg.FirstGraphemeClusterInString(remaining, state)
+		state = newState
+		remaining = rest
+		clusters = append(clusters, cluster)
+	}
+	return clusters
+}
+
+func joinGraphemeClusters(clusters []string) string {
+	if len(clusters) == 0 {
+		return ""
+	}
+	return strings.Join(clusters, "")
+}
+
+func isNaturalRevealBoundary(prev string, next string) bool {
+	prev = ansi.Strip(prev)
+	next = ansi.Strip(next)
+	if prev == "" {
+		return false
+	}
+	if strings.Contains(prev, "\n") {
+		return true
+	}
+	prevRune, _ := lastRune(prev)
+	nextRune, _ := firstRune(next)
+	switch {
+	case unicode.IsSpace(prevRune):
+		return true
+	case revealBoundaryPunctuation(prevRune):
+		return true
+	case next != "" && (unicode.IsSpace(nextRune) || revealBoundaryPunctuation(nextRune) || nextRune == '\n'):
+		return true
+	default:
+		return false
+	}
+}
+
+func revealBoundaryPunctuation(r rune) bool {
+	switch r {
+	case '.', ',', '!', '?', ';', ':', ')', ']', '}', '>', '-', '*', '`', '~',
+		'。', '，', '！', '？', '；', '：', '）', '】', '》', '、', '”', '’':
+		return true
+	default:
+		return false
+	}
+}
+
+func firstRune(s string) (rune, bool) {
+	for _, r := range s {
+		return r, true
+	}
+	return 0, false
+}
+
+func lastRune(s string) (rune, bool) {
+	var out rune
+	var ok bool
+	for _, r := range s {
+		out = r
+		ok = true
+	}
+	return out, ok
 }

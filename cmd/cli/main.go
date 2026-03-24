@@ -248,11 +248,11 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 	var newACPAdapter appbootstrap.ACPAdapterFactory
 	subagentRunnerFactory := acpext.NewACPSubagentRunnerFactory(acpext.Config{
-		Store:         store,
-		WorkspaceRoot: resolvedWorkspaceRoot,
-		WorkspaceCWD:  workspace.CWD,
-		ClientRuntime: execRuntime,
-		AgentRegistry: agentReg,
+		Store:                store,
+		WorkspaceRoot:        resolvedWorkspaceRoot,
+		WorkspaceCWD:         workspace.CWD,
+		ClientRuntime:        execRuntime,
+		ResolveAgentRegistry: configStore.AgentRegistry,
 		NewAdapter: func(conn *internalacp.Conn) (internalacp.Adapter, error) {
 			if newACPAdapter == nil {
 				return nil, fmt.Errorf("self acp adapter is not initialized")
@@ -263,8 +263,11 @@ func runCLI(ctx context.Context, args []string) error {
 	serviceSet, err := appbootstrap.Build(appbootstrap.Config{
 		Runtime:               rt,
 		Store:                 store,
+		ACPRuntime:            sessionRT.ACPRuntime,
+		ACPStore:              sessionRT.ACPStore,
 		AppName:               *appName,
 		UserID:                *userID,
+		DefaultAgent:          configStore.DefaultAgent(),
 		WorkspaceCWD:          workspace.CWD,
 		Execution:             execRuntime,
 		Tools:                 resolved.Tools,
@@ -286,6 +289,8 @@ func runCLI(ctx context.Context, args []string) error {
 					EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 					BasePrompt:                  *systemPrompt,
 					SkillDirs:                   skillDirList,
+					DefaultAgent:                configStore.DefaultAgent(),
+					AgentDescriptors:            configStore.AgentDescriptors(),
 				})
 			},
 			SessionConfigState: func(sessionCfg internalacp.AgentSessionConfig, templates []internalacp.SessionConfigOptionTemplate) []internalacp.SessionConfigOption {
@@ -323,6 +328,8 @@ func runCLI(ctx context.Context, args []string) error {
 					BasePrompt:                  *systemPrompt,
 					FrozenPrompt:                frozenPrompt,
 					SkillDirs:                   skillDirList,
+					DefaultAgent:                configStore.DefaultAgent(),
+					AgentDescriptors:            configStore.AgentDescriptors(),
 					StreamModel:                 stream,
 					ThinkingBudget:              sessionRuntime.ThinkingBudget,
 					ReasoningEffort:             resolvedReasoningEffort,
@@ -424,6 +431,8 @@ func runCLI(ctx context.Context, args []string) error {
 			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 			BasePrompt:                  *systemPrompt,
 			SkillDirs:                   skillDirList,
+			DefaultAgent:                configStore.DefaultAgent(),
+			AgentDescriptors:            configStore.AgentDescriptors(),
 			StreamModel:                 false,
 			ThinkingBudget:              modelRuntime.ThinkingBudget,
 			ReasoningEffort:             modelRuntime.ReasoningEffort,

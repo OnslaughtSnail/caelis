@@ -16,7 +16,7 @@ func fullTerminalCapabilities() bool {
 	return true
 }
 
-func TestNewRuntime_TerminalCapabilityKeepsSandboxRunnerIsolated(t *testing.T) {
+func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -73,11 +73,12 @@ func TestNewRuntime_TerminalCapabilityKeepsSandboxRunnerIsolated(t *testing.T) {
 	if !ok {
 		t.Fatal("expected host runner to implement AsyncCommandRunner")
 	}
-	if _, ok := rt.SandboxRunner().(*sessionAsyncCommandRunner); ok {
-		t.Fatal("did not expect sandbox runner to be replaced by ACP terminal runner")
+	sandboxAsync, ok := rt.SandboxRunner().(toolexec.AsyncCommandRunner)
+	if !ok {
+		t.Fatal("expected sandbox runner to implement AsyncCommandRunner")
 	}
-	if _, ok := rt.SandboxRunner().(toolexec.AsyncCommandRunner); ok {
-		t.Fatal("did not expect sandbox runner to use ACP async runner")
+	if _, ok := sandboxAsync.(*sessionAsyncCommandRunner); !ok {
+		t.Fatalf("expected sandbox runner to be wrapped ACP async runner, got %T", sandboxAsync)
 	}
 
 	sessionID, err := asyncRunner.StartAsync(context.Background(), toolexec.CommandRequest{
@@ -135,7 +136,7 @@ func TestNewRuntime_TerminalCapabilityKeepsSandboxRunnerIsolated(t *testing.T) {
 	cancel()
 }
 
-func TestNewRuntime_TerminalCapabilityPreservesAsyncSandboxRunner(t *testing.T) {
+func TestNewRuntime_TerminalCapabilityRoutesSandboxAsyncThroughACPBridge(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -204,11 +205,8 @@ func TestNewRuntime_TerminalCapabilityPreservesAsyncSandboxRunner(t *testing.T) 
 	if !ok {
 		t.Fatalf("expected async sandbox runner wrapper, got %T", rt.SandboxRunner())
 	}
-	if _, ok := sandboxAsync.AsyncCommandRunner.(*clientAsyncCommandRunner); ok {
-		t.Fatal("did not expect sandbox runner to use ACP terminal bridge")
-	}
-	if _, ok := sandboxAsync.AsyncCommandRunner.(*asyncSandboxStubRunner); !ok {
-		t.Fatalf("expected sandbox runner to preserve base async runner, got %T", sandboxAsync.AsyncCommandRunner)
+	if _, ok := sandboxAsync.AsyncCommandRunner.(*clientAsyncCommandRunner); !ok {
+		t.Fatalf("expected sandbox runner to use ACP terminal bridge, got %T", sandboxAsync.AsyncCommandRunner)
 	}
 
 	sessionID, err := sandboxAsync.StartAsync(context.Background(), toolexec.CommandRequest{
@@ -217,17 +215,14 @@ func TestNewRuntime_TerminalCapabilityPreservesAsyncSandboxRunner(t *testing.T) 
 	if err != nil {
 		t.Fatalf("start async on sandbox runner: %v", err)
 	}
-	if sessionID != "sandbox-session-1" {
+	if sessionID != "term-should-not-be-used" {
 		t.Fatalf("unexpected sandbox session id %q", sessionID)
 	}
-	if terminalCreates != 0 {
-		t.Fatalf("did not expect terminal/create for sandbox async, got %d", terminalCreates)
+	if terminalCreates != 1 {
+		t.Fatalf("expected terminal/create for sandbox async, got %d", terminalCreates)
 	}
-	if sandboxRunner.startCalls != 1 {
-		t.Fatalf("expected one sandbox async start, got %d", sandboxRunner.startCalls)
-	}
-	if sandboxRunner.lastReq.Dir != "/workspace/subdir" {
-		t.Fatalf("expected sandbox async dir to default to session cwd, got %q", sandboxRunner.lastReq.Dir)
+	if sandboxRunner.startCalls != 0 {
+		t.Fatalf("did not expect local sandbox async start, got %d", sandboxRunner.startCalls)
 	}
 }
 

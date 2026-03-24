@@ -32,7 +32,8 @@ func TestInitializeResponse_MarshalsSchemaFieldsOnly(t *testing.T) {
 	raw, err := json.Marshal(InitializeResponse{
 		ProtocolVersion: CurrentProtocolVersion,
 		AgentCapabilities: AgentCapabilities{
-			LoadSession: true,
+			LoadSession:     true,
+			MCPCapabilities: MCPCapabilities{},
 		},
 	})
 	if err != nil {
@@ -42,7 +43,10 @@ func TestInitializeResponse_MarshalsSchemaFieldsOnly(t *testing.T) {
 	if !strings.Contains(text, `"protocolVersion":1`) {
 		t.Fatalf("expected integer protocolVersion, got %s", text)
 	}
-	if strings.Contains(text, `"mcpCapabilities"`) || strings.Contains(text, `"mcp"`) {
-		t.Fatalf("did not expect MCP capability fields, got %s", text)
+	if !strings.Contains(text, `"mcpCapabilities":{"http":false,"sse":false}`) {
+		t.Fatalf("expected standard mcpCapabilities field, got %s", text)
+	}
+	if strings.Contains(text, `"mcp"`) {
+		t.Fatalf("did not expect legacy mcp field, got %s", text)
 	}
 }

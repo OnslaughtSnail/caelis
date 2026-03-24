@@ -131,12 +131,9 @@ func TestRuntime_RunState_NoLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
-		ID:   "ev_user",
-		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: "hello",
-		},
+		ID:      "ev_user",
+		Time:    time.Now(),
+		Message: model.NewTextMessage(model.RoleUser, "hello"),
 	}); err != nil {
 		t.Fatal(err)
 	}

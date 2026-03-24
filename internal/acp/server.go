@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
+	ksession "github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -66,17 +68,6 @@ type Server struct {
 	authOK     bool
 	sessions   map[string]*serverSession
 	liveStream map[string]*serverSession
-
-	subagentMu      sync.Mutex
-	subagentStarted map[string]bool              // spawnID → started
-	subagentStreams map[string]*subagentACPState // spawnID → delta state
-}
-
-// subagentACPState tracks partial content already sent for a subagent
-// so that partial→final transitions only emit the delta.
-type subagentACPState struct {
-	assistantSent string
-	reasoningSent string
 }
 
 type serverSession struct {
@@ -96,6 +87,9 @@ type serverSession struct {
 	toolCalls     map[string]toolCallSnapshot
 	asyncTasks    map[string]string
 	asyncSessions map[string]string
+
+	approvalMu sync.Mutex
+	approver   *permissionBridge
 }
 
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -141,7 +135,8 @@ func (s *Server) handleRequest(ctx context.Context, msg Message) (any, *RPCError
 		return InitializeResponse{
 			ProtocolVersion: s.cfg.ProtocolVersion,
 			AgentCapabilities: AgentCapabilities{
-				LoadSession: true,
+				LoadSession:     true,
+				MCPCapabilities: MCPCapabilities{},
 				Prompt: PromptCapabilities{
 					EmbeddedContext: true,
 					Image:           caps.PromptImage,
@@ -275,7 +270,7 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		}
 	}()
 
-	approver := newPermissionBridge(s.cfg.Conn, req.SessionID, sess.currentMode)
+	approver := sess.permissionBridge(s.cfg.Conn)
 	runCtx = toolexec.WithApprover(runCtx, approver)
 	runCtx = policy.WithToolAuthorizer(runCtx, approver)
 	var (
@@ -403,6 +398,23 @@ func (s *Server) notifyConfigOptions(sessionID string, options []SessionConfigOp
 	})
 }
 
+func (s *Server) notifySessionInfo(sessionID string, title string, updatedAt string) error {
+	update := SessionInfoUpdate{SessionUpdate: UpdateSessionInfo}
+	if trimmed := strings.TrimSpace(title); trimmed != "" {
+		update.Title = ptr(trimmed)
+	}
+	if trimmed := strings.TrimSpace(updatedAt); trimmed != "" {
+		update.UpdatedAt = ptr(trimmed)
+	}
+	if update.Title == nil && update.UpdatedAt == nil {
+		return nil
+	}
+	return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
+		SessionID: sessionID,
+		Update:    update,
+	})
+}
+
 func loadPlanEntries(raw any) []PlanEntry {
 	payload := anyMap(raw)
 	if payload == nil {
@@ -459,7 +471,17 @@ func invalidParamsError(err error) *RPCError {
 }
 
 func requestFailed(err error) *RPCError {
-	return &RPCError{Code: -32000, Message: err.Error()}
+	if err == nil {
+		return &RPCError{Code: -32603, Message: "internal error"}
+	}
+	switch {
+	case errors.Is(err, errAuthenticationRequired):
+		return &RPCError{Code: -32000, Message: err.Error()}
+	case errors.Is(err, errSessionNotFound), errors.Is(err, ksession.ErrSessionNotFound), errors.Is(err, os.ErrNotExist):
+		return &RPCError{Code: -32002, Message: err.Error()}
+	default:
+		return &RPCError{Code: -32603, Message: err.Error()}
+	}
 }
 
 func stringValue(value any) string {

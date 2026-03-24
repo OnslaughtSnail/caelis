@@ -14,15 +14,6 @@ import (
 
 const defaultActivityWaitMS = 5000
 
-func normalizeActivityBoundary(kind string) activityBlockKind {
-	switch activityBlockKind(strings.TrimSpace(kind)) {
-	case activityBlockExploration, activityBlockTaskMonitor:
-		return activityBlockKind(strings.TrimSpace(kind))
-	default:
-		return ""
-	}
-}
-
 func (m *Model) consumeActivityLine(line string) bool {
 	kind, entry, ok := parseActivityLine(line)
 	if !ok {
@@ -165,10 +156,6 @@ func (m *Model) findPreviousTranscriptBlock(blockID string) *TranscriptBlock {
 	return nil
 }
 
-func (m *Model) clearActivityBlock() {
-	m.activeActivityID = ""
-}
-
 func (m *Model) renderActivityBlockLines(block *foldedActivityBlockState) []string {
 	if block == nil {
 		return nil
@@ -234,7 +221,7 @@ func (m *Model) renderTaskMonitorMeta(block *foldedActivityBlockState) string {
 	return strings.Join(parts, "  ")
 }
 
-func (m *Model) renderActivityEntryLine(block *foldedActivityBlockState, verb string, detail string) string {
+func (m *Model) renderActivityEntryLine(_ *foldedActivityBlockState, verb string, detail string) string {
 	border := lipgloss.NewStyle().Foreground(m.theme.RoleBorderFg).Render("│")
 	verbText := m.theme.KeyLabelStyle().Render(verb)
 	if detail != "" {
@@ -309,15 +296,6 @@ func (m *Model) renderTaskMonitorInlineLine(block *foldedActivityBlockState, fin
 	return prefix + " " + m.renderTaskMonitorSummaryText(text)
 }
 
-func (m *Model) renderStandaloneTaskMonitorSummaryLine(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	prefix := m.theme.ToolStyle().Bold(true).Render("▸")
-	return prefix + " " + m.renderTaskMonitorSummaryText(text)
-}
-
 func (m *Model) renderTaskMonitorSummaryText(text string) string {
 	parts := strings.Split(strings.TrimSpace(text), ", ")
 	if len(parts) == 0 {
@@ -345,7 +323,7 @@ func (m *Model) renderTaskMonitorSummaryText(text string) string {
 	return strings.Join(out, sep)
 }
 
-func (m *Model) renderActivityTitlePrefix(block *foldedActivityBlockState) string {
+func (m *Model) renderActivityTitlePrefix(_ *foldedActivityBlockState) string {
 	return m.theme.ToolStyle().Bold(true).Render("▸")
 }
 
@@ -667,7 +645,7 @@ func parseExplorationEntry(tool string, remainder string, result bool) activityE
 	return entry
 }
 
-func parseTaskWaitEntry(tool string, remainder string, result bool) activityEntry {
+func parseTaskWaitEntry(_ string, remainder string, result bool) activityEntry {
 	return activityEntry{
 		tool:   "TASK",
 		action: "wait",
@@ -957,11 +935,8 @@ func splitPathAndQuery(remainder string) (string, string) {
 	if query == "" {
 		query = extractBraceValue(remainder, "q")
 	}
-	idx := strings.Index(remainder, "{")
-	path := strings.TrimSpace(remainder)
-	if idx >= 0 {
-		path = strings.TrimSpace(remainder[:idx])
-	}
+	before, _, _ := strings.Cut(remainder, "{")
+	path := strings.TrimSpace(before)
 	if path == "." {
 		path = ""
 	}
@@ -999,7 +974,7 @@ func parseFriendlyWaitMS(input string) int {
 		return 0
 	}
 	fields := strings.Fields(input)
-	for i := 0; i < len(fields); i++ {
+	for i := range len(fields) {
 		field := strings.TrimSpace(fields[i])
 		if ms, ok := parseWaitToken(field); ok {
 			return ms
@@ -1033,12 +1008,12 @@ func parseWaitToken(token string) (int, bool) {
 	if token == "" {
 		return 0, false
 	}
-	if strings.HasSuffix(token, "ms") {
-		n, err := strconv.Atoi(strings.TrimSuffix(token, "ms"))
+	if trimmed, ok := strings.CutSuffix(token, "ms"); ok {
+		n, err := strconv.Atoi(trimmed)
 		return n, err == nil
 	}
-	if strings.HasSuffix(token, "s") {
-		n, err := strconv.ParseFloat(strings.TrimSuffix(token, "s"), 64)
+	if trimmed, ok := strings.CutSuffix(token, "s"); ok {
+		n, err := strconv.ParseFloat(trimmed, 64)
 		if err != nil {
 			return 0, false
 		}

@@ -1,7 +1,6 @@
 package providers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,15 +9,22 @@ import (
 	"strings"
 	"time"
 
+	anthropic "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
+
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 )
 
-type anthropicLLM struct {
+const anthropicReplayKindThinkingSignature = "thinking_signature"
+
+type anthropicSDKLLM struct {
 	name                string
 	provider            string
 	baseURL             string
 	token               string
-	client              *http.Client
+	headers             map[string]string
+	auth                AuthConfig
+	client              *anthropic.Client
 	requestTimeout      time.Duration
 	maxOutputTok        int
 	contextWindowTokens int
@@ -33,259 +39,605 @@ func newAnthropic(cfg Config, token string) model.LLM {
 	if maxTok <= 0 {
 		maxTok = 1024
 	}
-	return &anthropicLLM{
+	opts := make([]option.RequestOption, 0, 8+len(cfg.Headers))
+	opts = append(opts, option.WithBaseURL(anthropicSDKBaseURL(cfg.BaseURL)))
+	opts = append(opts, option.WithHTTPClient(&http.Client{}))
+	opts = append(opts, anthropicAuthOptions(cfg, token)...)
+	for key, value := range cfg.Headers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		opts = append(opts, option.WithHeader(key, value))
+	}
+	client := anthropic.NewClient(opts...)
+	return &anthropicSDKLLM{
 		name:                cfg.Model,
 		provider:            cfg.Provider,
-		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
+		baseURL:             anthropicSDKBaseURL(cfg.BaseURL),
 		token:               token,
-		client:              &http.Client{},
+		headers:             cloneHeaders(cfg.Headers),
+		auth:                cfg.Auth,
+		client:              &client,
 		requestTimeout:      timeout,
 		maxOutputTok:        maxTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 	}
 }
 
-func (l *anthropicLLM) Name() string {
+func (l *anthropicSDKLLM) Name() string {
 	return l.name
 }
 
-func (l *anthropicLLM) ProviderName() string {
+func (l *anthropicSDKLLM) ProviderName() string {
 	return l.provider
 }
 
-func (l *anthropicLLM) ContextWindowTokens() int {
+func (l *anthropicSDKLLM) ContextWindowTokens() int {
 	return l.contextWindowTokens
 }
 
-func (l *anthropicLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
-	return func(yield func(*model.Response, error) bool) {
+func (l *anthropicSDKLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		if req == nil {
 			yield(nil, fmt.Errorf("model: request is nil"))
 			return
 		}
-		system, messages := toAnthropicMessages(req.Messages)
-		payload := anthropicRequest{
-			Model:     l.name,
-			System:    system,
-			Messages:  messages,
-			Tools:     toAnthropicTools(req.Tools),
-			MaxTokens: l.maxOutputTok,
-			Stream:    false,
-		}
-		if effort := strings.ToLower(strings.TrimSpace(req.Reasoning.Effort)); effort != "" && effort != "none" {
-			budget := req.Reasoning.BudgetTokens
-			if budget <= 0 {
-				budget = 512
-			}
-			payload.Thinking = &anthropicThinking{
-				Type:         "enabled",
-				BudgetTokens: budget,
-			}
-		}
-		raw, err := json.Marshal(payload)
+		params, err := l.buildRequest(req)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		runCtx := ctx
-		cancel := func() {}
-		if l.requestTimeout > 0 {
-			runCtx, cancel = context.WithTimeout(ctx, l.requestTimeout)
-		}
-		defer cancel()
-
-		httpReq, err := http.NewRequestWithContext(runCtx, http.MethodPost, l.baseURL+"/messages", bytes.NewReader(raw))
-		if err != nil {
-			yield(nil, err)
+		if req.Stream {
+			l.generateStreaming(ctx, params, yield)
 			return
 		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("x-api-key", l.token)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
-
-		resp, err := l.client.Do(httpReq)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 300 {
-			yield(nil, statusError(resp))
-			return
-		}
-		var out anthropicResponse
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			yield(nil, err)
-			return
-		}
-
-		msg := model.Message{Role: model.RoleAssistant}
-		textParts := make([]string, 0, len(out.Content))
-		for _, part := range out.Content {
-			switch part.Type {
-			case "text":
-				if strings.TrimSpace(part.Text) != "" {
-					textParts = append(textParts, part.Text)
-				}
-			case "tool_use":
-				msg.ToolCalls = append(msg.ToolCalls, model.ToolCall{
-					ID:   part.ID,
-					Name: part.Name,
-					Args: toolArgsRaw(part.Input),
-				})
-			}
-		}
-		msg.Text = strings.TrimSpace(strings.Join(textParts, "\n"))
-		yield(&model.Response{
-			Message:      msg,
-			TurnComplete: true,
-			Model:        out.Model,
-			Provider:     l.provider,
-			Usage: model.Usage{
-				PromptTokens:     out.Usage.InputTokens,
-				CompletionTokens: out.Usage.OutputTokens,
-				TotalTokens:      out.Usage.InputTokens + out.Usage.OutputTokens,
-			},
-		}, nil)
+		l.generateNonStreaming(ctx, params, yield)
 	}
 }
 
-type anthropicRequest struct {
-	Model     string              `json:"model"`
-	System    string              `json:"system,omitempty"`
-	Messages  []anthropicMessage  `json:"messages"`
-	Tools     []anthropicToolDecl `json:"tools,omitempty"`
-	Thinking  *anthropicThinking  `json:"thinking,omitempty"`
-	MaxTokens int                 `json:"max_tokens"`
-	Stream    bool                `json:"stream"`
+func (l *anthropicSDKLLM) generateNonStreaming(ctx context.Context, params anthropic.MessageNewParams, yield func(*model.StreamEvent, error) bool) {
+	cli := l.clientOrZero()
+	runCtx := ctx
+	cancel := func() {}
+	if l.requestTimeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, l.requestTimeout)
+	}
+	defer cancel()
+
+	resp, err := cli.Messages.New(runCtx, params)
+	if err != nil {
+		yield(nil, err)
+		return
+	}
+	msg, finishReason, rawFinishReason, usage, err := anthropicResponseToMessage(l.provider, resp)
+	if err != nil {
+		yield(nil, err)
+		return
+	}
+	yield(&model.StreamEvent{
+		Type: model.StreamEventTurnDone,
+		Response: &model.Response{
+			Message:         msg,
+			TurnComplete:    true,
+			StepComplete:    true,
+			Status:          model.ResponseStatusCompleted,
+			FinishReason:    finishReason,
+			RawFinishReason: rawFinishReason,
+			Model:           string(resp.Model),
+			Provider:        l.provider,
+			Usage:           usage,
+		},
+	}, nil)
 }
 
-type anthropicThinking struct {
-	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens,omitempty"`
+func (l *anthropicSDKLLM) generateStreaming(ctx context.Context, params anthropic.MessageNewParams, yield func(*model.StreamEvent, error) bool) {
+	cli := l.clientOrZero()
+	stream := cli.Messages.NewStreaming(ctx, params)
+	if stream == nil {
+		yield(nil, fmt.Errorf("providers: anthropic stream is nil"))
+		return
+	}
+	defer stream.Close()
+
+	acc := anthropic.Message{}
+	stopped := false
+	for stream.Next() {
+		event := stream.Current()
+		if err := acc.Accumulate(event); err != nil {
+			yield(nil, err)
+			return
+		}
+		switch ev := event.AsAny().(type) {
+		case anthropic.ContentBlockStartEvent:
+			if !l.emitStreamingStartBlock(ev, yield) {
+				stopped = true
+				return
+			}
+		case anthropic.ContentBlockDeltaEvent:
+			if !l.emitStreamingDeltaBlock(ev, yield) {
+				stopped = true
+				return
+			}
+		}
+	}
+	if stopped {
+		return
+	}
+	if err := stream.Err(); err != nil {
+		yield(nil, err)
+		return
+	}
+	msg, finishReason, rawFinishReason, usage, err := anthropicMessageToKernel(l.provider, &acc)
+	if err != nil {
+		yield(nil, err)
+		return
+	}
+	yield(&model.StreamEvent{
+		Type: model.StreamEventTurnDone,
+		Response: &model.Response{
+			Message:         msg,
+			TurnComplete:    true,
+			StepComplete:    true,
+			Status:          model.ResponseStatusCompleted,
+			FinishReason:    finishReason,
+			RawFinishReason: rawFinishReason,
+			Model:           string(acc.Model),
+			Provider:        l.provider,
+			Usage:           usage,
+		},
+	}, nil)
 }
 
-type anthropicMessage struct {
-	Role    string             `json:"role"`
-	Content []anthropicMsgPart `json:"content"`
+func (l *anthropicSDKLLM) emitStreamingStartBlock(ev anthropic.ContentBlockStartEvent, yield func(*model.StreamEvent, error) bool) bool {
+	switch block := ev.ContentBlock.AsAny().(type) {
+	case anthropic.TextBlock:
+		return l.emitStreamingTextDelta(int(ev.Index), model.PartKindText, block.Text, nil, yield)
+	case anthropic.ThinkingBlock:
+		replay := anthropicReplayMeta(l.provider, strings.TrimSpace(block.Signature))
+		return l.emitStreamingTextDelta(int(ev.Index), model.PartKindReasoning, block.Thinking, replay, yield)
+	default:
+		return true
+	}
 }
 
-type anthropicImageSource struct {
-	Type      string `json:"type"`       // "base64"
-	MediaType string `json:"media_type"` // e.g. "image/png"
-	Data      string `json:"data"`       // base64-encoded
+func (l *anthropicSDKLLM) emitStreamingDeltaBlock(ev anthropic.ContentBlockDeltaEvent, yield func(*model.StreamEvent, error) bool) bool {
+	switch delta := ev.Delta.AsAny().(type) {
+	case anthropic.TextDelta:
+		return l.emitStreamingTextDelta(int(ev.Index), model.PartKindText, delta.Text, nil, yield)
+	case anthropic.ThinkingDelta:
+		return l.emitStreamingTextDelta(int(ev.Index), model.PartKindReasoning, delta.Thinking, nil, yield)
+	case anthropic.SignatureDelta:
+		return yield(&model.StreamEvent{
+			Type: model.StreamEventPartDelta,
+			PartDelta: &model.PartDelta{
+				Index:  int(ev.Index),
+				Kind:   model.PartKindReasoning,
+				Replay: anthropicReplayMeta(l.provider, strings.TrimSpace(delta.Signature)),
+			},
+		}, nil)
+	default:
+		return true
+	}
 }
 
-type anthropicMsgPart struct {
-	Type      string                `json:"type"`
-	Text      string                `json:"text,omitempty"`
-	ID        string                `json:"id,omitempty"`
-	Name      string                `json:"name,omitempty"`
-	Input     map[string]any        `json:"input,omitempty"`
-	ToolUseID string                `json:"tool_use_id,omitempty"`
-	Content   string                `json:"content,omitempty"`
-	Source    *anthropicImageSource `json:"source,omitempty"`
+func (l *anthropicSDKLLM) emitStreamingTextDelta(index int, kind model.PartKind, text string, replay *model.ReplayMeta, yield func(*model.StreamEvent, error) bool) bool {
+	if text == "" && replay == nil {
+		return true
+	}
+	return yield(&model.StreamEvent{
+		Type: model.StreamEventPartDelta,
+		PartDelta: &model.PartDelta{
+			Index:     index,
+			Kind:      kind,
+			TextDelta: text,
+			Replay:    replay,
+		},
+	}, nil)
 }
 
-type anthropicToolDecl struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	InputSchema map[string]any `json:"input_schema"`
+func anthropicReplayMeta(provider string, token string) *model.ReplayMeta {
+	if token == "" {
+		return nil
+	}
+	return &model.ReplayMeta{
+		Provider: provider,
+		Kind:     anthropicReplayKindThinkingSignature,
+		Token:    token,
+	}
 }
 
-type anthropicResponse struct {
-	Model   string `json:"model"`
-	Content []struct {
-		Type  string         `json:"type"`
-		Text  string         `json:"text,omitempty"`
-		ID    string         `json:"id,omitempty"`
-		Name  string         `json:"name,omitempty"`
-		Input map[string]any `json:"input,omitempty"`
-	} `json:"content"`
-	Usage struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
+func (l *anthropicSDKLLM) buildRequest(req *model.Request) (anthropic.MessageNewParams, error) {
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.Model(l.name),
+		MaxTokens: int64(l.maxOutputTok),
+		Messages:  toAnthropicMessages(req.Messages),
+		System:    toAnthropicSystem(req.Instructions),
+		Tools:     toAnthropicTools(model.FunctionToolDefinitions(req.Tools)),
+	}
+	if thinking := anthropicThinkingConfig(l.provider, req.Reasoning); thinking != nil {
+		params.Thinking = *thinking
+	}
+	return params, nil
 }
 
-func toAnthropicTools(tools []model.ToolDefinition) []anthropicToolDecl {
-	out := make([]anthropicToolDecl, 0, len(tools))
-	for _, t := range tools {
-		out = append(out, anthropicToolDecl{
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.Parameters,
-		})
+func (l *anthropicSDKLLM) clientOrZero() anthropic.Client {
+	if l.client != nil {
+		return *l.client
+	}
+	return anthropic.NewClient()
+}
+
+func anthropicAuthOptions(cfg Config, token string) []option.RequestOption {
+	auth := cfg.Auth
+	if strings.TrimSpace(token) == "" {
+		return nil
+	}
+	if key := strings.TrimSpace(auth.HeaderKey); key != "" {
+		value := token
+		if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
+			value = prefix + " " + token
+		}
+		return []option.RequestOption{option.WithHeader(key, value)}
+	}
+	switch auth.Type {
+	case AuthBearerToken, AuthOAuthToken:
+		return []option.RequestOption{option.WithAuthToken(token)}
+	case AuthNone:
+		return nil
+	default:
+		return []option.RequestOption{option.WithAPIKey(token)}
+	}
+}
+
+func anthropicThinkingConfig(provider string, reasoning model.ReasoningConfig) *anthropic.ThinkingConfigParamUnion {
+	budget := reasoning.BudgetTokens
+	effort := strings.ToLower(strings.TrimSpace(reasoning.Effort))
+	if budget <= 0 {
+		switch effort {
+		case "low":
+			budget = 1024
+		case "high":
+			budget = 8192
+		case "medium":
+			budget = 4096
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "minimax") && budget <= 0 {
+		budget = 4096
+	}
+	if budget <= 0 {
+		return nil
+	}
+	if budget < 1024 {
+		budget = 1024
+	}
+	cfg := anthropic.ThinkingConfigParamOfEnabled(int64(budget))
+	return &cfg
+}
+
+func toAnthropicSystem(instructions []model.Part) []anthropic.TextBlockParam {
+	if len(instructions) == 0 {
+		return nil
+	}
+	out := make([]anthropic.TextBlockParam, 0, len(instructions))
+	for _, part := range instructions {
+		if part.Text == nil || part.Text.Text == "" {
+			continue
+		}
+		out = append(out, anthropic.TextBlockParam{Text: part.Text.Text})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
 
-func toAnthropicMessages(messages []model.Message) (string, []anthropicMessage) {
-	systemLines := make([]string, 0, 2)
-	out := make([]anthropicMessage, 0, len(messages))
-
-	for _, m := range messages {
-		switch m.Role {
+func toAnthropicMessages(messages []model.Message) []anthropic.MessageParam {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]anthropic.MessageParam, 0, len(messages))
+	for _, msg := range messages {
+		switch msg.Role {
 		case model.RoleSystem:
-			if strings.TrimSpace(m.Text) != "" {
-				systemLines = append(systemLines, m.Text)
-			}
+			continue
 		case model.RoleUser:
-			var parts []anthropicMsgPart
-			if len(m.ContentParts) > 0 {
-				for _, cp := range m.ContentParts {
-					switch cp.Type {
-					case model.ContentPartText:
-						parts = append(parts, anthropicMsgPart{Type: "text", Text: cp.Text})
-					case model.ContentPartImage:
-						parts = append(parts, anthropicMsgPart{
-							Type: "image",
-							Source: &anthropicImageSource{
-								Type:      "base64",
-								MediaType: cp.MimeType,
-								Data:      cp.Data,
-							},
-						})
-					}
-				}
-			} else {
-				parts = []anthropicMsgPart{{Type: "text", Text: m.Text}}
+			blocks := toAnthropicContentBlocks(msg.Parts, true)
+			if len(blocks) > 0 {
+				out = append(out, anthropic.NewUserMessage(blocks...))
 			}
-			out = append(out, anthropicMessage{
-				Role:    "user",
-				Content: parts,
-			})
 		case model.RoleAssistant:
-			parts := make([]anthropicMsgPart, 0, len(m.ToolCalls)+1)
-			if strings.TrimSpace(m.Text) != "" {
-				parts = append(parts, anthropicMsgPart{Type: "text", Text: m.Text})
-			}
-			for _, call := range m.ToolCalls {
-				parts = append(parts, anthropicMsgPart{
-					Type:  "tool_use",
-					ID:    call.ID,
-					Name:  call.Name,
-					Input: toolArgsMap(call.Args),
-				})
-			}
-			if len(parts) > 0 {
-				out = append(out, anthropicMessage{Role: "assistant", Content: parts})
+			blocks := toAnthropicContentBlocks(msg.Parts, false)
+			if len(blocks) > 0 {
+				out = append(out, anthropic.NewAssistantMessage(blocks...))
 			}
 		case model.RoleTool:
-			if m.ToolResponse == nil {
-				continue
+			blocks := toAnthropicToolResultBlocks(msg.Parts)
+			if len(blocks) > 0 {
+				out = append(out, anthropic.NewUserMessage(blocks...))
 			}
-			raw, _ := json.Marshal(m.ToolResponse.Result)
-			out = append(out, anthropicMessage{
-				Role: "user",
-				Content: []anthropicMsgPart{{
-					Type:      "tool_result",
-					ToolUseID: m.ToolResponse.ID,
-					Content:   string(raw),
-				}},
-			})
 		}
 	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
 
-	return strings.Join(systemLines, "\n\n"), out
+func toAnthropicContentBlocks(parts []model.Part, userRole bool) []anthropic.ContentBlockParamUnion {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]anthropic.ContentBlockParamUnion, 0, len(parts))
+	for _, part := range parts {
+		switch part.Kind {
+		case model.PartKindText:
+			if part.Text != nil {
+				out = append(out, anthropic.NewTextBlock(part.Text.Text))
+			}
+		case model.PartKindReasoning:
+			if userRole || part.Reasoning == nil {
+				continue
+			}
+			text := ""
+			if part.Reasoning.VisibleText != nil {
+				text = *part.Reasoning.VisibleText
+			}
+			token := ""
+			if part.Reasoning.Replay != nil {
+				token = strings.TrimSpace(part.Reasoning.Replay.Token)
+			}
+			switch part.Reasoning.Visibility {
+			case model.ReasoningVisibilityRedacted:
+				if raw := anthropicProviderDetail(part.Reasoning.ProviderDetails, "data"); raw != "" {
+					out = append(out, anthropic.NewRedactedThinkingBlock(raw))
+				} else if text != "" || token != "" {
+					out = append(out, anthropic.NewThinkingBlock(token, text))
+				}
+			default:
+				if text != "" || token != "" {
+					out = append(out, anthropic.NewThinkingBlock(token, text))
+				}
+			}
+		case model.PartKindToolUse:
+			if userRole || part.ToolUse == nil {
+				continue
+			}
+			out = append(out, anthropic.NewToolUseBlock(part.ToolUse.ID, jsonRawToAny(part.ToolUse.Input), part.ToolUse.Name))
+		case model.PartKindMedia:
+			if !userRole || part.Media == nil || part.Media.Modality != model.MediaModalityImage {
+				continue
+			}
+			if part.Media.Source.Kind == model.MediaSourceInline && part.Media.Source.Data != "" {
+				out = append(out, anthropic.NewImageBlockBase64(part.Media.MimeType, part.Media.Source.Data))
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func toAnthropicToolResultBlocks(parts []model.Part) []anthropic.ContentBlockParamUnion {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]anthropic.ContentBlockParamUnion, 0, len(parts))
+	for _, part := range parts {
+		if part.ToolResult == nil {
+			continue
+		}
+		block := anthropic.ToolResultBlockParam{
+			ToolUseID: part.ToolResult.ToolUseID,
+			IsError:   anthropic.Bool(part.ToolResult.IsError),
+			Content:   toAnthropicToolResultContent(part.ToolResult.Content),
+		}
+		out = append(out, anthropic.ContentBlockParamUnion{OfToolResult: &block})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func toAnthropicToolResultContent(parts []model.Part) []anthropic.ToolResultBlockParamContentUnion {
+	if len(parts) == 0 {
+		return []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "{}"}}}
+	}
+	out := make([]anthropic.ToolResultBlockParamContentUnion, 0, len(parts))
+	for _, part := range parts {
+		switch part.Kind {
+		case model.PartKindText:
+			if part.Text != nil {
+				out = append(out, anthropic.ToolResultBlockParamContentUnion{
+					OfText: &anthropic.TextBlockParam{Text: part.Text.Text},
+				})
+			}
+		case model.PartKindJSON:
+			if raw := part.JSONValue(); len(raw) > 0 {
+				out = append(out, anthropic.ToolResultBlockParamContentUnion{
+					OfText: &anthropic.TextBlockParam{Text: string(raw)},
+				})
+			}
+		case model.PartKindMedia:
+			if part.Media == nil || part.Media.Modality != model.MediaModalityImage {
+				continue
+			}
+			if part.Media.Source.Kind != model.MediaSourceInline || part.Media.Source.Data == "" {
+				continue
+			}
+			out = append(out, anthropic.ToolResultBlockParamContentUnion{
+				OfImage: &anthropic.ImageBlockParam{
+					Source: anthropic.ImageBlockParamSourceUnion{
+						OfBase64: &anthropic.Base64ImageSourceParam{
+							Data:      part.Media.Source.Data,
+							MediaType: anthropic.Base64ImageSourceMediaType(part.Media.MimeType),
+						},
+					},
+				},
+			})
+		case model.PartKindFileRef:
+			if part.FileRef != nil {
+				refText := strings.TrimSpace(part.FileRef.URI)
+				if refText == "" {
+					refText = strings.TrimSpace(part.FileRef.LocalRef)
+				}
+				if refText == "" {
+					refText = strings.TrimSpace(part.FileRef.FileID)
+				}
+				if refText != "" {
+					out = append(out, anthropic.ToolResultBlockParamContentUnion{
+						OfText: &anthropic.TextBlockParam{Text: refText},
+					})
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []anthropic.ToolResultBlockParamContentUnion{{OfText: &anthropic.TextBlockParam{Text: "{}"}}}
+	}
+	return out
+}
+
+func toAnthropicTools(tools []model.ToolDefinition) []anthropic.ToolUnionParam {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]anthropic.ToolUnionParam, 0, len(tools))
+	for _, tool := range tools {
+		schema := anthropicToolInputSchema(tool.Parameters)
+		entry := anthropic.ToolUnionParamOfTool(schema, tool.Name)
+		if entry.OfTool != nil {
+			entry.OfTool.Description = anthropic.String(strings.TrimSpace(tool.Description))
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func anthropicToolInputSchema(schema map[string]any) anthropic.ToolInputSchemaParam {
+	if len(schema) == 0 {
+		return anthropic.ToolInputSchemaParam{Type: "object"}
+	}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return anthropic.ToolInputSchemaParam{Type: "object", ExtraFields: map[string]any{}}
+	}
+	var out anthropic.ToolInputSchemaParam
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return anthropic.ToolInputSchemaParam{Type: "object", ExtraFields: map[string]any{}}
+	}
+	if out.Type == "" {
+		out.Type = "object"
+	}
+	return out
+}
+
+func anthropicResponseToMessage(provider string, resp *anthropic.Message) (model.Message, model.FinishReason, string, model.Usage, error) {
+	if resp == nil {
+		return model.Message{}, model.FinishReasonUnknown, "", model.Usage{}, fmt.Errorf("providers: anthropic response is nil")
+	}
+	msg, finishReason, rawFinishReason, usage, err := anthropicMessageToKernel(provider, resp)
+	if err != nil {
+		return model.Message{}, model.FinishReasonUnknown, "", model.Usage{}, err
+	}
+	return msg, finishReason, rawFinishReason, usage, nil
+}
+
+func anthropicMessageToKernel(provider string, resp *anthropic.Message) (model.Message, model.FinishReason, string, model.Usage, error) {
+	if resp == nil {
+		return model.Message{}, model.FinishReasonUnknown, "", model.Usage{}, fmt.Errorf("providers: anthropic message is nil")
+	}
+	parts := make([]model.Part, 0, len(resp.Content))
+	for _, block := range resp.Content {
+		switch variant := block.AsAny().(type) {
+		case anthropic.TextBlock:
+			parts = append(parts, model.NewTextPart(variant.Text))
+		case anthropic.ThinkingBlock:
+			part := model.NewReasoningPart(variant.Thinking, model.ReasoningVisibilityVisible)
+			if part.Reasoning != nil && strings.TrimSpace(variant.Signature) != "" {
+				part.Reasoning.Replay = &model.ReplayMeta{
+					Provider: provider,
+					Kind:     anthropicReplayKindThinkingSignature,
+					Token:    variant.Signature,
+				}
+			}
+			parts = append(parts, part)
+		case anthropic.RedactedThinkingBlock:
+			part := model.NewReasoningPart("", model.ReasoningVisibilityRedacted)
+			if part.Reasoning != nil && strings.TrimSpace(variant.Data) != "" {
+				raw, _ := json.Marshal(map[string]string{"data": variant.Data})
+				part.Reasoning.ProviderDetails = map[string]json.RawMessage{"anthropic": raw}
+			}
+			parts = append(parts, part)
+		case anthropic.ToolUseBlock:
+			raw := append(json.RawMessage(nil), variant.Input...)
+			part := model.NewToolUsePart(variant.ID, variant.Name, raw)
+			parts = append(parts, part)
+		}
+	}
+	out := model.Message{
+		Role:  model.RoleAssistant,
+		Parts: parts,
+		Origin: &model.MessageOrigin{
+			Provider:        provider,
+			Model:           string(resp.Model),
+			RawFinishReason: string(resp.StopReason),
+		},
+	}
+	return out, normalizeAnthropicFinishReason(resp.StopReason), string(resp.StopReason), anthropicUsageToKernel(resp.Usage), nil
+}
+
+func anthropicUsageToKernel(usage anthropic.Usage) model.Usage {
+	return model.Usage{
+		PromptTokens:     int(usage.InputTokens),
+		CompletionTokens: int(usage.OutputTokens),
+		TotalTokens:      int(usage.InputTokens + usage.OutputTokens),
+	}
+}
+
+func normalizeAnthropicFinishReason(reason anthropic.StopReason) model.FinishReason {
+	switch reason {
+	case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence, anthropic.StopReasonPauseTurn, anthropic.StopReasonRefusal:
+		return model.FinishReasonStop
+	case anthropic.StopReasonMaxTokens:
+		return model.FinishReasonLength
+	case anthropic.StopReasonToolUse:
+		return model.FinishReasonToolCalls
+	default:
+		return model.FinishReasonUnknown
+	}
+}
+
+func anthropicProviderDetail(details map[string]json.RawMessage, key string) string {
+	if len(details) == 0 || strings.TrimSpace(key) == "" {
+		return ""
+	}
+	raw, ok := details["anthropic"]
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	value, _ := payload[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func jsonRawToAny(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return map[string]any{}
+	}
+	if value == nil {
+		return map[string]any{}
+	}
+	return value
 }

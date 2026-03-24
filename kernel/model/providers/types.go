@@ -6,16 +6,17 @@ import "time"
 type APIType string
 
 const (
-	APIOpenAI           APIType = "openai"
-	APIOpenAICompatible APIType = "openai_compatible"
-	APIOpenRouter       APIType = "openrouter"
-	APIGemini           APIType = "gemini"
-	APIAnthropic        APIType = "anthropic"
-	APIDeepSeek         APIType = "deepseek"
-	APIVolcengine       APIType = "volcengine"
-	APIMimo             APIType = "mimo"
-	APIVolcengineCoding APIType = "volcengine_coding_plan"
-	APIOllama           APIType = "ollama"
+	APIOpenAI              APIType = "openai"
+	APIOpenAICompatible    APIType = "openai_compatible"
+	APIOpenRouter          APIType = "openrouter"
+	APIGemini              APIType = "gemini"
+	APIAnthropic           APIType = "anthropic"
+	APIAnthropicCompatible APIType = "anthropic_compatible"
+	APIDeepSeek            APIType = "deepseek"
+	APIVolcengine          APIType = "volcengine"
+	APIMimo                APIType = "mimo"
+	APIVolcengineCoding    APIType = "volcengine_coding_plan"
+	APIOllama              APIType = "ollama"
 )
 
 // AuthType defines model provider authentication strategy.

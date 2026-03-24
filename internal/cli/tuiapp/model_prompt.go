@@ -96,7 +96,7 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	if text := msg.Key().Text; text != "" {
-		for _, r := range []rune(text) {
+		for _, r := range text {
 			head := append([]rune(nil), m.activePrompt.input[:m.activePrompt.cursor]...)
 			head = append(head, r)
 			m.activePrompt.input = append(head, m.activePrompt.input[m.activePrompt.cursor:]...)
@@ -115,7 +115,7 @@ func (m *Model) handlePromptPaste(msg tea.PasteMsg) tea.Cmd {
 		return nil
 	}
 	if len(m.activePrompt.choices) > 0 && m.activePrompt.filterable {
-		for _, r := range []rune(text) {
+		for _, r := range text {
 			head := append([]rune(nil), m.activePrompt.filter[:m.activePrompt.cursor]...)
 			head = append(head, r)
 			m.activePrompt.filter = append(head, m.activePrompt.filter[m.activePrompt.cursor:]...)
@@ -127,7 +127,7 @@ func (m *Model) handlePromptPaste(msg tea.PasteMsg) tea.Cmd {
 	if len(m.activePrompt.choices) > 0 {
 		return nil
 	}
-	for _, r := range []rune(text) {
+	for _, r := range text {
 		head := append([]rune(nil), m.activePrompt.input[:m.activePrompt.cursor]...)
 		head = append(head, r)
 		m.activePrompt.input = append(head, m.activePrompt.input[m.activePrompt.cursor:]...)
@@ -337,7 +337,7 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 	}
 	if text := msg.Key().Text; text != "" {
 		if m.activePrompt.filterable {
-			for _, r := range []rune(text) {
+			for _, r := range text {
 				head := append([]rune(nil), m.activePrompt.filter[:m.activePrompt.cursor]...)
 				head = append(head, r)
 				m.activePrompt.filter = append(head, m.activePrompt.filter[m.activePrompt.cursor:]...)

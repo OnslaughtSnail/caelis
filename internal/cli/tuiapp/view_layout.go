@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
@@ -69,6 +70,10 @@ func (m *Model) renderedStyledLines() []string {
 // Both styled and plain text are wrapped independently from RenderedRow,
 // making RenderedRow the single layout truth.
 func (m *Model) syncViewportContent() {
+	if m.viewportSyncDepth > 0 {
+		m.viewportDirty = true
+		return
+	}
 	wrapWidth := maxInt(1, m.viewport.Width())
 	ctx := BlockRenderContext{
 		Width:     wrapWidth,
@@ -98,6 +103,11 @@ func (m *Model) syncViewportContent() {
 		case BlockAssistant, BlockReasoning:
 			// Narrative: wrap plain first, derive styled from same segments.
 			wrappedPlain, wrappedStyled = m.wrapNarrativeRow(row, plainLine, wrapWidth)
+		case BlockParticipantTurn:
+			// Participant turns already render wrapped rows in block.Render.
+			// Re-wrapping styled ANSI text here can duplicate visual content.
+			wrappedStyled = styledLine
+			wrappedPlain = plainLine
 		default:
 			wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
 			wrappedPlain = hardWrapDisplayLine(plainLine, wrapWidth)
@@ -189,6 +199,24 @@ func (m *Model) syncViewportContent() {
 	m.renderViewportContent()
 }
 
+func (m *Model) beginDeferredViewportSync() {
+	if m == nil {
+		return
+	}
+	m.viewportSyncDepth++
+}
+
+func (m *Model) endDeferredViewportSync() {
+	if m == nil || m.viewportSyncDepth == 0 {
+		return
+	}
+	m.viewportSyncDepth--
+	if m.viewportSyncDepth == 0 && m.viewportDirty {
+		m.viewportDirty = false
+		m.syncViewportContent()
+	}
+}
+
 func (m *Model) renderedRowWrapMode(blockID string) BlockKind {
 	if blockID == "" {
 		return ""
@@ -245,10 +273,7 @@ func (m *Model) adaptLineForViewport(line string, wrapWidth int, colorize bool) 
 	}
 	style := tuikit.LineStyleTool
 	gutter := tuikit.LineExtraGutter(style)
-	available := wrapWidth - displayColumns(gutter) - displayColumns(prefix)
-	if available < 16 {
-		available = 16
-	}
+	available := max(wrapWidth-displayColumns(gutter)-displayColumns(prefix), 16)
 	targetWidth := minInt(available, maxInt(24, wrapWidth*2/3))
 	adapted := prefix + truncateMiddleDisplay(taskText, targetWidth)
 	if colorize {
@@ -283,17 +308,39 @@ func truncateMiddleDisplay(text string, width int) string {
 }
 
 func (m *Model) renderViewportContent() {
-	wasAtBottom := m.viewport.AtBottom()
+	start := time.Now()
 	lines := m.viewportStyledLines
 	if m.hasSelectionRange() {
 		lines = m.renderSelectionLines()
 	}
-	m.viewport.SetContent(strings.Join(lines, "\n"))
+	content := strings.Join(lines, "\n")
+	if content != m.lastViewportContent {
+		m.viewport.SetContent(content)
+		m.lastViewportContent = content
+	}
 
-	// Auto-scroll: if user hasn't manually scrolled up, stay at bottom.
-	if !m.userScrolledUp || wasAtBottom {
+	// Auto-scroll: decide based on current state AFTER SetContent so
+	// that scroll decisions use the up-to-date content length. The
+	// previous approach sampled AtBottom() before SetContent, which
+	// could produce the wrong decision when content/height changed.
+	if !m.userScrolledUp {
 		m.viewport.GotoBottom()
-		m.userScrolledUp = false
+	}
+	m.streamPlayback.LastFrameRenderCost = time.Since(start)
+}
+
+// ensureViewportLayout reconciles the viewport height with the current
+// bottom-section layout. Call this from Update() after any state change
+// that may affect bottomSectionHeight (textarea resize, drawer toggle,
+// pending queue change, etc.). Moving this out of View() avoids
+// mutating viewport state during rendering, which can cause the scroll
+// offset and visible content to desynchronize for one or more frames —
+// producing the "invisible but selectable text" artefact.
+func (m *Model) ensureViewportLayout() {
+	vpHeight, _ := m.computeLayout()
+	if m.viewport.Height() != vpHeight {
+		m.viewport.SetHeight(vpHeight)
+		m.syncViewportContent()
 	}
 }
 
@@ -340,18 +387,12 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 		return textSelectionPoint{}, false
 	}
 
-	line := m.viewport.YOffset() + vy
-	if line < 0 {
-		line = 0
-	}
+	line := max(m.viewport.YOffset()+vy, 0)
 	if line >= len(m.viewportPlainLines) {
 		line = len(m.viewportPlainLines) - 1
 	}
 
-	col := x - tuikit.GutterNarrative
-	if col < 0 {
-		col = 0
-	}
+	col := max(x-tuikit.GutterNarrative, 0)
 	width := displayColumns(m.viewportPlainLines[line])
 	if col > width {
 		col = width
@@ -387,10 +428,7 @@ func (m *Model) mousePointToInputPoint(x int, y int, clamp bool, lines []string)
 	if ry >= len(lines) {
 		ry = len(lines) - 1
 	}
-	col := x - inputHorizontalInset
-	if col < 0 {
-		col = 0
-	}
+	col := max(x-inputHorizontalInset, 0)
 	width := displayColumns(lines[ry])
 	if col > width {
 		col = width

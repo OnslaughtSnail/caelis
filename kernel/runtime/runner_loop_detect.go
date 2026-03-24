@@ -23,13 +23,14 @@ func (t *stepBoundaryTracker) observe(ev *session.Event) (boundary bool, termina
 	}
 	msg := ev.Message
 	if msg.Role == model.RoleAssistant {
-		if len(msg.ToolCalls) == 0 {
+		calls := msg.ToolCalls()
+		if len(calls) == 0 {
 			t.reset()
 			return true, true
 		}
 		t.reset()
-		t.pendingToolCalls = make(map[string]int, len(msg.ToolCalls))
-		for _, call := range msg.ToolCalls {
+		t.pendingToolCalls = make(map[string]int, len(calls))
+		for _, call := range calls {
 			if id := strings.TrimSpace(call.ID); id != "" {
 				t.pendingToolCalls[id]++
 				continue
@@ -38,13 +39,14 @@ func (t *stepBoundaryTracker) observe(ev *session.Event) (boundary bool, termina
 		}
 		return false, false
 	}
-	if msg.Role != model.RoleTool || msg.ToolResponse == nil {
+	resp := msg.ToolResponse()
+	if msg.Role != model.RoleTool || resp == nil {
 		return false, false
 	}
 	if len(t.pendingToolCalls) == 0 && t.pendingUnnamed == 0 {
 		return false, false
 	}
-	if id := strings.TrimSpace(msg.ToolResponse.ID); id != "" {
+	if id := strings.TrimSpace(resp.ID); id != "" {
 		if count := t.pendingToolCalls[id]; count > 0 {
 			if count == 1 {
 				delete(t.pendingToolCalls, id)
@@ -115,10 +117,11 @@ func isStableTaskPollingTurn(events []*session.Event) bool {
 	if assistant == nil || toolResult == nil {
 		return false
 	}
-	if assistant.Message.Role != model.RoleAssistant || len(assistant.Message.ToolCalls) != 1 {
+	calls := assistant.Message.ToolCalls()
+	if assistant.Message.Role != model.RoleAssistant || len(calls) != 1 {
 		return false
 	}
-	call := assistant.Message.ToolCalls[0]
+	call := calls[0]
 	if !strings.EqualFold(strings.TrimSpace(call.Name), "TASK") {
 		return false
 	}
@@ -130,10 +133,10 @@ func isStableTaskPollingTurn(events []*session.Event) bool {
 	if !strings.EqualFold(strings.TrimSpace(action), "wait") {
 		return false
 	}
-	if toolResult.Message.Role != model.RoleTool || toolResult.Message.ToolResponse == nil {
+	resp := toolResult.Message.ToolResponse()
+	if toolResult.Message.Role != model.RoleTool || resp == nil {
 		return false
 	}
-	resp := toolResult.Message.ToolResponse
 	if !strings.EqualFold(strings.TrimSpace(resp.Name), "TASK") {
 		return false
 	}
@@ -155,23 +158,28 @@ func turnSignature(events []*session.Event) string {
 		}
 		msg := ev.Message
 		if msg.Role == model.RoleAssistant {
+			calls := msg.ToolCalls()
 			h.Write([]byte("A:"))
-			h.Write([]byte(strings.TrimSpace(msg.Text)))
+			h.Write([]byte(strings.TrimSpace(msg.TextContent())))
 			h.Write([]byte("\x00"))
-			h.Write([]byte(strings.TrimSpace(msg.Reasoning)))
+			h.Write([]byte(strings.TrimSpace(msg.ReasoningText())))
 			h.Write([]byte("\x00"))
-			for _, tc := range msg.ToolCalls {
+			for _, tc := range calls {
 				h.Write([]byte("TC:"))
 				h.Write([]byte(strings.TrimSpace(tc.Name)))
 				h.Write([]byte(":"))
 				h.Write([]byte(normalizeArgs(tc.Args)))
 				h.Write([]byte("\x00"))
 			}
-		} else if msg.Role == model.RoleTool && msg.ToolResponse != nil {
+		} else if msg.Role == model.RoleTool {
+			resp := msg.ToolResponse()
+			if resp == nil {
+				continue
+			}
 			h.Write([]byte("TR:"))
-			h.Write([]byte(strings.TrimSpace(msg.ToolResponse.Name)))
+			h.Write([]byte(strings.TrimSpace(resp.Name)))
 			h.Write([]byte(":"))
-			h.Write([]byte(normalizeResultMap(msg.ToolResponse.Result)))
+			h.Write([]byte(normalizeResultMap(resp.Result)))
 			h.Write([]byte("\x00"))
 		}
 	}

@@ -33,28 +33,11 @@ func cloneAttachments(items []Attachment) []Attachment {
 		if name == "" {
 			continue
 		}
-		offset := item.Offset
-		if offset < 0 {
-			offset = 0
-		}
+		offset := max(item.Offset, 0)
 		out = append(out, Attachment{Name: name, Offset: offset})
 	}
 	if len(out) == 0 {
 		return nil
-	}
-	return out
-}
-
-func submissionAttachments(items []inputAttachment) []Attachment {
-	if len(items) == 0 {
-		return nil
-	}
-	out := make([]Attachment, 0, len(items))
-	for _, item := range cloneInputAttachments(items) {
-		out = append(out, Attachment{
-			Name:   item.Name,
-			Offset: item.Offset,
-		})
 	}
 	return out
 }

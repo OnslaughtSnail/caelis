@@ -80,7 +80,7 @@ func TestSessionIndex_ListByWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspaceA, "app", "u", "s-a", &session.Event{
-		Message: model.Message{Role: model.RoleUser, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleUser, "hello"),
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -130,14 +130,14 @@ func TestIndexedSessionStore_AppendEventUpdatesIndex(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "e1",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleUser, Text: "first prompt"},
+		Message: model.NewTextMessage(model.RoleUser, "first prompt"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:      "e2",
 		Time:    time.Now().Add(time.Second),
-		Message: model.Message{Role: model.RoleAssistant, Text: "ok"},
+		Message: model.NewTextMessage(model.RoleAssistant, "ok"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -176,20 +176,14 @@ func TestSessionIndex_SyncWorkspaceFromStoreDir_BackfillsLastUserMessage(t *test
 	}
 	events := []*session.Event{
 		{
-			ID:   "e1",
-			Time: time.Date(2026, 3, 12, 4, 10, 0, 0, time.UTC),
-			Message: model.Message{
-				Role: model.RoleUser,
-				Text: "first request",
-			},
+			ID:      "e1",
+			Time:    time.Date(2026, 3, 12, 4, 10, 0, 0, time.UTC),
+			Message: model.NewTextMessage(model.RoleUser, "first request"),
 		},
 		{
-			ID:   "e2",
-			Time: time.Date(2026, 3, 12, 4, 11, 0, 0, time.UTC),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "done",
-			},
+			ID:      "e2",
+			Time:    time.Date(2026, 3, 12, 4, 11, 0, 0, time.UTC),
+			Message: model.NewTextMessage(model.RoleAssistant, "done"),
 		},
 	}
 	var buf bytes.Buffer
@@ -236,12 +230,12 @@ func TestSessionIndex_TouchEvent_CompactionDoesNotOverrideLastUserMessage(t *tes
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspace, "app", "u", "s-compact", &session.Event{
-		Message: model.Message{Role: model.RoleUser, Text: "real user prompt"},
+		Message: model.NewTextMessage(model.RoleUser, "real user prompt"),
 	}, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspace, "app", "u", "s-compact", &session.Event{
-		Message: model.Message{Role: model.RoleUser, Text: "checkpoint text"},
+		Message: model.NewTextMessage(model.RoleUser, "checkpoint text"),
 		Meta: map[string]any{
 			"kind": "compaction",
 		},
@@ -270,14 +264,11 @@ func TestSessionIndex_TouchEvent_StripsHiddenSessionModePrefix(t *testing.T) {
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-hidden"}
 	if err := idx.TouchEvent(workspace, "app", "u", "s-hidden", &session.Event{
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: `<caelis-session-mode mode="plan" hidden="true">
+		Message: model.NewTextMessage(model.RoleUser, `<caelis-session-mode mode="plan" hidden="true">
 This turn is running in PLAN mode.
 </caelis-session-mode>
 
-show the pending files`,
-		},
+show the pending files`),
 	}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -290,6 +281,40 @@ show the pending files`,
 	}
 	if rec.LastUserMessage != "show the pending files" {
 		t.Fatalf("expected stripped user message, got %q", rec.LastUserMessage)
+	}
+}
+
+func TestSessionIndex_TouchEvent_HidesDelegatedChildSessions(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-hidden-child"}
+	now := time.Now()
+	if err := idx.TouchEvent(workspace, "app", "u", "s-root", &session.Event{
+		Message: model.NewTextMessage(model.RoleUser, "visible root"),
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.TouchEvent(workspace, "app", "u", "s-child", &session.Event{
+		Message: model.NewTextMessage(model.RoleAssistant, "hidden child"),
+		Meta: map[string]any{
+			"parent_session_id": "s-root",
+			"child_session_id":  "s-child",
+			"delegation_id":     "dlg-1",
+		},
+	}, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := idx.ListWorkspaceSessionsPage(workspace.Key, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "s-root" {
+		t.Fatalf("expected only root session to remain visible, got %+v", items)
 	}
 }
 
@@ -313,14 +338,14 @@ func TestHandleResume_WithSessionID_NonTUIStaysSilent(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-me"}, &session.Event{
 		ID:      "ev-user",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleUser, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleUser, "hello"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-me"}, &session.Event{
 		ID:      "ev-assistant",
 		Time:    time.Now().Add(time.Second),
-		Message: model.Message{Role: model.RoleAssistant, Text: "world"},
+		Message: model.NewTextMessage(model.RoleAssistant, "world"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -496,14 +521,14 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-me"}, &session.Event{
 		ID:      "ev-user",
 		Time:    time.Now(),
-		Message: model.Message{Role: model.RoleUser, Text: "hello"},
+		Message: model.NewTextMessage(model.RoleUser, "hello"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-me"}, &session.Event{
 		ID:      "ev-assistant",
 		Time:    time.Now().Add(time.Second),
-		Message: model.Message{Role: model.RoleAssistant, Text: "world"},
+		Message: model.NewTextMessage(model.RoleAssistant, "world"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -565,8 +590,8 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 			if strings.Contains(msg.Chunk, "session resumed:") || strings.Contains(msg.Chunk, "recent events:") {
 				t.Fatalf("did not expect legacy resume headers, got %q", msg.Chunk)
 			}
-		case tuievents.AssistantStreamMsg:
-			if msg.Final && msg.Text == "world" {
+		case tuievents.RawDeltaMsg:
+			if msg.Target == tuievents.RawDeltaTargetAssistant && msg.Stream == "answer" && msg.Final && msg.Text == "world" {
 				foundAssistant = true
 			}
 		}
@@ -599,16 +624,12 @@ func TestHandleResume_TUIReplaysInterleavedUserAttachmentsInStoredOrder(t *testi
 	if err := store.AppendEvent(context.Background(), &session.Session{AppName: "app", UserID: "u", ID: "resume-order"}, &session.Event{
 		ID:   "ev-user-order",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: "Hi豆包这两个是什么APP?",
-			ContentParts: []model.ContentPart{
-				{Type: model.ContentPartImage, FileName: "first.png", Data: "a"},
-				{Type: model.ContentPartText, Text: "Hi豆包"},
-				{Type: model.ContentPartImage, FileName: "second.png", Data: "b"},
-				{Type: model.ContentPartText, Text: "这两个是什么APP?"},
-			},
-		},
+		Message: model.MessageFromContentParts(model.RoleUser, []model.ContentPart{
+			{Type: model.ContentPartImage, FileName: "first.png", Data: "a"},
+			{Type: model.ContentPartText, Text: "Hi豆包"},
+			{Type: model.ContentPartImage, FileName: "second.png", Data: "b"},
+			{Type: model.ContentPartText, Text: "这两个是什么APP?"},
+		}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -669,37 +690,31 @@ func TestHandleResume_WithPatchResponse_ReplaysCompactSummaryWithoutDiffBlock(t 
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "ev-call",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{
-					ID:   "call_patch_1",
-					Name: "PATCH",
-					Args: fmt.Sprintf(`{"path":%q,"old":"old","new":"new"}`, diffFixturePath),
-				},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{
+				ID:   "call_patch_1",
+				Name: "PATCH",
+				Args: fmt.Sprintf(`{"path":%q,"old":"old","new":"new"}`, diffFixturePath),
 			},
-		},
+		}, ""),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "ev-result",
 		Time: time.Now().Add(time.Second),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_patch_1",
-				Name: "PATCH",
-				Result: map[string]any{
-					"path":          diffFixturePath,
-					"created":       false,
-					"replaced":      1,
-					"old_count":     1,
-					"added_lines":   1,
-					"removed_lines": 1,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_patch_1",
+			Name: "PATCH",
+			Result: map[string]any{
+				"path":          diffFixturePath,
+				"created":       false,
+				"replaced":      1,
+				"old_count":     1,
+				"added_lines":   1,
+				"removed_lines": 1,
 			},
-		},
+		}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -770,37 +785,31 @@ func TestHandleResume_WithPatchInsert_ReplaysTrueDiffStats(t *testing.T) {
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "ev-call",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{
-					ID:   "call_patch_insert",
-					Name: "PATCH",
-					Args: fmt.Sprintf(`{"path":%q,"old":"a\nb","new":"a\nx\nb"}`, diffFixturePath),
-				},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{
+				ID:   "call_patch_insert",
+				Name: "PATCH",
+				Args: fmt.Sprintf(`{"path":%q,"old":"a\nb","new":"a\nx\nb"}`, diffFixturePath),
 			},
-		},
+		}, ""),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "ev-result",
 		Time: time.Now().Add(time.Second),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_patch_insert",
-				Name: "PATCH",
-				Result: map[string]any{
-					"path":          diffFixturePath,
-					"created":       false,
-					"replaced":      1,
-					"old_count":     1,
-					"added_lines":   1,
-					"removed_lines": 0,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_patch_insert",
+			Name: "PATCH",
+			Result: map[string]any{
+				"path":          diffFixturePath,
+				"created":       false,
+				"replaced":      1,
+				"old_count":     1,
+				"added_lines":   1,
+				"removed_lines": 0,
 			},
-		},
+		}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -861,34 +870,28 @@ func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) 
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "ev-call",
 		Time: time.Now(),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			ToolCalls: []model.ToolCall{
-				{
-					ID:   "call_write_legacy",
-					Name: "WRITE",
-					Args: fmt.Sprintf(`{"path":%q,"content":"new-one\nnew-two\n"}`, diffFixturePath),
-				},
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{
+				ID:   "call_write_legacy",
+				Name: "WRITE",
+				Args: fmt.Sprintf(`{"path":%q,"content":"new-one\nnew-two\n"}`, diffFixturePath),
 			},
-		},
+		}, ""),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendEvent(context.Background(), sess, &session.Event{
 		ID:   "ev-result",
 		Time: time.Now().Add(time.Second),
-		Message: model.Message{
-			Role: model.RoleTool,
-			ToolResponse: &model.ToolResponse{
-				ID:   "call_write_legacy",
-				Name: "WRITE",
-				Result: map[string]any{
-					"path":       diffFixturePath,
-					"created":    false,
-					"line_count": 2,
-				},
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_write_legacy",
+			Name: "WRITE",
+			Result: map[string]any{
+				"path":       diffFixturePath,
+				"created":    false,
+				"line_count": 2,
 			},
-		},
+		}),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -990,7 +993,7 @@ func TestSessionIndex_ListWorkspaceSessionsPage_Pagination(t *testing.T) {
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
 	base := time.Now()
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		sid := fmt.Sprintf("s-%02d", i)
 		if err := idx.UpsertSession(workspace, "app", "u", sid, base.Add(time.Duration(i)*time.Second)); err != nil {
 			t.Fatal(err)
@@ -1012,6 +1015,47 @@ func TestSessionIndex_ListWorkspaceSessionsPage_Pagination(t *testing.T) {
 	}
 	if items[0].SessionID != "s-14" || items[9].SessionID != "s-05" {
 		t.Fatalf("unexpected page 2 range: first=%q last=%q", items[0].SessionID, items[9].SessionID)
+	}
+}
+
+func TestSessionIndex_SyncWorkspaceFromStoreDir_HidesDelegatedChildSessionsWithoutDeletingThem(t *testing.T) {
+	root := t.TempDir()
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	rootDir := filepath.Join(root, "s-root")
+	childDir := filepath.Join(root, "s-child")
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootEvents := []byte("{\"ID\":\"e1\",\"Message\":{\"Role\":\"user\",\"Text\":\"visible root\"}}\n")
+	if err := os.WriteFile(filepath.Join(rootDir, "events.jsonl"), rootEvents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childEvents := []byte("{\"ID\":\"e2\",\"Message\":{\"Role\":\"assistant\",\"Text\":\"hidden child\"},\"Meta\":{\"parent_session_id\":\"s-root\",\"child_session_id\":\"s-child\",\"delegation_id\":\"dlg-1\"}}\n")
+	if err := os.WriteFile(filepath.Join(childDir, "events.jsonl"), childEvents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	if err := idx.SyncWorkspaceFromStoreDir(workspace, "app", "u", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := idx.ListWorkspaceSessionsPage(workspace.Key, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "s-root" {
+		t.Fatalf("expected only root session to remain visible, got %+v", items)
+	}
+	if _, err := os.Stat(childDir); err != nil {
+		t.Fatalf("expected delegated child dir to remain on disk, stat err=%v", err)
 	}
 }
 
@@ -1044,6 +1088,44 @@ func TestSessionIndex_SyncWorkspaceFromStoreDir(t *testing.T) {
 	}
 }
 
+func TestSessionIndex_SyncWorkspaceFromStoreDir_VisibleSessionsExcludeDelegatedChildren(t *testing.T) {
+	root := t.TempDir()
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	rootDir := filepath.Join(root, "s-root")
+	childDir := filepath.Join(root, "s-child")
+	if err := os.MkdirAll(rootDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootEvents := []byte("{\"ID\":\"e1\",\"Message\":{\"Role\":\"user\",\"Text\":\"visible root\"}}\n")
+	if err := os.WriteFile(filepath.Join(rootDir, "events.jsonl"), rootEvents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	childEvents := []byte("{\"ID\":\"e2\",\"Message\":{\"Role\":\"assistant\",\"Text\":\"hidden child\"},\"Meta\":{\"parent_session_id\":\"s-root\",\"child_session_id\":\"s-child\",\"delegation_id\":\"dlg-1\"}}\n")
+	if err := os.WriteFile(filepath.Join(childDir, "events.jsonl"), childEvents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	if err := idx.SyncWorkspaceFromStoreDir(workspace, "app", "u", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := idx.ListWorkspaceSessionsPage(workspace.Key, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "s-root" {
+		t.Fatalf("expected delegated child session to be hidden from visible listings, got %+v", items)
+	}
+}
+
 func TestCompleteResumeCandidates_ShowsPromptAndAgeAndExcludesCurrent(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {
@@ -1064,12 +1146,12 @@ func TestCompleteResumeCandidates_ShowsPromptAndAgeAndExcludesCurrent(t *testing
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspace, "app", "u", "s-a", &session.Event{
-		Message: model.Message{Role: model.RoleUser, Text: "请审查我未提交的更改"},
+		Message: model.NewTextMessage(model.RoleUser, "请审查我未提交的更改"),
 	}, now.Add(-2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if err := idx.TouchEvent(workspace, "app", "u", "s-b", &session.Event{
-		Message: model.Message{Role: model.RoleUser, Text: "写一个负载均衡方案"},
+		Message: model.NewTextMessage(model.RoleUser, "写一个负载均衡方案"),
 	}, now.Add(-5*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -1093,5 +1175,43 @@ func TestCompleteResumeCandidates_ShowsPromptAndAgeAndExcludesCurrent(t *testing
 	}
 	if strings.TrimSpace(cands[0].Age) == "" || cands[0].Age == "-" {
 		t.Fatalf("expected computed age, got %q", cands[0].Age)
+	}
+}
+
+func TestCompleteResumeCandidates_SkipsEmptySessions(t *testing.T) {
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	now := time.Now()
+	if err := idx.UpsertSession(workspace, "app", "u", "current", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "s-empty", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.UpsertSession(workspace, "app", "u", "s-visible", now.Add(-3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.TouchEvent(workspace, "app", "u", "s-visible", &session.Event{
+		Message: model.NewTextMessage(model.RoleUser, "visible session"),
+	}, now.Add(-3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	c := &cliConsole{
+		workspace:    workspace,
+		sessionIndex: idx,
+		sessionID:    "current",
+	}
+	cands, err := c.completeResumeCandidates("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cands) != 1 || cands[0].SessionID != "s-visible" {
+		t.Fatalf("expected only visible candidate, got %+v", cands)
 	}
 }

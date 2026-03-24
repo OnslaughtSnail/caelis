@@ -35,13 +35,14 @@ func BuildMap(tools []Tool) (map[string]Tool, error) {
 }
 
 // Declarations returns model-visible declarations for tools.
-func Declarations(tools []Tool) []model.ToolDefinition {
-	decls := make([]model.ToolDefinition, 0, len(tools))
+func Declarations(tools []Tool) []model.ToolSpec {
+	decls := make([]model.ToolSpec, 0, len(tools))
 	for _, t := range tools {
 		if t == nil {
 			continue
 		}
-		decls = append(decls, t.Declaration())
+		decl := t.Declaration()
+		decls = append(decls, model.NewFunctionToolSpec(decl.Name, decl.Description, decl.Parameters))
 	}
 	return decls
 }

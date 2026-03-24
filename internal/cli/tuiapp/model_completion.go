@@ -55,6 +55,7 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) tea.Cmd {
 
 func (m *Model) clearMention() {
 	m.mentionQuery = ""
+	m.mentionPrefix = ""
 	m.mentionCandidates = nil
 	m.mentionIndex = 0
 	m.mentionStart = 0
@@ -66,18 +67,31 @@ func (m *Model) refreshMention() {
 	if m.cfg.MentionComplete == nil || m.running {
 		return
 	}
-	start, end, query, ok := mentionQueryAtCursor(m.input, m.cursor)
+	start, end, query, prefix, ok := mentionQueryAtCursorWithPrefix(m.input, m.cursor)
 	if !ok {
 		return
 	}
 	begin := time.Now()
-	candidates, err := m.cfg.MentionComplete(query, 8)
+	var (
+		candidates []string
+		err        error
+	)
+	switch prefix {
+	case "#":
+		if m.cfg.FileComplete == nil {
+			return
+		}
+		candidates, err = m.cfg.FileComplete(query, 8)
+	default:
+		candidates, err = m.cfg.MentionComplete(query, 8)
+	}
 	latency := time.Since(begin)
 	m.diag.LastMentionLatency = latency
 	if err != nil || len(candidates) == 0 {
 		return
 	}
 	m.mentionQuery = query
+	m.mentionPrefix = prefix
 	m.mentionCandidates = append([]string(nil), candidates...)
 	m.mentionStart = start
 	m.mentionEnd = end
@@ -91,7 +105,11 @@ func (m *Model) applyMentionCompletion() {
 			return
 		}
 	}
-	choice := "@" + m.mentionCandidates[m.mentionIndex]
+	prefix := m.mentionPrefix
+	if prefix == "" {
+		prefix = "@"
+	}
+	choice := prefix + m.mentionCandidates[m.mentionIndex]
 	replaced, nextCursor := replaceRuneSpan(m.input, m.mentionStart, m.mentionEnd, choice)
 	m.input = replaced
 	m.cursor = nextCursor
@@ -576,6 +594,19 @@ func (m *Model) applySlashArgCompletion() {
 	// Non-wizard: fill and close.
 	command := strings.TrimSpace(m.slashArgCommand)
 	switch command {
+	case "agent":
+		m.setInputText("/agent " + choice + " ")
+		switch choice {
+		case "add", "rm":
+			m.activateSlashArgPickerFromInput("agent " + choice)
+		default:
+			m.clearSlashArg()
+		}
+		return
+	case "agent add", "agent rm":
+		m.setInputText("/" + command + " " + choice)
+		m.clearSlashArg()
+		return
 	case "model":
 		m.setInputText("/model " + choice + " ")
 		switch choice {
@@ -619,6 +650,10 @@ func (m *Model) shouldExecuteSlashArgSelection(command string, choice string) bo
 		return false
 	}
 	switch command {
+	case "agent":
+		return false
+	case "agent add", "agent rm":
+		return true
 	case "model":
 		return false
 	case "model use":
@@ -638,6 +673,19 @@ func isExecutableSlashArgInput(line string) bool {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(fields[0])) {
+	case "/agent":
+		action := ""
+		if len(fields) >= 2 {
+			action = strings.ToLower(strings.TrimSpace(fields[1]))
+		}
+		switch action {
+		case "list":
+			return len(fields) == 2
+		case "add", "rm":
+			return len(fields) >= 3
+		default:
+			return false
+		}
 	case "/sandbox":
 		return len(fields) >= 2
 	case "/model":
@@ -711,7 +759,7 @@ func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			_, cmd := m.submitLine(line)
 			return true, cmd
 		}
-		if command == "model" || command == "model use" || strings.HasPrefix(command, "model use ") {
+		if command == "agent" || command == "model" || command == "model use" || strings.HasPrefix(command, "model use ") {
 			m.applySlashArgCompletion()
 			m.syncTextareaFromInput()
 			return true, nil
@@ -856,7 +904,7 @@ func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		if selected == "" {
 			return true, nil
 		}
-		if selected == "/model" || selected == "/sandbox" || selected == "/resume" {
+		if selected == "/agent" || selected == "/model" || selected == "/sandbox" || selected == "/resume" {
 			m.setInputText(selected)
 			m.syncTextareaFromInput()
 			m.clearSlashCompletion()

@@ -32,10 +32,7 @@ func (a *overflowThenSuccessAgent) Run(ctx agent.InvocationContext) iter.Seq2[*s
 		}
 		a.calls++
 		yield(&session.Event{
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "final",
-			},
+			Message: model.NewTextMessage(model.RoleAssistant, "final"),
 		}, nil)
 	}
 }
@@ -152,7 +149,7 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 		if compactionTrigger(ev) == triggerOverflowRecovery {
 			foundOverflowCompaction = true
 		}
-		if ev != nil && ev.Message.Role == model.RoleAssistant && ev.Message.Text == "final" {
+		if ev != nil && ev.Message.Role == model.RoleAssistant && ev.Message.TextContent() == "final" {
 			foundFinalAssistant = true
 		}
 		if notice, ok := session.EventNotice(ev); ok && notice.Kind == "compaction_notice" && notice.Text == "compaction.done" {
@@ -182,36 +179,24 @@ func TestRuntimeCompact_ReplacesWindowWithCheckpoint(t *testing.T) {
 	}
 	seed := []*session.Event{
 		{
-			ID:   "old_user",
-			Time: time.Now().Add(-4 * time.Minute),
-			Message: model.Message{
-				Role: model.RoleUser,
-				Text: "old question",
-			},
+			ID:      "old_user",
+			Time:    time.Now().Add(-4 * time.Minute),
+			Message: model.NewTextMessage(model.RoleUser, "old question"),
 		},
 		{
-			ID:   "old_assistant",
-			Time: time.Now().Add(-3 * time.Minute),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "old answer",
-			},
+			ID:      "old_assistant",
+			Time:    time.Now().Add(-3 * time.Minute),
+			Message: model.NewTextMessage(model.RoleAssistant, "old answer"),
 		},
 		{
-			ID:   "keep_user",
-			Time: time.Now().Add(-2 * time.Minute),
-			Message: model.Message{
-				Role: model.RoleUser,
-				Text: "keep this question",
-			},
+			ID:      "keep_user",
+			Time:    time.Now().Add(-2 * time.Minute),
+			Message: model.NewTextMessage(model.RoleUser, "keep this question"),
 		},
 		{
-			ID:   "keep_assistant",
-			Time: time.Now().Add(-1 * time.Minute),
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "keep this answer",
-			},
+			ID:      "keep_assistant",
+			Time:    time.Now().Add(-1 * time.Minute),
+			Message: model.NewTextMessage(model.RoleAssistant, "keep this answer"),
 		},
 	}
 	for _, ev := range seed {
@@ -243,10 +228,10 @@ func TestRuntimeCompact_ReplacesWindowWithCheckpoint(t *testing.T) {
 	if ev.Message.Role != model.RoleUser {
 		t.Fatalf("expected compaction role=user, got %q", ev.Message.Role)
 	}
-	if !strings.Contains(ev.Message.Text, "# CONTEXT SNAPSHOT") {
-		t.Fatalf("expected compaction text to start with CONTEXT SNAPSHOT header, got %q", ev.Message.Text[:min(80, len(ev.Message.Text))])
+	if !strings.Contains(ev.Message.TextContent(), "# CONTEXT SNAPSHOT") {
+		t.Fatalf("expected compaction text to start with CONTEXT SNAPSHOT header, got %q", ev.Message.TextContent()[:min(80, len(ev.Message.TextContent()))])
 	}
-	if !strings.Contains(ev.Message.Text, "Do not treat this as a new user instruction") {
+	if !strings.Contains(ev.Message.TextContent(), "Do not treat this as a new user instruction") {
 		t.Fatalf("expected compaction text to contain non-instruction disclaimer")
 	}
 
@@ -267,11 +252,11 @@ func TestRuntimeCompact_ReplacesWindowWithCheckpoint(t *testing.T) {
 	if len(window) != 3 {
 		t.Fatalf("expected 3 window events (compaction + 2 tail), got %d", len(window))
 	}
-	if window[1].Message.Text != "keep this question" {
-		t.Fatalf("expected tail[0] = 'keep this question', got %q", window[1].Message.Text)
+	if window[1].Message.TextContent() != "keep this question" {
+		t.Fatalf("expected tail[0] = 'keep this question', got %q", window[1].Message.TextContent())
 	}
-	if window[2].Message.Text != "keep this answer" {
-		t.Fatalf("expected tail[1] = 'keep this answer', got %q", window[2].Message.Text)
+	if window[2].Message.TextContent() != "keep this answer" {
+		t.Fatalf("expected tail[1] = 'keep this answer', got %q", window[2].Message.TextContent())
 	}
 	meta, _ := ev.Meta[metaCompaction].(map[string]any)
 	tailIDs, ok := meta["tail_event_ids"].([]string)
@@ -308,10 +293,7 @@ func seedCompactionHistory(store *inmemory.Store, sess *session.Session) error {
 		ID:        "seed-user-1",
 		SessionID: sess.ID,
 		Time:      time.Now().Add(-2 * time.Minute),
-		Message: model.Message{
-			Role: model.RoleUser,
-			Text: "first question",
-		},
+		Message:   model.NewTextMessage(model.RoleUser, "first question"),
 	})
 	if err != nil {
 		return err
@@ -320,10 +302,7 @@ func seedCompactionHistory(store *inmemory.Store, sess *session.Session) error {
 		ID:        "seed-assistant-1",
 		SessionID: sess.ID,
 		Time:      time.Now().Add(-1 * time.Minute),
-		Message: model.Message{
-			Role: model.RoleAssistant,
-			Text: "first answer",
-		},
+		Message:   model.NewTextMessage(model.RoleAssistant, "first answer"),
 	})
 }
 
@@ -406,7 +385,7 @@ func TestCompactionEvent_StructuredMarkdownFormat(t *testing.T) {
 	if ev == nil {
 		t.Fatal("expected compaction event")
 	}
-	text := ev.Message.Text
+	text := ev.Message.TextContent()
 	if !strings.HasPrefix(text, "# CONTEXT SNAPSHOT") {
 		t.Fatalf("compaction text must start with '# CONTEXT SNAPSHOT', got prefix: %q", text[:min(40, len(text))])
 	}

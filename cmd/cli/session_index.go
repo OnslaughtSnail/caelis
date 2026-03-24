@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	_ "modernc.org/sqlite"
 )
@@ -39,6 +40,8 @@ type sessionIndexRecord struct {
 	EventCount      int64
 	LastUserMessage string
 }
+
+const sessionIndexVisibleFilter = "hidden = 0"
 
 func newSessionIndex(path string) (*sessionIndex, error) {
 	if strings.TrimSpace(path) == "" {
@@ -127,7 +130,13 @@ UPDATE session_index SET
 	END
 WHERE workspace_key = ? AND session_id = ?`
 	_, err := s.db.ExecContext(context.Background(), q, ts, lastUser, lastUser, workspace.Key, sessionID)
-	return err
+	if err != nil {
+		return err
+	}
+	if sessionIndexHiddenForEvent(ev, sessionID) {
+		return s.setSessionHidden(workspace.Key, sessionID, true)
+	}
+	return nil
 }
 
 func isCompactionEventForIndex(ev *session.Event) bool {
@@ -156,7 +165,7 @@ func (s *sessionIndex) ListWorkspaceSessionsPage(workspaceKey string, page int, 
 	const q = `
 	SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
 	FROM session_index
-	WHERE workspace_key = ?
+	WHERE workspace_key = ? AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT ? OFFSET ?`
 	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, pageSize, offset)
@@ -186,7 +195,7 @@ func (s *sessionIndex) CountWorkspaceSessions(workspaceKey string) (int, error) 
 	if workspaceKey == "" {
 		return 0, fmt.Errorf("session index: workspace_key is required")
 	}
-	const q = `SELECT COUNT(*) FROM session_index WHERE workspace_key = ?`
+	const q = `SELECT COUNT(*) FROM session_index WHERE workspace_key = ? AND ` + sessionIndexVisibleFilter
 	var count int
 	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey).Scan(&count); err != nil {
 		return 0, err
@@ -206,7 +215,7 @@ func (s *sessionIndex) MostRecentWorkspaceSession(workspaceKey string, excludeSe
 	const q = `
 	SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
 	FROM session_index
-	WHERE workspace_key = ? AND (? = '' OR session_id <> ?)
+	WHERE workspace_key = ? AND (? = '' OR session_id <> ?) AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT 1`
 	var rec sessionIndexRecord
@@ -233,7 +242,7 @@ func (s *sessionIndex) HasWorkspaceSession(workspaceKey, sessionID string) (bool
 	if workspaceKey == "" || sessionID == "" {
 		return false, fmt.Errorf("session index: workspace_key and session_id are required")
 	}
-	const q = `SELECT 1 FROM session_index WHERE workspace_key = ? AND session_id = ? LIMIT 1`
+	const q = `SELECT 1 FROM session_index WHERE workspace_key = ? AND session_id = ? AND ` + sessionIndexVisibleFilter + ` LIMIT 1`
 	var one int
 	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey, sessionID).Scan(&one); err != nil {
 		if err == sql.ErrNoRows {
@@ -256,7 +265,7 @@ func (s *sessionIndex) ResolveWorkspaceSessionID(workspaceKey, prefix string) (s
 	const q = `
 	SELECT session_id
 	FROM session_index
-	WHERE workspace_key = ? AND session_id LIKE ?
+	WHERE workspace_key = ? AND session_id LIKE ? AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT 3`
 	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, prefix+"%")
@@ -318,12 +327,19 @@ func (s *sessionIndex) SyncWorkspaceFromStoreDir(workspace workspaceContext, app
 		if statErr != nil {
 			continue
 		}
+		hidden, hiddenErr := isDelegatedChildSessionDir(eventsPath, sessionID)
+		if hiddenErr != nil {
+			return hiddenErr
+		}
 		snapshot, snapErr := readSessionIndexSnapshot(eventsPath)
 		timestamp := info.ModTime()
 		if snapErr == nil && !snapshot.LastEventAt.IsZero() {
 			timestamp = snapshot.LastEventAt
 		}
 		if err := s.UpsertSession(workspace, appName, userID, sessionID, timestamp); err != nil {
+			return err
+		}
+		if err := s.setSessionHidden(workspace.Key, sessionID, hidden); err != nil {
 			return err
 		}
 		if snapErr == nil {
@@ -375,10 +391,11 @@ func sessionIndexLastUserMessage(ev *session.Event) string {
 	if ev == nil {
 		return ""
 	}
-	lastUser := sessionmode.VisibleText(strings.TrimSpace(ev.Message.Text))
-	if lastUser == "" && len(ev.Message.ContentParts) > 0 {
-		parts := make([]string, 0, len(ev.Message.ContentParts))
-		for _, part := range ev.Message.ContentParts {
+	lastUser := sessionmode.VisibleText(strings.TrimSpace(ev.Message.TextContent()))
+	contentParts := model.ContentPartsFromParts(ev.Message.Parts)
+	if lastUser == "" && len(contentParts) > 0 {
+		parts := make([]string, 0, len(contentParts))
+		for _, part := range contentParts {
 			if part.Type != model.ContentPartText {
 				continue
 			}
@@ -431,6 +448,7 @@ CREATE TABLE IF NOT EXISTS session_index (
 	created_at INTEGER NOT NULL,
 	last_event_at INTEGER NOT NULL,
 	event_count INTEGER NOT NULL DEFAULT 0,
+	hidden INTEGER NOT NULL DEFAULT 0,
 	last_user_message TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (workspace_key, session_id)
 );
@@ -440,5 +458,83 @@ ON session_index(workspace_key, last_event_at DESC);`
 	if err != nil {
 		return fmt.Errorf("session index: migrate: %w", err)
 	}
+	if err := s.ensureHiddenColumn(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *sessionIndex) ensureHiddenColumn(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(session_index)`)
+	if err != nil {
+		return fmt.Errorf("session index: inspect schema: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			fieldType string
+			notNull   int
+			defValue  any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defValue, &pk); err != nil {
+			return fmt.Errorf("session index: inspect schema: %w", err)
+		}
+		if strings.EqualFold(strings.TrimSpace(name), "hidden") {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("session index: inspect schema: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE session_index ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return fmt.Errorf("session index: add hidden column: %w", err)
+	}
+	return nil
+}
+
+func (s *sessionIndex) setSessionHidden(workspaceKey, sessionID string, hidden bool) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	sessionID = strings.TrimSpace(sessionID)
+	if workspaceKey == "" || sessionID == "" {
+		return nil
+	}
+	hiddenValue := 0
+	if hidden {
+		hiddenValue = 1
+	}
+	_, err := s.db.ExecContext(context.Background(), `UPDATE session_index SET hidden = ? WHERE workspace_key = ? AND session_id = ?`, hiddenValue, workspaceKey, sessionID)
+	return err
+}
+
+func sessionIndexHiddenForEvent(ev *session.Event, sessionID string) bool {
+	if ev == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	meta, ok := runtime.DelegationMetadataFromEvent(ev)
+	if !ok || strings.TrimSpace(meta.ParentSessionID) == "" {
+		return false
+	}
+	return strings.TrimSpace(meta.ChildSessionID) == strings.TrimSpace(sessionID)
+}
+
+func (s *sessionIndex) DeleteWorkspaceSession(workspaceKey, sessionID string) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	sessionID = strings.TrimSpace(sessionID)
+	if workspaceKey == "" || sessionID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(context.Background(), `DELETE FROM session_index WHERE workspace_key = ? AND session_id = ?`, workspaceKey, sessionID)
+	return err
 }

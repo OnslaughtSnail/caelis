@@ -1,6 +1,7 @@
 package gitignorefilter
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,5 +80,42 @@ func TestMatcher_FallsBackToNearestGitignoreRoot(t *testing.T) {
 	}
 	if !got {
 		t.Fatal("expected generated file to be ignored")
+	}
+}
+
+type acpMissingExcludeFS struct {
+	root string
+}
+
+func (f acpMissingExcludeFS) ReadFile(path string) ([]byte, error) {
+	clean := filepath.Clean(path)
+	if clean == filepath.Join(f.root, ".git", "info", "exclude") {
+		return nil, fmt.Errorf("acp rpc error -32002: Resource not found")
+	}
+	return os.ReadFile(clean)
+}
+
+func (f acpMissingExcludeFS) Stat(path string) (os.FileInfo, error) {
+	return os.Stat(filepath.Clean(path))
+}
+
+func TestMatcher_IgnoresMissingACPExcludeFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("ignored.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	matcher, err := NewForPath(acpMissingExcludeFS{root: root}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := matcher.Match(filepath.Join(root, "ignored.txt"), false)
+	if err != nil {
+		t.Fatalf("expected missing exclude file to be ignored, got %v", err)
+	}
+	if !got {
+		t.Fatal("expected ignored.txt to still be ignored by .gitignore")
 	}
 }

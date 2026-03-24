@@ -21,20 +21,20 @@ func TestHandleAgentAddAndRemove(t *testing.T) {
 		ui:            newUI(uiOut, true, false),
 	}
 
-	if _, err := handleAgent(console, []string{"add", "codex-acp"}); err != nil {
+	if _, err := handleAgent(console, []string{"add", "codex"}); err != nil {
 		t.Fatalf("add preset: %v", err)
 	}
-	if _, ok := console.configStore.data.AgentServers["codex-acp"]; !ok {
-		t.Fatal("expected codex-acp in config after add")
+	if _, ok := console.configStore.data.Agents["codex"]; !ok {
+		t.Fatal("expected codex in config after add")
 	}
-	if _, ok := console.agentRegistry.Lookup("codex-acp"); !ok {
-		t.Fatal("expected codex-acp in runtime registry after add")
+	if _, ok := console.agentRegistry.Lookup("codex"); !ok {
+		t.Fatal("expected codex in runtime registry after add")
 	}
 
-	if _, err := handleAgent(console, []string{"rm", "codex-acp"}); err != nil {
+	if _, err := handleAgent(console, []string{"rm", "codex"}); err != nil {
 		t.Fatalf("remove preset: %v", err)
 	}
-	if _, ok := console.configStore.data.AgentServers["codex-acp"]; ok {
-		t.Fatal("expected codex-acp removed from config")
+	if _, ok := console.configStore.data.Agents["codex"]; ok {
+		t.Fatal("expected codex removed from config")
 	}
 }

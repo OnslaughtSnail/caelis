@@ -52,9 +52,6 @@ func TestAddTruncationMeta_MarksOutputMeta(t *testing.T) {
 	long := strings.Repeat("abcdef", 3000)
 	in := map[string]any{
 		"stdout": long,
-		"output_meta": map[string]any{
-			"model_truncated": false,
-		},
 	}
 	out, info := TruncateMap(in, TruncationPolicy{MaxTokens: 100})
 	out = AddTruncationMeta(out, info)

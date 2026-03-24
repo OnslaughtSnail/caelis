@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
@@ -81,7 +82,11 @@ func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controlle
 			userID:       entry.Session.UserID,
 			sessionID:    stringValue(entry.Spec, taskSpecChildSession),
 			delegationID: stringValue(entry.Spec, taskSpecDelegationID),
+			runner:       m.subagents,
 			store:        m.store,
+			agent:        stringValueFallback(entry.Spec, taskSpecAgent, entry.Result),
+			childCWD:     stringValueFallback(entry.Spec, taskSpecChildCWD, entry.Result),
+			timeout:      time.Duration(intValue(entry.Spec, taskSpecTimeout)) * time.Second,
 		}
 	default:
 		return nil
@@ -159,4 +164,24 @@ func persistedFinalTaskSnapshot(record *task.Record) (task.Snapshot, bool) {
 		}
 	})
 	return snapshot, ok
+}
+
+func intValue(values map[string]any, key string) int {
+	if len(values) == 0 {
+		return 0
+	}
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return 0
+	}
+	switch value := raw.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
 }

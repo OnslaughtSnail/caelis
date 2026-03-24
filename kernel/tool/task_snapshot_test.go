@@ -122,9 +122,35 @@ func TestSnapshotResultMap_CompletedTTYBashUsesPreviewAndOutputMeta(t *testing.T
 	if _, exists := result["stdout"]; exists {
 		t.Fatalf("expected tty snapshot to suppress stdout field, got %#v", result)
 	}
+	if _, exists := result["output_meta"]; exists {
+		t.Fatalf("expected uninformative tty output_meta to be omitted, got %#v", result)
+	}
+}
+
+func TestSnapshotResultMap_KeepsMeaningfulOutputMeta(t *testing.T) {
+	result := SnapshotResultMap(task.Snapshot{
+		Kind:  task.KindBash,
+		State: task.StateCompleted,
+		Result: map[string]any{
+			"output_meta": map[string]any{
+				"tty":                  true,
+				"streamed":             true,
+				"capture_truncated":    true,
+				"capture_cap_bytes":    262144,
+				"stdout_dropped_bytes": 512,
+			},
+		},
+		Output: task.Output{Stdout: "full transcript"},
+	})
 	meta, _ := result["output_meta"].(map[string]any)
-	if got := meta["streamed"]; got != true {
-		t.Fatalf("expected output_meta to survive serialization, got %#v", result)
+	if len(meta) == 0 {
+		t.Fatalf("expected meaningful output_meta to survive serialization, got %#v", result)
+	}
+	if got := meta["truncated"]; got != true {
+		t.Fatalf("expected compact truncation signal, got %#v", meta)
+	}
+	if len(meta) != 1 {
+		t.Fatalf("expected only truncated marker, got %#v", meta)
 	}
 }
 

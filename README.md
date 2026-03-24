@@ -8,6 +8,7 @@
 - Supports headless single-shot execution for scripted use.
 - Exposes the same runtime over ACP for external clients.
 - Persists sessions, plans, tasks, and lifecycle state so runs can be resumed safely.
+- Supports ACP-backed external agents that can be invoked as slash commands inside the console.
 - Routes shell execution through `default` approval mode or `full_control`.
 - Supports built-in workspace tools, shell tools, MCP tools, and optional CLI LSP tools.
 - Assembles prompts from built-in identity/runtime context, `AGENTS.md`, and discovered skills metadata.
@@ -94,6 +95,7 @@ Interactive console sessions are persisted under `~/.caelis/sessions` by default
 Current interactive slash commands:
 
 - `/help`
+- `/agent list | add <builtin> | rm <name>`
 - `/btw <question>`
 - `/version`
 - `/exit`
@@ -109,6 +111,8 @@ Current interactive slash commands:
 - `/resume [session-id]`
 
 `/btw` runs an ephemeral side-question turn against the current context without persisting that exchange into conversation history.
+
+ACP agent presets can be managed with `/agent`. Once configured, ACP agent IDs are exposed as dynamic slash commands, so adding `codex`, `gemini`, or `claude` enables `/codex ...`, `/gemini ...`, or `/claude ...` turns in the console. These run as external participant sessions rather than replacing the main conversation agent.
 
 ## Prompt And Skills
 
@@ -156,8 +160,8 @@ Example MCP config:
 
 ## Release
 
-- Current release: `v0.0.25`
-- Version source: `VERSION`
+- Current release: `v0.0.26`
+- Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
 Local dry run:
@@ -166,7 +170,7 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.25`.
+CI release is triggered by pushing a version tag such as `v0.0.26`.
 
 ## npm Package
 

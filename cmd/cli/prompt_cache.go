@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func (c *cliConsole) ensureSessionPrompt(ctx context.Context) (string, error) {
+func (c *cliConsole) ensureSessionPrompt(_ context.Context) (string, error) {
 	if c == nil {
 		return "", nil
 	}
@@ -25,6 +25,8 @@ func (c *cliConsole) ensureSessionPrompt(ctx context.Context) (string, error) {
 		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
 		BasePrompt:                  c.systemPrompt,
 		SkillDirs:                   c.skillDirs,
+		DefaultAgent:                c.configStore.DefaultAgent(),
+		AgentDescriptors:            c.configStore.AgentDescriptors(),
 	})
 	if err != nil {
 		return "", err

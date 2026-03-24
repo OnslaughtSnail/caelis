@@ -2,9 +2,12 @@ package acp
 
 import (
 	"fmt"
+	"maps"
+	"path/filepath"
 	"strings"
 
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 )
 
@@ -73,10 +76,6 @@ func summarizeToolCallTitle(name string, args map[string]any) string {
 	return name
 }
 
-func summarizeToolResultTitle(name string) string {
-	return strings.TrimSpace(name)
-}
-
 func toolCallContentForResult(toolName string, result map[string]any) []ToolCallContent {
 	if !strings.EqualFold(strings.TrimSpace(toolName), "BASH") {
 		return nil
@@ -89,6 +88,27 @@ func toolCallContentForResult(toolName string, result map[string]any) []ToolCall
 		Type:       "terminal",
 		TerminalID: terminalID,
 	}}
+}
+
+func toolStatusForResult(toolName string, result map[string]any) string {
+	if hasToolError(result) {
+		return ToolStatusFailed
+	}
+	state := strings.ToLower(strings.TrimSpace(stringValue(result["state"])))
+	switch state {
+	case "running", "waiting_input", "waiting_approval":
+		return ToolStatusInProgress
+	}
+	if strings.EqualFold(strings.TrimSpace(toolName), "BASH") {
+		switch state {
+		case "failed", "cancelled", "interrupted", "terminated":
+			return ToolStatusFailed
+		}
+		if exitCode, ok := intValue(result["exit_code"]); ok && exitCode != 0 {
+			return ToolStatusFailed
+		}
+	}
+	return ToolStatusCompleted
 }
 
 func toolLocations(args map[string]any, result map[string]any) []ToolCallLocation {
@@ -131,6 +151,16 @@ func sanitizeToolResultMapForACP(result map[string]any, topLevel bool) map[strin
 		if topLevel && strings.EqualFold(trimmed, "metadata") {
 			continue
 		}
+		if strings.EqualFold(trimmed, "output_meta") {
+			meta, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sanitized := sanitizeOutputMetaForACP(meta); len(sanitized) > 0 {
+				out[key] = sanitized
+			}
+			continue
+		}
 		out[key] = sanitizeToolResultValueForACP(value)
 	}
 	return out
@@ -151,6 +181,48 @@ func sanitizeToolResultValueForACP(value any) any {
 	}
 }
 
+func sanitizeOutputMetaForACP(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	copyIfTrue := func(key string) {
+		if typed, ok := meta[key].(bool); ok && typed {
+			out[key] = true
+		}
+	}
+	copyIfPositive := func(key string) {
+		if value, ok := intValue(meta[key]); ok && value > 0 {
+			out[key] = value
+		}
+	}
+
+	copyIfTrue("capture_truncated")
+	copyIfTrue("model_truncated")
+	copyIfTrue("stdout_cap_reached")
+	copyIfTrue("stderr_cap_reached")
+	copyIfPositive("capture_cap_bytes")
+	copyIfPositive("stdout_dropped_bytes")
+	copyIfPositive("stderr_dropped_bytes")
+	copyIfPositive("stdout_earliest_marker")
+	copyIfPositive("stderr_earliest_marker")
+
+	if !boolValue(meta["capture_truncated"]) && !boolValue(meta["stdout_cap_reached"]) && !boolValue(meta["stderr_cap_reached"]) {
+		delete(out, "capture_cap_bytes")
+		delete(out, "stdout_earliest_marker")
+		delete(out, "stderr_earliest_marker")
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func boolValue(value any) bool {
+	typed, ok := value.(bool)
+	return ok && typed
+}
+
 func (s *serverSession) rememberToolCall(callID string, name string, args map[string]any) {
 	if s == nil {
 		return
@@ -165,10 +237,66 @@ func (s *serverSession) rememberToolCall(callID string, name string, args map[st
 		s.toolCalls = map[string]toolCallSnapshot{}
 	}
 	cp := make(map[string]any, len(args))
-	for key, value := range args {
-		cp[key] = value
-	}
+	maps.Copy(cp, args)
 	s.toolCalls[callID] = toolCallSnapshot{name: strings.TrimSpace(name), args: cp}
+}
+
+func normalizeToolArgsForACP(toolName string, args map[string]any, fsys toolexec.FileSystem) map[string]any {
+	if len(args) == 0 {
+		return args
+	}
+	keys := toolPathKeysForACP(toolName)
+	if len(keys) == 0 {
+		return args
+	}
+	out := make(map[string]any, len(args))
+	maps.Copy(out, args)
+	for _, key := range keys {
+		value := strings.TrimSpace(stringValue(out[key]))
+		if value == "" {
+			continue
+		}
+		if normalized, ok := normalizeACPPathValue(fsys, value); ok {
+			out[key] = normalized
+		}
+	}
+	return out
+}
+
+func toolPathKeysForACP(toolName string) []string {
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "READ", "WRITE", "PATCH", "SEARCH", "LIST", "GLOB":
+		return []string{"path"}
+	case "BASH":
+		return []string{"workdir", "dir"}
+	default:
+		return nil
+	}
+}
+
+func normalizeACPPathValue(fsys toolexec.FileSystem, value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if strings.HasPrefix(value, "~/") {
+		if fsys != nil {
+			if home, err := fsys.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+				value = filepath.Join(home, value[2:])
+			}
+		}
+	}
+	if !filepath.IsAbs(value) {
+		if fsys == nil {
+			return "", false
+		}
+		wd, err := fsys.Getwd()
+		if err != nil || strings.TrimSpace(wd) == "" {
+			return "", false
+		}
+		value = filepath.Join(wd, value)
+	}
+	return filepath.Clean(value), true
 }
 
 func (s *serverSession) rememberAsyncToolResult(toolName string, callID string, result map[string]any) {

@@ -37,9 +37,9 @@ func (l *testLLM) ContextWindowTokens() int {
 	return 64000
 }
 
-func (l *testLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (l *testLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	_ = ctx
-	return func(yield func(*model.Response, error) bool) {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		if l == nil {
 			yield(nil, nil)
 			return
@@ -50,7 +50,7 @@ func (l *testLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*m
 			return
 		}
 		if resp == nil {
-			resp = &model.Response{Message: model.Message{Role: model.RoleAssistant, Text: ""}}
+			resp = &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "")}
 		}
 		if resp.Model == "" {
 			resp.Model = l.name
@@ -59,17 +59,14 @@ func (l *testLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*m
 			resp.Provider = "test-provider"
 		}
 		resp.TurnComplete = true
-		yield(resp, nil)
+		yield(model.StreamEventFromResponse(resp), nil)
 	}
 }
 
 func (l *testLLM) handle(req *model.Request) (*model.Response, error) {
 	if l.handler == nil {
 		return &model.Response{
-			Message: model.Message{
-				Role: model.RoleAssistant,
-				Text: "ok",
-			},
+			Message: model.NewTextMessage(model.RoleAssistant, "ok"),
 		}, nil
 	}
 	return l.handler(req)
@@ -90,14 +87,38 @@ func (l *seqLLM) ContextWindowTokens() int {
 	return 64000
 }
 
-func (l *seqLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.Response, error] {
+func (l *seqLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	_ = ctx
-	return func(yield func(*model.Response, error) bool) {
+	return func(yield func(*model.StreamEvent, error) bool) {
 		if l == nil || l.handler == nil {
 			return
 		}
 		for _, step := range l.handler(req) {
-			if !yield(step.resp, step.err) {
+			if step.err != nil {
+				if !yield(nil, step.err) {
+					return
+				}
+				continue
+			}
+			if step.resp != nil && !step.resp.TurnComplete {
+				// Emit intermediate results as PartDelta events so
+				// collectLast recognises them as partial output.
+				text := step.resp.Message.TextContent()
+				if text != "" {
+					evt := &model.StreamEvent{
+						Type: model.StreamEventPartDelta,
+						PartDelta: &model.PartDelta{
+							Kind:      model.PartKindText,
+							TextDelta: text,
+						},
+					}
+					if !yield(evt, nil) {
+						return
+					}
+					continue
+				}
+			}
+			if !yield(model.StreamEventFromResponse(step.resp), step.err) {
 				return
 			}
 		}

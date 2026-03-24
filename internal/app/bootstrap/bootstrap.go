@@ -40,8 +40,11 @@ type ACPConfig struct {
 type Config struct {
 	Runtime               *runtime.Runtime
 	Store                 session.Store
+	ACPRuntime            *runtime.Runtime
+	ACPStore              session.Store
 	AppName               string
 	UserID                string
+	DefaultAgent          string
 	WorkspaceCWD          string
 	Execution             toolexec.Runtime
 	Tools                 []tool.Tool
@@ -84,6 +87,7 @@ func Build(cfg Config) (ServiceSet, error) {
 		Store:                 cfg.Store,
 		AppName:               cfg.AppName,
 		UserID:                cfg.UserID,
+		DefaultAgent:          cfg.DefaultAgent,
 		WorkspaceCWD:          cfg.WorkspaceCWD,
 		Execution:             cfg.Execution,
 		Tools:                 append([]tool.Tool(nil), cfg.Tools...),
@@ -121,10 +125,11 @@ func Build(cfg Config) (ServiceSet, error) {
 				return nil, fmt.Errorf("bootstrap: acp session resource factory is required")
 			}
 			return acpadapter.New(acpadapter.Config{
-				Runtime:               cfg.Runtime,
-				Store:                 cfg.Store,
+				Runtime:               firstNonNilRuntime(cfg.ACPRuntime, cfg.Runtime),
+				Store:                 firstNonNilStore(cfg.ACPStore, cfg.Store),
 				AppName:               cfg.AppName,
 				UserID:                cfg.UserID,
+				DefaultAgent:          cfg.DefaultAgent,
 				WorkspaceRoot:         cfg.ACP.WorkspaceRoot,
 				SessionModes:          append([]internalacp.SessionMode(nil), cfg.ACP.SessionModes...),
 				DefaultModeID:         cfg.ACP.DefaultModeID,
@@ -149,4 +154,22 @@ func Build(cfg Config) (ServiceSet, error) {
 		}
 	}
 	return set, nil
+}
+
+func firstNonNilRuntime(values ...*runtime.Runtime) *runtime.Runtime {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func firstNonNilStore(values ...session.Store) session.Store {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }

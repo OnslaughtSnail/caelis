@@ -106,15 +106,6 @@ type DelegationRef struct {
 	ParentToolName   string
 }
 
-type AttachSessionRequest struct {
-	SessionRef       SessionRef
-	ChildSessionID   string
-	DelegationID     string
-	CWD              string
-	Limit            int
-	IncludeLifecycle bool
-}
-
 type InterruptSessionRequest struct {
 	SessionRef SessionRef
 	Reason     string
@@ -142,6 +133,7 @@ type ServiceConfig struct {
 	Store                 session.Store
 	AppName               string
 	UserID                string
+	DefaultAgent          string
 	WorkspaceRoot         string
 	WorkspaceCWD          string
 	Execution             toolexec.Runtime
@@ -159,6 +151,7 @@ type Service struct {
 	store                 session.Store
 	appName               string
 	userID                string
+	defaultAgent          string
 	workspaceRoot         string
 	workspaceCWD          string
 	execution             toolexec.Runtime
@@ -197,6 +190,7 @@ func New(cfg ServiceConfig) (*Service, error) {
 		store:                 cfg.Store,
 		appName:               strings.TrimSpace(cfg.AppName),
 		userID:                strings.TrimSpace(cfg.UserID),
+		defaultAgent:          strings.TrimSpace(cfg.DefaultAgent),
 		workspaceRoot:         strings.TrimSpace(cfg.WorkspaceRoot),
 		workspaceCWD:          strings.TrimSpace(cfg.WorkspaceCWD),
 		execution:             cfg.Execution,
@@ -297,6 +291,7 @@ func (s *Service) RunTurn(ctx context.Context, req RunTurnRequest) (RunTurnResul
 		Runtime:               s.runtime,
 		AppName:               ref.AppName,
 		UserID:                ref.UserID,
+		DefaultAgent:          s.defaultAgent,
 		WorkspaceRoot:         s.workspaceRoot,
 		WorkspaceCWD:          s.workspaceCWD,
 		Execution:             s.execution,
@@ -385,51 +380,6 @@ func (s *Service) ListDelegations(ctx context.Context, ref SessionRef) ([]Delega
 		out = append(out, item)
 	}
 	return out, nil
-}
-
-func (s *Service) AttachSession(ctx context.Context, req AttachSessionRequest) (LoadedSession, error) {
-	ref := s.normalizeRef(req.SessionRef)
-	delegations, err := s.ListDelegations(ctx, ref)
-	if err != nil {
-		return LoadedSession{}, err
-	}
-	target := strings.TrimSpace(req.ChildSessionID)
-	if target == "" {
-		delegationID := strings.TrimSpace(req.DelegationID)
-		for _, item := range delegations {
-			if strings.TrimSpace(item.DelegationID) != delegationID {
-				continue
-			}
-			target = strings.TrimSpace(item.ChildSessionID)
-			break
-		}
-		if target == "" {
-			return LoadedSession{}, session.ErrSessionNotFound
-		}
-	} else {
-		found := false
-		for _, item := range delegations {
-			if strings.TrimSpace(item.ChildSessionID) == target {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return LoadedSession{}, session.ErrSessionNotFound
-		}
-	}
-	childRef := SessionRef{
-		AppName:      ref.AppName,
-		UserID:       ref.UserID,
-		SessionID:    target,
-		WorkspaceKey: ref.WorkspaceKey,
-	}
-	return s.LoadSession(ctx, LoadSessionRequest{
-		SessionRef:       childRef,
-		CWD:              strings.TrimSpace(req.CWD),
-		Limit:            req.Limit,
-		IncludeLifecycle: req.IncludeLifecycle,
-	})
 }
 
 func (s *Service) ListSessions(ctx context.Context, req SessionListRequest) (SessionList, error) {
@@ -530,6 +480,7 @@ func (s *Service) VisibleTools() ([]tool.Tool, error) {
 		Runtime:               s.runtime,
 		AppName:               s.appName,
 		UserID:                s.userID,
+		DefaultAgent:          s.defaultAgent,
 		WorkspaceRoot:         s.workspaceRoot,
 		WorkspaceCWD:          s.workspaceCWD,
 		Execution:             s.execution,
@@ -768,7 +719,7 @@ func delegationRefFromParentEvent(parentSessionID string, ev *session.Event) (De
 			}, true
 		}
 	}
-	resp := ev.Message.ToolResponse
+	resp := ev.Message.ToolResponse()
 	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName) {
 		return DelegationRef{}, false
 	}

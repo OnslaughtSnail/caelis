@@ -8,8 +8,8 @@ import (
 
 func TestContextWindowEvents_NoCompaction(t *testing.T) {
 	events := []*Event{
-		{ID: "u1", Message: model.Message{Role: model.RoleUser, Text: "one"}},
-		{ID: "a1", Message: model.Message{Role: model.RoleAssistant, Text: "two"}},
+		{ID: "u1", Message: model.NewTextMessage(model.RoleUser, "one")},
+		{ID: "a1", Message: model.NewTextMessage(model.RoleAssistant, "two")},
 	}
 	window := ContextWindowEvents(events)
 	if len(window) != 2 {
@@ -24,15 +24,15 @@ func TestContextWindowEvents_LegacyCompactionFallback(t *testing.T) {
 	// Compaction event without summarized_to_event_id: falls back to
 	// compaction + everything after it (no tail reconstruction).
 	events := []*Event{
-		{ID: "old", Message: model.Message{Role: model.RoleUser, Text: "old"}},
+		{ID: "old", Message: model.NewTextMessage(model.RoleUser, "old")},
 		{
 			ID:      "compact",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 			},
 		},
-		{ID: "new", Message: model.Message{Role: model.RoleUser, Text: "new"}},
+		{ID: "new", Message: model.NewTextMessage(model.RoleUser, "new")},
 	}
 	window := ContextWindowEvents(events)
 	if len(window) != 2 {
@@ -49,13 +49,13 @@ func TestContextWindowEvents_TailReconstructedFromSummarizedToID(t *testing.T) {
 	// must appear in the window AFTER the compaction event without being
 	// duplicated in the store.
 	events := []*Event{
-		{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old"}},
-		{ID: "old_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "old answer"}},
-		{ID: "tail_user", Message: model.Message{Role: model.RoleUser, Text: "tail q"}},
-		{ID: "tail_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "tail a"}},
+		{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old")},
+		{ID: "old_assistant", Message: model.NewTextMessage(model.RoleAssistant, "old answer")},
+		{ID: "tail_user", Message: model.NewTextMessage(model.RoleUser, "tail q")},
+		{ID: "tail_assistant", Message: model.NewTextMessage(model.RoleAssistant, "tail a")},
 		{
 			ID:      "compact_1",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 				"compaction": map[string]any{
@@ -79,13 +79,13 @@ func TestContextWindowEvents_TailReconstructedFromSummarizedToID(t *testing.T) {
 
 func TestContextWindowEvents_UsesExplicitTailEventIDs(t *testing.T) {
 	events := []*Event{
-		{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old"}},
-		{ID: "old_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "old answer"}},
-		{ID: "tail_user", Message: model.Message{Role: model.RoleUser, Text: "tail q"}},
-		{ID: "tail_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "tail a"}},
+		{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old")},
+		{ID: "old_assistant", Message: model.NewTextMessage(model.RoleAssistant, "old answer")},
+		{ID: "tail_user", Message: model.NewTextMessage(model.RoleUser, "tail q")},
+		{ID: "tail_assistant", Message: model.NewTextMessage(model.RoleAssistant, "tail a")},
 		{
 			ID:      "compact_1",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 				"compaction": map[string]any{
@@ -111,11 +111,11 @@ func TestContextWindowEvents_TailPlusPostCompactionEvents(t *testing.T) {
 	// After compaction, new events may be appended. The window should be:
 	// [compaction, tail..., new events after compaction...]
 	events := []*Event{
-		{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old"}},
-		{ID: "tail_user", Message: model.Message{Role: model.RoleUser, Text: "tail"}},
+		{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old")},
+		{ID: "tail_user", Message: model.NewTextMessage(model.RoleUser, "tail")},
 		{
 			ID:      "compact_1",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 				"compaction": map[string]any{
@@ -123,7 +123,7 @@ func TestContextWindowEvents_TailPlusPostCompactionEvents(t *testing.T) {
 				},
 			},
 		},
-		{ID: "new_after", Message: model.Message{Role: model.RoleUser, Text: "new"}},
+		{ID: "new_after", Message: model.NewTextMessage(model.RoleUser, "new")},
 	}
 	window := ContextWindowEvents(events)
 	// Expected: [compaction, tail_user, new_after]
@@ -140,18 +140,18 @@ func TestContextWindowEvents_TailPlusPostCompactionEvents(t *testing.T) {
 
 func TestContextWindowEvents_UsesLatestCompactionWindow(t *testing.T) {
 	events := []*Event{
-		{ID: "old_user", Message: model.Message{Role: model.RoleUser, Text: "old user"}},
-		{ID: "old_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "old assistant"}},
-		{ID: "tail_user", Message: model.Message{Role: model.RoleUser, Text: "tail user"}},
-		{ID: "tail_assistant", Message: model.Message{Role: model.RoleAssistant, Text: "tail assistant"}},
+		{ID: "old_user", Message: model.NewTextMessage(model.RoleUser, "old user")},
+		{ID: "old_assistant", Message: model.NewTextMessage(model.RoleAssistant, "old assistant")},
+		{ID: "tail_user", Message: model.NewTextMessage(model.RoleUser, "tail user")},
+		{ID: "tail_assistant", Message: model.NewTextMessage(model.RoleAssistant, "tail assistant")},
 		{
 			ID:      "compact_1",
-			Message: model.Message{Role: model.RoleUser, Text: "summary"},
+			Message: model.NewTextMessage(model.RoleUser, "summary"),
 			Meta: map[string]any{
 				"kind": "compaction",
 			},
 		},
-		{ID: "new_user", Message: model.Message{Role: model.RoleUser, Text: "new user"}},
+		{ID: "new_user", Message: model.NewTextMessage(model.RoleUser, "new user")},
 	}
 	window := ContextWindowEvents(events)
 	if len(window) != 2 {

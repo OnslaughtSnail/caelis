@@ -140,12 +140,9 @@ func lastCursor(events []*session.Event, fallback string) string {
 
 func streamResyncEvent() *session.Event {
 	return session.MarkUIOnly(&session.Event{
-		ID:   eventID(),
-		Time: now(),
-		Message: model.Message{
-			Role: model.RoleSystem,
-			Text: "",
-		},
+		ID:      eventID(),
+		Time:    now(),
+		Message: model.Message{Role: model.RoleSystem},
 		Meta: map[string]any{
 			"kind": "stream_resync",
 		},

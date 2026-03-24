@@ -2,11 +2,18 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
+)
+
+var (
+	errAuthenticationRequired = errors.New("authentication required")
+	errSessionNotFound        = errors.New("session not found")
 )
 
 func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSessionResponse, error) {
@@ -18,6 +25,9 @@ func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSess
 	sess.applyState(state)
 	s.storeSession(sess)
 	if err := s.notifyAvailableCommands(sess.id, sess); err != nil {
+		return NewSessionResponse{}, err
+	}
+	if err := s.notifySessionInfo(sess.id, "", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		return NewSessionResponse{}, err
 	}
 	if err := s.notifyPlan(sess.id, sess.planSnapshot()); err != nil {
@@ -45,9 +55,13 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 		s.storeSession(sess)
 	}
 	sess.applyState(loaded.Session)
+	updatedAt := ""
 	for _, ev := range loaded.Events {
 		if ev == nil {
 			continue
+		}
+		if updatedAt == "" && !ev.Time.IsZero() {
+			updatedAt = ev.Time.UTC().Format(time.RFC3339)
 		}
 		if _, ok := runtime.LifecycleFromEvent(ev); ok {
 			continue
@@ -55,6 +69,12 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 		if err := s.notifyEvent(req.SessionID, ev, nil); err != nil {
 			return LoadSessionResponse{}, err
 		}
+	}
+	if updatedAt == "" {
+		updatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if err := s.notifySessionInfo(req.SessionID, "", updatedAt); err != nil {
+		return LoadSessionResponse{}, err
 	}
 	if err := s.notifyAvailableCommands(req.SessionID, sess); err != nil {
 		return LoadSessionResponse{}, err
@@ -138,7 +158,7 @@ func (s *Server) requireAuthenticated() error {
 	if s.authOK {
 		return nil
 	}
-	return fmt.Errorf("authentication required")
+	return errAuthenticationRequired
 }
 
 func (s *Server) hasAuthMethod(methodID string) bool {
@@ -162,7 +182,7 @@ func (s *Server) session(id string) (*serverSession, error) {
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[strings.TrimSpace(id)]
 	if !ok || sess == nil {
-		return nil, fmt.Errorf("unknown session %q", id)
+		return nil, fmt.Errorf("%w: %q", errSessionNotFound, id)
 	}
 	return sess, nil
 }
@@ -208,6 +228,18 @@ func (s *serverSession) currentMode() string {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	return strings.TrimSpace(s.currentModeID)
+}
+
+func (s *serverSession) permissionBridge(conn *Conn) *permissionBridge {
+	if s == nil {
+		return nil
+	}
+	s.approvalMu.Lock()
+	defer s.approvalMu.Unlock()
+	if s.approver == nil {
+		s.approver = newPermissionBridge(conn, s.id, s.currentMode)
+	}
+	return s.approver
 }
 
 func (s *serverSession) modeState() *SessionModeState {

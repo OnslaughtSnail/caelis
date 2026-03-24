@@ -48,9 +48,9 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 		}
 		switch eventChannel(ev) {
 		case "answer":
-			return s.emitBufferedPartial(sessionID, sess, "answer", msg.Text)
+			return s.emitBufferedPartial(sessionID, sess, "answer", msg.TextContent())
 		case "reasoning":
-			return s.emitBufferedPartial(sessionID, sess, "reasoning", msg.Reasoning)
+			return s.emitBufferedPartial(sessionID, sess, "reasoning", msg.ReasoningText())
 		}
 	}
 	if msg.Role == model.RoleUser {
@@ -74,12 +74,12 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 	}
 	if msg.Role == model.RoleAssistant {
 		if sess == nil {
-			if strings.TrimSpace(msg.Reasoning) != "" {
-				if err := s.emitContentUpdate(sessionID, UpdateAgentThought, strings.TrimSpace(msg.Reasoning)); err != nil {
+			if reasoning := msg.ReasoningText(); reasoning != "" {
+				if err := s.emitContentUpdate(sessionID, UpdateAgentThought, reasoning); err != nil {
 					return err
 				}
 			}
-			if text := strings.TrimSpace(msg.Text); text != "" {
+			if text := msg.TextContent(); text != "" {
 				if err := s.emitContentUpdate(sessionID, UpdateAgentMessage, text); err != nil {
 					return err
 				}
@@ -92,11 +92,12 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 			}
 		}
 	}
-	for _, call := range msg.ToolCalls {
+	for _, call := range msg.ToolCalls() {
 		args := map[string]any{}
 		if raw := strings.TrimSpace(call.Args); raw != "" {
 			_ = json.Unmarshal([]byte(raw), &args)
 		}
+		args = normalizeToolArgsForACP(call.Name, args, s.sessionFS(sessionID))
 		if sess != nil {
 			sess.rememberToolCall(call.ID, call.Name, args)
 		}
@@ -113,29 +114,26 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 			return err
 		}
 	}
-	if msg.ToolResponse != nil {
+	if resp := msg.ToolResponse(); resp != nil {
 		if sess != nil {
-			sess.rememberAsyncToolResult(msg.ToolResponse.Name, msg.ToolResponse.ID, msg.ToolResponse.Result)
+			sess.rememberAsyncToolResult(resp.Name, resp.ID, resp.Result)
 		}
-		status := ToolStatusCompleted
-		if hasToolError(msg.ToolResponse.Result) {
-			status = ToolStatusFailed
-		}
+		status := toolStatusForResult(resp.Name, resp.Result)
 		update := ToolCallUpdate{
 			SessionUpdate: UpdateToolCallState,
-			ToolCallID:    msg.ToolResponse.ID,
+			ToolCallID:    resp.ID,
 			Status:        ptr(status),
-			RawOutput:     sanitizeToolResultForACP(msg.ToolResponse.Result),
-			Locations:     toolLocations(nil, msg.ToolResponse.Result),
+			RawOutput:     sanitizeToolResultForACP(resp.Result),
+			Locations:     toolLocations(nil, resp.Result),
 		}
-		if content := toolCallContentForResult(msg.ToolResponse.Name, msg.ToolResponse.Result); len(content) > 0 {
+		if content := toolCallContentForResult(resp.Name, resp.Result); len(content) > 0 {
 			update.Content = content
 		}
 		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: update}); err != nil {
 			return err
 		}
-		if strings.EqualFold(strings.TrimSpace(msg.ToolResponse.Name), tool.PlanToolName) && !hasToolError(msg.ToolResponse.Result) {
-			entries := planEntriesFromResult(msg.ToolResponse.Result)
+		if strings.EqualFold(strings.TrimSpace(resp.Name), tool.PlanToolName) && !hasToolError(resp.Result) {
+			entries := planEntriesFromResult(resp.Result)
 			if sess != nil {
 				sess.setPlan(entries)
 			}
@@ -143,7 +141,7 @@ func (s *Server) notifyEvent(sessionID string, ev *session.Event, sess *serverSe
 				return err
 			}
 		}
-		for _, extra := range supplementalToolCallUpdates(sess, msg.ToolResponse) {
+		for _, extra := range supplementalToolCallUpdates(sess, resp) {
 			if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{SessionID: sessionID, Update: extra}); err != nil {
 				return err
 			}
@@ -161,10 +159,6 @@ func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessions
 	if sessionID == "" || sessionID == strings.TrimSpace(rootSessionID) {
 		return nil
 	}
-	// Emit subagent-specific notifications for SPAWN child events.
-	if err := s.emitSubagentUpdates(rootSessionID, update); err != nil {
-		return err
-	}
 	var streamSess *serverSession
 	if eventIsPartial(update.Event) || update.Event.Message.Role == model.RoleAssistant {
 		streamSess = s.liveStreamSession(sessionID)
@@ -179,199 +173,6 @@ func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessions
 		}
 	}
 	return nil
-}
-
-// emitSubagentUpdates checks if a child session event belongs to a SPAWN subagent
-// and emits subagent-specific ACP update notifications to the parent session.
-func (s *Server) emitSubagentUpdates(parentSessionID string, update sessionstream.Update) error {
-	ev := update.Event
-	if ev == nil {
-		return nil
-	}
-	meta, ok := runtime.DelegationMetadataFromEvent(ev)
-	if !ok || meta.ParentToolName != tool.SpawnToolName {
-		return nil
-	}
-	spawnID := strings.TrimSpace(meta.ChildSessionID)
-	if spawnID == "" {
-		spawnID = strings.TrimSpace(update.SessionID)
-	}
-	if spawnID == "" {
-		spawnID = meta.ParentToolCall
-	}
-
-	agent := "self"
-
-	// Handle lifecycle (done/failed/interrupted) — clean up tracking state.
-	if info, ok := runtime.LifecycleFromEvent(ev); ok {
-		if isTerminalStatus(info.Status) {
-			s.subagentMu.Lock()
-			delete(s.subagentStarted, spawnID)
-			delete(s.subagentStreams, spawnID)
-			s.subagentMu.Unlock()
-			return s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-				SessionID: parentSessionID,
-				Update: SubagentDoneUpdate{
-					SessionUpdate: UpdateSubagentDone,
-					SpawnID:       spawnID,
-					State:         string(info.Status),
-				},
-			})
-		}
-		return nil
-	}
-
-	// Emit start notification only once per spawnID.
-	s.subagentMu.Lock()
-	if s.subagentStarted == nil {
-		s.subagentStarted = map[string]bool{}
-	}
-	if s.subagentStreams == nil {
-		s.subagentStreams = map[string]*subagentACPState{}
-	}
-	alreadyStarted := s.subagentStarted[spawnID]
-	if !alreadyStarted {
-		s.subagentStarted[spawnID] = true
-	}
-	streamState := s.subagentStreams[spawnID]
-	if streamState == nil {
-		streamState = &subagentACPState{}
-		s.subagentStreams[spawnID] = streamState
-	}
-	s.subagentMu.Unlock()
-
-	if !alreadyStarted {
-		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-			SessionID: parentSessionID,
-			Update: SubagentStartUpdate{
-				SessionUpdate: UpdateSubagentStart,
-				SpawnID:       spawnID,
-				Agent:         agent,
-				CallID:        meta.ParentToolCall,
-			},
-		}); err != nil {
-			return err
-		}
-	}
-
-	// Emit tool call updates.
-	for _, call := range ev.Message.ToolCalls {
-		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-			SessionID: parentSessionID,
-			Update: SubagentToolCallUpdate{
-				SessionUpdate: UpdateSubagentToolCall,
-				SpawnID:       spawnID,
-				ToolName:      call.Name,
-				CallID:        call.ID,
-			},
-		}); err != nil {
-			return err
-		}
-	}
-	if resp := ev.Message.ToolResponse; resp != nil {
-		stream := "stdout"
-		if hasToolError(resp.Result) {
-			stream = "stderr"
-		}
-		if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-			SessionID: parentSessionID,
-			Update: SubagentToolCallUpdate{
-				SessionUpdate: UpdateSubagentToolCall,
-				SpawnID:       spawnID,
-				ToolName:      resp.Name,
-				CallID:        resp.ID,
-				Stream:        stream,
-				Final:         true,
-			},
-		}); err != nil {
-			return err
-		}
-		// Detect PLAN tool result and emit SubagentPlanUpdate.
-		if strings.EqualFold(strings.TrimSpace(resp.Name), tool.PlanToolName) && !hasToolError(resp.Result) {
-			entries := planEntriesFromResult(resp.Result)
-			if len(entries) > 0 {
-				if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-					SessionID: parentSessionID,
-					Update: SubagentPlanUpdate{
-						SessionUpdate: UpdateSubagentPlan,
-						SpawnID:       spawnID,
-						Entries:       entries,
-					},
-				}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	// Emit assistant/reasoning stream with delta dedup.
-	if ev.Message.Role == model.RoleAssistant {
-		partial := eventIsPartial(ev)
-
-		if reasoning := strings.TrimSpace(ev.Message.Reasoning); reasoning != "" {
-			s.subagentMu.Lock()
-			delta := subagentDelta(streamState.reasoningSent, reasoning)
-			streamState.reasoningSent = reasoning
-			if !partial {
-				// Final event: send remaining delta and reset for next turn.
-				streamState.reasoningSent = ""
-			}
-			s.subagentMu.Unlock()
-			if delta != "" {
-				if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-					SessionID: parentSessionID,
-					Update: SubagentStreamUpdate{
-						SessionUpdate: UpdateSubagentStream,
-						SpawnID:       spawnID,
-						Stream:        "reasoning",
-						Chunk:         delta,
-					},
-				}); err != nil {
-					return err
-				}
-			}
-		}
-
-		if answer := ev.Message.TextContent(); strings.TrimSpace(answer) != "" {
-			s.subagentMu.Lock()
-			delta := subagentDelta(streamState.assistantSent, answer)
-			streamState.assistantSent = answer
-			if !partial {
-				streamState.assistantSent = ""
-			}
-			s.subagentMu.Unlock()
-			if delta != "" {
-				if err := s.cfg.Conn.Notify(MethodSessionUpdate, SessionNotification{
-					SessionID: parentSessionID,
-					Update: SubagentStreamUpdate{
-						SessionUpdate: UpdateSubagentStream,
-						SpawnID:       spawnID,
-						Stream:        "assistant",
-						Chunk:         delta,
-					},
-				}); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// subagentDelta returns the portion of incoming not yet sent.
-func subagentDelta(sent, incoming string) string {
-	if strings.HasPrefix(incoming, sent) {
-		return incoming[len(sent):]
-	}
-	return incoming
-}
-
-func isTerminalStatus(status runtime.RunLifecycleStatus) bool {
-	switch status {
-	case runtime.RunLifecycleStatusCompleted, runtime.RunLifecycleStatusFailed, runtime.RunLifecycleStatusInterrupted:
-		return true
-	}
-	return false
 }
 
 func (s *Server) liveStreamSession(sessionID string) *serverSession {
@@ -522,10 +323,10 @@ func (s *serverSession) finalizeAssistantContent(msg model.Message) []pendingCon
 	s.streamMu.Lock()
 	defer s.streamMu.Unlock()
 	out := make([]pendingContentUpdate, 0, 2)
-	if update := finalizePartialState(&s.thoughtStream, UpdateAgentThought, strings.TrimSpace(msg.Reasoning)); update != nil {
+	if update := finalizePartialState(&s.thoughtStream, UpdateAgentThought, msg.ReasoningText()); update != nil {
 		out = append(out, *update)
 	}
-	if update := finalizePartialState(&s.answerStream, UpdateAgentMessage, strings.TrimSpace(msg.Text)); update != nil {
+	if update := finalizePartialState(&s.answerStream, UpdateAgentMessage, msg.TextContent()); update != nil {
 		out = append(out, *update)
 	}
 	return out

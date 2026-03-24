@@ -18,10 +18,22 @@ type ctrlCExpireMsg struct {
 }
 
 type paletteAnimationMsg struct{}
+type frameTickMsg struct {
+	at time.Time
+}
 
 func animatePaletteCmd() tea.Cmd {
 	return tea.Tick(paletteAnimationInterval, func(time.Time) tea.Msg {
 		return paletteAnimationMsg{}
+	})
+}
+
+func frameTickCmd(interval time.Duration) tea.Cmd {
+	if interval <= 0 {
+		interval = streamSmoothingTickIntervalDefault
+	}
+	return tea.Tick(interval, func(at time.Time) tea.Msg {
+		return frameTickMsg{at: at}
 	})
 }
 

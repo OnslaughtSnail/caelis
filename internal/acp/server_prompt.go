@@ -147,7 +147,10 @@ func (s *Server) resolveResourceLink(sessionID string, link ResourceLink) (model
 func (s *Server) resolveEmbeddedResource(block EmbeddedResource) (model.ContentPart, string, error) {
 	resource := block.Resource
 	if imageMIME(strings.TrimSpace(resource.MimeType)) {
-		raw := strings.TrimSpace(resource.Data)
+		raw := strings.TrimSpace(resource.Blob)
+		if raw == "" {
+			raw = strings.TrimSpace(resource.Data)
+		}
 		if raw == "" {
 			raw = strings.TrimSpace(resource.Text)
 		}
@@ -220,13 +223,6 @@ func (s *Server) loadImageContentPart(sessionID string, path string, mime string
 		}
 	}
 	return imageutil.ContentPartFromBytes(data, mime, name, nil)
-}
-
-func (s *Server) promptImageEnabled() bool {
-	if s == nil || s.cfg.Adapter == nil {
-		return false
-	}
-	return s.cfg.Adapter.Capabilities().PromptImage
 }
 
 func (s *Server) linkIsImage(path string, mime string) bool {

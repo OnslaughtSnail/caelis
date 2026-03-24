@@ -37,6 +37,8 @@ func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceRoot, ses
 	var terminalRunner toolexec.AsyncCommandRunner
 	if caps.Terminal && conn != nil && base.PermissionMode() != toolexec.PermissionModeFullControl {
 		terminalRunner = wrapSessionAsyncCommandRunner(NewAsyncCommandRunner(conn, sessionID), sessionCWD)
+		hostRunner = terminalRunner
+		sandboxRunner = terminalRunner
 	}
 	return &runtimeBridge{
 		base:           base,

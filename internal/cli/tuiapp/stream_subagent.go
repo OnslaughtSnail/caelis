@@ -2,35 +2,165 @@ package tuiapp
 
 import (
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 )
 
-func (m *Model) ensureSubagentPanelBlock(spawnID, attachID, agent, callID string) *SubagentPanelBlock {
+func (m *Model) ensureSubagentSessionState(spawnID, attachID, agent string) (string, *SubagentSessionState) {
+	if m.subagentSessions == nil {
+		m.subagentSessions = map[string]*SubagentSessionState{}
+	}
+	sessionKey := subagentPanelSessionKey(spawnID, attachID)
+	if sessionKey == "" {
+		return "", nil
+	}
+	state := m.subagentSessions[sessionKey]
+	if state == nil {
+		state = NewSubagentSessionState(spawnID, attachID, agent)
+		m.subagentSessions[sessionKey] = state
+	} else {
+		if state.SpawnID == "" && strings.TrimSpace(spawnID) != "" {
+			state.SpawnID = strings.TrimSpace(spawnID)
+		}
+		if state.AttachID == "" && strings.TrimSpace(attachID) != "" {
+			state.AttachID = strings.TrimSpace(attachID)
+		}
+		if state.Agent == "" && strings.TrimSpace(agent) != "" {
+			state.Agent = strings.TrimSpace(agent)
+		}
+		if state.Status == "" {
+			state.Status = "running"
+		}
+	}
+	return sessionKey, state
+}
+
+func (m *Model) rememberSubagentPanelRef(sessionKey, blockID string) {
+	if m == nil || sessionKey == "" || blockID == "" {
+		return
+	}
 	if m.subagentBlockIDs == nil {
 		m.subagentBlockIDs = map[string]string{}
 	}
-	blockID, ok := m.subagentBlockIDs[spawnID]
-	if ok {
-		block := m.doc.Find(blockID)
-		if block != nil {
-			if sp, ok := block.(*SubagentPanelBlock); ok {
-				if sp.AttachID == "" && strings.TrimSpace(attachID) != "" {
-					sp.AttachID = strings.TrimSpace(attachID)
-				}
-				if sp.Agent == "" && strings.TrimSpace(agent) != "" {
-					sp.Agent = strings.TrimSpace(agent)
-				}
-				if sp.CallID == "" && strings.TrimSpace(callID) != "" {
-					sp.CallID = strings.TrimSpace(callID)
-				}
-				m.syncInlineSubagentAnchorState(sp)
-				return sp
-			}
+	if m.subagentSessionRefs == nil {
+		m.subagentSessionRefs = map[string][]string{}
+	}
+	refs := m.subagentSessionRefs[sessionKey][:0]
+	seen := false
+	for _, refID := range m.subagentSessionRefs[sessionKey] {
+		if strings.TrimSpace(refID) == "" || m.doc.Find(refID) == nil {
+			continue
+		}
+		refs = append(refs, refID)
+		if refID == blockID {
+			seen = true
 		}
 	}
+	if !seen {
+		refs = append(refs, blockID)
+	}
+	m.subagentSessionRefs[sessionKey] = refs
+	m.subagentBlockIDs[sessionKey] = blockID
+}
+
+func (m *Model) subagentPanelsForSession(sessionKey string) []*SubagentPanelBlock {
+	if m == nil || sessionKey == "" {
+		return nil
+	}
+	ids := m.subagentSessionRefs[sessionKey]
+	if len(ids) == 0 {
+		if blockID := strings.TrimSpace(m.subagentBlockIDs[sessionKey]); blockID != "" {
+			ids = []string{blockID}
+		}
+	}
+	out := make([]*SubagentPanelBlock, 0, len(ids))
+	liveIDs := make([]string, 0, len(ids))
+	for _, blockID := range ids {
+		panel, _ := m.doc.Find(blockID).(*SubagentPanelBlock)
+		if panel == nil {
+			continue
+		}
+		out = append(out, panel)
+		liveIDs = append(liveIDs, blockID)
+	}
+	if len(liveIDs) > 0 {
+		if m.subagentSessionRefs == nil {
+			m.subagentSessionRefs = map[string][]string{}
+		}
+		m.subagentSessionRefs[sessionKey] = liveIDs
+	}
+	return out
+}
+
+func (m *Model) latestSubagentPanelForSession(sessionKey string) *SubagentPanelBlock {
+	if m == nil || sessionKey == "" {
+		return nil
+	}
+	blockID := strings.TrimSpace(m.subagentBlockIDs[sessionKey])
+	if blockID != "" {
+		panel, _ := m.doc.Find(blockID).(*SubagentPanelBlock)
+		if panel != nil {
+			return panel
+		}
+	}
+	panels := m.subagentPanelsForSession(sessionKey)
+	if len(panels) == 0 {
+		return nil
+	}
+	panel := panels[len(panels)-1]
+	m.subagentBlockIDs[sessionKey] = panel.BlockID()
+	return panel
+}
+
+func (m *Model) syncSubagentSessionPanels(sessionKey string) {
+	if m == nil || sessionKey == "" {
+		return
+	}
+	state := m.subagentSessions[sessionKey]
+	if state == nil {
+		return
+	}
+	for _, panel := range m.subagentPanelsForSession(sessionKey) {
+		panel.bindSession(state)
+	}
+}
+
+func (m *Model) ensureSubagentPanelBlock(spawnID, attachID, agent, callID string) *SubagentPanelBlock {
+	sessionKey, state := m.ensureSubagentSessionState(spawnID, attachID, agent)
+	if sessionKey == "" || state == nil {
+		return nil
+	}
+	callID = strings.TrimSpace(callID)
+	for _, panel := range m.subagentPanelsForSession(sessionKey) {
+		if callID != "" && strings.TrimSpace(panel.CallID) == callID {
+			panel.bindSession(state)
+			if panel.CallID == "" {
+				panel.CallID = callID
+			}
+			m.rememberSubagentPanelRef(sessionKey, panel.BlockID())
+			m.syncInlineSubagentAnchorState(panel)
+			return panel
+		}
+	}
+	if panel := m.latestSubagentPanelForSession(sessionKey); panel != nil {
+		prevCallID := strings.TrimSpace(panel.CallID)
+		canReuse := callID == "" || callID == prevCallID || prevCallID == ""
+		if canReuse {
+			panel.bindSession(state)
+			if callID != "" {
+				panel.CallID = callID
+			}
+			m.reanchorSubagentPanel(panel, prevCallID)
+			m.rememberSubagentPanelRef(sessionKey, panel.BlockID())
+			m.syncInlineSubagentAnchorState(panel)
+			return panel
+		}
+	}
+
 	sp := NewSubagentPanelBlock(spawnID, attachID, agent, callID)
+	sp.bindSession(state)
 	// Anchor panel after its specific tool call line.
 	anchorID := m.resolveCallAnchor(callID, "SPAWN")
 	if anchorID != "" {
@@ -38,85 +168,202 @@ func (m *Model) ensureSubagentPanelBlock(spawnID, attachID, agent, callID string
 	} else {
 		m.doc.Append(sp)
 	}
-	m.subagentBlockIDs[spawnID] = sp.BlockID()
+	m.rememberSubagentPanelRef(sessionKey, sp.BlockID())
 	m.syncInlineSubagentAnchorState(sp)
 	return sp
 }
 
-func (m *Model) handleSubagentStart(msg tuievents.SubagentStartMsg) (tea.Model, tea.Cmd) {
-	panel := m.ensureSubagentPanelBlock(msg.SpawnID, msg.AttachTarget, msg.Agent, msg.CallID)
-	if panel.Status == "" {
-		panel.Status = "running"
+func subagentPanelSessionKey(spawnID, attachID string) string {
+	if key := strings.TrimSpace(spawnID); key != "" {
+		return key
 	}
-	if !isTerminalSubagentState(panel.Status) {
+	return strings.TrimSpace(attachID)
+}
+
+func (m *Model) reanchorSubagentPanel(panel *SubagentPanelBlock, prevCallID string) {
+	if m == nil || panel == nil {
+		return
+	}
+	prevCallID = strings.TrimSpace(prevCallID)
+	nextCallID := strings.TrimSpace(panel.CallID)
+	if prevCallID == nextCallID {
+		return
+	}
+	if prevCallID != "" {
+		m.syncInlineSubagentAnchorLabel(prevCallID, false)
+	}
+	anchorID := m.resolveCallAnchor(nextCallID, "SPAWN")
+	if anchorID != "" {
+		_, _ = m.doc.MoveAfter(panel.BlockID(), anchorID)
+	}
+}
+
+func (m *Model) handleSubagentStart(msg tuievents.SubagentStartMsg) (tea.Model, tea.Cmd) {
+	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, msg.AttachTarget, msg.Agent)
+	panel := m.ensureSubagentPanelBlock(msg.SpawnID, msg.AttachTarget, msg.Agent, msg.CallID)
+	if state != nil && state.Status == "" {
+		state.Status = "running"
+	}
+	if panel != nil && !isTerminalSubagentState(state.Status) {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
 		panel.Expanded = true
-	} else {
+	} else if panel != nil {
 		panel.Expanded = false
 	}
+	m.syncSubagentSessionPanels(sessionKey)
 	m.syncInlineSubagentAnchorState(panel)
 	m.syncViewportContent()
 	return m, nil
 }
 
 func (m *Model) handleSubagentStatus(msg tuievents.SubagentStatusMsg) (tea.Model, tea.Cmd) {
+	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
-	state := strings.TrimSpace(msg.State)
-	if state != "" {
-		panel.Status = state
+	var cmd tea.Cmd
+	stateName := strings.TrimSpace(msg.State)
+	if stateName != "" && state != nil {
+		state.Status = stateName
 	}
-	if isTerminalSubagentState(state) && subagentHasInlineAnchor(m, panel) {
-		panel.Expanded = false
+	if isTerminalSubagentState(stateName) && subagentHasInlineAnchor(m, panel) {
+		m.scheduleInlineSubagentCollapse(panel)
+		cmd = m.ensurePanelAnimationTick()
+	} else if panel != nil {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
 	}
 	// Create an approval event with context when entering waiting_approval.
-	if strings.EqualFold(state, "waiting_approval") {
-		panel.AddApprovalEvent(msg.ApprovalTool, msg.ApprovalCommand)
+	if strings.EqualFold(stateName, "waiting_approval") && state != nil {
+		state.AddApprovalEvent(msg.ApprovalTool, msg.ApprovalCommand)
 	}
+	m.syncSubagentSessionPanels(sessionKey)
 	m.syncInlineSubagentAnchorState(panel)
 	m.syncViewportContent()
-	return m, nil
+	return m, cmd
 }
 
 func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model, tea.Cmd) {
-	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
-	switch msg.Stream {
-	case "assistant":
-		panel.AppendStreamChunk(SEAssistant, msg.Chunk)
-	case "reasoning":
-		panel.AppendStreamChunk(SEReasoning, msg.Chunk)
+	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
+	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
+	streamKind := strings.TrimSpace(msg.Stream)
+	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
+		state.Status = "running"
 	}
-	m.syncViewportContent()
+	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", ""); panel != nil {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	}
+	m.applySubagentStreamImmediate(sessionKey, streamKind, msg.Chunk)
+	m.syncSubagentSessionPanels(sessionKey)
 	return m, nil
 }
 
-func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.Model, tea.Cmd) {
-	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
-	if msg.CallID != "" {
-		panel.UpdateToolCall(msg.CallID, msg.ToolName, msg.Args, msg.Stream, msg.Chunk, msg.Final)
+func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string, final bool) (tea.Model, tea.Cmd) {
+	sessionKey, state := m.ensureSubagentSessionState(spawnID, "", "")
+	_ = m.ensureSubagentPanelBlock(spawnID, "", "", "")
+	streamKind := strings.TrimSpace(stream)
+	m.flushSubagentStreamSmoothingExcept(sessionKey, streamKind)
+	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
+		state.Status = "running"
 	}
+	if !m.enqueueStreamDelta("subagent", sessionKey, streamKind, "", chunk, final) {
+		m.syncSubagentSessionPanels(sessionKey)
+		return m, nil
+	}
+	m.syncSubagentSessionPanels(sessionKey)
+	return m, m.ensurePendingStreamSmoothingTick()
+}
+
+func (m *Model) applySubagentStreamImmediate(sessionKey string, stream string, chunk string) {
+	if m == nil || strings.TrimSpace(sessionKey) == "" || chunk == "" {
+		return
+	}
+	state := m.subagentSessions[sessionKey]
+	if state == nil {
+		_, state = m.ensureSubagentSessionState(sessionKey, "", "")
+	}
+	if state == nil {
+		return
+	}
+	switch stream {
+	case "assistant":
+		state.AppendStreamChunk(SEAssistant, chunk)
+	case "reasoning":
+		state.AppendStreamChunk(SEReasoning, chunk)
+	default:
+		return
+	}
+	m.syncSubagentSessionPanels(sessionKey)
+	m.syncViewportContent()
+}
+
+func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.Model, tea.Cmd) {
+	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
+	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
+	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
+		state.Status = "running"
+	}
+	if msg.CallID != "" && state != nil {
+		state.UpdateToolCall(msg.CallID, msg.ToolName, msg.Args, msg.Stream, msg.Chunk, msg.Final)
+	}
+	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", ""); panel != nil {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	}
+	m.syncSubagentSessionPanels(sessionKey)
 	m.syncViewportContent()
 	return m, nil
 }
 
 func (m *Model) handleSubagentPlan(msg tuievents.SubagentPlanMsg) (tea.Model, tea.Cmd) {
-	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
+	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
+	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
+	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
+		state.Status = "running"
+	}
 	entries := make([]planEntryState, len(msg.Entries))
 	for i, e := range msg.Entries {
 		entries[i] = planEntryState{Content: e.Content, Status: e.Status}
 	}
-	panel.UpdatePlan(entries)
+	if state != nil {
+		state.UpdatePlan(entries)
+	}
+	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", ""); panel != nil {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	}
+	m.syncSubagentSessionPanels(sessionKey)
 	m.syncViewportContent()
 	return m, nil
 }
 
 func (m *Model) handleSubagentDone(msg tuievents.SubagentDoneMsg) (tea.Model, tea.Cmd) {
+	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "")
-	panel.Status = msg.State
-	if subagentHasInlineAnchor(m, panel) {
-		panel.Expanded = false
+	var cmd tea.Cmd
+	if state != nil {
+		state.Status = msg.State
 	}
+	if subagentHasInlineAnchor(m, panel) {
+		m.scheduleInlineSubagentCollapse(panel)
+		cmd = m.ensurePanelAnimationTick()
+	}
+	m.syncSubagentSessionPanels(sessionKey)
 	m.syncInlineSubagentAnchorState(panel)
 	m.syncViewportContent()
-	return m, nil
+	return m, cmd
+}
+
+func (m *Model) scheduleInlineSubagentCollapse(panel *SubagentPanelBlock) {
+	if m == nil || panel == nil || !subagentHasInlineAnchor(m, panel) {
+		return
+	}
+	scheduleInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.CollapseFor, &panel.VisibleLines, panel.StartedAt, subagentOutputPreviewLines, time.Now())
+	m.syncInlineSubagentAnchorState(panel)
+}
+
+func (m *Model) toggleInlineSubagentPanel(panel *SubagentPanelBlock) {
+	if m == nil || panel == nil {
+		return
+	}
+	cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	panel.Expanded = !panel.Expanded
+	m.syncInlineSubagentAnchorState(panel)
 }
 
 func (m *Model) findInlineSubagentPanelByAnchorBlockID(blockID string) *SubagentPanelBlock {
@@ -124,17 +371,15 @@ func (m *Model) findInlineSubagentPanelByAnchorBlockID(blockID string) *Subagent
 	if blockID == "" {
 		return nil
 	}
-	for _, candidate := range m.subagentBlockIDs {
-		panel, _ := m.doc.Find(candidate).(*SubagentPanelBlock)
-		if panel == nil {
-			continue
-		}
-		callID := strings.TrimSpace(panel.CallID)
-		if callID == "" {
-			continue
-		}
-		if strings.TrimSpace(m.callAnchorIndex[callID]) == blockID {
-			return panel
+	for sessionKey := range m.subagentSessionRefs {
+		for _, panel := range m.subagentPanelsForSession(sessionKey) {
+			callID := strings.TrimSpace(panel.CallID)
+			if callID == "" {
+				continue
+			}
+			if strings.TrimSpace(m.callAnchorIndex[callID]) == blockID {
+				return panel
+			}
 		}
 	}
 	return nil
@@ -144,7 +389,14 @@ func (m *Model) syncInlineSubagentAnchorState(panel *SubagentPanelBlock) {
 	if m == nil || panel == nil {
 		return
 	}
-	callID := strings.TrimSpace(panel.CallID)
+	m.syncInlineSubagentAnchorLabel(strings.TrimSpace(panel.CallID), panel.Expanded)
+}
+
+func (m *Model) syncInlineSubagentAnchorLabel(callID string, expanded bool) {
+	if m == nil {
+		return
+	}
+	callID = strings.TrimSpace(callID)
 	if callID == "" {
 		return
 	}
@@ -156,7 +408,7 @@ func (m *Model) syncInlineSubagentAnchorState(panel *SubagentPanelBlock) {
 	if tb == nil {
 		return
 	}
-	tb.Raw = inlineBashAnchorLabel(tb.Raw, panel.Expanded)
+	tb.Raw = inlineBashAnchorLabel(tb.Raw, expanded)
 }
 
 func subagentHasInlineAnchor(m *Model, panel *SubagentPanelBlock) bool {

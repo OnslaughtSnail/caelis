@@ -2,6 +2,7 @@ package runservice
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func (s *stubTaskManager) List(context.Context) ([]task.Snapshot, error) {
 }
 
 func TestSelfSpawnToolStartsSelfChildSession(t *testing.T) {
-	toolImpl, err := NewSelfSpawnTool()
+	toolImpl, err := NewSelfSpawnTool("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,14 +63,14 @@ func TestSelfSpawnToolStartsSelfChildSession(t *testing.T) {
 	ctx := task.WithManager(context.Background(), manager)
 	result, err := toolImpl.Run(ctx, map[string]any{
 		"agent":         "self",
-		"task":          "child task",
+		"prompt":        "child task",
 		"yield_seconds": 2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manager.lastStart.Task != "child task" {
-		t.Fatalf("expected child task prompt, got %q", manager.lastStart.Task)
+	if manager.lastStart.Prompt != "child task" {
+		t.Fatalf("expected child task prompt, got %q", manager.lastStart.Prompt)
 	}
 	if manager.lastStart.Kind != task.KindSpawn {
 		t.Fatalf("expected spawn kind, got %q", manager.lastStart.Kind)
@@ -85,5 +86,37 @@ func TestSelfSpawnToolStartsSelfChildSession(t *testing.T) {
 	}
 	if result["task_id"] != "task-1" {
 		t.Fatalf("expected task_id=task-1, got %#v", result["task_id"])
+	}
+}
+
+func TestSelfSpawnToolRejectsLegacyContinuationArgs(t *testing.T) {
+	toolImpl, err := NewSelfSpawnTool("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := task.WithManager(context.Background(), &stubTaskManager{})
+	_, err = toolImpl.Run(ctx, map[string]any{
+		"prompt":     "child task",
+		"session_id": "child-1",
+	})
+	if err == nil {
+		t.Fatal("expected legacy continuation args to be rejected")
+	}
+	if !strings.Contains(err.Error(), "TASK write") {
+		t.Fatalf("expected migration hint to TASK write, got %v", err)
+	}
+}
+
+func TestSelfSpawnToolDeclarationOmitsLegacyContinuationArgs(t *testing.T) {
+	toolImpl, err := NewSelfSpawnTool("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := toolImpl.Declaration()
+	props, _ := decl.Parameters["properties"].(map[string]any)
+	for _, legacy := range []string{"session", "session_id", "new_session"} {
+		if _, ok := props[legacy]; ok {
+			t.Fatalf("did not expect legacy arg %q in SPAWN declaration", legacy)
+		}
 	}
 }

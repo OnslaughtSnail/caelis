@@ -133,10 +133,7 @@ func composerWindowStart(cursorRow int, totalRows int, maxRows int) int {
 	if maxRows <= 0 || totalRows <= maxRows {
 		return 0
 	}
-	start := cursorRow - maxRows + 1
-	if start < 0 {
-		start = 0
-	}
+	start := max(cursorRow-maxRows+1, 0)
 	maxStart := totalRows - maxRows
 	if start > maxStart {
 		start = maxStart
@@ -203,13 +200,8 @@ func wrapComposerRows(attachment string, value string, cursor int, width int) ([
 				rowEnd := globalIndex + segEnd
 				if !cursorAssigned && cursor >= rowStart && cursor <= rowEnd {
 					cursorRow = rowIndex
-					consumed := cursor - rowStart
-					if consumed < 0 {
-						consumed = 0
-					}
-					if consumed > segEnd-segStart {
-						consumed = segEnd - segStart
-					}
+					consumed := max(cursor-rowStart, 0)
+					consumed = min(consumed, segEnd-segStart)
 					cursorCol = displayColumns(rowPrefix + string(runes[segStart:segStart+consumed]))
 					cursorAssigned = true
 				}
@@ -245,7 +237,7 @@ func wrapComposerRows(attachment string, value string, cursor int, width int) ([
 	return rows, cursorRow, cursorCol
 }
 
-func desiredComposerRows(value string, attachment string, width int, maxRows int) int {
+func desiredComposerRows(value string, _ string, width int, maxRows int) int {
 	rows, _, _ := wrapComposerRows("", value, len([]rune(value)), width)
 	if len(rows) < 1 {
 		return 1
@@ -262,10 +254,7 @@ func (m *Model) textareaCursorIndex() int {
 		return 0
 	}
 	lines := strings.Split(value, "\n")
-	row := m.textarea.Line()
-	if row < 0 {
-		row = 0
-	}
+	row := max(m.textarea.Line(), 0)
 	if row >= len(lines) {
 		row = len(lines) - 1
 	}

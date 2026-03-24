@@ -11,7 +11,7 @@ import (
 func TestPrepareEvent_AnnotatesEventType(t *testing.T) {
 	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-prepare-event-type"}
 	ev := &session.Event{
-		Message: model.Message{Role: model.RoleAssistant, Text: "ok"},
+		Message: model.NewTextMessage(model.RoleAssistant, "ok"),
 	}
 
 	prepareEvent(context.Background(), sess, ev)
