@@ -31,6 +31,7 @@ type subagentProjectionTarget struct {
 	SpawnID       string
 	AttachTarget  string
 	CallID        string
+	AnchorTool    string
 	Agent         string
 }
 
@@ -86,6 +87,7 @@ func (c *cliConsole) projectSubagentDomainUpdate(update subagentDomainUpdate) []
 			AttachTarget: target.AttachTarget,
 			Agent:        target.Agent,
 			CallID:       target.CallID,
+			AnchorTool:   target.AnchorTool,
 			ClaimAnchor:  update.ClaimAnchor,
 			Provisional:  update.Provisional,
 		}}
@@ -128,6 +130,7 @@ func renderSubagentDomainUpdates(updates []subagentDomainUpdate) []any {
 				AttachTarget: target.AttachTarget,
 				Agent:        target.Agent,
 				CallID:       target.CallID,
+				AnchorTool:   target.AnchorTool,
 				ClaimAnchor:  update.ClaimAnchor,
 				Provisional:  update.Provisional,
 			})
@@ -233,6 +236,7 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 		SpawnID:       spawnID,
 		AttachTarget:  attachTarget,
 		CallID:        strings.TrimSpace(resp.ID),
+		AnchorTool:    tool.SpawnToolName,
 		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
 	}
 	if target.Agent == "" {
@@ -247,6 +251,70 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 		ApprovalTool:    approvalTool,
 		ApprovalCommand: approvalCmd,
 	}, true
+}
+
+func subagentDomainUpdatesFromTaskToolResponse(rootSessionID string, resp *model.ToolResponse, callArgs map[string]any) []subagentDomainUpdate {
+	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.TaskToolName) {
+		return nil
+	}
+	spawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+	if spawnID == "" {
+		return nil
+	}
+	state := strings.ToLower(strings.TrimSpace(firstNonEmpty(resp.Result, "progress_state", "state")))
+	if state == "" {
+		return nil
+	}
+	callID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_parent_tool_call_id"))
+	panelSpawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_spawn_id"))
+	if panelSpawnID == "" {
+		panelSpawnID = spawnID
+	}
+	anchorTool := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_anchor_tool"))
+	if anchorTool == "" {
+		anchorTool = tool.SpawnToolName
+	}
+	target := subagentProjectionTarget{
+		RootSessionID: strings.TrimSpace(rootSessionID),
+		SpawnID:       panelSpawnID,
+		AttachTarget:  strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id", "_ui_delegation_id", "delegation_id")),
+		CallID:        callID,
+		AnchorTool:    anchorTool,
+		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+	}
+	if target.Agent == "" {
+		target.Agent = "self"
+	}
+	updates := make([]subagentDomainUpdate, 0, 2)
+	action := strings.ToLower(strings.TrimSpace(asString(callArgs["action"])))
+	if panelSpawnID != spawnID || action == "write" {
+		updates = append(updates, subagentDomainUpdate{
+			Kind:        subagentDomainBootstrap,
+			Target:      target,
+			Status:      state,
+			ClaimAnchor: callID != "",
+		})
+	}
+	switch state {
+	case "completed", "failed", "interrupted", "timed_out":
+		updates = append(updates, subagentDomainUpdate{
+			Kind:   subagentDomainTerminal,
+			Target: target,
+			Status: state,
+		})
+		return updates
+	}
+	update := subagentDomainUpdate{
+		Kind:   subagentDomainStatus,
+		Target: target,
+		Status: state,
+	}
+	if state == "waiting_approval" {
+		update.ApprovalTool = strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_approval_tool", "approval_tool"))
+		update.ApprovalCommand = strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_approval_command", "approval_command"))
+	}
+	updates = append(updates, update)
+	return updates
 }
 
 func subagentDomainUpdateFromSpawnToolCall(rootSessionID string, call model.ToolCall, args map[string]any, defaultAgent string) (subagentDomainUpdate, bool) {
@@ -271,12 +339,92 @@ func subagentDomainUpdateFromSpawnToolCall(rootSessionID string, call model.Tool
 			SpawnID:       callID,
 			AttachTarget:  callID,
 			CallID:        callID,
+			AnchorTool:    tool.SpawnToolName,
 			Agent:         agent,
 		},
 		Status:      "running",
 		ClaimAnchor: true,
 		Provisional: true,
 	}, true
+}
+
+func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.ToolResponse) []subagentDomainUpdate {
+	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName) || !hasToolError(resp.Result) {
+		return nil
+	}
+	errText := strings.TrimSpace(firstNonEmpty(resp.Result, "error", "msg", "message"))
+	if errText == "" {
+		return nil
+	}
+	childSessionID := strings.TrimSpace(firstNonEmpty(
+		resp.Result,
+		"_ui_child_session_id",
+		"child_session_id",
+	))
+	spawnID := childSessionID
+	provisional := false
+	if spawnID == "" {
+		spawnID = strings.TrimSpace(resp.ID)
+		provisional = true
+	}
+	if spawnID == "" {
+		return nil
+	}
+	attachTarget := strings.TrimSpace(firstNonEmpty(
+		resp.Result,
+		"_ui_child_session_id",
+		"child_session_id",
+		"_ui_delegation_id",
+		"delegation_id",
+	))
+	if provisional && attachTarget == "" {
+		attachTarget = strings.TrimSpace(resp.ID)
+	}
+	target := subagentProjectionTarget{
+		RootSessionID: strings.TrimSpace(rootSessionID),
+		SpawnID:       spawnID,
+		AttachTarget:  attachTarget,
+		CallID:        strings.TrimSpace(resp.ID),
+		AnchorTool:    tool.SpawnToolName,
+		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+	}
+	if target.Agent == "" {
+		target.Agent = "self"
+	}
+	return []subagentDomainUpdate{
+		{
+			Kind:        subagentDomainBootstrap,
+			Target:      target,
+			ClaimAnchor: true,
+			Provisional: provisional,
+		},
+		{
+			Kind:       subagentDomainToolCall,
+			Target:     target,
+			ToolName:   tool.SpawnToolName,
+			ToolCallID: strings.TrimSpace(resp.ID),
+			Chunk:      errText,
+			Stream:     "stderr",
+			Final:      true,
+		},
+		{
+			Kind:   subagentDomainTerminal,
+			Target: target,
+			Status: subagentTerminalStateFromError(errText),
+		},
+	}
+}
+
+func subagentTerminalStateFromError(errText string) string {
+	errText = strings.ToLower(strings.TrimSpace(errText))
+	switch {
+	case strings.Contains(errText, "context deadline exceeded"), strings.Contains(errText, "deadline exceeded"), strings.Contains(errText, "timed out"), strings.Contains(errText, "timeout"):
+		return "timed_out"
+	case strings.Contains(errText, "context canceled"), strings.Contains(errText, "cancelled"), strings.Contains(errText, "canceled"):
+		return "interrupted"
+	default:
+		return "failed"
+	}
 }
 
 func syntheticSubagentDomainUpdate(target subagentProjectionTarget, ev *session.Event) subagentDomainUpdate {
@@ -359,8 +507,8 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 	if !ok || strings.TrimSpace(meta.ParentToolCall) == "" {
 		return nil
 	}
-	// Only handle SPAWN child events (identified by parent tool name).
-	if meta.ParentToolName != tool.SpawnToolName {
+	// Only handle SPAWN child events and TASK-write continuations.
+	if !strings.EqualFold(meta.ParentToolName, tool.SpawnToolName) && !strings.EqualFold(meta.ParentToolName, tool.TaskToolName) {
 		return nil
 	}
 	attachTarget := strings.TrimSpace(meta.ChildSessionID)
@@ -369,11 +517,17 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 	}
 
 	spawnID := strings.TrimSpace(meta.ChildSessionID)
-	if spawnID == "" {
-		spawnID = strings.TrimSpace(update.SessionID)
-	}
-	if spawnID == "" {
-		spawnID = meta.ParentToolCall
+	anchorTool := tool.SpawnToolName
+	if strings.EqualFold(meta.ParentToolName, tool.TaskToolName) && strings.TrimSpace(meta.ParentToolCall) != "" {
+		spawnID = strings.TrimSpace(meta.ParentToolCall)
+		anchorTool = runtime.SubagentContinuationAnchorTool
+	} else {
+		if spawnID == "" {
+			spawnID = strings.TrimSpace(update.SessionID)
+		}
+		if spawnID == "" {
+			spawnID = meta.ParentToolCall
+		}
 	}
 
 	p.mu.Lock()
@@ -403,6 +557,7 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 					AttachTarget: attachTarget,
 					Agent:        agentName,
 					CallID:       meta.ParentToolCall,
+					AnchorTool:   anchorTool,
 				},
 				Status:      string(info.Status),
 				ClaimAnchor: false,
@@ -423,6 +578,7 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 					AttachTarget: attachTarget,
 					Agent:        agentName,
 					CallID:       meta.ParentToolCall,
+					AnchorTool:   anchorTool,
 				},
 				Status: string(info.Status),
 			}}
@@ -439,6 +595,7 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 		AttachTarget: attachTarget,
 		Agent:        state.agent,
 		CallID:       meta.ParentToolCall,
+		AnchorTool:   anchorTool,
 	}
 
 	// Emit SubagentStartMsg on first event for this spawn.

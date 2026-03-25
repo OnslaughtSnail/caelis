@@ -965,7 +965,7 @@ func taskActionCallDisplayName(action string) string {
 	case "status":
 		return "CHECK"
 	case "write":
-		return "WRITE"
+		return runtime.SubagentContinuationAnchorTool
 	case "cancel":
 		return "CANCEL"
 	case "list":

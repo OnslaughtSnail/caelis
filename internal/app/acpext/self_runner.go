@@ -19,6 +19,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 )
 
 type AdapterFactory func(*internalacp.Conn) (internalacp.Adapter, error)
@@ -358,7 +359,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 			Workspace:           r.resolveWorkspaceRoot(),
 			ClientInfo:          nil,
 			OnUpdate:            onUpdate,
-			OnPermissionRequest: r.permissionRequestHandler(ctx, strings.TrimSpace(desc.ID), func() string { return strings.TrimSpace(sessionIDForPermissions) }, metaBase.DelegationID, target.childCWD),
+			OnPermissionRequest: r.permissionRequestHandler(ctx, strings.TrimSpace(desc.ID), func() string { return strings.TrimSpace(sessionIDForPermissions) }, metaBase, target.childCWD),
 		})
 		if err != nil {
 			return nil, nil, err
@@ -422,6 +423,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		activeBridge.FlushAssistant(ctx)
 	}
 	if err == nil {
+		r.emitLifecycleState(ctx, actualSessionID, meta, desc.ID, runtime.RunLifecycleStatusCompleted, nil)
 		if snapshot, ok := r.shared.tracker.inspect(desc.ID, actualSessionID); ok {
 			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), snapshot.Assistant)
 		} else {
@@ -441,7 +443,7 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		Workspace:           r.resolveWorkspaceRoot(),
 		WorkDir:             r.resolveWorkspaceCWD(),
 		OnUpdate:            onUpdate,
-		OnPermissionRequest: r.permissionRequestHandler(ctx, "self", sessionIDProvider, meta.DelegationID, firstNonEmpty(childCWD, r.resolveWorkspaceCWD())),
+		OnPermissionRequest: r.permissionRequestHandler(ctx, "self", sessionIDProvider, meta, firstNonEmpty(childCWD, r.resolveWorkspaceCWD())),
 	}, clientReader, clientWriter)
 	if err != nil {
 		return nil, nil, err
@@ -515,14 +517,16 @@ func (r *selfACPSubagentRunner) delegationMetadata(ctx context.Context, childSes
 		if existing.ChildSessionID != "" {
 			meta.ChildSessionID = existing.ChildSessionID
 		}
-		if existing.ParentToolCall != "" {
-			meta.ParentToolCall = existing.ParentToolCall
-		}
-		if existing.ParentToolName != "" {
-			meta.ParentToolName = existing.ParentToolName
-		}
-		if existing.DelegationID != "" {
-			meta.DelegationID = existing.DelegationID
+		if !runtime.IsSubagentContinuation(ctx) {
+			if existing.ParentToolCall != "" {
+				meta.ParentToolCall = existing.ParentToolCall
+			}
+			if existing.ParentToolName != "" {
+				meta.ParentToolName = existing.ParentToolName
+			}
+			if existing.DelegationID != "" {
+				meta.DelegationID = existing.DelegationID
+			}
 		}
 	}
 	return meta
@@ -725,8 +729,8 @@ func (r *selfACPSubagentRunner) inspectPersisted(ctx context.Context, childSessi
 	return result, true, nil
 }
 
-func (r *selfACPSubagentRunner) persistFailureState(ctx context.Context, childSessionID string, meta runtime.DelegationMetadata, status runtime.RunLifecycleStatus, cause error) {
-	if r == nil || r.store == nil || r.parent == nil {
+func (r *selfACPSubagentRunner) emitLifecycleState(ctx context.Context, childSessionID string, meta runtime.DelegationMetadata, agentName string, status runtime.RunLifecycleStatus, cause error) {
+	if r == nil || r.parent == nil {
 		return
 	}
 	childSessionID = strings.TrimSpace(childSessionID)
@@ -738,14 +742,28 @@ func (r *selfACPSubagentRunner) persistFailureState(ctx context.Context, childSe
 		UserID:  r.parent.UserID,
 		ID:      childSessionID,
 	}
-	if _, err := r.store.GetOrCreate(ctx, childSession); err != nil {
-		return
-	}
 	ev := runtime.LifecycleEvent(childSession, status, "self_acp", cause)
 	if ev == nil {
 		return
 	}
-	_ = r.store.AppendEvent(ctx, childSession, annotateDelegationEvent(ev, meta))
+	ev = annotateAgentEventMeta(annotateDelegationEvent(ev, meta), agentName)
+	if r.store != nil {
+		if _, err := r.store.GetOrCreate(ctx, childSession); err == nil {
+			_ = r.store.AppendEvent(ctx, childSession, ev)
+		}
+	}
+	sessionstream.Emit(ctx, childSessionID, ev)
+}
+
+func (r *selfACPSubagentRunner) persistFailureState(ctx context.Context, childSessionID string, meta runtime.DelegationMetadata, status runtime.RunLifecycleStatus, cause error) {
+	if r == nil || r.parent == nil {
+		return
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return
+	}
+	r.emitLifecycleState(ctx, childSessionID, meta, "", status, cause)
 }
 
 func annotateDelegationEvent(ev *session.Event, meta runtime.DelegationMetadata) *session.Event {
@@ -773,8 +791,23 @@ func annotateDelegationEvent(ev *session.Event, meta runtime.DelegationMetadata)
 	return ev
 }
 
-func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, agentName string, sessionID func() string, delegationID string, childCWD string) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+func approvalLifecycleMeta(parentSessionID, childSessionID, delegationID string, base runtime.DelegationMetadata) runtime.DelegationMetadata {
+	meta := base
+	if meta.ParentSessionID == "" {
+		meta.ParentSessionID = strings.TrimSpace(parentSessionID)
+	}
+	if meta.ChildSessionID == "" {
+		meta.ChildSessionID = strings.TrimSpace(childSessionID)
+	}
+	if meta.DelegationID == "" {
+		meta.DelegationID = strings.TrimSpace(delegationID)
+	}
+	return meta
+}
+
+func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, agentName string, sessionID func() string, meta runtime.DelegationMetadata, childCWD string) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
 	return func(reqCtx context.Context, req acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+		delegationID := strings.TrimSpace(meta.DelegationID)
 		if r != nil && r.shared != nil && r.shared.tracker != nil && sessionID != nil {
 			r.shared.tracker.markApprovalPending(agentName, sessionID(), delegationID, childCWD)
 		}
@@ -790,6 +823,9 @@ func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, ag
 				if err != nil {
 					return acpclient.RequestPermissionResponse{}, err
 				}
+				if allowed && r != nil && r.parent != nil && sessionID != nil {
+					r.emitLifecycleState(ctx, sessionID(), approvalLifecycleMeta(r.parent.ID, sessionID(), delegationID, meta), agentName, runtime.RunLifecycleStatusRunning, nil)
+				}
 				return permissionOutcome(req, allowed), nil
 			}
 		}
@@ -798,6 +834,9 @@ func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, ag
 			if err != nil {
 				return acpclient.RequestPermissionResponse{}, err
 			}
+			if allowed && r != nil && r.parent != nil && sessionID != nil {
+				r.emitLifecycleState(ctx, sessionID(), approvalLifecycleMeta(r.parent.ID, sessionID(), delegationID, meta), agentName, runtime.RunLifecycleStatusRunning, nil)
+			}
 			return permissionOutcome(req, allowed), nil
 		}
 		if !isToolAuthorization {
@@ -805,6 +844,9 @@ func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, ag
 				allowed, err := authorizer.AuthorizeTool(reqCtx, authorizationRequestFromACP(req))
 				if err != nil {
 					return acpclient.RequestPermissionResponse{}, err
+				}
+				if allowed && r != nil && r.parent != nil && sessionID != nil {
+					r.emitLifecycleState(ctx, sessionID(), approvalLifecycleMeta(r.parent.ID, sessionID(), delegationID, meta), agentName, runtime.RunLifecycleStatusRunning, nil)
 				}
 				return permissionOutcome(req, allowed), nil
 			}

@@ -18,6 +18,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 func TestHandleResumeEmitsSessionHintInTUI(t *testing.T) {
@@ -283,6 +284,165 @@ func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {
 	t.Fatal("expected async ACP load replay to populate subagent panel")
 }
 
+func TestCollectResumedSubagentTargets_PrefersTaskWriteContinuation(t *testing.T) {
+	events := []*session.Event{
+		{
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call-spawn-1",
+				Name: tool.SpawnToolName,
+				Result: map[string]any{
+					"child_session_id": "child-1",
+					"delegation_id":    "dlg-1",
+					"agent":            "copilot",
+					"state":            "running",
+				},
+			}),
+		},
+		{
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call-task-status-1",
+				Name: tool.TaskToolName,
+				Result: map[string]any{
+					"child_session_id":        "child-1",
+					"delegation_id":           "dlg-2",
+					"agent":                   "copilot",
+					"state":                   "running",
+					"_ui_spawn_id":            "call-task-write-1",
+					"_ui_parent_tool_call_id": "call-task-write-1",
+					"_ui_parent_tool_name":    tool.TaskToolName,
+					"_ui_anchor_tool":         runtime.SubagentContinuationAnchorTool,
+				},
+			}),
+		},
+	}
+
+	targets := collectResumedSubagentTargets(events)
+	if len(targets) != 1 {
+		t.Fatalf("expected one resumed target, got %#v", targets)
+	}
+	target := targets[0]
+	if target.SpawnID != "call-task-write-1" || target.SessionID != "child-1" {
+		t.Fatalf("expected continuation target to replace original spawn, got %+v", target)
+	}
+	if target.CallID != "call-task-write-1" || target.AnchorTool != runtime.SubagentContinuationAnchorTool {
+		t.Fatalf("expected continuation anchor metadata, got %+v", target)
+	}
+}
+
+func TestHandleResume_SkipsACPReplayWhenChildRunStateIsAlreadyCompleted(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.AppendEvent(context.Background(), parent, &session.Event{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "gemini",
+				"state":            "running",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if updater, ok := any(store).(session.StateUpdateStore); ok {
+		if err := updater.UpdateState(context.Background(), child, func(values map[string]any) (map[string]any, error) {
+			if values == nil {
+				values = map[string]any{}
+			}
+			values["runtime.lifecycle"] = map[string]any{
+				"status": string(runtime.RunLifecycleStatusCompleted),
+				"phase":  "run",
+			}
+			return values, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatal("expected state update store")
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: "resume-parent",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adapterCalls atomic.Int32
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "current",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		rt:             rt,
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			adapterCalls.Add(1)
+			return blockingResumeAdapter{}, nil
+		},
+	}
+
+	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := adapterCalls.Load(); got != 0 {
+		t.Fatalf("expected completed child run state to skip ACP replay, got %d adapter calls", got)
+	}
+}
+
+func TestShouldReplayResumedSubagentTarget_UsesChildSessionStateForContinuation(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	if _, err := store.GetOrCreate(context.Background(), child); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), child, runtime.LifecycleEvent(child, runtime.RunLifecycleStatusCompleted, "run", nil)); err != nil {
+		t.Fatal(err)
+	}
+
+	console := &cliConsole{
+		appName: "app",
+		userID:  "u",
+		rt:      rt,
+	}
+	if console.shouldReplayResumedSubagentTarget(context.Background(), resumedSubagentTarget{
+		SpawnID:   "call-task-write-1",
+		SessionID: "child-1",
+	}) {
+		t.Fatal("expected completed child continuation to skip ACP replay")
+	}
+}
+
 func TestHandleResume_SkipsACPReplayForCompletedSpawn(t *testing.T) {
 	store := inmemory.New()
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
@@ -376,6 +536,101 @@ func TestHandleResume_SkipsACPReplayForCompletedSpawn(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := adapterCalls.Load(); got != 0 {
 		t.Fatalf("expected completed spawn to skip ACP replay, got %d adapter calls", got)
+	}
+}
+
+func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), parent, &session.Event{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-uuid-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "gemini",
+				"state":            "running",
+				"task_id":          "task-1",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), parent, &session.Event{
+		ID:        "ev-parent-task-wait",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-task-1",
+			Name: "TASK",
+			Result: map[string]any{
+				"child_session_id": "child-uuid-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "gemini",
+				"state":            "completed",
+				"result":           "done",
+			},
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: "resume-parent",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var adapterCalls atomic.Int32
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "current",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			adapterCalls.Add(1)
+			return blockingResumeAdapter{}, nil
+		},
+	}
+
+	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := adapterCalls.Load(); got != 0 {
+		t.Fatalf("expected completed TASK wait result to skip ACP replay, got %d adapter calls", got)
+	}
+	foundDone := false
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.SubagentDoneMsg)
+		if !ok {
+			continue
+		}
+		if msg.SpawnID == "child-uuid-1" && msg.State == "completed" {
+			foundDone = true
+			break
+		}
+	}
+	if !foundDone {
+		t.Fatal("expected completed TASK wait result to finalize the original SPAWN panel")
 	}
 }
 

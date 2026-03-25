@@ -1393,7 +1393,7 @@ func TestDetachedSubagentStartupFailurePersistsFailedLifecycle(t *testing.T) {
 	}
 }
 
-func TestPrepareChildRunPreservesOriginalSpawnLineageForExistingSession(t *testing.T) {
+func TestPrepareChildRunUsesCurrentTaskWriteLineageForExistingSessionContinuation(t *testing.T) {
 	store := inmemory.New()
 	rt, err := New(Config{Store: store})
 	if err != nil {
@@ -1434,21 +1434,21 @@ func TestPrepareChildRunPreservesOriginalSpawnLineageForExistingSession(t *testi
 	}
 
 	ctx := toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write")
-	_, lineage, err := runner.prepareChildRun(ctx, agent.SubagentRunRequest{
+	_, lineage, err := runner.prepareChildRun(WithSubagentContinuation(ctx), agent.SubagentRunRequest{
 		SessionID: child.ID,
 		Prompt:    "follow up",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lineage.ParentToolCall != "call-spawn-original" {
-		t.Fatalf("expected original spawn call id preserved, got %q", lineage.ParentToolCall)
+	if lineage.ParentToolCall != "call-task-write" {
+		t.Fatalf("expected current TASK write call id, got %q", lineage.ParentToolCall)
 	}
-	if lineage.ParentToolName != tool.SpawnToolName {
-		t.Fatalf("expected original spawn tool preserved, got %q", lineage.ParentToolName)
+	if lineage.ParentToolName != tool.TaskToolName {
+		t.Fatalf("expected current TASK tool preserved, got %q", lineage.ParentToolName)
 	}
-	if lineage.DelegationID != "dlg-original" {
-		t.Fatalf("expected original delegation id preserved, got %q", lineage.DelegationID)
+	if lineage.DelegationID == "dlg-original" || lineage.DelegationID == "" {
+		t.Fatalf("expected fresh delegation id for continuation, got %q", lineage.DelegationID)
 	}
 }
 

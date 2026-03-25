@@ -14,12 +14,21 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 type stubSubagentRunner struct {
 	runResult     agent.SubagentRunResult
 	inspectResult agent.SubagentRunResult
 	inspectErr    error
+}
+
+type trackingSubagentRunner struct {
+	runCalls       int
+	lastRunRequest agent.SubagentRunRequest
+	runResult      agent.SubagentRunResult
+	inspectCalls   int
+	inspectResults []agent.SubagentRunResult
 }
 
 type stubTaskController struct {
@@ -32,6 +41,25 @@ func (s stubSubagentRunner) RunSubagent(context.Context, agent.SubagentRunReques
 
 func (s stubSubagentRunner) InspectSubagent(context.Context, string) (agent.SubagentRunResult, error) {
 	return s.inspectResult, s.inspectErr
+}
+
+func (s *trackingSubagentRunner) RunSubagent(_ context.Context, req agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
+	s.runCalls++
+	s.lastRunRequest = req
+	return s.runResult, nil
+}
+
+func (s *trackingSubagentRunner) InspectSubagent(context.Context, string) (agent.SubagentRunResult, error) {
+	if s.inspectCalls < len(s.inspectResults) {
+		result := s.inspectResults[s.inspectCalls]
+		s.inspectCalls++
+		return result, nil
+	}
+	s.inspectCalls++
+	if len(s.inspectResults) == 0 {
+		return agent.SubagentRunResult{}, nil
+	}
+	return s.inspectResults[len(s.inspectResults)-1], nil
 }
 
 func (s *stubTaskController) Wait(context.Context, *task.Record, time.Duration) (task.Snapshot, error) {
@@ -668,6 +696,116 @@ func TestSubagentTaskController_StatusKeepsStaleSilentRunRunning(t *testing.T) {
 	}
 	if !snapshot.Running || snapshot.State != task.StateRunning {
 		t.Fatalf("expected quiet running subagent to remain running, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+}
+
+func TestSubagentTaskController_WriteRejectsRunningSubagent(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-running-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now(),
+		HeartbeatAt: time.Now(),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	runner := &trackingSubagentRunner{
+		inspectResults: []agent.SubagentRunResult{{
+			SessionID: "child-1",
+			State:     string(task.StateRunning),
+			Running:   true,
+			UpdatedAt: time.Now(),
+		}},
+	}
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "dlg-1",
+		agent:        "copilot",
+		childCWD:     "/tmp",
+		runner:       runner,
+	}
+
+	_, err := controller.Write(toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write"), record, "yes", 0)
+	if err == nil || !strings.Contains(err.Error(), "only allowed for completed spawn subagents") {
+		t.Fatalf("expected running TASK write rejection, got %v", err)
+	}
+	if runner.runCalls != 0 {
+		t.Fatalf("expected TASK write to stop before RunSubagent, got %d run calls", runner.runCalls)
+	}
+}
+
+func TestSubagentTaskController_WriteStoresContinuationPanelMetadata(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-completed-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateCompleted,
+		Running:     false,
+		CreatedAt:   time.Now().Add(-time.Minute),
+		HeartbeatAt: time.Now().Add(-time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Spec: map[string]any{
+			taskSpecChildSession: "child-1",
+			taskSpecDelegationID: "dlg-old",
+			taskSpecAgent:        "copilot",
+			taskSpecChildCWD:     "/tmp",
+		},
+	}
+	runner := &trackingSubagentRunner{
+		inspectResults: []agent.SubagentRunResult{
+			{
+				SessionID: "child-1",
+				State:     string(task.StateCompleted),
+				Running:   false,
+				UpdatedAt: time.Now().Add(-time.Minute),
+			},
+			{
+				SessionID:    "child-1",
+				DelegationID: "dlg-new",
+				Agent:        "copilot",
+				ChildCWD:     "/tmp",
+				State:        string(task.StateRunning),
+				Running:      true,
+				UpdatedAt:    time.Now(),
+			},
+		},
+		runResult: agent.SubagentRunResult{
+			SessionID:    "child-1",
+			DelegationID: "dlg-new",
+			Agent:        "copilot",
+			ChildCWD:     "/tmp",
+			State:        string(task.StateRunning),
+			Running:      true,
+			UpdatedAt:    time.Now(),
+		},
+	}
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "dlg-old",
+		agent:        "copilot",
+		childCWD:     "/tmp",
+		runner:       runner,
+	}
+
+	snapshot, err := controller.Write(toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write"), record, "follow up", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Running || snapshot.State != task.StateRunning {
+		t.Fatalf("expected continued subagent to be running, got state=%q running=%v", snapshot.State, snapshot.Running)
+	}
+	if got := snapshot.Result["_ui_spawn_id"]; got != "call-task-write" {
+		t.Fatalf("expected continuation spawn id from TASK write call, got %#v", snapshot.Result)
+	}
+	if got := snapshot.Result["_ui_parent_tool_call_id"]; got != "call-task-write" {
+		t.Fatalf("expected continuation parent call id, got %#v", snapshot.Result)
+	}
+	if got := snapshot.Result["_ui_anchor_tool"]; got != SubagentContinuationAnchorTool {
+		t.Fatalf("expected WRITE anchor metadata, got %#v", snapshot.Result)
+	}
+	if runner.lastRunRequest.SessionID != "child-1" {
+		t.Fatalf("expected continuation to reuse child session, got %+v", runner.lastRunRequest)
 	}
 }
 

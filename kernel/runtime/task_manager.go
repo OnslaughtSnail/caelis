@@ -45,6 +45,10 @@ const (
 	taskSpecChildCWD      = "child_cwd"
 	taskSpecPrompt        = "prompt"
 	taskSpecTimeout       = "timeout_seconds"
+	taskSpecParentToolCall = "parent_tool_call_id"
+	taskSpecParentToolName = "parent_tool_name"
+	taskSpecUISpawnID      = "ui_spawn_id"
+	taskSpecUIAnchorTool   = "ui_anchor_tool"
 
 	// taskSpecLegacyPrompt is the pre-rename key for the spawn prompt text.
 	// Kept for backward-compatible reads of persisted task records.

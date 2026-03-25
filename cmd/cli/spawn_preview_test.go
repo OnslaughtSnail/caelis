@@ -201,6 +201,118 @@ func TestSubagentDomainUpdateFromSpawnToolResponse_TaskOnlyStaysProvisional(t *t
 	}
 }
 
+func TestSubagentDomainUpdatesFromTaskToolResponse_Terminal(t *testing.T) {
+	updates := subagentDomainUpdatesFromTaskToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-task-1",
+		Name: tool.TaskToolName,
+		Result: map[string]any{
+			"child_session_id": "child-1",
+			"delegation_id":    "dlg-1",
+			"agent":            "gemini",
+			"state":            "completed",
+		},
+	}, map[string]any{"action": "wait"})
+	if len(updates) != 1 {
+		t.Fatalf("expected one TASK wait update, got %#v", updates)
+	}
+	update := updates[0]
+	if update.Kind != subagentDomainTerminal {
+		t.Fatalf("expected terminal kind, got %q", update.Kind)
+	}
+	if update.Target.RootSessionID != "parent-1" || update.Target.SpawnID != "child-1" {
+		t.Fatalf("unexpected target: %+v", update.Target)
+	}
+	if update.Target.AttachTarget != "child-1" || update.Target.Agent != "gemini" {
+		t.Fatalf("unexpected target metadata: %+v", update.Target)
+	}
+	if update.Status != "completed" {
+		t.Fatalf("expected completed status, got %q", update.Status)
+	}
+}
+
+func TestSubagentDomainUpdatesFromSpawnToolError_Timeout(t *testing.T) {
+	updates := subagentDomainUpdatesFromSpawnToolError("parent-1", &model.ToolResponse{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"agent": "gemini",
+			"error": "context deadline exceeded",
+		},
+	})
+	if len(updates) != 3 {
+		t.Fatalf("expected bootstrap/tool/terminal updates, got %#v", updates)
+	}
+	if updates[0].Kind != subagentDomainBootstrap || updates[0].Target.SpawnID != "call-spawn-1" {
+		t.Fatalf("unexpected bootstrap update %#v", updates[0])
+	}
+	if updates[1].Kind != subagentDomainToolCall || updates[1].Stream != "stderr" || updates[1].Chunk != "context deadline exceeded" {
+		t.Fatalf("unexpected tool update %#v", updates[1])
+	}
+	if updates[2].Kind != subagentDomainTerminal || updates[2].Status != "timed_out" {
+		t.Fatalf("unexpected terminal update %#v", updates[2])
+	}
+}
+
+func TestSubagentDomainUpdatesFromTaskToolResponse_Status(t *testing.T) {
+	updates := subagentDomainUpdatesFromTaskToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-task-1",
+		Name: tool.TaskToolName,
+		Result: map[string]any{
+			"child_session_id":     "child-1",
+			"delegation_id":        "dlg-1",
+			"agent":                "gemini",
+			"state":                "waiting_approval",
+			"_ui_approval_tool":    "BASH",
+			"_ui_approval_command": "rm -rf /tmp/demo",
+		},
+	}, map[string]any{"action": "status"})
+	if len(updates) != 1 {
+		t.Fatalf("expected one TASK status update, got %#v", updates)
+	}
+	update := updates[0]
+	if update.Kind != subagentDomainStatus {
+		t.Fatalf("expected status kind, got %q", update.Kind)
+	}
+	if update.Status != "waiting_approval" {
+		t.Fatalf("expected waiting_approval status, got %q", update.Status)
+	}
+	if update.ApprovalTool != "BASH" || update.ApprovalCommand != "rm -rf /tmp/demo" {
+		t.Fatalf("unexpected approval context: %+v", update)
+	}
+}
+
+func TestSubagentDomainUpdatesFromTaskToolResponse_WriteContinuationBootstrapsNewPanel(t *testing.T) {
+	updates := subagentDomainUpdatesFromTaskToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-task-write-1",
+		Name: tool.TaskToolName,
+		Result: map[string]any{
+			"child_session_id":        "child-1",
+			"delegation_id":           "dlg-1",
+			"agent":                   "copilot",
+			"state":                   "running",
+			"_ui_spawn_id":            "call-task-write-1",
+			"_ui_parent_tool_call_id": "call-task-write-1",
+			"_ui_parent_tool_name":    tool.TaskToolName,
+			"_ui_anchor_tool":         runtime.SubagentContinuationAnchorTool,
+		},
+	}, map[string]any{"action": "write"})
+	if len(updates) != 2 {
+		t.Fatalf("expected bootstrap + status for TASK write continuation, got %#v", updates)
+	}
+	if updates[0].Kind != subagentDomainBootstrap {
+		t.Fatalf("expected first update bootstrap, got %#v", updates[0])
+	}
+	if updates[0].Target.SpawnID != "call-task-write-1" || updates[0].Target.AttachTarget != "child-1" {
+		t.Fatalf("unexpected continuation bootstrap target %+v", updates[0].Target)
+	}
+	if updates[0].Target.AnchorTool != runtime.SubagentContinuationAnchorTool || !updates[0].ClaimAnchor {
+		t.Fatalf("expected WRITE anchor claim, got %#v", updates[0])
+	}
+	if updates[1].Kind != subagentDomainStatus || updates[1].Status != "running" {
+		t.Fatalf("expected running status update, got %#v", updates[1])
+	}
+}
+
 func TestSpawnPreviewProjector_UsesAgentIDFromMeta(t *testing.T) {
 	proj := newSpawnPreviewProjector()
 	msgs := proj.Project(sessionstream.Update{
@@ -344,6 +456,43 @@ func TestSpawnPreviewProjector_ProjectsReasoningStream(t *testing.T) {
 	}
 	if !reasoningFound {
 		t.Fatal("expected SubagentStreamMsg for reasoning")
+	}
+}
+
+func TestSpawnPreviewProjector_ProjectsTaskWriteContinuationToNewPanel(t *testing.T) {
+	proj := newSpawnPreviewProjector()
+	msgs := proj.Project(sessionstream.Update{
+		SessionID: "child-1",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "continued"),
+			Meta: map[string]any{
+				"parent_session_id":   "parent",
+				"child_session_id":    "child-1",
+				"parent_tool_call_id": "call-task-write-1",
+				"parent_tool_name":    tool.TaskToolName,
+				"delegation_id":       "dlg-2",
+				"agent_id":            "copilot",
+			},
+		},
+	})
+	var start tuievents.SubagentStartMsg
+	var stream tuievents.SubagentStreamMsg
+	for _, raw := range msgs {
+		switch msg := raw.(type) {
+		case tuievents.SubagentStartMsg:
+			start = msg
+		case tuievents.SubagentStreamMsg:
+			stream = msg
+		}
+	}
+	if start.SpawnID != "call-task-write-1" || start.CallID != "call-task-write-1" {
+		t.Fatalf("expected continuation to key off TASK write call, got %+v", start)
+	}
+	if start.AttachTarget != "child-1" || start.AnchorTool != runtime.SubagentContinuationAnchorTool {
+		t.Fatalf("unexpected continuation start metadata %+v", start)
+	}
+	if stream.SpawnID != "call-task-write-1" || stream.Stream != "assistant" || stream.Chunk == "" {
+		t.Fatalf("unexpected continuation stream %+v", stream)
 	}
 }
 

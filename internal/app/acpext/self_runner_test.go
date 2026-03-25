@@ -216,7 +216,7 @@ func TestPermissionRequestHandler_PrefersToolAuthorizerForFileEdits(t *testing.T
 	kind := internalacp.ToolKindEdit
 
 	runner := &selfACPSubagentRunner{}
-	handler := runner.permissionRequestHandler(ctx, "self", func() string { return "child" }, "delegation-1", "/workspace")
+	handler := runner.permissionRequestHandler(ctx, "self", func() string { return "child" }, runtime.DelegationMetadata{DelegationID: "delegation-1"}, "/workspace")
 	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{
 		SessionID: "child",
 		ToolCall: acpclient.ToolCallUpdate{
@@ -355,7 +355,7 @@ func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 	}
 }
 
-func TestSelfACPSubagentRunner_PreservesOriginalSpawnLineageWhenReusingChildSession(t *testing.T) {
+func TestSelfACPSubagentRunner_UsesCurrentTaskWriteLineageWhenReusingChildSession(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{Store: store})
 	if err != nil {
@@ -389,17 +389,17 @@ func TestSelfACPSubagentRunner_PreservesOriginalSpawnLineageWhenReusingChildSess
 		parent:  parent,
 	}
 	meta := runner.delegationMetadata(
-		toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write"),
+		runtime.WithSubagentContinuation(toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write")),
 		child.ID,
 	)
-	if meta.ParentToolCall != "call-spawn-original" {
-		t.Fatalf("expected original spawn call id preserved, got %q", meta.ParentToolCall)
+	if meta.ParentToolCall != "call-task-write" {
+		t.Fatalf("expected current TASK write call id, got %q", meta.ParentToolCall)
 	}
-	if meta.ParentToolName != tool.SpawnToolName {
-		t.Fatalf("expected original spawn tool preserved, got %q", meta.ParentToolName)
+	if meta.ParentToolName != tool.TaskToolName {
+		t.Fatalf("expected current TASK tool preserved, got %q", meta.ParentToolName)
 	}
-	if meta.DelegationID != "dlg-original" {
-		t.Fatalf("expected original delegation id preserved, got %q", meta.DelegationID)
+	if meta.DelegationID == "dlg-original" || meta.DelegationID == "" {
+		t.Fatalf("expected fresh delegation id for continuation, got %q", meta.DelegationID)
 	}
 }
 
@@ -488,6 +488,97 @@ func TestSelfACPSubagentRunner_FailedResultPersistsLifecycle(t *testing.T) {
 	}
 	if meta, ok := runtime.DelegationMetadataFromEvent(events[0]); !ok || meta.DelegationID != "dlg-failed" {
 		t.Fatalf("expected delegation metadata on failure event, got %+v", events[0].Meta)
+	}
+}
+
+func TestSelfACPSubagentRunner_PermissionApprovalEmitsRunningLifecycle(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-approval"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &selfACPSubagentRunner{
+		store:  store,
+		parent: parent,
+		shared: &sharedACPSubagentState{
+			tracker: newRemoteSubagentTracker(),
+		},
+	}
+	approver := &recordingApprover{allow: true}
+	streamed := make(chan sessionstream.Update, 1)
+	ctx := sessionstream.WithStreamer(
+		toolexec.WithApprover(context.Background(), approver),
+		sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+			streamed <- update
+		}),
+	)
+	handler := runner.permissionRequestHandler(ctx, "copilot", func() string { return child.ID }, runtime.DelegationMetadata{
+		ParentSessionID: parent.ID,
+		ChildSessionID:  child.ID,
+		ParentToolCall:  "call-task-write-1",
+		ParentToolName:  tool.TaskToolName,
+		DelegationID:    "dlg-approval",
+	}, "")
+	title := "ECHO echo hi"
+	kind := "echo"
+	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: child.ID,
+		ToolCall: acpclient.ToolCallUpdate{
+			ToolCallID: "call-echo-1",
+			Title:      &title,
+			Kind:       &kind,
+			RawInput: map[string]any{
+				"command": "echo hi",
+			},
+		},
+		Options: []struct {
+			OptionID string `json:"optionId"`
+			Name     string `json:"name"`
+			Kind     string `json:"kind"`
+		}{
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if len(resp.Outcome) == 0 {
+		t.Fatal("expected non-empty permission outcome")
+	}
+	select {
+	case update := <-streamed:
+		if update.SessionID != child.ID {
+			t.Fatalf("expected lifecycle update for child session %q, got %q", child.ID, update.SessionID)
+		}
+		info, ok := runtime.LifecycleFromEvent(update.Event)
+		if !ok || info.Status != runtime.RunLifecycleStatusRunning {
+			t.Fatalf("expected running lifecycle event, got %+v", update.Event)
+		}
+		meta, ok := runtime.DelegationMetadataFromEvent(update.Event)
+		if !ok || meta.ParentToolCall != "call-task-write-1" || meta.ParentToolName != tool.TaskToolName {
+			t.Fatalf("expected running lifecycle event to preserve parent tool lineage, got %+v", update.Event)
+		}
+	default:
+		t.Fatal("expected running lifecycle sessionstream update after approval")
+	}
+	events, err := store.ListEvents(context.Background(), child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected persisted running lifecycle event")
+	}
+	info, ok := runtime.LifecycleFromEvent(events[len(events)-1])
+	if !ok || info.Status != runtime.RunLifecycleStatusRunning {
+		t.Fatalf("expected last persisted event to be running lifecycle, got %+v", events[len(events)-1])
+	}
+	meta, ok := runtime.DelegationMetadataFromEvent(events[len(events)-1])
+	if !ok || meta.ParentToolCall != "call-task-write-1" || meta.ParentToolName != tool.TaskToolName {
+		t.Fatalf("expected persisted lifecycle event to preserve parent tool lineage, got %+v", events[len(events)-1])
 	}
 }
 
@@ -589,9 +680,13 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var sawList, sawGlob bool
+	var sawList, sawGlob, sawCompleted bool
 	for _, ev := range loadedEvents {
 		if ev == nil {
+			continue
+		}
+		if info, ok := runtime.LifecycleFromEvent(ev); ok && info.Status == runtime.RunLifecycleStatusCompleted {
+			sawCompleted = true
 			continue
 		}
 		resp := ev.Message.ToolResponse()
@@ -616,6 +711,9 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	}
 	if !sawList || !sawGlob {
 		t.Fatalf("expected LIST and GLOB tool responses, sawList=%v sawGlob=%v", sawList, sawGlob)
+	}
+	if !sawCompleted {
+		t.Fatalf("expected child session to persist completed lifecycle, got %+v", loadedEvents)
 	}
 }
 

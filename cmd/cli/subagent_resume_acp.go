@@ -23,8 +23,10 @@ import (
 
 type resumedSubagentTarget struct {
 	SpawnID      string
+	SessionID    string
 	AttachTarget string
 	CallID       string
+	AnchorTool   string
 	Agent        string
 	ChildCWD     string
 }
@@ -39,6 +41,9 @@ func (c *cliConsole) restoreResumedSubagentPanels(ctx context.Context, rootSessi
 		return
 	}
 	for _, target := range collectResumedSubagentTargets(events) {
+		if !c.shouldReplayResumedSubagentTarget(ctx, target) {
+			continue
+		}
 		c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
 			Kind:        subagentDomainBootstrap,
 			ClaimAnchor: true,
@@ -47,6 +52,7 @@ func (c *cliConsole) restoreResumedSubagentPanels(ctx context.Context, rootSessi
 				SpawnID:       target.SpawnID,
 				AttachTarget:  target.AttachTarget,
 				CallID:        target.CallID,
+				AnchorTool:    target.AnchorTool,
 				Agent:         target.Agent,
 			},
 		})
@@ -54,46 +60,109 @@ func (c *cliConsole) restoreResumedSubagentPanels(ctx context.Context, rootSessi
 	}
 }
 
+func (c *cliConsole) shouldReplayResumedSubagentTarget(ctx context.Context, target resumedSubagentTarget) bool {
+	if c == nil {
+		return false
+	}
+	if strings.TrimSpace(target.SessionID) == "" {
+		return false
+	}
+	if c.rt == nil {
+		return true
+	}
+	state, err := c.rt.RunState(ctx, runtime.RunStateRequest{
+		AppName:   c.appName,
+		UserID:    c.userID,
+		SessionID: target.SessionID,
+	})
+	if err != nil || !state.HasLifecycle {
+		return true
+	}
+	return !isTerminalSpawnStatus(state.Status)
+}
+
 func collectResumedSubagentTargets(events []*session.Event) []resumedSubagentTarget {
 	if len(events) == 0 {
 		return nil
 	}
 	liveStates := resumedSubagentLiveStateIndex(events)
-	seen := map[string]int{}
-	out := make([]resumedSubagentTarget, 0)
+	orderedSessions := make([]string, 0)
+	latestBySession := map[string]resumedSubagentTarget{}
 	for _, ev := range events {
 		if ev == nil {
 			continue
 		}
 		resp := ev.Message.ToolResponse()
-		if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName) {
+		target, ok := resumedSubagentTargetFromToolResponse(resp, liveStates)
+		if !ok {
 			continue
 		}
-		spawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
-		if spawnID == "" {
+		sessionID := strings.TrimSpace(target.SessionID)
+		if _, exists := latestBySession[sessionID]; !exists {
+			orderedSessions = append(orderedSessions, sessionID)
+		}
+		latestBySession[sessionID] = target
+	}
+	out := make([]resumedSubagentTarget, 0, len(orderedSessions))
+	for _, sessionID := range orderedSessions {
+		target, ok := latestBySession[sessionID]
+		if !ok {
 			continue
 		}
-		if !shouldResumeSubagentTarget(resp.Result, liveStates[spawnID]) {
-			continue
+		out = append(out, target)
+	}
+	return out
+}
+
+func resumedSubagentTargetFromToolResponse(resp *model.ToolResponse, liveStates map[string]string) (resumedSubagentTarget, bool) {
+	if resp == nil {
+		return resumedSubagentTarget{}, false
+	}
+	switch {
+	case strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName):
+		sessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+		if sessionID == "" || !shouldResumeSubagentTarget(resp.Result, liveStates[sessionID]) {
+			return resumedSubagentTarget{}, false
 		}
 		target := resumedSubagentTarget{
-			SpawnID:      spawnID,
+			SpawnID:      sessionID,
+			SessionID:    sessionID,
 			AttachTarget: strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id", "_ui_delegation_id", "delegation_id")),
 			CallID:       strings.TrimSpace(resp.ID),
+			AnchorTool:   tool.SpawnToolName,
 			Agent:        strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
 			ChildCWD:     strings.TrimSpace(firstNonEmpty(resp.Result, "child_cwd")),
 		}
 		if target.Agent == "" {
 			target.Agent = "self"
 		}
-		if idx, ok := seen[target.SpawnID]; ok {
-			out[idx] = target
-			continue
+		return target, true
+	case strings.EqualFold(strings.TrimSpace(resp.Name), tool.TaskToolName):
+		sessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+		spawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_spawn_id"))
+		callID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_parent_tool_call_id"))
+		if sessionID == "" || spawnID == "" || callID == "" || !shouldResumeSubagentTarget(resp.Result, liveStates[sessionID]) {
+			return resumedSubagentTarget{}, false
 		}
-		seen[target.SpawnID] = len(out)
-		out = append(out, target)
+		target := resumedSubagentTarget{
+			SpawnID:      spawnID,
+			SessionID:    sessionID,
+			AttachTarget: strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id", "_ui_delegation_id", "delegation_id")),
+			CallID:       callID,
+			AnchorTool:   strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_anchor_tool")),
+			Agent:        strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+			ChildCWD:     strings.TrimSpace(firstNonEmpty(resp.Result, "child_cwd")),
+		}
+		if target.AnchorTool == "" {
+			target.AnchorTool = runtime.SubagentContinuationAnchorTool
+		}
+		if target.Agent == "" {
+			target.Agent = "self"
+		}
+		return target, true
+	default:
+		return resumedSubagentTarget{}, false
 	}
-	return out
 }
 
 func resumedSubagentLiveStateIndex(events []*session.Event) map[string]string {
@@ -102,16 +171,30 @@ func resumedSubagentLiveStateIndex(events []*session.Event) map[string]string {
 	}
 	out := map[string]string{}
 	for _, ev := range events {
-		if ev == nil || ev.Meta == nil {
+		if ev == nil {
 			continue
 		}
-		childSessionID := strings.TrimSpace(firstNonEmpty(ev.Meta, "child_session_id"))
+		if ev.Meta != nil {
+			childSessionID := strings.TrimSpace(firstNonEmpty(ev.Meta, "child_session_id"))
+			if childSessionID != "" {
+				if info, ok := runtime.LifecycleFromEvent(ev); ok {
+					out[childSessionID] = strings.ToLower(strings.TrimSpace(string(info.Status)))
+				}
+			}
+		}
+		resp := ev.Message.ToolResponse()
+		if resp == nil {
+			continue
+		}
+		childSessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
 		if childSessionID == "" {
 			continue
 		}
-		if info, ok := runtime.LifecycleFromEvent(ev); ok {
-			out[childSessionID] = strings.ToLower(strings.TrimSpace(string(info.Status)))
+		state := strings.ToLower(strings.TrimSpace(firstNonEmpty(resp.Result, "progress_state", "state")))
+		if state == "" {
+			continue
 		}
+		out[childSessionID] = state
 	}
 	return out
 }
@@ -174,7 +257,7 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 	if loadCWD == "" {
 		loadCWD = c.workspace.CWD
 	}
-	if _, err := client.LoadSession(loadCtx, target.SpawnID, loadCWD, nil); err != nil {
+	if _, err := client.LoadSession(loadCtx, target.SessionID, loadCWD, nil); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
 				Kind:   subagentDomainTerminal,
@@ -450,6 +533,7 @@ func resumedSubagentProjectionTarget(rootSessionID string, target resumedSubagen
 		SpawnID:       target.SpawnID,
 		AttachTarget:  target.AttachTarget,
 		CallID:        target.CallID,
+		AnchorTool:    target.AnchorTool,
 		Agent:         target.Agent,
 	}
 }

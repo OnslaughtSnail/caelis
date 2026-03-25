@@ -796,6 +796,16 @@ func TestSubagentPanelAutoCollapseCanBeReopenedFromAnchor(t *testing.T) {
 	if !panel.Expanded {
 		t.Fatal("expected collapsed subagent panel to reopen from the anchor")
 	}
+	if !panel.PinnedOpenByUser {
+		t.Fatal("expected reopened terminal subagent panel to stay pinned open")
+	}
+	if !panel.CollapseAt.IsZero() {
+		t.Fatal("expected reopened terminal subagent panel to cancel auto-collapse")
+	}
+	_, _ = m.Update(frameTickMsg{at: time.Now().Add(inlinePanelCollapseDuration)})
+	if !panel.Expanded {
+		t.Fatal("expected reopened terminal subagent panel to remain expanded without new work")
+	}
 	view = stripModelView(m)
 	if !strings.Contains(view, "child output") {
 		t.Fatalf("expected reopened subagent panel to show content, got:\n%s", view)
@@ -838,7 +848,7 @@ func TestPanelWheelScrollDoesNotMoveMainViewport(t *testing.T) {
 	}
 }
 
-func TestPanelWheelAtPanelBoundaryDoesNotMoveMainViewport(t *testing.T) {
+func TestPanelWheelAtPanelTopBoundaryFallsBackToMainViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 	for i := range 40 {
@@ -856,6 +866,7 @@ func TestPanelWheelAtPanelBoundaryDoesNotMoveMainViewport(t *testing.T) {
 	}
 
 	bid := m.subagentBlockIDs["s1"]
+	panel := m.doc.Find(bid).(*SubagentPanelBlock)
 	panelLine := -1
 	for i, id := range m.viewportBlockIDs {
 		if id == bid {
@@ -866,15 +877,108 @@ func TestPanelWheelAtPanelBoundaryDoesNotMoveMainViewport(t *testing.T) {
 	if panelLine < 0 {
 		t.Fatal("expected subagent panel block in viewport")
 	}
+	panel.ScrollOffset = 0
+	panel.FollowTail = false
+	offset := maxInt(1, panelLine-2)
+	m.viewport.SetYOffset(offset)
 	vy := panelLine - m.viewport.YOffset()
-	for range 32 {
-		_, _ = m.Update(mouseWheel(5, vy, tea.MouseWheelUp))
-	}
-
 	before := m.viewport.YOffset()
 	_, _ = m.Update(mouseWheel(5, vy, tea.MouseWheelUp))
-	if got := m.viewport.YOffset(); got != before {
-		t.Fatalf("expected main viewport offset to remain %d at panel boundary, got %d", before, got)
+	if got := m.viewport.YOffset(); got >= before {
+		t.Fatalf("expected main viewport offset to decrease once panel hits top boundary, got %d -> %d", before, got)
+	}
+}
+
+func TestPanelWheelAtPanelBottomBoundaryFallsBackToMainViewport(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	for i := range 24 {
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* intro-%d\n", i)})
+	}
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", CallID: "spawn-call", Agent: "self"})
+	for i := range 16 {
+		_, _ = m.Update(tuievents.SubagentToolCallMsg{
+			SpawnID:  "s1",
+			CallID:   fmt.Sprintf("tool-%d", i),
+			ToolName: "BASH",
+			Args:     fmt.Sprintf("step-%d", i),
+		})
+	}
+	for i := range 24 {
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* outro-%d\n", i)})
+	}
+
+	bid := m.subagentBlockIDs["s1"]
+	panelLine := -1
+	for i, id := range m.viewportBlockIDs {
+		if id == bid {
+			panelLine = i
+			break
+		}
+	}
+	if panelLine < 0 {
+		t.Fatal("expected subagent panel block in viewport")
+	}
+	offset := maxInt(0, panelLine-2)
+	maxOffset := maxInt(0, m.viewport.TotalLineCount()-m.viewport.Height())
+	if offset >= maxOffset {
+		t.Fatalf("expected room for main viewport to scroll down, got offset=%d max=%d", offset, maxOffset)
+	}
+	m.viewport.SetYOffset(offset)
+	vy := panelLine - m.viewport.YOffset()
+	before := m.viewport.YOffset()
+	_, _ = m.Update(mouseWheel(5, vy, tea.MouseWheelDown))
+	if got := m.viewport.YOffset(); got <= before {
+		t.Fatalf("expected main viewport offset to increase once panel hits bottom boundary, got %d -> %d", before, got)
+	}
+}
+
+func TestReopenedSubagentPanelAutoCollapseResetsWhenWorkResumes(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SPAWN demo task\n"})
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "s1", AttachTarget: "child-1", Agent: "self", CallID: "spawn-call"})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "s1", Stream: "assistant", Chunk: "child output"})
+	_, _ = m.Update(tuievents.SubagentDoneMsg{SpawnID: "s1", State: "completed"})
+
+	panel := m.doc.Find(m.subagentBlockIDs["s1"]).(*SubagentPanelBlock)
+	driveSubagentPanelCollapse(m, panel)
+
+	headerLine := -1
+	for i, id := range m.viewportBlockIDs {
+		if tb, ok := m.doc.Find(id).(*TranscriptBlock); ok && strings.Contains(tb.Raw, "SPAWN demo task") {
+			headerLine = i
+			break
+		}
+	}
+	if headerLine < 0 {
+		t.Fatal("could not find spawn tool call anchor in viewport")
+	}
+	vy := headerLine - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+	if !panel.PinnedOpenByUser {
+		t.Fatal("expected reopened panel to set pinned-open state")
+	}
+
+	_, _ = m.Update(tuievents.SubagentStatusMsg{SpawnID: "s1", State: "running"})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "s1", Stream: "assistant", Chunk: "more output"})
+	if panel.PinnedOpenByUser {
+		t.Fatal("expected resumed work to clear pinned-open state")
+	}
+	if panel.Terminal {
+		t.Fatal("expected resumed work to clear terminal state")
+	}
+
+	_, _ = m.Update(tuievents.SubagentDoneMsg{SpawnID: "s1", State: "completed"})
+	if panel.CollapseAt.IsZero() {
+		t.Fatal("expected resumed terminal panel to schedule auto-collapse again")
+	}
+	driveSubagentPanelCollapse(m, panel)
+	if panel.Expanded {
+		t.Fatal("expected terminal panel to auto-collapse again after work resumes")
 	}
 }
 
@@ -1667,6 +1771,7 @@ func TestSubagentPanelTerminalStates(t *testing.T) {
 		{"completed", "✓ completed"},
 		{"failed", "✗ failed"},
 		{"interrupted", "⊘ interrupted"},
+		{"timed_out", "⌛ timed out"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.status, func(t *testing.T) {

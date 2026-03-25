@@ -208,6 +208,7 @@ type SubagentStartMsg struct {
 	AttachTarget string // child session id or delegation id accepted by /attach
 	Agent        string // agent id (e.g. "self")
 	CallID       string // parent tool call ID
+	AnchorTool   string // transcript anchor label (e.g. "SPAWN", "WRITE")
 	ClaimAnchor  bool   // whether this start may claim a pending SPAWN anchor
 	Provisional  bool   // whether this is a pre-bootstrap placeholder keyed by callID
 }

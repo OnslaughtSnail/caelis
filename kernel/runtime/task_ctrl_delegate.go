@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
@@ -68,7 +69,19 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 	if input == "" {
 		return task.Snapshot{}, fmt.Errorf("task: input is required")
 	}
-	runResult, err := c.runner.RunSubagent(ctx, agent.SubagentRunRequest{
+	current, err := c.inspect(ctx, record, false)
+	if err != nil {
+		return task.Snapshot{}, err
+	}
+	if current.Running || current.State != task.StateCompleted {
+		state := strings.TrimSpace(string(current.State))
+		if state == "" {
+			state = "running"
+		}
+		return task.Snapshot{}, fmt.Errorf("task: TASK write is only allowed for completed spawn subagents; current state is %s, use TASK wait/status while it is still running", state)
+	}
+	callInfo, _ := toolexec.ToolCallInfoFromContext(ctx)
+	runResult, err := c.runner.RunSubagent(withSubagentContinuation(ctx), agent.SubagentRunRequest{
 		Agent:     c.agent,
 		Prompt:    input,
 		SessionID: c.sessionID,
@@ -102,6 +115,14 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 		one.Spec[taskSpecDelegationID] = c.delegationID
 		one.Spec[taskSpecAgent] = c.agent
 		one.Spec[taskSpecChildCWD] = c.childCWD
+		if callID := strings.TrimSpace(callInfo.ID); callID != "" {
+			one.Spec[taskSpecParentToolCall] = callID
+			one.Spec[taskSpecUISpawnID] = callID
+			one.Spec[taskSpecUIAnchorTool] = SubagentContinuationAnchorTool
+		}
+		if toolName := strings.TrimSpace(callInfo.Name); toolName != "" {
+			one.Spec[taskSpecParentToolName] = toolName
+		}
 		if c.timeout > 0 {
 			one.Spec[taskSpecTimeout] = int(c.timeout / time.Second)
 		}
@@ -131,6 +152,18 @@ func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record
 			"_ui_delegation_id":    c.delegationID,
 			"_ui_agent":            c.agent,
 			"progress_state":       string(task.StateCancelled),
+		}
+		if callID := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolCall)); callID != "" {
+			one.Result["_ui_parent_tool_call_id"] = callID
+		}
+		if toolName := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolName)); toolName != "" {
+			one.Result["_ui_parent_tool_name"] = toolName
+		}
+		if spawnID := strings.TrimSpace(stringValue(one.Spec, taskSpecUISpawnID)); spawnID != "" {
+			one.Result["_ui_spawn_id"] = spawnID
+		}
+		if anchorTool := strings.TrimSpace(stringValue(one.Spec, taskSpecUIAnchorTool)); anchorTool != "" {
+			one.Result["_ui_anchor_tool"] = anchorTool
 		}
 		if c.timeout > 0 {
 			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
@@ -209,6 +242,18 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 			"_ui_delegation_id":    c.delegationID,
 			"_ui_agent":            c.agent,
 			"progress_state":       string(one.State),
+		}
+		if callID := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolCall)); callID != "" {
+			one.Result["_ui_parent_tool_call_id"] = callID
+		}
+		if toolName := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolName)); toolName != "" {
+			one.Result["_ui_parent_tool_name"] = toolName
+		}
+		if spawnID := strings.TrimSpace(stringValue(one.Spec, taskSpecUISpawnID)); spawnID != "" {
+			one.Result["_ui_spawn_id"] = spawnID
+		}
+		if anchorTool := strings.TrimSpace(stringValue(one.Spec, taskSpecUIAnchorTool)); anchorTool != "" {
+			one.Result["_ui_anchor_tool"] = anchorTool
 		}
 		if c.timeout > 0 {
 			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)

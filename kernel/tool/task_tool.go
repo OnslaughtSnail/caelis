@@ -27,7 +27,7 @@ func (t *taskTool) Name() string {
 }
 
 func (t *taskTool) Description() string {
-	return "Control a long-running task created by BASH, SPAWN, or future async tools. Use wait/status/write/cancel/list with task_id."
+	return "Control a long-running task created by BASH, SPAWN, or future async tools. Use wait/status/write/cancel/list with task_id. For SPAWN tasks, action=write is only for continuing a completed child session; BASH tasks still use action=write while running."
 }
 
 func (t *taskTool) Declaration() model.ToolDefinition {
@@ -48,7 +48,7 @@ func (t *taskTool) Declaration() model.ToolDefinition {
 				},
 				"input": map[string]any{
 					"type":        "string",
-					"description": "Optional input text for action=write.",
+					"description": "Optional input text for action=write. For SPAWN tasks this only applies after the child session has completed; for BASH tasks write still targets a running process.",
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",

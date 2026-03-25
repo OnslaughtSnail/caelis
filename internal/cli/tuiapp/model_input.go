@@ -104,8 +104,14 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 	}
 	switch block := m.doc.Find(blockID).(type) {
 	case *BashPanelBlock:
+		if !block.CanScroll(delta, ctx) {
+			return false, false
+		}
 		return true, block.Scroll(delta, ctx)
 	case *SubagentPanelBlock:
+		if !block.CanScroll(delta, ctx) {
+			return false, false
+		}
 		return true, block.Scroll(delta, ctx)
 	default:
 		return false, false

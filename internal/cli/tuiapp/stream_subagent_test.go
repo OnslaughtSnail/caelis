@@ -159,6 +159,85 @@ func TestSubagentPanelShowsApprovalState(t *testing.T) {
 	}
 }
 
+func TestSubagentStartClaimsWriteTranscriptAnchor(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
+	})
+	anchor := NewTranscriptBlock("▸ TASK WRITE 你好", tuikit.LineStyleTool)
+	m.doc.Append(anchor)
+
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "call-task-write-1",
+		AttachTarget: "child-1",
+		Agent:        "copilot",
+		CallID:       "call-task-write-1",
+		AnchorTool:   "TASK WRITE",
+		ClaimAnchor:  true,
+	})
+
+	panelID := m.subagentBlockIDs["call-task-write-1"]
+	if panelID == "" {
+		t.Fatal("expected continuation panel block id")
+	}
+	if got := strings.TrimSpace(m.callAnchorIndex["call-task-write-1"]); got != anchor.BlockID() {
+		t.Fatalf("expected WRITE line to be claimed as call anchor, got %q want %q", got, anchor.BlockID())
+	}
+	blocks := m.doc.Blocks()
+	if len(blocks) != 2 || blocks[0].BlockID() != anchor.BlockID() || blocks[1].BlockID() != panelID {
+		t.Fatalf("expected continuation panel directly after WRITE line, got %#v", []string{blocks[0].BlockID(), blocks[1].BlockID()})
+	}
+}
+
+func TestSubagentStartDoesNotClaimRegularWriteTranscriptAnchor(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
+	})
+	taskAnchor := NewTranscriptBlock("▸ TASK WRITE continue child", tuikit.LineStyleTool)
+	fileAnchor := NewTranscriptBlock("▸ WRITE notes.txt", tuikit.LineStyleTool)
+	m.doc.Append(taskAnchor)
+	m.doc.Append(fileAnchor)
+
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "call-task-write-2",
+		AttachTarget: "child-2",
+		Agent:        "copilot",
+		CallID:       "call-task-write-2",
+		AnchorTool:   "TASK WRITE",
+		ClaimAnchor:  true,
+	})
+
+	if got := strings.TrimSpace(m.callAnchorIndex["call-task-write-2"]); got != taskAnchor.BlockID() {
+		t.Fatalf("expected continuation to anchor on TASK WRITE line, got %q want %q", got, taskAnchor.BlockID())
+	}
+}
+
+func TestSubagentStartIgnoresPendingSpawnAnchorsForTaskWrite(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
+	})
+	spawnAnchor := NewTranscriptBlock("▸ SPAWN helper", tuikit.LineStyleTool)
+	taskAnchor := NewTranscriptBlock("▸ TASK WRITE continue child", tuikit.LineStyleTool)
+	m.doc.Append(spawnAnchor)
+	m.doc.Append(taskAnchor)
+	m.pendingToolAnchors = []toolAnchor{{toolName: "SPAWN", blockID: spawnAnchor.BlockID()}}
+
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "call-task-write-3",
+		AttachTarget: "child-3",
+		Agent:        "copilot",
+		CallID:       "call-task-write-3",
+		AnchorTool:   "TASK WRITE",
+		ClaimAnchor:  true,
+	})
+
+	if got := strings.TrimSpace(m.callAnchorIndex["call-task-write-3"]); got != taskAnchor.BlockID() {
+		t.Fatalf("expected continuation to ignore pending SPAWN anchors, got %q want %q", got, taskAnchor.BlockID())
+	}
+	if got := len(m.pendingToolAnchors); got != 1 {
+		t.Fatalf("expected TASK write anchor claim not to consume SPAWN pending anchors, got %d", got)
+	}
+}
+
 func TestSubagentPanelClearsWaitingApprovalWhenWorkResumes(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

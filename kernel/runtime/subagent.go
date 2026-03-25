@@ -334,14 +334,16 @@ func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req agent.S
 		if existing.ParentSessionID != "" {
 			lineage.ParentSessionID = existing.ParentSessionID
 		}
-		if existing.ParentToolCall != "" {
-			lineage.ParentToolCall = existing.ParentToolCall
-		}
-		if existing.ParentToolName != "" {
-			lineage.ParentToolName = existing.ParentToolName
-		}
-		if existing.DelegationID != "" {
-			lineage.DelegationID = existing.DelegationID
+		if !isSubagentContinuation(ctx) {
+			if existing.ParentToolCall != "" {
+				lineage.ParentToolCall = existing.ParentToolCall
+			}
+			if existing.ParentToolName != "" {
+				lineage.ParentToolName = existing.ParentToolName
+			}
+			if existing.DelegationID != "" {
+				lineage.DelegationID = existing.DelegationID
+			}
 		}
 	}
 	if err := r.seedChildSessionMeta(ctx, childSessionID, req.Agent); err != nil {

@@ -833,6 +833,8 @@ func bashPanelStatus(b *BashPanelBlock, theme tuikit.Theme) (string, lipgloss.St
 		return "failed", theme.ErrorStyle().Bold(true)
 	case "interrupted":
 		return "interrupted", theme.WarnStyle().Bold(true)
+	case "timed_out":
+		return "timed out", theme.WarnStyle().Bold(true)
 	case "cancelled", "canceled":
 		return "cancelled", theme.WarnStyle().Bold(true)
 	case "terminated":
@@ -883,7 +885,7 @@ type SubagentSessionState struct {
 	SpawnID   string
 	AttachID  string
 	Agent     string
-	Status    string // "running", "completed", "failed", "interrupted", "waiting_approval"
+	Status    string // "running", "completed", "failed", "interrupted", "timed_out", "waiting_approval"
 	StartedAt time.Time
 	Events    []SubagentEvent
 
@@ -1030,7 +1032,7 @@ type SubagentPanelBlock struct {
 	AttachID     string
 	Agent        string
 	CallID       string
-	Status       string // "running", "completed", "failed", "interrupted", "waiting_approval"
+	Status       string // "running", "completed", "failed", "interrupted", "timed_out", "waiting_approval"
 	StartedAt    time.Time
 	Expanded     bool
 	CollapseAt   time.Time
@@ -1039,6 +1041,12 @@ type SubagentPanelBlock struct {
 	VisibleLines int
 	ScrollOffset int
 	FollowTail   bool
+	Terminal     bool
+
+	// PinnedOpenByUser is set when a terminal inline panel is manually
+	// reopened from its anchor. That suppresses future auto-collapse until
+	// the session resumes active work.
+	PinnedOpenByUser bool
 
 	// Events is the chronological stream of child session events.
 	Events []SubagentEvent
@@ -1341,6 +1349,8 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 		lines = append(lines, ctx.Theme.ErrorStyle().Width(contentWidth).Render("✗ failed"))
 	case "interrupted":
 		lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render("⊘ interrupted"))
+	case "timed_out":
+		lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render("⌛ timed out"))
 	}
 	return lines
 }
@@ -1429,6 +1439,24 @@ func panelScrollWindow(total, visible, offset int, followTail bool) (start int, 
 	return offset, minInt(total, offset+visible), maxOffset
 }
 
+func canScrollPanelState(offset int, followTail bool, total, visible, delta int) bool {
+	if delta == 0 {
+		return false
+	}
+	_, _, maxOffset := panelScrollWindow(total, visible, offset, followTail)
+	if maxOffset == 0 {
+		return false
+	}
+	current := offset
+	if followTail {
+		current = maxOffset
+	}
+	next := current + delta
+	next = max(next, 0)
+	next = min(next, maxOffset)
+	return next != current
+}
+
 func addPanelScrollbar(lines []string, contentWidth, visible, offset, total int, theme tuikit.Theme) []string {
 	if len(lines) == 0 || total <= visible {
 		return lines
@@ -1484,7 +1512,14 @@ func (b *BashPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 }
 
 func (b *BashPanelBlock) Scroll(delta int, ctx BlockRenderContext) bool {
-	return scrollPanelState(&b.ScrollOffset, &b.FollowTail, b.scrollableLineCount(ctx), toolOutputPreviewLines, delta)
+	return scrollPanelState(&b.ScrollOffset, &b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
+}
+
+func (b *BashPanelBlock) CanScroll(delta int, ctx BlockRenderContext) bool {
+	if b == nil {
+		return false
+	}
+	return canScrollPanelState(b.ScrollOffset, b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
 }
 
 func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
@@ -1506,7 +1541,14 @@ func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 }
 
 func (b *SubagentPanelBlock) Scroll(delta int, ctx BlockRenderContext) bool {
-	return scrollPanelState(&b.ScrollOffset, &b.FollowTail, b.scrollableLineCount(ctx), subagentOutputPreviewLines, delta)
+	return scrollPanelState(&b.ScrollOffset, &b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
+}
+
+func (b *SubagentPanelBlock) CanScroll(delta int, ctx BlockRenderContext) bool {
+	if b == nil {
+		return false
+	}
+	return canScrollPanelState(b.ScrollOffset, b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
 }
 
 // ---------------------------------------------------------------------------

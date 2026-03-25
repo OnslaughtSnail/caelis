@@ -219,7 +219,7 @@ func buildSystemAgentDelegationPrompt(defaultAgent string, configured []appagent
 	lines = append(lines,
 		"- Use SPAWN to start a delegated child session when the task benefits from delegation.",
 		"- SPAWN accepts prompt(required), agent, yield_seconds, timeout_seconds.",
-		"- Use TASK write with the SPAWN task_id to continue an existing child session.",
+		"- Use TASK write with the SPAWN task_id only after that child session has completed; while it is still running, use TASK wait/status instead.",
 	)
 	return strings.Join(lines, "\n")
 }

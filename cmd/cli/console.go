@@ -1090,6 +1090,13 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			if update, ok := subagentDomainUpdateFromSpawnToolResponse(c.sessionID, resp); ok {
 				c.dispatchSubagentDomainUpdate(context.Background(), update)
 			}
+			for _, update := range subagentDomainUpdatesFromSpawnToolError(c.sessionID, resp) {
+				c.dispatchSubagentDomainUpdate(context.Background(), update)
+			}
+		} else if strings.EqualFold(toolName, tool.TaskToolName) {
+			for _, update := range subagentDomainUpdatesFromTaskToolResponse(c.sessionID, resp, callArgs) {
+				c.dispatchSubagentDomainUpdate(context.Background(), update)
+			}
 		}
 		if strings.EqualFold(strings.TrimSpace(resp.Name), toolshell.BashToolName) {
 			if !emittedTaskStream {
@@ -1137,7 +1144,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: formatToolResultLine("✓ ", displayName, compact)})
 			return true
 		}
-		if strings.EqualFold(toolName, tool.SpawnToolName) && !hasToolError(resp.Result) {
+		if strings.EqualFold(toolName, tool.SpawnToolName) {
 			return true
 		}
 		// Suppress result line for read-only FS tools (the call line is sufficient).

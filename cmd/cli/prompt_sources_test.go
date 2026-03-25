@@ -89,7 +89,7 @@ func TestBuildPromptAssembleSpec_UsesStructuredSystemAndUserInstructions(t *test
 		"- default_agent=self",
 		"- agent=self stability=stable",
 		"- Use SPAWN to start a delegated child session when the task benefits from delegation.",
-		"- Use TASK write with the SPAWN task_id to continue an existing child session.",
+		"- Use TASK write with the SPAWN task_id only after that child session has completed; while it is still running, use TASK wait/status instead.",
 	} {
 		if !strings.Contains(agentFragment.Content, required) {
 			t.Fatalf("delegation guidance missing %q: %q", required, agentFragment.Content)
