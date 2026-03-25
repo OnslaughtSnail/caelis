@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## v0.0.27 - 2026-03-25
+
+### Release Prep
+- Bumped the repository release metadata to `v0.0.27` in `CHANGELOG.md`, `README.md`, and `VERSION` to prepare the next tagged release.
+
 ## v0.0.26 - 2026-03-24
 
 ### External ACP Agents, Resume, And Delegation
