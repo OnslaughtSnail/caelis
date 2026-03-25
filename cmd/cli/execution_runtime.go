@@ -9,7 +9,7 @@ import (
 )
 
 var cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
-	return toolexec.New(cfg)
+	return toolexec.NewModeSwitchable(cfg)
 }
 
 type swappableRuntime struct {

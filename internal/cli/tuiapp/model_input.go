@@ -388,6 +388,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.btwOverlay != nil {
 		return m.handleBTWOverlayKey(msg)
 	}
+	if m.running && key.Matches(msg, m.keys.Interrupt) {
+		m.clearInputOverlays()
+		if m.cfg.CancelRunning != nil && m.cfg.CancelRunning() {
+			return m, m.showHint("interrupt requested", hintOptions{
+				priority:       tuievents.HintPriorityCritical,
+				clearOnMessage: true,
+				clearAfter:     systemHintDuration,
+			})
+		}
+		return m, nil
+	}
 	// Command palette overlay.
 	if m.showPalette {
 		return m, m.handlePaletteKey(msg)

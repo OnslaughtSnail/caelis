@@ -395,6 +395,7 @@ func (c *cliConsole) sessionBoundary() (*sessionsvc.Service, error) {
 	if c.sessionService != nil {
 		return c.sessionService, nil
 	}
+	execRuntime := c.executionRuntimeForSession()
 	var tools []tool.Tool
 	var policies []kernelpolicy.Hook
 	if c.resolved != nil {
@@ -408,7 +409,7 @@ func (c *cliConsole) sessionBoundary() (*sessionsvc.Service, error) {
 		UserID:          c.userID,
 		DefaultAgent:    c.configStore.DefaultAgent(),
 		WorkspaceCWD:    c.workspace.CWD,
-		Execution:       c.execRuntime,
+		Execution:       execRuntime,
 		Tools:           tools,
 		Policies:        policies,
 		EnablePlan:      true,
@@ -417,11 +418,21 @@ func (c *cliConsole) sessionBoundary() (*sessionsvc.Service, error) {
 		SubagentRunnerFactory: acpext.NewACPSubagentRunnerFactory(acpext.Config{
 			Store:                c.sessionStore,
 			WorkspaceCWD:         c.workspace.CWD,
-			ClientRuntime:        c.execRuntime,
+			ClientRuntime:        execRuntime,
 			ResolveAgentRegistry: c.configStore.AgentRegistry,
 			NewAdapter:           c.newACPAdapter,
 		}),
 	})
+}
+
+func (c *cliConsole) executionRuntimeForSession() toolexec.Runtime {
+	if c == nil {
+		return nil
+	}
+	if c.execRuntimeView != nil {
+		return c.execRuntimeView
+	}
+	return c.execRuntime
 }
 
 func (c *cliConsole) sessionGateway() (*appgateway.Gateway, error) {
@@ -2245,6 +2256,18 @@ func (c *cliConsole) resetResumeReplayContext() context.Context {
 }
 
 func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandboxType string) error {
+	currentSandbox := ""
+	if c != nil && c.execRuntime != nil {
+		currentSandbox = c.execRuntime.SandboxType()
+	}
+	if c.execRuntime != nil && normalizeSandboxType(currentSandbox) == normalizeSandboxType(sandboxType) {
+		if setter, ok := c.execRuntime.(toolexec.PermissionModeSetter); ok {
+			if err := setter.SetPermissionMode(mode); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
 	prevRuntime := c.execRuntime
 	nextRuntime, err := newExecutionRuntime(mode, sandboxType, c.sandboxHelperPath)
 	if err != nil {

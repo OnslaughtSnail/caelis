@@ -13,6 +13,8 @@ var (
 	ErrSessionNotFound = errors.New("session not found")
 	// ErrSessionAlreadyExists is returned when trying to register a duplicate session.
 	ErrSessionAlreadyExists = errors.New("session already exists")
+	// ErrSessionManagerClosed is returned when starting a session after the manager was closed.
+	ErrSessionManagerClosed = errors.New("session manager is closed")
 )
 
 // SessionManager manages multiple async sessions.
@@ -97,7 +99,7 @@ func (sm *SessionManager) StartSession(cfg AsyncSessionConfig) (*AsyncSession, e
 	defer sm.mu.Unlock()
 
 	if sm.closed {
-		return nil, errors.New("session manager is closed")
+		return nil, ErrSessionManagerClosed
 	}
 
 	// Check session limit

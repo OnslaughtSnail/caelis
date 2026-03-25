@@ -55,23 +55,7 @@ func buildToolCallMutationVisuals(runtime toolexec.Runtime, toolName string, cal
 
 func mutationChangeCountsForTool(toolName string, preview toolfs.MutationPreview, callArgs map[string]any) mutationChangeCounts {
 	switch toolName {
-	case "PATCH":
-		oldText := asString(callArgs["old"])
-		newText := asString(callArgs["new"])
-		replaceAll, _ := callArgs["replace_all"].(bool)
-		replacements := 1
-		if replaceAll && oldText != "" {
-			replacements = strings.Count(preview.Old, oldText)
-			if replacements <= 0 {
-				replacements = 1
-			}
-		}
-		stats := toolfs.CountLineDiff(oldText, newText)
-		return mutationChangeCounts{
-			Added:   stats.Added * replacements,
-			Removed: stats.Removed * replacements,
-		}
-	case "WRITE":
+	case "PATCH", "WRITE":
 		stats := toolfs.CountLineDiff(preview.Old, preview.New)
 		return mutationChangeCounts{Added: stats.Added, Removed: stats.Removed}
 	default:

@@ -192,6 +192,22 @@ func (d *Document) Remove(id string) bool {
 	return false
 }
 
+func (d *Document) Replace(id string, block Block) bool {
+	id = strings.TrimSpace(id)
+	if d == nil || id == "" || block == nil {
+		return false
+	}
+	for i, existing := range d.blocks {
+		if existing.BlockID() != id {
+			continue
+		}
+		d.blocks[i] = block
+		d.rebuildIndex()
+		return true
+	}
+	return false
+}
+
 func (d *Document) Last() Block {
 	if len(d.blocks) == 0 {
 		return nil

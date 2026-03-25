@@ -334,6 +334,23 @@ func TestHostRunner_ListSessions(t *testing.T) {
 	}
 }
 
+func TestHostRunner_StartAsync_ReopensClosedSessionManager(t *testing.T) {
+	runner := newHostRunnerWithConfig(DefaultHostRunnerConfig())
+	if err := runner.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	_, err := runner.StartAsync(context.Background(), CommandRequest{
+		Command: "echo async-closed",
+	})
+	if err == nil {
+		t.Fatal("expected StartAsync to fail after session manager close")
+	}
+	if err != ErrSessionManagerClosed {
+		t.Fatalf("expected ErrSessionManagerClosed, got %v", err)
+	}
+}
+
 func TestAsyncSession_StatusConcurrentWithExit(t *testing.T) {
 	session := NewAsyncSession(AsyncSessionConfig{
 		Command: `printf "boom" >&2; exit 7`,

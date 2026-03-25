@@ -153,6 +153,33 @@ func TestBuildToolCallDiffBlockMsg_RejectsMismatchedPatch(t *testing.T) {
 	}
 }
 
+func TestMutationChangeCountsForTool_PatchUsesWholeFileDiff(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "a.txt")
+	before := strings.Join([]string{
+		"header-1",
+		"header-2",
+		"target-a",
+		"target-b",
+		"footer-1",
+		"footer-2",
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	visuals, ok := buildToolCallMutationVisuals(previewTestRuntime{cwd: ws}, "PATCH", map[string]any{
+		"path": path,
+		"old":  "header-2\ntarget-a\ntarget-b\nfooter-1",
+		"new":  "header-2\ntarget-a\ninserted\ntarget-b\nfooter-1",
+	})
+	if !ok {
+		t.Fatal("expected mutation preview visuals")
+	}
+	if visuals.ChangeCounts != (mutationChangeCounts{Added: 1, Removed: 0}) {
+		t.Fatalf("expected whole-file patch stats +1 -0, got %+v", visuals.ChangeCounts)
+	}
+}
+
 func TestPreviewTestRuntimeUsesCwd(t *testing.T) {
 	ws := t.TempDir()
 	rt := previewTestRuntime{cwd: ws}

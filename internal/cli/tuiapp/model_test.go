@@ -3420,6 +3420,30 @@ func TestEscInterruptsRunningEvenIfPendingQueueExists(t *testing.T) {
 	}
 }
 
+func TestEscInterruptsRunningEvenIfCompletionOverlayIsVisible(t *testing.T) {
+	interrupted := false
+	m := NewModel(Config{
+		CancelRunning: func() bool {
+			interrupted = true
+			return true
+		},
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+	m.running = true
+	m.mentionCandidates = []string{"worker"}
+	m.mentionIndex = 0
+
+	_, _ = m.Update(keyPress(tea.KeyEscape))
+
+	if !interrupted {
+		t.Fatal("expected interrupt to win over visible completion overlay")
+	}
+	if len(m.mentionCandidates) != 0 {
+		t.Fatal("expected interrupt to clear completion overlays")
+	}
+}
+
 func TestCtrlCRequiresDoublePressToQuitWhenIdle(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -4674,6 +4698,31 @@ func TestExplorationBlockCollapsesBeforeAssistantAnswer(t *testing.T) {
 	}
 	if strings.Contains(view, "Exploring") || strings.Contains(view, "Read state.go") {
 		t.Fatalf("expected expanded exploration block removed, got:\n%s", view)
+	}
+}
+
+func TestFinalizeActivityBlock_ReplacesBlockInPlace(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	m.doc.Append(NewTranscriptBlock("* assistant plan", tuikit.LineStyleAssistant))
+	m.finalizeActivityBlock()
+
+	view := stripModelView(m)
+	summaryIdx := strings.Index(view, "▸ Explored 1 files")
+	planIdx := strings.Index(view, "* assistant plan")
+	if summaryIdx < 0 || planIdx < 0 {
+		t.Fatalf("expected both activity summary and assistant line, got:\n%s", view)
+	}
+	if summaryIdx > planIdx {
+		t.Fatalf("expected activity summary to stay in original position before later content, got:\n%s", view)
+	}
+	if strings.Contains(view, "Exploring") {
+		t.Fatalf("expected expanded activity block to be replaced, got:\n%s", view)
+	}
+	if got := len(m.doc.Blocks()); got != 2 {
+		t.Fatalf("expected 2 blocks after in-place replacement, got %d", got)
 	}
 }
 

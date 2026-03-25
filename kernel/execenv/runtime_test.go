@@ -274,6 +274,76 @@ func TestNew_FullControlDerivesDangerFullPolicy(t *testing.T) {
 	}
 }
 
+func TestNewModeSwitchable_FullControlIgnoresUnsupportedSandboxUntilDefaultMode(t *testing.T) {
+	oldGoos := runtimeGOOS
+	runtimeGOOS = "darwin"
+	defer func() {
+		runtimeGOOS = oldGoos
+	}()
+
+	rt, err := NewModeSwitchable(Config{
+		PermissionMode: PermissionModeFullControl,
+		SandboxType:    bwrapSandboxType,
+	})
+	if err != nil {
+		t.Fatalf("expected full_control startup to skip sandbox validation, got %v", err)
+	}
+	t.Cleanup(func() {
+		_ = Close(rt)
+	})
+
+	if rt.PermissionMode() != PermissionModeFullControl {
+		t.Fatalf("expected full_control mode, got %q", rt.PermissionMode())
+	}
+	if rt.DecideRoute("echo hi", SandboxPermissionAuto).Route != ExecutionRouteHost {
+		t.Fatal("expected full_control mode to route to host")
+	}
+
+	setter, ok := rt.(PermissionModeSetter)
+	if !ok {
+		t.Fatal("expected PermissionModeSetter support")
+	}
+	if err := setter.SetPermissionMode(PermissionModeDefault); err == nil {
+		t.Fatal("expected switching into default mode to validate sandbox and fail")
+	}
+}
+
+func TestNewModeSwitchable_DefaultModeReusesProvidedHostRunnerAcrossSwitches(t *testing.T) {
+	hostRunner := &closeableRunner{}
+	rt, err := NewModeSwitchable(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    platformDefaultSandboxType(),
+		SandboxRunner:  noopRunner{},
+		HostRunner:     hostRunner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = Close(rt)
+	})
+
+	if rt.HostRunner() != hostRunner {
+		t.Fatalf("expected shared host runner, got %#v", rt.HostRunner())
+	}
+	setter, ok := rt.(PermissionModeSetter)
+	if !ok {
+		t.Fatal("expected PermissionModeSetter support")
+	}
+	if err := setter.SetPermissionMode(PermissionModeFullControl); err != nil {
+		t.Fatal(err)
+	}
+	if rt.HostRunner() != hostRunner {
+		t.Fatalf("expected host runner preserved in full_control, got %#v", rt.HostRunner())
+	}
+	if err := setter.SetPermissionMode(PermissionModeDefault); err != nil {
+		t.Fatal(err)
+	}
+	if rt.HostRunner() != hostRunner {
+		t.Fatalf("expected host runner preserved after switching back, got %#v", rt.HostRunner())
+	}
+}
+
 func TestClose_ClosesRuntimeResources(t *testing.T) {
 	runner := &closeableRunner{}
 	rt, err := New(Config{

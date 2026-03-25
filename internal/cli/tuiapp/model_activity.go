@@ -111,6 +111,7 @@ func (m *Model) finalizeActivityBlock() {
 	}
 	// Render finalized summary line.
 	summaryLine := m.renderActivitySummaryLine(foldedState)
+	rawSummary := ansi.Strip(summaryLine)
 	// Try to merge with previous task monitor summary.
 	if ab.BlockKindField == activityBlockTaskMonitor {
 		if prevBlock := m.findPreviousTranscriptBlock(ab.BlockID()); prevBlock != nil {
@@ -133,12 +134,12 @@ func (m *Model) finalizeActivityBlock() {
 		}
 	}
 	// Convert activity block to a summary transcript block.
-	m.doc.Remove(ab.BlockID())
-	m.activeActivityID = ""
-	// Get raw text for the summary line
-	rawSummary := ansi.Strip(summaryLine)
 	summaryBlock := NewTranscriptBlock(rawSummary, tuikit.DetectLineStyle(rawSummary))
-	m.doc.Append(summaryBlock)
+	if !m.doc.Replace(ab.BlockID(), summaryBlock) {
+		m.doc.Remove(ab.BlockID())
+		m.doc.Append(summaryBlock)
+	}
+	m.activeActivityID = ""
 	m.refreshHistoryTailState()
 	m.syncViewportContent()
 }

@@ -134,6 +134,12 @@ type Runtime interface {
 	DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision
 }
 
+// PermissionModeSetter allows callers to update the active permission mode
+// without rebuilding underlying runtime resources.
+type PermissionModeSetter interface {
+	SetPermissionMode(mode PermissionMode) error
+}
+
 // ApprovalRequiredError indicates that the call should be reviewed by upper
 // application layer. Kernel tool layer does not handle approval workflow.
 type ApprovalRequiredError struct {
@@ -160,6 +166,14 @@ type runtimeImpl struct {
 	closers        []runtimeCloser
 	closeOnce      sync.Once
 	closeErr       error
+}
+
+type modeSwitchableRuntime struct {
+	config         Config
+	hostRuntime    Runtime
+	defaultRuntime Runtime
+	mu             sync.RWMutex
+	permissionMode PermissionMode
 }
 
 func cloneSandboxPolicy(policy SandboxPolicy) SandboxPolicy {
@@ -446,6 +460,277 @@ func (r *runtimeImpl) Close() error {
 	return r.closeErr
 }
 
+func normalizePermissionMode(mode PermissionMode) (PermissionMode, error) {
+	if mode == "" {
+		mode = PermissionModeDefault
+	}
+	if mode != PermissionModeDefault && mode != PermissionModeFullControl {
+		return "", fmt.Errorf("execenv: invalid permission mode %q", mode)
+	}
+	return mode, nil
+}
+
+// NewModeSwitchable builds one runtime whose underlying resources remain
+// stable while callers switch between permission modes.
+func NewModeSwitchable(cfg Config) (Runtime, error) {
+	mode, err := normalizePermissionMode(cfg.PermissionMode)
+	if err != nil {
+		return nil, err
+	}
+	sharedCfg := cfg
+	if sharedCfg.FileSystem == nil {
+		sharedCfg.FileSystem = newHostFileSystem()
+	}
+	if sharedCfg.HostRunner == nil {
+		sharedCfg.HostRunner = newHostRunner()
+	}
+	hostCfg := sharedCfg
+	hostCfg.PermissionMode = PermissionModeFullControl
+	hostRuntime, err := New(hostCfg)
+	if err != nil {
+		return nil, err
+	}
+	runtime := &modeSwitchableRuntime{
+		config:         sharedCfg,
+		hostRuntime:    hostRuntime,
+		permissionMode: mode,
+	}
+	if mode != PermissionModeFullControl {
+		if err := runtime.initDefaultRuntimeLocked(); err != nil {
+			_ = Close(hostRuntime)
+			return nil, err
+		}
+	}
+	return runtime, nil
+}
+
+func (r *modeSwitchableRuntime) initDefaultRuntimeLocked() error {
+	if r == nil || r.defaultRuntime != nil {
+		return nil
+	}
+	defaultCfg := r.config
+	defaultCfg.PermissionMode = PermissionModeDefault
+	defaultRuntime, err := New(defaultCfg)
+	if err != nil {
+		return err
+	}
+	r.defaultRuntime = defaultRuntime
+	return nil
+}
+
+func (r *modeSwitchableRuntime) SetPermissionMode(mode PermissionMode) error {
+	normalized, err := normalizePermissionMode(mode)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if normalized != PermissionModeFullControl {
+		if err := r.initDefaultRuntimeLocked(); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	r.permissionMode = normalized
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *modeSwitchableRuntime) currentPermissionMode() PermissionMode {
+	if r == nil {
+		return PermissionModeDefault
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.permissionMode == "" {
+		return PermissionModeDefault
+	}
+	return r.permissionMode
+}
+
+func (r *modeSwitchableRuntime) PermissionMode() PermissionMode {
+	return r.currentPermissionMode()
+}
+
+func (r *modeSwitchableRuntime) SandboxType() string {
+	if r == nil {
+		return ""
+	}
+	r.mu.RLock()
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	if defaultRuntime != nil {
+		return defaultRuntime.SandboxType()
+	}
+	return strings.TrimSpace(strings.ToLower(r.config.SandboxType))
+}
+
+func (r *modeSwitchableRuntime) SandboxPolicy() SandboxPolicy {
+	if r == nil {
+		return SandboxPolicy{}
+	}
+	if r.currentPermissionMode() == PermissionModeFullControl {
+		return deriveSandboxPolicy(PermissionModeFullControl, SandboxPolicy{})
+	}
+	r.mu.RLock()
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	if defaultRuntime == nil {
+		return SandboxPolicy{}
+	}
+	return defaultRuntime.SandboxPolicy()
+}
+
+func (r *modeSwitchableRuntime) FallbackToHost() bool {
+	if r == nil {
+		return false
+	}
+	if r.currentPermissionMode() == PermissionModeFullControl {
+		return false
+	}
+	r.mu.RLock()
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	if defaultRuntime == nil {
+		return false
+	}
+	return defaultRuntime.FallbackToHost()
+}
+
+func (r *modeSwitchableRuntime) FallbackReason() string {
+	if r == nil {
+		return ""
+	}
+	if r.currentPermissionMode() == PermissionModeFullControl {
+		return ""
+	}
+	r.mu.RLock()
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	if defaultRuntime == nil {
+		return ""
+	}
+	return defaultRuntime.FallbackReason()
+}
+
+func (r *modeSwitchableRuntime) FileSystem() FileSystem {
+	if r == nil {
+		return nil
+	}
+	if r.currentPermissionMode() != PermissionModeFullControl {
+		r.mu.RLock()
+		defaultRuntime := r.defaultRuntime
+		r.mu.RUnlock()
+		if defaultRuntime != nil {
+			return defaultRuntime.FileSystem()
+		}
+	}
+	if r.hostRuntime == nil {
+		return nil
+	}
+	return r.hostRuntime.FileSystem()
+}
+
+func (r *modeSwitchableRuntime) HostRunner() CommandRunner {
+	if r == nil {
+		return nil
+	}
+	if r.currentPermissionMode() != PermissionModeFullControl {
+		r.mu.RLock()
+		defaultRuntime := r.defaultRuntime
+		r.mu.RUnlock()
+		if defaultRuntime != nil {
+			return defaultRuntime.HostRunner()
+		}
+	}
+	if r.hostRuntime == nil {
+		return nil
+	}
+	return r.hostRuntime.HostRunner()
+}
+
+func (r *modeSwitchableRuntime) SandboxRunner() CommandRunner {
+	if r == nil {
+		return nil
+	}
+	if r.currentPermissionMode() == PermissionModeFullControl {
+		if r.hostRuntime == nil {
+			return nil
+		}
+		return r.hostRuntime.HostRunner()
+	}
+	r.mu.RLock()
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	if defaultRuntime == nil {
+		return nil
+	}
+	return defaultRuntime.SandboxRunner()
+}
+
+func (r *modeSwitchableRuntime) DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision {
+	mode := r.currentPermissionMode()
+	if mode == PermissionModeFullControl {
+		return CommandDecision{Route: ExecutionRouteHost}
+	}
+	if r == nil {
+		return CommandDecision{}
+	}
+	r.mu.RLock()
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	if defaultRuntime == nil {
+		return CommandDecision{}
+	}
+	if defaultRuntime.FallbackToHost() {
+		message := "sandbox unavailable, host execution requires approval"
+		if strings.TrimSpace(defaultRuntime.FallbackReason()) != "" {
+			message = message + ": " + strings.TrimSpace(defaultRuntime.FallbackReason())
+		}
+		return CommandDecision{
+			Route: ExecutionRouteHost,
+			Escalation: &EscalationReason{
+				Message: message,
+			},
+			NeedApproval: true,
+		}
+	}
+	if sandboxPermission == SandboxPermissionRequireEscalated {
+		if commandIsApprovalWhitelisted(command) {
+			return CommandDecision{Route: ExecutionRouteHost}
+		}
+		return CommandDecision{
+			Route:        ExecutionRouteHost,
+			Escalation:   &EscalationReason{Message: "require_escalated requested"},
+			NeedApproval: true,
+		}
+	}
+	return CommandDecision{Route: ExecutionRouteSandbox}
+}
+
+func (r *modeSwitchableRuntime) Close() error {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	hostRuntime := r.hostRuntime
+	defaultRuntime := r.defaultRuntime
+	r.mu.RUnlock()
+	var firstErr error
+	if defaultRuntime != nil {
+		closeErr := Close(defaultRuntime)
+		if closeErr != nil && firstErr == nil {
+			firstErr = closeErr
+		}
+	}
+	if hostRuntime != nil {
+		closeErr := Close(hostRuntime)
+		if closeErr != nil && firstErr == nil {
+			firstErr = closeErr
+		}
+	}
+	return firstErr
+}
+
 // SandboxFactory builds one sandbox command runner by type.
 type SandboxFactory interface {
 	Type() string
@@ -495,12 +780,9 @@ func RegisterSandboxFactory(factory SandboxFactory) error {
 
 // New builds runtime based on permission mode and optional sandbox type.
 func New(cfg Config) (Runtime, error) {
-	mode := cfg.PermissionMode
-	if mode == "" {
-		mode = PermissionModeDefault
-	}
-	if mode != PermissionModeDefault && mode != PermissionModeFullControl {
-		return nil, fmt.Errorf("execenv: invalid permission mode %q", mode)
+	mode, err := normalizePermissionMode(cfg.PermissionMode)
+	if err != nil {
+		return nil, err
 	}
 
 	filesystem := cfg.FileSystem

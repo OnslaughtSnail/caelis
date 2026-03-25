@@ -397,6 +397,22 @@ func TestSwappableRuntime_TracksPermissionSwitchForPoliciesAndBash(t *testing.T)
 	}
 }
 
+func TestExecutionRuntimeForSession_PrefersSwappableRuntime(t *testing.T) {
+	host := &recordingSwitchRunner{}
+	runtimeView := newSwappableRuntime(fakeRuntime{
+		permissionMode: toolexec.PermissionModeDefault,
+		sandboxType:    cliTestSandboxType(),
+		hostRunner:     host,
+	})
+	console := &cliConsole{
+		execRuntime:     fakeRuntime{permissionMode: toolexec.PermissionModeFullControl},
+		execRuntimeView: runtimeView,
+	}
+	if got := console.executionRuntimeForSession(); got != runtimeView {
+		t.Fatalf("expected session runtime to prefer swappable view, got %#v", got)
+	}
+}
+
 func TestHandlePermission_PersistsGlobalRuntimeDefaults(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
 	t.Cleanup(func() {
@@ -524,7 +540,83 @@ func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 	}
 }
 
-func TestUpdateExecutionRuntime_ClosesPreviousRuntime(t *testing.T) {
+func TestUpdateExecutionRuntime_ReusesRuntimeForPermissionOnlySwitch(t *testing.T) {
+	sandboxRunner := &closeableSwitchRunner{}
+	rt, err := toolexec.NewModeSwitchable(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    cliTestSandboxType(),
+		SandboxRunner:  sandboxRunner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	console := &cliConsole{
+		baseCtx:     context.Background(),
+		execRuntime: rt,
+		sandboxType: cliTestSandboxType(),
+		resolved:    &appassembly.ResolvedSpec{},
+	}
+	if err := console.updateExecutionRuntime(toolexec.PermissionModeFullControl, cliTestSandboxType()); err != nil {
+		t.Fatal(err)
+	}
+	if console.execRuntime != rt {
+		t.Fatal("expected permission-only switch to keep the same runtime instance")
+	}
+	if console.execRuntime.PermissionMode() != toolexec.PermissionModeFullControl {
+		t.Fatalf("expected runtime mode to switch in place, got %q", console.execRuntime.PermissionMode())
+	}
+	if sandboxRunner.closed != 0 {
+		t.Fatalf("expected sandbox runner to stay open on permission-only switch, got %d closes", sandboxRunner.closed)
+	}
+}
+
+func TestUpdateExecutionRuntime_RebuildsWhenRequestedSandboxChanged(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		return fakeRuntime{permissionMode: cfg.PermissionMode, sandboxType: cfg.SandboxType}, nil
+	}
+
+	sandboxRunner := &closeableSwitchRunner{}
+	rt, err := toolexec.NewModeSwitchable(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    cliTestSandboxType(),
+		SandboxRunner:  sandboxRunner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	console := &cliConsole{
+		baseCtx:     context.Background(),
+		execRuntime: rt,
+		sandboxType: "other-sandbox",
+		resolved:    &appassembly.ResolvedSpec{},
+	}
+	if err := console.updateExecutionRuntime(toolexec.PermissionModeDefault, console.sandboxType); err != nil {
+		t.Fatal(err)
+	}
+	if console.execRuntime == rt {
+		t.Fatal("expected sandbox change to rebuild runtime even after console state was updated")
+	}
+	if console.execRuntime.SandboxType() != "other-sandbox" {
+		t.Fatalf("expected rebuilt runtime to use updated sandbox, got %q", console.execRuntime.SandboxType())
+	}
+	if sandboxRunner.closed != 1 {
+		t.Fatalf("expected previous runtime closed once on sandbox change, got %d closes", sandboxRunner.closed)
+	}
+}
+
+func TestUpdateExecutionRuntime_ClosesPreviousRuntimeOnRebuild(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		return fakeRuntime{permissionMode: cfg.PermissionMode, sandboxType: cfg.SandboxType}, nil
+	}
+
 	sandboxRunner := &closeableSwitchRunner{}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
@@ -540,7 +632,7 @@ func TestUpdateExecutionRuntime_ClosesPreviousRuntime(t *testing.T) {
 		sandboxType: cliTestSandboxType(),
 		resolved:    &appassembly.ResolvedSpec{},
 	}
-	if err := console.updateExecutionRuntime(toolexec.PermissionModeFullControl, cliTestSandboxType()); err != nil {
+	if err := console.updateExecutionRuntime(toolexec.PermissionModeDefault, "other-sandbox"); err != nil {
 		t.Fatal(err)
 	}
 	if sandboxRunner.closed != 1 {
