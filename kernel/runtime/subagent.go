@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -343,6 +344,9 @@ func (r *runtimeSubagentRunner) prepareChildRun(ctx context.Context, req agent.S
 			lineage.DelegationID = existing.DelegationID
 		}
 	}
+	if err := r.seedChildSessionMeta(ctx, childSessionID, req.Agent); err != nil {
+		return RunRequest{}, delegationLineage{}, err
+	}
 	childReq := r.req
 	childReq.SessionID = childSessionID
 	childReq.Input = req.Prompt
@@ -395,6 +399,106 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (r *runtimeSubagentRunner) seedChildSessionMeta(ctx context.Context, childSessionID string, agentName string) error {
+	if r == nil || r.runtime == nil || r.runtime.store == nil {
+		return nil
+	}
+	childSessionID = strings.TrimSpace(childSessionID)
+	if childSessionID == "" {
+		return nil
+	}
+	meta := r.childSessionMeta(ctx, childSessionID, agentName)
+	if len(meta) == 0 {
+		return nil
+	}
+	child := &session.Session{
+		AppName: r.req.AppName,
+		UserID:  r.req.UserID,
+		ID:      childSessionID,
+	}
+	if _, err := r.runtime.store.GetOrCreate(ctx, child); err != nil {
+		return err
+	}
+	return mergeChildSessionMeta(ctx, r.runtime.store, child, meta)
+}
+
+func (r *runtimeSubagentRunner) childSessionMeta(ctx context.Context, childSessionID string, agentName string) map[string]any {
+	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
+		return meta
+	}
+	parentMeta := r.sessionMeta(ctx, r.parent.ID)
+	depth := coremeta.SelfSpawnDepthFromMeta(parentMeta)
+	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
+		depth++
+	}
+	return coremeta.WithSelfSpawnDepth(parentMeta, depth)
+}
+
+func (r *runtimeSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {
+	if r == nil || r.runtime == nil || r.runtime.store == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	values, err := r.runtime.store.SnapshotState(ctx, &session.Session{
+		AppName: r.req.AppName,
+		UserID:  r.req.UserID,
+		ID:      sessionID,
+	})
+	if err != nil {
+		return nil
+	}
+	acpState, _ := values["acp"].(map[string]any)
+	if len(acpState) == 0 {
+		return nil
+	}
+	meta, _ := acpState["meta"].(map[string]any)
+	return coremeta.CloneMeta(meta)
+}
+
+func mergeChildSessionMeta(ctx context.Context, store session.Store, sess *session.Session, meta map[string]any) error {
+	if store == nil || sess == nil || len(meta) == 0 {
+		return nil
+	}
+	merge := func(values map[string]any) map[string]any {
+		if values == nil {
+			values = map[string]any{}
+		}
+		acpState, _ := values["acp"].(map[string]any)
+		if acpState == nil {
+			acpState = map[string]any{}
+		} else {
+			acpState = cloneMap(acpState)
+		}
+		acpState["meta"] = coremeta.CloneMeta(meta)
+		values["acp"] = acpState
+		return values
+	}
+	if updater, ok := store.(session.StateUpdateStore); ok {
+		return updater.UpdateState(ctx, sess, func(values map[string]any) (map[string]any, error) {
+			return merge(values), nil
+		})
+	}
+	values, err := store.SnapshotState(ctx, sess)
+	if err != nil {
+		return err
+	}
+	return store.ReplaceState(ctx, sess, merge(values))
+}
+
+func cloneMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, lineage delegationLineage) {

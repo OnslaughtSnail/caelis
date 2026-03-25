@@ -93,6 +93,7 @@ type managedSession struct {
 	stateMu           sync.Mutex
 	modeID            string
 	configValues      map[string]string
+	meta              map[string]any
 	configOptions     []internalacp.SessionConfigOption
 	availableCommands []internalacp.AvailableCommand
 	planEntries       []internalacp.PlanEntry
@@ -191,6 +192,7 @@ func (s *Service) NewSession(ctx context.Context, req internalacp.NewSessionRequ
 		cwd:          cwd,
 		modeID:       s.initialModeID(),
 		configValues: s.initialConfigValues(),
+		meta:         internalacp.CloneMeta(req.Meta),
 	}
 	s.normalizeSessionConfig(sess)
 	resources, err := s.newSessionResources(ctx, sessionID, sess.cwd, caps, sess.mode)
@@ -239,9 +241,14 @@ func (s *Service) LoadSession(ctx context.Context, req internalacp.LoadSessionRe
 	if err := s.ensureSessionExists(ctx, sessRef); err != nil {
 		return internalacp.LoadedSessionState{}, err
 	}
-	loaded, state, err := s.loadSessionState(ctx, strings.TrimSpace(req.SessionID), cwd, caps)
+	loaded, state, err := s.loadSessionState(ctx, strings.TrimSpace(req.SessionID), cwd, caps, req.Meta)
 	if err != nil {
 		return internalacp.LoadedSessionState{}, err
+	}
+	if len(req.Meta) > 0 {
+		if err := s.persistSessionState(ctx, s.sessionRef(loaded.id), loaded); err != nil {
+			return internalacp.LoadedSessionState{}, err
+		}
 	}
 	return internalacp.LoadedSessionState{
 		Session: s.snapshot(loaded),
@@ -324,6 +331,11 @@ func (s *Service) StartPrompt(ctx context.Context, req internalacp.StartPromptRe
 	runCtx := ctx
 	if runCtx == nil {
 		runCtx = context.Background()
+	}
+	if mergeSessionMeta(sess, req.Meta) {
+		if err := s.persistSessionState(runCtx, s.sessionRef(sess.id), sess); err != nil {
+			return internalacp.StartPromptResult{}, err
+		}
 	}
 	if !req.HasImages && len(req.ContentParts) == 0 {
 		if inv, ok := slashcmd.Parse(req.InputText); ok && s.hasAvailableCommand(sess, inv.Name) {
@@ -503,7 +515,7 @@ func (s *Service) appendAssistantText(ctx context.Context, sessionID string, tex
 	return ev, nil
 }
 
-func (s *Service) loadSessionState(ctx context.Context, sessionID string, resolvedCWD string, caps internalacp.ClientCapabilities) (*managedSession, []*session.Event, error) {
+func (s *Service) loadSessionState(ctx context.Context, sessionID string, resolvedCWD string, caps internalacp.ClientCapabilities, reqMeta map[string]any) (*managedSession, []*session.Event, error) {
 	loadFrom, err := s.baseSessionService(nil)
 	if err != nil {
 		return nil, nil, err
@@ -520,18 +532,19 @@ func (s *Service) loadSessionState(ctx context.Context, sessionID string, resolv
 	if err != nil {
 		return nil, nil, err
 	}
-	modeID, configValues, storedCWD, planEntries := s.restoreSessionState(loaded.State)
+	modeID, configValues, storedCWD, planEntries, meta := s.restoreSessionState(loaded.State)
 	if storedCWD != "" && storedCWD != resolvedCWD {
 		return nil, nil, fmt.Errorf("cwd %q does not match persisted session cwd %q", resolvedCWD, storedCWD)
 	}
 	if storedCWD != "" {
 		resolvedCWD = storedCWD
 	}
+	meta = mergeACPRequestMeta(meta, reqMeta)
 	if existing := s.loadedSession(sessionID); existing != nil {
 		if existing.cwd != resolvedCWD {
 			return nil, nil, fmt.Errorf("session %q is already loaded with cwd %q", sessionID, existing.cwd)
 		}
-		existing.setState(modeID, configValues, planEntries)
+		existing.setState(modeID, configValues, planEntries, meta)
 		s.normalizeSessionConfig(existing)
 		s.refreshDerivedState(existing)
 		return existing, loaded.Events, nil
@@ -541,6 +554,7 @@ func (s *Service) loadSessionState(ctx context.Context, sessionID string, resolv
 		cwd:          resolvedCWD,
 		modeID:       modeID,
 		configValues: configValues,
+		meta:         internalacp.CloneMeta(meta),
 		planEntries:  append([]internalacp.PlanEntry(nil), planEntries...),
 	}
 	s.normalizeSessionConfig(sess)
@@ -705,6 +719,7 @@ func (s *Service) persistSessionState(ctx context.Context, sessRef *session.Sess
 	}
 	modeID := sess.mode()
 	configValues := sess.configSnapshot()
+	meta := sess.metaSnapshot()
 	planEntries := sess.planSnapshot()
 	if updater, ok := s.store.(session.StateUpdateStore); ok {
 		return updater.UpdateState(ctx, sessRef, func(values map[string]any) (map[string]any, error) {
@@ -716,6 +731,7 @@ func (s *Service) persistSessionState(ctx context.Context, sessRef *session.Sess
 				"cwd":          sess.cwd,
 				"modeId":       modeID,
 				"configValues": configValues,
+				"meta":         meta,
 			}
 			values["plan"] = map[string]any{
 				"version": 1,
@@ -736,6 +752,7 @@ func (s *Service) persistSessionState(ctx context.Context, sessRef *session.Sess
 		"cwd":          sess.cwd,
 		"modeId":       modeID,
 		"configValues": configValues,
+		"meta":         meta,
 	}
 	values["plan"] = map[string]any{
 		"version": 1,
@@ -775,7 +792,7 @@ func (s *Service) ensurePromptSnapshot(ctx context.Context, sess *managedSession
 	return promptText, nil
 }
 
-func (s *Service) restoreSessionState(state map[string]any) (string, map[string]string, string, []internalacp.PlanEntry) {
+func (s *Service) restoreSessionState(state map[string]any) (string, map[string]string, string, []internalacp.PlanEntry, map[string]any) {
 	modeID := sessionmode.LoadSnapshot(state)
 	if !s.modeExists(modeID) {
 		modeID = s.initialModeID()
@@ -783,7 +800,7 @@ func (s *Service) restoreSessionState(state map[string]any) (string, map[string]
 	values := s.initialConfigValues()
 	raw := anyMap(state["acp"])
 	if raw == nil {
-		return modeID, values, "", loadPlanEntries(state["plan"])
+		return modeID, values, "", loadPlanEntries(state["plan"]), nil
 	}
 	cwd, _ := raw["cwd"].(string)
 	cwd = filepath.Clean(strings.TrimSpace(cwd))
@@ -806,7 +823,68 @@ func (s *Service) restoreSessionState(state map[string]any) (string, map[string]
 			values[template.ID] = strings.TrimSpace(rawValue)
 		}
 	}
-	return modeID, values, cwd, loadPlanEntries(state["plan"])
+	return modeID, values, cwd, loadPlanEntries(state["plan"]), internalacp.CloneMeta(anyMap(raw["meta"]))
+}
+
+func mergeACPRequestMeta(base map[string]any, incoming map[string]any) map[string]any {
+	if len(incoming) == 0 {
+		return internalacp.CloneMeta(base)
+	}
+	merged := internalacp.CloneMeta(base)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	for key, value := range internalacp.CloneMeta(incoming) {
+		if existing, ok := merged[key].(map[string]any); ok {
+			if nested, ok := value.(map[string]any); ok {
+				for nestedKey, nestedValue := range nested {
+					existing[nestedKey] = nestedValue
+				}
+				merged[key] = existing
+				continue
+			}
+		}
+		merged[key] = value
+	}
+	return merged
+}
+
+func mergeSessionMeta(sess *managedSession, incoming map[string]any) bool {
+	if sess == nil || len(incoming) == 0 {
+		return false
+	}
+	next := mergeACPRequestMeta(sess.metaSnapshot(), incoming)
+	sess.stateMu.Lock()
+	defer sess.stateMu.Unlock()
+	if equalACPMetadata(sess.meta, next) {
+		return false
+	}
+	sess.meta = next
+	return true
+}
+
+func equalACPMetadata(left map[string]any, right map[string]any) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		other, ok := right[key]
+		if !ok {
+			return false
+		}
+		leftNested, leftOK := value.(map[string]any)
+		rightNested, rightOK := other.(map[string]any)
+		if leftOK || rightOK {
+			if !leftOK || !rightOK || !equalACPMetadata(leftNested, rightNested) {
+				return false
+			}
+			continue
+		}
+		if fmt.Sprint(value) != fmt.Sprint(other) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) validateSessionCWD(cwd string) (string, error) {
@@ -997,6 +1075,12 @@ func (s *managedSession) configSnapshot() map[string]string {
 	return cloneStringMap(s.configValues)
 }
 
+func (s *managedSession) metaSnapshot() map[string]any {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return internalacp.CloneMeta(s.meta)
+}
+
 func (s *managedSession) agentConfig() internalacp.AgentSessionConfig {
 	return internalacp.AgentSessionConfig{
 		ModeID:       s.mode(),
@@ -1004,11 +1088,12 @@ func (s *managedSession) agentConfig() internalacp.AgentSessionConfig {
 	}
 }
 
-func (s *managedSession) setState(modeID string, configValues map[string]string, planEntries []internalacp.PlanEntry) {
+func (s *managedSession) setState(modeID string, configValues map[string]string, planEntries []internalacp.PlanEntry, meta map[string]any) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	s.modeID = strings.TrimSpace(modeID)
 	s.configValues = cloneStringMap(configValues)
+	s.meta = internalacp.CloneMeta(meta)
 	s.planEntries = append([]internalacp.PlanEntry(nil), planEntries...)
 }
 

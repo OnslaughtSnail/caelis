@@ -123,6 +123,7 @@ type MCPServer map[string]any
 type NewSessionRequest struct {
 	CWD        string      `json:"cwd"`
 	MCPServers []MCPServer `json:"mcpServers"`
+	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
 type NewSessionResponse struct {
@@ -133,6 +134,7 @@ type LoadSessionRequest struct {
 	SessionID  string      `json:"sessionId"`
 	CWD        string      `json:"cwd"`
 	MCPServers []MCPServer `json:"mcpServers"`
+	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
 type LoadSessionResponse struct{}
@@ -162,6 +164,7 @@ type TextContent struct {
 type PromptRequest struct {
 	SessionID string            `json:"sessionId"`
 	Prompt    []json.RawMessage `json:"prompt"`
+	Meta      map[string]any    `json:"_meta,omitempty"`
 }
 
 type PromptResponse struct {

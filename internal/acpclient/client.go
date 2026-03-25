@@ -147,32 +147,35 @@ func (c *Client) Initialize(ctx context.Context) (InitializeResponse, error) {
 	return resp, nil
 }
 
-func (c *Client) NewSession(ctx context.Context, cwd string) (NewSessionResponse, error) {
+func (c *Client) NewSession(ctx context.Context, cwd string, meta map[string]any) (NewSessionResponse, error) {
 	var resp NewSessionResponse
 	err := c.conn.Call(ctx, MethodSessionNew, NewSessionRequest{
 		CWD:        cwd,
 		MCPServers: c.mcpServers(),
+		Meta:       meta,
 	}, &resp)
 	return resp, err
 }
 
-func (c *Client) LoadSession(ctx context.Context, sessionID string, cwd string) (LoadSessionResponse, error) {
+func (c *Client) LoadSession(ctx context.Context, sessionID string, cwd string, meta map[string]any) (LoadSessionResponse, error) {
 	var resp LoadSessionResponse
 	err := c.conn.Call(ctx, MethodSessionLoad, LoadSessionRequest{
 		SessionID:  sessionID,
 		CWD:        cwd,
 		MCPServers: c.mcpServers(),
+		Meta:       meta,
 	}, &resp)
 	return resp, err
 }
 
-func (c *Client) Prompt(ctx context.Context, sessionID string, text string) (PromptResponse, error) {
+func (c *Client) Prompt(ctx context.Context, sessionID string, text string, meta map[string]any) (PromptResponse, error) {
 	var resp PromptResponse
 	err := c.conn.Call(ctx, MethodSessionPrompt, PromptRequest{
 		SessionID: sessionID,
 		Prompt: []json.RawMessage{
 			mustMarshalRaw(TextContent{Type: "text", Text: text}),
 		},
+		Meta: meta,
 	}, &resp)
 	return resp, err
 }

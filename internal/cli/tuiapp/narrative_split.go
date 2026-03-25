@@ -310,13 +310,13 @@ func buildNarrativeRows(raw string) ([]NarrativeLine, []string) {
 // ---------------------------------------------------------------------------
 
 // styleNarrativeLine applies minimal theme styling to a plain-text narrative
-// line based on its structural kind. The roleStyle controls the role-level
-// colorization (assistant vs reasoning).
-func styleNarrativeLine(raw, plain string, kind NarrativeBlockKind, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
-	prefix, _ := splitRolePrefix(plain)
+// line based on its structural kind. rolePrefix is a renderer-added prefix
+// such as "* " or "· actor: ", and must not be inferred from the content line
+// itself because markdown list items can also begin with "* ".
+func styleNarrativeLine(raw, rolePrefix string, kind NarrativeBlockKind, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
 	styledPrefix := ""
-	if prefix != "" {
-		styledPrefix = tuikit.ColorizeLogLine(prefix, roleStyle, theme)
+	if rolePrefix != "" {
+		styledPrefix = tuikit.ColorizeLogLine(rolePrefix, roleStyle, theme)
 	}
 	bodyRaw := strings.TrimRight(raw, " \t")
 	switch kind {
@@ -360,16 +360,6 @@ func styleBlockquoteLine(raw string, roleStyle tuikit.LineStyle, theme tuikit.Th
 		return renderInlineMarkdown(raw, narrativeBodyStyle(roleStyle, theme), theme)
 	}
 	return indent + theme.NoteStyle().Render(marker) + renderInlineMarkdown(body, narrativeBodyStyle(roleStyle, theme), theme)
-}
-
-// splitRolePrefix splits known role prefixes ("* ", "· ", "  ") from body text.
-func splitRolePrefix(plain string) (prefix, body string) {
-	for _, p := range []string{"* ", "· ", "  "} {
-		if strings.HasPrefix(plain, p) {
-			return p, plain[len(p):]
-		}
-	}
-	return "", plain
 }
 
 // simplifyInlineMarkers strips balanced inline markdown markers from a line

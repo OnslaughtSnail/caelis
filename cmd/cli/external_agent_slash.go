@@ -211,7 +211,7 @@ func (c *cliConsole) runExternalAgentSlash(desc appagents.Descriptor, prompt str
 	}
 	participant.DisplayLabel = participantDisplayLabel(participant.Alias, participant.AgentID)
 	routeText := "/" + strings.TrimSpace(desc.ID) + " " + prompt
-	return c.startExternalAgentTurnAsync(externalAgentTurn{
+	return c.startExternalAgentTurnAsync(&externalAgentTurn{
 		mode:        externalAgentTurnNew,
 		desc:        desc,
 		participant: participant,
@@ -250,7 +250,7 @@ func (c *cliConsole) routeExternalParticipant(alias string, prompt string) error
 	if !ok {
 		return fmt.Errorf("configured agent %q is unavailable", participant.AgentID)
 	}
-	return c.startExternalAgentTurnAsync(externalAgentTurn{
+	return c.startExternalAgentTurnAsync(&externalAgentTurn{
 		mode:        externalAgentTurnLoad,
 		desc:        desc,
 		participant: participant,
@@ -275,8 +275,8 @@ func (c *cliConsole) prepareExternalParticipantPrompt(prompt string) (string, er
 	return strings.TrimSpace(result.Text), nil
 }
 
-func (c *cliConsole) startExternalAgentTurnAsync(turn externalAgentTurn) error {
-	if c == nil {
+func (c *cliConsole) startExternalAgentTurnAsync(turn *externalAgentTurn) error {
+	if c == nil || turn == nil {
 		return fmt.Errorf("console is unavailable")
 	}
 
@@ -286,14 +286,16 @@ func (c *cliConsole) startExternalAgentTurnAsync(turn externalAgentTurn) error {
 	}
 	runCtx, cancelCtx := context.WithCancel(baseCtx)
 	cancel := func() {
-		turn.runState.cancel()
+		if turn.runState != nil {
+			turn.runState.cancel()
+		}
 		cancelCtx()
 	}
 	c.setActiveExternalRun(cancel)
 
 	go func() {
 		defer c.clearActiveRun()
-		err := c.runExternalAgentTurnOnce(runCtx, &turn)
+		err := c.runExternalAgentTurnOnce(runCtx, turn)
 		switch {
 		case err == nil:
 			if c.tuiSender != nil && strings.TrimSpace(turn.participant.ChildSessionID) != "" {
@@ -354,7 +356,7 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 
 	switch turn.mode {
 	case externalAgentTurnNew:
-		sessionResp, err := client.NewSession(ctx, c.resolveExternalAgentWorkDir(turn.desc))
+		sessionResp, err := client.NewSession(ctx, c.resolveExternalAgentWorkDir(turn.desc), nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -363,7 +365,7 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 		}
 		turn.participant.ChildSessionID = strings.TrimSpace(sessionResp.SessionID)
 	case externalAgentTurnLoad:
-		if _, err := client.LoadSession(ctx, strings.TrimSpace(turn.participant.ChildSessionID), c.resolveExternalAgentWorkDir(turn.desc)); err != nil {
+		if _, err := client.LoadSession(ctx, strings.TrimSpace(turn.participant.ChildSessionID), c.resolveExternalAgentWorkDir(turn.desc), nil); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -388,7 +390,7 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	if _, err := c.ensureSessionRecord(ctx, sessionID); err != nil {
 		return err
 	}
-	if err := c.persistExternalParticipantRoute(ctx, *turn); err != nil {
+	if err := c.persistExternalParticipantRoute(ctx, turn); err != nil {
 		return err
 	}
 	if c.tuiSender != nil {
@@ -399,17 +401,17 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	}
 	turn.ready.Store(true)
 
-	if _, err := client.Prompt(ctx, sessionID, turn.promptText); err != nil {
+	if _, err := client.Prompt(ctx, sessionID, turn.promptText, nil); err != nil {
 		if ctx.Err() != nil {
 			_ = c.updateParticipantStatus(context.Background(), sessionID, "interrupted")
-			c.finalizeExternalTurnStreams(*turn, true)
+			c.finalizeExternalTurnStreams(turn, true)
 			return ctx.Err()
 		}
 		_ = c.updateParticipantStatus(context.Background(), sessionID, "failed")
-		c.finalizeExternalTurnStreams(*turn, true)
+		c.finalizeExternalTurnStreams(turn, true)
 		return externalAgentRunError(err, client)
 	}
-	c.finalizeExternalTurnStreams(*turn, false)
+	c.finalizeExternalTurnStreams(turn, false)
 	_ = c.updateParticipantStatus(context.Background(), sessionID, "completed")
 	return nil
 }
@@ -501,7 +503,10 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 	return externalPermissionOutcome(req, true), nil
 }
 
-func (c *cliConsole) persistExternalParticipantRoute(ctx context.Context, turn externalAgentTurn) error {
+func (c *cliConsole) persistExternalParticipantRoute(ctx context.Context, turn *externalAgentTurn) error {
+	if turn == nil {
+		return fmt.Errorf("external agent turn is unavailable")
+	}
 	rootEvent := routeMirrorUserEvent(turn.routeText, turn.participant, turn.routeKind)
 	if err := c.appendSessionEvent(ctx, c.currentSessionRef(), rootEvent); err != nil {
 		return err
@@ -612,8 +617,8 @@ func (c *cliConsole) forwardExternalAgentUpdate(turn *externalAgentTurn, env acp
 	}
 }
 
-func (c *cliConsole) finalizeExternalTurnStreams(turn externalAgentTurn, interrupted bool) {
-	if c == nil || c.tuiSender == nil {
+func (c *cliConsole) finalizeExternalTurnStreams(turn *externalAgentTurn, interrupted bool) {
+	if c == nil || c.tuiSender == nil || turn == nil {
 		return
 	}
 	displayLabel := participantDisplayLabel(turn.participant.Alias, turn.participant.AgentID)

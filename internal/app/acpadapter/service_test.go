@@ -298,6 +298,84 @@ func TestServiceStartPromptFreezesSystemPromptPerLoadedSession(t *testing.T) {
 	}
 }
 
+func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
+	llm := &scriptedLLM{
+		calls: [][]*model.Response{
+			{{Message: model.NewTextMessage(model.RoleAssistant, "hello from adapter")}},
+		},
+	}
+	svc, cleanup := newTestService(t, testServiceConfig{llm: llm})
+	defer cleanup()
+
+	ctx := context.Background()
+	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+		CWD: "/workspace/project",
+		Meta: map[string]any{
+			"caelis": map[string]any{
+				"selfSpawnDepth": 0,
+			},
+		},
+	}, internalacp.ClientCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMeta := func(wantDepth int, wantTrace string, wantRequest string) {
+		t.Helper()
+		values, err := svc.store.SnapshotState(ctx, svc.sessionRef(created.SessionID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta := anyMap(anyMap(values["acp"])["meta"])
+		if got := internalacp.SelfSpawnDepthFromMeta(meta); got != wantDepth {
+			t.Fatalf("expected self spawn depth %d, got %d", wantDepth, got)
+		}
+		caelisMeta := anyMap(meta["caelis"])
+		traceValue, _ := caelisMeta["trace"].(string)
+		if got := strings.TrimSpace(traceValue); got != wantTrace {
+			t.Fatalf("expected caelis.trace %q, got %#v", wantTrace, meta)
+		}
+		requestValue, _ := meta["request"].(string)
+		if got := strings.TrimSpace(requestValue); got != wantRequest {
+			t.Fatalf("expected request %q, got %#v", wantRequest, meta)
+		}
+	}
+
+	assertMeta(0, "", "")
+
+	if _, err := svc.LoadSession(ctx, internalacp.LoadSessionRequest{
+		SessionID: created.SessionID,
+		CWD:       "/workspace/project",
+		Meta: map[string]any{
+			"caelis": map[string]any{
+				"trace": "load-1",
+			},
+		},
+	}, internalacp.ClientCapabilities{}); err != nil {
+		t.Fatal(err)
+	}
+	assertMeta(0, "load-1", "")
+
+	result, err := svc.StartPrompt(ctx, internalacp.StartPromptRequest{
+		SessionID: created.SessionID,
+		InputText: "hi",
+		Meta: map[string]any{
+			"request": "prompt-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, errs := drainPromptEvents(result.Handle.Events())
+	if len(errs) > 0 {
+		t.Fatalf("unexpected prompt errors: %v", errs)
+	}
+	if err := result.Handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertMeta(0, "load-1", "prompt-1")
+}
+
 type testServiceConfig struct {
 	llm          model.LLM
 	listSessions internalacp.SessionListFactory

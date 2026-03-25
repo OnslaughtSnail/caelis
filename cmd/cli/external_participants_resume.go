@@ -58,7 +58,7 @@ func (c *cliConsole) resumeExternalParticipantStream(ctx context.Context, partic
 	if _, err := client.Initialize(ctx); err != nil {
 		return
 	}
-	if _, err := client.LoadSession(ctx, participant.ChildSessionID, c.resolveExternalAgentWorkDir(desc)); err != nil {
+	if _, err := client.LoadSession(ctx, participant.ChildSessionID, c.resolveExternalAgentWorkDir(desc), nil); err != nil {
 		return
 	}
 	ready.Store(true)

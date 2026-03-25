@@ -51,6 +51,8 @@ type subagentDomainUpdate struct {
 	Target          subagentProjectionTarget
 	Event           *session.Event
 	Status          string
+	ClaimAnchor     bool
+	Provisional     bool
 	ApprovalTool    string
 	ApprovalCommand string
 	Entries         []tuievents.PlanEntry
@@ -84,6 +86,8 @@ func (c *cliConsole) projectSubagentDomainUpdate(update subagentDomainUpdate) []
 			AttachTarget: target.AttachTarget,
 			Agent:        target.Agent,
 			CallID:       target.CallID,
+			ClaimAnchor:  update.ClaimAnchor,
+			Provisional:  update.Provisional,
 		}}
 		if status := strings.TrimSpace(update.Status); status != "" {
 			msgs = append(msgs, tuievents.SubagentStatusMsg{
@@ -124,6 +128,8 @@ func renderSubagentDomainUpdates(updates []subagentDomainUpdate) []any {
 				AttachTarget: target.AttachTarget,
 				Agent:        target.Agent,
 				CallID:       target.CallID,
+				ClaimAnchor:  update.ClaimAnchor,
+				Provisional:  update.Provisional,
 			})
 			if status := strings.TrimSpace(update.Status); status != "" {
 				msgs = append(msgs, tuievents.SubagentStatusMsg{
@@ -184,12 +190,17 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName) {
 		return subagentDomainUpdate{}, false
 	}
-	spawnID := strings.TrimSpace(firstNonEmpty(
+	childSessionID := strings.TrimSpace(firstNonEmpty(
 		resp.Result,
 		"_ui_child_session_id",
 		"child_session_id",
-		"task_id",
 	))
+	spawnID := childSessionID
+	provisional := false
+	if spawnID == "" {
+		spawnID = strings.TrimSpace(resp.ID)
+		provisional = true
+	}
 	if spawnID == "" {
 		return subagentDomainUpdate{}, false
 	}
@@ -200,6 +211,9 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 		"_ui_delegation_id",
 		"delegation_id",
 	))
+	if provisional && attachTarget == "" {
+		attachTarget = strings.TrimSpace(resp.ID)
+	}
 	state := "running"
 	var approvalTool, approvalCmd string
 	if fmt.Sprint(resp.Result["_ui_approval_pending"]) == "true" || fmt.Sprint(resp.Result["approval_pending"]) == "true" {
@@ -221,12 +235,47 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 		CallID:        strings.TrimSpace(resp.ID),
 		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
 	}
+	if target.Agent == "" {
+		target.Agent = "self"
+	}
 	return subagentDomainUpdate{
 		Kind:            subagentDomainBootstrap,
 		Target:          target,
 		Status:          state,
+		ClaimAnchor:     true,
+		Provisional:     provisional,
 		ApprovalTool:    approvalTool,
 		ApprovalCommand: approvalCmd,
+	}, true
+}
+
+func subagentDomainUpdateFromSpawnToolCall(rootSessionID string, call model.ToolCall, args map[string]any, defaultAgent string) (subagentDomainUpdate, bool) {
+	if !strings.EqualFold(strings.TrimSpace(call.Name), tool.SpawnToolName) {
+		return subagentDomainUpdate{}, false
+	}
+	callID := strings.TrimSpace(call.ID)
+	if callID == "" {
+		return subagentDomainUpdate{}, false
+	}
+	agent := strings.TrimSpace(asString(args["agent"]))
+	if agent == "" {
+		agent = strings.TrimSpace(defaultAgent)
+	}
+	if agent == "" {
+		agent = "self"
+	}
+	return subagentDomainUpdate{
+		Kind: subagentDomainBootstrap,
+		Target: subagentProjectionTarget{
+			RootSessionID: strings.TrimSpace(rootSessionID),
+			SpawnID:       callID,
+			AttachTarget:  callID,
+			CallID:        callID,
+			Agent:         agent,
+		},
+		Status:      "running",
+		ClaimAnchor: true,
+		Provisional: true,
 	}, true
 }
 
@@ -265,6 +314,7 @@ func annotateSyntheticSubagentEvent(ev *session.Event, target subagentProjection
 		ev.Meta["parent_tool_call_id"] = callID
 	}
 	if agent := strings.TrimSpace(target.Agent); agent != "" {
+		ev.Meta["agent_id"] = agent
 		ev.Meta["_ui_agent"] = agent
 	}
 	ev.Meta["parent_tool_name"] = tool.SpawnToolName
@@ -326,6 +376,23 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 		spawnID = meta.ParentToolCall
 	}
 
+	p.mu.Lock()
+	state := p.states[spawnID]
+	if state == nil {
+		state = &spawnPreviewState{
+			toolCalls: map[string]toolCallSnapshot{},
+		}
+		p.states[spawnID] = state
+	}
+	if agent := spawnPreviewEventAgent(update.Event); agent != "" {
+		state.agent = agent
+	}
+	if state.agent == "" {
+		state.agent = "self"
+	}
+	agentName := state.agent
+	p.mu.Unlock()
+
 	// Handle lifecycle transitions (done/failed/interrupted).
 	if info, ok := runtime.LifecycleFromEvent(update.Event); ok {
 		if !isTerminalSpawnStatus(info.Status) {
@@ -334,10 +401,11 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 				Target: subagentProjectionTarget{
 					SpawnID:      spawnID,
 					AttachTarget: attachTarget,
-					Agent:        "self",
+					Agent:        agentName,
 					CallID:       meta.ParentToolCall,
 				},
-				Status: string(info.Status),
+				Status:      string(info.Status),
+				ClaimAnchor: false,
 			}
 			if info.Status == runtime.RunLifecycleStatusWaitingApproval {
 				status.ApprovalTool, status.ApprovalCommand = resolveApprovalContext(p, spawnID, info)
@@ -353,7 +421,7 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 				Target: subagentProjectionTarget{
 					SpawnID:      spawnID,
 					AttachTarget: attachTarget,
-					Agent:        "self",
+					Agent:        agentName,
 					CallID:       meta.ParentToolCall,
 				},
 				Status: string(info.Status),
@@ -363,14 +431,7 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	state := p.states[spawnID]
-	if state == nil {
-		state = &spawnPreviewState{
-			agent:     "self",
-			toolCalls: map[string]toolCallSnapshot{},
-		}
-		p.states[spawnID] = state
-	}
+	state = p.states[spawnID]
 
 	updates := make([]subagentDomainUpdate, 0, 4)
 	target := subagentProjectionTarget{
@@ -383,8 +444,9 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 	// Emit SubagentStartMsg on first event for this spawn.
 	if len(state.toolCalls) == 0 && state.assistant == "" && state.reasoning == "" {
 		updates = append(updates, subagentDomainUpdate{
-			Kind:   subagentDomainBootstrap,
-			Target: target,
+			Kind:        subagentDomainBootstrap,
+			Target:      target,
+			ClaimAnchor: false,
 		})
 	}
 
@@ -419,6 +481,13 @@ func (p *spawnPreviewProjector) ProjectDomain(update sessionstream.Update) []sub
 	}
 
 	return updates
+}
+
+func spawnPreviewEventAgent(ev *session.Event) string {
+	if ev == nil || len(ev.Meta) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(firstNonEmpty(ev.Meta, "_ui_agent", "agent_id", "agent"))
 }
 
 func isTerminalSpawnStatus(status runtime.RunLifecycleStatus) bool {

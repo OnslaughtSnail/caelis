@@ -86,11 +86,13 @@ func renderAssistantRows(blockID, actor, raw string, ctx BlockRenderContext) []R
 	}
 	rows := make([]RenderedRow, 0, len(plainRows))
 	for i, pr := range plainRows {
+		rolePrefix := ""
 		plain := pr
 		if i == 0 {
-			plain = "* " + actorPrefix + pr
+			rolePrefix = "* " + actorPrefix
+			plain = rolePrefix + pr
 		}
-		styled := styleNarrativeLine(nls[i].Text, plain, nls[i].Kind, tuikit.LineStyleAssistant, ctx.Theme)
+		styled := styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, tuikit.LineStyleAssistant, ctx.Theme)
 		rows = append(rows, StyledPlainRow(blockID, plain, styled))
 	}
 	return rows
@@ -134,12 +136,12 @@ func renderReasoningRows(blockID, actor, raw string, ctx BlockRenderContext) []R
 	}
 	rows := make([]RenderedRow, 0, len(plainRows))
 	for i, pr := range plainRows {
-		prefix := "  "
+		rolePrefix := "  "
 		if i == 0 {
-			prefix = "· " + actorPrefix
+			rolePrefix = "· " + actorPrefix
 		}
-		plain := prefix + pr
-		styled := styleNarrativeLine(nls[i].Text, plain, nls[i].Kind, tuikit.LineStyleReasoning, ctx.Theme)
+		plain := rolePrefix + pr
+		styled := styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, tuikit.LineStyleReasoning, ctx.Theme)
 		rows = append(rows, StyledPlainRow(blockID, plain, styled))
 	}
 	return rows
@@ -354,20 +356,20 @@ func renderParticipantTurnNarrativeRows(blockID string, raw string, lineStyle tu
 	}
 	out := make([]RenderedRow, 0, len(plainRows))
 	for i, plain := range plainRows {
-		prefix := ""
+		rolePrefix := ""
 		switch lineStyle {
 		case tuikit.LineStyleReasoning:
-			prefix = "· "
+			rolePrefix = "· "
 			if i > 0 {
-				prefix = "  "
+				rolePrefix = "  "
 			}
 		case tuikit.LineStyleAssistant:
 			if i == 0 {
-				prefix = "* "
+				rolePrefix = "* "
 			}
 		}
-		fullPlain := prefix + plain
-		fullStyled := styleNarrativeLine(nls[i].Text, fullPlain, nls[i].Kind, lineStyle, ctx.Theme)
+		fullPlain := rolePrefix + plain
+		fullStyled := styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, lineStyle, ctx.Theme)
 		wrappedPlain := strings.Split(hardWrapDisplayLine(fullPlain, maxInt(1, width)), "\n")
 		wrappedStyled := strings.Split(hardWrapDisplayLine(fullStyled, maxInt(1, width)), "\n")
 		lineCount := maxInt(len(wrappedPlain), len(wrappedStyled))

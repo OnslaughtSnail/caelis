@@ -1012,12 +1012,12 @@ func (m *Model) renderAssistantBlockLines(raw string) []string {
 		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
 	}
 	lines := make([]string, len(plainRows))
-	for i, pr := range plainRows {
-		plain := pr
+	for i := range plainRows {
+		rolePrefix := ""
 		if i == 0 {
-			plain = "* " + pr
+			rolePrefix = "* "
 		}
-		lines[i] = styleNarrativeLine(nls[i].Text, plain, nls[i].Kind, tuikit.LineStyleAssistant, m.theme)
+		lines[i] = styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, tuikit.LineStyleAssistant, m.theme)
 	}
 	return lines
 }

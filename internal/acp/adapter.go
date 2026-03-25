@@ -34,6 +34,7 @@ type StartPromptRequest struct {
 	InputText       string
 	ContentParts    []model.ContentPart
 	HasImages       bool
+	Meta            map[string]any
 	OnSessionStream func(sessionstream.Update) error
 }
 

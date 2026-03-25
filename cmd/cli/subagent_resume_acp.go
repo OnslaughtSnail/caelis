@@ -40,7 +40,8 @@ func (c *cliConsole) restoreResumedSubagentPanels(ctx context.Context, rootSessi
 	}
 	for _, target := range collectResumedSubagentTargets(events) {
 		c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
-			Kind: subagentDomainBootstrap,
+			Kind:        subagentDomainBootstrap,
+			ClaimAnchor: true,
 			Target: subagentProjectionTarget{
 				RootSessionID: rootSessionID,
 				SpawnID:       target.SpawnID,
@@ -173,7 +174,7 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 	if loadCWD == "" {
 		loadCWD = c.workspace.CWD
 	}
-	if _, err := client.LoadSession(loadCtx, target.SpawnID, loadCWD); err != nil {
+	if _, err := client.LoadSession(loadCtx, target.SpawnID, loadCWD, nil); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
 				Kind:   subagentDomainTerminal,

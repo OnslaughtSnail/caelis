@@ -175,8 +175,8 @@ func (m *Matcher) loadGitignoreFile(path string, domainDir string) ([]gitignore.
 	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 	patterns := make([]gitignore.Pattern, 0, len(lines))
 	for _, line := range lines {
-		if strings.HasSuffix(line, "\r") {
-			line = strings.TrimSuffix(line, "\r")
+		if before, ok := strings.CutSuffix(line, "\r"); ok {
+			line = before
 		}
 		if line == "" {
 			continue

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
+	appacpmeta "github.com/OnslaughtSnail/caelis/internal/app/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
@@ -77,6 +79,9 @@ func (t *selfSpawnTool) Run(ctx context.Context, args map[string]any) (map[strin
 	}
 	if agentName == "" {
 		agentName = "self"
+	}
+	if strings.EqualFold(agentName, "self") && appacpmeta.SelfSpawnDepthFromContext(ctx) >= coremeta.DefaultSelfSpawnMaxDepth {
+		return nil, fmt.Errorf("tool: SPAWN self exceeded max depth %d", coremeta.DefaultSelfSpawnMaxDepth)
 	}
 	for _, legacy := range []string{"session", "session_id", "new_session"} {
 		if _, ok := args[legacy]; ok {

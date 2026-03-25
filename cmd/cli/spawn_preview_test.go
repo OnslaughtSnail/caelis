@@ -55,6 +55,9 @@ func TestSpawnPreviewProjector_ProjectsAssistantStream(t *testing.T) {
 			if msg.SpawnID != "child-1" || msg.AttachTarget != "child-1" || msg.Agent != "self" || msg.CallID != "call-spawn-1" {
 				t.Fatalf("unexpected start msg: %+v", msg)
 			}
+			if msg.ClaimAnchor {
+				t.Fatalf("expected child-event bootstrap not to claim anchors, got %+v", msg)
+			}
 			startFound = true
 		case tuievents.SubagentStreamMsg:
 			if msg.Stream != "assistant" || msg.Chunk == "" {
@@ -91,6 +94,9 @@ func TestProjectSubagentDomainUpdate_UsesCommonSpawnProjectorPath(t *testing.T) 
 		case tuievents.SubagentStartMsg:
 			if msg.SpawnID != "child-1" || msg.AttachTarget != "child-1" || msg.CallID != "call-spawn-1" {
 				t.Fatalf("unexpected start msg: %+v", msg)
+			}
+			if msg.ClaimAnchor {
+				t.Fatalf("expected synthetic child-event bootstrap not to claim anchors, got %+v", msg)
 			}
 			startFound = true
 		case tuievents.SubagentStreamMsg:
@@ -136,11 +142,62 @@ func TestSubagentDomainUpdateFromSpawnToolResponse(t *testing.T) {
 	if update.Target.CallID != "call-spawn-1" || update.Target.Agent != "self" {
 		t.Fatalf("unexpected target metadata: %+v", update.Target)
 	}
+	if !update.ClaimAnchor {
+		t.Fatalf("expected spawn tool response bootstrap to claim anchor, got %+v", update)
+	}
+	if update.Provisional {
+		t.Fatalf("expected child-session bootstrap to be authoritative, got %+v", update)
+	}
 	if update.Status != "waiting_approval" {
 		t.Fatalf("expected waiting_approval status, got %q", update.Status)
 	}
 	if update.ApprovalTool != "BASH" || update.ApprovalCommand != "rm -rf /tmp/demo" {
 		t.Fatalf("unexpected approval context: %+v", update)
+	}
+}
+
+func TestSubagentDomainUpdateFromSpawnToolCallCreatesProvisionalBootstrap(t *testing.T) {
+	update, ok := subagentDomainUpdateFromSpawnToolCall("parent-1", model.ToolCall{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+	}, map[string]any{"agent": "gemini"}, "self")
+	if !ok {
+		t.Fatal("expected spawn tool call bootstrap to be extracted")
+	}
+	if update.Kind != subagentDomainBootstrap {
+		t.Fatalf("expected bootstrap kind, got %q", update.Kind)
+	}
+	if !update.ClaimAnchor || !update.Provisional {
+		t.Fatalf("expected provisional anchor-claiming bootstrap, got %+v", update)
+	}
+	if update.Target.RootSessionID != "parent-1" || update.Target.CallID != "call-spawn-1" {
+		t.Fatalf("unexpected root/call target: %+v", update.Target)
+	}
+	if update.Target.SpawnID != "call-spawn-1" || update.Target.AttachTarget != "call-spawn-1" {
+		t.Fatalf("expected provisional spawn to key off callID, got %+v", update.Target)
+	}
+	if update.Target.Agent != "gemini" {
+		t.Fatalf("expected agent from args, got %+v", update.Target)
+	}
+}
+
+func TestSubagentDomainUpdateFromSpawnToolResponse_TaskOnlyStaysProvisional(t *testing.T) {
+	update, ok := subagentDomainUpdateFromSpawnToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"task_id": "task-1",
+			"agent":   "self",
+		},
+	})
+	if !ok {
+		t.Fatal("expected task-only spawn response bootstrap to be extracted")
+	}
+	if !update.Provisional {
+		t.Fatalf("expected task-only bootstrap to remain provisional, got %+v", update)
+	}
+	if update.Target.SpawnID != "call-spawn-1" || update.Target.AttachTarget != "call-spawn-1" {
+		t.Fatalf("expected task-only bootstrap to stay keyed by callID, got %+v", update.Target)
 	}
 }
 
@@ -167,8 +224,96 @@ func TestSpawnPreviewProjector_UsesAgentIDFromMeta(t *testing.T) {
 			break
 		}
 	}
-	if startMsg.Agent != "self" {
-		t.Fatalf("expected agent=self by default, got %q", startMsg.Agent)
+	if startMsg.Agent != "codex" {
+		t.Fatalf("expected agent from event metadata, got %q", startMsg.Agent)
+	}
+}
+
+func TestSpawnPreviewProjector_InterleavedBootstrapAndChildEventsKeepAgentsAligned(t *testing.T) {
+	proj := newSpawnPreviewProjector()
+	var starts []tuievents.SubagentStartMsg
+	collectStarts := func(msgs []any) {
+		for _, raw := range msgs {
+			if msg, ok := raw.(tuievents.SubagentStartMsg); ok {
+				starts = append(starts, msg)
+			}
+		}
+	}
+
+	collectStarts(proj.Project(sessionstream.Update{
+		SessionID: "child-copilot",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "copilot child"),
+			Meta: map[string]any{
+				"parent_session_id":   "parent",
+				"child_session_id":    "child-copilot",
+				"parent_tool_call_id": "call-copilot",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-copilot",
+				"agent_id":            "copilot",
+			},
+		},
+	}))
+
+	selfBootstrap, ok := subagentDomainUpdateFromSpawnToolResponse("parent", &model.ToolResponse{
+		ID:   "call-self",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"child_session_id": "child-self",
+			"delegation_id":    "dlg-self",
+			"agent":            "self",
+		},
+	})
+	if !ok {
+		t.Fatal("expected self bootstrap update")
+	}
+	collectStarts(renderSubagentDomainUpdates([]subagentDomainUpdate{selfBootstrap}))
+
+	collectStarts(proj.Project(sessionstream.Update{
+		SessionID: "child-self",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "self child"),
+			Meta: map[string]any{
+				"parent_session_id":   "parent",
+				"child_session_id":    "child-self",
+				"parent_tool_call_id": "call-self",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-self",
+				"agent_id":            "self",
+			},
+		},
+	}))
+
+	copilotBootstrap, ok := subagentDomainUpdateFromSpawnToolResponse("parent", &model.ToolResponse{
+		ID:   "call-copilot",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"child_session_id": "child-copilot",
+			"delegation_id":    "dlg-copilot",
+			"agent":            "copilot",
+		},
+	})
+	if !ok {
+		t.Fatal("expected copilot bootstrap update")
+	}
+	collectStarts(renderSubagentDomainUpdates([]subagentDomainUpdate{copilotBootstrap}))
+
+	if len(starts) < 4 {
+		t.Fatalf("expected interleaved starts from child events and bootstraps, got %d", len(starts))
+	}
+	for _, msg := range starts {
+		switch msg.SpawnID {
+		case "child-self":
+			if msg.Agent != "self" || msg.CallID != "call-self" {
+				t.Fatalf("expected self spawn to keep self/call-self mapping, got %+v", msg)
+			}
+		case "child-copilot":
+			if msg.Agent != "copilot" || msg.CallID != "call-copilot" {
+				t.Fatalf("expected copilot spawn to keep copilot/call-copilot mapping, got %+v", msg)
+			}
+		default:
+			t.Fatalf("unexpected spawn start %+v", msg)
+		}
 	}
 }
 

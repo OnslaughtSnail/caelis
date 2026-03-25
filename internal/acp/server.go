@@ -298,6 +298,7 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		InputText:    input.text,
 		ContentParts: append([]model.ContentPart(nil), input.contentParts...),
 		HasImages:    input.hasImages,
+		Meta:         CloneMeta(req.Meta),
 		OnSessionStream: func(update sessionstream.Update) error {
 			if err := s.notifySessionStreamUpdate(req.SessionID, update); err != nil {
 				setSessionStreamErr(err)

@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
+	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
@@ -118,5 +121,41 @@ func TestSelfSpawnToolDeclarationOmitsLegacyContinuationArgs(t *testing.T) {
 		if _, ok := props[legacy]; ok {
 			t.Fatalf("did not expect legacy arg %q in SPAWN declaration", legacy)
 		}
+	}
+}
+
+func TestSelfSpawnToolRejectsNestedSelfSpawnFromSessionState(t *testing.T) {
+	toolImpl, err := NewSelfSpawnTool("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &stubTaskManager{}
+	store := inmemory.New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceState(context.Background(), sess, map[string]any{
+		"acp": map[string]any{
+			"meta": coremeta.WithSelfSpawnDepth(nil, 1),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := task.WithManager(context.Background(), manager)
+	ctx = session.WithStateContext(ctx, sess, store)
+	_, err = toolImpl.Run(ctx, map[string]any{
+		"agent":  "self",
+		"prompt": "nested child task",
+	})
+	if err == nil {
+		t.Fatal("expected nested self spawn to be rejected")
+	}
+	if !strings.Contains(err.Error(), "exceeded max depth 1") {
+		t.Fatalf("expected depth rejection, got %v", err)
+	}
+	if manager.lastStart.Prompt != "" {
+		t.Fatalf("did not expect task manager to start a child run, got %+v", manager.lastStart)
 	}
 }

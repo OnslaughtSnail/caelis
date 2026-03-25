@@ -619,6 +619,144 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	}
 }
 
+func TestSelfACPSpawnRejectsNestedSelfSpawnWithoutBreakingChildSession(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "one.txt"), []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listTool, err := toolfs.NewListWithRuntime(execRT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &testACPNestedSelfSpawnLLM{}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Runtime:         rt,
+		Store:           store,
+		AppName:         "app",
+		UserID:          "u",
+		WorkspaceCWD:    workspace,
+		Execution:       execRT,
+		Tools:           []tool.Tool{listTool},
+		EnableSelfSpawn: true,
+		SubagentRunnerFactory: NewACPSubagentRunnerFactory(Config{
+			Store:         store,
+			WorkspaceCWD:  workspace,
+			ClientRuntime: execRT,
+			NewAdapter:    newTestACPAdapterFactory(rt, store, execRT, workspace, ag, llm, []tool.Tool{listTool}),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runResult, err := svc.RunTurn(context.Background(), sessionsvc.RunTurnRequest{
+		SessionRef: sessionsvc.SessionRef{
+			AppName:      "app",
+			UserID:       "u",
+			SessionID:    "parent",
+			WorkspaceKey: workspace,
+		},
+		Input: "delegate nested self",
+		Agent: ag,
+		Model: llm,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runErr := range drainTurn(runResult.Handle.Events()) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	if err := runResult.Handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	delegations, err := svc.ListDelegations(context.Background(), sessionsvc.SessionRef{
+		AppName:      "app",
+		UserID:       "u",
+		SessionID:    "parent",
+		WorkspaceKey: workspace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delegations) != 1 {
+		t.Fatalf("expected only the first-level child delegation, got %d", len(delegations))
+	}
+	child := &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      delegations[0].ChildSessionID,
+	}
+	values, err := store.SnapshotState(context.Background(), child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := internalacp.SelfSpawnDepthFromMeta(anyMap(anyMap(values["acp"])["meta"])); got != 1 {
+		t.Fatalf("expected child self spawn depth 1, got %d", got)
+	}
+
+	events, err := store.ListEvents(context.Background(), child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawNestedSpawnError, sawList, sawRecovered, sawRunnerFailure bool
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		if strings.TrimSpace(ev.Message.TextContent()) == "child recovered" {
+			sawRecovered = true
+		}
+		resp := ev.Message.ToolResponse()
+		if resp == nil {
+			continue
+		}
+		errText := strings.TrimSpace(stringValue(resp.Result["error"]))
+		switch resp.Name {
+		case tool.SpawnToolName:
+			if strings.Contains(errText, "SPAWN self exceeded max depth 1") {
+				sawNestedSpawnError = true
+			}
+		case toolfs.ListToolName:
+			sawList = true
+		}
+		if strings.Contains(errText, "task manager") || strings.Contains(errText, "session-busy") || strings.Contains(errText, "runner closed") {
+			sawRunnerFailure = true
+		}
+	}
+	if !sawNestedSpawnError {
+		t.Fatalf("expected nested self spawn rejection in child events, got %+v", events)
+	}
+	if !sawList {
+		t.Fatalf("expected child to keep executing tools after nested spawn rejection, got %+v", events)
+	}
+	if !sawRecovered {
+		t.Fatalf("expected child assistant follow-up after nested spawn rejection, got %+v", events)
+	}
+	if sawRunnerFailure {
+		t.Fatalf("unexpected stale runner/task manager failure after nested spawn rejection, got %+v", events)
+	}
+}
+
 func TestSelectPermissionOptionIDPrefersAdvertisedAllowAndRejectOptions(t *testing.T) {
 	options := []struct {
 		OptionID string `json:"optionId"`
@@ -639,6 +777,8 @@ func TestSelectPermissionOptionIDPrefersAdvertisedAllowAndRejectOptions(t *testi
 type testACPSpawnLLM struct{}
 
 type testACPListGlobLLM struct{}
+
+type testACPNestedSelfSpawnLLM struct{}
 
 func (l *testACPSpawnLLM) Name() string { return "test-acp-spawn" }
 
@@ -679,6 +819,8 @@ func (l *testACPSpawnLLM) Generate(_ context.Context, req *model.Request) iter.S
 }
 
 func (l *testACPListGlobLLM) Name() string { return "test-acp-list-glob" }
+
+func (l *testACPNestedSelfSpawnLLM) Name() string { return "test-acp-nested-self-spawn" }
 
 func (l *testACPListGlobLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	return func(yield func(*model.StreamEvent, error) bool) {
@@ -733,6 +875,61 @@ func (l *testACPListGlobLLM) Generate(_ context.Context, req *model.Request) ite
 	}
 }
 
+func (l *testACPNestedSelfSpawnLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
+		last := req.Messages[len(req.Messages)-1]
+		switch last.Role {
+		case model.RoleUser:
+			switch last.TextContent() {
+			case "delegate nested self":
+				args, _ := json.Marshal(map[string]any{"prompt": "child nested self", "yield_seconds": 0})
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
+					TurnComplete: true,
+				}), nil)
+				return
+			case "child nested self":
+				args, _ := json.Marshal(map[string]any{"agent": "self", "prompt": "grandchild blocked", "yield_seconds": 0})
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-nested", Name: tool.SpawnToolName, Args: string(args)}}, ""),
+					TurnComplete: true,
+				}), nil)
+				return
+			}
+		case model.RoleTool:
+			resp := last.ToolResponse()
+			if resp == nil {
+				break
+			}
+			switch resp.Name {
+			case tool.SpawnToolName:
+				if errText := strings.TrimSpace(stringValue(resp.Result["error"])); errText != "" {
+					yield(model.StreamEventFromResponse(&model.Response{
+						Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-list-1", Name: toolfs.ListToolName, Args: `{"path":"."}`}}, ""),
+						TurnComplete: true,
+					}), nil)
+					return
+				}
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "delegated complete"),
+					TurnComplete: true,
+				}), nil)
+				return
+			case toolfs.ListToolName:
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "child recovered"),
+					TurnComplete: true,
+				}), nil)
+				return
+			}
+		}
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
+			TurnComplete: true,
+		}), nil)
+	}
+}
+
 func intValue(v any) int {
 	switch n := v.(type) {
 	case int:
@@ -749,6 +946,11 @@ func intValue(v any) int {
 func stringValue(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+func anyMap(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	return m
 }
 
 func drainTurn(seq iter.Seq2[*session.Event, error]) []error {

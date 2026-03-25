@@ -50,6 +50,61 @@ func TestSubagentStartBackfillsExistingPanelMetadata(t *testing.T) {
 	}
 }
 
+func TestSubagentStartUpdatesExistingPanelAgentWithoutReanchoring(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
+	})
+	anchor := NewTranscriptBlock("▸ SPAWN child", tuikit.LineStyleDefault)
+	m.doc.Append(anchor)
+	m.callAnchorIndex = map[string]string{
+		"call-1": anchor.BlockID(),
+	}
+
+	_, _ = m.handleSubagentStream(tuievents.SubagentStreamMsg{
+		SpawnID: "child-1",
+		Stream:  "assistant",
+		Chunk:   "hello",
+	})
+	panelID := m.subagentBlockIDs["child-1"]
+	if panelID == "" {
+		t.Fatal("expected panel to be created from stream event")
+	}
+
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "child-1",
+		AttachTarget: "child-1",
+		Agent:        "self",
+		CallID:       "call-1",
+	})
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "child-1",
+		AttachTarget: "child-1",
+		Agent:        "copilot",
+		CallID:       "call-1",
+	})
+
+	if got := m.subagentBlockIDs["child-1"]; got != panelID {
+		t.Fatalf("expected agent correction to reuse existing panel, got %q want %q", got, panelID)
+	}
+	panel, _ := m.doc.Find(panelID).(*SubagentPanelBlock)
+	if panel == nil {
+		t.Fatal("expected subagent panel")
+	}
+	if panel.Agent != "copilot" {
+		t.Fatalf("expected authoritative agent update, got %q", panel.Agent)
+	}
+	if panel.CallID != "call-1" {
+		t.Fatalf("expected call anchor to stay attached, got %q", panel.CallID)
+	}
+	blocks := m.doc.Blocks()
+	if len(blocks) != 2 {
+		t.Fatalf("expected anchor plus one panel block, got %d blocks", len(blocks))
+	}
+	if blocks[0].BlockID() != anchor.BlockID() || blocks[1].BlockID() != panelID {
+		t.Fatalf("expected panel to remain anchored after the same call block, got %#v", []string{blocks[0].BlockID(), blocks[1].BlockID()})
+	}
+}
+
 func TestSubagentPanelCoexistsWithAssistantBlock(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -234,5 +289,159 @@ func TestSubagentPanelEventsAreIndependentCopies(t *testing.T) {
 	panel1.Events = append(panel1.Events, SubagentEvent{Kind: SEToolCall, Name: "rogue"})
 	if len(panel2.Events) != 1 {
 		t.Fatalf("panel2 should be unaffected by direct mutation of panel1.Events, got %d", len(panel2.Events))
+	}
+}
+
+func TestSubagentStartPromotesProvisionalPanelToActualSession(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
+	})
+	anchor := NewTranscriptBlock("▸ SPAWN [gemini]", tuikit.LineStyleTool)
+	m.doc.Append(anchor)
+	m.pendingToolAnchors = []toolAnchor{
+		{blockID: anchor.BlockID(), toolName: "SPAWN"},
+	}
+
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "call-gemini",
+		AttachTarget: "call-gemini",
+		Agent:        "gemini",
+		CallID:       "call-gemini",
+		ClaimAnchor:  true,
+		Provisional:  true,
+	})
+
+	panelID := m.subagentBlockIDs["call-gemini"]
+	if panelID == "" {
+		t.Fatal("expected provisional panel to be created")
+	}
+	if got := len(m.pendingToolAnchors); got != 0 {
+		t.Fatalf("expected provisional bootstrap to claim anchor, got %d pending", got)
+	}
+
+	m.handleSubagentStart(tuievents.SubagentStartMsg{
+		SpawnID:      "child-gemini",
+		AttachTarget: "child-gemini",
+		Agent:        "gemini",
+		CallID:       "call-gemini",
+		ClaimAnchor:  false,
+	})
+	m.handleSubagentStream(tuievents.SubagentStreamMsg{
+		SpawnID: "child-gemini",
+		Stream:  "assistant",
+		Chunk:   "hello from gemini",
+	})
+
+	if stale := m.subagentBlockIDs["call-gemini"]; stale != "" {
+		t.Fatalf("expected provisional session key to be retired, got %q", stale)
+	}
+	if got := m.subagentBlockIDs["child-gemini"]; got != panelID {
+		t.Fatalf("expected actual child session to reuse provisional panel, got %q want %q", got, panelID)
+	}
+	blocks := m.doc.Blocks()
+	if len(blocks) != 2 {
+		t.Fatalf("expected anchor plus one promoted panel, got %d blocks", len(blocks))
+	}
+	if blocks[0].BlockID() != anchor.BlockID() || blocks[1].BlockID() != panelID {
+		t.Fatalf("expected promoted panel to stay inline under its SPAWN anchor, got %#v", []string{blocks[0].BlockID(), blocks[1].BlockID()})
+	}
+	panel, _ := m.doc.Find(panelID).(*SubagentPanelBlock)
+	if panel == nil {
+		t.Fatal("expected promoted panel to exist")
+	}
+	if panel.SpawnID != "child-gemini" || panel.AttachID != "child-gemini" {
+		t.Fatalf("expected promoted panel to reflect actual child session ids, got %+v", panel)
+	}
+	if panel.CallID != "call-gemini" {
+		t.Fatalf("expected promoted panel to keep original call anchor, got %+v", panel)
+	}
+	if len(panel.Events) != 1 || !strings.Contains(panel.Events[0].Text, "gemini") {
+		t.Fatalf("expected stream output to land in promoted inline panel, got %+v", panel.Events)
+	}
+}
+
+func TestSubagentStartDefersAnchorClaimUntilAuthoritativeBootstrap(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
+	})
+	codexAnchor := NewTranscriptBlock("▸ SPAWN [codex]", tuikit.LineStyleTool)
+	geminiAnchor := NewTranscriptBlock("▸ SPAWN [gemini]", tuikit.LineStyleTool)
+	selfAnchor := NewTranscriptBlock("▸ SPAWN [self]", tuikit.LineStyleTool)
+	m.doc.Append(codexAnchor)
+	m.doc.Append(geminiAnchor)
+	m.doc.Append(selfAnchor)
+	m.pendingToolAnchors = []toolAnchor{
+		{blockID: codexAnchor.BlockID(), toolName: "SPAWN"},
+		{blockID: geminiAnchor.BlockID(), toolName: "SPAWN"},
+		{blockID: selfAnchor.BlockID(), toolName: "SPAWN"},
+	}
+
+	// Child streams arrive out of order before parent spawn tool responses.
+	m.handleSubagentStream(tuievents.SubagentStreamMsg{SpawnID: "child-self", Stream: "assistant", Chunk: "self output"})
+	m.handleSubagentStream(tuievents.SubagentStreamMsg{SpawnID: "child-codex", Stream: "assistant", Chunk: "codex output"})
+	m.handleSubagentStream(tuievents.SubagentStreamMsg{SpawnID: "child-gemini", Stream: "assistant", Chunk: "gemini output"})
+
+	// Child-event bootstrap should record metadata but must not claim FIFO anchors.
+	m.handleSubagentStart(tuievents.SubagentStartMsg{SpawnID: "child-self", AttachTarget: "child-self", Agent: "self", CallID: "call-self", ClaimAnchor: false})
+	m.handleSubagentStart(tuievents.SubagentStartMsg{SpawnID: "child-codex", AttachTarget: "child-codex", Agent: "codex", CallID: "call-codex", ClaimAnchor: false})
+	m.handleSubagentStart(tuievents.SubagentStartMsg{SpawnID: "child-gemini", AttachTarget: "child-gemini", Agent: "gemini", CallID: "call-gemini", ClaimAnchor: false})
+
+	if got := len(m.pendingToolAnchors); got != 3 {
+		t.Fatalf("expected child-event starts to leave SPAWN anchors unclaimed, got %d", got)
+	}
+
+	// Parent spawn tool responses arrive in the original call order and claim anchors authoritatively.
+	m.handleSubagentStart(tuievents.SubagentStartMsg{SpawnID: "child-codex", AttachTarget: "child-codex", Agent: "codex", CallID: "call-codex", ClaimAnchor: true})
+	m.handleSubagentStart(tuievents.SubagentStartMsg{SpawnID: "child-gemini", AttachTarget: "child-gemini", Agent: "gemini", CallID: "call-gemini", ClaimAnchor: true})
+	m.handleSubagentStart(tuievents.SubagentStartMsg{SpawnID: "child-self", AttachTarget: "child-self", Agent: "self", CallID: "call-self", ClaimAnchor: true})
+
+	if got := len(m.pendingToolAnchors); got != 0 {
+		t.Fatalf("expected authoritative bootstraps to claim all SPAWN anchors, got %d", got)
+	}
+
+	codexPanelID := m.subagentBlockIDs["child-codex"]
+	geminiPanelID := m.subagentBlockIDs["child-gemini"]
+	selfPanelID := m.subagentBlockIDs["child-self"]
+	if codexPanelID == "" || geminiPanelID == "" || selfPanelID == "" {
+		t.Fatalf("expected panels for all children, got codex=%q gemini=%q self=%q", codexPanelID, geminiPanelID, selfPanelID)
+	}
+
+	blocks := m.doc.Blocks()
+	if len(blocks) != 6 {
+		t.Fatalf("expected 3 anchors + 3 panels, got %d blocks", len(blocks))
+	}
+	gotOrder := []string{
+		blocks[0].BlockID(),
+		blocks[1].BlockID(),
+		blocks[2].BlockID(),
+		blocks[3].BlockID(),
+		blocks[4].BlockID(),
+		blocks[5].BlockID(),
+	}
+	wantOrder := []string{
+		codexAnchor.BlockID(), codexPanelID,
+		geminiAnchor.BlockID(), geminiPanelID,
+		selfAnchor.BlockID(), selfPanelID,
+	}
+	for i := range wantOrder {
+		if gotOrder[i] != wantOrder[i] {
+			t.Fatalf("unexpected document order: got %#v want %#v", gotOrder, wantOrder)
+		}
+	}
+
+	codexPanel, _ := m.doc.Find(codexPanelID).(*SubagentPanelBlock)
+	geminiPanel, _ := m.doc.Find(geminiPanelID).(*SubagentPanelBlock)
+	selfPanel, _ := m.doc.Find(selfPanelID).(*SubagentPanelBlock)
+	if codexPanel == nil || geminiPanel == nil || selfPanel == nil {
+		t.Fatal("expected all subagent panels to exist")
+	}
+	if codexPanel.Agent != "codex" || codexPanel.CallID != "call-codex" {
+		t.Fatalf("expected codex panel metadata to stay aligned, got %+v", codexPanel)
+	}
+	if geminiPanel.Agent != "gemini" || geminiPanel.CallID != "call-gemini" {
+		t.Fatalf("expected gemini panel metadata to stay aligned, got %+v", geminiPanel)
+	}
+	if selfPanel.Agent != "self" || selfPanel.CallID != "call-self" {
+		t.Fatalf("expected self panel metadata to stay aligned, got %+v", selfPanel)
 	}
 }

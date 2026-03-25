@@ -160,6 +160,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	if cwd := strings.TrimSpace(req.ChildCWD); cwd != "" {
 		target.childCWD = cwd
 	}
+	sessionMeta := r.childSessionMeta(ctx, target.requestedSessionID, desc.ID)
 	metaBase := r.delegationMetadata(ctx, target.requestedSessionID)
 	runCtx, cancel := context.WithCancel(runtime.DetachDelegationContext(ctx, metaBase))
 	if req.Timeout > 0 {
@@ -194,7 +195,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	done := make(chan runOutcome, 1)
 	go func() {
 		outcome := runOutcome{}
-		outcome.sessionID, outcome.meta, outcome.created, outcome.err = r.runACPSubagent(runCtx, desc, target, req.Prompt, metaBase, func(created *acpclient.Client) {
+		outcome.sessionID, outcome.meta, outcome.created, outcome.err = r.runACPSubagent(runCtx, desc, target, req.Prompt, metaBase, sessionMeta, func(created *acpclient.Client) {
 			clientMu.Lock()
 			client = created
 			clientMu.Unlock()
@@ -319,7 +320,7 @@ type subagentSessionTarget struct {
 	childCWD           string
 }
 
-func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagents.Descriptor, target subagentSessionTarget, promptText string, metaBase runtime.DelegationMetadata, onClient func(*acpclient.Client), onReady func(readyState)) (string, runtime.DelegationMetadata, bool, error) {
+func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagents.Descriptor, target subagentSessionTarget, promptText string, metaBase runtime.DelegationMetadata, sessionMeta map[string]any, onClient func(*acpclient.Client), onReady func(readyState)) (string, runtime.DelegationMetadata, bool, error) {
 	var (
 		bridgeMu                sync.RWMutex
 		bridge                  *acpSessionUpdateBridge
@@ -346,7 +347,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 
 	startClient := func() (*acpclient.Client, func(), error) {
 		if desc.Transport == appagents.TransportSelf {
-			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient)
+			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, sessionMeta, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient)
 		}
 		client, err := acpclient.Start(ctx, acpclient.Config{
 			Command:             strings.TrimSpace(desc.Command),
@@ -381,7 +382,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	created := false
 	requestedSessionID := strings.TrimSpace(target.requestedSessionID)
 	if requestedSessionID != "" {
-		loadResp, loadErr := client.LoadSession(ctx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()))
+		loadResp, loadErr := client.LoadSession(ctx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()), sessionMeta)
 		if loadErr == nil {
 			_ = loadResp
 			actualSessionID = requestedSessionID
@@ -390,7 +391,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		}
 	} else {
 		sessionCWD := firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD())
-		newResp, err := client.NewSession(ctx, sessionCWD)
+		newResp, err := client.NewSession(ctx, sessionCWD, sessionMeta)
 		if err != nil {
 			return "", metaBase, false, err
 		}
@@ -413,7 +414,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	if onReady != nil {
 		onReady(readyState{sessionID: actualSessionID, meta: meta})
 	}
-	_, err = client.Prompt(ctx, actualSessionID, promptText)
+	_, err = client.Prompt(ctx, actualSessionID, promptText, sessionMeta)
 	bridgeMu.RLock()
 	activeBridge := bridge
 	bridgeMu.RUnlock()
@@ -430,7 +431,8 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	return actualSessionID, meta, created, err
 }
 
-func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, childCWD string, sessionIDProvider func() string, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client)) (*acpclient.Client, func(), error) {
+func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, childCWD string, sessionMeta map[string]any, sessionIDProvider func() string, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client)) (*acpclient.Client, func(), error) {
+	_ = sessionMeta
 	serverReader, clientWriter := io.Pipe()
 	clientReader, serverWriter := io.Pipe()
 	serverConn := internalacp.NewConn(serverReader, serverWriter)
@@ -561,6 +563,42 @@ func (r *selfACPSubagentRunner) existingChildDelegation(ctx context.Context, chi
 		return meta, true
 	}
 	return runtime.DelegationMetadata{}, false
+}
+
+func (r *selfACPSubagentRunner) childSessionMeta(ctx context.Context, childSessionID string, agentName string) map[string]any {
+	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
+		return meta
+	}
+	parentMeta := r.sessionMeta(ctx, r.parent.ID)
+	depth := internalacp.SelfSpawnDepthFromMeta(parentMeta)
+	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
+		depth++
+	}
+	return internalacp.WithSelfSpawnDepth(parentMeta, depth)
+}
+
+func (r *selfACPSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {
+	if r == nil || r.store == nil || r.parent == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	values, err := r.store.SnapshotState(ctx, &session.Session{
+		AppName: r.parent.AppName,
+		UserID:  r.parent.UserID,
+		ID:      sessionID,
+	})
+	if err != nil {
+		return nil
+	}
+	acpState, _ := values["acp"].(map[string]any)
+	if len(acpState) == 0 {
+		return nil
+	}
+	meta, _ := acpState["meta"].(map[string]any)
+	return internalacp.CloneMeta(meta)
 }
 
 func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessionID string) (agent.SubagentRunResult, error) {

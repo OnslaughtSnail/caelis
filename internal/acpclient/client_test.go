@@ -13,6 +13,11 @@ import (
 func TestClientNewSessionMatchesACPXRequestShape(t *testing.T) {
 	client, requests, respond, cleanup := newTestRPCClient()
 	defer cleanup()
+	meta := map[string]any{
+		"caelis": map[string]any{
+			"selfSpawnDepth": 1,
+		},
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -40,10 +45,18 @@ func TestClientNewSessionMatchesACPXRequestShape(t *testing.T) {
 			done <- fmt.Errorf("session/new should not send sessionId: %#v", params)
 			return
 		}
+		if !reflect.DeepEqual(params["_meta"], map[string]any{
+			"caelis": map[string]any{
+				"selfSpawnDepth": float64(1),
+			},
+		}) {
+			done <- fmt.Errorf("unexpected _meta %#v", params["_meta"])
+			return
+		}
 		done <- respond(msg.ID, map[string]any{"sessionId": "child-1"})
 	}()
 
-	resp, err := client.NewSession(context.Background(), "/workspace/project")
+	resp, err := client.NewSession(context.Background(), "/workspace/project", meta)
 	if err != nil {
 		t.Fatalf("NewSession: %v", err)
 	}
@@ -58,6 +71,12 @@ func TestClientNewSessionMatchesACPXRequestShape(t *testing.T) {
 func TestClientLoadSessionIncludesMCPServers(t *testing.T) {
 	client, requests, respond, cleanup := newTestRPCClient()
 	defer cleanup()
+	meta := map[string]any{
+		"caelis": map[string]any{
+			"selfSpawnDepth": 1,
+			"trace":          "load",
+		},
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -81,10 +100,19 @@ func TestClientLoadSessionIncludesMCPServers(t *testing.T) {
 			done <- fmt.Errorf("expected empty mcpServers array, got %#v", rawServers)
 			return
 		}
+		if !reflect.DeepEqual(params["_meta"], map[string]any{
+			"caelis": map[string]any{
+				"selfSpawnDepth": float64(1),
+				"trace":          "load",
+			},
+		}) {
+			done <- fmt.Errorf("unexpected _meta %#v", params["_meta"])
+			return
+		}
 		done <- respond(msg.ID, map[string]any{})
 	}()
 
-	if _, err := client.LoadSession(context.Background(), "child-1", "/workspace/project"); err != nil {
+	if _, err := client.LoadSession(context.Background(), "child-1", "/workspace/project", meta); err != nil {
 		t.Fatalf("LoadSession: %v", err)
 	}
 	if err := <-done; err != nil {
@@ -95,6 +123,9 @@ func TestClientLoadSessionIncludesMCPServers(t *testing.T) {
 func TestClientPromptUsesTextContentBlocks(t *testing.T) {
 	client, requests, respond, cleanup := newTestRPCClient()
 	defer cleanup()
+	meta := map[string]any{
+		"request": "prompt-1",
+	}
 
 	done := make(chan error, 1)
 	go func() {
@@ -118,10 +149,16 @@ func TestClientPromptUsesTextContentBlocks(t *testing.T) {
 			done <- fmt.Errorf("unexpected prompt block %#v", prompt[0])
 			return
 		}
+		if !reflect.DeepEqual(params["_meta"], map[string]any{
+			"request": "prompt-1",
+		}) {
+			done <- fmt.Errorf("unexpected _meta %#v", params["_meta"])
+			return
+		}
 		done <- respond(msg.ID, map[string]any{"stopReason": "end_turn"})
 	}()
 
-	if _, err := client.Prompt(context.Background(), "child-1", "hello"); err != nil {
+	if _, err := client.Prompt(context.Background(), "child-1", "hello", meta); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	if err := <-done; err != nil {

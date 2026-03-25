@@ -226,7 +226,7 @@ func TestStyleNarrativeLine_ListItemRendersInlineMarkdown(t *testing.T) {
 	raw := "- **bold** *italic* `code`"
 	plain := "- bold italic code"
 
-	got := styleNarrativeLine(raw, plain, NarrativeListItem, tuikit.LineStyleAssistant, theme)
+	got := styleNarrativeLine(raw, "", NarrativeListItem, tuikit.LineStyleAssistant, theme)
 	if ansi.Strip(got) != plain {
 		t.Fatalf("expected styled/plain parity, got %q", ansi.Strip(got))
 	}
@@ -241,13 +241,28 @@ func TestStyleNarrativeLine_BlockquoteUsesDedicatedMarkerStyle(t *testing.T) {
 	raw := "> quoted **text**"
 	plain := "> quoted text"
 
-	got := styleNarrativeLine(raw, plain, NarrativeBlockquote, tuikit.LineStyleAssistant, theme)
+	got := styleNarrativeLine(raw, "", NarrativeBlockquote, tuikit.LineStyleAssistant, theme)
 	if ansi.Strip(got) != plain {
 		t.Fatalf("expected styled/plain parity, got %q", ansi.Strip(got))
 	}
 	baseline := tuikit.ColorizeLogLine(plain, tuikit.LineStyleAssistant, theme)
 	if got == baseline {
 		t.Fatalf("expected blockquote marker styling beyond baseline assistant rendering")
+	}
+}
+
+func TestStyleNarrativeLine_AsteriskListItemDoesNotUseAssistantPrefixStyling(t *testing.T) {
+	theme := tuikit.DefaultTheme()
+	raw := "* item"
+	plain := "* item"
+
+	got := styleNarrativeLine(raw, "", NarrativeListItem, tuikit.LineStyleAssistant, theme)
+	if ansi.Strip(got) != plain {
+		t.Fatalf("expected styled/plain parity, got %q", ansi.Strip(got))
+	}
+	baseline := tuikit.ColorizeLogLine(plain, tuikit.LineStyleAssistant, theme)
+	if got == baseline {
+		t.Fatalf("expected markdown list marker styling, not assistant-prefix styling")
 	}
 }
 

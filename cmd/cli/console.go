@@ -1034,6 +1034,11 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			c.tuiSender.Send(tuievents.LogChunkMsg{
 				Chunk: fmt.Sprintf("▸ %s %s\n", displayToolCallName(call.Name, parsedArgs), formatToolCallSummary(c.ui, call.Name, parsedArgs, defaultSpawnAgent)),
 			})
+			if strings.EqualFold(strings.TrimSpace(call.Name), tool.SpawnToolName) {
+				if update, ok := subagentDomainUpdateFromSpawnToolCall(c.sessionID, call, parsedArgs, defaultSpawnAgent); ok {
+					c.dispatchSubagentDomainUpdate(context.Background(), update)
+				}
+			}
 			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) ||
 				strings.EqualFold(strings.TrimSpace(call.Name), tool.SpawnToolName) {
 				c.tuiSender.Send(tuievents.TaskStreamMsg{

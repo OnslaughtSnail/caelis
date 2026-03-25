@@ -95,7 +95,7 @@ func (b *acpSessionUpdateBridge) emitContent(ctx context.Context, sessionID stri
 	if b.tracker != nil {
 		b.tracker.markRunning(b.agentName, sessionID, b.meta.DelegationID, b.childCWD)
 	}
-	sessionstream.Emit(ctx, sessionID, annotateDelegationEvent(ev, b.meta))
+	sessionstream.Emit(ctx, sessionID, annotateAgentEventMeta(annotateDelegationEvent(ev, b.meta), b.agentName))
 }
 
 func (b *acpSessionUpdateBridge) emitToolCall(ctx context.Context, sessionID string, update acpclient.ToolCall) {
@@ -178,7 +178,23 @@ func (b *acpSessionUpdateBridge) emitCanonical(ctx context.Context, sessionID st
 	if ev == nil {
 		return
 	}
-	sessionstream.Emit(ctx, sessionID, annotateDelegationEvent(ev, b.meta))
+	sessionstream.Emit(ctx, sessionID, annotateAgentEventMeta(annotateDelegationEvent(ev, b.meta), b.agentName))
+}
+
+func annotateAgentEventMeta(ev *session.Event, agentName string) *session.Event {
+	if ev == nil {
+		return nil
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return ev
+	}
+	if ev.Meta == nil {
+		ev.Meta = map[string]any{}
+	}
+	ev.Meta["agent_id"] = agentName
+	ev.Meta["_ui_agent"] = agentName
+	return ev
 }
 
 func runtimeEventWithPartialMeta() *session.Event {
