@@ -87,6 +87,7 @@ func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controlle
 			agent:        stringValueFallback(entry.Spec, taskSpecAgent, entry.Result),
 			childCWD:     stringValueFallback(entry.Spec, taskSpecChildCWD, entry.Result),
 			timeout:      time.Duration(intValue(entry.Spec, taskSpecTimeout)) * time.Second,
+			idleTimeout:  time.Duration(intValue(entry.Spec, taskSpecIdleTimeout)) * time.Second,
 		}
 	default:
 		return nil

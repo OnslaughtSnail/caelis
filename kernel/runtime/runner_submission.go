@@ -180,7 +180,7 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 			continue
 		}
 		prepareEvent(h.ctx, h.sess, recoveryEvent)
-		if err := h.runtime.store.AppendEvent(h.ctx, h.sess, recoveryEvent); err != nil {
+		if err := h.runtime.logStore.AppendEvent(h.ctx, h.sess, recoveryEvent); err != nil {
 			h.emitTerminalError(err)
 			return nil, false
 		}
@@ -191,7 +191,7 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 	userMsg := model.MessageFromTextAndContentParts(model.RoleUser, sub.Text, prepareUserContentParts(sub.Text, sub.ContentParts))
 	userEvent := &session.Event{Message: userMsg}
 	prepareEvent(h.ctx, h.sess, userEvent)
-	if err := h.runtime.store.AppendEvent(h.ctx, h.sess, userEvent); err != nil {
+	if err := h.runtime.logStore.AppendEvent(h.ctx, h.sess, userEvent); err != nil {
 		h.emitTerminalError(err)
 		return nil, false
 	}

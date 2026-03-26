@@ -1295,11 +1295,11 @@ func sessionStoreDir(appName string) (string, error) {
 }
 
 func sessionIndexPath(appName string) (string, error) {
-	storeDir, err := sessionStoreDir(appName)
+	root, err := appDataDir(appName)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(storeDir, "session_index.db"), nil
+	return filepath.Join(root, "state.db"), nil
 }
 
 func historyFilePath(appName, workspaceKey string) (string, error) {

@@ -13,7 +13,7 @@ type requestTraceSessionDirStore interface {
 	SessionDir(*session.Session) (string, error)
 }
 
-func withRequestTraceContext(ctx context.Context, store session.Store, sess *session.Session, runID string) context.Context {
+func withRequestTraceContext(ctx context.Context, store session.LogStore, sess *session.Session, runID string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}

@@ -239,17 +239,22 @@ func TestSubagentDomainUpdatesFromSpawnToolError_Timeout(t *testing.T) {
 			"error": "context deadline exceeded",
 		},
 	})
-	if len(updates) != 3 {
-		t.Fatalf("expected bootstrap/tool/terminal updates, got %#v", updates)
+	if len(updates) != 0 {
+		t.Fatalf("expected no detached subagent panel updates when spawn failed before child session creation, got %#v", updates)
 	}
-	if updates[0].Kind != subagentDomainBootstrap || updates[0].Target.SpawnID != "call-spawn-1" {
-		t.Fatalf("unexpected bootstrap update %#v", updates[0])
-	}
-	if updates[1].Kind != subagentDomainToolCall || updates[1].Stream != "stderr" || updates[1].Chunk != "context deadline exceeded" {
-		t.Fatalf("unexpected tool update %#v", updates[1])
-	}
-	if updates[2].Kind != subagentDomainTerminal || updates[2].Status != "timed_out" {
-		t.Fatalf("unexpected terminal update %#v", updates[2])
+}
+
+func TestSubagentDomainUpdateFromSpawnToolResponse_IgnoresDetachedError(t *testing.T) {
+	update, ok := subagentDomainUpdateFromSpawnToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"agent": "gemini",
+			"error": "context deadline exceeded",
+		},
+	})
+	if ok {
+		t.Fatalf("expected detached spawn error to skip subagent bootstrap, got %#v", update)
 	}
 }
 

@@ -45,7 +45,7 @@ func (r *Runtime) RunState(ctx context.Context, req RunStateRequest) (RunState, 
 		UserID:  req.UserID,
 		ID:      req.SessionID,
 	}
-	snapshot, err := r.store.SnapshotState(ctx, sess)
+	snapshot, err := r.stateStore.SnapshotState(ctx, sess)
 	if err != nil {
 		if !errors.Is(err, session.ErrSessionNotFound) {
 			return RunState{}, err

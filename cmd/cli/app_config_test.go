@@ -256,10 +256,10 @@ func TestSanitizeAppName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(idxPath) != "session_index.db" {
+	if filepath.Base(idxPath) != "state.db" {
 		t.Fatalf("unexpected session index filename: %q", filepath.Base(idxPath))
 	}
-	if filepath.Base(filepath.Dir(idxPath)) != "sessions" {
+	if filepath.Base(filepath.Dir(idxPath)) != ".a_b_c" {
 		t.Fatalf("unexpected session index dir: %q", filepath.Dir(idxPath))
 	}
 }
@@ -461,7 +461,7 @@ func TestAppConfig_ResolvesAgentServerPlaceholdersAndBuildsRegistry(t *testing.T
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-raw := `{
+	raw := `{
   "version": 1,
   "defaultAgent": "codex",
   "agents": {
@@ -547,7 +547,7 @@ func TestAppConfig_FailsOnLegacyAgentServersKey(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-raw := `{
+	raw := `{
   "version": 1,
   "agent_servers": {
     "codex": {

@@ -234,6 +234,11 @@ func runCLI(ctx context.Context, args []string) error {
 		if closeErr := index.Close(); closeErr != nil {
 			fmt.Fprintf(os.Stderr, "warn: close session index failed: %v\n", closeErr)
 		}
+		if sessionRT.DB != nil {
+			if closeErr := sessionRT.DB.Close(); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "warn: close local store db failed: %v\n", closeErr)
+			}
+		}
 	}()
 	rt := sessionRT.Runtime
 	sessionModes := []internalacp.SessionMode{

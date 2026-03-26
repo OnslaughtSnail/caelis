@@ -186,6 +186,33 @@ func TestTaskManager_CleanupTurnCancelsAttachedTasks(t *testing.T) {
 	}
 }
 
+func TestTaskManager_InterruptTurnCancelsDetachedSpawnTasks(t *testing.T) {
+	registry := task.NewRegistry(task.RegistryConfig{})
+	spawnController := &stubTaskController{}
+	spawnRecord := registry.Create(task.KindSpawn, "spawned child", spawnController, true, true)
+	spawnRecord.CleanupOnTurnEnd = false
+	spawnRecord.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"}
+
+	bashController := &stubTaskController{}
+	bashRecord := registry.Create(task.KindBash, "sleep 30", bashController, true, true)
+	bashRecord.Session = task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"}
+
+	manager := newTaskManager(nil, nil, registry, nil, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	manager.trackTurnTask(spawnRecord.ID)
+	manager.trackTurnTask(bashRecord.ID)
+	manager.interruptTurn(context.Background())
+
+	if spawnController.cancelCalls != 1 {
+		t.Fatalf("expected detached spawn task to be cancelled once during interrupt cleanup, got %d", spawnController.cancelCalls)
+	}
+	if spawnRecord.Running {
+		t.Fatalf("expected detached spawn task to stop running after interrupt cleanup, got state=%q", spawnRecord.State)
+	}
+	if bashController.cancelCalls != 0 {
+		t.Fatalf("expected interrupt cleanup to leave non-spawn tasks alone, got %d cancel calls", bashController.cancelCalls)
+	}
+}
+
 func TestTaskManager_WaitUsesPersistedOutputCursorsAcrossTurns(t *testing.T) {
 	store := taskinmemory.New()
 	entry := &task.Entry{
@@ -696,6 +723,95 @@ func TestSubagentTaskController_StatusKeepsStaleSilentRunRunning(t *testing.T) {
 	}
 	if !snapshot.Running || snapshot.State != task.StateRunning {
 		t.Fatalf("expected quiet running subagent to remain running, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+}
+
+func TestSubagentTaskController_StatusFailsIdleTimedOutRun(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-idle-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-3 * time.Minute),
+		HeartbeatAt: time.Now().Add(-3 * time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	cancelled := false
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "codex",
+		childCWD:     "/tmp",
+		idleTimeout:  30 * time.Second,
+		cancel:       func() { cancelled = true },
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID: "child-1",
+				State:     string(task.StateRunning),
+				Running:   true,
+				UpdatedAt: time.Now().Add(-2 * time.Minute),
+			},
+		},
+	}
+
+	snapshot, err := controller.Status(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Running || snapshot.State != task.StateFailed {
+		t.Fatalf("expected idle timed out subagent to fail, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+	if snapshot.Result["idle_timed_out"] != true {
+		t.Fatalf("expected idle timeout marker, got %#v", snapshot.Result)
+	}
+	if !cancelled {
+		t.Fatal("expected idle timeout to trigger cancel")
+	}
+}
+
+func TestSubagentTaskController_StatusDoesNotIdleTimeoutApprovalWait(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-approval-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateWaitingApproval,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-3 * time.Minute),
+		HeartbeatAt: time.Now().Add(-3 * time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	cancelled := false
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "codex",
+		childCWD:     "/tmp",
+		idleTimeout:  30 * time.Second,
+		cancel:       func() { cancelled = true },
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID:       "child-1",
+				State:           string(task.StateWaitingApproval),
+				Running:         true,
+				ApprovalPending: true,
+				UpdatedAt:       time.Now().Add(-2 * time.Minute),
+			},
+		},
+	}
+
+	snapshot, err := controller.Status(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Running || snapshot.State != task.StateWaitingApproval {
+		t.Fatalf("expected approval-waiting subagent to remain waiting_approval, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+	if cancelled {
+		t.Fatal("did not expect approval wait to trigger idle-timeout cancellation")
+	}
+	if snapshot.Result["idle_timed_out"] == true {
+		t.Fatalf("did not expect idle timeout marker during approval wait, got %#v", snapshot.Result)
 	}
 }
 

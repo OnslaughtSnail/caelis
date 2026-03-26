@@ -24,6 +24,7 @@ type subagentTaskController struct {
 	agent        string
 	childCWD     string
 	timeout      time.Duration
+	idleTimeout  time.Duration
 }
 
 const subagentMissingStateGrace = 5 * time.Second
@@ -82,12 +83,13 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 	}
 	callInfo, _ := toolexec.ToolCallInfoFromContext(ctx)
 	runResult, err := c.runner.RunSubagent(withSubagentContinuation(ctx), agent.SubagentRunRequest{
-		Agent:     c.agent,
-		Prompt:    input,
-		SessionID: c.sessionID,
-		ChildCWD:  c.childCWD,
-		Yield:     yield,
-		Timeout:   c.timeout,
+		Agent:       c.agent,
+		Prompt:      input,
+		SessionID:   c.sessionID,
+		ChildCWD:    c.childCWD,
+		Yield:       yield,
+		Timeout:     c.timeout,
+		IdleTimeout: c.idleTimeout,
 	})
 	if err != nil {
 		return task.Snapshot{}, err
@@ -103,6 +105,9 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 	}
 	if childCWD := strings.TrimSpace(runResult.ChildCWD); childCWD != "" {
 		c.childCWD = childCWD
+	}
+	if runResult.IdleTimeout > 0 {
+		c.idleTimeout = runResult.IdleTimeout
 	}
 	c.cancel = cancelSubagentFunc(c.runner, c.sessionID)
 	now := time.Now()
@@ -125,6 +130,9 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 		}
 		if c.timeout > 0 {
 			one.Spec[taskSpecTimeout] = int(c.timeout / time.Second)
+		}
+		if c.idleTimeout > 0 {
+			one.Spec[taskSpecIdleTimeout] = int(c.idleTimeout / time.Second)
 		}
 		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, now)
 		if progressAt.After(one.HeartbeatAt) {
@@ -168,6 +176,9 @@ func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record
 		if c.timeout > 0 {
 			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
+		if c.idleTimeout > 0 {
+			one.Result["_ui_idle_timeout_seconds"] = int(c.idleTimeout / time.Second)
+		}
 		snapshot = one.LockedSnapshot(task.Output{})
 	})
 	_ = persistControllerRecord(ctx, c.store, record)
@@ -204,6 +215,23 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 				State:        string(task.StateInterrupted),
 				Running:      false,
 				UpdatedAt:    now,
+			}
+		}
+	}
+	if c.idleTimeout > 0 && runResult.Running && !runResult.ApprovalPending && runtimeTaskStateName(runResult.State) != task.StateWaitingApproval {
+		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, subagentLastSeenAt(record))
+		if progressAt.Add(c.idleTimeout).Before(now) {
+			if c.cancel != nil {
+				c.cancel()
+			}
+			runResult = agent.SubagentRunResult{
+				SessionID:    c.sessionID,
+				DelegationID: c.delegationID,
+				Agent:        c.agent,
+				ChildCWD:     c.childCWD,
+				State:        string(RunLifecycleStatusFailed),
+				Running:      false,
+				UpdatedAt:    progressAt,
 			}
 		}
 	}
@@ -258,16 +286,31 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		if c.timeout > 0 {
 			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
+		if c.idleTimeout > 0 {
+			one.Result["_ui_idle_timeout_seconds"] = int(c.idleTimeout / time.Second)
+		}
 		if runResult.ApprovalPending || one.State == task.StateWaitingApproval {
 			one.Result["approval_pending"] = true
 			one.Result["_ui_approval_pending"] = true
 		}
 		if one.State == task.StateInterrupted {
 			one.Result["interrupted"] = true
+			delete(one.Result, "error")
+		}
+		if c.idleTimeout > 0 && one.State == task.StateFailed && !runResult.Running {
+			progressAt := latestSubagentProgressTime(runResult.UpdatedAt, one.HeartbeatAt, one.CreatedAt)
+			if progressAt.Add(c.idleTimeout).Before(now) {
+				one.Result["error"] = fmt.Sprintf("subagent idle timeout exceeded after %s without updates", c.idleTimeout.Round(time.Second))
+				one.Result["idle_timed_out"] = true
+				one.Result["_ui_idle_timed_out"] = true
+			}
 		}
 		if !one.Running && assistant != "" {
 			one.Result["final_result"] = assistant
 			one.Result["final_summary"] = assistant
+		} else if one.State != task.StateFailed {
+			delete(one.Result, "idle_timed_out")
+			delete(one.Result, "_ui_idle_timed_out")
 		}
 		snapshot = one.LockedSnapshot(output)
 	})

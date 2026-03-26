@@ -158,7 +158,7 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 	meta["post_tokens"] = postTokens
 
 	prepareEvent(ctx, in.Session, compactionEvent)
-	if err := r.store.AppendEvent(ctx, in.Session, compactionEvent); err != nil {
+	if err := r.logStore.AppendEvent(ctx, in.Session, compactionEvent); err != nil {
 		return nil, err
 	}
 	if notify != nil {

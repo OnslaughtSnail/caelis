@@ -87,6 +87,9 @@ func TestSelfSpawnToolStartsSelfChildSession(t *testing.T) {
 	if manager.lastStart.Timeout != 0 {
 		t.Fatalf("expected no spawn timeout, got %s", manager.lastStart.Timeout)
 	}
+	if manager.lastStart.IdleTimeout != 0 {
+		t.Fatalf("expected idle timeout to stay internal, got %s", manager.lastStart.IdleTimeout)
+	}
 	if result["task_id"] != "task-1" {
 		t.Fatalf("expected task_id=task-1, got %#v", result["task_id"])
 	}
@@ -121,6 +124,9 @@ func TestSelfSpawnToolDeclarationOmitsLegacyContinuationArgs(t *testing.T) {
 		if _, ok := props[legacy]; ok {
 			t.Fatalf("did not expect legacy arg %q in SPAWN declaration", legacy)
 		}
+	}
+	if _, ok := props["idle_timeout_seconds"]; ok {
+		t.Fatal("did not expect idle timeout arg in SPAWN declaration")
 	}
 }
 

@@ -34,17 +34,18 @@ type sessionContext struct {
 }
 
 const (
-	taskSpecCommand       = "command"
-	taskSpecWorkdir       = "workdir"
-	taskSpecTTY           = "tty"
-	taskSpecRoute         = "route"
-	taskSpecExecSessionID = "exec_session_id"
-	taskSpecChildSession  = "child_session_id"
-	taskSpecDelegationID  = "delegation_id"
-	taskSpecAgent         = "agent"
-	taskSpecChildCWD      = "child_cwd"
-	taskSpecPrompt        = "prompt"
-	taskSpecTimeout       = "timeout_seconds"
+	taskSpecCommand        = "command"
+	taskSpecWorkdir        = "workdir"
+	taskSpecTTY            = "tty"
+	taskSpecRoute          = "route"
+	taskSpecExecSessionID  = "exec_session_id"
+	taskSpecChildSession   = "child_session_id"
+	taskSpecDelegationID   = "delegation_id"
+	taskSpecAgent          = "agent"
+	taskSpecChildCWD       = "child_cwd"
+	taskSpecPrompt         = "prompt"
+	taskSpecTimeout        = "timeout_seconds"
+	taskSpecIdleTimeout    = "idle_timeout_seconds"
 	taskSpecParentToolCall = "parent_tool_call_id"
 	taskSpecParentToolName = "parent_tool_name"
 	taskSpecUISpawnID      = "ui_spawn_id"
@@ -147,12 +148,13 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 	record.HeartbeatAt = time.Now()
 	m.trackTurnTask(record.ID)
 	runResult, err := m.subagents.RunSubagent(ctx, agent.SubagentRunRequest{
-		Agent:    agentName,
-		Prompt:   req.Prompt,
-		ChildCWD: "",
-		Parts:    model.CloneParts(req.Parts),
-		Yield:    req.Yield,
-		Timeout:  req.Timeout,
+		Agent:       agentName,
+		Prompt:      req.Prompt,
+		ChildCWD:    "",
+		Parts:       model.CloneParts(req.Parts),
+		Yield:       req.Yield,
+		Timeout:     req.Timeout,
+		IdleTimeout: req.IdleTimeout,
 	})
 	if err != nil {
 		return task.Snapshot{}, err
@@ -170,6 +172,7 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 		agent:        runResult.Agent,
 		childCWD:     runResult.ChildCWD,
 		timeout:      runResult.Timeout,
+		idleTimeout:  runResult.IdleTimeout,
 	}
 	record.Backend = controller
 	record.Session = task.SessionRef{AppName: m.parent.appName, UserID: m.parent.userID, SessionID: m.parent.sessionID}
@@ -182,6 +185,12 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 	}
 	if runResult.Timeout > 0 {
 		record.Spec[taskSpecTimeout] = int(runResult.Timeout / time.Second)
+	}
+	if runResult.IdleTimeout > 0 {
+		record.Spec[taskSpecIdleTimeout] = int(runResult.IdleTimeout / time.Second)
+	} else if req.IdleTimeout > 0 {
+		record.Spec[taskSpecIdleTimeout] = int(req.IdleTimeout / time.Second)
+		controller.idleTimeout = req.IdleTimeout
 	}
 	if err := m.persistRecord(ctx, record); err != nil {
 		if cancel != nil {
@@ -256,6 +265,32 @@ func (m *runtimeTaskManager) cleanupTurn(ctx context.Context) {
 			cleanupOnTurnEnd = one.CleanupOnTurnEnd
 		})
 		if !running || !supportsCancel || !cleanupOnTurnEnd {
+			continue
+		}
+		_, _ = record.Backend.Cancel(ctx, record)
+	}
+}
+
+func (m *runtimeTaskManager) interruptTurn(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.turnMu.Lock()
+	taskIDs := append([]string(nil), m.turnTaskIDs...)
+	m.turnMu.Unlock()
+	for _, taskID := range taskIDs {
+		record, err := m.ensureRecord(ctx, taskID)
+		if err != nil || record == nil || record.Backend == nil {
+			continue
+		}
+		var running, supportsCancel bool
+		var kind task.Kind
+		record.WithLock(func(one *task.Record) {
+			running = one.Running
+			supportsCancel = one.SupportsCancel
+			kind = one.Kind
+		})
+		if !running || !supportsCancel || kind != task.KindSpawn {
 			continue
 		}
 		_, _ = record.Backend.Cancel(ctx, record)

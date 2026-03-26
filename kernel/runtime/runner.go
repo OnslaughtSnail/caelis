@@ -43,6 +43,9 @@ type runHandle struct {
 	submitNotifyCh chan struct{}
 	doneCh         chan struct{}
 
+	interruptMu      sync.Mutex
+	interruptCleanup func()
+
 	eventsClaimed atomic.Bool
 	closed        atomic.Bool
 	closeOnce     sync.Once
@@ -81,6 +84,7 @@ func (h *runHandle) Cancel() bool {
 		return false
 	}
 	h.cancel()
+	h.runInterruptCleanup()
 	return true
 }
 
@@ -94,6 +98,27 @@ func (h *runHandle) Close() error {
 		<-h.doneCh
 	})
 	return nil
+}
+
+func (h *runHandle) setInterruptCleanup(fn func()) {
+	if h == nil {
+		return
+	}
+	h.interruptMu.Lock()
+	defer h.interruptMu.Unlock()
+	h.interruptCleanup = fn
+}
+
+func (h *runHandle) runInterruptCleanup() {
+	if h == nil {
+		return
+	}
+	h.interruptMu.Lock()
+	fn := h.interruptCleanup
+	h.interruptMu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
@@ -193,14 +218,14 @@ func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
 }
 
 func (h *runHandle) fetchDurableAfter(cursor string) ([]*session.Event, string, error) {
-	if h == nil || h.runtime == nil || h.runtime.store == nil {
+	if h == nil || h.runtime == nil || h.runtime.logStore == nil {
 		return nil, "", nil
 	}
-	if withCursor, ok := h.runtime.store.(session.CursorStore); ok {
+	if withCursor, ok := h.runtime.logStore.(session.CursorStore); ok {
 		events, nextCursor, err := withCursor.ListEventsAfter(h.ctx, h.sess, cursor, replayFetchLimit)
 		return durableReplaySlice(events), lastCursor(events, nextCursor), err
 	}
-	events, err := h.runtime.store.ListEvents(h.ctx, h.sess)
+	events, err := h.runtime.logStore.ListEvents(h.ctx, h.sess)
 	if err != nil {
 		return nil, "", err
 	}
@@ -245,14 +270,14 @@ func (r *Runtime) newRunner(ctx context.Context, req RunRequest) (*runHandle, er
 		r.releaseRunLease(leaseKey)
 		return nil, err
 	}
-	sess, err := r.store.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
+	sess, err := r.logStore.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
 	if err != nil {
 		r.releaseRunLease(leaseKey)
 		return nil, err
 	}
 	runID := idutil.NewRunID()
 	req.Model = model.WrapRequestTrace(req.Model)
-	runCtx := withRequestTraceContext(ctx, r.store, sess, runID)
+	runCtx := withRequestTraceContext(ctx, r.logStore, sess, runID)
 	runCtx, cancel := context.WithCancel(runCtx)
 	handle := &runHandle{
 		runtime:        r,
@@ -345,6 +370,14 @@ func (h *runHandle) runWorker(leaseKey string) {
 		h.emitTerminalError(err)
 		return
 	}
+	h.setInterruptCleanup(func() {
+		if inv == nil || inv.tasks == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		inv.tasks.interruptTurn(cleanupCtx)
+	})
 	defer func() {
 		if inv == nil || inv.tasks == nil {
 			return

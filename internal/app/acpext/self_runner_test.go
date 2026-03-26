@@ -216,7 +216,7 @@ func TestPermissionRequestHandler_PrefersToolAuthorizerForFileEdits(t *testing.T
 	kind := internalacp.ToolKindEdit
 
 	runner := &selfACPSubagentRunner{}
-	handler := runner.permissionRequestHandler(ctx, "self", func() string { return "child" }, runtime.DelegationMetadata{DelegationID: "delegation-1"}, "/workspace")
+	handler := runner.permissionRequestHandler(ctx, "self", func() string { return "child" }, runtime.DelegationMetadata{DelegationID: "delegation-1"}, "/workspace", nil, nil)
 	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{
 		SessionID: "child",
 		ToolCall: acpclient.ToolCallUpdate{
@@ -257,6 +257,50 @@ func TestPermissionRequestHandler_PrefersToolAuthorizerForFileEdits(t *testing.T
 	}
 	if outcome.Outcome != "selected" || outcome.OptionID != "allow_once" {
 		t.Fatalf("unexpected outcome %+v", outcome)
+	}
+}
+
+func TestPermissionRequestHandler_InvokesApprovalWatchdogHooks(t *testing.T) {
+	approver := &recordingApprover{allow: true}
+	ctx := toolexec.WithApprover(context.Background(), approver)
+	title := "BASH echo hi"
+	kind := "run"
+	var started, done int
+
+	runner := &selfACPSubagentRunner{}
+	handler := runner.permissionRequestHandler(
+		ctx,
+		"self",
+		func() string { return "child" },
+		runtime.DelegationMetadata{DelegationID: "delegation-1"},
+		"/workspace",
+		func() { started++ },
+		func() { done++ },
+	)
+	_, err := handler(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child",
+		ToolCall: acpclient.ToolCallUpdate{
+			ToolCallID: "call-run-1",
+			Title:      &title,
+			Kind:       &kind,
+			RawInput: map[string]any{
+				"command": "echo hi",
+			},
+		},
+		Options: []struct {
+			OptionID string `json:"optionId"`
+			Name     string `json:"name"`
+			Kind     string `json:"kind"`
+		}{
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if started != 1 || done != 1 {
+		t.Fatalf("expected approval hooks to run once, got started=%d done=%d", started, done)
 	}
 }
 
@@ -467,7 +511,7 @@ func TestSelfACPSubagentRunner_FailedResultPersistsLifecycle(t *testing.T) {
 		ParentSessionID: parent.ID,
 		ChildSessionID:  "child-failed",
 		DelegationID:    "dlg-failed",
-	}, "self", 0, cause)
+	}, "self", 0, 0, cause)
 	if !errors.Is(err, cause) {
 		t.Fatalf("expected original cause, got %v", err)
 	}
@@ -521,7 +565,7 @@ func TestSelfACPSubagentRunner_PermissionApprovalEmitsRunningLifecycle(t *testin
 		ParentToolCall:  "call-task-write-1",
 		ParentToolName:  tool.TaskToolName,
 		DelegationID:    "dlg-approval",
-	}, "")
+	}, "", nil, nil)
 	title := "ECHO echo hi"
 	kind := "echo"
 	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{

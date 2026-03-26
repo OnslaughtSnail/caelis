@@ -111,6 +111,7 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 			Running:      true,
 			Yielded:      true,
 			Timeout:      req.Timeout,
+			IdleTimeout:  req.IdleTimeout,
 		}, nil
 	}
 	result, err := r.InspectSubagent(ctx, childReq.SessionID)
@@ -124,12 +125,14 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 				Running:      true,
 				Yielded:      true,
 				Timeout:      req.Timeout,
+				IdleTimeout:  req.IdleTimeout,
 			}, nil
 		}
 		return agent.SubagentRunResult{}, err
 	}
 	result.Agent = req.Agent
 	result.Timeout = req.Timeout
+	result.IdleTimeout = req.IdleTimeout
 	if result.Running {
 		result.Yielded = true
 	}
@@ -404,7 +407,7 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func (r *runtimeSubagentRunner) seedChildSessionMeta(ctx context.Context, childSessionID string, agentName string) error {
-	if r == nil || r.runtime == nil || r.runtime.store == nil {
+	if r == nil || r.runtime == nil || r.runtime.logStore == nil || r.runtime.stateStore == nil {
 		return nil
 	}
 	childSessionID = strings.TrimSpace(childSessionID)
@@ -420,10 +423,10 @@ func (r *runtimeSubagentRunner) seedChildSessionMeta(ctx context.Context, childS
 		UserID:  r.req.UserID,
 		ID:      childSessionID,
 	}
-	if _, err := r.runtime.store.GetOrCreate(ctx, child); err != nil {
+	if _, err := r.runtime.logStore.GetOrCreate(ctx, child); err != nil {
 		return err
 	}
-	return mergeChildSessionMeta(ctx, r.runtime.store, child, meta)
+	return mergeChildSessionMeta(ctx, r.runtime.stateStore, child, meta)
 }
 
 func (r *runtimeSubagentRunner) childSessionMeta(ctx context.Context, childSessionID string, agentName string) map[string]any {
@@ -439,14 +442,14 @@ func (r *runtimeSubagentRunner) childSessionMeta(ctx context.Context, childSessi
 }
 
 func (r *runtimeSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {
-	if r == nil || r.runtime == nil || r.runtime.store == nil {
+	if r == nil || r.runtime == nil || r.runtime.stateStore == nil {
 		return nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return nil
 	}
-	values, err := r.runtime.store.SnapshotState(ctx, &session.Session{
+	values, err := r.runtime.stateStore.SnapshotState(ctx, &session.Session{
 		AppName: r.req.AppName,
 		UserID:  r.req.UserID,
 		ID:      sessionID,
@@ -462,7 +465,7 @@ func (r *runtimeSubagentRunner) sessionMeta(ctx context.Context, sessionID strin
 	return coremeta.CloneMeta(meta)
 }
 
-func mergeChildSessionMeta(ctx context.Context, store session.Store, sess *session.Session, meta map[string]any) error {
+func mergeChildSessionMeta(ctx context.Context, store session.StateStore, sess *session.Session, meta map[string]any) error {
 	if store == nil || sess == nil || len(meta) == 0 {
 		return nil
 	}
@@ -529,10 +532,10 @@ func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childRe
 }
 
 func (r *runtimeSubagentRunner) persistDetachedSubagentFailure(ctx context.Context, childReq RunRequest, cause error) {
-	if r == nil || r.runtime == nil || r.runtime.store == nil {
+	if r == nil || r.runtime == nil || r.runtime.logStore == nil {
 		return
 	}
-	sess, err := r.runtime.store.GetOrCreate(ctx, &session.Session{
+	sess, err := r.runtime.logStore.GetOrCreate(ctx, &session.Session{
 		AppName: childReq.AppName,
 		UserID:  childReq.UserID,
 		ID:      childReq.SessionID,

@@ -7,13 +7,13 @@ import (
 )
 
 func (r *Runtime) listContextWindowEvents(ctx context.Context, sess *session.Session) ([]*session.Event, error) {
-	if r == nil || r.store == nil {
+	if r == nil || r.logStore == nil {
 		return nil, nil
 	}
-	if withWindow, ok := r.store.(session.ContextWindowStore); ok {
+	if withWindow, ok := r.logStore.(session.ContextWindowStore); ok {
 		return withWindow.ListContextWindowEvents(ctx, sess)
 	}
-	events, err := r.store.ListEvents(ctx, sess)
+	events, err := r.logStore.ListEvents(ctx, sess)
 	if err != nil {
 		return nil, err
 	}

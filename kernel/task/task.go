@@ -68,12 +68,13 @@ type BashStartRequest struct {
 }
 
 type SpawnStartRequest struct {
-	Agent   string
-	Prompt  string
-	Parts   []model.Part
-	Yield   time.Duration
-	Timeout time.Duration
-	Kind    Kind // defaults to KindSpawn if empty
+	Agent       string
+	Prompt      string
+	Parts       []model.Part
+	Yield       time.Duration
+	Timeout     time.Duration
+	IdleTimeout time.Duration
+	Kind        Kind // defaults to KindSpawn if empty
 }
 
 type ControlRequest struct {

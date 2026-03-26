@@ -4,14 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/internal/app/storage/localstore"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -26,8 +29,10 @@ const (
 )
 
 type sessionIndex struct {
-	db *sql.DB
-	mu sync.Mutex
+	path   string
+	db     *sql.DB
+	ownsDB bool
+	mu     sync.Mutex
 }
 
 type sessionIndexRecord struct {
@@ -47,14 +52,14 @@ func newSessionIndex(path string) (*sessionIndex, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("session index: path is required")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := osMkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("session index: create dir: %w", err)
 	}
 	db, err := sql.Open(sessionIndexDriver, path+sessionIndexDSNOpt)
 	if err != nil {
 		return nil, fmt.Errorf("session index: open db: %w", err)
 	}
-	idx := &sessionIndex{db: db}
+	idx := &sessionIndex{path: path, db: db, ownsDB: true}
 	if err := idx.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -62,8 +67,22 @@ func newSessionIndex(path string) (*sessionIndex, error) {
 	return idx, nil
 }
 
+func newSessionIndexWithDB(path string, db *sql.DB) (*sessionIndex, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("session index: path is required")
+	}
+	if db == nil {
+		return nil, fmt.Errorf("session index: db is required")
+	}
+	idx := &sessionIndex{path: path, db: db}
+	if err := idx.migrate(context.Background()); err != nil {
+		return nil, err
+	}
+	return idx, nil
+}
+
 func (s *sessionIndex) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || !s.ownsDB {
 		return nil
 	}
 	return s.db.Close()
@@ -79,23 +98,25 @@ func (s *sessionIndex) UpsertSession(workspace workspaceContext, appName, userID
 	if at.IsZero() {
 		at = time.Now()
 	}
+	path := rolloutPathFallback(workspace, sessionID, at)
 	ts := at.UnixMilli()
 	const q = `
-INSERT INTO session_index (
-	workspace_key, session_id, workspace_cwd, app_name, user_id,
-	created_at, last_event_at, event_count, last_user_message
-) VALUES (?, ?, ?, ?, ?, ?, ?, 0, '')
-ON CONFLICT(workspace_key, session_id) DO UPDATE SET
+INSERT INTO sessions (
+	scope, workspace_key, app_name, user_id, session_id, workspace_cwd, rollout_path,
+	created_at, updated_at, last_event_at, event_count, last_user_message, hidden
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', 0)
+ON CONFLICT(scope, workspace_key, app_name, user_id, session_id) DO UPDATE SET
 	workspace_cwd = excluded.workspace_cwd,
 	app_name = excluded.app_name,
 	user_id = excluded.user_id,
+	updated_at = excluded.updated_at,
 	last_event_at = CASE
-		WHEN session_index.last_event_at > excluded.last_event_at THEN session_index.last_event_at
+		WHEN sessions.last_event_at > excluded.last_event_at THEN sessions.last_event_at
 		ELSE excluded.last_event_at
 	END`
 	_, err := s.db.ExecContext(context.Background(), q,
-		workspace.Key, sessionID, workspace.CWD, appName, userID,
-		ts, ts,
+		localstore.ScopeMain, workspace.Key, appName, userID, sessionID, workspace.CWD, path,
+		ts, ts, ts,
 	)
 	return err
 }
@@ -121,20 +142,22 @@ func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, s
 		return err
 	}
 	const q = `
-UPDATE session_index SET
+UPDATE sessions SET
+	updated_at = ?,
 	last_event_at = ?,
 	event_count = event_count + 1,
 	last_user_message = CASE
 		WHEN ? <> '' THEN ?
 		ELSE last_user_message
 	END
-WHERE workspace_key = ? AND session_id = ?`
-	_, err := s.db.ExecContext(context.Background(), q, ts, lastUser, lastUser, workspace.Key, sessionID)
-	if err != nil {
+WHERE scope = ? AND workspace_key = ? AND app_name = ? AND user_id = ? AND session_id = ?`
+	if _, err := s.db.ExecContext(context.Background(), q,
+		ts, ts, lastUser, lastUser, localstore.ScopeMain, workspace.Key, appName, userID, sessionID,
+	); err != nil {
 		return err
 	}
 	if sessionIndexHiddenForEvent(ev, sessionID) {
-		return s.setSessionHidden(workspace.Key, sessionID, true)
+		return s.setSessionHidden(workspace.Key, appName, userID, sessionID, true)
 	}
 	return nil
 }
@@ -164,11 +187,11 @@ func (s *sessionIndex) ListWorkspaceSessionsPage(workspaceKey string, page int, 
 	offset := (page - 1) * pageSize
 	const q = `
 	SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
-	FROM session_index
-	WHERE workspace_key = ? AND ` + sessionIndexVisibleFilter + `
+	FROM sessions
+	WHERE scope = ? AND workspace_key = ? AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT ? OFFSET ?`
-	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, pageSize, offset)
+	rows, err := s.db.QueryContext(context.Background(), q, localstore.ScopeMain, workspaceKey, pageSize, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -195,9 +218,9 @@ func (s *sessionIndex) CountWorkspaceSessions(workspaceKey string) (int, error) 
 	if workspaceKey == "" {
 		return 0, fmt.Errorf("session index: workspace_key is required")
 	}
-	const q = `SELECT COUNT(*) FROM session_index WHERE workspace_key = ? AND ` + sessionIndexVisibleFilter
+	const q = `SELECT COUNT(*) FROM sessions WHERE scope = ? AND workspace_key = ? AND ` + sessionIndexVisibleFilter
 	var count int
-	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), q, localstore.ScopeMain, workspaceKey).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -214,13 +237,13 @@ func (s *sessionIndex) MostRecentWorkspaceSession(workspaceKey string, excludeSe
 	excludeSessionID = strings.TrimSpace(excludeSessionID)
 	const q = `
 	SELECT session_id, app_name, user_id, workspace_cwd, created_at, last_event_at, event_count, last_user_message
-	FROM session_index
-	WHERE workspace_key = ? AND (? = '' OR session_id <> ?) AND ` + sessionIndexVisibleFilter + `
+	FROM sessions
+	WHERE scope = ? AND workspace_key = ? AND (? = '' OR session_id <> ?) AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT 1`
 	var rec sessionIndexRecord
 	var createdAt, lastEventAt int64
-	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey, excludeSessionID, excludeSessionID).Scan(
+	if err := s.db.QueryRowContext(context.Background(), q, localstore.ScopeMain, workspaceKey, excludeSessionID, excludeSessionID).Scan(
 		&rec.SessionID, &rec.AppName, &rec.UserID, &rec.WorkspaceCWD, &createdAt, &lastEventAt, &rec.EventCount, &rec.LastUserMessage,
 	); err != nil {
 		if err == sql.ErrNoRows {
@@ -242,9 +265,9 @@ func (s *sessionIndex) HasWorkspaceSession(workspaceKey, sessionID string) (bool
 	if workspaceKey == "" || sessionID == "" {
 		return false, fmt.Errorf("session index: workspace_key and session_id are required")
 	}
-	const q = `SELECT 1 FROM session_index WHERE workspace_key = ? AND session_id = ? AND ` + sessionIndexVisibleFilter + ` LIMIT 1`
+	const q = `SELECT 1 FROM sessions WHERE scope = ? AND workspace_key = ? AND session_id = ? AND ` + sessionIndexVisibleFilter + ` LIMIT 1`
 	var one int
-	if err := s.db.QueryRowContext(context.Background(), q, workspaceKey, sessionID).Scan(&one); err != nil {
+	if err := s.db.QueryRowContext(context.Background(), q, localstore.ScopeMain, workspaceKey, sessionID).Scan(&one); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
@@ -264,16 +287,15 @@ func (s *sessionIndex) ResolveWorkspaceSessionID(workspaceKey, prefix string) (s
 	}
 	const q = `
 	SELECT session_id
-	FROM session_index
-	WHERE workspace_key = ? AND session_id LIKE ? AND ` + sessionIndexVisibleFilter + `
+	FROM sessions
+	WHERE scope = ? AND workspace_key = ? AND session_id LIKE ? AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT 3`
-	rows, err := s.db.QueryContext(context.Background(), q, workspaceKey, prefix+"%")
+	rows, err := s.db.QueryContext(context.Background(), q, localstore.ScopeMain, workspaceKey, prefix+"%")
 	if err != nil {
 		return "", false, err
 	}
 	defer rows.Close()
-
 	matches := make([]string, 0, 3)
 	for rows.Next() {
 		var sessionID string
@@ -301,90 +323,57 @@ func (s *sessionIndex) ResolveWorkspaceSessionID(workspaceKey, prefix string) (s
 }
 
 func (s *sessionIndex) SyncWorkspaceFromStoreDir(workspace workspaceContext, appName, userID, storeDir string) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	if strings.TrimSpace(workspace.Key) == "" {
-		return fmt.Errorf("session index: workspace_key is required")
+	storeDir = strings.TrimSpace(storeDir)
+	if storeDir == "" {
+		return nil
 	}
-	entries, err := os.ReadDir(storeDir)
-	if err != nil {
-		if os.IsNotExist(err) {
+	if _, err := os.Stat(storeDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		sessionID := strings.TrimSpace(entry.Name())
-		if sessionID == "" {
-			continue
-		}
-		eventsPath := filepath.Join(storeDir, sessionID, "events.jsonl")
-		info, statErr := os.Stat(eventsPath)
-		if statErr != nil {
-			continue
-		}
-		hidden, hiddenErr := isDelegatedChildSessionDir(eventsPath, sessionID)
-		if hiddenErr != nil {
-			return hiddenErr
-		}
-		snapshot, snapErr := readSessionIndexSnapshot(eventsPath)
-		timestamp := info.ModTime()
-		if snapErr == nil && !snapshot.LastEventAt.IsZero() {
-			timestamp = snapshot.LastEventAt
-		}
-		if err := s.UpsertSession(workspace, appName, userID, sessionID, timestamp); err != nil {
+	return filepath.WalkDir(storeDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
 			return err
 		}
-		if err := s.setSessionHidden(workspace.Key, sessionID, hidden); err != nil {
-			return err
+		if entry.IsDir() {
+			if path != storeDir && entry.Name() == localstore.ScopeACPRemote {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		if snapErr == nil {
-			if err := s.applySessionSnapshot(workspace, sessionID, snapshot); err != nil {
+		name := entry.Name()
+		switch {
+		case name == "events.jsonl":
+			sessionID := strings.TrimSpace(filepath.Base(filepath.Dir(path)))
+			snapshot, err := readLegacySessionIndexSnapshot(path, sessionID)
+			if err != nil {
 				return err
 			}
-		}
-	}
-	return nil
-}
-
-type sessionIndexSnapshot struct {
-	LastEventAt     time.Time
-	EventCount      int64
-	LastUserMessage string
-}
-
-func readSessionIndexSnapshot(eventsPath string) (sessionIndexSnapshot, error) {
-	f, err := os.Open(eventsPath)
-	if err != nil {
-		return sessionIndexSnapshot{}, err
-	}
-	defer f.Close()
-
-	dec := json.NewDecoder(f)
-	var snapshot sessionIndexSnapshot
-	for {
-		var ev session.Event
-		if err := dec.Decode(&ev); err != nil {
-			if err == io.EOF {
-				break
+			return s.upsertSnapshot(workspace, appName, userID, sessionID, firstNonZeroTime(snapshot.LastEventAt, entryModTime(path)), snapshot)
+		case strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, ".jsonl"):
+			meta, snapshot, err := readRolloutIndexSnapshot(path)
+			if err != nil {
+				return err
 			}
-			return sessionIndexSnapshot{}, err
-		}
-		snapshot.EventCount++
-		if !ev.Time.IsZero() && ev.Time.After(snapshot.LastEventAt) {
-			snapshot.LastEventAt = ev.Time
-		}
-		if ev.Message.Role == model.RoleUser && !isCompactionEventForIndex(&ev) {
-			if text := sessionIndexLastUserMessage(&ev); text != "" {
-				snapshot.LastUserMessage = text
+			if meta == nil || strings.TrimSpace(meta.SessionID) == "" {
+				return nil
 			}
+			return s.upsertSnapshot(workspace,
+				firstNonEmptyString(meta.AppName, appName),
+				firstNonEmptyString(meta.UserID, userID),
+				meta.SessionID,
+				firstNonZeroTime(snapshot.LastEventAt, entryModTime(path)),
+				snapshot,
+			)
+		default:
+			return nil
 		}
-	}
-	return snapshot, nil
+	})
 }
 
 func sessionIndexLastUserMessage(ev *session.Event) string {
@@ -410,24 +399,6 @@ func sessionIndexLastUserMessage(ev *session.Event) string {
 	return lastUser
 }
 
-func (s *sessionIndex) applySessionSnapshot(workspace workspaceContext, sessionID string, snapshot sessionIndexSnapshot) error {
-	if s == nil || s.db == nil {
-		return nil
-	}
-	ts := snapshot.LastEventAt.UnixMilli()
-	if snapshot.LastEventAt.IsZero() {
-		ts = time.Now().UnixMilli()
-	}
-	const q = `
-UPDATE session_index SET
-	last_event_at = ?,
-	event_count = CASE WHEN ? > 0 THEN ? ELSE event_count END,
-	last_user_message = CASE WHEN ? <> '' THEN ? ELSE last_user_message END
-WHERE workspace_key = ? AND session_id = ?`
-	_, err := s.db.ExecContext(context.Background(), q, ts, snapshot.EventCount, snapshot.EventCount, snapshot.LastUserMessage, snapshot.LastUserMessage, workspace.Key, sessionID)
-	return err
-}
-
 func sessionIndexPreview(rec sessionIndexRecord, limit int) string {
 	prompt := strings.TrimSpace(rec.LastUserMessage)
 	if prompt == "" {
@@ -438,71 +409,42 @@ func sessionIndexPreview(rec sessionIndexRecord, limit int) string {
 }
 
 func (s *sessionIndex) migrate(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
 	const ddl = `
-CREATE TABLE IF NOT EXISTS session_index (
+CREATE TABLE IF NOT EXISTS sessions (
+	scope TEXT NOT NULL,
 	workspace_key TEXT NOT NULL,
+	app_name TEXT NOT NULL,
+	user_id TEXT NOT NULL,
 	session_id TEXT NOT NULL,
 	workspace_cwd TEXT NOT NULL DEFAULT '',
-	app_name TEXT NOT NULL DEFAULT '',
-	user_id TEXT NOT NULL DEFAULT '',
+	rollout_path TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
-	last_event_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	last_event_at INTEGER NOT NULL DEFAULT 0,
 	event_count INTEGER NOT NULL DEFAULT 0,
-	hidden INTEGER NOT NULL DEFAULT 0,
 	last_user_message TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY (workspace_key, session_id)
+	hidden INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (scope, workspace_key, app_name, user_id, session_id)
 );
-CREATE INDEX IF NOT EXISTS idx_session_index_workspace_last_event
-ON session_index(workspace_key, last_event_at DESC);`
+CREATE INDEX IF NOT EXISTS idx_sessions_workspace_last_event
+ON sessions(scope, workspace_key, hidden, last_event_at DESC, created_at DESC);`
 	_, err := s.db.ExecContext(ctx, ddl)
 	if err != nil {
 		return fmt.Errorf("session index: migrate: %w", err)
 	}
-	if err := s.ensureHiddenColumn(ctx); err != nil {
-		return err
-	}
 	return nil
 }
 
-func (s *sessionIndex) ensureHiddenColumn(ctx context.Context) error {
-	if s == nil || s.db == nil {
-		return nil
-	}
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(session_index)`)
-	if err != nil {
-		return fmt.Errorf("session index: inspect schema: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			cid       int
-			name      string
-			fieldType string
-			notNull   int
-			defValue  any
-			pk        int
-		)
-		if err := rows.Scan(&cid, &name, &fieldType, &notNull, &defValue, &pk); err != nil {
-			return fmt.Errorf("session index: inspect schema: %w", err)
-		}
-		if strings.EqualFold(strings.TrimSpace(name), "hidden") {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("session index: inspect schema: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE session_index ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return fmt.Errorf("session index: add hidden column: %w", err)
-	}
-	return nil
-}
-
-func (s *sessionIndex) setSessionHidden(workspaceKey, sessionID string, hidden bool) error {
+func (s *sessionIndex) setSessionHidden(workspaceKey, appName, userID, sessionID string, hidden bool) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
 	workspaceKey = strings.TrimSpace(workspaceKey)
+	appName = strings.TrimSpace(appName)
+	userID = strings.TrimSpace(userID)
 	sessionID = strings.TrimSpace(sessionID)
 	if workspaceKey == "" || sessionID == "" {
 		return nil
@@ -511,7 +453,10 @@ func (s *sessionIndex) setSessionHidden(workspaceKey, sessionID string, hidden b
 	if hidden {
 		hiddenValue = 1
 	}
-	_, err := s.db.ExecContext(context.Background(), `UPDATE session_index SET hidden = ? WHERE workspace_key = ? AND session_id = ?`, hiddenValue, workspaceKey, sessionID)
+	_, err := s.db.ExecContext(context.Background(),
+		`UPDATE sessions SET hidden = ? WHERE scope = ? AND workspace_key = ? AND app_name = ? AND user_id = ? AND session_id = ?`,
+		hiddenValue, localstore.ScopeMain, workspaceKey, appName, userID, sessionID,
+	)
 	return err
 }
 
@@ -535,6 +480,183 @@ func (s *sessionIndex) DeleteWorkspaceSession(workspaceKey, sessionID string) er
 	if workspaceKey == "" || sessionID == "" {
 		return nil
 	}
-	_, err := s.db.ExecContext(context.Background(), `DELETE FROM session_index WHERE workspace_key = ? AND session_id = ?`, workspaceKey, sessionID)
+	_, err := s.db.ExecContext(context.Background(),
+		`DELETE FROM sessions WHERE scope = ? AND workspace_key = ? AND session_id = ?`,
+		localstore.ScopeMain, workspaceKey, sessionID,
+	)
 	return err
+}
+
+func rolloutPathFallback(workspace workspaceContext, sessionID string, at time.Time) string {
+	if at.IsZero() {
+		at = time.Now()
+	}
+	return filepath.Join(
+		".",
+		strings.TrimSpace(workspace.Key),
+		at.UTC().Format("2006"),
+		at.UTC().Format("01"),
+		at.UTC().Format("02"),
+		fmt.Sprintf("rollout-%s-%s.jsonl", at.UTC().Format("2006-01-02T15-04-05"), strings.TrimSpace(sessionID)),
+	)
+}
+
+var osMkdirAll = func(path string, perm os.FileMode) error {
+	return os.MkdirAll(path, perm)
+}
+
+func (s *sessionIndex) upsertSnapshot(workspace workspaceContext, appName, userID, sessionID string, at time.Time, snapshot sessionIndexSnapshot) error {
+	if err := s.UpsertSession(workspace, appName, userID, sessionID, at); err != nil {
+		return err
+	}
+	if err := s.applySessionSnapshot(workspace, appName, userID, sessionID, snapshot); err != nil {
+		return err
+	}
+	return s.setSessionHidden(workspace.Key, appName, userID, sessionID, snapshot.Hidden)
+}
+
+type sessionIndexSnapshot struct {
+	LastEventAt     time.Time
+	EventCount      int64
+	LastUserMessage string
+	Hidden          bool
+}
+
+func readLegacySessionIndexSnapshot(eventsPath, sessionID string) (sessionIndexSnapshot, error) {
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		return sessionIndexSnapshot{}, err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	var snapshot sessionIndexSnapshot
+	for {
+		var ev session.Event
+		if err := dec.Decode(&ev); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return sessionIndexSnapshot{}, err
+		}
+		snapshot.EventCount++
+		if !ev.Time.IsZero() && ev.Time.After(snapshot.LastEventAt) {
+			snapshot.LastEventAt = ev.Time
+		}
+		if ev.Message.Role == model.RoleUser && !isCompactionEventForIndex(&ev) {
+			if text := sessionIndexLastUserMessage(&ev); text != "" {
+				snapshot.LastUserMessage = text
+			}
+		}
+		if sessionIndexHiddenForEvent(&ev, sessionID) {
+			snapshot.Hidden = true
+		}
+	}
+	return snapshot, nil
+}
+
+type indexedRolloutLine struct {
+	Type    string                 `json:"type"`
+	Session *indexedRolloutSession `json:"session,omitempty"`
+	Event   *session.Event         `json:"event,omitempty"`
+}
+
+type indexedRolloutSession struct {
+	AppName   string `json:"app_name"`
+	UserID    string `json:"user_id"`
+	SessionID string `json:"session_id"`
+}
+
+func readRolloutIndexSnapshot(path string) (*indexedRolloutSession, sessionIndexSnapshot, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, sessionIndexSnapshot{}, err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	var (
+		meta     *indexedRolloutSession
+		snapshot sessionIndexSnapshot
+	)
+	for {
+		var line indexedRolloutLine
+		if err := dec.Decode(&line); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, sessionIndexSnapshot{}, err
+		}
+		switch line.Type {
+		case "session_meta":
+			if line.Session != nil {
+				cp := *line.Session
+				meta = &cp
+			}
+		case "event":
+			if line.Event == nil {
+				continue
+			}
+			snapshot.EventCount++
+			if !line.Event.Time.IsZero() && line.Event.Time.After(snapshot.LastEventAt) {
+				snapshot.LastEventAt = line.Event.Time
+			}
+			if line.Event.Message.Role == model.RoleUser && !isCompactionEventForIndex(line.Event) {
+				if text := sessionIndexLastUserMessage(line.Event); text != "" {
+					snapshot.LastUserMessage = text
+				}
+			}
+			if meta != nil && sessionIndexHiddenForEvent(line.Event, meta.SessionID) {
+				snapshot.Hidden = true
+			}
+		}
+	}
+	return meta, snapshot, nil
+}
+
+func (s *sessionIndex) applySessionSnapshot(workspace workspaceContext, appName, userID, sessionID string, snapshot sessionIndexSnapshot) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	ts := snapshot.LastEventAt.UnixMilli()
+	if snapshot.LastEventAt.IsZero() {
+		ts = time.Now().UnixMilli()
+	}
+	const q = `
+UPDATE sessions SET
+	last_event_at = ?,
+	updated_at = ?,
+	event_count = CASE WHEN ? > 0 THEN ? ELSE event_count END,
+	last_user_message = CASE WHEN ? <> '' THEN ? ELSE last_user_message END
+WHERE scope = ? AND workspace_key = ? AND app_name = ? AND user_id = ? AND session_id = ?`
+	_, err := s.db.ExecContext(context.Background(), q,
+		ts, ts, snapshot.EventCount, snapshot.EventCount, snapshot.LastUserMessage, snapshot.LastUserMessage,
+		localstore.ScopeMain, workspace.Key, appName, userID, sessionID,
+	)
+	return err
+}
+
+func entryModTime(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+func firstNonZeroTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Time{}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

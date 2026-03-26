@@ -30,13 +30,24 @@ type Event struct {
 	Meta      map[string]any
 }
 
-// Store provides session and event persistence.
-type Store interface {
+// LogStore provides durable canonical session history persistence.
+type LogStore interface {
 	GetOrCreate(context.Context, *Session) (*Session, error)
 	AppendEvent(context.Context, *Session, *Event) error
 	ListEvents(context.Context, *Session) ([]*Event, error)
+}
+
+// StateStore provides durable session-scoped state persistence.
+type StateStore interface {
 	SnapshotState(context.Context, *Session) (map[string]any, error)
 	ReplaceState(context.Context, *Session, map[string]any) error
+}
+
+// Store is the compatibility aggregate used by existing callers. New kernel
+// code should depend on narrower ports such as LogStore and StateStore.
+type Store interface {
+	LogStore
+	StateStore
 }
 
 // CursorStore optionally exposes cursor-based event replay for efficient
@@ -63,6 +74,77 @@ type ExistenceStore interface {
 // events).
 type ContextWindowStore interface {
 	ListContextWindowEvents(context.Context, *Session) ([]*Event, error)
+}
+
+// SessionStateStore is a typed repository for one logical session namespace.
+// It can be layered over a generic StateStore or backed by a dedicated adapter.
+type SessionStateStore[T any] interface {
+	Load(context.Context, *Session) (T, error)
+	Save(context.Context, *Session, T) error
+}
+
+// StateNamespaceCodec translates one typed state namespace to and from a
+// generic session state snapshot.
+type StateNamespaceCodec[T any] interface {
+	LoadState(map[string]any) (T, error)
+	StoreState(map[string]any, T) (map[string]any, error)
+}
+
+// MapSessionStateStore adapts a generic map-backed state store to a typed
+// session namespace repository.
+type MapSessionStateStore[T any] struct {
+	store   StateStore
+	updater StateUpdateStore
+	codec   StateNamespaceCodec[T]
+}
+
+func NewMapSessionStateStore[T any](store StateStore, codec StateNamespaceCodec[T]) (*MapSessionStateStore[T], error) {
+	if store == nil {
+		return nil, errors.New("session: state store is nil")
+	}
+	if codec == nil {
+		return nil, errors.New("session: state codec is nil")
+	}
+	typed := &MapSessionStateStore[T]{
+		store: store,
+		codec: codec,
+	}
+	if updater, ok := store.(StateUpdateStore); ok {
+		typed.updater = updater
+	}
+	return typed, nil
+}
+
+func (s *MapSessionStateStore[T]) Load(ctx context.Context, sess *Session) (T, error) {
+	var zero T
+	if s == nil || s.store == nil || s.codec == nil {
+		return zero, errors.New("session: typed state store is not configured")
+	}
+	values, err := s.store.SnapshotState(ctx, sess)
+	if err != nil {
+		return zero, err
+	}
+	return s.codec.LoadState(values)
+}
+
+func (s *MapSessionStateStore[T]) Save(ctx context.Context, sess *Session, value T) error {
+	if s == nil || s.store == nil || s.codec == nil {
+		return errors.New("session: typed state store is not configured")
+	}
+	if s.updater != nil {
+		return s.updater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
+			return s.codec.StoreState(existing, value)
+		})
+	}
+	existing, err := s.store.SnapshotState(ctx, sess)
+	if err != nil {
+		return err
+	}
+	next, err := s.codec.StoreState(existing, value)
+	if err != nil {
+		return err
+	}
+	return s.store.ReplaceState(ctx, sess, next)
 }
 
 // Iterator returns a sequence over events.

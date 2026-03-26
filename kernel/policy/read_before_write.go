@@ -176,7 +176,7 @@ func hasReadEvidenceInPersistedState(ctx context.Context, targetPath string) (bo
 	if !ok || targetPath == "" {
 		return false, false
 	}
-	values, err := stateCtx.Store.SnapshotState(ctx, stateCtx.Session)
+	values, err := stateCtx.StateStore.SnapshotState(ctx, stateCtx.Session)
 	if err != nil {
 		return false, false
 	}
@@ -191,7 +191,10 @@ func hasReadEvidenceViaBackfill(ctx context.Context, readToolName string, target
 	if !ok || targetPath == "" {
 		return false
 	}
-	events, err := stateCtx.Store.ListEvents(ctx, stateCtx.Session)
+	if stateCtx.LogStore == nil {
+		return false
+	}
+	events, err := stateCtx.LogStore.ListEvents(ctx, stateCtx.Session)
 	if err != nil {
 		return false
 	}
@@ -281,8 +284,8 @@ func persistReadPathIndex(ctx context.Context, paths []string) error {
 	}
 	slices.Sort(normalized)
 	normalized = slices.Compact(normalized)
-	if updater, ok := stateCtx.Store.(session.StateUpdateStore); ok {
-		return updater.UpdateState(ctx, stateCtx.Session, func(existing map[string]any) (map[string]any, error) {
+	if stateCtx.StateUpdater != nil {
+		return stateCtx.StateUpdater.UpdateState(ctx, stateCtx.Session, func(existing map[string]any) (map[string]any, error) {
 			if existing == nil {
 				existing = map[string]any{}
 			}
@@ -291,7 +294,7 @@ func persistReadPathIndex(ctx context.Context, paths []string) error {
 			return existing, nil
 		})
 	}
-	values, err := stateCtx.Store.SnapshotState(ctx, stateCtx.Session)
+	values, err := stateCtx.StateStore.SnapshotState(ctx, stateCtx.Session)
 	if err != nil {
 		return err
 	}
@@ -300,7 +303,7 @@ func persistReadPathIndex(ctx context.Context, paths []string) error {
 	}
 	values[readBeforeWriteStateKey] = mergeReadPathIndex(values[readBeforeWriteStateKey], normalized)
 	values[readBeforeWriteIndexReadyStateKey] = true
-	return stateCtx.Store.ReplaceState(ctx, stateCtx.Session, values)
+	return stateCtx.StateStore.ReplaceState(ctx, stateCtx.Session, values)
 }
 
 func mergeReadPathIndex(existing any, additions []string) []string {

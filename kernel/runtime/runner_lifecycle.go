@@ -63,7 +63,7 @@ func (h *runHandle) appendOutput(ev *session.Event, err error, persist bool) boo
 	if ev != nil {
 		prepareEvent(h.ctx, h.sess, ev)
 		if persist {
-			if appendErr := h.runtime.store.AppendEvent(h.ctx, h.sess, ev); appendErr != nil {
+			if appendErr := h.runtime.logStore.AppendEvent(h.ctx, h.sess, ev); appendErr != nil {
 				h.replay.append(nil, appendErr, false)
 				return false
 			}

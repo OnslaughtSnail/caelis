@@ -21,10 +21,10 @@ func SessionMetaFromState(state map[string]any) map[string]any {
 
 func SessionMetaFromContext(ctx context.Context) map[string]any {
 	stateCtx, ok := session.StateContextFromContext(ctx)
-	if !ok || stateCtx.Session == nil || stateCtx.Store == nil {
+	if !ok || stateCtx.Session == nil || stateCtx.StateStore == nil {
 		return nil
 	}
-	values, err := stateCtx.Store.SnapshotState(ctx, stateCtx.Session)
+	values, err := stateCtx.StateStore.SnapshotState(ctx, stateCtx.Session)
 	if err != nil {
 		return nil
 	}

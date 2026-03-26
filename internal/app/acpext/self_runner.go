@@ -3,6 +3,7 @@ package acpext
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -85,6 +86,11 @@ type sharedACPSubagentState struct {
 	tracker *remoteSubagentTracker
 }
 
+const (
+	defaultRemoteACPIdleTimeout = 3 * time.Minute
+	defaultRemoteACPInitTimeout = 6 * time.Minute
+)
+
 type readyState struct {
 	sessionID string
 	meta      runtime.DelegationMetadata
@@ -163,9 +169,39 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	}
 	sessionMeta := r.childSessionMeta(ctx, target.requestedSessionID, desc.ID)
 	metaBase := r.delegationMetadata(ctx, target.requestedSessionID)
-	runCtx, cancel := context.WithCancel(runtime.DetachDelegationContext(ctx, metaBase))
+	idleTimeout := req.IdleTimeout
+	if idleTimeout <= 0 && desc.Transport == appagents.TransportACP {
+		idleTimeout = defaultRemoteACPIdleTimeout
+	}
+	baseCtx, baseCancel := context.WithCancel(runtime.DetachDelegationContext(ctx, metaBase))
+	runCtx := baseCtx
+	timeoutCancel := func() {}
 	if req.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(runtime.DetachDelegationContext(ctx, metaBase), req.Timeout)
+		runCtx, timeoutCancel = context.WithTimeout(runCtx, req.Timeout)
+	}
+	cancel := func() {
+		timeoutCancel()
+		baseCancel()
+	}
+	var (
+		idleErrMu sync.Mutex
+		idleErr   error
+	)
+	noteIdleErr := func(err error) {
+		if err == nil {
+			return
+		}
+		idleErrMu.Lock()
+		if idleErr == nil {
+			idleErr = err
+		}
+		idleErrMu.Unlock()
+		cancel()
+	}
+	loadIdleErr := func() error {
+		idleErrMu.Lock()
+		defer idleErrMu.Unlock()
+		return idleErr
 	}
 	var (
 		clientMu sync.Mutex
@@ -196,16 +232,20 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	done := make(chan runOutcome, 1)
 	go func() {
 		outcome := runOutcome{}
-		outcome.sessionID, outcome.meta, outcome.created, outcome.err = r.runACPSubagent(runCtx, desc, target, req.Prompt, metaBase, sessionMeta, func(created *acpclient.Client) {
-			clientMu.Lock()
-			client = created
-			clientMu.Unlock()
-		}, func(state readyState) {
-			select {
-			case ready <- state:
-			default:
-			}
-		})
+		outcome.sessionID, outcome.meta, outcome.created, outcome.err = r.runACPSubagent(
+			runCtx, desc, target, req.Prompt, metaBase, sessionMeta, idleTimeout, noteIdleErr,
+			func(created *acpclient.Client) {
+				clientMu.Lock()
+				client = created
+				clientMu.Unlock()
+			},
+			func(state readyState) {
+				select {
+				case ready <- state:
+				default:
+				}
+			},
+		)
 		if strings.TrimSpace(outcome.sessionID) != "" {
 			r.unregisterCancel(outcome.sessionID)
 		}
@@ -229,8 +269,11 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		idMu.Unlock()
 		r.registerCancel(childSessionID, cancelSubagent)
 	case outcome := <-done:
+		if cause := loadIdleErr(); cause != nil && (errors.Is(outcome.err, context.Canceled) || errors.Is(outcome.err, context.DeadlineExceeded)) {
+			outcome.err = cause
+		}
 		if outcome.err != nil {
-			return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, outcome.err)
+			return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 		}
 		childSessionID = strings.TrimSpace(outcome.sessionID)
 		meta = outcome.meta
@@ -241,6 +284,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		result.Agent = agentName
 		result.ChildCWD = firstNonEmpty(result.ChildCWD, target.childCWD)
 		result.Timeout = req.Timeout
+		result.IdleTimeout = idleTimeout
 		if result.DelegationID == "" {
 			result.DelegationID = meta.DelegationID
 		}
@@ -255,8 +299,11 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		defer timer.Stop()
 		select {
 		case outcome := <-done:
+			if cause := loadIdleErr(); cause != nil && (errors.Is(outcome.err, context.Canceled) || errors.Is(outcome.err, context.DeadlineExceeded)) {
+				outcome.err = cause
+			}
 			if outcome.err != nil {
-				return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, outcome.err)
+				return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 			}
 		case <-timer.C:
 			yielded = true
@@ -266,8 +313,11 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	} else {
 		select {
 		case outcome := <-done:
+			if cause := loadIdleErr(); cause != nil && (errors.Is(outcome.err, context.Canceled) || errors.Is(outcome.err, context.DeadlineExceeded)) {
+				outcome.err = cause
+			}
 			if outcome.err != nil {
-				return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, outcome.err)
+				return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 			}
 		default:
 			yielded = true
@@ -283,6 +333,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 			Running:      true,
 			Yielded:      true,
 			Timeout:      req.Timeout,
+			IdleTimeout:  idleTimeout,
 		}, nil
 	}
 	result, err := r.InspectSubagent(ctx, childSessionID)
@@ -292,6 +343,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	result.Agent = agentName
 	result.ChildCWD = firstNonEmpty(result.ChildCWD, target.childCWD)
 	result.Timeout = req.Timeout
+	result.IdleTimeout = idleTimeout
 	if result.DelegationID == "" {
 		result.DelegationID = meta.DelegationID
 	}
@@ -321,13 +373,21 @@ type subagentSessionTarget struct {
 	childCWD           string
 }
 
-func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagents.Descriptor, target subagentSessionTarget, promptText string, metaBase runtime.DelegationMetadata, sessionMeta map[string]any, onClient func(*acpclient.Client), onReady func(readyState)) (string, runtime.DelegationMetadata, bool, error) {
+func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagents.Descriptor, target subagentSessionTarget, promptText string, metaBase runtime.DelegationMetadata, sessionMeta map[string]any, idleTimeout time.Duration, onIdle func(error), onClient func(*acpclient.Client), onReady func(readyState)) (string, runtime.DelegationMetadata, bool, error) {
 	var (
 		bridgeMu                sync.RWMutex
 		bridge                  *acpSessionUpdateBridge
 		sessionIDForPermissions string
+		watchdogMu              sync.RWMutex
+		watchdog                *idleWatchdog
 	)
 	onUpdate := func(env acpclient.UpdateEnvelope) {
+		watchdogMu.RLock()
+		activeWatchdog := watchdog
+		watchdogMu.RUnlock()
+		if activeWatchdog != nil {
+			activeWatchdog.Beat()
+		}
 		bridgeMu.RLock()
 		activeBridge := bridge
 		bridgeMu.RUnlock()
@@ -347,8 +407,24 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	}
 
 	startClient := func() (*acpclient.Client, func(), error) {
+		pauseWatchdog := func() {
+			watchdogMu.RLock()
+			activeWatchdog := watchdog
+			watchdogMu.RUnlock()
+			if activeWatchdog != nil {
+				activeWatchdog.Pause()
+			}
+		}
+		resumeWatchdog := func() {
+			watchdogMu.RLock()
+			activeWatchdog := watchdog
+			watchdogMu.RUnlock()
+			if activeWatchdog != nil {
+				activeWatchdog.Resume()
+			}
+		}
 		if desc.Transport == appagents.TransportSelf {
-			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, sessionMeta, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient)
+			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, sessionMeta, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient, pauseWatchdog, resumeWatchdog)
 		}
 		client, err := acpclient.Start(ctx, acpclient.Config{
 			Command:             strings.TrimSpace(desc.Command),
@@ -359,7 +435,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 			Workspace:           r.resolveWorkspaceRoot(),
 			ClientInfo:          nil,
 			OnUpdate:            onUpdate,
-			OnPermissionRequest: r.permissionRequestHandler(ctx, strings.TrimSpace(desc.ID), func() string { return strings.TrimSpace(sessionIDForPermissions) }, metaBase, target.childCWD),
+			OnPermissionRequest: r.permissionRequestHandler(ctx, strings.TrimSpace(desc.ID), func() string { return strings.TrimSpace(sessionIDForPermissions) }, metaBase, target.childCWD, pauseWatchdog, resumeWatchdog),
 		})
 		if err != nil {
 			return nil, nil, err
@@ -415,6 +491,20 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	if onReady != nil {
 		onReady(readyState{sessionID: actualSessionID, meta: meta})
 	}
+	if idleTimeout > 0 {
+		activeWatchdog := newIdleWatchdog(idleTimeout, maxDuration(defaultRemoteACPInitTimeout, idleTimeout*2), func(idleFor time.Duration) {
+			cause := fmt.Errorf("acpext: delegated child session %q idle timeout exceeded after %s without updates", actualSessionID, idleFor.Round(time.Second))
+			if onIdle != nil {
+				onIdle(cause)
+			}
+			_ = client.Cancel(context.Background(), actualSessionID)
+		})
+		watchdogMu.Lock()
+		watchdog = activeWatchdog
+		watchdogMu.Unlock()
+		activeWatchdog.Start()
+		defer activeWatchdog.Stop()
+	}
 	_, err = client.Prompt(ctx, actualSessionID, promptText, sessionMeta)
 	bridgeMu.RLock()
 	activeBridge := bridge
@@ -433,7 +523,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	return actualSessionID, meta, created, err
 }
 
-func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, childCWD string, sessionMeta map[string]any, sessionIDProvider func() string, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client)) (*acpclient.Client, func(), error) {
+func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, childCWD string, sessionMeta map[string]any, sessionIDProvider func() string, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client), onApprovalStart func(), onApprovalDone func()) (*acpclient.Client, func(), error) {
 	_ = sessionMeta
 	serverReader, clientWriter := io.Pipe()
 	clientReader, serverWriter := io.Pipe()
@@ -443,7 +533,7 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		Workspace:           r.resolveWorkspaceRoot(),
 		WorkDir:             r.resolveWorkspaceCWD(),
 		OnUpdate:            onUpdate,
-		OnPermissionRequest: r.permissionRequestHandler(ctx, "self", sessionIDProvider, meta, firstNonEmpty(childCWD, r.resolveWorkspaceCWD())),
+		OnPermissionRequest: r.permissionRequestHandler(ctx, "self", sessionIDProvider, meta, firstNonEmpty(childCWD, r.resolveWorkspaceCWD()), onApprovalStart, onApprovalDone),
 	}, clientReader, clientWriter)
 	if err != nil {
 		return nil, nil, err
@@ -653,7 +743,7 @@ func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessio
 	return agent.SubagentRunResult{}, fmt.Errorf("acpext: delegated child session %q is not tracked in this process", childSessionID)
 }
 
-func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID string, childCreated bool, meta runtime.DelegationMetadata, agentName string, timeout time.Duration, cause error) (agent.SubagentRunResult, error) {
+func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID string, childCreated bool, meta runtime.DelegationMetadata, agentName string, timeout, idleTimeout time.Duration, cause error) (agent.SubagentRunResult, error) {
 	status := runtime.RunLifecycleStatusFailed
 	if strings.Contains(strings.ToLower(strings.TrimSpace(fmt.Sprint(cause))), "context canceled") {
 		status = runtime.RunLifecycleStatusInterrupted
@@ -670,6 +760,7 @@ func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID
 		Agent:        agentName,
 		State:        string(status),
 		Timeout:      timeout,
+		IdleTimeout:  idleTimeout,
 	}, cause
 }
 
@@ -805,13 +896,19 @@ func approvalLifecycleMeta(parentSessionID, childSessionID, delegationID string,
 	return meta
 }
 
-func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, agentName string, sessionID func() string, meta runtime.DelegationMetadata, childCWD string) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, agentName string, sessionID func() string, meta runtime.DelegationMetadata, childCWD string, onApprovalStart func(), onApprovalDone func()) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
 	return func(reqCtx context.Context, req acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+		if onApprovalStart != nil {
+			onApprovalStart()
+		}
 		delegationID := strings.TrimSpace(meta.DelegationID)
 		if r != nil && r.shared != nil && r.shared.tracker != nil && sessionID != nil {
 			r.shared.tracker.markApprovalPending(agentName, sessionID(), delegationID, childCWD)
 		}
 		defer func() {
+			if onApprovalDone != nil {
+				onApprovalDone()
+			}
 			if r != nil && r.shared != nil && r.shared.tracker != nil && sessionID != nil {
 				r.shared.tracker.clearApproval(agentName, sessionID())
 			}
@@ -853,6 +950,16 @@ func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, ag
 		}
 		return permissionOutcome(req, true), nil
 	}
+}
+
+func maxDuration(values ...time.Duration) time.Duration {
+	var out time.Duration
+	for _, value := range values {
+		if value > out {
+			out = value
+		}
+	}
+	return out
 }
 
 func permissionOutcome(req acpclient.RequestPermissionRequest, allowed bool) acpclient.RequestPermissionResponse {

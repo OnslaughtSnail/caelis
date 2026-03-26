@@ -101,8 +101,8 @@ func (t *planTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
-	if updater, ok := stateCtx.Store.(session.StateUpdateStore); ok {
-		err = updater.UpdateState(ctx, stateCtx.Session, func(values map[string]any) (map[string]any, error) {
+	if stateCtx.StateUpdater != nil {
+		err = stateCtx.StateUpdater.UpdateState(ctx, stateCtx.Session, func(values map[string]any) (map[string]any, error) {
 			if values == nil {
 				values = map[string]any{}
 			}
@@ -113,7 +113,7 @@ func (t *planTool) Run(ctx context.Context, args map[string]any) (map[string]any
 			return values, nil
 		})
 	} else {
-		values, snapErr := stateCtx.Store.SnapshotState(ctx, stateCtx.Session)
+		values, snapErr := stateCtx.StateStore.SnapshotState(ctx, stateCtx.Session)
 		if snapErr != nil {
 			return nil, snapErr
 		}
@@ -124,7 +124,7 @@ func (t *planTool) Run(ctx context.Context, args map[string]any) (map[string]any
 			"version": 1,
 			"entries": planEntriesToAny(entries),
 		}
-		err = stateCtx.Store.ReplaceState(ctx, stateCtx.Session, values)
+		err = stateCtx.StateStore.ReplaceState(ctx, stateCtx.Session, values)
 	}
 	if err != nil {
 		return nil, err

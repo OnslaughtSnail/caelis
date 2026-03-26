@@ -182,6 +182,12 @@ func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) 
 		entry.Result["agent"] = agentName
 		entry.Result["_ui_agent"] = agentName
 	}
+	if timeoutSeconds := intValue(entry.Spec, taskSpecTimeout); timeoutSeconds > 0 {
+		entry.Result["_ui_timeout_seconds"] = timeoutSeconds
+	}
+	if idleTimeoutSeconds := intValue(entry.Spec, taskSpecIdleTimeout); idleTimeoutSeconds > 0 {
+		entry.Result["_ui_idle_timeout_seconds"] = idleTimeoutSeconds
+	}
 	if childCWD := strings.TrimSpace(stringValueFallback(entry.Spec, taskSpecChildCWD, entry.Result)); childCWD != "" {
 		entry.Result["child_cwd"] = childCWD
 	}

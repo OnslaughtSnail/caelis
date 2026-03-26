@@ -18,14 +18,24 @@ import (
 
 // Config configures Runtime.
 type Config struct {
-	Store      session.Store
+	LogStore   session.LogStore
+	StateStore session.StateStore
 	TaskStore  task.Store
 	Compaction CompactionConfig
+
+	// Store is kept as a compatibility aggregate while callers migrate to
+	// narrower ports. LogStore/StateStore take precedence when set.
+	Store session.Store
 }
 
 // Runtime orchestrates session lifecycle and agent execution.
 type Runtime struct {
+	// store is kept as a compatibility aggregate for tests and transitional
+	// callers that still inspect the legacy field directly.
 	store              session.Store
+	logStore           session.LogStore
+	stateStore         session.StateStore
+	stateUpdater       session.StateUpdateStore
 	taskStore          task.Store
 	taskRegistry       *task.Registry
 	compaction         CompactionConfig
@@ -37,16 +47,29 @@ type Runtime struct {
 type SubagentRunnerFactory func(*Runtime, *session.Session, RunRequest) agent.SubagentRunner
 
 func New(cfg Config) (*Runtime, error) {
-	if cfg.Store == nil {
-		return nil, fmt.Errorf("runtime: store is nil")
+	if cfg.LogStore == nil && cfg.Store != nil {
+		cfg.LogStore = cfg.Store
+	}
+	if cfg.StateStore == nil && cfg.Store != nil {
+		cfg.StateStore = cfg.Store
+	}
+	if cfg.LogStore == nil {
+		return nil, fmt.Errorf("runtime: log store is nil")
+	}
+	if cfg.StateStore == nil {
+		return nil, fmt.Errorf("runtime: state store is nil")
 	}
 	compactionCfg := normalizeCompactionConfig(cfg.Compaction)
 	strategy := compactionCfg.Strategy
 	if strategy == nil {
 		strategy = DefaultCompactionStrategy()
 	}
+	updater, _ := cfg.StateStore.(session.StateUpdateStore)
 	return &Runtime{
 		store:              cfg.Store,
+		logStore:           cfg.LogStore,
+		stateStore:         cfg.StateStore,
+		stateUpdater:       updater,
 		taskStore:          cfg.TaskStore,
 		taskRegistry:       task.NewRegistry(task.RegistryConfig{}),
 		compaction:         compactionCfg,
@@ -152,7 +175,7 @@ func (r *Runtime) buildInvocationContext(
 		subagentRunner,
 	)
 	ctx = task.WithManager(ctx, taskManager)
-	ctx = session.WithStateContext(ctx, sess, r.store)
+	ctx = session.WithStoresContext(ctx, sess, r.logStore, r.stateStore)
 	allTools, err := tool.EnsureCoreTools(req.Tools, coreTools)
 	if err != nil {
 		return nil, err
@@ -193,7 +216,7 @@ func (r *Runtime) projectInvocationEvents(allEvents []*session.Event) session.Ev
 }
 
 func (r *Runtime) snapshotReadonlyState(ctx context.Context, sess *session.Session) (session.ReadonlyState, error) {
-	values, err := r.store.SnapshotState(ctx, sess)
+	values, err := r.stateStore.SnapshotState(ctx, sess)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return session.NewReadonlyState(nil), nil
@@ -274,11 +297,11 @@ func (r *Runtime) Compact(ctx context.Context, req CompactRequest) (*session.Eve
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return nil, fmt.Errorf("runtime: app_name, user_id and session_id are required")
 	}
-	sess, err := r.store.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
+	sess, err := r.logStore.GetOrCreate(ctx, &session.Session{AppName: req.AppName, UserID: req.UserID, ID: req.SessionID})
 	if err != nil {
 		return nil, err
 	}
-	ctx = withRequestTraceContext(ctx, r.store, sess, "")
+	ctx = withRequestTraceContext(ctx, r.logStore, sess, "")
 	req.Model = model.WrapRequestTrace(req.Model)
 	allEvents, err := r.listContextWindowEvents(ctx, sess)
 	if err != nil {
@@ -336,8 +359,8 @@ func (r *Runtime) appendAndYieldLifecycle(
 	state, ok := runStateFromLifecycleEvent(ev)
 	if ok {
 		snapshot := runStateSnapshot(state)
-		if updater, ok := r.store.(session.StateUpdateStore); ok {
-			if err := updater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
+		if r.stateUpdater != nil {
+			if err := r.stateUpdater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
 				if existing == nil {
 					existing = map[string]any{}
 				}
@@ -351,7 +374,7 @@ func (r *Runtime) appendAndYieldLifecycle(
 		} else {
 			// Merge lifecycle data into existing state instead of replacing
 			// the entire map, so that unrelated state keys are preserved.
-			existing, snapErr := r.store.SnapshotState(ctx, sess)
+			existing, snapErr := r.stateStore.SnapshotState(ctx, sess)
 			if snapErr != nil {
 				return yield(nil, fmt.Errorf("lifecycle state merge: failed to read existing state: %w", snapErr))
 			}
@@ -361,7 +384,7 @@ func (r *Runtime) appendAndYieldLifecycle(
 			for k, v := range snapshot {
 				existing[k] = v
 			}
-			if err := r.store.ReplaceState(ctx, sess, existing); err != nil {
+			if err := r.stateStore.ReplaceState(ctx, sess, existing); err != nil {
 				return yield(nil, err)
 			}
 		}

@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appprompting "github.com/OnslaughtSnail/caelis/internal/app/prompting"
+	"github.com/OnslaughtSnail/caelis/internal/app/storage/localstore"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -15,8 +16,7 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/session/filestore"
-	taskfilestore "github.com/OnslaughtSnail/caelis/kernel/task/filestore"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -363,68 +363,59 @@ func resolveModelAliasFromConfig(alias string, configStore *appConfigStore) stri
 
 type sessionRuntimeResult struct {
 	Store      session.Store
-	TaskStore  *taskfilestore.Store
+	TaskStore  task.Store
 	Index      *sessionIndex
+	DB         *localstore.Database
 	Runtime    *runtime.Runtime
 	ACPStore   session.Store
 	ACPRuntime *runtime.Runtime
 }
 
 func setupSessionRuntime(storeDir, workspaceKey, appName, userID, sessionIndexFile string, compactWatermark float64, workspace workspaceContext) (*sessionRuntimeResult, error) {
-	eventStoreDir := filepath.Join(storeDir, workspaceKey)
-	storeImpl, err := filestore.NewWithOptions(eventStoreDir, filestore.Options{
-		Layout: filestore.LayoutSessionOnly,
-	})
+	db, err := localstore.Open(storeDir, sessionIndexFile)
 	if err != nil {
 		return nil, err
 	}
-	taskStoreImpl, err := taskfilestore.New(filepath.Join(eventStoreDir, ".tasks"))
+	index, err := newSessionIndexWithDB(sessionIndexFile, db.SQLDB())
 	if err != nil {
+		_ = db.Close()
 		return nil, err
 	}
-	index, err := newSessionIndex(sessionIndexFile)
-	if err != nil {
-		return nil, err
+	mainStore := db.Scope(localstore.Workspace{Key: workspaceKey, CWD: workspace.CWD}, localstore.ScopeMain)
+	if err := mainStore.Backfill(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: backfill local session catalog failed: %v\n", err)
 	}
-	if err := index.SyncWorkspaceFromStoreDir(workspace, appName, userID, eventStoreDir); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: sync session index failed: %v\n", err)
+	acpStore := db.Scope(localstore.Workspace{Key: workspaceKey, CWD: workspace.CWD}, localstore.ScopeACPRemote)
+	if err := acpStore.Backfill(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: backfill ACP session catalog failed: %v\n", err)
 	}
-	store := newIndexedSessionStore(storeImpl, index, workspace)
 	rt, err := runtime.New(runtime.Config{
-		Store:     store,
-		TaskStore: taskStoreImpl,
+		Store:     mainStore,
+		TaskStore: mainStore,
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio: compactWatermark,
 		},
-	})
+		})
 	if err != nil {
-		return nil, err
-	}
-	acpStoreDir := filepath.Join(eventStoreDir, ".acp_remote", "sessions")
-	acpStore, err := filestore.NewWithOptions(acpStoreDir, filestore.Options{
-		Layout: filestore.LayoutSessionOnly,
-	})
-	if err != nil {
-		return nil, err
-	}
-	acpTaskStore, err := taskfilestore.New(filepath.Join(eventStoreDir, ".acp_remote", "tasks"))
-	if err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	acpRuntime, err := runtime.New(runtime.Config{
 		Store:     acpStore,
-		TaskStore: acpTaskStore,
+		TaskStore: acpStore,
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio: compactWatermark,
 		},
 	})
 	if err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	return &sessionRuntimeResult{
-		Store:      store,
-		TaskStore:  taskStoreImpl,
+		Store:      mainStore,
+		TaskStore:  mainStore,
 		Index:      index,
+		DB:         db,
 		Runtime:    rt,
 		ACPStore:   acpStore,
 		ACPRuntime: acpRuntime,

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	"github.com/OnslaughtSnail/caelis/internal/app/storage/localstore"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
@@ -1123,6 +1124,42 @@ func TestSessionIndex_SyncWorkspaceFromStoreDir_VisibleSessionsExcludeDelegatedC
 	}
 	if len(items) != 1 || items[0].SessionID != "s-root" {
 		t.Fatalf("expected delegated child session to be hidden from visible listings, got %+v", items)
+	}
+}
+
+func TestSessionIndex_SyncWorkspaceFromStoreDir_SkipsACPRemoteSubtree(t *testing.T) {
+	root := t.TempDir()
+	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
+	mainDir := filepath.Join(root, "s-main")
+	acpDir := filepath.Join(root, localstore.ScopeACPRemote, "2026", "03", "25")
+	if err := os.MkdirAll(mainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(acpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainDir, "events.jsonl"), []byte("{\"ID\":\"e1\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(acpDir, "rollout-2026-03-25T10-00-00-s-remote.jsonl"), []byte("{\"type\":\"session_meta\",\"session\":{\"app_name\":\"app\",\"user_id\":\"u\",\"session_id\":\"s-remote\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = idx.Close()
+	})
+	if err := idx.SyncWorkspaceFromStoreDir(workspace, "app", "u", root); err != nil {
+		t.Fatal(err)
+	}
+	items, err := idx.ListWorkspaceSessionsPage(workspace.Key, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SessionID != "s-main" {
+		t.Fatalf("expected ACP remote rollout files to stay out of main session index, got %+v", items)
 	}
 }
 

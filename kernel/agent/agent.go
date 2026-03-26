@@ -61,13 +61,14 @@ type InvocationContext interface {
 
 // SubagentRunRequest describes one delegated child run.
 type SubagentRunRequest struct {
-	Agent     string
-	Prompt    string
-	SessionID string
-	ChildCWD  string
-	Parts     []model.Part
-	Yield     time.Duration
-	Timeout   time.Duration
+	Agent       string
+	Prompt      string
+	SessionID   string
+	ChildCWD    string
+	Parts       []model.Part
+	Yield       time.Duration
+	Timeout     time.Duration
+	IdleTimeout time.Duration
 }
 
 // SubagentRunResult captures the final delegated child run summary.
@@ -85,6 +86,7 @@ type SubagentRunResult struct {
 	UpdatedAt       time.Time
 	Yielded         bool
 	Timeout         time.Duration
+	IdleTimeout     time.Duration
 }
 
 // SubagentRunner starts delegated child runs from the current invocation.
