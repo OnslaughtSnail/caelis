@@ -809,6 +809,7 @@ func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []stri
 		return nil
 	}
 	lines := make([]string, 0, len(details)*2)
+	detailBudget := m.promptDetailLineBudget()
 	for _, detail := range details {
 		label := strings.TrimSpace(detail.Label)
 		value := strings.TrimSpace(detail.Value)
@@ -820,6 +821,11 @@ func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []stri
 			valueStyle = valueStyle.Bold(true)
 		}
 		valueLines := strings.Split(value, "\n")
+		truncatedCount := 0
+		if len(valueLines) > detailBudget {
+			truncatedCount = len(valueLines) - detailBudget
+			valueLines = append(append([]string(nil), valueLines[:detailBudget]...), "")
+		}
 		first := strings.TrimRight(valueLines[0], "\r")
 		if strings.TrimSpace(first) == "" {
 			continue
@@ -832,6 +838,9 @@ func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []stri
 			}
 			lines = append(lines, "  "+valueStyle.Render(line))
 		}
+		if truncatedCount > 0 {
+			lines = append(lines, "  "+m.theme.HelpHintTextStyle().Render(fmt.Sprintf("… %d more lines", truncatedCount)))
+		}
 	}
 	return lines
 }
@@ -839,7 +848,11 @@ func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []stri
 func (m *Model) renderPromptModalBox(lines []string) string {
 	filtered := make([]string, 0, len(lines))
 	for _, line := range lines {
-		filtered = append(filtered, line)
+		filtered = append(filtered, wrapPromptModalLine(line, m.promptModalInnerWidth())...)
+	}
+	filtered = clampPromptModalLines(filtered, m.promptModalLineBudget(), m.theme)
+	if len(filtered) == 0 {
+		filtered = []string{""}
 	}
 	body := strings.Join(filtered, "\n")
 	inset := tuikit.GutterNarrative
@@ -853,6 +866,59 @@ func (m *Model) renderPromptModalBox(lines []string) string {
 		Padding(0, 1).
 		Width(width)
 	return insetRenderedBlock(box.Render(body), inset)
+}
+
+func (m *Model) promptDetailLineBudget() int {
+	switch {
+	case m.height <= 18:
+		return 8
+	case m.height <= 26:
+		return 12
+	default:
+		return 18
+	}
+}
+
+func (m *Model) promptModalInnerWidth() int {
+	inset := tuikit.GutterNarrative
+	width := minInt(maxInt(44, m.width-(inset*2)), 96)
+	if width <= 0 {
+		width = 72
+	}
+	return maxInt(8, width-4)
+}
+
+func (m *Model) promptModalLineBudget() int {
+	if m.height <= 0 {
+		return 24
+	}
+	return maxInt(8, m.height-8)
+}
+
+func wrapPromptModalLine(line string, width int) []string {
+	if width <= 0 {
+		return []string{line}
+	}
+	if strings.TrimSpace(line) == "" {
+		return []string{""}
+	}
+	wrapped := hardWrapDisplayLine(line, width)
+	if wrapped == "" {
+		return []string{""}
+	}
+	return strings.Split(wrapped, "\n")
+}
+
+func clampPromptModalLines(lines []string, budget int, theme tuikit.Theme) []string {
+	if budget <= 0 || len(lines) <= budget {
+		return lines
+	}
+	if budget == 1 {
+		return []string{theme.HelpHintTextStyle().Render("…")}
+	}
+	truncated := append([]string(nil), lines[:budget-1]...)
+	truncated = append(truncated, theme.HelpHintTextStyle().Render(fmt.Sprintf("… %d more lines", len(lines)-budget+1)))
+	return truncated
 }
 
 func (m *Model) renderCompletionOverlay(title string, lines []string) string {

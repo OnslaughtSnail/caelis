@@ -718,7 +718,7 @@ func (r *modeSwitchableRuntime) Close() error {
 	var firstErr error
 	if defaultRuntime != nil {
 		closeErr := Close(defaultRuntime)
-		if closeErr != nil && firstErr == nil {
+		if closeErr != nil {
 			firstErr = closeErr
 		}
 	}

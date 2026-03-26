@@ -154,8 +154,8 @@ func TestSubagentPanelShowsApprovalState(t *testing.T) {
 	if !strings.Contains(joined, "waiting approval") {
 		t.Fatalf("expected waiting approval state in subagent panel, got %q", joined)
 	}
-	if !strings.Contains(joined, "waiting for user confirmation") {
-		t.Fatalf("expected approval hint in subagent panel, got %q", joined)
+	if strings.Contains(joined, "waiting for user confirmation") || strings.Contains(joined, "approval needed") {
+		t.Fatalf("did not expect approval body hint in subagent panel, got %q", joined)
 	}
 }
 

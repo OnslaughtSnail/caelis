@@ -170,7 +170,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	sessionMeta := r.childSessionMeta(ctx, target.requestedSessionID, desc.ID)
 	metaBase := r.delegationMetadata(ctx, target.requestedSessionID)
 	idleTimeout := req.IdleTimeout
-	if idleTimeout <= 0 && desc.Transport == appagents.TransportACP {
+	if idleTimeout <= 0 {
 		idleTimeout = defaultRemoteACPIdleTimeout
 	}
 	baseCtx, baseCancel := context.WithCancel(runtime.DetachDelegationContext(ctx, metaBase))
@@ -324,6 +324,15 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		}
 	}
 	if yielded {
+		go func() {
+			outcome := <-done
+			if cause := loadIdleErr(); cause != nil && (errors.Is(outcome.err, context.Canceled) || errors.Is(outcome.err, context.DeadlineExceeded)) {
+				outcome.err = cause
+			}
+			if outcome.err != nil {
+				_, _ = r.failedResult(context.Background(), outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
+			}
+		}()
 		return agent.SubagentRunResult{
 			SessionID:    childSessionID,
 			DelegationID: meta.DelegationID,

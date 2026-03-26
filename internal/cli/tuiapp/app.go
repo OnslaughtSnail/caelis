@@ -1,7 +1,6 @@
 package tuiapp
 
 import (
-	"os"
 	"strings"
 	"time"
 
@@ -169,65 +168,9 @@ func (m *Model) Init() tea.Cmd {
 }
 
 func (m *Model) appendWelcomeCard() {
-	versionText := strings.TrimSpace(m.cfg.Version)
-	if versionText == "" {
-		versionText = "unknown"
-	}
-	versionLabel := versionText
-	if !strings.HasPrefix(strings.ToLower(versionText), "v") {
-		versionLabel = "v" + versionText
-	}
-	workspace := strings.TrimSpace(m.cfg.Workspace)
-	if workspace == "" {
-		workspace = "."
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		workspace = strings.Replace(workspace, home, "~", 1)
-	}
-	modelAlias := strings.TrimSpace(m.cfg.ModelAlias)
-	if modelAlias == "" {
-		modelAlias = "not configured (/connect)"
-	}
-
-	prefix := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Accent).Render(">_")
-	title := lipgloss.NewStyle().Bold(true).Foreground(m.theme.PanelTitle).Render("CAELIS")
-	version := lipgloss.NewStyle().Foreground(m.theme.TextSecondary).Render("(" + versionLabel + ")")
-
-	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Info).Width(10)
-	valueStyle := lipgloss.NewStyle().Foreground(m.theme.TextPrimary)
-	tipValueStyle := lipgloss.NewStyle().Foreground(m.theme.TextSecondary)
-
-	titleLine := prefix + " " + title + " " + version
-	modelLine := labelStyle.Render("model:") + " " + valueStyle.Render(modelAlias)
-	workspaceLine := labelStyle.Render("workspace:") + " " + valueStyle.Render(workspace)
-	tipLine := labelStyle.Render("tip:") + " " + tipValueStyle.Render("type / for command list")
-
-	body := strings.Join([]string{
-		titleLine,
-		"",
-		modelLine,
-		workspaceLine,
-		tipLine,
-	}, "\n")
-
-	frame := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.PanelBorder).
-		Foreground(m.theme.TextPrimary).
-		Width(maxInt(30, minInt(72, maxInt(30, m.viewport.Width()-6)))).
-		Padding(0, 2).
-		Margin(1, 0, 1, 1).
-		Render(body)
-	lines := strings.Split(frame, "\n")
-	for _, line := range lines {
-		block := NewTranscriptBlock(line, tuikit.LineStyleDefault)
-		block.PreStyled = true
-		m.doc.Append(block)
-	}
-	if len(lines) > 0 {
-		m.hasCommittedLine = true
-		m.lastCommittedStyle = tuikit.LineStyleDefault
-	}
+	m.doc.Append(NewWelcomeBlock(m.cfg.Version, m.cfg.Workspace, m.cfg.ModelAlias))
+	m.hasCommittedLine = true
+	m.lastCommittedStyle = tuikit.LineStyleDefault
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

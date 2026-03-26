@@ -16,6 +16,7 @@ const (
 	defaultReadToolName               = "READ"
 	readBeforeWriteStateKey           = "policy.read_before_write.read_paths"
 	readBeforeWriteIndexReadyStateKey = "policy.read_before_write.index_ready"
+	readBeforeWriteSafeWriteStateKey  = "policy.read_before_write.safe_write_paths"
 )
 
 type ReadBeforeWriteConfig struct {
@@ -29,7 +30,7 @@ type readBeforeWriteHook struct {
 
 func RequireReadBeforeWrite(cfg ReadBeforeWriteConfig) Hook {
 	name := "require_read_before_write"
-	readToolName := strings.TrimSpace(cfg.ReadToolName)
+	readToolName := strings.ToUpper(strings.TrimSpace(cfg.ReadToolName))
 	if readToolName == "" {
 		readToolName = defaultReadToolName
 	}
@@ -72,6 +73,9 @@ func (h readBeforeWriteHook) BeforeTool(ctx context.Context, in ToolInput) (Tool
 	if hasReadEvidence(ctx, h.readToolName, targetPath) {
 		return in, nil
 	}
+	if hasSafeWriteEvidence(ctx, targetPath) {
+		return in, nil
+	}
 	in.Decision = Decision{
 		Effect: DecisionEffectDeny,
 		Reason: fmt.Sprintf("write tool %q requires prior READ of %q", in.Call.Name, targetPath),
@@ -80,18 +84,28 @@ func (h readBeforeWriteHook) BeforeTool(ctx context.Context, in ToolInput) (Tool
 }
 
 func (h readBeforeWriteHook) AfterTool(ctx context.Context, out ToolOutput) (ToolOutput, error) {
-	if strings.TrimSpace(out.Call.Name) != h.readToolName {
+	callName := strings.ToUpper(strings.TrimSpace(out.Call.Name))
+	if callName == h.readToolName {
+		if out.Err != nil || out.Result == nil {
+			return out, nil
+		}
+		readPathRaw, _ := out.Result["path"].(string)
+		readPath := normalizePathForComparison(readPathRaw)
+		if readPath == "" {
+			return out, nil
+		}
+		_ = persistReadEvidence(ctx, readPath)
 		return out, nil
 	}
-	if out.Err != nil || out.Result == nil {
+	if out.Err != nil || out.Result == nil || !isSafeWriteBootstrapResult(callName, out.Result) {
 		return out, nil
 	}
-	readPathRaw, _ := out.Result["path"].(string)
-	readPath := normalizePathForComparison(readPathRaw)
-	if readPath == "" {
+	writePathRaw, _ := out.Result["path"].(string)
+	writePath := normalizePathForComparison(writePathRaw)
+	if writePath == "" {
 		return out, nil
 	}
-	_ = persistReadEvidence(ctx, readPath)
+	_ = persistSafeWriteEvidence(ctx, writePath)
 	return out, nil
 }
 
@@ -122,6 +136,19 @@ func hasReadEvidence(ctx context.Context, readToolName string, targetPath string
 		return allowed
 	}
 	return hasReadEvidenceViaBackfill(ctx, readToolName, targetPath)
+}
+
+func hasSafeWriteEvidence(ctx context.Context, targetPath string) bool {
+	if hasSafeWriteEvidenceInEvents(ctx, targetPath) {
+		return true
+	}
+	if known, allowed := hasSafeWriteEvidenceInState(readonlyState(ctx), targetPath); known {
+		return allowed
+	}
+	if known, allowed := hasSafeWriteEvidenceInPersistedState(ctx, targetPath); known {
+		return allowed
+	}
+	return hasSafeWriteEvidenceViaBackfill(ctx, targetPath)
 }
 
 func hasReadEvidenceInEvents(ctx context.Context, readToolName string, targetPath string) bool {
@@ -157,6 +184,30 @@ func hasReadEvidenceInEvents(ctx context.Context, readToolName string, targetPat
 	return false
 }
 
+func hasSafeWriteEvidenceInEvents(ctx context.Context, targetPath string) bool {
+	type eventReader interface {
+		Events() session.Events
+	}
+	h, ok := ctx.(eventReader)
+	if !ok {
+		return false
+	}
+	for ev := range h.Events().All() {
+		if ev == nil {
+			continue
+		}
+		resp := ev.Message.ToolResponse()
+		if resp == nil || !isSafeWriteBootstrapResult(strings.ToUpper(strings.TrimSpace(resp.Name)), resp.Result) {
+			continue
+		}
+		writePathRaw, _ := resp.Result["path"].(string)
+		if normalizePathForComparison(writePathRaw) == targetPath {
+			return true
+		}
+	}
+	return false
+}
+
 func hasReadEvidenceInState(state session.ReadonlyState, targetPath string) (bool, bool) {
 	if state == nil || targetPath == "" {
 		return false, false
@@ -186,6 +237,33 @@ func hasReadEvidenceInPersistedState(ctx context.Context, targetPath string) (bo
 	return true, readPathIndexContains(values[readBeforeWriteStateKey], targetPath)
 }
 
+func hasSafeWriteEvidenceInState(state session.ReadonlyState, targetPath string) (bool, bool) {
+	if state == nil || targetPath == "" {
+		return false, false
+	}
+	value, ok := state.Get(readBeforeWriteSafeWriteStateKey)
+	if !ok {
+		return false, false
+	}
+	return true, readPathIndexContains(value, targetPath)
+}
+
+func hasSafeWriteEvidenceInPersistedState(ctx context.Context, targetPath string) (bool, bool) {
+	stateCtx, ok := session.StateContextFromContext(ctx)
+	if !ok || targetPath == "" {
+		return false, false
+	}
+	values, err := stateCtx.StateStore.SnapshotState(ctx, stateCtx.Session)
+	if err != nil {
+		return false, false
+	}
+	value, ok := values[readBeforeWriteSafeWriteStateKey]
+	if !ok {
+		return false, false
+	}
+	return true, readPathIndexContains(value, targetPath)
+}
+
 func hasReadEvidenceViaBackfill(ctx context.Context, readToolName string, targetPath string) bool {
 	stateCtx, ok := session.StateContextFromContext(ctx)
 	if !ok || targetPath == "" {
@@ -200,6 +278,23 @@ func hasReadEvidenceViaBackfill(ctx context.Context, readToolName string, target
 	}
 	paths := collectReadPaths(events, readToolName)
 	_ = persistReadPathIndex(ctx, paths)
+	return slices.Contains(paths, targetPath)
+}
+
+func hasSafeWriteEvidenceViaBackfill(ctx context.Context, targetPath string) bool {
+	stateCtx, ok := session.StateContextFromContext(ctx)
+	if !ok || targetPath == "" {
+		return false
+	}
+	if stateCtx.LogStore == nil {
+		return false
+	}
+	events, err := stateCtx.LogStore.ListEvents(ctx, stateCtx.Session)
+	if err != nil {
+		return false
+	}
+	paths := collectSafeWritePaths(events)
+	_ = persistSafeWritePathIndex(ctx, paths)
 	return slices.Contains(paths, targetPath)
 }
 
@@ -263,11 +358,44 @@ func collectReadPaths(events []*session.Event, readToolName string) []string {
 	return out
 }
 
+func collectSafeWritePaths(events []*session.Event) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(events))
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		resp := ev.Message.ToolResponse()
+		if resp == nil || !isSafeWriteBootstrapResult(strings.ToUpper(strings.TrimSpace(resp.Name)), resp.Result) {
+			continue
+		}
+		writePathRaw, _ := resp.Result["path"].(string)
+		writePath := normalizePathForComparison(writePathRaw)
+		if writePath == "" {
+			continue
+		}
+		if _, exists := seen[writePath]; exists {
+			continue
+		}
+		seen[writePath] = struct{}{}
+		out = append(out, writePath)
+	}
+	slices.Sort(out)
+	return out
+}
+
 func persistReadEvidence(ctx context.Context, targetPath string) error {
 	if targetPath == "" {
 		return nil
 	}
 	return persistReadPathIndex(ctx, []string{targetPath})
+}
+
+func persistSafeWriteEvidence(ctx context.Context, targetPath string) error {
+	if targetPath == "" {
+		return nil
+	}
+	return persistSafeWritePathIndex(ctx, []string{targetPath})
 }
 
 func persistReadPathIndex(ctx context.Context, paths []string) error {
@@ -304,6 +432,57 @@ func persistReadPathIndex(ctx context.Context, paths []string) error {
 	values[readBeforeWriteStateKey] = mergeReadPathIndex(values[readBeforeWriteStateKey], normalized)
 	values[readBeforeWriteIndexReadyStateKey] = true
 	return stateCtx.StateStore.ReplaceState(ctx, stateCtx.Session, values)
+}
+
+func persistSafeWritePathIndex(ctx context.Context, paths []string) error {
+	stateCtx, ok := session.StateContextFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	normalized := make([]string, 0, len(paths))
+	for _, one := range paths {
+		one = normalizePathForComparison(one)
+		if one != "" {
+			normalized = append(normalized, one)
+		}
+	}
+	slices.Sort(normalized)
+	normalized = slices.Compact(normalized)
+	if stateCtx.StateUpdater != nil {
+		return stateCtx.StateUpdater.UpdateState(ctx, stateCtx.Session, func(existing map[string]any) (map[string]any, error) {
+			if existing == nil {
+				existing = map[string]any{}
+			}
+			existing[readBeforeWriteSafeWriteStateKey] = mergeReadPathIndex(existing[readBeforeWriteSafeWriteStateKey], normalized)
+			return existing, nil
+		})
+	}
+	values, err := stateCtx.StateStore.SnapshotState(ctx, stateCtx.Session)
+	if err != nil {
+		return err
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	values[readBeforeWriteSafeWriteStateKey] = mergeReadPathIndex(values[readBeforeWriteSafeWriteStateKey], normalized)
+	return stateCtx.StateStore.ReplaceState(ctx, stateCtx.Session, values)
+}
+
+func isSafeWriteBootstrapResult(toolName string, result map[string]any) bool {
+	if len(result) == 0 {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "WRITE", "PATCH":
+	default:
+		return false
+	}
+	created, _ := result["created"].(bool)
+	if created {
+		return true
+	}
+	previousEmpty, _ := result["previous_empty"].(bool)
+	return previousEmpty
 }
 
 func mergeReadPathIndex(existing any, additions []string) []string {

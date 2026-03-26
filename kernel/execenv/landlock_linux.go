@@ -22,6 +22,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const internalHelperCommand = "__caelis_execenv_helper__"
+
 type landlockSandboxFactory struct{}
 
 func (f landlockSandboxFactory) Type() string {

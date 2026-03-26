@@ -97,6 +97,16 @@ func TestSplitNarrativeBlocks_Blockquote(t *testing.T) {
 	}
 }
 
+func TestSplitNarrativeBlocks_PipeDelimitedCommandStaysPlain(t *testing.T) {
+	lines := SplitNarrativeBlocks("rg foo | sort | uniq")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(lines))
+	}
+	if lines[0].Kind != NarrativePlain {
+		t.Fatalf("expected plain pipeline line, got %d", lines[0].Kind)
+	}
+}
+
 func TestSplitNarrativeBlocks_Mixed(t *testing.T) {
 	input := "你好！\n\n# 关于我\n\n- 身份：我是你的个人 AI 助手\n\n```\ncode\n```"
 	lines := SplitNarrativeBlocks(input)
@@ -166,6 +176,19 @@ func TestNarrativeToPlainRows_EmptyLinePreserved(t *testing.T) {
 	}
 	if rows[1] != "" {
 		t.Fatalf("expected empty line preserved, got %q", rows[1])
+	}
+}
+
+func TestBuildNarrativeRows_PromotesMarkdownTableBlock(t *testing.T) {
+	nls, rows := buildNarrativeRows("Name | Value\n--- | ---\nfoo | bar")
+	if len(nls) != 3 || len(rows) != 3 {
+		t.Fatalf("expected 3 table rows, got kinds=%d rows=%d", len(nls), len(rows))
+	}
+	if nls[0].Kind != NarrativeTableRow || nls[1].Kind != NarrativeTableRule || nls[2].Kind != NarrativeTableRow {
+		t.Fatalf("expected table kinds, got %#v", []NarrativeBlockKind{nls[0].Kind, nls[1].Kind, nls[2].Kind})
+	}
+	if rows[0] != "Name │ Value" || rows[1] != "───┼───" || rows[2] != "foo │ bar" {
+		t.Fatalf("unexpected plain rows: %#v", rows)
 	}
 }
 

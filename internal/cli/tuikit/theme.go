@@ -17,6 +17,8 @@ type Theme struct {
 	PanelTitle     color.Color
 	TextPrimary    color.Color
 	TextSecondary  color.Color
+	SecondaryText  color.Color
+	MutedText      color.Color
 	Info           color.Color
 	Success        color.Color
 	Warning        color.Color
@@ -77,6 +79,12 @@ type Theme struct {
 	CodeBg              color.Color
 	CodeBlockFg         color.Color
 	CodeBlockBg         color.Color
+	TranscriptRail      color.Color
+	TranscriptShell     color.Color
+	TranscriptPillBg    color.Color
+	CodeSurface         color.Color
+	TableHeaderBg       color.Color
+	TableBorder         color.Color
 }
 
 func DefaultTheme() Theme {
@@ -174,6 +182,8 @@ func defaultThemeVariant(trueColor bool) Theme {
 		PanelTitle:     themeColor(trueColor, "#f3f4f6", "255"),
 		TextPrimary:    themeColor(trueColor, "#f5f5f5", "255"),
 		TextSecondary:  themeColor(trueColor, "#a1a1aa", "248"),
+		SecondaryText:  themeColor(trueColor, "#c7cbd1", "250"),
+		MutedText:      themeColor(trueColor, "#7c8798", "245"),
 		Info:           themeColor(trueColor, "#d4d4d8", "252"),
 		Success:        themeColor(trueColor, "#56d364", "77"),
 		Warning:        themeColor(trueColor, "#f5c451", "221"),
@@ -230,6 +240,12 @@ func defaultThemeVariant(trueColor bool) Theme {
 		CodeBg:              themeColor(trueColor, "#1b1f27", "234"),
 		CodeBlockFg:         themeColor(trueColor, "#d4d4d8", "252"),
 		CodeBlockBg:         themeColor(trueColor, "#171a20", "234"),
+		TranscriptRail:      themeColor(trueColor, "#5b6472", "242"),
+		TranscriptShell:     themeColor(trueColor, "#2a303a", "236"),
+		TranscriptPillBg:    themeColor(trueColor, "#1a1f27", "234"),
+		CodeSurface:         themeColor(trueColor, "#171c23", "234"),
+		TableHeaderBg:       themeColor(trueColor, "#171c23", "234"),
+		TableBorder:         themeColor(trueColor, "#5b6472", "242"),
 	}
 }
 
@@ -242,6 +258,8 @@ func defaultLightThemeVariant(trueColor bool) Theme {
 		PanelTitle:     themeColor(trueColor, "#0f172a", "235"),
 		TextPrimary:    themeColor(trueColor, "#111827", "235"),
 		TextSecondary:  themeColor(trueColor, "#4b5563", "240"),
+		SecondaryText:  themeColor(trueColor, "#334155", "239"),
+		MutedText:      themeColor(trueColor, "#64748b", "243"),
 		Info:           themeColor(trueColor, "#334155", "239"),
 		Success:        themeColor(trueColor, "#15803d", "28"),
 		Warning:        themeColor(trueColor, "#b45309", "130"),
@@ -298,6 +316,12 @@ func defaultLightThemeVariant(trueColor bool) Theme {
 		CodeBg:              themeColor(trueColor, "#eef2ff", "189"),
 		CodeBlockFg:         themeColor(trueColor, "#1f2937", "236"),
 		CodeBlockBg:         themeColor(trueColor, "#f1f5f9", "255"),
+		TranscriptRail:      themeColor(trueColor, "#94a3b8", "249"),
+		TranscriptShell:     themeColor(trueColor, "#cbd5e1", "252"),
+		TranscriptPillBg:    themeColor(trueColor, "#e2e8f0", "254"),
+		CodeSurface:         themeColor(trueColor, "#f8fafc", "255"),
+		TableHeaderBg:       themeColor(trueColor, "#eef2f7", "254"),
+		TableBorder:         themeColor(trueColor, "#94a3b8", "249"),
 	}
 }
 
@@ -309,6 +333,8 @@ func nordTheme(trueColor bool) Theme {
 	theme.PanelTitle = themeColor(trueColor, "#eceff4", "255")
 	theme.TextPrimary = themeColor(trueColor, "#eceff4", "255")
 	theme.TextSecondary = themeColor(trueColor, "#d8dee9", "252")
+	theme.SecondaryText = themeColor(trueColor, "#d8dee9", "252")
+	theme.MutedText = themeColor(trueColor, "#a7b0c0", "248")
 	theme.Info = themeColor(trueColor, "#d8dee9", "252")
 	theme.Success = themeColor(trueColor, "#a3be8c", "108")
 	theme.Warning = themeColor(trueColor, "#ebcb8b", "223")
@@ -332,6 +358,12 @@ func nordTheme(trueColor bool) Theme {
 	theme.LinkFg = themeColor(trueColor, "#88c0d0", "110")
 	theme.CodeBg = themeColor(trueColor, "#3b4252", "237")
 	theme.CodeBlockBg = themeColor(trueColor, "#2b303b", "236")
+	theme.TranscriptRail = themeColor(trueColor, "#81a1c1", "110")
+	theme.TranscriptShell = themeColor(trueColor, "#434c5e", "239")
+	theme.TranscriptPillBg = themeColor(trueColor, "#3b4252", "237")
+	theme.CodeSurface = themeColor(trueColor, "#343b48", "237")
+	theme.TableHeaderBg = themeColor(trueColor, "#3b4252", "237")
+	theme.TableBorder = themeColor(trueColor, "#81a1c1", "110")
 	return theme
 }
 
@@ -343,6 +375,8 @@ func solarizedTheme(trueColor bool) Theme {
 	theme.PanelTitle = themeColor(trueColor, "#fdf6e3", "230")
 	theme.TextPrimary = themeColor(trueColor, "#eee8d5", "254")
 	theme.TextSecondary = themeColor(trueColor, "#93a1a1", "245")
+	theme.SecondaryText = themeColor(trueColor, "#b7c0bc", "250")
+	theme.MutedText = themeColor(trueColor, "#839496", "244")
 	theme.Info = themeColor(trueColor, "#93a1a1", "245")
 	theme.Success = themeColor(trueColor, "#859900", "100")
 	theme.Warning = themeColor(trueColor, "#b58900", "136")
@@ -367,6 +401,12 @@ func solarizedTheme(trueColor bool) Theme {
 	theme.CodeFg = themeColor(trueColor, "#cb4b16", "166")
 	theme.CodeBg = themeColor(trueColor, "#073642", "236")
 	theme.CodeBlockBg = themeColor(trueColor, "#062f3a", "236")
+	theme.TranscriptRail = themeColor(trueColor, "#2aa198", "36")
+	theme.TranscriptShell = themeColor(trueColor, "#31545e", "238")
+	theme.TranscriptPillBg = themeColor(trueColor, "#073642", "236")
+	theme.CodeSurface = themeColor(trueColor, "#073642", "236")
+	theme.TableHeaderBg = themeColor(trueColor, "#073642", "236")
+	theme.TableBorder = themeColor(trueColor, "#2aa198", "36")
 	return theme
 }
 
@@ -378,6 +418,8 @@ func draculaTheme(trueColor bool) Theme {
 	theme.PanelTitle = themeColor(trueColor, "#f8f8f2", "255")
 	theme.TextPrimary = themeColor(trueColor, "#f8f8f2", "255")
 	theme.TextSecondary = themeColor(trueColor, "#bd93f9", "141")
+	theme.SecondaryText = themeColor(trueColor, "#d7c2ff", "183")
+	theme.MutedText = themeColor(trueColor, "#9580c2", "104")
 	theme.Info = themeColor(trueColor, "#8be9fd", "123")
 	theme.Success = themeColor(trueColor, "#50fa7b", "84")
 	theme.Warning = themeColor(trueColor, "#ffb86c", "215")
@@ -401,6 +443,12 @@ func draculaTheme(trueColor bool) Theme {
 	theme.LinkFg = themeColor(trueColor, "#8be9fd", "123")
 	theme.CodeBg = themeColor(trueColor, "#343746", "237")
 	theme.CodeBlockBg = themeColor(trueColor, "#21222c", "235")
+	theme.TranscriptRail = themeColor(trueColor, "#8be9fd", "123")
+	theme.TranscriptShell = themeColor(trueColor, "#44475a", "239")
+	theme.TranscriptPillBg = themeColor(trueColor, "#343746", "237")
+	theme.CodeSurface = themeColor(trueColor, "#2b2d39", "236")
+	theme.TableHeaderBg = themeColor(trueColor, "#343746", "237")
+	theme.TableBorder = themeColor(trueColor, "#6272a4", "61")
 	return theme
 }
 
@@ -420,6 +468,14 @@ func (t Theme) StatusStyle() lipgloss.Style {
 
 func (t Theme) HintStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.TextSecondary)
+}
+
+func (t Theme) SecondaryTextStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.SecondaryText)
+}
+
+func (t Theme) MutedTextStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.MutedText)
 }
 
 func (t Theme) HintRowStyle() lipgloss.Style {
@@ -547,6 +603,58 @@ func (t Theme) ErrorStyle() lipgloss.Style {
 // NoteStyle renders note text (dimmed).
 func (t Theme) NoteStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(t.NoteFg)
+}
+
+func (t Theme) TranscriptRailStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.TranscriptRail)
+}
+
+func (t Theme) TranscriptShellStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.TranscriptShell)
+}
+
+func (t Theme) TranscriptMetaStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.MutedText)
+}
+
+func (t Theme) TranscriptLabelStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.SecondaryText).Bold(true)
+}
+
+func (t Theme) TranscriptPillStyle(tone string) lipgloss.Style {
+	style := lipgloss.NewStyle().
+		Background(t.TranscriptPillBg).
+		Foreground(t.SecondaryText).
+		Padding(0, 1)
+	switch strings.ToLower(strings.TrimSpace(tone)) {
+	case "success":
+		return style.Foreground(t.Success)
+	case "warning":
+		return style.Foreground(t.Warning)
+	case "error":
+		return style.Foreground(t.Error)
+	case "accent":
+		return style.Foreground(t.Accent)
+	default:
+		return style.Foreground(t.SecondaryText)
+	}
+}
+
+func (t Theme) CodeSurfaceStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.CodeBlockFg).
+		Background(t.CodeSurface)
+}
+
+func (t Theme) TableHeaderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(t.TextPrimary).
+		Background(t.TableHeaderBg).
+		Bold(true)
+}
+
+func (t Theme) TableBorderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(t.TableBorder)
 }
 
 // LogBlockStyle renders log/tool output lines with a subtle left border

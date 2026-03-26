@@ -268,6 +268,9 @@ func subagentDomainUpdatesFromTaskToolResponse(rootSessionID string, resp *model
 	if state == "" {
 		return nil
 	}
+	if fmt.Sprint(resp.Result["_ui_idle_timed_out"]) == "true" || fmt.Sprint(resp.Result["idle_timed_out"]) == "true" {
+		state = "timed_out"
+	}
 	callID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_parent_tool_call_id"))
 	panelSpawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_spawn_id"))
 	if panelSpawnID == "" {

@@ -2,7 +2,6 @@ package tuiapp
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -298,23 +297,18 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		return rows
 	}
 	contentWidth := maxInt(8, ctx.Width)
-	for _, ev := range b.Events {
+	for _, ev := range visibleNarrativeEvents(b.Events, b.Status) {
 		switch ev.Kind {
 		case SEReasoning:
 			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleReasoning, contentWidth, ctx)...)
 		case SEAssistant:
 			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleAssistant, contentWidth, ctx)...)
 		case SEToolCall:
-			rows = append(rows, renderParticipantTurnToolRows(b.id, ev, contentWidth, ctx)...)
-		case SEApproval:
-			line := "⚠ waiting for user confirmation"
-			if ev.ApprovalTool != "" {
-				line = "⚠ approval needed: " + strings.TrimSpace(ev.ApprovalTool)
-				if cmd := strings.TrimSpace(ev.ApprovalCommand); cmd != "" {
-					line += " — " + truncateDisplayText(cmd, maxInt(12, contentWidth-displayColumns(line)-3))
-				}
+			if shouldRenderToolEvent(ev) {
+				rows = append(rows, renderParticipantTurnToolRows(b.id, ev, contentWidth, ctx)...)
 			}
-			rows = append(rows, StyledRow(b.id, ctx.Theme.WarnStyle().Render(line)))
+		case SEApproval:
+			continue
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(b.Status)) {
@@ -330,20 +324,22 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 }
 
 func renderParticipantTurnHeader(b *ParticipantTurnBlock, ctx BlockRenderContext) string {
+	if b == nil {
+		return ""
+	}
 	icon := "▾"
-	if b == nil || !b.Expanded {
+	if !b.Expanded {
 		icon = "▸"
 	}
-	actorText := strings.TrimSpace(b.Actor)
 	iconText := ctx.Theme.PromptStyle().Bold(true).Render(icon)
-	actor := ctx.Theme.CommandActiveStyle().Bold(true).Render(actorText)
+	actor := renderParticipantActorLabel(ctx.Theme, b.Actor)
 	switch strings.ToLower(strings.TrimSpace(b.Status)) {
 	case "waiting_approval":
-		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + ctx.Theme.WarnStyle().Bold(true).Render(actorText)
+		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + actor
 	case "failed":
-		return ctx.Theme.ErrorStyle().Bold(true).Render(icon) + " " + ctx.Theme.ErrorStyle().Bold(true).Render(actorText)
+		return ctx.Theme.ErrorStyle().Bold(true).Render(icon) + " " + actor
 	case "interrupted":
-		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + ctx.Theme.WarnStyle().Bold(true).Render(actorText)
+		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + actor
 	default:
 		return iconText + " " + actor
 	}
@@ -354,80 +350,27 @@ func renderParticipantTurnNarrativeRows(blockID string, raw string, lineStyle tu
 	if len(plainRows) == 0 {
 		return nil
 	}
-	out := make([]RenderedRow, 0, len(plainRows))
+	rolePrefix, continuationPrefix := narrativeLinePrefixes(lineStyle)
+	out := make([]RenderedRow, 0, len(plainRows)*2)
 	for i, plain := range plainRows {
-		rolePrefix := ""
-		switch lineStyle {
-		case tuikit.LineStyleReasoning:
-			rolePrefix = "· "
-			if i > 0 {
-				rolePrefix = "  "
-			}
-		case tuikit.LineStyleAssistant:
-			if i == 0 {
-				rolePrefix = "* "
-			}
+		linePrefix := continuationPrefix
+		if i == 0 {
+			linePrefix = rolePrefix
 		}
-		fullPlain := rolePrefix + plain
-		fullStyled := styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, lineStyle, ctx.Theme)
-		wrappedPlain := strings.Split(hardWrapDisplayLine(fullPlain, maxInt(1, width)), "\n")
-		wrappedStyled := strings.Split(hardWrapDisplayLine(fullStyled, maxInt(1, width)), "\n")
-		lineCount := maxInt(len(wrappedPlain), len(wrappedStyled))
-		for j := range lineCount {
-			plainSegment := ""
-			if j < len(wrappedPlain) {
-				plainSegment = wrappedPlain[j]
-			}
-			styledSegment := plainSegment
-			if j < len(wrappedStyled) {
-				styledSegment = wrappedStyled[j]
-			}
-			out = append(out, StyledPlainRow(blockID, plainSegment, styledSegment))
-		}
+		out = append(out, renderNarrativeViewModelRows(blockID, NarrativeViewModel{
+			Raw:                plain,
+			Kind:               nls[i].Kind,
+			RolePrefix:         linePrefix,
+			ContinuationPrefix: continuationPrefix,
+			LineStyle:          lineStyle,
+			Width:              width,
+		}, ctx.Theme)...)
 	}
 	return out
 }
 
 func renderParticipantTurnToolRows(blockID string, ev SubagentEvent, width int, ctx BlockRenderContext) []RenderedRow {
-	text := "▸ " + strings.TrimSpace(ev.Name)
-	if text == "▸" || text == "▸ " {
-		text = "▸ TOOL"
-	}
-	if ev.Done {
-		prefix := "✓ "
-		if ev.Err {
-			prefix = "✗ "
-		}
-		text = prefix + strings.TrimSpace(ev.Name)
-		if summary := strings.TrimSpace(ev.Output); summary != "" {
-			text += " " + summary
-		}
-	}
-	if !ev.Done {
-		if args := strings.TrimSpace(ev.Args); args != "" {
-			text += " " + args
-		}
-	}
-	lines := wrapToolOutputText(text, maxInt(1, width))
-	if len(lines) == 0 {
-		lines = []string{text}
-	}
-	out := make([]RenderedRow, 0, len(lines))
-	style := ctx.Theme.TextStyle()
-	if ev.Done {
-		if ev.Err {
-			style = ctx.Theme.ErrorStyle()
-		} else {
-			style = ctx.Theme.HelpHintTextStyle()
-		}
-	}
-	for i, line := range lines {
-		if i > 0 {
-			line = "  " + line
-		}
-		out = append(out, StyledPlainRow(blockID, line, style.Render(line)))
-	}
-	return out
+	return renderToolEventViewModelLines(blockID, buildToolEventViewModel(ev), width, ctx.Theme)
 }
 
 func truncateDisplayText(text string, width int) string {
@@ -490,6 +433,16 @@ func participantTurnIsTerminal(state string) bool {
 	default:
 		return false
 	}
+}
+
+func (b *ParticipantTurnBlock) elapsed() time.Duration {
+	if b == nil || b.StartedAt.IsZero() {
+		return 0
+	}
+	if !b.EndedAt.IsZero() {
+		return b.EndedAt.Sub(b.StartedAt)
+	}
+	return time.Since(b.StartedAt)
 }
 
 func renderParticipantTurnFooter(b *ParticipantTurnBlock, ctx BlockRenderContext) string {
@@ -629,14 +582,13 @@ func (b *BashPanelBlock) renderCollapsedHeader(ctx BlockRenderContext) string {
 	if tool == "" {
 		tool = "TASK"
 	}
-	statusText, statusStyle := bashPanelStatus(b, ctx.Theme)
-	header := ctx.Theme.KeyLabelStyle().Bold(true).Render("▶ "+tool) + " "
-	if statusText != "" {
-		header += statusStyle.Render(statusText) + " "
-	}
-	if age := formatToolOutputAge(b.elapsed()); age != "" {
-		header += ctx.Theme.HelpHintTextStyle().Render(age)
-	}
+	header := tuikit.RenderPanelHeader(ctx.Theme, maxInt(1, ctx.Width), tuikit.PanelHeaderModel{
+		Expanded: false,
+		Kind:     tool,
+		Title:    "",
+		State:    b.State,
+		Meta:     formatToolOutputAge(b.elapsed()),
+	})
 	return header
 }
 
@@ -687,13 +639,30 @@ func (b *BashPanelBlock) renderPanelLines(ctx BlockRenderContext, content []tool
 	if overflow {
 		lines = addPanelScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme)
 	}
-	borderColor := ctx.Theme.PanelBorder
-	boxStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		Padding(0, 1).
-		Width(boxWidth)
-	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
+	if isInlineBashPanel(b) {
+		return renderPanelViewModel(ctx.Theme, PanelViewModel{
+			Variant: tuikit.PanelShellVariantDrawer,
+			Width:   boxWidth,
+			Body:    lines,
+		})
+	}
+	tool := strings.ToUpper(strings.TrimSpace(b.ToolName))
+	if tool == "" {
+		tool = "TASK"
+	}
+	vm := PanelViewModel{
+		Variant: tuikit.PanelShellVariantDrawer,
+		Width:   boxWidth,
+		Header: tuikit.PanelHeaderModel{
+			Expanded: true,
+			Kind:     tool,
+			Title:    "",
+			State:    b.State,
+			Meta:     formatToolOutputAge(b.elapsed()),
+		},
+		Body: lines,
+	}
+	return renderPanelViewModel(ctx.Theme, vm)
 }
 
 func (b *BashPanelBlock) previewLines() int {
@@ -769,20 +738,7 @@ func (b *BashPanelBlock) renderHeaderLine(ctx BlockRenderContext, width int) str
 	if isInlineBashPanel(b) {
 		return ""
 	}
-	right := ctx.Theme.HelpHintTextStyle().Render(formatToolOutputAge(b.elapsed()))
-	if isSpawnLikeTool(b.ToolName) {
-		return composeStyledFooter(width, "", right)
-	}
-	tool := strings.ToUpper(strings.TrimSpace(b.ToolName))
-	if tool == "" {
-		tool = "TASK"
-	}
-	left := ctx.Theme.KeyLabelStyle().Bold(true).Render(tool)
-	statusText, statusStyle := bashPanelStatus(b, ctx.Theme)
-	if statusText != "" {
-		left += " " + statusStyle.Render(statusText)
-	}
-	return composeStyledFooter(width, left, right)
+	return ""
 }
 
 func (b *BashPanelBlock) elapsed() time.Duration {
@@ -805,15 +761,113 @@ func isInlineBashPanel(b *BashPanelBlock) bool {
 func (b *BashPanelBlock) renderOutputLine(ctx BlockRenderContext, line toolOutputLine) (text string, prefix string, style lipgloss.Style) {
 	text = tuikit.LinkifyText(strings.TrimSpace(line.text), ctx.Theme.LinkStyle())
 	prefix = "  "
-	style = lipgloss.NewStyle().Foreground(ctx.Theme.TextPrimary)
+	style = ctx.Theme.SecondaryTextStyle()
 	if isSpawnLikeTool(b.ToolName) {
-		return text, "  ", style
+		return text, "  ", ctx.Theme.TextStyle()
 	}
 	stream := strings.ToLower(strings.TrimSpace(line.stream))
 	if stream == "stderr" {
 		return text, "! ", ctx.Theme.ErrorStyle()
 	}
 	return text, prefix, style
+}
+
+func renderParticipantActorLabel(theme tuikit.Theme, actor string) string {
+	name, provider := splitParticipantActor(actor)
+	nameStyle := theme.TextStyle().Bold(true)
+	if provider == "" {
+		return nameStyle.Render(name)
+	}
+	return nameStyle.Render(name) +
+		" " + theme.TranscriptMetaStyle().Render(fmt.Sprintf("[%s]", provider))
+}
+
+func narrativeLinePrefixes(lineStyle tuikit.LineStyle) (string, string) {
+	switch lineStyle {
+	case tuikit.LineStyleAssistant:
+		return "* ", "  "
+	case tuikit.LineStyleReasoning:
+		return "· ", "  "
+	default:
+		return "", ""
+	}
+}
+
+func shouldRenderToolEvent(ev SubagentEvent) bool {
+	if ev.Kind != SEToolCall {
+		return true
+	}
+	if !ev.Done || ev.Err {
+		return true
+	}
+	output := strings.TrimSpace(ev.Output)
+	if output == "" || strings.EqualFold(output, "completed") {
+		return false
+	}
+	return true
+}
+
+func visibleNarrativeEvents(events []SubagentEvent, status string) []SubagentEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]SubagentEvent, 0, len(events))
+	for i, ev := range events {
+		if ev.Kind == SEReasoning && !shouldRenderReasoningEvent(events, i, status) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func shouldRenderReasoningEvent(events []SubagentEvent, idx int, status string) bool {
+	if idx < 0 || idx >= len(events) {
+		return false
+	}
+	ev := events[idx]
+	if ev.Kind != SEReasoning || strings.TrimSpace(ev.Text) == "" {
+		return false
+	}
+	for j := idx + 1; j < len(events); j++ {
+		if reasoningSupersededBy(events[j]) {
+			return false
+		}
+	}
+	return true
+}
+
+func reasoningSupersededBy(ev SubagentEvent) bool {
+	switch ev.Kind {
+	case SEAssistant:
+		return strings.TrimSpace(ev.Text) != ""
+	case SEToolCall:
+		return strings.TrimSpace(ev.Name) != "" || strings.TrimSpace(ev.Args) != "" || strings.TrimSpace(ev.Output) != ""
+	case SEPlan:
+		return len(ev.PlanEntries) > 0
+	case SEApproval:
+		return true
+	default:
+		return false
+	}
+}
+
+func splitParticipantActor(actor string) (name string, provider string) {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return "", ""
+	}
+	open := strings.LastIndex(actor, "(")
+	close := strings.LastIndex(actor, ")")
+	if open <= 0 || close != len(actor)-1 || close <= open+1 {
+		return actor, ""
+	}
+	name = strings.TrimSpace(actor[:open])
+	provider = strings.TrimSpace(actor[open+1 : close])
+	if name == "" || provider == "" {
+		return actor, ""
+	}
+	return name, provider
 }
 
 func bashPanelStatus(b *BashPanelBlock, theme tuikit.Theme) (string, lipgloss.Style) {
@@ -1249,12 +1303,13 @@ func renderSubagentPanelLines(panel *SubagentPanelBlock, ctx BlockRenderContext)
 	if overflow {
 		lines = addPanelScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme)
 	}
-	boxStyle := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(ctx.Theme.PanelBorder).
-		Padding(0, 1).
-		Width(boxWidth)
-	return strings.Split(boxStyle.Render(strings.Join(lines, "\n")), "\n")
+	vm := PanelViewModel{
+		Variant: tuikit.PanelShellVariantDrawer,
+		Width:   boxWidth,
+		Header:  tuikit.PanelHeaderModel{},
+		Body:    lines,
+	}
+	return renderPanelViewModel(ctx.Theme, vm)
 }
 
 func (b *SubagentPanelBlock) previewLines() int {
@@ -1281,7 +1336,7 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 	var lines []string
 	hasContent := false
 
-	for _, ev := range panel.Events {
+	for _, ev := range visibleNarrativeEvents(panel.Events, panel.Status) {
 		switch ev.Kind {
 		case SEPlan:
 			for _, pe := range ev.PlanEntries {
@@ -1302,38 +1357,24 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 
 		case SEReasoning:
 			if text := strings.TrimSpace(ev.Text); text != "" {
-				for _, pl := range wrapToolOutputText(text, maxInt(1, contentWidth-2)) {
-					lines = append(lines, ctx.Theme.ReasoningStyle().Width(contentWidth).Render("│ "+pl))
-				}
+				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleReasoning, contentWidth, ctx)...)
 				hasContent = true
 			}
 
 		case SEAssistant:
 			if text := strings.TrimSpace(ev.Text); text != "" {
-				for _, pl := range wrapToolOutputText(text, maxInt(1, contentWidth-2)) {
-					lines = append(lines, ctx.Theme.TextStyle().Width(contentWidth).Render("* "+tuikit.LinkifyText(pl, ctx.Theme.LinkStyle())))
-				}
+				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleAssistant, contentWidth, ctx)...)
 				hasContent = true
 			}
 
 		case SEToolCall:
-			lines = append(lines, renderSubagentToolEvent(ev, ctx, contentWidth)...)
-			hasContent = true
+			if shouldRenderToolEvent(ev) {
+				lines = append(lines, renderSubagentToolEvent(ev, ctx, contentWidth)...)
+				hasContent = true
+			}
 
 		case SEApproval:
-			approvalText := "⚠ waiting for user confirmation"
-			if ev.ApprovalTool != "" {
-				approvalText = fmt.Sprintf("⚠ approval needed: %s", ev.ApprovalTool)
-				if ev.ApprovalCommand != "" {
-					cmd := ev.ApprovalCommand
-					if displayColumns(cmd) > contentWidth-20 {
-						cmd = graphemeSlice(cmd, 0, maxInt(1, contentWidth-23)) + "..."
-					}
-					approvalText += " — " + cmd
-				}
-			}
-			lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render(approvalText))
-			hasContent = true
+			continue
 		}
 	}
 
@@ -1356,53 +1397,33 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 }
 
 func renderSubagentToolEvent(ev SubagentEvent, ctx BlockRenderContext, contentWidth int) []string {
-	name := strings.TrimSpace(ev.Name)
-	if name == "" {
-		name = "TOOL"
-	}
-	if !ev.Done && !ev.Err {
-		line := "▸ " + name
-		if args := strings.TrimSpace(ev.Args); args != "" {
-			line += " " + args
-		}
-		return wrapStyledSubagentToolText(line, "  ", tuikit.LineStyleTool, ctx, contentWidth)
-	}
-
-	prefix := "✓ "
-	style := ctx.Theme.HelpHintTextStyle()
-	if ev.Err {
-		prefix = "✗ "
-		style = ctx.Theme.ErrorStyle()
-	}
-	line := prefix + name
-	if summary := strings.TrimSpace(ev.Output); summary != "" {
-		parts := splitAndWrapToolSummary(summary, maxInt(1, contentWidth-displayColumns(prefix)-displayColumns(name)-1))
-		if len(parts) > 0 {
-			line += " " + tuikit.LinkifyText(parts[0], ctx.Theme.LinkStyle())
-			rows := []string{style.Width(contentWidth).Render(line)}
-			indent := strings.Repeat(" ", displayColumns(prefix))
-			for _, extra := range parts[1:] {
-				rows = append(rows, style.Width(contentWidth).Render(indent+tuikit.LinkifyText(extra, ctx.Theme.LinkStyle())))
-			}
-			return rows
-		}
-	}
-	return []string{style.Width(contentWidth).Render(line)}
+	return renderToolEventViewModelStyledLines(buildToolEventViewModel(ev), contentWidth, ctx.Theme)
 }
 
-func wrapStyledSubagentToolText(text string, continuation string, lineStyle tuikit.LineStyle, ctx BlockRenderContext, contentWidth int) []string {
-	wrapped := wrapToolOutputText(text, maxInt(1, contentWidth))
-	if len(wrapped) == 0 {
+func renderSubagentNarrativeLines(raw string, lineStyle tuikit.LineStyle, contentWidth int, ctx BlockRenderContext) []string {
+	nls, plainRows := buildNarrativeRows(raw)
+	if len(plainRows) == 0 {
 		return nil
 	}
-	rows := make([]string, 0, len(wrapped))
-	for i, line := range wrapped {
-		if i > 0 {
-			line = continuation + line
+	rolePrefix, continuationPrefix := narrativeLinePrefixes(lineStyle)
+	out := make([]string, 0, len(plainRows)*2)
+	for i, plain := range plainRows {
+		linePrefix := continuationPrefix
+		if i == 0 {
+			linePrefix = rolePrefix
 		}
-		rows = append(rows, tuikit.ColorizeLogLine(line, lineStyle, ctx.Theme))
+		for _, segment := range renderNarrativeViewModelSegments(NarrativeViewModel{
+			Raw:                plain,
+			Kind:               nls[i].Kind,
+			RolePrefix:         linePrefix,
+			ContinuationPrefix: continuationPrefix,
+			LineStyle:          lineStyle,
+			Width:              contentWidth,
+		}, ctx.Theme) {
+			out = append(out, segment.Styled)
+		}
 	}
-	return rows
+	return out
 }
 
 func splitAndWrapToolSummary(text string, width int) []string {
@@ -1416,6 +1437,42 @@ func splitAndWrapToolSummary(text string, width int) []string {
 		lines = append(lines, wrapToolOutputText(raw, width)...)
 	}
 	return lines
+}
+
+func latestSubagentEventSummary(panel *SubagentPanelBlock) string {
+	if panel == nil {
+		return ""
+	}
+	for i := len(panel.Events) - 1; i >= 0; i-- {
+		ev := panel.Events[i]
+		switch ev.Kind {
+		case SEAssistant, SEReasoning:
+			if text := strings.TrimSpace(ev.Text); text != "" {
+				return truncateDisplayText(text, 44)
+			}
+		case SEToolCall:
+			if text := strings.TrimSpace(ev.Output); text != "" {
+				return truncateDisplayText(text, 44)
+			}
+			if text := strings.TrimSpace(ev.Args); text != "" {
+				return truncateDisplayText(text, 44)
+			}
+			if text := strings.TrimSpace(ev.Name); text != "" {
+				return text
+			}
+		case SEPlan:
+			for j := len(ev.PlanEntries) - 1; j >= 0; j-- {
+				if text := strings.TrimSpace(ev.PlanEntries[j].Content); text != "" {
+					return truncateDisplayText(text, 44)
+				}
+			}
+		case SEApproval:
+			if text := strings.TrimSpace(ev.ApprovalCommand); text != "" {
+				return truncateDisplayText(text, 44)
+			}
+		}
+	}
+	return ""
 }
 
 func panelScrollWindow(total, visible, offset int, followTail bool) (start int, end int, maxOffset int) {
@@ -1592,78 +1649,4 @@ func (b *ActivityBlock) toFoldedState() *foldedActivityBlockState {
 		entries:   b.Entries,
 		summary:   b.Summary,
 	}
-}
-
-// ---------------------------------------------------------------------------
-// WelcomeBlock — welcome card.
-// ---------------------------------------------------------------------------
-
-type WelcomeBlock struct {
-	id        string
-	Version   string
-	Workspace string
-	ModelName string
-}
-
-func NewWelcomeBlock(version, workspace, modelName string) *WelcomeBlock {
-	return &WelcomeBlock{
-		id:        nextBlockID(),
-		Version:   version,
-		Workspace: workspace,
-		ModelName: modelName,
-	}
-}
-
-func (b *WelcomeBlock) BlockID() string { return b.id }
-func (b *WelcomeBlock) Kind() BlockKind { return BlockWelcome }
-func (b *WelcomeBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderWelcomeRows(b, ctx)
-}
-
-func renderWelcomeRows(w *WelcomeBlock, ctx BlockRenderContext) []RenderedRow {
-	versionText := strings.TrimSpace(w.Version)
-	if versionText == "" {
-		versionText = "unknown"
-	}
-	versionLabel := versionText
-	if !strings.HasPrefix(strings.ToLower(versionText), "v") {
-		versionLabel = "v" + versionText
-	}
-	workspace := strings.TrimSpace(w.Workspace)
-	if workspace == "" {
-		workspace = "."
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		workspace = strings.Replace(workspace, home, "~", 1)
-	}
-	modelAlias := strings.TrimSpace(w.ModelName)
-	if modelAlias == "" {
-		modelAlias = "not configured (/connect)"
-	}
-	prefix := lipgloss.NewStyle().Bold(true).Foreground(ctx.Theme.Accent).Render(">_")
-	title := lipgloss.NewStyle().Bold(true).Foreground(ctx.Theme.PanelTitle).Render("CAELIS")
-	version := lipgloss.NewStyle().Foreground(ctx.Theme.TextSecondary).Render("(" + versionLabel + ")")
-	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(ctx.Theme.Info).Width(10)
-	valueStyle := lipgloss.NewStyle().Foreground(ctx.Theme.TextPrimary)
-	tipValueStyle := lipgloss.NewStyle().Foreground(ctx.Theme.TextSecondary)
-	titleLine := prefix + " " + title + " " + version
-	modelLine := labelStyle.Render("model:") + " " + valueStyle.Render(modelAlias)
-	workspaceLine := labelStyle.Render("workspace:") + " " + valueStyle.Render(workspace)
-	tipLine := labelStyle.Render("tip:") + " " + tipValueStyle.Render("type / for command list")
-	body := strings.Join([]string{titleLine, "", modelLine, workspaceLine, tipLine}, "\n")
-	vpWidth := maxInt(1, ctx.Width)
-	frame := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		BorderForeground(ctx.Theme.PanelBorder).
-		Foreground(ctx.Theme.TextPrimary).
-		Width(maxInt(30, minInt(72, maxInt(30, vpWidth-6)))).
-		Padding(0, 2).
-		Margin(1, 0, 1, 1).
-		Render(body)
-	frameLines := strings.Split(frame, "\n")
-	rows := make([]RenderedRow, len(frameLines))
-	for i, line := range frameLines {
-		rows[i] = StyledRow(w.id, line)
-	}
-	return rows
 }

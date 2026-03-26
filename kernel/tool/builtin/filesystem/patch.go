@@ -77,11 +77,12 @@ func (t *PatchTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	}
 	diffStats := CountLineDiff(plan.before, plan.after)
 	return map[string]any{
-		"path":          plan.path,
-		"replaced":      plan.replaced,
-		"created":       plan.created,
-		"added_lines":   diffStats.Added,
-		"removed_lines": diffStats.Removed,
+		"path":           plan.path,
+		"replaced":       plan.replaced,
+		"created":        plan.created,
+		"previous_empty": plan.before == "",
+		"added_lines":    diffStats.Added,
+		"removed_lines":  diffStats.Removed,
 	}, nil
 }
 

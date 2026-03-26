@@ -100,14 +100,20 @@ func TestParticipantTurnBlock_GroupsActorOutputUnderSingleHeader(t *testing.T) {
 	})
 
 	view := strings.Join(m.viewportPlainLines, "\n")
-	if count := strings.Count(view, "luna(gemini)"); count != 1 {
+	if count := strings.Count(view, "luna [gemini]"); count != 1 {
 		t.Fatalf("expected a single actor header for the turn, got %d occurrences:\n%s", count, view)
 	}
-	if !strings.Contains(view, "luna(gemini)") || !strings.Contains(view, "▾") {
+	if !strings.Contains(view, "luna [gemini]") || !strings.Contains(view, "▾") {
 		t.Fatalf("expected grouped participant turn header, got:\n%s", view)
 	}
-	if !strings.Contains(view, "▸ SHELL rm shanghai_weather.md") {
+	if !strings.Contains(view, "SHELL") || !strings.Contains(view, "rm shanghai_weather.md") {
 		t.Fatalf("expected grouped tool call line, got:\n%s", view)
+	}
+	if strings.Contains(view, "Examining the file") {
+		t.Fatalf("did not expect superseded reasoning to remain visible, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ SHELL completed") {
+		t.Fatalf("did not expect empty completion line to remain visible, got:\n%s", view)
 	}
 	if !strings.Contains(view, "* Done.") {
 		t.Fatalf("expected grouped assistant answer, got:\n%s", view)
@@ -140,7 +146,7 @@ func TestParticipantTurnBlock_CanCollapseToHeaderOnly(t *testing.T) {
 	m.syncViewportContent()
 
 	view := strings.Join(m.viewportPlainLines, "\n")
-	if !strings.Contains(view, "luna(gemini)") || !strings.Contains(view, "▸") {
+	if !strings.Contains(view, "luna [gemini]") || !strings.Contains(view, "▸") {
 		t.Fatalf("expected collapsed header, got:\n%s", view)
 	}
 	if strings.Contains(view, "Done.") {
@@ -164,7 +170,7 @@ func TestParticipantTurnBlock_RendersCompletionFooter(t *testing.T) {
 	_, _ = m.Update(tuievents.ParticipantStatusMsg{SessionID: "child-1", State: "completed"})
 
 	view := strings.Join(m.viewportPlainLines, "\n")
-	if !strings.Contains(view, "mia(codex)") {
+	if !strings.Contains(view, "mia [codex]") {
 		t.Fatalf("expected actor header, got:\n%s", view)
 	}
 	if !strings.Contains(view, "─") {
@@ -193,7 +199,7 @@ func TestParticipantTurnBlock_TaskResultDoesNotAppendMainDivider(t *testing.T) {
 	if count := strings.Count(view, "─"); count < 1 {
 		t.Fatalf("expected participant footer divider, got:\n%s", view)
 	}
-	if count := strings.Count(view, "owen(gemini)"); count != 1 {
+	if count := strings.Count(view, "owen [gemini]"); count != 1 {
 		t.Fatalf("expected single participant turn, got:\n%s", view)
 	}
 }
@@ -222,7 +228,7 @@ func TestParticipantTurnBlock_TaskResultFinalizesFooterWithoutStatusEvent(t *tes
 	_, _ = m.Update(tuievents.TaskResultMsg{SuppressTurnDivider: true})
 
 	view := strings.Join(m.viewportPlainLines, "\n")
-	if !strings.Contains(view, "owen(gemini)") || !strings.Contains(view, "─") {
+	if !strings.Contains(view, "owen [gemini]") || !strings.Contains(view, "─") {
 		t.Fatalf("expected participant turn footer to be finalized by task result, got:\n%s", view)
 	}
 }
@@ -249,11 +255,10 @@ func TestParticipantTurnBlock_DoesNotDuplicateStyledReasoningRowsInViewport(t *t
 		s = strings.ReplaceAll(s, " ", "")
 		return s
 	}
-	want := normalize(text)
-	if !strings.Contains(normalize(plain), want) {
+	if !strings.Contains(normalize(plain), normalize("simple greeting is enough")) {
 		t.Fatalf("expected plain viewport to contain reasoning, got:\n%s", plain)
 	}
-	if strings.Count(normalize(ansi.Strip(styled)), want) != 1 {
+	if strings.Count(normalize(ansi.Strip(styled)), normalize("simple greeting is enough")) != 1 {
 		t.Fatalf("expected styled viewport to contain reasoning once, got:\n%s", ansi.Strip(styled))
 	}
 }

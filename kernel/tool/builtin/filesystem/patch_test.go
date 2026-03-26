@@ -30,6 +30,9 @@ func TestPatchTool_AppliesWithoutPriorRead(t *testing.T) {
 	if out["replaced"] != 1 {
 		t.Fatalf("expected replaced=1, got %v", out["replaced"])
 	}
+	if previousEmpty, _ := out["previous_empty"].(bool); previousEmpty {
+		t.Fatalf("expected previous_empty=false, got %v", out["previous_empty"])
+	}
 }
 
 func TestPatchTool_AppliesSingleReplacement(t *testing.T) {
@@ -53,6 +56,9 @@ func TestPatchTool_AppliesSingleReplacement(t *testing.T) {
 	}
 	if out["replaced"] != 1 {
 		t.Fatalf("expected replaced=1, got %v", out["replaced"])
+	}
+	if previousEmpty, _ := out["previous_empty"].(bool); previousEmpty {
+		t.Fatalf("expected previous_empty=false, got %v", out["previous_empty"])
 	}
 	if out["added_lines"] != 1 || out["removed_lines"] != 1 {
 		t.Fatalf("expected +1 -1 stats, got +%v -%v", out["added_lines"], out["removed_lines"])
@@ -112,6 +118,9 @@ func TestPatchTool_AllowsEmptyOldForEmptyFile(t *testing.T) {
 	if out["replaced"] != 1 {
 		t.Fatalf("expected replaced=1, got %v", out["replaced"])
 	}
+	if previousEmpty, _ := out["previous_empty"].(bool); !previousEmpty {
+		t.Fatalf("expected previous_empty=true, got %v", out["previous_empty"])
+	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +149,9 @@ func TestPatchTool_CreateMissingFileWithEmptyOld(t *testing.T) {
 	created, _ := out["created"].(bool)
 	if !created {
 		t.Fatalf("expected created=true, got %v", out["created"])
+	}
+	if previousEmpty, _ := out["previous_empty"].(bool); !previousEmpty {
+		t.Fatalf("expected previous_empty=true, got %v", out["previous_empty"])
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

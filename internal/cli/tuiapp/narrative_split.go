@@ -17,6 +17,8 @@ const (
 	NarrativeCodeFenceDelim                    // the ``` line itself
 	NarrativeListItem                          // "- …", "* …", "1. …"
 	NarrativeBlockquote                        // "> …"
+	NarrativeTableRow                          // "| a | b |"
+	NarrativeTableRule                         // "| --- | --- |"
 )
 
 // NarrativeLine is one output line from the block splitter, carrying both
@@ -228,6 +230,55 @@ func applyMathNormalization(nls []NarrativeLine) []NarrativeLine {
 	return result
 }
 
+func promoteMarkdownTables(nls []NarrativeLine) []NarrativeLine {
+	if len(nls) == 0 {
+		return nil
+	}
+	out := append([]NarrativeLine(nil), nls...)
+	for start := 0; start < len(out); {
+		if out[start].Kind == NarrativeCodeFence || out[start].Kind == NarrativeCodeFenceDelim {
+			start++
+			continue
+		}
+		end := start
+		for end < len(out) && out[end].Kind != NarrativeCodeFence && out[end].Kind != NarrativeCodeFenceDelim {
+			end++
+		}
+		for i := start; i < end; {
+			trimmed := strings.TrimSpace(out[i].Text)
+			if !isPotentialTableRow(trimmed) {
+				i++
+				continue
+			}
+			j := i
+			hasSeparator := false
+			for j < end {
+				trimmed = strings.TrimSpace(out[j].Text)
+				if !isPotentialTableRow(trimmed) {
+					break
+				}
+				if isTableSeparatorLine(trimmed) {
+					hasSeparator = true
+				}
+				j++
+			}
+			if hasSeparator {
+				for k := i; k < j; k++ {
+					trimmed = strings.TrimSpace(out[k].Text)
+					if isTableSeparatorLine(trimmed) {
+						out[k].Kind = NarrativeTableRule
+						continue
+					}
+					out[k].Kind = NarrativeTableRow
+				}
+			}
+			i = j
+		}
+		start = end
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // Plain-text extraction from narrative lines.
 // ---------------------------------------------------------------------------
@@ -245,6 +296,10 @@ func NarrativeToPlainRows(nls []NarrativeLine) []string {
 			rows = append(rows, strings.TrimRight(nl.Text, " \t"))
 		case NarrativeHeading:
 			rows = append(rows, stripHeadingMarker(nl.Text))
+		case NarrativeTableRow:
+			rows = append(rows, formatTablePlainRow(nl.Text))
+		case NarrativeTableRule:
+			rows = append(rows, formatTableRuleRow(nl.Text))
 		case NarrativeListItem, NarrativeBlockquote:
 			rows = append(rows, simplifyInlineMarkers(strings.TrimRight(nl.Text, " \t")))
 		default:
@@ -285,6 +340,7 @@ func buildNarrativeRows(raw string) ([]NarrativeLine, []string) {
 	raw = strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
 	nls := SplitNarrativeBlocks(raw)
 	nls = applyMathNormalization(nls)
+	nls = promoteMarkdownTables(nls)
 	plainRows := NarrativeToPlainRows(nls)
 
 	// Trim leading blank rows — lockstep.
@@ -323,11 +379,15 @@ func styleNarrativeLine(raw, rolePrefix string, kind NarrativeBlockKind, roleSty
 	case NarrativeHeading:
 		return styledPrefix + styleHeadingLine(bodyRaw, theme)
 	case NarrativeCodeFence, NarrativeCodeFenceDelim:
-		return styledPrefix + theme.TextStyle().Render(bodyRaw)
+		return styledPrefix + styleCodeFenceLine(bodyRaw, theme)
 	case NarrativeListItem:
 		return styledPrefix + styleListItemLine(bodyRaw, roleStyle, theme)
 	case NarrativeBlockquote:
 		return styledPrefix + styleBlockquoteLine(bodyRaw, roleStyle, theme)
+	case NarrativeTableRow:
+		return styledPrefix + styleTableRowLine(bodyRaw, theme)
+	case NarrativeTableRule:
+		return styledPrefix + styleTableRuleLine(bodyRaw, theme)
 	default:
 		return styledPrefix + renderInlineMarkdown(bodyRaw, narrativeBodyStyle(roleStyle, theme), theme)
 	}
@@ -360,6 +420,30 @@ func styleBlockquoteLine(raw string, roleStyle tuikit.LineStyle, theme tuikit.Th
 		return renderInlineMarkdown(raw, narrativeBodyStyle(roleStyle, theme), theme)
 	}
 	return indent + theme.NoteStyle().Render(marker) + renderInlineMarkdown(body, narrativeBodyStyle(roleStyle, theme), theme)
+}
+
+func styleCodeFenceLine(raw string, theme tuikit.Theme) string {
+	return theme.CodeSurfaceStyle().Render(raw)
+}
+
+func styleTableRowLine(raw string, theme tuikit.Theme) string {
+	cells := tableCells(raw)
+	if len(cells) == 0 {
+		return theme.SecondaryTextStyle().Render(strings.TrimSpace(raw))
+	}
+	parts := make([]string, 0, len(cells)*2-1)
+	for i, cell := range cells {
+		cellText := renderInlineMarkdown(cell, theme.SecondaryTextStyle(), theme)
+		parts = append(parts, cellText)
+		if i < len(cells)-1 {
+			parts = append(parts, theme.TableBorderStyle().Render(" │ "))
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func styleTableRuleLine(raw string, theme tuikit.Theme) string {
+	return theme.TableBorderStyle().Render(formatTableRuleRow(raw))
 }
 
 // simplifyInlineMarkers strips balanced inline markdown markers from a line
@@ -408,4 +492,69 @@ func splitBlockquoteMarker(raw string) (indent, marker, body string, ok bool) {
 		return indent, ">", "", true
 	}
 	return "", "", "", false
+}
+
+func isPotentialTableRow(trimmed string) bool {
+	if strings.Count(trimmed, "|") == 0 {
+		return false
+	}
+	return len(tableCells(trimmed)) >= 2
+}
+
+func isTableSeparatorLine(trimmed string) bool {
+	if !isPotentialTableRow(trimmed) {
+		return false
+	}
+	cells := tableCells(trimmed)
+	if len(cells) == 0 {
+		return false
+	}
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		if cell == "" {
+			continue
+		}
+		for _, r := range cell {
+			if r != '-' && r != ':' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func tableCells(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+	parts := strings.Split(trimmed, "|")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, strings.TrimSpace(part))
+	}
+	return out
+}
+
+func formatTablePlainRow(raw string) string {
+	cells := tableCells(raw)
+	if len(cells) == 0 {
+		return strings.TrimSpace(raw)
+	}
+	return strings.Join(cells, " │ ")
+}
+
+func formatTableRuleRow(raw string) string {
+	cells := tableCells(raw)
+	if len(cells) == 0 {
+		return strings.TrimSpace(raw)
+	}
+	parts := make([]string, 0, len(cells)*2-1)
+	for i, cell := range cells {
+		width := max(3, len([]rune(strings.TrimSpace(cell))))
+		parts = append(parts, strings.Repeat("─", width))
+		if i < len(cells)-1 {
+			parts = append(parts, "┼")
+		}
+	}
+	return strings.Join(parts, "")
 }

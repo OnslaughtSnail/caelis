@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.0.28 - 2026-03-26
+
+### TUI Transcript And Panel Refinements
+- Reworked the Bubble Tea welcome card and panel/header rendering around shared transcript primitives, with richer participant labels, tighter panel shells, and more consistent prompt/help styling.
+- Improved subagent and participant transcript rendering so superseded reasoning/completion noise is hidden without dropping unsuperseded diagnostic reasoning on failed or approval-paused turns.
+- Added Markdown table-aware narrative rendering while preserving ordinary pipe-delimited prose and shell pipelines as plain text.
+
+### Delegation, Task Idle Detection, And Safe Follow-up Writes
+- Projected idle-timed-out child task results to the spawn preview UI as explicit `timed_out` terminal states and prevented repeated `TASK status` polling from extending the subagent idle timeout window.
+- Applied a default idle-timeout fallback to ACP-backed child sessions, including `self` delegates, so stalled child runs cannot hang indefinitely without surfaced failure state.
+- Extended read-before-write policy state with safe-write evidence so follow-up `WRITE` / `PATCH` operations against just-created or previously empty files can proceed without a redundant `READ`.
+
+### Execenv Polish And Release Metadata
+- Fixed minor `kernel/execenv` cleanup and test issues surfaced by editor diagnostics, including dead-condition cleanup, Linux-only helper constant scoping, and a clearer platform switch in runtime tests.
+- Bumped the repository release metadata to `v0.0.28` in `CHANGELOG.md`, `README.md`, and `VERSION` for the tagged release.
+
 ## v0.0.27 - 2026-03-25
 
 ### Release Prep

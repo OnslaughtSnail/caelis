@@ -770,6 +770,51 @@ func TestSubagentTaskController_StatusFailsIdleTimedOutRun(t *testing.T) {
 	}
 }
 
+func TestSubagentTaskController_StatusPollDoesNotExtendIdleWindow(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-idle-poll-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-5 * time.Minute),
+		UpdatedAt:   time.Now().Add(-5 * time.Second),
+		HeartbeatAt: time.Now().Add(-4 * time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	cancelled := false
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "self",
+		childCWD:     "/tmp",
+		idleTimeout:  30 * time.Second,
+		cancel:       func() { cancelled = true },
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID: "child-1",
+				State:     string(task.StateRunning),
+				Running:   true,
+				UpdatedAt: time.Now().Add(-4 * time.Minute),
+			},
+		},
+	}
+
+	snapshot, err := controller.Status(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Running || snapshot.State != task.StateFailed {
+		t.Fatalf("expected stale polled subagent to fail idle timeout, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+	if snapshot.Result["idle_timed_out"] != true {
+		t.Fatalf("expected idle timeout marker after stale polling, got %#v", snapshot.Result)
+	}
+	if !cancelled {
+		t.Fatal("expected stale polled subagent to be cancelled")
+	}
+}
+
 func TestSubagentTaskController_StatusDoesNotIdleTimeoutApprovalWait(t *testing.T) {
 	record := &task.Record{
 		ID:          "t-approval-subagent",

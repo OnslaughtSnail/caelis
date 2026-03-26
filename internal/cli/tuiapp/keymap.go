@@ -113,50 +113,47 @@ func (m *Model) currentFooterHelp() helpBindings {
 	if m.activePrompt != nil {
 		if len(m.activePrompt.choices) > 0 {
 			return helpBindings{
-				short: enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Back),
+				short: enabledBindings(m.keys.Accept, m.keys.Back),
 				full: [][]key.Binding{
-					enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Back),
+					enabledBindings(m.keys.Accept, m.keys.Back),
 				},
 			}
 		}
 		return helpBindings{
 			short: enabledBindings(m.keys.Accept, m.keys.Back),
 			full: [][]key.Binding{
-				enabledBindings(m.keys.Accept, m.keys.Clear, m.keys.Back),
+				enabledBindings(m.keys.Accept, m.keys.Back),
 			},
 		}
 	}
 	if m.btwOverlay != nil {
 		return helpBindings{
-			short: enabledBindings(m.keys.OverlayClose, m.keys.OverlayScroll),
+			short: enabledBindings(m.keys.OverlayClose),
 			full: [][]key.Binding{
-				enabledBindings(m.keys.OverlayScroll, m.keys.PageUp, m.keys.PageDown, m.keys.OverlayClose),
+				enabledBindings(m.keys.OverlayClose),
 			},
 		}
 	}
 	if m.showPalette || len(m.resumeCandidates) > 0 || m.slashArgActive || len(m.slashCandidates) > 0 || len(m.mentionCandidates) > 0 || len(m.skillCandidates) > 0 {
 		return helpBindings{
-			short: enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Complete, m.keys.Back),
+			short: enabledBindings(m.keys.Back),
 			full: [][]key.Binding{
-				enabledBindings(m.keys.ChoosePrev, m.keys.Accept, m.keys.Complete, m.keys.Back),
+				enabledBindings(m.keys.Back),
 			},
 		}
 	}
 	if m.running {
 		return helpBindings{
-			short: enabledBindings(m.keys.Interrupt, m.keys.Send, m.keys.PageUp, m.keys.PageDown),
+			short: enabledBindings(m.keys.Mode, m.keys.Interrupt),
 			full: [][]key.Binding{
-				enabledBindings(m.keys.Interrupt, m.keys.Send),
-				enabledBindings(m.keys.PageUp, m.keys.PageDown),
+				enabledBindings(m.keys.Mode, m.keys.Interrupt),
 			},
 		}
 	}
 	return helpBindings{
-		short: enabledBindings(m.keys.Mode, m.keys.Send, m.keys.ImagePaste, m.keys.HistoryPrev),
+		short: enabledBindings(m.keys.Mode),
 		full: [][]key.Binding{
-			enabledBindings(m.keys.Mode, m.keys.Send, m.keys.Clear),
-			enabledBindings(m.keys.ImagePaste, m.keys.TextPaste),
-			enabledBindings(m.keys.HistoryPrev, m.keys.HistoryNext),
+			enabledBindings(m.keys.Mode),
 		},
 	}
 }

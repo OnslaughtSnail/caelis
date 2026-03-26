@@ -332,7 +332,10 @@ func subagentLastSeenAt(record *task.Record) time.Time {
 	}
 	var out time.Time
 	record.WithLock(func(one *task.Record) {
-		out = latestSubagentProgressTime(one.HeartbeatAt, one.UpdatedAt, one.CreatedAt)
+		// UpdatedAt tracks local TASK bookkeeping as well as real child progress.
+		// Using it here lets repeated TASK status/wait polls artificially extend the
+		// idle window for a stuck subagent.
+		out = latestSubagentProgressTime(one.HeartbeatAt, one.CreatedAt)
 	})
 	return out
 }

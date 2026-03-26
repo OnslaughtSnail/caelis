@@ -71,12 +71,13 @@ func (t *WriteTool) Run(ctx context.Context, args map[string]any) (map[string]an
 	diffStats := CountLineDiff(plan.before, plan.after)
 
 	return map[string]any{
-		"path":          plan.path,
-		"created":       plan.created,
-		"bytes_written": len([]byte(plan.after)),
-		"line_count":    lineCount(plan.after),
-		"added_lines":   diffStats.Added,
-		"removed_lines": diffStats.Removed,
+		"path":           plan.path,
+		"created":        plan.created,
+		"previous_empty": plan.before == "",
+		"bytes_written":  len([]byte(plan.after)),
+		"line_count":     lineCount(plan.after),
+		"added_lines":    diffStats.Added,
+		"removed_lines":  diffStats.Removed,
 	}, nil
 }
 

@@ -251,18 +251,22 @@ func TestDefaultKeyMapUsesWSLImagePasteShortcut(t *testing.T) {
 	}
 }
 
-func TestRenderHelpShowsWSLPasteShortcuts(t *testing.T) {
+func TestRenderHelpShowsMinimalFooterHints(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
 	m.keys = defaultKeyMap(true)
 
 	bindings := m.currentFooterHelp()
 	help := ansi.Strip(m.help.FullHelpView(bindings.FullHelp()))
-	if !strings.Contains(help, "ctrl+alt+v") {
-		t.Fatalf("expected WSL image paste shortcut in help, got %q", help)
+	for _, want := range []string{"shift+tab", "mode"} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("expected minimal footer help to include %q, got %q", want, help)
+		}
 	}
-	if !strings.Contains(help, "ctrl+v") {
-		t.Fatalf("expected WSL text paste shortcut in help, got %q", help)
+	for _, unwanted := range []string{"enter", "history"} {
+		if strings.Contains(help, unwanted) {
+			t.Fatalf("did not expect verbose footer help to include %q, got %q", unwanted, help)
+		}
 	}
 }
 
@@ -520,11 +524,11 @@ func TestWelcomeCardRendersWhenEnabled(t *testing.T) {
 	})
 	_ = m.Init()
 	resizeModel(m)
-	view := renderModel(m)
+	view := stripModelView(m)
 	if !strings.Contains(view, "CAELIS") {
 		t.Fatalf("expected welcome card title in view, got %q", view)
 	}
-	if !strings.Contains(view, "workspace:") {
+	if !strings.Contains(view, "workspace") {
 		t.Fatalf("expected workspace line in welcome card, got %q", view)
 	}
 }
@@ -2598,11 +2602,8 @@ func TestViewShowsToolOutputPanelWithScrollableHistory(t *testing.T) {
 	if strings.Contains(view, "terminal output") {
 		t.Fatalf("expected rich tool output panel, got:\n%s", view)
 	}
-	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
-		t.Fatalf("expected bordered tool output box, got:\n%s", view)
-	}
-	if strings.Contains(view, "BASH") || strings.Contains(view, "<1s") {
-		t.Fatalf("did not expect bash header/timer inside panel, got:\n%s", view)
+	if strings.Contains(view, "shell task") || strings.Contains(view, "<1s") {
+		t.Fatalf("did not expect inline bash shell header/timer inside panel, got:\n%s", view)
 	}
 	for _, want := range []string{"line-3", "line-4", "line-5", "line-6"} {
 		if !strings.Contains(view, want) {
@@ -2624,28 +2625,8 @@ func TestViewShowsCompactToolOutputPanelForShortOutput(t *testing.T) {
 	})
 
 	view := stripModelView(m)
-	lines := strings.Split(view, "\n")
-	var topBorder string
-	var contentLine string
-	for _, line := range lines {
-		if strings.Contains(line, "╭") && strings.Contains(line, "╮") {
-			topBorder = line
-		}
-		if strings.Contains(line, "short") {
-			contentLine = line
-			break
-		}
-	}
-	if topBorder == "" || contentLine == "" {
-		t.Fatalf("expected tool output box, got:\n%s", view)
-	}
-	topBorder = strings.TrimRight(topBorder, " ")
-	contentLine = strings.TrimRight(contentLine, " ")
-	if len(topBorder) < 70 {
-		t.Fatalf("expected tool output box to fill viewport width, got top border %q", topBorder)
-	}
-	if len(contentLine) < 70 {
-		t.Fatalf("expected tool output content line to fill viewport width, got %q", contentLine)
+	if !strings.Contains(view, "short") {
+		t.Fatalf("expected compact inline bash output, got:\n%s", view)
 	}
 }
 
@@ -4215,7 +4196,7 @@ func TestViewShowsModeFooterWhenConfigured(t *testing.T) {
 	})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	view := stripModelView(m)
-	if !strings.Contains(view, "full_access") || !strings.Contains(view, "shift+tab") {
+	if !strings.Contains(view, "full_access") || !strings.Contains(view, "shift+tab mode") {
 		t.Fatalf("expected mode footer in view, got:\n%s", view)
 	}
 }

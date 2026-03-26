@@ -48,6 +48,7 @@ const (
 	stateKeyExternalParticipants     = "external_participants_v1"
 	stateKeyReadBeforeWriteReadPaths = "policy.read_before_write.read_paths"
 	stateKeyReadBeforeWriteReady     = "policy.read_before_write.index_ready"
+	stateKeyReadBeforeWriteSafeWrite = "policy.read_before_write.safe_write_paths"
 )
 
 type Workspace struct {
@@ -1138,6 +1139,9 @@ func assembleStateMap(rows []stateRow) (map[string]any, error) {
 				if ready, ok := value["index_ready"]; ok {
 					out[stateKeyReadBeforeWriteReady] = ready
 				}
+				if safeWrites, ok := value["safe_write_paths"]; ok {
+					out[stateKeyReadBeforeWriteSafeWrite] = safeWrites
+				}
 			}
 		case namespaceMisc:
 			if value, ok := payload.(map[string]any); ok {
@@ -1193,6 +1197,8 @@ func splitStateMap(values map[string]any) (map[string]string, error) {
 			readBeforeWrite["read_paths"] = value
 		case stateKeyReadBeforeWriteReady:
 			readBeforeWrite["index_ready"] = value
+		case stateKeyReadBeforeWriteSafeWrite:
+			readBeforeWrite["safe_write_paths"] = value
 		default:
 			misc[key] = value
 		}

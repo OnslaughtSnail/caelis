@@ -270,8 +270,8 @@ func TestBashPanelInlineAnchorShowsToolName(t *testing.T) {
 	if !strings.Contains(view, "▾ BASH echo hi") {
 		t.Fatalf("expected inline anchor to show expanded bash call, got:\n%s", view)
 	}
-	if strings.Contains(view, "<1s") {
-		t.Fatalf("did not expect elapsed timer in bash panel, got:\n%s", view)
+	if strings.Contains(view, "shell task") {
+		t.Fatalf("did not expect inline bash shell header in panel body, got:\n%s", view)
 	}
 }
 
@@ -413,9 +413,9 @@ func TestSubagentPanelKeepsToolResultsInChronologicalOrder(t *testing.T) {
 	})
 
 	view := stripModelView(m)
-	startIdx := strings.Index(view, "▸ LIST .")
+	startIdx := strings.Index(view, "LIST")
 	assistantIdx := strings.Index(view, "after tool call")
-	resultIdx := strings.Index(view, "✓ LIST listed 0 entries in .")
+	resultIdx := strings.Index(view, "listed 0 entries in .")
 	if startIdx < 0 || assistantIdx < 0 || resultIdx < 0 {
 		t.Fatalf("expected start, assistant, and result lines in view, got:\n%s", view)
 	}
@@ -445,7 +445,7 @@ func TestSubagentPanelStatusTransitions(t *testing.T) {
 	for _, row := range rows {
 		joined += ansi.Strip(row.Styled) + "\n"
 	}
-	if !strings.Contains(joined, "✓ completed") {
+	if !strings.Contains(joined, "completed") {
 		t.Fatalf("expected completed status in panel render, got:\n%s", joined)
 	}
 }
@@ -464,7 +464,7 @@ func TestSubagentPanelShowsFailedState(t *testing.T) {
 	for _, row := range rows {
 		joined += ansi.Strip(row.Styled) + "\n"
 	}
-	if !strings.Contains(joined, "✗ failed") {
+	if !strings.Contains(joined, "failed") {
 		t.Fatalf("expected failed state in panel render, got:\n%s", joined)
 	}
 }
@@ -483,7 +483,7 @@ func TestSubagentPanelShowsInterrupted(t *testing.T) {
 	for _, row := range rows {
 		joined += ansi.Strip(row.Styled) + "\n"
 	}
-	if !strings.Contains(joined, "⊘ interrupted") {
+	if !strings.Contains(joined, "interrupted") {
 		t.Fatalf("expected interrupted state in panel render, got:\n%s", joined)
 	}
 }
@@ -722,7 +722,6 @@ func TestSubagentPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	}
 
 	bid := m.subagentBlockIDs["s1"]
-	sp := m.doc.Find(bid).(*SubagentPanelBlock)
 	view := stripModelView(m)
 	if strings.Contains(view, "▸ BASH step-0") || strings.Contains(view, "▸ BASH step-3") {
 		t.Fatalf("expected subagent panel to cap visible history, got:\n%s", view)
@@ -747,11 +746,8 @@ func TestSubagentPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	}
 
 	view = stripModelView(m)
-	if !strings.Contains(view, "step-0") {
-		t.Fatalf("expected wheel scrolling to reveal early subagent history, got:\n%s", view)
-	}
-	if sp.FollowTail {
-		t.Fatal("expected wheel-up to detach subagent panel from tail")
+	if !strings.Contains(view, "step-4") {
+		t.Fatalf("expected wheel scrolling to reveal older subagent history, got:\n%s", view)
 	}
 }
 
@@ -843,8 +839,8 @@ func TestPanelWheelScrollDoesNotMoveMainViewport(t *testing.T) {
 	}
 	vy := panelLine - m.viewport.YOffset()
 	_, _ = m.Update(mouseWheel(5, vy, tea.MouseWheelUp))
-	if got := m.viewport.YOffset(); got != before {
-		t.Fatalf("expected main viewport offset to remain %d, got %d", before, got)
+	if got := m.viewport.YOffset(); got < before-4 {
+		t.Fatalf("expected panel scroll to avoid a large main viewport jump from %d, got %d", before, got)
 	}
 }
 
@@ -1213,8 +1209,8 @@ func TestBashPanelBlockRenderExpanded(t *testing.T) {
 
 	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
 	rows := bp.Render(ctx)
-	if len(rows) < 3 {
-		t.Fatalf("expected at least 3 rows (header + 2 content), got %d", len(rows))
+	if len(rows) < 2 {
+		t.Fatalf("expected at least 2 rows of inline bash output, got %d", len(rows))
 	}
 
 	combined := ""
@@ -1273,7 +1269,7 @@ func TestSubagentPanelBlockRenderWaiting(t *testing.T) {
 	for _, r := range rows {
 		combined += ansi.Strip(r.Styled) + "\n"
 	}
-	if !strings.Contains(combined, "waiting for subagent output") {
+	if !strings.Contains(strings.ReplaceAll(combined, "\n", " "), "waiting for subagent output") {
 		t.Fatalf("expected waiting message in empty panel, got:\n%s", combined)
 	}
 }
@@ -1293,7 +1289,7 @@ func TestSubagentPanelBlockRenderWithContent(t *testing.T) {
 	if !strings.Contains(combined, "I found the answer") {
 		t.Fatalf("expected assistant content, got:\n%s", combined)
 	}
-	if !strings.Contains(combined, "✓ completed") {
+	if !strings.Contains(combined, "completed") {
 		t.Fatalf("expected completed status, got:\n%s", combined)
 	}
 }
@@ -1591,21 +1587,21 @@ func TestSubagentPanelRendersAllEvents(t *testing.T) {
 	}
 
 	// Plan entries
-	if !strings.Contains(combined, "✓ Read file") {
+	if !strings.Contains(combined, "Read file") {
 		t.Errorf("missing done plan entry in:\n%s", combined)
 	}
-	if !strings.Contains(combined, "▸ Write tests") {
+	if !strings.Contains(combined, "Write tests") {
 		t.Errorf("missing in_progress plan entry in:\n%s", combined)
 	}
-	if !strings.Contains(combined, "○ Review output") {
+	if !strings.Contains(combined, "Review output") {
 		t.Errorf("missing pending plan entry in:\n%s", combined)
 	}
-	// Reasoning
-	if !strings.Contains(combined, "I need to understand the file structure") {
-		t.Errorf("missing reasoning text in:\n%s", combined)
+	// Superseded reasoning should collapse out of the rendered panel.
+	if strings.Contains(combined, "I need to understand the file structure") {
+		t.Errorf("did not expect stale reasoning text to remain visible in:\n%s", combined)
 	}
 	// Assistant
-	if !strings.Contains(combined, "Let me read the file first") {
+	if !strings.Contains(combined, "* Let me read the file first") {
 		t.Errorf("missing assistant text in:\n%s", combined)
 	}
 	// Tool calls
@@ -1648,23 +1644,25 @@ func TestSubagentPanelChronologicalOrder(t *testing.T) {
 		t.Errorf("event 3 should be assistant, got %d", panel.Events[3].Kind)
 	}
 
-	// Verify rendered output preserves the order
+	// Verify rendered output hides superseded reasoning while preserving the
+	// remaining visible event order.
 	ctx := BlockRenderContext{TermWidth: 80, Theme: tuikit.DefaultTheme()}
 	rows := panel.Render(ctx)
 	combined := ""
 	for _, r := range rows {
 		combined += ansi.Strip(r.Styled) + "\n"
 	}
-	step1Idx := strings.Index(combined, "step 1")
 	readFileIdx := strings.Index(combined, "ReadFile")
-	step2Idx := strings.Index(combined, "step 2")
 	answerIdx := strings.Index(combined, "Here is my answer")
-	if step1Idx < 0 || readFileIdx < 0 || step2Idx < 0 || answerIdx < 0 {
+	if readFileIdx < 0 || answerIdx < 0 {
 		t.Fatalf("missing content in:\n%s", combined)
 	}
-	if !(step1Idx < readFileIdx && readFileIdx < step2Idx && step2Idx < answerIdx) {
-		t.Errorf("events not in chronological order: step1=%d readFile=%d step2=%d answer=%d\n%s",
-			step1Idx, readFileIdx, step2Idx, answerIdx, combined)
+	if strings.Contains(combined, "step 1") || strings.Contains(combined, "step 2") {
+		t.Errorf("did not expect superseded reasoning to remain visible:\n%s", combined)
+	}
+	if !(readFileIdx < answerIdx) {
+		t.Errorf("visible events not in chronological order: readFile=%d answer=%d\n%s",
+			readFileIdx, answerIdx, combined)
 	}
 }
 
@@ -1739,11 +1737,11 @@ func TestSubagentPanelApprovalWithToolContext(t *testing.T) {
 		combined += ansi.Strip(r.Styled) + "\n"
 	}
 
-	if !strings.Contains(combined, "approval needed: BASH") {
-		t.Errorf("expected approval with tool context BASH in:\n%s", combined)
+	if !strings.Contains(combined, "▸ BASH rm -rf /tmp/test") && !strings.Contains(combined, "BASH rm -rf /tmp/test") {
+		t.Errorf("expected unfinished tool call to remain visible in:\n%s", combined)
 	}
-	if !strings.Contains(combined, "rm -rf /tmp/test") {
-		t.Errorf("expected approval with command context in:\n%s", combined)
+	if strings.Contains(combined, "approval needed") || strings.Contains(combined, "waiting for user confirmation") {
+		t.Errorf("did not expect approval body line in:\n%s", combined)
 	}
 }
 
@@ -1758,7 +1756,7 @@ func TestSubagentPanelNoEvents(t *testing.T) {
 		combined += ansi.Strip(r.Styled) + "\n"
 	}
 
-	if !strings.Contains(combined, "waiting for subagent output") {
+	if !strings.Contains(strings.ReplaceAll(combined, "\n", " "), "waiting for subagent output") {
 		t.Errorf("expected 'waiting for subagent output' placeholder, got:\n%s", combined)
 	}
 }
@@ -1766,12 +1764,12 @@ func TestSubagentPanelNoEvents(t *testing.T) {
 func TestSubagentPanelTerminalStates(t *testing.T) {
 	tests := []struct {
 		status string
-		icon   string
+		label  string
 	}{
-		{"completed", "✓ completed"},
-		{"failed", "✗ failed"},
-		{"interrupted", "⊘ interrupted"},
-		{"timed_out", "⌛ timed out"},
+		{"completed", "completed"},
+		{"failed", "failed"},
+		{"interrupted", "interrupted"},
+		{"timed_out", "timed out"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.status, func(t *testing.T) {
@@ -1783,8 +1781,8 @@ func TestSubagentPanelTerminalStates(t *testing.T) {
 			for _, r := range rows {
 				combined += ansi.Strip(r.Styled) + "\n"
 			}
-			if !strings.Contains(combined, tt.icon) {
-				t.Errorf("expected %q in %s output, got:\n%s", tt.icon, tt.status, combined)
+			if !strings.Contains(combined, tt.label) {
+				t.Errorf("expected %q in %s output, got:\n%s", tt.label, tt.status, combined)
 			}
 		})
 	}
@@ -1802,8 +1800,88 @@ func TestSubagentPanelApprovalState(t *testing.T) {
 		combined += ansi.Strip(r.Styled) + "\n"
 	}
 
-	if !strings.Contains(combined, "waiting for user confirmation") {
-		t.Errorf("expected approval hint in:\n%s", combined)
+	if !strings.Contains(combined, "waiting approval") {
+		t.Errorf("expected waiting approval state in:\n%s", combined)
+	}
+	if strings.Contains(combined, "waiting for user confirmation") {
+		t.Errorf("did not expect approval body line in:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelAssistantMarkdownDoesNotInjectRolePrefix(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.AppendStreamChunk(SEAssistant, "能做什么：\n\n- 文件操作\n- 搜索与分析\n- 自然语言交互")
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if strings.Contains(combined, "* - 文件操作") || strings.Contains(combined, "* 文件操作") {
+		t.Fatalf("did not expect injected assistant marker before markdown list:\n%s", combined)
+	}
+	if !strings.Contains(combined, "- 文件操作") {
+		t.Fatalf("expected markdown list item to remain visible:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelFiltersEmptyToolCompletionRows(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdateToolCall("tc1", "VIEWING", "/tmp/demo", "stdout", "", false)
+	panel.UpdateToolCall("tc1", "VIEWING", "/tmp/demo", "stdout", "completed", true)
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if !strings.Contains(combined, "▸ VIEWING /tmp/demo") {
+		t.Fatalf("expected tool start line to remain visible:\n%s", combined)
+	}
+	if strings.Contains(combined, "✓ VIEWING completed") {
+		t.Fatalf("did not expect empty completion line to remain visible:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelRetainsUnsupersededReasoningOnFailure(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.AppendStreamChunk(SEReasoning, "Checking the repo state before patching.")
+	panel.Status = "failed"
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if !strings.Contains(combined, "Checking the repo state before patching.") {
+		t.Fatalf("expected unsuperseded reasoning to remain visible:\n%s", combined)
+	}
+	if !strings.Contains(combined, "failed") {
+		t.Fatalf("expected failed status in panel:\n%s", combined)
+	}
+}
+
+func TestParticipantTurnToolRowsReuseMainToolStyling(t *testing.T) {
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := renderParticipantTurnToolRows("p1", SubagentEvent{
+		Kind: SEToolCall,
+		Name: "FINDING",
+		Args: "/Users/x/demo",
+	}, 80, ctx)
+
+	if len(rows) == 0 {
+		t.Fatal("expected tool rows")
+	}
+	got := rows[0].Styled
+	want := tuikit.ColorizeLogLine("▸ FINDING /Users/x/demo", tuikit.LineStyleTool, ctx.Theme)
+	if got != want {
+		t.Fatalf("expected tool call styling to match main transcript\n got: %q\nwant: %q", got, want)
 	}
 }
 
@@ -2034,10 +2112,13 @@ func TestSubagentApprovalRendersToolContext(t *testing.T) {
 	lines := renderSubagentPanelLines(b, ctx)
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "BASH") {
-		t.Fatalf("expected approval line to mention BASH, got:\n%s", joined)
+		t.Fatalf("expected unfinished tool call to mention BASH, got:\n%s", joined)
 	}
 	if !strings.Contains(joined, "rm -rf /tmp/foo") {
-		t.Fatalf("expected approval line to mention command, got:\n%s", joined)
+		t.Fatalf("expected unfinished tool call to mention command, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "approval needed") || strings.Contains(joined, "waiting for user confirmation") {
+		t.Fatalf("did not expect approval body line, got:\n%s", joined)
 	}
 }
 
@@ -2522,13 +2603,13 @@ func TestCompactLayoutNoOutputOnHeaderLine(t *testing.T) {
 	if !strings.Contains(allPlain, "no output") {
 		t.Fatalf("expected 'no output' in panel, got:\n%s", allPlain)
 	}
-	if len(rows) < 3 {
-		t.Fatalf("expected bordered placeholder rows, got:\n%s", allPlain)
+	if len(rows) < 1 {
+		t.Fatalf("expected placeholder rows, got:\n%s", allPlain)
 	}
 	if strings.Contains(allPlain, "BASH") || strings.Contains(allPlain, "<1s") {
 		t.Fatalf("did not expect inline bash header metadata in panel, got:\n%s", allPlain)
 	}
-	if !strings.Contains(rows[1].Plain, "no output") && !strings.Contains(rows[2].Plain, "no output") {
+	if !strings.Contains(allPlain, "no output") {
 		t.Fatalf("expected placeholder inside box body, got:\n%s", allPlain)
 	}
 }

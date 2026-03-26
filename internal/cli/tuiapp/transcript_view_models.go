@@ -1,0 +1,234 @@
+package tuiapp
+
+import (
+	"cmp"
+	"os"
+	"strings"
+
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
+)
+
+type PanelViewModel struct {
+	Variant tuikit.PanelShellVariant
+	Width   int
+	Header  tuikit.PanelHeaderModel
+	Body    []string
+	Footer  string
+}
+
+type ToolEventViewModel struct {
+	Name   string
+	Args   string
+	Output string
+	Done   bool
+	Err    bool
+}
+
+type NarrativeViewModel struct {
+	Raw                string
+	Kind               NarrativeBlockKind
+	RolePrefix         string
+	ContinuationPrefix string
+	LineStyle          tuikit.LineStyle
+	Width              int
+}
+
+type WelcomeViewModel struct {
+	VersionLabel string
+	Workspace    string
+	ModelAlias   string
+}
+
+type renderedSegment struct {
+	Plain  string
+	Styled string
+}
+
+func renderPanelViewModel(theme tuikit.Theme, vm PanelViewModel) []string {
+	width := maxInt(1, vm.Width)
+	headerWidth := width
+	switch vm.Variant {
+	case tuikit.PanelShellVariantDrawer, tuikit.PanelShellVariantCard:
+		headerWidth = maxInt(1, width-4)
+	}
+	header := ""
+	if strings.TrimSpace(vm.Header.Kind) != "" || strings.TrimSpace(vm.Header.Title) != "" || strings.TrimSpace(vm.Header.State) != "" || strings.TrimSpace(vm.Header.Meta) != "" {
+		header = tuikit.RenderPanelHeader(theme, headerWidth, vm.Header)
+	}
+	return tuikit.RenderPanelShell(theme, tuikit.PanelShellModel{
+		Variant: vm.Variant,
+		Width:   width,
+		Header:  header,
+		Body:    vm.Body,
+		Footer:  strings.TrimSpace(vm.Footer),
+	})
+}
+
+func buildWelcomeViewModel(version, workspace, modelName string) WelcomeViewModel {
+	versionText := cmp.Or(strings.TrimSpace(version), "unknown")
+	versionLabel := versionText
+	if !strings.HasPrefix(strings.ToLower(versionText), "v") {
+		versionLabel = "v" + versionText
+	}
+
+	workspace = cmp.Or(strings.TrimSpace(workspace), ".")
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		workspace = strings.Replace(workspace, home, "~", 1)
+	}
+
+	return WelcomeViewModel{
+		VersionLabel: versionLabel,
+		Workspace:    workspace,
+		ModelAlias:   cmp.Or(strings.TrimSpace(modelName), "not configured (/connect)"),
+	}
+}
+
+func buildWelcomePanelViewModel(w WelcomeViewModel, width int, theme tuikit.Theme) PanelViewModel {
+	titleLine := theme.PromptStyle().Render(">_") +
+		" " + theme.TitleStyle().Render("CAELIS") +
+		" " + theme.TranscriptMetaStyle().Render("("+w.VersionLabel+")")
+	renderField := func(label string, value string, render func(...string) string) string {
+		labelText := theme.TranscriptLabelStyle().Render(label + ":")
+		padding := maxInt(0, 11-displayColumns(label+":"))
+		return labelText + strings.Repeat(" ", padding) + render(value)
+	}
+	body := []string{
+		titleLine,
+		"",
+		renderField("model", w.ModelAlias, theme.TextStyle().Render),
+		renderField("workspace", w.Workspace, theme.SecondaryTextStyle().Render),
+		renderField("tip", "type / for command list", theme.TranscriptMetaStyle().Render),
+	}
+	return PanelViewModel{
+		Variant: tuikit.PanelShellVariantCard,
+		Width:   width,
+		Body:    body,
+	}
+}
+
+func buildToolEventViewModel(ev SubagentEvent) ToolEventViewModel {
+	return ToolEventViewModel{
+		Name:   strings.TrimSpace(ev.Name),
+		Args:   strings.TrimSpace(ev.Args),
+		Output: strings.TrimSpace(ev.Output),
+		Done:   ev.Done,
+		Err:    ev.Err,
+	}
+}
+
+func renderToolEventViewModelLines(blockID string, vm ToolEventViewModel, width int, theme tuikit.Theme) []RenderedRow {
+	segments := renderToolEventViewModelSegments(vm, width, theme)
+	rows := make([]RenderedRow, 0, len(segments))
+	for _, segment := range segments {
+		rows = append(rows, StyledPlainRow(blockID, segment.Plain, segment.Styled))
+	}
+	return rows
+}
+
+func renderToolEventViewModelStyledLines(vm ToolEventViewModel, width int, theme tuikit.Theme) []string {
+	segments := renderToolEventViewModelSegments(vm, width, theme)
+	lines := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		lines = append(lines, segment.Styled)
+	}
+	return lines
+}
+
+func renderToolEventViewModelSegments(vm ToolEventViewModel, width int, theme tuikit.Theme) []renderedSegment {
+	text, style := renderToolEventViewModelPlain(vm)
+	lines := wrapToolOutputText(text, maxInt(1, width))
+	if len(lines) == 0 {
+		lines = []string{text}
+	}
+	segments := make([]renderedSegment, 0, len(lines))
+	for i, line := range lines {
+		if i > 0 {
+			line = "  " + line
+		}
+		segments = append(segments, renderedSegment{
+			Plain:  line,
+			Styled: styleToolEventLine(theme, line, style),
+		})
+	}
+	return segments
+}
+
+func styleToolEventLine(theme tuikit.Theme, line string, style tuikit.LineStyle) string {
+	switch style {
+	case tuikit.LineStyleTool:
+		parts := strings.SplitN(strings.TrimSpace(line), " ", 3)
+		model := tuikit.ToolLineModel{Style: tuikit.LineStyleTool}
+		if len(parts) > 0 {
+			model.Prefix = parts[0]
+		}
+		if len(parts) > 1 {
+			model.Name = parts[1]
+		}
+		if len(parts) > 2 {
+			model.Suffix = parts[2]
+		}
+		styled := tuikit.RenderToolLine(theme, model)
+		if strings.HasPrefix(line, "  ") {
+			styled = "  " + styled
+		}
+		return styled
+	case tuikit.LineStyleError:
+		return theme.ErrorStyle().Render(line)
+	default:
+		return theme.TextStyle().Render(line)
+	}
+}
+
+func renderToolEventViewModelPlain(vm ToolEventViewModel) (string, tuikit.LineStyle) {
+	name := cmp.Or(strings.TrimSpace(vm.Name), "TOOL")
+	if !vm.Done {
+		line := "▸ " + name
+		if vm.Args != "" {
+			line += " " + vm.Args
+		}
+		return line, tuikit.LineStyleTool
+	}
+	if vm.Err {
+		line := "✗ " + name
+		if vm.Output != "" {
+			line += " " + vm.Output
+		}
+		return line, tuikit.LineStyleError
+	}
+	line := "✓ " + name
+	if vm.Output != "" {
+		line += " " + vm.Output
+	} else {
+		line += " completed"
+	}
+	return line, tuikit.LineStyleTool
+}
+
+func renderNarrativeViewModelRows(blockID string, vm NarrativeViewModel, theme tuikit.Theme) []RenderedRow {
+	segments := renderNarrativeViewModelSegments(vm, theme)
+	rows := make([]RenderedRow, 0, len(segments))
+	for _, segment := range segments {
+		rows = append(rows, StyledPlainRow(blockID, segment.Plain, segment.Styled))
+	}
+	return rows
+}
+
+func renderNarrativeViewModelSegments(vm NarrativeViewModel, theme tuikit.Theme) []renderedSegment {
+	wrapWidth := maxInt(1, vm.Width-maxInt(displayColumns(vm.RolePrefix), displayColumns(vm.ContinuationPrefix)))
+	segments := graphemeHardWrap(vm.Raw, wrapWidth)
+	if len(segments) == 0 {
+		segments = []string{""}
+	}
+	out := make([]renderedSegment, 0, len(segments))
+	for i, segment := range segments {
+		prefix := vm.RolePrefix
+		if i > 0 {
+			prefix = vm.ContinuationPrefix
+		}
+		out = append(out, renderedSegment{
+			Plain:  prefix + segment,
+			Styled: styleNarrativeLine(segment, prefix, vm.Kind, vm.LineStyle, theme),
+		})
+	}
+	return out
+}

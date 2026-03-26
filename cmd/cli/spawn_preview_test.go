@@ -286,6 +286,30 @@ func TestSubagentDomainUpdatesFromTaskToolResponse_Status(t *testing.T) {
 	}
 }
 
+func TestSubagentDomainUpdatesFromTaskToolResponse_IdleTimeoutPromotesTimedOut(t *testing.T) {
+	updates := subagentDomainUpdatesFromTaskToolResponse("parent-1", &model.ToolResponse{
+		ID:   "call-task-1",
+		Name: tool.TaskToolName,
+		Result: map[string]any{
+			"child_session_id":   "child-1",
+			"delegation_id":      "dlg-1",
+			"agent":              "self",
+			"state":              "failed",
+			"_ui_idle_timed_out": true,
+		},
+	}, map[string]any{"action": "wait"})
+	if len(updates) != 1 {
+		t.Fatalf("expected one TASK wait update, got %#v", updates)
+	}
+	update := updates[0]
+	if update.Kind != subagentDomainTerminal {
+		t.Fatalf("expected terminal kind, got %#v", update)
+	}
+	if update.Status != "timed_out" {
+		t.Fatalf("expected idle timed out state to project as timed_out, got %#v", update)
+	}
+}
+
 func TestSubagentDomainUpdatesFromTaskToolResponse_WriteContinuationBootstrapsNewPanel(t *testing.T) {
 	updates := subagentDomainUpdatesFromTaskToolResponse("parent-1", &model.ToolResponse{
 		ID:   "call-task-write-1",

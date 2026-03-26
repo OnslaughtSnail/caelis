@@ -379,9 +379,10 @@ func TestNew_DefaultSandboxTypeFollowsPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := bwrapSandboxType
-	if stdruntime.GOOS == "darwin" {
+	switch stdruntime.GOOS {
+	case "darwin":
 		want = seatbeltSandboxType
-	} else if stdruntime.GOOS == "linux" {
+	case "linux":
 		want = bwrapSandboxType
 	}
 	if rt.SandboxType() != want {
