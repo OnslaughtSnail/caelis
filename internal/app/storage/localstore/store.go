@@ -545,6 +545,12 @@ func (s *ScopeStore) Backfill(ctx context.Context) error {
 	if strings.TrimSpace(root) == "" {
 		return nil
 	}
+	if _, err := os.Stat(root); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err

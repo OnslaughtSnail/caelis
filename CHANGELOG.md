@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v0.0.29 - 2026-03-26
+
+### ACP And Headless Compatibility Fixes
+- Fixed headless single-shot `-p` runs to use streaming model responses again, avoiding provider failures in non-interactive mode for prompts that require streaming.
+- Fixed ACP `session/new` startup sequencing so the server returns the JSON-RPC response before pushing initial session snapshot notifications, improving compatibility with strict headless ACP clients.
+- Fixed empty ACP plan updates to serialize as `[]` instead of `null`, which restores compatibility with `acpx` text rendering for sessions that have no active plan entries.
+
+### Session Catalog Robustness
+- Treated missing `acp_remote` catalog roots as an empty backfill case instead of surfacing a startup warning before any ACP-backed sessions exist.
+- Added regression coverage around post-response ACP notifications, empty-plan encoding, and missing-scope catalog backfill behavior.
+
 ## v0.0.28 - 2026-03-26
 
 ### TUI Transcript And Panel Refinements

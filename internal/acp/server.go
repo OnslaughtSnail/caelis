@@ -165,11 +165,11 @@ func (s *Server) handleRequest(ctx context.Context, msg Message) (any, *RPCError
 		if err := decodeParams(msg.Params, &req); err != nil {
 			return nil, invalidParamsError(err)
 		}
-		resp, err := s.newSession(ctx, req)
+		resp, afterWrite, err := s.newSession(ctx, req)
 		if err != nil {
 			return nil, requestFailed(err)
 		}
-		return resp, nil
+		return postWriteResult{payload: resp, afterWrite: afterWrite}, nil
 	case MethodSessionList:
 		if err := s.requireAuthenticated(); err != nil {
 			return nil, requestFailed(err)
@@ -384,7 +384,7 @@ func (s *Server) notifyPlan(sessionID string, entries []PlanEntry) error {
 		SessionID: sessionID,
 		Update: PlanUpdate{
 			SessionUpdate: UpdatePlan,
-			Entries:       append([]PlanEntry(nil), entries...),
+			Entries:       append([]PlanEntry{}, entries...),
 		},
 	})
 }

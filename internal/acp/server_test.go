@@ -1051,6 +1051,36 @@ func TestServer_NewSessionEmitsAvailableCommandsAndEmptyPlan(t *testing.T) {
 	if !containsAll(types, UpdateAvailableCmds, UpdatePlan) {
 		t.Fatalf("expected available commands and empty plan updates, got %#v", types)
 	}
+	h.mu.Lock()
+	notes := append([]SessionNotification(nil), h.notifications...)
+	h.mu.Unlock()
+	foundEmptyPlan := false
+	for _, note := range notes {
+		raw, err := json.Marshal(note.Update)
+		if err != nil {
+			t.Fatalf("marshal update: %v", err)
+		}
+		var update struct {
+			SessionUpdate string      `json:"sessionUpdate"`
+			Entries       []PlanEntry `json:"entries"`
+		}
+		if err := json.Unmarshal(raw, &update); err != nil {
+			t.Fatalf("unmarshal update: %v", err)
+		}
+		if update.SessionUpdate != UpdatePlan {
+			continue
+		}
+		if update.Entries == nil {
+			t.Fatal("expected empty plan update to encode entries as [] instead of null")
+		}
+		if len(update.Entries) != 0 {
+			t.Fatalf("expected empty plan update, got %#v", update.Entries)
+		}
+		foundEmptyPlan = true
+	}
+	if !foundEmptyPlan {
+		t.Fatal("expected plan notification")
+	}
 }
 
 func TestServer_PlanToolEmitsPlanUpdate(t *testing.T) {

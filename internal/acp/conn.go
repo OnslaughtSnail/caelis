@@ -27,6 +27,11 @@ type pendingCall struct {
 	ch chan Message
 }
 
+type postWriteResult struct {
+	payload    any
+	afterWrite func()
+}
+
 func NewConn(reader io.Reader, writer io.Writer) *Conn {
 	return &Conn{
 		reader: reader,
@@ -94,6 +99,17 @@ func (c *Conn) Serve(ctx context.Context, onRequest requestHandler, onNotificati
 				return
 			}
 			result, rpcErr := onRequest(ctx, req)
+			var afterWrite func()
+			switch wrapped := result.(type) {
+			case postWriteResult:
+				result = wrapped.payload
+				afterWrite = wrapped.afterWrite
+			case *postWriteResult:
+				if wrapped != nil {
+					result = wrapped.payload
+					afterWrite = wrapped.afterWrite
+				}
+			}
 			resp := Message{
 				JSONRPC: JSONRPCVersion,
 				ID:      req.ID,
@@ -105,7 +121,12 @@ func (c *Conn) Serve(ctx context.Context, onRequest requestHandler, onNotificati
 			} else {
 				resp.Result = result
 			}
-			_ = c.writeMessage(resp)
+			if err := c.writeMessage(resp); err != nil {
+				return
+			}
+			if afterWrite != nil {
+				afterWrite()
+			}
 		}(msg)
 	}
 }

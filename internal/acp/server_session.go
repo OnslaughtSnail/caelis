@@ -16,27 +16,22 @@ var (
 	errSessionNotFound        = errors.New("session not found")
 )
 
-func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSessionResponse, error) {
+func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSessionResponse, func(), error) {
 	state, err := s.cfg.Adapter.NewSession(ctx, req, s.clientCapabilities())
 	if err != nil {
-		return NewSessionResponse{}, err
+		return NewSessionResponse{}, nil, err
 	}
 	sess := &serverSession{id: state.SessionID}
 	sess.applyState(state)
 	s.storeSession(sess)
-	if err := s.notifyAvailableCommands(sess.id, sess); err != nil {
-		return NewSessionResponse{}, err
-	}
-	if err := s.notifySessionInfo(sess.id, "", time.Now().UTC().Format(time.RFC3339)); err != nil {
-		return NewSessionResponse{}, err
-	}
-	if err := s.notifyPlan(sess.id, sess.planSnapshot()); err != nil {
-		return NewSessionResponse{}, err
-	}
-	return NewSessionResponse{
+	resp := NewSessionResponse{
 		SessionID:     sess.id,
 		ConfigOptions: sess.configOptionsSnapshot(),
 		Modes:         sess.modeState(),
+	}
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	return resp, func() {
+		_ = s.syncSessionSnapshot(sess.id, sess, updatedAt)
 	}, nil
 }
 
@@ -73,13 +68,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 	if updatedAt == "" {
 		updatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	if err := s.notifySessionInfo(req.SessionID, "", updatedAt); err != nil {
-		return LoadSessionResponse{}, err
-	}
-	if err := s.notifyAvailableCommands(req.SessionID, sess); err != nil {
-		return LoadSessionResponse{}, err
-	}
-	if err := s.notifyPlan(req.SessionID, sess.planSnapshot()); err != nil {
+	if err := s.syncSessionSnapshot(req.SessionID, sess, updatedAt); err != nil {
 		return LoadSessionResponse{}, err
 	}
 	return LoadSessionResponse{
@@ -194,6 +183,19 @@ func (s *Server) storeSession(sess *serverSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[strings.TrimSpace(sess.id)] = sess
+}
+
+func (s *Server) syncSessionSnapshot(sessionID string, sess *serverSession, updatedAt string) error {
+	if err := s.notifyAvailableCommands(sessionID, sess); err != nil {
+		return err
+	}
+	if err := s.notifySessionInfo(sessionID, "", updatedAt); err != nil {
+		return err
+	}
+	if err := s.notifyPlan(sessionID, sess.planSnapshot()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) sessionFS(sessionID string) toolexec.FileSystem {

@@ -438,7 +438,7 @@ func runCLI(ctx context.Context, args []string) error {
 			SkillDirs:                   skillDirList,
 			DefaultAgent:                configStore.DefaultAgent(),
 			AgentDescriptors:            configStore.AgentDescriptors(),
-			StreamModel:                 false,
+			StreamModel:                 true,
 			ThinkingBudget:              modelRuntime.ThinkingBudget,
 			ReasoningEffort:             modelRuntime.ReasoningEffort,
 			ModelProvider:               resolveProviderName(factory, alias),

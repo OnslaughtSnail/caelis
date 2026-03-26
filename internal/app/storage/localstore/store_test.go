@@ -173,6 +173,24 @@ func TestScopeStore_BackfillsCatalogFromRolloutAfterDBReset(t *testing.T) {
 	}
 }
 
+func TestScopeStore_BackfillIgnoresMissingScopeRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	dbPath := filepath.Join(filepath.Dir(root), "state.db")
+	db, err := Open(root, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	acpStore := db.Scope(Workspace{Key: "ws", CWD: "/tmp/ws"}, ScopeACPRemote)
+	if err := os.RemoveAll(filepath.Join(root, ScopeACPRemote)); err != nil {
+		t.Fatal(err)
+	}
+	if err := acpStore.Backfill(context.Background()); err != nil {
+		t.Fatalf("expected missing scope root to be ignored, got %v", err)
+	}
+}
+
 func TestScopeStore_BackfillKeepsACPRemoteSessionsOutOfMainScope(t *testing.T) {
 	tmp := t.TempDir()
 	root := filepath.Join(tmp, "sessions")

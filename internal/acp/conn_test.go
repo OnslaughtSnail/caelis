@@ -1,8 +1,10 @@
 package acp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"sync"
 	"testing"
@@ -116,5 +118,75 @@ func TestConnCall_IncludesRPCErrorData(t *testing.T) {
 	got := err.Error()
 	if got != `acp rpc error -32603: Internal error (data: {"statusCode":900,"traceId":"trace-123"})` {
 		t.Fatalf("unexpected error text: %q", got)
+	}
+}
+
+func TestConnServe_WritesResponseBeforePostWriteNotifications(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	serverConn := NewConn(c2sR, s2cW)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
+			return postWriteResult{
+				payload: map[string]any{"ok": true},
+				afterWrite: func() {
+					_ = serverConn.Notify(MethodSessionUpdate, map[string]any{
+						"sessionId": "s-1",
+						"update": map[string]any{
+							"sessionUpdate": UpdatePlan,
+						},
+					})
+				},
+			}, nil
+		}, nil)
+	}()
+
+	if _, err := io.WriteString(c2sW, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session/new\",\"params\":{}}\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	reader := bufio.NewReader(s2cR)
+	firstLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read first message: %v", err)
+	}
+	secondLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read second message: %v", err)
+	}
+
+	var first Message
+	if err := json.Unmarshal(firstLine, &first); err != nil {
+		t.Fatalf("unmarshal first message: %v", err)
+	}
+	if first.ID == nil || first.Method != "" {
+		t.Fatalf("expected rpc response first, got %+v", first)
+	}
+
+	var second Message
+	if err := json.Unmarshal(secondLine, &second); err != nil {
+		t.Fatalf("unmarshal second message: %v", err)
+	}
+	if second.Method != MethodSessionUpdate {
+		t.Fatalf("expected notification after response, got %+v", second)
+	}
+
+	cancel()
+	_ = c2sW.Close()
+	_ = s2cR.Close()
+	_ = s2cW.Close()
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Serve returned unexpected error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return")
 	}
 }

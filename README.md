@@ -160,7 +160,7 @@ Example MCP config:
 
 ## Release
 
-- Current release: `v0.0.28`
+- Current release: `v0.0.29`
 - Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
@@ -170,7 +170,7 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.28`.
+CI release is triggered by pushing a version tag such as `v0.0.29`.
 
 ## npm Package
 
