@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"strings"
@@ -22,6 +23,7 @@ import (
 
 type buildAgentInput struct {
 	AppName                     string
+	PromptRole                  string
 	WorkspaceDir                string
 	EnableExperimentalLSPPrompt bool
 	BasePrompt                  string
@@ -36,6 +38,11 @@ type buildAgentInput struct {
 	ModelName                   string
 	ModelConfig                 modelproviders.Config
 }
+
+const (
+	promptRoleMainSession = "main_session"
+	promptRoleACPServer   = "acp_server"
+)
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 	systemPrompt, err := resolveSystemPrompt(in)
@@ -371,22 +378,32 @@ type sessionRuntimeResult struct {
 	ACPRuntime *runtime.Runtime
 }
 
-func setupSessionRuntime(storeDir, workspaceKey, appName, userID, sessionIndexFile string, compactWatermark float64, workspace workspaceContext) (*sessionRuntimeResult, error) {
-	db, err := localstore.Open(storeDir, sessionIndexFile)
+func openLocalStore(ctx context.Context, storeDir, sessionIndexFile string) (*localstore.Database, error) {
+	_ = ctx
+	return localstore.Open(storeDir, sessionIndexFile) //nolint:contextcheck // localstore.Open does not accept a context.
+}
+
+func newSessionIndexWithDBContext(ctx context.Context, path string, db *sql.DB) (*sessionIndex, error) {
+	_ = ctx
+	return newSessionIndexWithDB(path, db) //nolint:contextcheck // session index initialization does not support context propagation.
+}
+
+func setupSessionRuntime(ctx context.Context, storeDir, workspaceKey, _, _ string, sessionIndexFile string, compactWatermark float64, workspace workspaceContext) (*sessionRuntimeResult, error) {
+	db, err := openLocalStore(ctx, storeDir, sessionIndexFile)
 	if err != nil {
 		return nil, err
 	}
-	index, err := newSessionIndexWithDB(sessionIndexFile, db.SQLDB())
+	index, err := newSessionIndexWithDBContext(ctx, sessionIndexFile, db.SQLDB())
 	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	mainStore := db.Scope(localstore.Workspace{Key: workspaceKey, CWD: workspace.CWD}, localstore.ScopeMain)
-	if err := mainStore.Backfill(context.Background()); err != nil {
+	if err := mainStore.Backfill(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: backfill local session catalog failed: %v\n", err)
 	}
 	acpStore := db.Scope(localstore.Workspace{Key: workspaceKey, CWD: workspace.CWD}, localstore.ScopeACPRemote)
-	if err := acpStore.Backfill(context.Background()); err != nil {
+	if err := acpStore.Backfill(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: backfill ACP session catalog failed: %v\n", err)
 	}
 	rt, err := runtime.New(runtime.Config{
@@ -395,7 +412,7 @@ func setupSessionRuntime(storeDir, workspaceKey, appName, userID, sessionIndexFi
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio: compactWatermark,
 		},
-		})
+	})
 	if err != nil {
 		_ = db.Close()
 		return nil, err

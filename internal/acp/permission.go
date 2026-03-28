@@ -65,10 +65,6 @@ func (p *permissionBridge) Approve(ctx context.Context, req toolexec.ApprovalReq
 		p.rememberCallDecision(callID, allowed)
 		return allowed, nil
 	}
-	title := strings.TrimSpace(req.ToolName)
-	if title == "" {
-		title = "permission"
-	}
 	toolCall := commandApprovalToolCall(callID, req)
 	var allowed bool
 	err := p.queue.Do(ctx, func(ctx context.Context) error {
@@ -114,10 +110,6 @@ func (p *permissionBridge) AuthorizeTool(ctx context.Context, req policy.ToolAut
 	callID := strings.TrimSpace(info.ID)
 	if callID == "" {
 		callID = "tool-" + strings.ToLower(strings.TrimSpace(req.ToolName))
-	}
-	title := strings.TrimSpace(req.ToolName)
-	if title == "" {
-		title = "tool"
 	}
 	toolCall := authorizationToolCall(callID, req)
 	var allowed bool

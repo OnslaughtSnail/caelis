@@ -18,25 +18,54 @@ type toolCallMutationVisuals struct {
 	PreviewNew   string
 }
 
+type mutationPreviewRender struct {
+	Preview toolfs.MutationPreview
+	Counts  mutationChangeCounts
+	DiffMsg tuievents.DiffBlockMsg
+
+	HasChanges bool
+	TooLarge   bool
+}
+
 type mutationChangeCounts struct {
 	Added   int
 	Removed int
 }
 
 func buildToolCallMutationVisuals(runtime toolexec.Runtime, toolName string, callArgs map[string]any) (toolCallMutationVisuals, bool) {
-	preview, err := toolfs.BuildMutationPreview(runtime, toolName, callArgs)
+	render, err := buildMutationPreviewRender(runtime, toolName, callArgs)
 	if err != nil {
 		return toolCallMutationVisuals{}, false
 	}
 	visuals := toolCallMutationVisuals{
-		ChangeCounts: mutationChangeCountsForTool(strings.ToUpper(strings.TrimSpace(toolName)), preview, callArgs),
-		PreviewPath:  preview.Path,
-		PreviewNew:   preview.New,
+		ChangeCounts: render.Counts,
+		PreviewPath:  render.Preview.Path,
+		PreviewNew:   render.Preview.New,
 	}
-	if shouldSkipRichDiff(preview, visuals.ChangeCounts) {
+	if !render.HasChanges || render.TooLarge {
 		return visuals, true
 	}
-	visuals.DiffMsg = tuievents.DiffBlockMsg{
+	visuals.DiffMsg = render.DiffMsg
+	visuals.DiffShown = true
+	return visuals, true
+}
+
+func buildMutationPreviewRender(runtime toolexec.Runtime, toolName string, callArgs map[string]any) (mutationPreviewRender, error) {
+	preview, err := toolfs.BuildMutationPreview(runtime, toolName, callArgs)
+	if err != nil {
+		return mutationPreviewRender{}, err
+	}
+	counts := mutationChangeCountsForTool(strings.ToUpper(strings.TrimSpace(toolName)), preview, callArgs)
+	render := mutationPreviewRender{
+		Preview:    preview,
+		Counts:     counts,
+		HasChanges: !mutationHasNoChanges(preview, counts),
+	}
+	if !render.HasChanges {
+		return render, nil
+	}
+	render.TooLarge = shouldSkipRichDiff(preview, counts)
+	render.DiffMsg = tuievents.DiffBlockMsg{
 		Tool:      strings.ToUpper(strings.TrimSpace(preview.Tool)),
 		Path:      displayFileName(preview.Path),
 		Created:   preview.Created,
@@ -46,14 +75,13 @@ func buildToolCallMutationVisuals(runtime toolexec.Runtime, toolName string, cal
 		Preview:   preview.Preview,
 		Truncated: strings.Contains(preview.Preview, "... (preview truncated)"),
 	}
-	if visuals.DiffMsg.Tool == "" {
-		visuals.DiffMsg.Tool = strings.ToUpper(strings.TrimSpace(toolName))
+	if render.DiffMsg.Tool == "" {
+		render.DiffMsg.Tool = strings.ToUpper(strings.TrimSpace(toolName))
 	}
-	visuals.DiffShown = true
-	return visuals, true
+	return render, nil
 }
 
-func mutationChangeCountsForTool(toolName string, preview toolfs.MutationPreview, callArgs map[string]any) mutationChangeCounts {
+func mutationChangeCountsForTool(toolName string, preview toolfs.MutationPreview, _ map[string]any) mutationChangeCounts {
 	switch toolName {
 	case "PATCH", "WRITE":
 		stats := toolfs.CountLineDiff(preview.Old, preview.New)
@@ -110,22 +138,55 @@ func formatMutationChangeSummary(counts mutationChangeCounts) string {
 }
 
 func shouldSkipRichDiff(preview toolfs.MutationPreview, counts mutationChangeCounts) bool {
-	const richDiffMaxTotalLines = 5000
 	if mutationHasNoChanges(preview, counts) {
 		return true
 	}
-
-	totalLines := countLines(preview.Old) + countLines(preview.New)
-	if totalLines > richDiffMaxTotalLines {
-		return true
+	oldChanged, newChanged := mutationChangedWindowLineCounts(preview.Old, preview.New)
+	windowLines := oldChanged + newChanged
+	if windowLines <= 0 {
+		windowLines = counts.Added + counts.Removed
 	}
-	diffLines := counts.Added + counts.Removed
-	if diffLines <= 0 {
-		diffLines = totalLines
-	}
-	return diffLines > richDiffMaxLines
+	return windowLines > richDiffMaxLines
 }
 
 func mutationHasNoChanges(preview toolfs.MutationPreview, counts mutationChangeCounts) bool {
 	return !preview.Created && counts.Added == 0 && counts.Removed == 0 && preview.Old == preview.New
+}
+
+func mutationChangedWindowLineCounts(oldText, newText string) (int, int) {
+	oldLines := mutationDiffLines(oldText)
+	newLines := mutationDiffLines(newText)
+	prefix, suffix := mutationCommonAffixLineCounts(oldLines, newLines)
+	oldChanged := len(oldLines) - prefix - suffix
+	newChanged := len(newLines) - prefix - suffix
+	if oldChanged < 0 {
+		oldChanged = 0
+	}
+	if newChanged < 0 {
+		newChanged = 0
+	}
+	return oldChanged, newChanged
+}
+
+func mutationCommonAffixLineCounts(oldLines, newLines []string) (int, int) {
+	prefix := 0
+	for prefix < len(oldLines) && prefix < len(newLines) && oldLines[prefix] == newLines[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for prefix+suffix < len(oldLines) &&
+		prefix+suffix < len(newLines) &&
+		oldLines[len(oldLines)-1-suffix] == newLines[len(newLines)-1-suffix] {
+		suffix++
+	}
+	return prefix, suffix
+}
+
+func mutationDiffLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+	normalized = strings.TrimSuffix(normalized, "\n")
+	return strings.Split(normalized, "\n")
 }

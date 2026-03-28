@@ -58,9 +58,11 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 		default:
 		}
 		var stdoutMarker, stderrMarker int64
+		var previousPreview string
 		record.WithLock(func(one *task.Record) {
 			stdoutMarker = one.StdoutCursor
 			stderrMarker = one.StderrCursor
+			previousPreview = strings.TrimSpace(fmt.Sprint(one.Result["latest_output"]))
 		})
 
 		stdout, stderr, nextStdout, nextStderr, err := c.runner.ReadOutput(c.sessionID, stdoutMarker, stderrMarker)
@@ -85,36 +87,48 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 		if err != nil {
 			return task.Snapshot{}, err
 		}
+		now := time.Now()
 		var (
 			snapshot     task.Snapshot
 			finalOutput  task.Output
-			latestOutput = bashOutputPreview(stdout, stderr)
+			latestOutput = task.MergeLatestOutput(previousPreview, bashOutputPreview(stdout, stderr))
 			outputMeta   = bashTaskOutputMeta(status, c.tty)
 		)
 		if status.State != toolexec.SessionStateRunning && !c.tty {
 			finalOutput = readRetainedOutput(c.runner, c.sessionID)
-			if latestOutput == "" {
-				latestOutput = bashOutputPreview([]byte(finalOutput.Stdout), []byte(finalOutput.Stderr))
-			}
+			latestOutput = task.MergeLatestOutput(previousPreview, bashOutputPreview([]byte(finalOutput.Stdout), []byte(finalOutput.Stderr)))
 		}
 		record.WithLock(func(one *task.Record) {
+			prevState := one.State
 			one.StdoutCursor = nextStdout
 			one.StderrCursor = nextStderr
-			one.State = bashTaskState(status.State)
+			one.State = bashTaskState(status, latestOutput)
 			one.Running = status.State == toolexec.SessionStateRunning
-			one.UpdatedAt = time.Now()
+			one.UpdatedAt = now
+			if len(stdout) > 0 || len(stderr) > 0 || prevState != one.State {
+				one.HeartbeatAt = now
+			}
 			one.Result = map[string]any{
-				"command":     c.command,
-				"workdir":     c.workdir,
-				"tty":         c.tty,
-				"route":       c.route,
-				"state":       string(one.State),
-				"exit_code":   status.ExitCode,
-				"session_id":  c.sessionID,
-				"output_meta": outputMeta,
+				"command":              c.command,
+				"workdir":              c.workdir,
+				"tty":                  c.tty,
+				"route":                c.route,
+				"state":                string(one.State),
+				"exit_code":            status.ExitCode,
+				"session_id":           c.sessionID,
+				"_ui_exec_session_id":  c.sessionID,
+				"_ui_route":            c.route,
+				"output_meta":          outputMeta,
+				"stdout_bytes":         status.StdoutBytes,
+				"stderr_bytes":         status.StderrBytes,
+				"progress_seq":         status.StdoutBytes + status.StderrBytes,
+				"progress_age_seconds": 0,
 			}
 			if latestOutput != "" {
 				one.Result["latest_output"] = latestOutput
+			}
+			if text := strings.TrimSpace(status.Error); text != "" {
+				one.Result["error"] = text
 			}
 			if one.Running {
 				output.Stdout += string(stdout)
@@ -238,69 +252,6 @@ func (s *bashTaskLiveStream) emit(ctx context.Context, snapshot task.Snapshot) {
 	}
 }
 
-func (c *bashTaskController) Status(ctx context.Context, record *task.Record) (task.Snapshot, error) {
-	if c == nil || c.runner == nil {
-		record.WithLock(func(one *task.Record) {
-			one.State = task.StateInterrupted
-			one.Running = false
-			one.UpdatedAt = time.Now()
-			if one.Result == nil {
-				one.Result = map[string]any{}
-			}
-			one.Result["state"] = string(one.State)
-			one.Result["interrupted"] = true
-		})
-		if c != nil {
-			_ = persistControllerRecord(ctx, c.store, record)
-		}
-		return record.Snapshot(task.Output{}), nil
-	}
-	status, err := c.runner.GetSessionStatus(c.sessionID)
-	if err != nil {
-		if errors.Is(err, toolexec.ErrSessionNotFound) {
-			record.WithLock(func(one *task.Record) {
-				one.State = task.StateInterrupted
-				one.Running = false
-				one.UpdatedAt = time.Now()
-				if one.Result == nil {
-					one.Result = map[string]any{}
-				}
-				one.Result["state"] = string(one.State)
-				one.Result["interrupted"] = true
-			})
-			_ = persistControllerRecord(ctx, c.store, record)
-			return record.Snapshot(task.Output{}), nil
-		}
-		return task.Snapshot{}, err
-	}
-	preview, err := c.previewOutput()
-	if err != nil {
-		return task.Snapshot{}, err
-	}
-	var snapshot task.Snapshot
-	record.WithLock(func(one *task.Record) {
-		one.State = bashTaskState(status.State)
-		one.Running = status.State == toolexec.SessionStateRunning
-		one.UpdatedAt = time.Now()
-		one.Result = map[string]any{
-			"command":     c.command,
-			"workdir":     c.workdir,
-			"tty":         c.tty,
-			"route":       c.route,
-			"state":       string(one.State),
-			"exit_code":   status.ExitCode,
-			"session_id":  c.sessionID,
-			"output_meta": bashTaskOutputMeta(status, c.tty),
-		}
-		if preview != "" {
-			one.Result["latest_output"] = preview
-		}
-		snapshot = one.LockedSnapshot(task.Output{})
-	})
-	_ = persistControllerRecord(ctx, c.store, record)
-	return snapshot, nil
-}
-
 func (c *bashTaskController) Write(ctx context.Context, record *task.Record, input string, yield time.Duration) (task.Snapshot, error) {
 	if c == nil || c.runner == nil {
 		return task.Snapshot{}, fmt.Errorf("task: bash controller is unavailable")
@@ -326,13 +277,15 @@ func (c *bashTaskController) Cancel(ctx context.Context, record *task.Record) (t
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"command":     c.command,
-			"workdir":     c.workdir,
-			"tty":         c.tty,
-			"route":       c.route,
-			"state":       string(one.State),
-			"session_id":  c.sessionID,
-			"output_meta": bashTaskOutputMeta(status, c.tty),
+			"command":             c.command,
+			"workdir":             c.workdir,
+			"tty":                 c.tty,
+			"route":               c.route,
+			"state":               string(one.State),
+			"session_id":          c.sessionID,
+			"_ui_exec_session_id": c.sessionID,
+			"_ui_route":           c.route,
+			"output_meta":         bashTaskOutputMeta(status, c.tty),
 		}
 		if preview != "" {
 			one.Result["latest_output"] = preview
@@ -377,10 +330,7 @@ func bashOutputPreview(stdout []byte, stderr []byte) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	if len(lines) > 6 {
-		lines = lines[len(lines)-6:]
-	}
-	return strings.Join(lines, "\n")
+	return task.FormatLatestOutput(strings.Join(lines, "\n"))
 }
 
 func bashTaskOutputMeta(status toolexec.SessionStatus, tty bool) map[string]any {
@@ -438,8 +388,8 @@ func asyncBashRunnerForRoute(execRuntime toolexec.Runtime, route string) (toolex
 	}
 }
 
-func bashTaskState(state toolexec.SessionState) task.State {
-	switch state {
+func bashTaskState(status toolexec.SessionStatus, latestOutput string) task.State {
+	switch status.State {
 	case toolexec.SessionStateCompleted:
 		return task.StateCompleted
 	case toolexec.SessionStateTerminated:
@@ -447,6 +397,46 @@ func bashTaskState(state toolexec.SessionState) task.State {
 	case toolexec.SessionStateError:
 		return task.StateFailed
 	default:
+		if bashTaskLikelyWaitingInput(latestOutput) {
+			return task.StateWaitingInput
+		}
 		return task.StateRunning
 	}
+}
+
+func bashTaskLikelyWaitingInput(preview string) bool {
+	preview = strings.TrimSpace(strings.ToLower(preview))
+	if preview == "" {
+		return false
+	}
+	lines := strings.Split(preview, "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if last == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"waiting for",
+		"press any key",
+		"press enter",
+		"hit enter",
+		"type 'yes'",
+		"enter password",
+		"authentication required",
+		"login:",
+		"username:",
+		"passphrase",
+		"(y/n)",
+		"[y/n]",
+		"continue?",
+		"proceed?",
+		"confirm",
+	} {
+		if strings.Contains(last, marker) {
+			return true
+		}
+	}
+	if len(last) <= 120 && (strings.HasSuffix(last, ":") || strings.HasSuffix(last, "?")) {
+		return true
+	}
+	return false
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -301,6 +302,21 @@ func subagentDomainUpdatesFromTaskToolResponse(rootSessionID string, resp *model
 			ClaimAnchor: callID != "",
 		})
 	}
+	for _, ev := range taskstream.EventsFromResult(resp.Result) {
+		if strings.TrimSpace(ev.Chunk) == "" {
+			continue
+		}
+		stream := strings.TrimSpace(ev.Stream)
+		if stream == "" {
+			stream = "assistant"
+		}
+		updates = append(updates, subagentDomainUpdate{
+			Kind:   subagentDomainStream,
+			Target: target,
+			Stream: stream,
+			Chunk:  ev.Chunk,
+		})
+	}
 	switch state {
 	case "completed", "failed", "interrupted", "timed_out":
 		updates = append(updates, subagentDomainUpdate{
@@ -478,6 +494,7 @@ type spawnPreviewState struct {
 	assistant        string
 	reasoning        string
 	toolCalls        map[string]toolCallSnapshot
+	toolPreviews     map[string]string
 	lastToolCallName string
 	lastToolCallArgs string
 }
@@ -759,22 +776,29 @@ func projectSpawnToolActivity(state *spawnPreviewState, target subagentProjectio
 			stream = "stderr"
 		}
 		var callArgs map[string]any
-		if toolCalls, snapshot, ok := consumeSubagentToolSnapshot(state.toolCalls, respID); ok {
-			state.toolCalls = toolCalls
+		if snapshot, ok := state.toolCalls[respID]; ok {
 			callArgs = snapshot.Args
 		}
-		summary := summarizeToolResponseWithCall(resp.Name, resp.Result, callArgs)
+		chunk, final := spawnToolResponseProjection(state, respID, resp.Name, resp.Result, callArgs)
+		if final {
+			if toolCalls, _, ok := consumeSubagentToolSnapshot(state.toolCalls, respID); ok {
+				state.toolCalls = toolCalls
+			}
+		}
+		if !final && strings.TrimSpace(chunk) == "" {
+			return updates
+		}
 		updates = append(updates, subagentDomainUpdate{
 			Kind:       subagentDomainToolCall,
 			Target:     target,
 			ToolName:   resp.Name,
 			ToolCallID: respID,
-			Chunk:      summary,
+			Chunk:      chunk,
 			Stream:     stream,
-			Final:      true,
+			Final:      final,
 		})
 		// Detect PLAN tool result and emit SubagentPlanMsg.
-		if isPlanToolName(resp.Name) && !hasToolError(resp.Result) {
+		if final && isPlanToolName(resp.Name) && !hasToolError(resp.Result) {
 			entries := subagentPlanEntriesFromToolPayload(callArgs, resp.Result)
 			if len(entries) > 0 {
 				updates = append(updates, subagentDomainUpdate{
@@ -786,6 +810,37 @@ func projectSpawnToolActivity(state *spawnPreviewState, target subagentProjectio
 		}
 	}
 	return updates
+}
+
+func spawnToolResponseProjection(state *spawnPreviewState, callID, toolName string, result map[string]any, callArgs map[string]any) (string, bool) {
+	if taskStateIsActive(asString(result["state"])) {
+		preview := strings.TrimSpace(firstNonEmpty(result, "latest_output", "result", "output", "stdout", "stderr"))
+		if preview == "" {
+			preview = strings.TrimSpace(taskProgressMessage(firstNonEmpty(result, "msg", "message")))
+		}
+		if state == nil || strings.TrimSpace(callID) == "" || preview == "" {
+			return preview, false
+		}
+		if state.toolPreviews == nil {
+			state.toolPreviews = map[string]string{}
+		}
+		prev := state.toolPreviews[callID]
+		state.toolPreviews[callID] = preview
+		if prev == "" {
+			return preview, false
+		}
+		if delta := previewDelta(prev, preview); delta != "" {
+			return delta, false
+		}
+		if preview == prev {
+			return "", false
+		}
+		return "\n" + preview, false
+	}
+	if state != nil && strings.TrimSpace(callID) != "" && state.toolPreviews != nil {
+		delete(state.toolPreviews, callID)
+	}
+	return summarizeToolResponseWithCall(toolName, result, callArgs), true
 }
 
 func subagentPlanEntriesFromToolPayload(callArgs map[string]any, result map[string]any) []tuievents.PlanEntry {

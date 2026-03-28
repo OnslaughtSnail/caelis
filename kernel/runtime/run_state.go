@@ -35,7 +35,7 @@ type RunState struct {
 // then falls back to persisted lifecycle events for older sessions.
 func (r *Runtime) RunState(ctx context.Context, req RunStateRequest) (RunState, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return RunState{}, fmt.Errorf("runtime: context is required")
 	}
 	if strings.TrimSpace(req.AppName) == "" || strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return RunState{}, fmt.Errorf("runtime: app_name, user_id and session_id are required")

@@ -12,21 +12,21 @@ func (capabilityValue) Capability() Capability {
 }
 
 func TestOf_DefaultUnknown(t *testing.T) {
-	cap := Of(nil)
-	if cap.Risk != RiskUnknown {
-		t.Fatalf("expected unknown risk for nil value, got %q", cap.Risk)
+	got := Of(nil)
+	if got.Risk != RiskUnknown {
+		t.Fatalf("expected unknown risk for nil value, got %q", got.Risk)
 	}
 }
 
 func TestOf_NormalizesOperations(t *testing.T) {
-	cap := Of(capabilityValue{})
-	if cap.Risk != RiskMedium {
-		t.Fatalf("expected risk=%q, got %q", RiskMedium, cap.Risk)
+	got := Of(capabilityValue{})
+	if got.Risk != RiskMedium {
+		t.Fatalf("expected risk=%q, got %q", RiskMedium, got.Risk)
 	}
-	if !cap.HasOperation(OperationFileRead) || !cap.HasOperation(OperationExec) {
-		t.Fatalf("expected declared operations in capability: %#v", cap.Operations)
+	if !got.HasOperation(OperationFileRead) || !got.HasOperation(OperationExec) {
+		t.Fatalf("expected declared operations in capability: %#v", got.Operations)
 	}
-	if len(cap.Operations) != 2 {
-		t.Fatalf("expected deduped operations length 2, got %d (%#v)", len(cap.Operations), cap.Operations)
+	if len(got.Operations) != 2 {
+		t.Fatalf("expected deduped operations length 2, got %d (%#v)", len(got.Operations), got.Operations)
 	}
 }

@@ -148,10 +148,10 @@ func renderPrompt(fragments []PromptFragment) string {
 	if block := renderInstructionBlock("user_custom_instructions", userFragments, renderLegacyUserPrecedenceNote(userFragments)); block != "" {
 		parts = append(parts, block)
 	}
-	if block := renderRawFragments(contextFragments); block != "" {
+	if block := renderRawFragments(metadataFragments); block != "" {
 		parts = append(parts, block)
 	}
-	if block := renderRawFragments(metadataFragments); block != "" {
+	if block := renderRawFragments(contextFragments); block != "" {
 		parts = append(parts, block)
 	}
 	return strings.Join(parts, "\n\n")
@@ -167,7 +167,7 @@ func normalizeFragmentKind(kind PromptFragmentKind, stage string, content string
 	switch stage {
 	case "global_agents", "workspace_agents", "active_agent_policies", "session_overrides", "user_custom", "user_custom_instructions":
 		return PromptFragmentKindUser
-	case "workspace_context", "environment_context":
+	case "workspace_context", "environment_context", "dynamic_runtime_context":
 		return PromptFragmentKindContext
 	case "skills_meta", "metadata":
 		return PromptFragmentKindMetadata

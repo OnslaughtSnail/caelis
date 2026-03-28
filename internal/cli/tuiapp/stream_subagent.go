@@ -240,24 +240,6 @@ func subagentPanelSessionKey(spawnID, attachID string) string {
 	return strings.TrimSpace(attachID)
 }
 
-func (m *Model) reanchorSubagentPanel(panel *SubagentPanelBlock, prevCallID string) {
-	if m == nil || panel == nil {
-		return
-	}
-	prevCallID = strings.TrimSpace(prevCallID)
-	nextCallID := strings.TrimSpace(panel.CallID)
-	if prevCallID == nextCallID {
-		return
-	}
-	if prevCallID != "" {
-		m.syncInlineSubagentAnchorLabel(prevCallID, false)
-	}
-	anchorID := m.resolveCallAnchor(nextCallID, "SPAWN")
-	if anchorID != "" {
-		_, _ = m.doc.MoveAfter(panel.BlockID(), anchorID)
-	}
-}
-
 func (m *Model) resolveRecentTranscriptAnchor(callID, toolName string) string {
 	if m == nil || strings.TrimSpace(callID) == "" || strings.TrimSpace(toolName) == "" {
 		return ""

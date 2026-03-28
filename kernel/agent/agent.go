@@ -79,10 +79,14 @@ type SubagentRunResult struct {
 	Session         string
 	ChildCWD        string
 	Assistant       string
+	Error           string
 	State           string
 	Running         bool
 	ApprovalPending bool
+	ToolCallPending bool
 	LogSnapshot     string
+	LatestOutput    string
+	ProgressSeq     int
 	UpdatedAt       time.Time
 	Yielded         bool
 	Timeout         time.Duration

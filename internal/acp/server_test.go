@@ -469,7 +469,7 @@ func TestServer_PromptForwardsDelegatedChildSessionUpdates(t *testing.T) {
 					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
 						ID:   "call_delegate_1",
 						Name: tool.SpawnToolName,
-						Args: `{"prompt":"child task","yield_seconds":0}`,
+						Args: `{"prompt":"child task","yield_time_ms":0}`,
 					}}, ""),
 				}},
 				{{Message: model.NewTextMessage(model.RoleAssistant, "child done")}},
@@ -783,8 +783,7 @@ func TestServer_Prompt_BashUsesACPTerminalWhenClientSupportsIt(t *testing.T) {
 
 func TestServer_Prompt_FiltersInternalToolMetadataFromACPUpdates(t *testing.T) {
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
-			_ = stream
+		newAgent: func(_ bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = sessionCWD
 			_ = cfg
 			return scriptedAgent{
@@ -1046,10 +1045,10 @@ func TestServer_NewSessionEmitsAvailableCommandsAndEmptyPlan(t *testing.T) {
 	var newResp NewSessionResponse
 	mustCall(t, h.client, MethodSessionNew, NewSessionRequest{CWD: h.workspace}, &newResp)
 
-	h.waitNotifications(t, 2)
+	h.waitNotificationTypes(t, UpdateAvailableCmds, UpdateSessionInfo, UpdatePlan)
 	types := h.notificationTypes()
-	if !containsAll(types, UpdateAvailableCmds, UpdatePlan) {
-		t.Fatalf("expected available commands and empty plan updates, got %#v", types)
+	if !containsAll(types, UpdateAvailableCmds, UpdateSessionInfo, UpdatePlan) {
+		t.Fatalf("expected available commands, session info, and empty plan updates, got %#v", types)
 	}
 	h.mu.Lock()
 	notes := append([]SessionNotification(nil), h.notifications...)
@@ -1737,7 +1736,7 @@ func TestSupplementalToolCallUpdates_TaskCancelCompletesOriginBash(t *testing.T)
 func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(_ bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = sessionCWD
 			_ = cfg
 			return blockingAgent{name: "block", blocker: blocker}, nil
@@ -1779,7 +1778,7 @@ func TestServer_SessionCancelInterruptsPrompt(t *testing.T) {
 func TestServer_SessionLoadKeepsCancelForActiveRun(t *testing.T) {
 	blocker := make(chan struct{})
 	h := newHarness(t, harnessConfig{
-		newAgent: func(stream bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
+		newAgent: func(_ bool, sessionCWD string, _ string, cfg AgentSessionConfig) (agent.Agent, error) {
 			_ = sessionCWD
 			_ = cfg
 			return blockingAgent{name: "block", blocker: blocker}, nil
@@ -2126,7 +2125,7 @@ func (h *harness) close() {
 	h.cancel()
 }
 
-func (h *harness) handleRequest(ctx context.Context, msg Message) (any, *RPCError) {
+func (h *harness) handleRequest(_ context.Context, msg Message) (any, *RPCError) {
 	switch msg.Method {
 	case MethodReadTextFile:
 		var req ReadTextFileRequest

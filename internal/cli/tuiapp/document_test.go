@@ -1808,6 +1808,47 @@ func TestSubagentPanelApprovalState(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelApprovalTemporarilyHidesPlan(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdatePlan([]planEntryState{
+		{Content: "review pending approval", Status: "in_progress"},
+	})
+
+	ctx := BlockRenderContext{TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+	if !strings.Contains(combined, "review pending approval") {
+		t.Fatalf("expected plan content before approval, got:\n%s", combined)
+	}
+
+	panel.Status = "waiting_approval"
+	panel.AddApprovalEvent("BASH", "rm -rf /tmp/demo")
+	rows = panel.Render(ctx)
+	combined = ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+	if strings.Contains(combined, "review pending approval") {
+		t.Fatalf("did not expect plan content while approval is active, got:\n%s", combined)
+	}
+	if !strings.Contains(combined, "waiting approval") {
+		t.Fatalf("expected approval status while approval is active, got:\n%s", combined)
+	}
+
+	panel.Status = "running"
+	rows = panel.Render(ctx)
+	combined = ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+	if !strings.Contains(combined, "review pending approval") {
+		t.Fatalf("expected plan content to return after approval clears, got:\n%s", combined)
+	}
+}
+
 func TestSubagentPanelAssistantMarkdownDoesNotInjectRolePrefix(t *testing.T) {
 	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
 	panel.AppendStreamChunk(SEAssistant, "能做什么：\n\n- 文件操作\n- 搜索与分析\n- 自然语言交互")
@@ -2362,6 +2403,7 @@ func TestWaitDoesNotGetOwnPanel(t *testing.T) {
 	bp := m.findBashPanelBlock("call-1")
 	if bp == nil {
 		t.Fatal("expected original panel for call-1")
+		return
 	}
 	if !strings.Contains(strings.Join(bashPanelTexts(bp), "\n"), "from-wait") {
 		t.Fatal("expected original panel to contain 'from-wait'")
@@ -2413,6 +2455,7 @@ func TestWaitingInputStateShownInPanel(t *testing.T) {
 	bp := m.findBashPanelBlock("call-1")
 	if bp == nil {
 		t.Fatal("expected panel for call-1")
+		return
 	}
 	if bp.State != "waiting_input" {
 		t.Fatalf("expected state 'waiting_input', got %q", bp.State)

@@ -75,7 +75,7 @@ func TestRuntimeRun_AutoCompaction(t *testing.T) {
 	foundAutoCompaction := false
 	foundStartNotice := false
 	foundDoneNotice := false
-	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for ev, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:             sess.AppName,
 		UserID:              sess.UserID,
 		SessionID:           sess.ID,
@@ -133,7 +133,7 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 	foundOverflowCompaction := false
 	foundFinalAssistant := false
 	foundOverflowNotice := false
-	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for ev, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:             sess.AppName,
 		UserID:              sess.UserID,
 		SessionID:           sess.ID,

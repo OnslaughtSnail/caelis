@@ -276,7 +276,7 @@ func (h *hostRunner) waitWithSmartIdleDetection(
 }
 
 // StartAsync starts a command asynchronously and returns a session ID.
-func (h *hostRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+func (h *hostRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
 	session, err := h.sessionManager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
@@ -362,8 +362,8 @@ func asExitError(err error, target **exec.ExitError) bool {
 	if err == nil || target == nil {
 		return false
 	}
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
 		return false
 	}
 	*target = exitErr

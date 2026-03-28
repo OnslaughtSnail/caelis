@@ -698,17 +698,17 @@ func (a blockingResumeAdapter) CancelPrompt(string) {}
 
 func (a blockingResumeAdapter) SessionFS(string) toolexec.FileSystem { return nil }
 
-func (s resumeIndexStub) ResolveWorkspaceSessionID(workspaceKey, prefix string) (string, bool, error) {
+func (s resumeIndexStub) ResolveWorkspaceSessionID(_ context.Context, _ string, prefix string) (string, bool, error) {
 	if strings.TrimSpace(prefix) == strings.TrimSpace(s.resolveID) {
 		return s.resolveID, true, nil
 	}
 	return "", false, nil
 }
 
-func (s resumeIndexStub) MostRecentWorkspaceSessionID(workspaceKey, excludeSessionID string) (string, bool, error) {
+func (s resumeIndexStub) MostRecentWorkspaceSessionID(_ context.Context, _ string, _ string) (string, bool, error) {
 	return "", false, nil
 }
 
-func (s resumeIndexStub) ListWorkspaceSessionsPage(workspaceKey string, page int, pageSize int) ([]sessionsvc.SessionSummary, error) {
+func (s resumeIndexStub) ListWorkspaceSessionsPage(_ context.Context, _ string, _ int, _ int) ([]sessionsvc.SessionSummary, error) {
 	return nil, nil
 }

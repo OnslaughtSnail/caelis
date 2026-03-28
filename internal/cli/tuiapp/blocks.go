@@ -373,16 +373,6 @@ func renderParticipantTurnToolRows(blockID string, ev SubagentEvent, width int, 
 	return renderToolEventViewModelLines(blockID, buildToolEventViewModel(ev), width, ctx.Theme)
 }
 
-func truncateDisplayText(text string, width int) string {
-	if width <= 0 || displayColumns(text) <= width {
-		return text
-	}
-	if width == 1 {
-		return "…"
-	}
-	return sliceByDisplayColumns(text, 0, width-1) + "…"
-}
-
 func collapseRepeatedNarrativeText(text string) string {
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	if strings.TrimSpace(text) == "" {
@@ -433,16 +423,6 @@ func participantTurnIsTerminal(state string) bool {
 	default:
 		return false
 	}
-}
-
-func (b *ParticipantTurnBlock) elapsed() time.Duration {
-	if b == nil || b.StartedAt.IsZero() {
-		return 0
-	}
-	if !b.EndedAt.IsZero() {
-		return b.EndedAt.Sub(b.StartedAt)
-	}
-	return time.Since(b.StartedAt)
 }
 
 func renderParticipantTurnFooter(b *ParticipantTurnBlock, ctx BlockRenderContext) string {
@@ -731,7 +711,7 @@ func (b *BashPanelBlock) renderPanelInnerLines(ctx BlockRenderContext, content [
 	return lines
 }
 
-func (b *BashPanelBlock) renderHeaderLine(ctx BlockRenderContext, width int) string {
+func (b *BashPanelBlock) renderHeaderLine(_ BlockRenderContext, width int) string {
 	if width <= 0 {
 		return ""
 	}
@@ -811,9 +791,13 @@ func visibleNarrativeEvents(events []SubagentEvent, status string) []SubagentEve
 	if len(events) == 0 {
 		return nil
 	}
+	hidePlan := strings.EqualFold(strings.TrimSpace(status), "waiting_approval") && hasApprovalEvent(events)
 	out := make([]SubagentEvent, 0, len(events))
 	for i, ev := range events {
 		if ev.Kind == SEReasoning && !shouldRenderReasoningEvent(events, i, status) {
+			continue
+		}
+		if hidePlan && ev.Kind == SEPlan {
 			continue
 		}
 		out = append(out, ev)
@@ -821,7 +805,16 @@ func visibleNarrativeEvents(events []SubagentEvent, status string) []SubagentEve
 	return out
 }
 
-func shouldRenderReasoningEvent(events []SubagentEvent, idx int, status string) bool {
+func hasApprovalEvent(events []SubagentEvent) bool {
+	for _, ev := range events {
+		if ev.Kind == SEApproval {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldRenderReasoningEvent(events []SubagentEvent, idx int, _ string) bool {
 	if idx < 0 || idx >= len(events) {
 		return false
 	}
@@ -858,43 +851,16 @@ func splitParticipantActor(actor string) (name string, provider string) {
 		return "", ""
 	}
 	open := strings.LastIndex(actor, "(")
-	close := strings.LastIndex(actor, ")")
-	if open <= 0 || close != len(actor)-1 || close <= open+1 {
+	closeIdx := strings.LastIndex(actor, ")")
+	if open <= 0 || closeIdx != len(actor)-1 || closeIdx <= open+1 {
 		return actor, ""
 	}
 	name = strings.TrimSpace(actor[:open])
-	provider = strings.TrimSpace(actor[open+1 : close])
+	provider = strings.TrimSpace(actor[open+1 : closeIdx])
 	if name == "" || provider == "" {
 		return actor, ""
 	}
 	return name, provider
-}
-
-func bashPanelStatus(b *BashPanelBlock, theme tuikit.Theme) (string, lipgloss.Style) {
-	if b == nil {
-		return "", theme.HelpHintTextStyle()
-	}
-	switch b.State {
-	case "running":
-		return "running", theme.AssistantStyle().Bold(true)
-	case "waiting_approval":
-		return "approval", theme.WarnStyle().Bold(true)
-	case "waiting_input":
-		return "input", theme.HelpHintTextStyle().Bold(true)
-	case "completed":
-		return "done", theme.HelpHintTextStyle()
-	case "failed":
-		return "failed", theme.ErrorStyle().Bold(true)
-	case "interrupted":
-		return "interrupted", theme.WarnStyle().Bold(true)
-	case "timed_out":
-		return "timed out", theme.WarnStyle().Bold(true)
-	case "cancelled", "canceled":
-		return "cancelled", theme.WarnStyle().Bold(true)
-	case "terminated":
-		return "terminated", theme.WarnStyle().Bold(true)
-	}
-	return "", theme.HelpHintTextStyle()
 }
 
 // ---------------------------------------------------------------------------
@@ -1424,55 +1390,6 @@ func renderSubagentNarrativeLines(raw string, lineStyle tuikit.LineStyle, conten
 		}
 	}
 	return out
-}
-
-func splitAndWrapToolSummary(text string, width int) []string {
-	width = maxInt(1, width)
-	var lines []string
-	for raw := range strings.SplitSeq(text, "\n") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		lines = append(lines, wrapToolOutputText(raw, width)...)
-	}
-	return lines
-}
-
-func latestSubagentEventSummary(panel *SubagentPanelBlock) string {
-	if panel == nil {
-		return ""
-	}
-	for i := len(panel.Events) - 1; i >= 0; i-- {
-		ev := panel.Events[i]
-		switch ev.Kind {
-		case SEAssistant, SEReasoning:
-			if text := strings.TrimSpace(ev.Text); text != "" {
-				return truncateDisplayText(text, 44)
-			}
-		case SEToolCall:
-			if text := strings.TrimSpace(ev.Output); text != "" {
-				return truncateDisplayText(text, 44)
-			}
-			if text := strings.TrimSpace(ev.Args); text != "" {
-				return truncateDisplayText(text, 44)
-			}
-			if text := strings.TrimSpace(ev.Name); text != "" {
-				return text
-			}
-		case SEPlan:
-			for j := len(ev.PlanEntries) - 1; j >= 0; j-- {
-				if text := strings.TrimSpace(ev.PlanEntries[j].Content); text != "" {
-					return truncateDisplayText(text, 44)
-				}
-			}
-		case SEApproval:
-			if text := strings.TrimSpace(ev.ApprovalCommand); text != "" {
-				return truncateDisplayText(text, 44)
-			}
-		}
-	}
-	return ""
 }
 
 func panelScrollWindow(total, visible, offset int, followTail bool) (start int, end int, maxOffset int) {

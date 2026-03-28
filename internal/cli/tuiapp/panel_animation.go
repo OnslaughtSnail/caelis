@@ -138,7 +138,7 @@ func advanceInlineCollapse(collapseAt *time.Time, collapseFrom *time.Time, colla
 		}
 		return true
 	}
-	if *collapseFor <= 0 || !now.Before((*collapseFrom).Add(*collapseFor)) {
+	if *collapseFor <= 0 || !now.Before(collapseFrom.Add(*collapseFor)) {
 		*expanded = false
 		cancelInlineCollapse(collapseAt, collapseFrom, visibleLines)
 		return true

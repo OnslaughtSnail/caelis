@@ -117,3 +117,39 @@ func TestSearchTool_RespectsGitignore(t *testing.T) {
 		t.Fatalf("expected visible file only, got %v", hits[0]["path"])
 	}
 }
+
+func TestSearchTool_ExcludeFiltersRelativePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, "keep.txt"), []byte("hello keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(tmpDir, "skip"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "skip", "hidden.txt"), []byte("hello hidden\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := NewSearchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), map[string]any{
+		"path":    tmpDir,
+		"query":   "hello",
+		"exclude": []any{"skip", "missing"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["count"] != 1 {
+		t.Fatalf("expected exclude to keep only one hit, got %#v", out)
+	}
+	hits, ok := out["hits"].([]map[string]any)
+	if !ok || len(hits) != 1 {
+		t.Fatalf("expected one hit after exclude, got %#v", out)
+	}
+	if hits[0]["path"] != filepath.Join(tmpDir, "keep.txt") {
+		t.Fatalf("expected keep.txt to remain visible, got %#v", hits[0]["path"])
+	}
+}

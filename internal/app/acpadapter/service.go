@@ -177,7 +177,7 @@ func (s *Service) Capabilities() internalacp.AdapterCapabilities {
 
 func (s *Service) NewSession(ctx context.Context, req internalacp.NewSessionRequest, caps internalacp.ClientCapabilities) (internalacp.AdapterSessionState, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return internalacp.AdapterSessionState{}, fmt.Errorf("acpadapter: context is required")
 	}
 	cwd, err := s.validateSessionCWD(req.CWD)
 	if err != nil {
@@ -231,7 +231,7 @@ func (s *Service) ListSessions(ctx context.Context, req internalacp.SessionListR
 
 func (s *Service) LoadSession(ctx context.Context, req internalacp.LoadSessionRequest, caps internalacp.ClientCapabilities) (internalacp.LoadedSessionState, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return internalacp.LoadedSessionState{}, fmt.Errorf("acpadapter: context is required")
 	}
 	cwd, err := s.validateSessionCWD(req.CWD)
 	if err != nil {
@@ -330,7 +330,7 @@ func (s *Service) StartPrompt(ctx context.Context, req internalacp.StartPromptRe
 	}
 	runCtx := ctx
 	if runCtx == nil {
-		runCtx = context.Background()
+		return internalacp.StartPromptResult{}, fmt.Errorf("acpadapter: context is required")
 	}
 	if mergeSessionMeta(sess, req.Meta) {
 		if err := s.persistSessionState(runCtx, s.sessionRef(sess.id), sess); err != nil {
@@ -501,7 +501,7 @@ func (s *Service) handleSlashCompact(ctx context.Context, sess *managedSession, 
 func (s *Service) appendAssistantText(ctx context.Context, sessionID string, text string) (*session.Event, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, nil
+		return nil, fmt.Errorf("acpadapter: assistant text is empty")
 	}
 	ev := &session.Event{
 		ID:        fmt.Sprintf("ev_%d", time.Now().UnixNano()),
@@ -761,7 +761,7 @@ func (s *Service) persistSessionState(ctx context.Context, sessRef *session.Sess
 	return s.store.ReplaceState(ctx, sessRef, values)
 }
 
-func (s *Service) ensurePromptSnapshot(ctx context.Context, sess *managedSession) (string, error) {
+func (s *Service) ensurePromptSnapshot(_ context.Context, sess *managedSession) (string, error) {
 	if sess == nil {
 		return "", fmt.Errorf("acpadapter: session is required")
 	}
@@ -1063,10 +1063,6 @@ func (s *managedSession) mode() string {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
 	return strings.TrimSpace(s.modeID)
-}
-
-func (s *managedSession) modeResolver() string {
-	return s.mode()
 }
 
 func (s *managedSession) configSnapshot() map[string]string {

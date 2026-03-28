@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,7 +86,7 @@ func TestBuildACPSessionList_UsesIndexedHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := buildACPSessionList(idx, workspace, internalacp.SessionListRequest{})
+	resp := buildACPSessionList(context.Background(), idx, workspace, internalacp.SessionListRequest{})
 	if len(resp.Sessions) != 1 {
 		t.Fatalf("expected one session, got %+v", resp)
 	}
@@ -120,7 +121,7 @@ func TestBuildACPSessionList_FiltersEmptySessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := buildACPSessionList(idx, workspace, internalacp.SessionListRequest{})
+	resp := buildACPSessionList(context.Background(), idx, workspace, internalacp.SessionListRequest{})
 	if len(resp.Sessions) != 1 {
 		t.Fatalf("expected one non-empty session, got %+v", resp)
 	}
@@ -163,7 +164,7 @@ func TestBuildACPSessionList_UsesIndexedSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := buildACPSessionList(idx, workspace, internalacp.SessionListRequest{})
+	resp := buildACPSessionList(context.Background(), idx, workspace, internalacp.SessionListRequest{})
 	if len(resp.Sessions) != 1 || resp.Sessions[0].SessionID != "s-root" {
 		t.Fatalf("expected delegated child sessions to be hidden from ACP list, got %+v", resp.Sessions)
 	}
@@ -199,7 +200,7 @@ func TestBuildACPSessionList_FiltersByCWD(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := buildACPSessionList(idx, workspace, internalacp.SessionListRequest{CWD: "/workspace"})
+	resp := buildACPSessionList(context.Background(), idx, workspace, internalacp.SessionListRequest{CWD: "/workspace"})
 	if len(resp.Sessions) != 1 {
 		t.Fatalf("expected one cwd-filtered session, got %+v", resp.Sessions)
 	}

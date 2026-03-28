@@ -19,7 +19,7 @@ type promptInputResult struct {
 	hasImages    bool
 }
 
-func (s *Server) promptInput(sessionID string, blocks []json.RawMessage) (promptInputResult, error) {
+func (s *Server) promptInput(ctx context.Context, sessionID string, blocks []json.RawMessage) (promptInputResult, error) {
 	result := promptInputResult{}
 	orderedParts := make([]model.ContentPart, 0, len(blocks))
 	textParts := make([]string, 0, len(blocks))
@@ -49,7 +49,7 @@ func (s *Server) promptInput(sessionID string, blocks []json.RawMessage) (prompt
 			if err := json.Unmarshal(raw, &block); err != nil {
 				return promptInputResult{}, err
 			}
-			part, err := s.resolveImageBlock(sessionID, block)
+			part, err := s.resolveImageBlock(ctx, sessionID, block)
 			if err != nil {
 				return promptInputResult{}, err
 			}
@@ -62,7 +62,7 @@ func (s *Server) promptInput(sessionID string, blocks []json.RawMessage) (prompt
 			if err := json.Unmarshal(raw, &block); err != nil {
 				return promptInputResult{}, err
 			}
-			part, text, err := s.resolveResourceLink(sessionID, block)
+			part, text, err := s.resolveResourceLink(ctx, sessionID, block)
 			if err != nil {
 				return promptInputResult{}, err
 			}
@@ -108,7 +108,7 @@ func (s *Server) promptInput(sessionID string, blocks []json.RawMessage) (prompt
 	return result, nil
 }
 
-func (s *Server) resolveResourceLink(sessionID string, link ResourceLink) (model.ContentPart, string, error) {
+func (s *Server) resolveResourceLink(ctx context.Context, sessionID string, link ResourceLink) (model.ContentPart, string, error) {
 	uri := strings.TrimSpace(link.URI)
 	if uri == "" {
 		return model.ContentPart{}, "", nil
@@ -126,7 +126,7 @@ func (s *Server) resolveResourceLink(sessionID string, link ResourceLink) (model
 		return part, "", err
 	}
 	var resp ReadTextFileResponse
-	err = s.cfg.Conn.Call(context.Background(), MethodReadTextFile, ReadTextFileRequest{
+	err = s.cfg.Conn.Call(ctx, MethodReadTextFile, ReadTextFileRequest{
 		SessionID: sessionID,
 		Path:      path,
 	}, &resp)
@@ -179,7 +179,7 @@ func (s *Server) resolveEmbeddedResource(block EmbeddedResource) (model.ContentP
 	return model.ContentPart{}, fmt.Sprintf("[embedded resource: %s]\n%s", name, text), nil
 }
 
-func (s *Server) resolveImageBlock(sessionID string, block ImageContent) (model.ContentPart, error) {
+func (s *Server) resolveImageBlock(ctx context.Context, sessionID string, block ImageContent) (model.ContentPart, error) {
 	if uri := strings.TrimSpace(block.URI); uri != "" {
 		link := ResourceLink{
 			Type:     "resource_link",
@@ -187,7 +187,7 @@ func (s *Server) resolveImageBlock(sessionID string, block ImageContent) (model.
 			URI:      uri,
 			MimeType: block.MimeType,
 		}
-		part, _, err := s.resolveResourceLink(sessionID, link)
+		part, _, err := s.resolveResourceLink(ctx, sessionID, link)
 		return part, err
 	}
 	raw := strings.TrimSpace(block.Data)

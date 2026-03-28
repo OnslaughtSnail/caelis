@@ -8,9 +8,7 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
-var cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
-	return toolexec.NewModeSwitchable(cfg)
-}
+var cliExecRuntimeBuilder = toolexec.NewModeSwitchable
 
 type swappableRuntime struct {
 	mu      sync.RWMutex

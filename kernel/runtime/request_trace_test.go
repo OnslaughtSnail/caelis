@@ -18,6 +18,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/filestore"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
@@ -166,7 +167,7 @@ type traceSpawnRunner struct {
 	userID  string
 }
 
-func (r *traceSpawnRunner) RunSubagent(ctx context.Context, req agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
+func (r *traceSpawnRunner) RunSubagent(ctx context.Context, _ agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
 	child := &session.Session{AppName: r.appName, UserID: r.userID, ID: "child-1"}
 	if _, err := r.runtime.store.GetOrCreate(ctx, child); err != nil {
 		return agent.SubagentRunResult{}, err
@@ -174,15 +175,15 @@ func (r *traceSpawnRunner) RunSubagent(ctx context.Context, req agent.SubagentRu
 	if err := r.runtime.store.AppendEvent(ctx, child, lifecycleEvent(child, RunLifecycleStatusRunning, "run", nil)); err != nil {
 		return agent.SubagentRunResult{}, err
 	}
-	go func() {
+	go func(ctx context.Context) {
 		time.Sleep(30 * time.Millisecond)
-		_ = r.runtime.store.AppendEvent(context.Background(), child, &session.Event{
+		_ = r.runtime.store.AppendEvent(ctx, child, &session.Event{
 			ID:      "child-assistant",
 			Time:    time.Now(),
 			Message: model.NewTextMessage(model.RoleAssistant, "child final output"),
 		})
-		_ = r.runtime.store.AppendEvent(context.Background(), child, lifecycleEvent(child, RunLifecycleStatusCompleted, "run", nil))
-	}()
+		_ = r.runtime.store.AppendEvent(ctx, child, lifecycleEvent(child, RunLifecycleStatusCompleted, "run", nil))
+	}(context.WithoutCancel(ctx))
 	return agent.SubagentRunResult{
 		SessionID:    child.ID,
 		DelegationID: "deleg-1",
@@ -233,7 +234,7 @@ func TestRuntimeRequestTraceMatchesPersistedToolContext(t *testing.T) {
 	var calls int
 	llm := &scriptedRuntimeLLM{
 		name: "trace-runtime-llm",
-		run: func(req *model.Request) (*model.Response, error) {
+		run: func(_ *model.Request) (*model.Response, error) {
 			calls++
 			switch calls {
 			case 1:
@@ -256,7 +257,7 @@ func TestRuntimeRequestTraceMatchesPersistedToolContext(t *testing.T) {
 			}
 		},
 	}
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "trace-tool",
@@ -344,7 +345,7 @@ func TestRuntimeRequestTraceExcludesPartialEventsFromNextRequest(t *testing.T) {
 			}
 		},
 	}
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "trace-partials",
@@ -425,7 +426,7 @@ func TestRuntimeRequestTraceBashYieldUsesLatestPersistedTaskResult(t *testing.T)
 			}
 		},
 	}
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "trace-bash",
@@ -484,7 +485,7 @@ func TestRuntimeRequestTraceSpawnYieldUsesLatestPersistedTaskResult(t *testing.T
 			case 1:
 				args, _ := json.Marshal(map[string]any{
 					"prompt":        "child task",
-					"yield_seconds": 1,
+					"yield_time_ms": 1000,
 				})
 				return &model.Response{
 					Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
@@ -507,7 +508,7 @@ func TestRuntimeRequestTraceSpawnYieldUsesLatestPersistedTaskResult(t *testing.T
 			}
 		},
 	}
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "trace-spawn",
@@ -755,6 +756,39 @@ func traceSanitizeToolResult(result map[string]any) map[string]any {
 			continue
 		}
 		out[key] = traceSanitizeToolValue(value)
+	}
+	if _, ok := out["error"]; ok {
+		compact := map[string]any{"error": out["error"]}
+		for _, key := range []string{"tool", "error_code", "recoverable", "hint", "state"} {
+			if value, exists := out[key]; exists {
+				compact[key] = value
+			}
+		}
+		return compact
+	}
+	if _, ok := out["state"]; ok {
+		compact := map[string]any{
+			"state": out["state"],
+		}
+		if taskID, exists := out["task_id"]; exists {
+			compact["task_id"] = taskID
+		}
+		if events, exists := out["events"]; exists {
+			compact["events"] = events
+		}
+		if msg, exists := out["msg"]; exists {
+			compact["msg"] = msg
+		}
+		if state, _ := compact["state"].(string); state == string(task.StateRunning) || state == string(task.StateWaitingInput) || state == string(task.StateWaitingApproval) {
+			return compact
+		}
+		delete(compact, "task_id")
+		for _, key := range []string{"exit_code", "stdout", "stderr", "output"} {
+			if value, exists := out[key]; exists {
+				compact[key] = value
+			}
+		}
+		return compact
 	}
 	return out
 }

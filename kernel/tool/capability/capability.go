@@ -47,16 +47,16 @@ func Of(value any) Capability {
 	if !ok {
 		return Capability{Risk: RiskUnknown}
 	}
-	cap := withCap.Capability()
-	if cap.Risk == "" {
-		cap.Risk = RiskUnknown
+	declared := withCap.Capability()
+	if declared.Risk == "" {
+		declared.Risk = RiskUnknown
 	}
-	if len(cap.Operations) == 0 {
-		return cap
+	if len(declared.Operations) == 0 {
+		return declared
 	}
 	seen := map[Operation]struct{}{}
-	out := make([]Operation, 0, len(cap.Operations))
-	for _, one := range cap.Operations {
+	out := make([]Operation, 0, len(declared.Operations))
+	for _, one := range declared.Operations {
 		if one == "" {
 			continue
 		}
@@ -66,6 +66,6 @@ func Of(value any) Capability {
 		seen[one] = struct{}{}
 		out = append(out, one)
 	}
-	cap.Operations = out
-	return cap
+	declared.Operations = out
+	return declared
 }

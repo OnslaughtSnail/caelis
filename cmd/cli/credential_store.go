@@ -57,6 +57,7 @@ func normalizeCredentialStoreMode(input string) string {
 func loadOrInitCredentialStore(appName, mode string) (*credentialStore, error) {
 	mode = normalizeCredentialStoreMode(mode)
 	if mode == credentialStoreModeEphemeral {
+		//nolint:nilnil // A nil store disables persistence while keeping callers on the no-op path.
 		return nil, nil
 	}
 

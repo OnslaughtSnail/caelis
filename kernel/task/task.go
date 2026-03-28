@@ -46,6 +46,7 @@ type Snapshot struct {
 	TaskID         string
 	Kind           Kind
 	Title          string
+	CreatedAt      time.Time
 	State          State
 	Running        bool
 	Yielded        bool
@@ -87,7 +88,6 @@ type Manager interface {
 	StartBash(context.Context, BashStartRequest) (Snapshot, error)
 	StartSpawn(context.Context, SpawnStartRequest) (Snapshot, error)
 	Wait(context.Context, ControlRequest) (Snapshot, error)
-	Status(context.Context, ControlRequest) (Snapshot, error)
 	Write(context.Context, ControlRequest) (Snapshot, error)
 	Cancel(context.Context, ControlRequest) (Snapshot, error)
 	List(context.Context) ([]Snapshot, error)
@@ -126,7 +126,6 @@ type Store interface {
 
 type Controller interface {
 	Wait(context.Context, *Record, time.Duration) (Snapshot, error)
-	Status(context.Context, *Record) (Snapshot, error)
 	Write(context.Context, *Record, string, time.Duration) (Snapshot, error)
 	Cancel(context.Context, *Record) (Snapshot, error)
 }
@@ -170,6 +169,7 @@ func (r *Record) snapshotLocked(output Output) Snapshot {
 		TaskID:         r.ID,
 		Kind:           r.Kind,
 		Title:          r.Title,
+		CreatedAt:      r.CreatedAt,
 		State:          r.State,
 		Running:        r.Running,
 		SupportsInput:  r.SupportsInput,

@@ -64,8 +64,8 @@ func TestPendingToolCalls_ReturnsOnlyUnmatchedCallsInOrder(t *testing.T) {
 			}, ""),
 		},
 		{
-			ID:   "tool-a",
-			Time: now,
+			ID:      "tool-a",
+			Time:    now,
 			Message: model.MessageFromToolResponse(&model.ToolResponse{ID: "call-a", Name: "READ", Result: map[string]any{"ok": true}}),
 		},
 		{

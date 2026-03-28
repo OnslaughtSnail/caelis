@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -67,7 +68,7 @@ func TestConnServe_ProcessesNotificationsInArrivalOrder(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil && err != context.Canceled {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatalf("Serve returned unexpected error: %v", err)
 		}
 	case <-time.After(time.Second):
@@ -131,7 +132,7 @@ func TestConnServe_WritesResponseBeforePostWriteNotifications(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
+		done <- serverConn.Serve(ctx, func(_ context.Context, _ Message) (any, *RPCError) {
 			return postWriteResult{
 				payload: map[string]any{"ok": true},
 				afterWrite: func() {
@@ -183,7 +184,7 @@ func TestConnServe_WritesResponseBeforePostWriteNotifications(t *testing.T) {
 
 	select {
 	case err := <-done:
-		if err != nil && err != context.Canceled {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatalf("Serve returned unexpected error: %v", err)
 		}
 	case <-time.After(time.Second):

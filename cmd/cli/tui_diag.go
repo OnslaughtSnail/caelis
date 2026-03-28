@@ -133,7 +133,7 @@ func (d *tuiDiagnostics) UpdateFromModel(
 	slowFrames uint64,
 	last time.Duration,
 	avg time.Duration,
-	max time.Duration,
+	maxFrame time.Duration,
 	renderBytes uint64,
 	peakFrameBytes uint64,
 	lastRenderAt time.Time,
@@ -155,7 +155,7 @@ func (d *tuiDiagnostics) UpdateFromModel(
 	d.SlowFrames = slowFrames
 	d.LastFrameDuration = last
 	d.AvgFrameDuration = avg
-	d.MaxFrameDuration = max
+	d.MaxFrameDuration = maxFrame
 	if renderBytes > d.LogBytes {
 		d.LogBytes = renderBytes
 	}

@@ -592,7 +592,8 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 	if contextWindow <= 0 {
 		contextWindow = defaultContextWindowForTemplate(tpl)
 	}
-	if !baseKnown {
+	switch {
+	case !baseKnown:
 		maxOutput = recommendedCatalogFallbackMaxOutputTokens(contextWindow, maxOutput, baseCaps.SupportsReasoning)
 		var err error
 		contextWindow, err = promptTokenCount(c, "context_window_tokens", contextWindow, subjectCfg)
@@ -607,20 +608,20 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 		if err != nil {
 			return connectModelSelection{}, err
 		}
-	} else if shouldFallbackManualReasoning(baseCfg.Provider, catalogKnown, remote) {
+	case shouldFallbackManualReasoning(baseCfg.Provider, catalogKnown, remote):
 		var err error
 		reasoningMode, reasoningEfforts, defaultReasoningEffort, err = promptUnknownModelReasoningDefinition(c, subjectCfg, reasoningMode, reasoningEfforts, defaultReasoningEffort)
 		if err != nil {
 			return connectModelSelection{}, err
 		}
-	} else if !baseCaps.SupportsReasoning {
+	case !baseCaps.SupportsReasoning:
 		reasoningMode = reasoningModeNone
 		reasoningEfforts = nil
 		defaultReasoningEffort = ""
-	} else if reasoningMode == reasoningModeFixed {
+	case reasoningMode == reasoningModeFixed:
 		reasoningEfforts = nil
 		defaultReasoningEffort = ""
-	} else if reasoningMode == "" {
+	case reasoningMode == "":
 		profile := connectProviderReasoningProfile(baseCfg)
 		switch profile.Mode {
 		case reasoningModeFixed:
@@ -632,7 +633,6 @@ func buildConnectModelSelection(c *cliConsole, tpl providerTemplate, baseCfg mod
 			reasoningEfforts = nil
 			defaultReasoningEffort = ""
 		case reasoningModeEffort:
-			reasoningMode = profile.Mode
 			reasoningEfforts = append([]string(nil), profile.SupportedEfforts...)
 			defaultReasoningEffort = profile.DefaultEffort
 			var err error

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -205,7 +206,7 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 		State:  string(RunLifecycleStatusRunning),
 		Reset:  true,
 	})
-	snapshot, err := controller.Status(ctx, record)
+	snapshot, err := controller.Wait(ctx, record, 0)
 	if err != nil {
 		return task.Snapshot{}, err
 	}
@@ -316,20 +317,6 @@ func (m *runtimeTaskManager) Wait(ctx context.Context, req task.ControlRequest) 
 	return snapshot, nil
 }
 
-func (m *runtimeTaskManager) Status(ctx context.Context, req task.ControlRequest) (task.Snapshot, error) {
-	record, err := m.ensureRecord(ctx, req.TaskID)
-	if err != nil {
-		return task.Snapshot{}, err
-	}
-	if snapshot, ok := persistedFinalTaskSnapshot(record); ok {
-		return snapshot, nil
-	}
-	if record.Backend == nil {
-		return task.Snapshot{}, fmt.Errorf("task: controller missing for %q", req.TaskID)
-	}
-	return record.Backend.Status(ctx, record)
-}
-
 func (m *runtimeTaskManager) Write(ctx context.Context, req task.ControlRequest) (task.Snapshot, error) {
 	record, err := m.ensureRecord(ctx, req.TaskID)
 	if err != nil {
@@ -402,5 +389,8 @@ func (m *runtimeTaskManager) List(ctx context.Context) ([]task.Snapshot, error) 
 			out = append(out, entryToRecord(entry).Snapshot(task.Output{}))
 		}
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }

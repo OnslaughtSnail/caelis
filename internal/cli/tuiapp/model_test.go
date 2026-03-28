@@ -192,7 +192,7 @@ func TestCurrentInputGhostHint_ForSlashCommand(t *testing.T) {
 func TestCurrentInputGhostHint_ForModelAlias(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "model":
 				return []SlashArgCandidate{{Value: "use", Display: "use"}}, nil
@@ -213,7 +213,7 @@ func TestCurrentInputGhostHint_ForModelAlias(t *testing.T) {
 func TestCurrentInputGhostHint_ForModelActionPrefix(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			if command != "model" {
 				return nil, nil
 			}
@@ -230,7 +230,7 @@ func TestCurrentInputGhostHint_ForModelActionPrefix(t *testing.T) {
 func TestCurrentInputGhostHint_ForResume(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
 			return []ResumeCandidate{{SessionID: "s-123", Prompt: "demo", Age: "1m"}}, nil
 		},
 	})
@@ -555,7 +555,7 @@ func TestResumeOverlayEnterExecutesSelectedSession(t *testing.T) {
 			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
-		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
 			return []ResumeCandidate{
 				{SessionID: "s-1", Prompt: "first prompt", Age: "10m"},
 				{SessionID: "s-2", Prompt: "second prompt", Age: "30m"},
@@ -598,7 +598,7 @@ func TestResumeOverlayEnterExecutesSelectedSession(t *testing.T) {
 func TestResumeOverlayTabFillsSessionID(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
 			return []ResumeCandidate{
 				{SessionID: "s-1", Prompt: "first", Age: "1m"},
 				{SessionID: "s-2", Prompt: "second", Age: "2m"},
@@ -623,7 +623,7 @@ func TestResumeOverlayTabFillsSessionID(t *testing.T) {
 func TestResumeOverlayEscClearsResumeCommand(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
 			return []ResumeCandidate{
 				{SessionID: "s-1", Prompt: "first", Age: "1m"},
 			}, nil
@@ -648,7 +648,7 @@ func TestResumeOverlayEscClearsResumeCommand(t *testing.T) {
 func TestResumeOverlayScrollWindowKeepsSelectedVisible(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
 			out := make([]ResumeCandidate, 0, 20)
 			for i := 0; i < 20; i++ {
 				out = append(out, ResumeCandidate{
@@ -685,7 +685,7 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 			called = submission.Text
 			return tuievents.TaskResultMsg{}
 		},
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch {
 			case command == "model":
 				return []SlashArgCandidate{
@@ -762,7 +762,7 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch {
 			case command == "model":
 				return []SlashArgCandidate{
@@ -799,7 +799,7 @@ func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
 func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "model":
 				return []SlashArgCandidate{
@@ -832,7 +832,7 @@ func TestModelWizardTypingSubcommandOpensAliasStep(t *testing.T) {
 func TestAgentSlashArgOpensOnTrailingSpaceAndAdvancesToBuiltinStep(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "agent":
 				return []SlashArgCandidate{
@@ -875,7 +875,7 @@ func TestAgentAddExecutesOnSingleEnterWhenBuiltinAlreadyComplete(t *testing.T) {
 			called = strings.TrimSpace(submission.Text)
 			return tuievents.TaskResultMsg{}
 		},
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			if command != "agent add" {
 				return nil, nil
 			}
@@ -904,7 +904,7 @@ func TestModelDelExecutesOnSingleEnterWhenAliasAlreadyComplete(t *testing.T) {
 			called = strings.TrimSpace(submission.Text)
 			return tuievents.TaskResultMsg{}
 		},
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			if command != "model del" {
 				return nil, nil
 			}
@@ -952,7 +952,7 @@ func TestModelDelExecutesWithoutAlias(t *testing.T) {
 func TestSlashArgOverlayTabFillsSelectedValue(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			if command != "sandbox" {
 				return nil, nil
 			}
@@ -980,7 +980,7 @@ func TestSlashArgOverlayEscClearsSlashCommand(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
 		Wizards:     testWizards(),
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			if command != "connect" {
 				return nil, nil
 			}
@@ -1011,7 +1011,7 @@ func TestConnectSlashArgUsesStepPickerWithHiddenArgs(t *testing.T) {
 			return tuievents.TaskResultMsg{}
 		},
 		Wizards: testWizards(),
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "connect":
 				return []SlashArgCandidate{
@@ -1121,7 +1121,7 @@ func TestConnectSlashArgAllowsManualModelInputWhenNoCandidates(t *testing.T) {
 			return tuievents.TaskResultMsg{}
 		},
 		Wizards: testWizards(),
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "connect":
 				return []SlashArgCandidate{{Value: "openai", Display: "openai"}}, nil
@@ -1239,6 +1239,20 @@ func TestTickStatusMsg(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected next tick cmd")
+	}
+}
+
+func TestTickStatusMsgRefreshesWorkspace(t *testing.T) {
+	m := NewModel(Config{
+		Workspace: "before",
+		RefreshWorkspace: func() string {
+			return "after"
+		},
+	})
+	updated, _ := m.Update(tuievents.TickStatusMsg{})
+	next := updated.(*Model)
+	if next.cfg.Workspace != "after" {
+		t.Fatalf("expected workspace refreshed, got %q", next.cfg.Workspace)
 	}
 }
 
@@ -1433,7 +1447,7 @@ func TestSlashCommandsAutoOpenRelevantPickers(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"model", "resume", "connect"},
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "model":
 				return []SlashArgCandidate{{Value: "use", Display: "use"}}, nil
@@ -1441,7 +1455,7 @@ func TestSlashCommandsAutoOpenRelevantPickers(t *testing.T) {
 				return nil, nil
 			}
 		},
-		ResumeComplete: func(query string, limit int) ([]ResumeCandidate, error) {
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
 			return []ResumeCandidate{{SessionID: "s-1", Prompt: "p", Age: "1m"}}, nil
 		},
 	})
@@ -1527,7 +1541,7 @@ func TestSlashCommandEnterOpensModelPicker(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"model", "status"},
 		ExecuteLine: noopExecute,
-		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
 			if command != "model" {
 				return nil, nil
 			}
@@ -3566,7 +3580,7 @@ func TestEnterSubmitsMessageWhileRunning(t *testing.T) {
 
 func TestEnterWhileRunningShowsHintWhenReplacingPendingMessage(t *testing.T) {
 	m := NewModel(Config{
-		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+		ExecuteLine: func(_ Submission) tuievents.TaskResultMsg {
 			return tuievents.TaskResultMsg{ContinueRunning: true}
 		},
 	})
@@ -3628,7 +3642,7 @@ func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
 
 func TestUserMessageMsgCommitsPendingUserLine(t *testing.T) {
 	m := NewModel(Config{
-		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+		ExecuteLine: func(_ Submission) tuievents.TaskResultMsg {
 			return tuievents.TaskResultMsg{ContinueRunning: true}
 		},
 	})

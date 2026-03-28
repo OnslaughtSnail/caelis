@@ -34,6 +34,7 @@ func (c *subagentTaskController) Wait(ctx context.Context, record *task.Record, 
 	if yield > 0 {
 		deadline = time.Now().Add(yield)
 	}
+	var aggregated task.Output
 	for {
 		select {
 		case <-ctx.Done():
@@ -43,6 +44,10 @@ func (c *subagentTaskController) Wait(ctx context.Context, record *task.Record, 
 		snapshot, err := c.inspect(ctx, record, true)
 		if err != nil {
 			return task.Snapshot{}, err
+		}
+		if snapshot.Output.Log != "" {
+			aggregated.Log += snapshot.Output.Log
+			snapshot.Output.Log = aggregated.Log
 		}
 		if !snapshot.Running {
 			return snapshot, nil
@@ -56,10 +61,6 @@ func (c *subagentTaskController) Wait(ctx context.Context, record *task.Record, 
 		case <-time.After(150 * time.Millisecond):
 		}
 	}
-}
-
-func (c *subagentTaskController) Status(ctx context.Context, record *task.Record) (task.Snapshot, error) {
-	return c.inspect(ctx, record, false)
 }
 
 func (c *subagentTaskController) Write(ctx context.Context, record *task.Record, input string, yield time.Duration) (task.Snapshot, error) {
@@ -79,7 +80,7 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 		if state == "" {
 			state = "running"
 		}
-		return task.Snapshot{}, fmt.Errorf("task: TASK write is only allowed for completed spawn subagents; current state is %s, use TASK wait/status while it is still running", state)
+		return task.Snapshot{}, fmt.Errorf("task: TASK write can continue a spawn subagent only after it reaches completed; current state is %s, use TASK wait while it is still running", state)
 	}
 	callInfo, _ := toolexec.ToolCallInfoFromContext(ctx)
 	runResult, err := c.runner.RunSubagent(withSubagentContinuation(ctx), agent.SubagentRunRequest{
@@ -218,7 +219,7 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 			}
 		}
 	}
-	if c.idleTimeout > 0 && runResult.Running && !runResult.ApprovalPending && runtimeTaskStateName(runResult.State) != task.StateWaitingApproval {
+	if c.idleTimeout > 0 && runResult.Running && !runResult.ApprovalPending && !runResult.ToolCallPending && runtimeTaskStateName(runResult.State) != task.StateWaitingApproval {
 		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, subagentLastSeenAt(record))
 		if progressAt.Add(c.idleTimeout).Before(now) {
 			if c.cancel != nil {
@@ -238,6 +239,11 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 	var snapshot task.Snapshot
 	var output task.Output
 	var assistant string
+	previewSource := strings.TrimSpace(runResult.LatestOutput)
+	if previewSource == "" {
+		previewSource = runResult.LogSnapshot
+	}
+	preview := task.FormatLatestOutput(previewSource)
 	record.WithLock(func(one *task.Record) {
 		assistant, _ = one.Result["final_result"].(string)
 	})
@@ -245,11 +251,18 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		assistant = final
 	}
 	record.WithLock(func(one *task.Record) {
+		if preview == "" {
+			preview = task.FormatLatestOutput(fmt.Sprint(one.Result["latest_output"]))
+		}
 		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, one.HeartbeatAt, one.CreatedAt)
 		if progressAt.After(one.HeartbeatAt) {
 			one.HeartbeatAt = progressAt
 		}
 		logSnapshot := runResult.LogSnapshot
+		progressSeq := runResult.ProgressSeq
+		if progressSeq <= 0 {
+			progressSeq = len(logSnapshot)
+		}
 		start := one.EventCursor
 		if start < 0 || start > len(logSnapshot) {
 			start = len(logSnapshot)
@@ -270,6 +283,11 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 			"_ui_delegation_id":    c.delegationID,
 			"_ui_agent":            c.agent,
 			"progress_state":       string(one.State),
+			"progress_seq":         progressSeq,
+			"progress_age_seconds": progressAgeSeconds(progressAt, now),
+		}
+		if text := strings.TrimSpace(runResult.Error); text != "" {
+			one.Result["error"] = text
 		}
 		if callID := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolCall)); callID != "" {
 			one.Result["_ui_parent_tool_call_id"] = callID
@@ -288,6 +306,9 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		}
 		if c.idleTimeout > 0 {
 			one.Result["_ui_idle_timeout_seconds"] = int(c.idleTimeout / time.Second)
+		}
+		if preview != "" {
+			one.Result["latest_output"] = preview
 		}
 		if runResult.ApprovalPending || one.State == task.StateWaitingApproval {
 			one.Result["approval_pending"] = true
@@ -318,6 +339,16 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 	return snapshot, nil
 }
 
+func progressAgeSeconds(last time.Time, now time.Time) int {
+	if last.IsZero() {
+		return 0
+	}
+	if now.Before(last) {
+		return 0
+	}
+	return int(now.Sub(last).Round(time.Second) / time.Second)
+}
+
 func isMissingSubagentStateErr(err error) bool {
 	if err == nil {
 		return false
@@ -333,7 +364,7 @@ func subagentLastSeenAt(record *task.Record) time.Time {
 	var out time.Time
 	record.WithLock(func(one *task.Record) {
 		// UpdatedAt tracks local TASK bookkeeping as well as real child progress.
-		// Using it here lets repeated TASK status/wait polls artificially extend the
+		// Using it here lets repeated TASK wait polls artificially extend the
 		// idle window for a stuck subagent.
 		out = latestSubagentProgressTime(one.HeartbeatAt, one.CreatedAt)
 	})

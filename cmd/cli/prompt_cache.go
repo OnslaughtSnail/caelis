@@ -21,6 +21,7 @@ func (c *cliConsole) ensureSessionPrompt(_ context.Context) (string, error) {
 	c.promptMu.Unlock()
 	promptText, err := resolveSystemPrompt(buildAgentInput{
 		AppName:                     c.appName,
+		PromptRole:                  promptRoleMainSession,
 		WorkspaceDir:                c.workspace.CWD,
 		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
 		BasePrompt:                  c.systemPrompt,

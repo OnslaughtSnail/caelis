@@ -57,11 +57,11 @@ func TestBuildMetaPrompt(t *testing.T) {
 	if !strings.Contains(text, "- a: desc (file: /tmp/a/SKILL.md)") {
 		t.Fatalf("missing skill name: %q", text)
 	}
-	if !strings.Contains(text, "### How to use skills") {
-		t.Fatalf("missing usage rules section: %q", text)
+	if !strings.Contains(text, "Use a skill only when its description clearly matches the task.") {
+		t.Fatalf("missing compact usage rule: %q", text)
 	}
-	if !strings.Contains(text, "installed from external sources") {
-		t.Fatalf("missing external source warning: %q", text)
+	if strings.Contains(text, "### How to use skills") {
+		t.Fatalf("expected shorter skill guidance, got %q", text)
 	}
 	if strings.Contains(text, "must not redefine who you are") {
 		t.Fatalf("expected shorter skill guidance, got %q", text)

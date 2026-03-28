@@ -15,6 +15,10 @@ type CompactionSummarizeInput struct {
 	InputBudget            int
 	SummaryChunkTokens     int
 	MaxModelSummaryRetries int
+	PlanSummary            string
+	ProgressSummary        string
+	ActiveTasksSummary     string
+	LatestBlockerSummary   string
 }
 
 // CompactionSummarizeResult is one compaction summary result.
@@ -30,8 +34,8 @@ type CompactionStrategy interface {
 
 const (
 	defaultCompactionSystemPrompt = "You are writing a CONTEXT CHECKPOINT for an autonomous coding agent that must continue work after history truncation. Do not write a project retrospective or final answer. Focus on what the next model turn must execute."
-	defaultCompactionUserPrefix   = "Create a continuation checkpoint from the transcript below.\n\nOutput requirements:\n- Use exactly these Markdown headings in this order:\n  1) ## Active Objective\n  2) ## Current Task State\n  3) ## Completed Tasks\n  4) ## Pending Next Tasks\n  5) ## Constraints And Preferences\n  6) ## Open Issues And Risks\n  7) ## Critical References\n- Keep items concrete and execution-oriented.\n- Preserve critical tool outcomes, errors, and unresolved user intent.\n- For Pending Next Tasks, provide an ordered checklist.\n- If something is unknown, explicitly write \"unknown\".\n- Return only checkpoint content, no preface.\n\nTranscript:\n\n"
-	defaultCompactionMergePrefix  = "Merge the following checkpoint chunks into one continuation checkpoint.\nKeep the same section headings and remove duplicates.\nReturn only the merged checkpoint body:\n\n"
+	defaultCompactionUserPrefix   = "Create a continuation checkpoint from the transcript below.\nYou will also receive runtime state separately, so do not waste space repeating it unless it changes the next action.\n\nOutput requirements:\n- Use exactly these Markdown headings in this order:\n  1) ## Active Objective\n  2) ## Current Progress\n  3) ## Key Decisions\n  4) ## Constraints And Preferences\n  5) ## Risks And Unknowns\n  6) ## Immediate Next Actions\n- Keep the content concrete, short, and execution-oriented.\n- Preserve unresolved user intent, durable decisions, and the next legal actions after failures.\n- If something is unknown, explicitly write \"unknown\".\n- Return only checkpoint content, no preface.\n\n"
+	defaultCompactionMergePrefix  = "Merge the following continuation checkpoint chunks into one checkpoint.\nKeep the same six section headings, remove duplicates, preserve actionable next steps, and return only the merged body.\n\n"
 )
 
 // MapReduceCompactionStrategyConfig configures default map-reduce compaction.
@@ -92,7 +96,7 @@ func (s *MapReduceCompactionStrategy) Summarize(
 		if chunkBudget < 800 {
 			chunkBudget = 800
 		}
-		summary, err := s.summarizeByMapReduce(ctx, llm, working, chunkBudget)
+		summary, err := s.summarizeByMapReduce(ctx, llm, in, working, chunkBudget)
 		if err == nil && strings.TrimSpace(summary) != "" {
 			return CompactionSummarizeResult{
 				Text:             strings.TrimSpace(summary),
@@ -119,6 +123,7 @@ func (s *MapReduceCompactionStrategy) Summarize(
 func (s *MapReduceCompactionStrategy) summarizeByMapReduce(
 	ctx context.Context,
 	llm model.LLM,
+	in CompactionSummarizeInput,
 	events []*session.Event,
 	chunkBudget int,
 ) (string, error) {
@@ -126,7 +131,7 @@ func (s *MapReduceCompactionStrategy) summarizeByMapReduce(
 	summaries := make([]string, 0, len(chunks))
 	for _, chunk := range chunks {
 		transcript := eventsToTranscript(chunk)
-		out, err := s.callCompactionModel(ctx, llm, s.userPrefix+transcript)
+		out, err := s.callCompactionModel(ctx, llm, s.userPrompt(in, transcript))
 		if err != nil {
 			return "", err
 		}
@@ -140,6 +145,58 @@ func (s *MapReduceCompactionStrategy) summarizeByMapReduce(
 	}
 	merged := strings.Join(summaries, "\n\n")
 	return s.callCompactionModel(ctx, llm, s.mergePrefix+merged)
+}
+
+func (s *MapReduceCompactionStrategy) userPrompt(in CompactionSummarizeInput, transcript string) string {
+	var b strings.Builder
+	b.WriteString(s.userPrefix)
+	if runtimeState := compactRuntimeStateBlock(in); runtimeState != "" {
+		b.WriteString(runtimeState)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Transcript:\n\n")
+	b.WriteString(transcript)
+	return b.String()
+}
+
+func compactRuntimeStateBlock(in CompactionSummarizeInput) string {
+	lines := make([]string, 0, 6)
+	if text := strings.TrimSpace(in.PlanSummary); text != "" {
+		lines = append(lines, "plan_summary="+singleLineSummary(text))
+	}
+	if text := strings.TrimSpace(in.ProgressSummary); text != "" {
+		lines = append(lines, "progress_summary="+singleLineSummary(text))
+	}
+	if text := strings.TrimSpace(in.ActiveTasksSummary); text != "" {
+		lines = append(lines, "active_tasks_summary="+singleLineSummary(text))
+	}
+	if text := strings.TrimSpace(in.LatestBlockerSummary); text != "" {
+		lines = append(lines, "latest_blocker_summary="+singleLineSummary(text))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "<runtime_state>\n" + strings.Join(lines, "\n") + "\n</runtime_state>"
+}
+
+func singleLineSummary(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	parts := strings.Split(text, "\n")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.TrimPrefix(part, "-"))
+		part = strings.TrimSpace(strings.TrimPrefix(part, "*"))
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return strings.Join(out, " | ")
 }
 
 func (s *MapReduceCompactionStrategy) callCompactionModel(

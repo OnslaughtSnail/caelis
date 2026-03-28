@@ -209,10 +209,8 @@ func TestDetectDestructiveCommand(t *testing.T) {
 			if reason == "" {
 				t.Errorf("command %q: expected non-empty reason", tc.cmd)
 			}
-		} else {
-			if base != "" {
-				t.Errorf("command %q: expected safe (no match), got base=%q reason=%q", tc.cmd, base, reason)
-			}
+		} else if base != "" {
+			t.Errorf("command %q: expected safe (no match), got base=%q reason=%q", tc.cmd, base, reason)
 		}
 	}
 }

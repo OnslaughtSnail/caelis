@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -283,6 +285,58 @@ func TestSubagentDomainUpdatesFromTaskToolResponse_Status(t *testing.T) {
 	}
 	if update.ApprovalTool != "BASH" || update.ApprovalCommand != "rm -rf /tmp/demo" {
 		t.Fatalf("unexpected approval context: %+v", update)
+	}
+}
+
+func TestSubagentDomainUpdatesFromTaskToolResponse_ProjectsRunningTaskStream(t *testing.T) {
+	result := taskstream.AppendResultEvent(map[string]any{
+		"child_session_id": "child-1",
+		"delegation_id":    "dlg-1",
+		"agent":            "gemini",
+		"state":            "running",
+	}, taskstream.Event{
+		Label:  "SPAWN",
+		TaskID: "task-1",
+		Stream: "assistant",
+		Chunk:  "new child output",
+		State:  "running",
+	})
+	updates := subagentDomainUpdatesFromTaskToolResponse("parent-1", &model.ToolResponse{
+		ID:     "call-task-1",
+		Name:   tool.TaskToolName,
+		Result: result,
+	}, map[string]any{"action": "wait"})
+	if len(updates) != 2 {
+		t.Fatalf("expected stream + status update, got %#v", updates)
+	}
+	if updates[0].Kind != subagentDomainStream || updates[0].Stream != "assistant" || updates[0].Chunk != "new child output" {
+		t.Fatalf("expected first update to replay task stream chunk, got %#v", updates[0])
+	}
+	if updates[1].Kind != subagentDomainStatus || updates[1].Status != "running" {
+		t.Fatalf("expected trailing running status update, got %#v", updates[1])
+	}
+}
+
+func TestSendSubagentProjectionMsg_IgnoresCancelledTurnContext(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{sessionID: "parent-1", tuiSender: sender}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.sendSubagentProjectionMsg(ctx, "parent-1", tuievents.SubagentStreamMsg{
+		SpawnID: "child-1",
+		Stream:  "assistant",
+		Chunk:   "still arrives",
+	})
+	msgs := sender.Snapshot()
+	if len(msgs) != 1 {
+		t.Fatalf("expected canceled turn context not to drop subagent projection, got %#v", msgs)
+	}
+	raw, ok := msgs[0].(tuievents.RawDeltaMsg)
+	if !ok {
+		t.Fatalf("expected RawDeltaMsg, got %T", msgs[0])
+	}
+	if raw.Target != tuievents.RawDeltaTargetSubagent || raw.ScopeID != "child-1" || raw.Text != "still arrives" {
+		t.Fatalf("unexpected raw subagent delta %+v", raw)
 	}
 }
 
@@ -636,6 +690,91 @@ func TestSpawnPreviewProjector_ProjectsDoneOnLifecycleEvent(t *testing.T) {
 	}
 }
 
+func TestSpawnPreviewProjector_ProjectsRunningToolPreview(t *testing.T) {
+	proj := newSpawnPreviewProjector()
+	msgs := proj.Project(sessionstream.Update{
+		SessionID: "child-1",
+		Event: &session.Event{
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "tc-bash-1",
+				Name: "BASH",
+				Result: map[string]any{
+					"state":         "running",
+					"task_id":       "task-bash-1",
+					"latest_output": "[10s] heartbeat 1/6",
+				},
+			}),
+			Meta: map[string]any{
+				"parent_session_id":   "parent",
+				"child_session_id":    "child-1",
+				"parent_tool_call_id": "call-spawn-1",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-1",
+			},
+		},
+	})
+	var found bool
+	for _, m := range msgs {
+		msg, ok := m.(tuievents.SubagentToolCallMsg)
+		if !ok {
+			continue
+		}
+		if msg.CallID != "tc-bash-1" || msg.ToolName != "BASH" || msg.Final {
+			t.Fatalf("unexpected running tool preview msg: %+v", msg)
+		}
+		if !strings.Contains(msg.Chunk, "heartbeat 1/6") {
+			t.Fatalf("expected running tool preview chunk, got %+v", msg)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("expected SubagentToolCallMsg for running tool preview")
+	}
+}
+
+func TestSpawnPreviewProjector_DropsUnchangedRunningToolPreview(t *testing.T) {
+	proj := newSpawnPreviewProjector()
+	update := sessionstream.Update{
+		SessionID: "child-1",
+		Event: &session.Event{
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "tc-bash-1",
+				Name: "BASH",
+				Result: map[string]any{
+					"state":         "running",
+					"task_id":       "task-bash-1",
+					"latest_output": "[10s] heartbeat 1/6",
+				},
+			}),
+			Meta: map[string]any{
+				"parent_session_id":   "parent",
+				"child_session_id":    "child-1",
+				"parent_tool_call_id": "call-spawn-1",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-1",
+			},
+		},
+	}
+
+	first := proj.Project(update)
+	second := proj.Project(update)
+
+	var firstCount int
+	for _, msg := range first {
+		if _, ok := msg.(tuievents.SubagentToolCallMsg); ok {
+			firstCount++
+		}
+	}
+	if firstCount == 0 {
+		t.Fatalf("expected initial running preview to emit tool call msg, got %#v", first)
+	}
+	for _, msg := range second {
+		if toolMsg, ok := msg.(tuievents.SubagentToolCallMsg); ok {
+			t.Fatalf("expected unchanged preview to emit no tool call msg, got %+v", toolMsg)
+		}
+	}
+}
+
 func TestSpawnPreviewProjector_ProjectsWaitingApprovalStatus(t *testing.T) {
 	proj := newSpawnPreviewProjector()
 	msgs := proj.Project(sessionstream.Update{
@@ -763,6 +902,7 @@ func TestSpawnPreviewProjector_ApprovalForwardsToolContext(t *testing.T) {
 	}
 	if foundStatus == nil {
 		t.Fatal("expected SubagentStatusMsg for waiting_approval")
+		return
 	}
 	if foundStatus.State != "waiting_approval" {
 		t.Fatalf("expected state waiting_approval, got %q", foundStatus.State)

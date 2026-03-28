@@ -76,6 +76,39 @@ func TestScopeStore_AppendsEventsToRolloutAndCatalog(t *testing.T) {
 	}
 }
 
+func TestDatabaseWithWriteTx_RollsBackOnError(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sessions")
+	dbPath := filepath.Join(filepath.Dir(root), "state.db")
+	db, err := Open(root, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := t.Context()
+	if _, err := db.execWrite(ctx, `CREATE TABLE tx_probe (value TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := fmt.Errorf("force rollback")
+	err = db.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if _, execErr := tx.ExecContext(ctx, `INSERT INTO tx_probe(value) VALUES (?)`, "rolled-back"); execErr != nil {
+			return execErr
+		}
+		return wantErr
+	})
+	if err == nil || err.Error() != wantErr.Error() {
+		t.Fatalf("expected rollback error %v, got %v", wantErr, err)
+	}
+
+	var count int
+	if err := db.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tx_probe`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expected transaction rollback to leave table empty, got %d rows", count)
+	}
+}
+
 func TestScopeStore_StateUsesNamespacedSQLiteRows(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sessions")
 	dbPath := filepath.Join(filepath.Dir(root), "state.db")

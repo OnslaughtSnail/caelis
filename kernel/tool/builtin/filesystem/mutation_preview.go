@@ -196,7 +196,7 @@ func planPatchMutation(fsys toolexec.FileSystem, args map[string]any) (fileMutat
 
 	count := strings.Count(content, oldValue)
 	if count == 0 {
-		return fileMutationPlan{}, fmt.Errorf("tool: PATCH old content not found in file")
+		return fileMutationPlan{}, fmt.Errorf("tool: PATCH target %q did not contain an exact match for \"old\"; READ the file again to capture the current text, and use replace_all=true only when you intend to replace every exact match", target)
 	}
 	if !replaceAll && count != 1 {
 		return fileMutationPlan{}, fmt.Errorf("tool: PATCH requires exact single match, found %d; set replace_all=true to replace all", count)

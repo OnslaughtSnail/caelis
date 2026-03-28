@@ -30,7 +30,7 @@ func (t *WriteTool) Name() string {
 }
 
 func (t *WriteTool) Description() string {
-	return "Write full file content by path."
+	return "Write complete file contents to one path."
 }
 
 func (t *WriteTool) Capability() capability.Capability {
@@ -47,8 +47,8 @@ func (t *WriteTool) Declaration() model.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":    map[string]any{"type": "string", "description": "target file path"},
-				"content": map[string]any{"type": "string", "description": "full file content to write"},
+				"path":    map[string]any{"type": "string", "description": "Target file path."},
+				"content": map[string]any{"type": "string", "description": "Full file contents to write."},
 			},
 			"required": []string{"path", "content"},
 		},

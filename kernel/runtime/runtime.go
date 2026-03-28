@@ -289,7 +289,7 @@ type CompactRequest struct {
 // Compact triggers one manual compaction without sending user input to LLM.
 func (r *Runtime) Compact(ctx context.Context, req CompactRequest) (*session.Event, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("runtime: context is required")
 	}
 	if req.Model == nil {
 		return nil, fmt.Errorf("runtime: model is nil")

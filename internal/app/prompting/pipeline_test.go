@@ -16,10 +16,10 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 		Additional: []PromptFragment{
 			{
 				Kind:    PromptFragmentKindSystem,
-				Stage:   "runtime_context",
-				Title:   "Runtime Context",
+				Stage:   "capability_guidance",
+				Title:   "Capability Guidance",
 				Source:  "runtime",
-				Content: "## Runtime Execution\n- permission_mode=default sandbox_type=seatbelt",
+				Content: "## Capability Guidance\n- Tool families and delegation rules",
 			},
 			{
 				Kind:    PromptFragmentKindUser,
@@ -30,7 +30,7 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 			},
 			{
 				Kind:    PromptFragmentKindContext,
-				Stage:   "workspace_context",
+				Stage:   "dynamic_runtime_context",
 				Title:   "Environment Context",
 				Source:  "runtime",
 				Content: "<environment_context>\n  <cwd>/tmp/demo</cwd>\n</environment_context>",
@@ -57,7 +57,7 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 		"<user_custom_instructions>",
 		"</user_custom_instructions>",
 		"Kernel identity rule.",
-		"## Runtime Execution",
+		"## Capability Guidance",
 		"Use LSP_SYMBOLS first.",
 		"Session overrides workspace instructions, and workspace instructions override global instructions on conflict.",
 		"# Global",
@@ -79,10 +79,10 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 
 	idxSystem := strings.Index(text, "<system_instructions>")
 	idxUser := strings.Index(text, "<user_custom_instructions>")
-	idxContext := strings.Index(text, "<environment_context>")
 	idxSkills := strings.Index(text, "Skills Metadata (auto-loaded, all active):")
-	if !(idxSystem >= 0 && idxSystem < idxUser && idxUser < idxContext && idxContext < idxSkills) {
-		t.Fatalf("unexpected section order: system=%d user=%d context=%d skills=%d", idxSystem, idxUser, idxContext, idxSkills)
+	idxContext := strings.Index(text, "<environment_context>")
+	if !(idxSystem >= 0 && idxSystem < idxUser && idxUser < idxSkills && idxSkills < idxContext) {
+		t.Fatalf("unexpected section order: system=%d user=%d skills=%d context=%d", idxSystem, idxUser, idxSkills, idxContext)
 	}
 }
 

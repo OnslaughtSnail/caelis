@@ -252,7 +252,7 @@ type loopingAgent struct {
 }
 
 func (a *loopingAgent) Name() string { return "looping-agent" }
-func (a *loopingAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *loopingAgent) Run(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// Infinite loop: always produces the same assistant → tool → tool-response cycle
 		args, _ := json.Marshal(map[string]any{"command": "echo hello"})
@@ -284,7 +284,7 @@ func TestRuntime_LoopDetection_TerminatesStuckAgent(t *testing.T) {
 	llm := newRuntimeTestLLM("fake")
 	ag := &loopingAgent{}
 	var gotLoopErr bool
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-loop",
@@ -322,7 +322,7 @@ func TestRuntime_LoopDetection_EmitsVisibleWarningNotice(t *testing.T) {
 		gotLoopErr bool
 		gotNotice  bool
 	)
-	for ev, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for ev, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-loop-notice",
@@ -361,7 +361,7 @@ type varyingToolArgsAgent struct {
 }
 
 func (a *varyingToolArgsAgent) Name() string { return "varying-args-agent" }
-func (a *varyingToolArgsAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+func (a *varyingToolArgsAgent) Run(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for a.turn < loopDetectorThreshold+2 {
 			a.turn++
@@ -396,7 +396,7 @@ func TestRuntime_LoopDetection_NoFalsePositiveForVaryingArgs(t *testing.T) {
 	llm := newRuntimeTestLLM("fake")
 	ag := &varyingToolArgsAgent{}
 	var gotLoopErr bool
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-no-false-pos",

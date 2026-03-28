@@ -414,6 +414,64 @@ func TestForwardEventToTUI_LargeFileSmallPatchStillEmitsRichDiff(t *testing.T) {
 	}
 }
 
+func TestForwardEventToTUI_HugeFileTinyPatchStillUsesRichDiffWithoutCompactSummary(t *testing.T) {
+	ws := t.TempDir()
+	path := filepath.Join(ws, "huge.txt")
+	lines := make([]string, 0, 6000)
+	for i := 1; i <= 6000; i++ {
+		lines = append(lines, fmt.Sprintf("line-%04d", i))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	oldSnippet := "line-3200\nline-3201\nline-3202"
+	newSnippet := "line-3200\ninserted\nline-3201\nline-3202"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	c := &cliConsole{
+		tuiSender:   sender,
+		execRuntime: previewTestRuntime{cwd: ws},
+	}
+	pending := map[string]toolCallSnapshot{}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
+			{ID: "call_patch_huge", Name: "PATCH", Args: fmt.Sprintf(`{"path":%q,"old":%q,"new":%q}`, path, oldSnippet, newSnippet)},
+		}, ""),
+	}, pending)
+	if !handled {
+		t.Fatal("expected tool call to be handled")
+	}
+	if len(sender.msgs) != 2 {
+		t.Fatalf("expected tool call log and rich diff block, got %#v", sender.msgs)
+	}
+	if _, ok := sender.msgs[1].(tuievents.DiffBlockMsg); !ok {
+		t.Fatalf("expected rich diff block, got %T", sender.msgs[1])
+	}
+
+	sender.msgs = nil
+	handled = c.forwardEventToTUI(&session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_patch_huge",
+			Name: "PATCH",
+			Result: map[string]any{
+				"path":          path,
+				"created":       false,
+				"replaced":      1,
+				"old_count":     1,
+				"added_lines":   1,
+				"removed_lines": 0,
+			},
+		}),
+	}, pending)
+	if !handled {
+		t.Fatal("expected tool response to be handled")
+	}
+	if len(sender.msgs) != 0 {
+		t.Fatalf("did not expect compact +1 -0 summary after rich diff, got %#v", sender.msgs)
+	}
+}
+
 func TestForwardEventToTUI_StagesEarlierPatchForLaterPreviewInSameEvent(t *testing.T) {
 	ws := t.TempDir()
 	path := filepath.Join(ws, "chain.txt")

@@ -20,7 +20,7 @@ type ReconcileSessionRequest struct {
 
 func (r *Runtime) ReconcileSession(ctx context.Context, req ReconcileSessionRequest) ([]*task.Entry, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("runtime: context is required")
 	}
 	if r == nil || r.taskStore == nil {
 		return nil, nil
@@ -53,7 +53,7 @@ func (r *Runtime) ReconcileSession(ctx context.Context, req ReconcileSessionRequ
 
 func (r *Runtime) reconcileTaskEntry(ctx context.Context, entry *task.Entry, execRuntime toolexec.Runtime) (*task.Entry, error) {
 	if entry == nil {
-		return nil, nil
+		return nil, fmt.Errorf("runtime: task entry is required")
 	}
 	if !entry.Running {
 		return entry, nil
@@ -99,7 +99,8 @@ func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, exec
 		}
 		return nil, err
 	}
-	entry.State = bashTaskState(status.State)
+	preview := recoveredBashPreview(runner, sessionID)
+	entry.State = bashTaskState(status, preview)
 	entry.Running = status.State == toolexec.SessionStateRunning
 	entry.UpdatedAt = time.Now()
 	entry.HeartbeatAt = time.Now()
@@ -114,13 +115,16 @@ func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, exec
 	entry.Result["exit_code"] = status.ExitCode
 	entry.Result["session_id"] = sessionID
 	entry.Result["output_meta"] = bashTaskOutputMeta(status, boolValue(entry.Spec, taskSpecTTY))
-	if preview := recoveredBashPreview(runner, sessionID); preview != "" {
+	if preview != "" {
 		entry.Result["latest_output"] = preview
 	} else {
 		delete(entry.Result, "latest_output")
 	}
 	delete(entry.Result, "interrupted")
 	delete(entry.Result, "error")
+	if text := strings.TrimSpace(status.Error); text != "" {
+		entry.Result["error"] = text
+	}
 	if err := r.taskStore.Upsert(ctx, task.CloneEntry(entry)); err != nil {
 		return nil, err
 	}
@@ -217,7 +221,7 @@ func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) 
 
 func (r *Runtime) markTaskInterrupted(ctx context.Context, entry *task.Entry, reason string) (*task.Entry, error) {
 	if entry == nil {
-		return nil, nil
+		return nil, fmt.Errorf("runtime: task entry is required")
 	}
 	entry.State = task.StateInterrupted
 	entry.Running = false

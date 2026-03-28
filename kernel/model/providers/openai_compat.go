@@ -2,6 +2,7 @@ package providers
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -378,10 +379,6 @@ type openAIStreamAccumulator struct {
 }
 
 func (a *openAIStreamAccumulator) message() (model.Message, error) {
-	role := a.role
-	if role == "" {
-		role = model.RoleAssistant
-	}
 	calls := make([]model.ToolCall, 0, len(a.toolCalls))
 	keys := make([]int, 0, len(a.toolCalls))
 	for idx := range a.toolCalls {
@@ -396,7 +393,21 @@ func (a *openAIStreamAccumulator) message() (model.Message, error) {
 			Args: tc.Function.Arguments,
 		})
 	}
-	return model.MessageFromAssistantParts(a.text.String(), a.reasoning.String(), calls), nil
+	parts := make([]model.Part, 0, len(calls)+2)
+	if strings.TrimSpace(a.reasoning.String()) != "" {
+		parts = append(parts, model.NewReasoningPart(a.reasoning.String(), model.ReasoningVisibilityVisible))
+	}
+	if strings.TrimSpace(a.text.String()) != "" {
+		parts = append(parts, model.NewTextPart(a.text.String()))
+	}
+	for _, call := range calls {
+		part := model.NewToolUsePart(call.ID, call.Name, json.RawMessage(strings.TrimSpace(call.Args)))
+		if part.ToolUse != nil && strings.TrimSpace(call.ThoughtSignature) != "" {
+			part.ToolUse.Replay = &model.ReplayMeta{Token: call.ThoughtSignature}
+		}
+		parts = append(parts, part)
+	}
+	return model.Message{Role: cmp.Or(a.role, model.RoleAssistant), Parts: parts}, nil
 }
 
 func (l *openAICompatLLM) fromKernelMessages(instructions []model.Part, messages []model.Message) []openAICompatReqMsg {

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
@@ -23,7 +24,7 @@ type closeableSwitchRunner struct {
 
 type panicSender struct{}
 
-func (panicSender) Send(msg any) {
+func (panicSender) Send(_ any) {
 	panic("unexpected TUI send")
 }
 
@@ -76,6 +77,35 @@ func (r *recordingSwitchRunner) Run(ctx context.Context, req toolexec.CommandReq
 	r.calls = append(r.calls, req)
 	return toolexec.CommandResult{Stdout: "ok"}, nil
 }
+
+func (r *recordingSwitchRunner) StartAsync(ctx context.Context, req toolexec.CommandRequest) (string, error) {
+	if _, err := r.Run(ctx, req); err != nil {
+		return "", err
+	}
+	return "bash-session-1", nil
+}
+
+func (r *recordingSwitchRunner) WriteInput(string, []byte) error { return nil }
+
+func (r *recordingSwitchRunner) ReadOutput(string, int64, int64) ([]byte, []byte, int64, int64, error) {
+	return []byte("ok"), nil, int64(len("ok")), 0, nil
+}
+
+func (r *recordingSwitchRunner) GetSessionStatus(string) (toolexec.SessionStatus, error) {
+	return toolexec.SessionStatus{
+		ID:       "bash-session-1",
+		State:    toolexec.SessionStateCompleted,
+		ExitCode: 0,
+	}, nil
+}
+
+func (r *recordingSwitchRunner) WaitSession(context.Context, string, time.Duration) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{Stdout: "ok"}, nil
+}
+
+func (r *recordingSwitchRunner) TerminateSession(string) error { return nil }
+
+func (r *recordingSwitchRunner) ListSessions() []toolexec.SessionInfo { return nil }
 
 func TestHandlePermission_SwitchMode(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder

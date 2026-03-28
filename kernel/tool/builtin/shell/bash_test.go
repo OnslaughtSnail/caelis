@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"runtime"
@@ -16,10 +17,11 @@ import (
 )
 
 type recordingRunner struct {
-	result toolexec.CommandResult
-	err    error
-	calls  []toolexec.CommandRequest
-	onRun  func(toolexec.CommandRequest)
+	result         toolexec.CommandResult
+	err            error
+	calls          []toolexec.CommandRequest
+	onRun          func(toolexec.CommandRequest)
+	startSessionID string
 }
 
 type asyncRecordingRunner struct {
@@ -52,14 +54,8 @@ func assertBashOutput(t *testing.T, out map[string]any, want string) {
 	if got := out["state"]; got != string(task.StateCompleted) {
 		t.Fatalf("expected completed state, got %#v", out)
 	}
-	if got := out["msg"]; got != "task success" {
-		t.Fatalf("expected success msg, got %#v", out)
-	}
-	if _, exists := out["result"]; exists {
-		t.Fatalf("expected no compact result field, got %#v", out)
-	}
-	if _, exists := out["output_meta"]; exists {
-		t.Fatalf("expected uninformative output_meta to be omitted, got %#v", out)
+	if _, exists := out["task_id"]; exists {
+		t.Fatalf("expected completed result to omit task_id, got %#v", out)
 	}
 }
 
@@ -77,6 +73,59 @@ func (r *recordingRunner) Run(ctx context.Context, req toolexec.CommandRequest) 
 		r.onRun(req)
 	}
 	return r.result, r.err
+}
+
+func (r *recordingRunner) StartAsync(ctx context.Context, req toolexec.CommandRequest) (string, error) {
+	_, err := r.Run(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	if r.startSessionID == "" {
+		r.startSessionID = "bash-session-1"
+	}
+	return r.startSessionID, nil
+}
+
+func (r *recordingRunner) WriteInput(sessionID string, input []byte) error {
+	_ = sessionID
+	_ = input
+	return nil
+}
+
+func (r *recordingRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	_ = sessionID
+	_ = stdoutMarker
+	_ = stderrMarker
+	return []byte(r.result.Stdout), []byte(r.result.Stderr), int64(len(r.result.Stdout)), int64(len(r.result.Stderr)), nil
+}
+
+func (r *recordingRunner) GetSessionStatus(sessionID string) (toolexec.SessionStatus, error) {
+	_ = sessionID
+	id := r.startSessionID
+	if id == "" {
+		id = "bash-session-1"
+	}
+	return toolexec.SessionStatus{
+		ID:       id,
+		State:    toolexec.SessionStateCompleted,
+		ExitCode: r.result.ExitCode,
+	}, nil
+}
+
+func (r *recordingRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (toolexec.CommandResult, error) {
+	_ = ctx
+	_ = sessionID
+	_ = timeout
+	return r.result, r.err
+}
+
+func (r *recordingRunner) TerminateSession(sessionID string) error {
+	_ = sessionID
+	return nil
+}
+
+func (r *recordingRunner) ListSessions() []toolexec.SessionInfo {
+	return nil
 }
 
 func (r *asyncRecordingRunner) StartAsync(ctx context.Context, req toolexec.CommandRequest) (string, error) {
@@ -223,6 +272,59 @@ func TestBash_DefaultSafeCommandRunsInSandbox(t *testing.T) {
 	assertBashOutput(t, out, "sandbox-ok")
 }
 
+func TestBash_PassesTimeoutToTaskManager(t *testing.T) {
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		HostRunner:     &recordingRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(rt) })
+
+	manager := &stubTaskManager{
+		startBash: task.Snapshot{
+			TaskID:  "bash-1",
+			Kind:    task.KindBash,
+			State:   task.StateRunning,
+			Running: true,
+		},
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := task.WithManager(context.Background(), manager)
+	_, err = tool.Run(ctx, map[string]any{
+		"command":    "echo hi",
+		"timeout_ms": 1234,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.lastBash.Timeout != 1234*time.Millisecond {
+		t.Fatalf("expected timeout_ms to reach task manager, got %s", manager.lastBash.Timeout)
+	}
+}
+
+func TestBash_CompletedResultExposesTruncationMsg(t *testing.T) {
+	out := snapshotResultMap(task.Snapshot{
+		Kind:  task.KindBash,
+		State: task.StateCompleted,
+		Output: task.Output{
+			Stdout: "long output\n",
+		},
+		Result: map[string]any{
+			"output_meta": map[string]any{
+				"capture_truncated": true,
+			},
+		},
+	})
+	if got := out["msg"]; got != "output truncated" {
+		t.Fatalf("expected truncation msg, got %#v", out)
+	}
+}
+
 func TestBash_StreamsCommandOutputThroughContext(t *testing.T) {
 	var got []toolexec.OutputChunk
 	sandbox := &recordingRunner{
@@ -263,6 +365,29 @@ func TestBash_StreamsCommandOutputThroughContext(t *testing.T) {
 	}
 	if got[1].Stream != "stderr" || strings.TrimSpace(got[1].Text) != "warn-1" {
 		t.Fatalf("unexpected second output chunk: %+v", got[1])
+	}
+}
+
+func TestKtoolSnapshotResult_RunningBashUsesMinimalPayload(t *testing.T) {
+	result := ktoolSnapshotResult(task.Snapshot{
+		TaskID:  "bash-task-1",
+		Kind:    task.KindBash,
+		State:   task.StateRunning,
+		Running: true,
+		Result: map[string]any{
+			"latest_output": "Password:",
+		},
+	}, "sandbox")
+	if got := result["state"]; got != string(task.StateRunning) {
+		t.Fatalf("expected running state, got %#v", result)
+	}
+	if got := result["task_id"]; got != "bash-task-1" {
+		t.Fatalf("expected running task_id, got %#v", result)
+	}
+	for _, key := range []string{"next_action", "suggested_args", "msg", "result"} {
+		if _, exists := result[key]; exists {
+			t.Fatalf("did not expect %s in minimal running payload, got %#v", key, result)
+		}
 	}
 }
 
@@ -307,7 +432,7 @@ func TestBash_YieldReturnsSharedTaskHandle(t *testing.T) {
 	}
 }
 
-func TestBash_SyncTTYKeepsTranscriptOutOfResultFields(t *testing.T) {
+func TestBash_CompletedCommandReturnsStdoutEvenWhenTTYArgIsIgnored(t *testing.T) {
 	host := &recordingRunner{
 		result: toolexec.CommandResult{
 			Stdout:   "name?\nalice\nhello alice\n",
@@ -332,14 +457,11 @@ func TestBash_SyncTTYKeepsTranscriptOutOfResultFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, exists := out["stdout"]; exists {
-		t.Fatalf("expected tty output to stay out of stdout field, got %#v", out)
+	if got := strings.TrimSpace(fmt.Sprint(out["stdout"])); got != "name?\nalice\nhello alice" {
+		t.Fatalf("expected completed stdout result, got %#v", out)
 	}
-	if got := strings.TrimSpace(out["result"].(string)); !strings.Contains(got, "hello alice") {
-		t.Fatalf("expected tty preview in result, got %#v", out)
-	}
-	if _, exists := out["output_meta"]; exists {
-		t.Fatalf("expected tty bookkeeping output_meta to be omitted from visible result, got %#v", out)
+	if _, exists := out["result"]; exists {
+		t.Fatalf("did not expect preview result field, got %#v", out)
 	}
 }
 
@@ -645,7 +767,7 @@ func TestBash_InvalidRequireEscalatedType(t *testing.T) {
 	}
 }
 
-func TestBash_TTYWithoutYieldAutomaticallyBecomesTask(t *testing.T) {
+func TestBash_InteractiveCommandWithoutYieldBecomesTask(t *testing.T) {
 	host := &asyncRecordingRunner{
 		status: toolexec.SessionStatus{State: toolexec.SessionStateRunning},
 		readResult: struct {
@@ -692,12 +814,13 @@ func TestBash_TTYWithoutYieldAutomaticallyBecomesTask(t *testing.T) {
 	if got := out["task_id"]; got != "t-bash-1" {
 		t.Fatalf("expected interactive command to yield task handle, got %#v", out)
 	}
-	message := strings.TrimSpace(strings.TrimSpace(out["msg"].(string)))
-	if !strings.Contains(message, "use TASK with task_id t-bash-1") {
-		t.Fatalf("expected yielded message with task guidance, got %#v", out)
+	if got := out["state"]; got != string(task.StateRunning) {
+		t.Fatalf("expected running state, got %#v", out)
 	}
-	if got := strings.TrimSpace(out["result"].(string)); got != "What is your name?" {
-		t.Fatalf("expected yielded result preview, got %#v", out)
+	for _, key := range []string{"msg", "result", "next_action", "suggested_args"} {
+		if _, exists := out[key]; exists {
+			t.Fatalf("did not expect %s in yielded bash payload, got %#v", key, out)
+		}
 	}
 }
 
@@ -902,7 +1025,7 @@ func TestBash_ExplicitZeroYieldUsesDefaultWait(t *testing.T) {
 	}
 }
 
-func TestBash_SandboxCommandMissingEscalatesToHostAfterApproval(t *testing.T) {
+func TestBash_SandboxCommandMissingDoesNotEscalateToHost(t *testing.T) {
 	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-ok"}}
 	sandbox := &recordingRunner{
 		result: toolexec.CommandResult{
@@ -926,20 +1049,22 @@ func TestBash_SandboxCommandMissingEscalatesToHostAfterApproval(t *testing.T) {
 	}
 	ctx := toolexec.WithApprover(context.Background(), fixedApprover{allow: true})
 	ctx = withSandboxFallbackDecision(ctx)
-	out, err := tool.Run(ctx, map[string]any{"command": "grep foo bar.txt"})
-	if err != nil {
-		t.Fatal(err)
+	_, err = tool.Run(ctx, map[string]any{"command": "grep foo bar.txt"})
+	if err == nil {
+		t.Fatal("expected sandbox command failure")
+	}
+	if !strings.Contains(err.Error(), "sandbox command failed") {
+		t.Fatalf("expected sandbox failure to surface, got %v", err)
 	}
 	if len(sandbox.calls) != 1 {
 		t.Fatalf("expected sandbox called once, got %d", len(sandbox.calls))
 	}
-	if len(host.calls) != 1 {
-		t.Fatalf("expected host called once, got %d", len(host.calls))
+	if len(host.calls) != 0 {
+		t.Fatalf("expected host not called, got %d", len(host.calls))
 	}
-	assertBashOutput(t, out, "host-ok")
 }
 
-func TestBash_SandboxCommandMissingRequiresApprovalWhenNoApprover(t *testing.T) {
+func TestBash_SandboxCommandMissingWithoutApproverStillSurfacesSandboxError(t *testing.T) {
 	host := &recordingRunner{result: toolexec.CommandResult{Stdout: "host-ok"}}
 	sandbox := &recordingRunner{
 		result: toolexec.CommandResult{
@@ -964,14 +1089,10 @@ func TestBash_SandboxCommandMissingRequiresApprovalWhenNoApprover(t *testing.T) 
 	ctx := withSandboxFallbackDecision(context.Background())
 	_, err = tool.Run(ctx, map[string]any{"command": "grep foo bar.txt"})
 	if err == nil {
-		t.Fatal("expected approval required")
+		t.Fatal("expected sandbox command failure")
 	}
-	var approvalErr *toolexec.ApprovalRequiredError
-	if !errors.As(err, &approvalErr) {
-		t.Fatalf("expected approval-required error, got: %v", err)
-	}
-	if !toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalRequired) {
-		t.Fatalf("expected approval-required code %q, got %q", toolexec.ErrorCodeApprovalRequired, toolexec.ErrorCodeOf(err))
+	if !strings.Contains(err.Error(), "sandbox command failed") {
+		t.Fatalf("expected sandbox failure to surface, got %v", err)
 	}
 	if len(host.calls) != 0 {
 		t.Fatalf("expected host not called without approval, got %d", len(host.calls))

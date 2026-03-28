@@ -76,7 +76,7 @@ func resolveSingleShotInput(
 
 func runHeadlessOnce(ctx context.Context, svc *sessionsvc.Service, req sessionsvc.RunTurnRequest) (headlessRunResult, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return headlessRunResult{}, fmt.Errorf("cli: context is required")
 	}
 	var (
 		lastAssistant string

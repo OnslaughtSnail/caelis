@@ -407,7 +407,7 @@ func TestRuntime_ReconcileSession_InterruptsLegacyDelegateTask(t *testing.T) {
 
 func TestRuntime_ReconcileSession_LegacySpawnSpecFallback(t *testing.T) {
 	// Old persisted spawn records stored agent and child_cwd only in Result,
-	// not in Spec. Verify reconcilation still picks them up.
+	// not in Spec. Verify reconciliation still picks them up.
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
 	rt, err := New(Config{Store: sessions, TaskStore: tasks})

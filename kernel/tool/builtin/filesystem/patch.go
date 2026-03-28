@@ -35,7 +35,7 @@ func (t *PatchTool) Name() string {
 }
 
 func (t *PatchTool) Description() string {
-	return "Patch one file by exact old->new replacement."
+	return "Patch one file by exact old-to-new replacement."
 }
 
 func (t *PatchTool) Capability() capability.Capability {
@@ -52,10 +52,10 @@ func (t *PatchTool) Declaration() model.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":        map[string]any{"type": "string", "description": "target file path"},
-				"old":         map[string]any{"type": "string", "description": "exact original content to replace"},
-				"new":         map[string]any{"type": "string", "description": "replacement content"},
-				"replace_all": map[string]any{"type": "boolean", "description": "replace all occurrences"},
+				"path":        map[string]any{"type": "string", "description": "Target file path."},
+				"old":         map[string]any{"type": "string", "description": "Exact original text to replace."},
+				"new":         map[string]any{"type": "string", "description": "Replacement text."},
+				"replace_all": map[string]any{"type": "boolean", "description": "Replace all occurrences instead of one."},
 			},
 			"required": []string{"path", "old", "new"},
 		},

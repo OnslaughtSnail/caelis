@@ -91,13 +91,127 @@ type Model struct {
 func BuildModel(payload Payload) Model {
 	oldLines := splitContentLines(payload.Old)
 	newLines := splitContentLines(payload.New)
-	rows := make([]Row, 0, len(oldLines)+len(newLines)+4)
+	rows := make([]Row, 0, minInt(len(oldLines)+len(newLines), richDiffMaxRowsHint(oldLines, newLines)))
 
+	prefix, suffix := commonLineAffixCounts(oldLines, newLines)
+	if len(oldLines) == len(newLines) && prefix == len(oldLines) {
+		return Model{
+			Tool:         payload.Tool,
+			Path:         payload.Path,
+			Created:      payload.Created,
+			Hunk:         strings.TrimSpace(payload.Hunk),
+			Preview:      payload.Preview,
+			Truncated:    payload.Truncated,
+			Rows:         nil,
+			OldLineCount: len(oldLines),
+			NewLineCount: len(newLines),
+		}
+	}
+
+	rows = append(rows, buildSharedPrefixRows(oldLines, newLines, prefix)...)
+
+	oldCoreEnd := len(oldLines) - suffix
+	newCoreEnd := len(newLines) - suffix
+	coreRows, _, _ := buildDiffRows(oldLines[prefix:oldCoreEnd], newLines[prefix:newCoreEnd], prefix, prefix)
+	rows = append(rows, foldRows(coreRows, FoldContextLines)...)
+	rows = append(rows, buildSharedSuffixRows(oldLines, newLines, oldCoreEnd, newCoreEnd, suffix)...)
+
+	return Model{
+		Tool:         payload.Tool,
+		Path:         payload.Path,
+		Created:      payload.Created,
+		Hunk:         strings.TrimSpace(payload.Hunk),
+		Preview:      payload.Preview,
+		Truncated:    payload.Truncated,
+		Rows:         rows,
+		OldLineCount: len(oldLines),
+		NewLineCount: len(newLines),
+	}
+}
+
+func richDiffMaxRowsHint(oldLines, newLines []string) int {
+	const extraRows = 16
+	return (FoldContextLines * 4) + len(oldLines) + len(newLines) + extraRows
+}
+
+func commonLineAffixCounts(oldLines, newLines []string) (int, int) {
+	prefix := 0
+	for prefix < len(oldLines) && prefix < len(newLines) && oldLines[prefix] == newLines[prefix] {
+		prefix++
+	}
+
+	suffix := 0
+	for prefix+suffix < len(oldLines) &&
+		prefix+suffix < len(newLines) &&
+		oldLines[len(oldLines)-1-suffix] == newLines[len(newLines)-1-suffix] {
+		suffix++
+	}
+	return prefix, suffix
+}
+
+func buildSharedPrefixRows(oldLines, newLines []string, prefix int) []Row {
+	if prefix <= 0 {
+		return nil
+	}
+	rows := make([]Row, 0, minInt(prefix, FoldContextLines)+1)
+	if prefix > FoldContextLines {
+		rows = append(rows, Row{
+			Kind:       RowFold,
+			OldLineNo:  1,
+			OldLineEnd: prefix - FoldContextLines,
+			NewLineNo:  1,
+			NewLineEnd: prefix - FoldContextLines,
+		})
+	}
+	start := maxInt(0, prefix-FoldContextLines)
+	for idx := start; idx < prefix; idx++ {
+		rows = append(rows, sharedContextRow(oldLines[idx], newLines[idx], idx+1, idx+1))
+	}
+	return rows
+}
+
+func buildSharedSuffixRows(oldLines, newLines []string, oldStart, newStart, suffix int) []Row {
+	if suffix <= 0 {
+		return nil
+	}
+	show := minInt(FoldContextLines, suffix)
+	rows := make([]Row, 0, show+1)
+	for offset := 0; offset < show; offset++ {
+		oldIdx := oldStart + offset
+		newIdx := newStart + offset
+		rows = append(rows, sharedContextRow(oldLines[oldIdx], newLines[newIdx], oldIdx+1, newIdx+1))
+	}
+	if suffix > show {
+		rows = append(rows, Row{
+			Kind:       RowFold,
+			OldLineNo:  oldStart + show + 1,
+			OldLineEnd: len(oldLines),
+			NewLineNo:  newStart + show + 1,
+			NewLineEnd: len(newLines),
+		})
+	}
+	return rows
+}
+
+func sharedContextRow(oldText, newText string, oldLineNo, newLineNo int) Row {
+	return Row{
+		Kind:      RowContext,
+		OldLineNo: oldLineNo,
+		NewLineNo: newLineNo,
+		OldText:   oldText,
+		NewText:   newText,
+		OldSpans:  []InlineSpan{{Text: oldText, Kind: InlineUnchanged}},
+		NewSpans:  []InlineSpan{{Text: newText, Kind: InlineUnchanged}},
+	}
+}
+
+func buildDiffRows(oldLines, newLines []string, oldBase, newBase int) ([]Row, int, int) {
+	rows := make([]Row, 0, len(oldLines)+len(newLines)+4)
 	pairs := lcsLinePairs(oldLines, newLines)
 	oldCursor := 0
 	newCursor := 0
-	oldNo := 0
-	newNo := 0
+	oldNo := oldBase
+	newNo := newBase
 
 	for _, one := range pairs {
 		segOld := oldLines[oldCursor:one.a]
@@ -109,16 +223,7 @@ func BuildModel(payload Payload) Model {
 
 		oldNo++
 		newNo++
-		text := oldLines[one.a]
-		rows = append(rows, Row{
-			Kind:      RowContext,
-			OldLineNo: oldNo,
-			NewLineNo: newNo,
-			OldText:   text,
-			NewText:   newLines[one.b],
-			OldSpans:  []InlineSpan{{Text: text, Kind: InlineUnchanged}},
-			NewSpans:  []InlineSpan{{Text: newLines[one.b], Kind: InlineUnchanged}},
-		})
+		rows = append(rows, sharedContextRow(oldLines[one.a], newLines[one.b], oldNo, newNo))
 
 		oldCursor = one.a + 1
 		newCursor = one.b + 1
@@ -126,19 +231,7 @@ func BuildModel(payload Payload) Model {
 
 	tailRows, tailOldNo, tailNewNo := buildChangedRows(oldLines[oldCursor:], newLines[newCursor:], oldNo, newNo)
 	rows = append(rows, tailRows...)
-	rows = foldRows(rows, FoldContextLines)
-
-	return Model{
-		Tool:         payload.Tool,
-		Path:         payload.Path,
-		Created:      payload.Created,
-		Hunk:         strings.TrimSpace(payload.Hunk),
-		Preview:      payload.Preview,
-		Truncated:    payload.Truncated,
-		Rows:         rows,
-		OldLineCount: maxInt(tailOldNo, oldNo),
-		NewLineCount: maxInt(tailNewNo, newNo),
-	}
+	return rows, tailOldNo, tailNewNo
 }
 
 // Render renders a diff model to TUI lines with adaptive layout.

@@ -37,7 +37,7 @@ func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	go func() {
-		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
 			switch msg.Method {
 			case MethodTerminalCreate:
 				return CreateTerminalResponse{TerminalID: "term-async-1"}, nil
@@ -159,7 +159,7 @@ func TestNewRuntime_TerminalCapabilityRoutesSandboxAsyncThroughACPBridge(t *test
 
 	terminalCreates := 0
 	go func() {
-		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
 			switch msg.Method {
 			case MethodTerminalCreate:
 				terminalCreates++
@@ -389,7 +389,7 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	go func() {
-		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
 			switch msg.Method {
 			case MethodTerminalCreate:
 				return CreateTerminalResponse{TerminalID: "term-full-access"}, nil
@@ -437,7 +437,7 @@ func TestAsyncRunner_TerminateSessionUsesTerminalKill(t *testing.T) {
 	killCalls := 0
 	releaseCalls := 0
 	go func() {
-		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
 			switch msg.Method {
 			case MethodTerminalCreate:
 				return CreateTerminalResponse{TerminalID: "term-kill-1"}, nil
@@ -501,7 +501,7 @@ func TestNewRuntime_FullAccessModeKeepsACPFileSystemBridge(t *testing.T) {
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	go func() {
-		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
 			switch msg.Method {
 			case MethodReadTextFile:
 				var req ReadTextFileRequest
@@ -663,7 +663,7 @@ func TestNewRuntime_BaseFullControlKeepsACPFileSystemBridge(t *testing.T) {
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	go func() {
-		_ = serverConn.Serve(ctx, func(ctx context.Context, msg Message) (any, *RPCError) {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
 			switch msg.Method {
 			case MethodReadTextFile:
 				var req ReadTextFileRequest

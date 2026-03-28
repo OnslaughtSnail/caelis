@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -168,8 +169,8 @@ func TestClientPromptUsesTextContentBlocks(t *testing.T) {
 
 func TestDecodeUpdate_IgnoresUnknownExtensionUpdate(t *testing.T) {
 	update, err := decodeUpdate(json.RawMessage(`{"sessionUpdate":"vendor_extension","value":1}`))
-	if err != nil {
-		t.Fatalf("decodeUpdate: %v", err)
+	if !errors.Is(err, errUnknownSessionUpdate) {
+		t.Fatalf("expected unknown session update error, got %v", err)
 	}
 	if update != nil {
 		t.Fatalf("expected unknown update to be ignored, got %#v", update)

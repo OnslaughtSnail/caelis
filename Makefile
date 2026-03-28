@@ -2,12 +2,19 @@ GIT_TAG ?= $(shell git describe --tags --exact-match 2>/dev/null || true)
 VERSION ?= $(if $(strip $(GIT_TAG)),$(strip $(GIT_TAG)),$(shell cat VERSION 2>/dev/null || echo dev))
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GOFILES := $(shell rg --files -g '*.go')
 LDFLAGS := -s -w \
 	-X github.com/OnslaughtSnail/caelis/internal/version.Version=$(VERSION) \
 	-X github.com/OnslaughtSnail/caelis/internal/version.Commit=$(COMMIT) \
 	-X github.com/OnslaughtSnail/caelis/internal/version.Date=$(DATE)
 
-.PHONY: build build-cli install vet lint test eval-light eval-nightly eval-real-matrix release-dry-run
+.PHONY: build build-cli fmt fmt-check install lint quality test vet eval-light eval-nightly eval-real-matrix release-dry-run
+
+fmt:
+	gofmt -w $(GOFILES)
+
+fmt-check:
+	@test -z "$$(gofmt -l $(GOFILES))"
 
 build:
 	go build ./...
@@ -23,7 +30,9 @@ vet:
 	go vet ./...
 
 lint:
-	golangci-lint run ./kernel/...
+	golangci-lint run ./...
+
+quality: fmt-check lint test vet build
 
 test:
 	go test ./...

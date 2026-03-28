@@ -220,7 +220,7 @@ func (a *Adapter) resolveSymbol(ctx context.Context, workspace, query string) ([
 	}
 
 	var raw []lspSymbolInformation
-	err := withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+	err := withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 		rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		return mc.client.Call(rpcCtx, "workspace/symbol", map[string]any{
@@ -444,7 +444,7 @@ func (a *Adapter) newSymbolDefinitionTool(workspace string) (tool.Tool, error) {
 				}
 
 				var raw json.RawMessage
-				callErr := withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+				callErr := withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 					rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 					defer cancel()
 					return mc.client.Call(rpcCtx, "textDocument/definition", map[string]any{
@@ -537,7 +537,7 @@ func (a *Adapter) newSymbolReferencesTool(workspace string) (tool.Tool, error) {
 			}
 
 			var raw []lspLocation
-			callErr := withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+			callErr := withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 				rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 				defer cancel()
 				return mc.client.Call(rpcCtx, "textDocument/references", map[string]any{
@@ -599,7 +599,7 @@ func (a *Adapter) newDiagnosticsTool(workspace string) (tool.Tool, error) {
 		}
 
 		var report lspDocumentDiagnosticReport
-		err = withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+		err = withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 			rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
 			return mc.client.Call(rpcCtx, "textDocument/diagnostic", map[string]any{
@@ -622,7 +622,7 @@ func (a *Adapter) newDiagnosticsTool(workspace string) (tool.Tool, error) {
 				endLine, endColumn = lspPositionToUser(lines, one.Range.End)
 			}
 			code := ""
-			switch v := any(one.Code).(type) {
+			switch v := one.Code.(type) {
 			case string:
 				code = v
 			case float64:
@@ -674,7 +674,7 @@ func (a *Adapter) newDefinitionTool(workspace string) (tool.Tool, error) {
 		query := fmt.Sprintf("%s:%d:%d", absPath, in.Line, in.Column)
 
 		var raw json.RawMessage
-		err = withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+		err = withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 			rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
 			return mc.client.Call(rpcCtx, "textDocument/definition", map[string]any{
@@ -737,7 +737,7 @@ func (a *Adapter) newReferencesTool(workspace string) (tool.Tool, error) {
 		query := fmt.Sprintf("%s:%d:%d", absPath, in.Line, in.Column)
 
 		var raw []lspLocation
-		err = withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+		err = withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 			rpcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
 			return mc.client.Call(rpcCtx, "textDocument/references", map[string]any{
@@ -770,7 +770,7 @@ func (a *Adapter) ensureDocumentSynced(ctx context.Context, workspace, path stri
 	uri := mustPathToURI(absPath)
 	hash := hashBytes(content)
 
-	err = withManagedClient(a, ctx, workspace, func(mc *managedClient) error {
+	err = withManagedClient(ctx, a, workspace, func(mc *managedClient) error {
 		mc.docMu.Lock()
 		state, exists := mc.docs[absPath]
 		mc.docMu.Unlock()
@@ -818,7 +818,7 @@ func (a *Adapter) ensureDocumentSynced(ctx context.Context, workspace, path stri
 	return absPath, uri, splitLines(string(content)), nil
 }
 
-func withManagedClient(a *Adapter, ctx context.Context, workspace string, fn func(*managedClient) error) error {
+func withManagedClient(ctx context.Context, a *Adapter, workspace string, fn func(*managedClient) error) error {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
 		forceRecreate := attempt > 0

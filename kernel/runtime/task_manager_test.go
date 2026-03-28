@@ -83,7 +83,7 @@ func (s *stubTaskController) Cancel(_ context.Context, record *task.Record) (tas
 	return task.Snapshot{State: task.StateCancelled}, nil
 }
 
-func TestTaskManager_StatusReturnsPersistedCancelledTaskAcrossTurns(t *testing.T) {
+func TestTaskManager_WaitReturnsPersistedCancelledTaskAcrossTurnsWithoutController(t *testing.T) {
 	store := taskinmemory.New()
 	entry := &task.Entry{
 		TaskID:         "t-cancelled",
@@ -106,7 +106,7 @@ func TestTaskManager_StatusReturnsPersistedCancelledTaskAcrossTurns(t *testing.T
 	}
 
 	manager := newTaskManager(nil, nil, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "s"}, RunRequest{}, nil)
-	snapshot, err := manager.Status(context.Background(), task.ControlRequest{TaskID: entry.TaskID})
+	snapshot, err := manager.Wait(context.Background(), task.ControlRequest{TaskID: entry.TaskID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,8 +497,8 @@ func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 	if got := snapshot.Result["progress_state"]; got != string(task.StateRunning) {
 		t.Fatalf("expected subagent progress_state in snapshot result, got %#v", snapshot.Result)
 	}
-	if _, ok := snapshot.Result["latest_output"]; ok {
-		t.Fatalf("did not expect spawn latest_output to leak into snapshot result, got %#v", snapshot.Result)
+	if got := snapshot.Result["latest_output"]; got != "still working" {
+		t.Fatalf("expected running spawn latest_output slice, got %#v", snapshot.Result)
 	}
 }
 
@@ -554,7 +554,78 @@ func TestTaskManager_ListFiltersRegistryBySession(t *testing.T) {
 	}
 }
 
-func TestTaskManager_StatusRebuildsPersistedSpawnController(t *testing.T) {
+func TestTaskManager_StatusUsesSubagentProgressFromNestedToolOutput(t *testing.T) {
+	record := &task.Record{
+		ID:      "t-delegate-progress",
+		Kind:    task.KindSpawn,
+		Title:   "spawn job",
+		State:   task.StateRunning,
+		Running: true,
+		Session: task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	controller := &subagentTaskController{
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID:    "child-1",
+				DelegationID: "d-1",
+				Agent:        "self",
+				State:        string(task.StateRunning),
+				Running:      true,
+				LatestOutput: "[10s] heartbeat 1/2",
+				ProgressSeq:  42,
+				UpdatedAt:    time.Now(),
+			},
+		},
+	}
+
+	snapshot, err := controller.Wait(context.Background(), record, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Result["latest_output"]; got != "[10s] heartbeat 1/2" {
+		t.Fatalf("expected latest_output from nested tool progress, got %#v", snapshot.Result)
+	}
+	if got := snapshot.Result["progress_seq"]; got != 42 {
+		t.Fatalf("expected progress_seq from subagent progress, got %#v", snapshot.Result)
+	}
+}
+
+func TestTaskManager_BashWaitDetectsWaitingInputPrompt(t *testing.T) {
+	runner := &stubAsyncTaskRunner{
+		stdoutByMarker: map[int64][]byte{
+			0: []byte("What is your name?\n"),
+		},
+		status:    toolexec.SessionStatus{State: toolexec.SessionStateRunning},
+		sessionID: "sess-prompt-1",
+	}
+	controller := &bashTaskController{
+		runner:    runner,
+		sessionID: "sess-prompt-1",
+		command:   "read name",
+		route:     string(toolexec.ExecutionRouteHost),
+	}
+	record := &task.Record{
+		ID:      "t-bash-prompt",
+		Kind:    task.KindBash,
+		Title:   "prompt job",
+		State:   task.StateRunning,
+		Running: true,
+	}
+
+	snapshot, err := controller.Wait(context.Background(), record, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.State != task.StateWaitingInput {
+		t.Fatalf("expected waiting_input state, got %#v", snapshot)
+	}
+}
+
+func TestTaskManager_WaitRebuildsPersistedSpawnController(t *testing.T) {
 	sessStore := sessioninmemory.New()
 	taskStore := taskinmemory.New()
 	rt, err := New(Config{Store: sessStore, TaskStore: taskStore})
@@ -610,7 +681,7 @@ func TestTaskManager_StatusRebuildsPersistedSpawnController(t *testing.T) {
 			Running:      true,
 		},
 	})
-	snapshot, err := manager.Status(context.Background(), task.ControlRequest{TaskID: "t-spawn-persisted"})
+	snapshot, err := manager.Wait(context.Background(), task.ControlRequest{TaskID: "t-spawn-persisted"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +720,7 @@ func TestSubagentTaskController_StatusInterruptsStaleTrackerLoss(t *testing.T) {
 		inspectErr: assertErrString("acpext: delegated child session \"child-1\" is not tracked in this process"),
 	}
 
-	snapshot, err := controller.Status(context.Background(), record)
+	snapshot, err := controller.Wait(context.Background(), record, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +753,7 @@ func TestSubagentTaskController_StatusKeepsRecentTrackerLossRunning(t *testing.T
 		},
 	}
 
-	snapshot, err := controller.Status(context.Background(), record)
+	snapshot, err := controller.Wait(context.Background(), record, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -717,7 +788,7 @@ func TestSubagentTaskController_StatusKeepsStaleSilentRunRunning(t *testing.T) {
 		},
 	}
 
-	snapshot, err := controller.Status(context.Background(), record)
+	snapshot, err := controller.Wait(context.Background(), record, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,7 +826,7 @@ func TestSubagentTaskController_StatusFailsIdleTimedOutRun(t *testing.T) {
 		},
 	}
 
-	snapshot, err := controller.Status(context.Background(), record)
+	snapshot, err := controller.Wait(context.Background(), record, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,7 +871,7 @@ func TestSubagentTaskController_StatusPollDoesNotExtendIdleWindow(t *testing.T) 
 		},
 	}
 
-	snapshot, err := controller.Status(context.Background(), record)
+	snapshot, err := controller.Wait(context.Background(), record, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,7 +916,7 @@ func TestSubagentTaskController_StatusDoesNotIdleTimeoutApprovalWait(t *testing.
 		},
 	}
 
-	snapshot, err := controller.Status(context.Background(), record)
+	snapshot, err := controller.Wait(context.Background(), record, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,6 +928,51 @@ func TestSubagentTaskController_StatusDoesNotIdleTimeoutApprovalWait(t *testing.
 	}
 	if snapshot.Result["idle_timed_out"] == true {
 		t.Fatalf("did not expect idle timeout marker during approval wait, got %#v", snapshot.Result)
+	}
+}
+
+func TestSubagentTaskController_StatusDoesNotIdleTimeoutActiveToolCall(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-toolcall-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-3 * time.Minute),
+		HeartbeatAt: time.Now().Add(-3 * time.Minute),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	cancelled := false
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "codex",
+		childCWD:     "/tmp",
+		idleTimeout:  30 * time.Second,
+		cancel:       func() { cancelled = true },
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID:       "child-1",
+				State:           string(task.StateRunning),
+				Running:         true,
+				ToolCallPending: true,
+				UpdatedAt:       time.Now().Add(-2 * time.Minute),
+			},
+		},
+	}
+
+	snapshot, err := controller.Wait(context.Background(), record, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Running || snapshot.State != task.StateRunning {
+		t.Fatalf("expected active tool-call subagent to remain running, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	}
+	if cancelled {
+		t.Fatal("did not expect active tool call to trigger idle-timeout cancellation")
+	}
+	if snapshot.Result["idle_timed_out"] == true {
+		t.Fatalf("did not expect idle timeout marker during tool call wait, got %#v", snapshot.Result)
 	}
 }
 
@@ -888,7 +1004,7 @@ func TestSubagentTaskController_WriteRejectsRunningSubagent(t *testing.T) {
 	}
 
 	_, err := controller.Write(toolexec.WithToolCallInfo(context.Background(), tool.TaskToolName, "call-task-write"), record, "yes", 0)
-	if err == nil || !strings.Contains(err.Error(), "only allowed for completed spawn subagents") {
+	if err == nil || !strings.Contains(err.Error(), "can continue a spawn subagent only after it reaches completed") {
 		t.Fatalf("expected running TASK write rejection, got %v", err)
 	}
 	if runner.runCalls != 0 {

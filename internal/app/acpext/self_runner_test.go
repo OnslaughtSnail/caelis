@@ -626,6 +626,143 @@ func TestSelfACPSubagentRunner_PermissionApprovalEmitsRunningLifecycle(t *testin
 	}
 }
 
+func TestSelfACPSubagentRunner_ReturnsSessionHandleWhenPromptTimeoutHitsAfterReady(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &timeoutAwareACPSpawnLLM{
+		started:  make(chan struct{}, 1),
+		canceled: make(chan struct{}, 1),
+	}
+	factory := NewACPSubagentRunnerFactory(Config{
+		Store:         store,
+		WorkspaceCWD:  "/workspace",
+		ClientRuntime: execRT,
+		NewAdapter:    newTestACPAdapterFactory(rt, store, execRT, "/workspace", ag, llm, nil),
+	})
+	runner := factory(rt, parent, runtime.RunRequest{
+		AppName: "app",
+		UserID:  "u",
+		CoreTools: tool.CoreToolsConfig{
+			Runtime: execRT,
+		},
+	})
+	if runner == nil {
+		t.Fatal("expected self ACP subagent runner")
+	}
+
+	result, err := runner.RunSubagent(context.Background(), agent.SubagentRunRequest{
+		Agent:   "self",
+		Prompt:  "slow child",
+		Yield:   250 * time.Millisecond,
+		Timeout: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("expected timeout to degrade into a tracked child state, got %v", err)
+	}
+	if strings.TrimSpace(result.SessionID) == "" {
+		t.Fatalf("expected timed-out child to preserve session handle, got %+v", result)
+	}
+	if strings.TrimSpace(result.DelegationID) == "" {
+		t.Fatalf("expected delegation id on timeout recovery, got %+v", result)
+	}
+	if result.Timeout != 50*time.Millisecond {
+		t.Fatalf("expected timeout to round-trip, got %s", result.Timeout)
+	}
+}
+
+func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &timeoutAwareACPSpawnLLM{
+		started:  make(chan struct{}, 1),
+		canceled: make(chan struct{}, 1),
+	}
+	factory := NewACPSubagentRunnerFactory(Config{
+		Store:         store,
+		WorkspaceCWD:  "/workspace",
+		ClientRuntime: execRT,
+		NewAdapter:    newTestACPAdapterFactory(rt, store, execRT, "/workspace", ag, llm, nil),
+	})
+	runner := factory(rt, parent, runtime.RunRequest{
+		AppName: "app",
+		UserID:  "u",
+		CoreTools: tool.CoreToolsConfig{
+			Runtime: execRT,
+		},
+	})
+	if runner == nil {
+		t.Fatal("expected self ACP subagent runner")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := runner.RunSubagent(context.Background(), agent.SubagentRunRequest{
+			Agent:   "self",
+			Prompt:  "slow child",
+			Yield:   250 * time.Millisecond,
+			Timeout: 50 * time.Millisecond,
+		})
+		done <- runErr
+	}()
+
+	select {
+	case <-llm.started:
+	case <-time.After(time.Second):
+		t.Fatal("expected child prompt to start")
+	}
+	select {
+	case <-llm.canceled:
+	case <-time.After(time.Second):
+		t.Fatal("expected local timeout to cancel the remote child prompt")
+	}
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("expected timeout cancellation to remain recoverable, got %v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected RunSubagent to return after timeout")
+	}
+}
+
 func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{Store: store})
@@ -922,6 +1059,39 @@ type testACPListGlobLLM struct{}
 
 type testACPNestedSelfSpawnLLM struct{}
 
+type timeoutAwareACPSpawnLLM struct {
+	started  chan struct{}
+	canceled chan struct{}
+}
+
+type fakeTerminalOutputClient struct {
+	mu       sync.Mutex
+	outputs  []acpclient.TerminalOutputResponse
+	released []string
+}
+
+func (f *fakeTerminalOutputClient) TerminalOutput(_ context.Context, _, _ string) (acpclient.TerminalOutputResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.outputs) == 0 {
+		return acpclient.TerminalOutputResponse{}, nil
+	}
+	resp := f.outputs[0]
+	if len(f.outputs) > 1 {
+		f.outputs = f.outputs[1:]
+	}
+	return resp, nil
+}
+
+func (f *fakeTerminalOutputClient) TerminalRelease(_ context.Context, _, terminalID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.released = append(f.released, terminalID)
+	return nil
+}
+
+func intPtr(value int) *int { return &value }
+
 func (l *testACPSpawnLLM) Name() string { return "test-acp-spawn" }
 
 func (l *testACPSpawnLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
@@ -931,7 +1101,7 @@ func (l *testACPSpawnLLM) Generate(_ context.Context, req *model.Request) iter.S
 		case model.RoleUser:
 			switch last.TextContent() {
 			case "delegate please":
-				args, _ := json.Marshal(map[string]any{"prompt": "child task", "yield_seconds": 0})
+				args, _ := json.Marshal(map[string]any{"prompt": "child task", "yield_time_ms": 0})
 				yield(model.StreamEventFromResponse(&model.Response{
 					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
@@ -964,6 +1134,91 @@ func (l *testACPListGlobLLM) Name() string { return "test-acp-list-glob" }
 
 func (l *testACPNestedSelfSpawnLLM) Name() string { return "test-acp-nested-self-spawn" }
 
+func (l *timeoutAwareACPSpawnLLM) Name() string { return "test-acp-timeout" }
+
+func TestTerminalBridgeManager_StreamsTerminalOutputIntoSessionUpdates(t *testing.T) {
+	client := &fakeTerminalOutputClient{
+		outputs: []acpclient.TerminalOutputResponse{
+			{Output: "[10s] heartbeat 1/2\n"},
+			{
+				Output: "[10s] heartbeat 1/2\n[20s] heartbeat 2/2\n",
+				ExitStatus: &acpclient.TerminalExitStatus{
+					ExitCode: intPtr(0),
+				},
+			},
+		},
+	}
+	meta := runtime.DelegationMetadata{
+		ParentSessionID: "parent",
+		ChildSessionID:  "child-1",
+		ParentToolCall:  "call-spawn-1",
+		ParentToolName:  tool.SpawnToolName,
+		DelegationID:    "dlg-1",
+	}
+	var (
+		mu      sync.Mutex
+		updates []sessionstream.Update
+	)
+	ctx, cancel := context.WithCancel(sessionstream.WithStreamer(context.Background(), sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		mu.Lock()
+		updates = append(updates, update)
+		mu.Unlock()
+	})))
+	defer cancel()
+	manager := &terminalBridgeManager{}
+	tracker := newRemoteSubagentTracker()
+	title := "BASH python long_job.py"
+	kind := "execute"
+	manager.observe(ctx, client, tracker, "child-1", "self", meta, acpclient.ToolCallUpdate{
+		ToolCallID: "call-bash-1",
+		Title:      &title,
+		Kind:       &kind,
+		Status:     strPtr("in_progress"),
+		Content: []acpclient.ToolCallContent{{
+			Type:       "terminal",
+			TerminalID: "term-child-1",
+		}},
+	})
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		count := len(updates)
+		mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	manager.stopAll()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(updates) < 2 {
+		t.Fatalf("expected at least 2 streamed terminal updates, got %#v", updates)
+	}
+	first := updates[0].Event.Message.ToolResponse()
+	second := updates[1].Event.Message.ToolResponse()
+	if first == nil || second == nil {
+		t.Fatalf("expected tool responses, got %#v", updates)
+	}
+	if got := first.Result["stdout"]; !strings.Contains(got.(string), "heartbeat 1/2") {
+		t.Fatalf("expected first terminal delta, got %#v", first.Result)
+	}
+	if got := second.Result["stdout"]; !strings.Contains(got.(string), "heartbeat 2/2") {
+		t.Fatalf("expected second terminal delta, got %#v", second.Result)
+	}
+	state, ok := tracker.inspect("self", "child-1")
+	if !ok {
+		t.Fatal("expected terminal bridge to update tracker state")
+	}
+	if state.ProgressSeq <= 0 {
+		t.Fatalf("expected tracker progress seq to advance, got %+v", state)
+	}
+	if !strings.Contains(state.LatestOutput, "heartbeat 2/2") {
+		t.Fatalf("expected tracker latest output to include terminal progress, got %+v", state)
+	}
+}
+
 func (l *testACPListGlobLLM) Generate(_ context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
 	return func(yield func(*model.StreamEvent, error) bool) {
 		last := req.Messages[len(req.Messages)-1]
@@ -971,7 +1226,7 @@ func (l *testACPListGlobLLM) Generate(_ context.Context, req *model.Request) ite
 		case model.RoleUser:
 			switch last.TextContent() {
 			case "delegate list glob":
-				args, _ := json.Marshal(map[string]any{"prompt": "child list glob", "yield_seconds": 0})
+				args, _ := json.Marshal(map[string]any{"prompt": "child list glob", "yield_time_ms": 0})
 				yield(model.StreamEventFromResponse(&model.Response{
 					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
@@ -1024,14 +1279,14 @@ func (l *testACPNestedSelfSpawnLLM) Generate(_ context.Context, req *model.Reque
 		case model.RoleUser:
 			switch last.TextContent() {
 			case "delegate nested self":
-				args, _ := json.Marshal(map[string]any{"prompt": "child nested self", "yield_seconds": 0})
+				args, _ := json.Marshal(map[string]any{"prompt": "child nested self", "yield_time_ms": 0})
 				yield(model.StreamEventFromResponse(&model.Response{
 					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-1", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
 				}), nil)
 				return
 			case "child nested self":
-				args, _ := json.Marshal(map[string]any{"agent": "self", "prompt": "grandchild blocked", "yield_seconds": 0})
+				args, _ := json.Marshal(map[string]any{"agent": "self", "prompt": "grandchild blocked", "yield_time_ms": 0})
 				yield(model.StreamEventFromResponse(&model.Response{
 					Message:      model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{ID: "call-spawn-nested", Name: tool.SpawnToolName, Args: string(args)}}, ""),
 					TurnComplete: true,
@@ -1064,6 +1319,29 @@ func (l *testACPNestedSelfSpawnLLM) Generate(_ context.Context, req *model.Reque
 				}), nil)
 				return
 			}
+		}
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
+			TurnComplete: true,
+		}), nil)
+	}
+}
+
+func (l *timeoutAwareACPSpawnLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser && last.TextContent() == "slow child" {
+			select {
+			case l.started <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			select {
+			case l.canceled <- struct{}{}:
+			default:
+			}
+			yield(nil, ctx.Err())
+			return
 		}
 		yield(model.StreamEventFromResponse(&model.Response{
 			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),

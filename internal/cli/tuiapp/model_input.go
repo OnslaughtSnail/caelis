@@ -451,6 +451,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(hint) == "" {
 			hint = "mode updated"
 		}
+		if m.cfg.RefreshWorkspace != nil {
+			if workspace := strings.TrimSpace(m.cfg.RefreshWorkspace()); workspace != "" {
+				m.cfg.Workspace = workspace
+			}
+		}
 		if m.cfg.RefreshStatus != nil {
 			m.statusModel, m.statusContext = m.cfg.RefreshStatus()
 		}
@@ -587,22 +592,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Complete):
 		val := m.textarea.Value()
 		m.syncInputFromTextarea()
-		if len(m.mentionCandidates) > 0 {
+		switch {
+		case len(m.mentionCandidates) > 0:
 			m.applyMentionCompletion()
 			m.syncTextareaFromInput()
-		} else if len(m.skillCandidates) > 0 {
+		case len(m.skillCandidates) > 0:
 			m.applySkillCompletion()
 			m.syncTextareaFromInput()
-		} else if len(m.resumeCandidates) > 0 {
+		case len(m.resumeCandidates) > 0:
 			m.applyResumeCompletion()
 			m.syncTextareaFromInput()
-		} else if len(m.slashArgCandidates) > 0 {
+		case len(m.slashArgCandidates) > 0:
 			m.applySlashArgCompletion()
 			m.syncTextareaFromInput()
-		} else if len(m.slashCandidates) > 0 {
+		case len(m.slashCandidates) > 0:
 			m.applySlashCommandCompletion()
 			m.syncTextareaFromInput()
-		} else if strings.HasPrefix(strings.TrimSpace(val), "/") && !strings.Contains(strings.TrimSpace(val), " ") {
+		case strings.HasPrefix(strings.TrimSpace(val), "/") && !strings.Contains(strings.TrimSpace(val), " "):
 			m.applySlashCommandCompletion()
 			m.syncTextareaFromInput()
 		}
@@ -770,15 +776,16 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	attachments = cloneAttachments(attachments)
 	displayLine = strings.TrimSpace(displayLine)
 	replacedPending := alreadyRunning && m.pendingQueue != nil && mode != SubmissionModeOverlay
-	if mode == SubmissionModeOverlay {
+	switch {
+	case mode == SubmissionModeOverlay:
 		m.openBTWOverlay(execLine)
-	} else if alreadyRunning {
+	case alreadyRunning:
 		m.pendingQueue = &pendingPrompt{
 			execLine:    strings.TrimSpace(execLine),
 			displayLine: displayLine,
 			attachments: cloneAttachments(attachments),
 		}
-	} else {
+	default:
 		m.commitUserDisplayLine(displayLine)
 	}
 

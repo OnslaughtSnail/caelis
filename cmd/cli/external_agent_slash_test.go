@@ -36,11 +36,18 @@ func TestAvailableCommandNames_IncludesConfiguredExternalAgents(t *testing.T) {
 	}
 }
 
+func TestDynamicSlashAgents_NilConsoleReturnsNil(t *testing.T) {
+	var console *cliConsole
+	if got := console.dynamicSlashAgents(); got != nil {
+		t.Fatalf("expected nil dynamic slash agents for nil console, got %#v", got)
+	}
+}
+
 func TestRunExternalAgentSlash_RequiresIdleMainSession(t *testing.T) {
 	console := &cliConsole{}
 	console.setActiveRunCancel(func() {})
 
-	err := console.runExternalAgentSlash(appagents.Descriptor{
+	err := console.runExternalAgentSlashContext(t.Context(), appagents.Descriptor{
 		ID:        "gemini",
 		Transport: appagents.TransportACP,
 		Command:   "gemini",

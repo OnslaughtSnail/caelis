@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/builtin/filesystem"
 	toolcap "github.com/OnslaughtSnail/caelis/kernel/tool/capability"
@@ -429,7 +430,7 @@ func (a *Agent) executeToolCall(
 		execOut := policy.ToolOutput{
 			Err: fmt.Errorf("llmagent: unknown tool %q", call.Name),
 		}
-		execOut.Result = map[string]any{"error": execOut.Err.Error()}
+		execOut.Result = toolErrorResult(call.Name, execOut.Err)
 		finalResult := annotateToolResultMetadata(execOut.Result, execOut.Err)
 		toolMsg := model.MessageFromToolResponse(&model.ToolResponse{ID: call.ID, Name: call.Name, Result: finalResult})
 		ev := &session.Event{ID: newEventID(), Time: time.Now(), Message: toolMsg}
@@ -470,7 +471,7 @@ func (a *Agent) executeToolCall(
 			reason = "tool denied by policy"
 		}
 		execOut.Err = fmt.Errorf("llmagent: tool %q denied by policy: %s", call.Name, reason)
-		execOut.Result = map[string]any{"error": execOut.Err.Error()}
+		execOut.Result = toolErrorResult(call.Name, execOut.Err)
 	} else {
 		execOut.Capability = toolcap.Of(t)
 		result, runErr := t.Run(toolCtx, args)
@@ -482,7 +483,7 @@ func (a *Agent) executeToolCall(
 				}
 				return errStopAfterYieldedError
 			}
-			execOut.Result = map[string]any{"error": runErr.Error()}
+			execOut.Result = toolErrorResult(call.Name, runErr)
 		} else {
 			execOut.Result = result
 		}
@@ -532,7 +533,7 @@ func defaultSanitizeToolResultForModel(result map[string]any) map[string]any {
 		}
 		out[key] = sanitizeToolResultValue(value, defaultSanitizeToolResultForModel)
 	}
-	return out
+	return compactToolResultForModel(out)
 }
 
 func defaultIsModelHiddenToolResultKey(key string) bool {
@@ -604,10 +605,357 @@ func resolveToolCallArgs(call model.ToolCall) (map[string]any, error) {
 func toolArgParseErrorResult(call model.ToolCall, err error) map[string]any {
 	return map[string]any{
 		"error":       fmt.Sprintf("invalid tool call %q arguments: %v", call.Name, err),
-		"error_type":  "invalid_tool_call_args",
+		"error_code":  "arg_invalid",
 		"recoverable": true,
-		"hint":        fmt.Sprintf("tool call %q arguments appear truncated (incomplete JSON); try reducing the argument size or splitting into smaller operations", call.Name),
+		"hint":        fmt.Sprintf("Retry %q with valid JSON arguments. Reduce argument size or split the work if the payload was truncated.", call.Name),
 	}
+}
+
+func toolErrorResult(toolName string, execErr error) map[string]any {
+	message := compactToolErrorMessage(execErr)
+	code, recoverable, hint, _, _ := classifyToolError(execErr)
+	result := map[string]any{
+		"error":       message,
+		"recoverable": recoverable,
+	}
+	if strings.TrimSpace(code) != "" {
+		result["error_code"] = code
+	}
+	if strings.TrimSpace(hint) != "" {
+		result["hint"] = hint
+	}
+	if strings.TrimSpace(toolName) != "" {
+		result["tool"] = toolName
+	}
+	return result
+}
+
+func compactToolErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := strings.TrimSpace(err.Error())
+	for _, prefix := range []string{"llmagent: ", "tool: "} {
+		text = strings.TrimPrefix(text, prefix)
+	}
+	return text
+}
+
+func classifyToolError(err error) (code string, recoverable bool, hint string, nextAction string, suggestedArgs map[string]any) {
+	if err == nil {
+		return "", false, "", "", nil
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(text, "unknown tool"):
+		return "unknown_tool", true, "Call one of the declared tools instead of an unavailable tool name.", "", nil
+	case strings.Contains(text, "missing required arg"), strings.Contains(text, `arg "`) && strings.Contains(text, "is required"):
+		return "arg_missing", true, "Provide the missing required argument and retry.", "", nil
+	case strings.Contains(text, "decode args"), strings.Contains(text, "invalid tool call"), strings.Contains(text, "must be"), strings.Contains(text, "invalid action"), strings.Contains(text, "no longer supported"), strings.Contains(text, "must be non-empty"):
+		return "arg_invalid", true, "Fix the tool arguments and retry with a smaller, valid payload.", "", nil
+	case strings.Contains(text, "denied by policy"):
+		return "policy_denied", true, "Use a safer tool or narrower scope that satisfies policy.", "", nil
+	case toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalRequired):
+		return "permission_required", true, "Request approval or adjust the command so it can run without escalation.", "", nil
+	case toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalAborted):
+		return "permission_required", false, "The required approval was not granted.", "", nil
+	case toolexec.IsErrorCode(err, toolexec.ErrorCodeSessionBusy), strings.Contains(text, "session busy"):
+		return "session_busy", true, "Wait for the running session to finish, then retry.", "", nil
+	case toolexec.IsErrorCode(err, toolexec.ErrorCodeSandboxCommandTimeout), toolexec.IsErrorCode(err, toolexec.ErrorCodeSandboxIdleTimeout), toolexec.IsErrorCode(err, toolexec.ErrorCodeHostCommandTimeout), toolexec.IsErrorCode(err, toolexec.ErrorCodeHostIdleTimeout), strings.Contains(text, "timeout"):
+		return "timeout", true, "Retry with a smaller scope or a longer timeout.", "", nil
+	case isTaskWriteContinuationError(text):
+		return "state_invalid", true, "Use TASK wait until the child reaches completed.", "", nil
+	case isTaskStateNotFoundError(err):
+		return "state_invalid", true, "Refresh the task state or list available tasks before retrying.", "", nil
+	case strings.Contains(text, "not found"):
+		return "tool_failed", true, "Re-read the target or fix the missing path/content before retrying.", "", nil
+	case strings.Contains(text, "task manager is unavailable"), strings.Contains(text, "child session runtime is unavailable"), strings.Contains(text, "subagent runner is unavailable"), strings.Contains(text, "host runner is unavailable"), strings.Contains(text, "environment is unavailable"):
+		return "environment_unavailable", true, "Retry only after the required runtime capability is available.", "", nil
+	default:
+		return "tool_failed", false, "Inspect the error and choose a narrower follow-up step.", "", nil
+	}
+}
+
+func isTaskWriteContinuationError(text string) bool {
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if !strings.Contains(text, "task write") || !strings.Contains(text, "spawn subagent") {
+		return false
+	}
+	if !strings.Contains(text, "completed") || !strings.Contains(text, "use task wait") {
+		return false
+	}
+	return true
+}
+
+func isTaskStateNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, task.ErrTaskNotFound) {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(text, "delegated child session") && (strings.Contains(text, "not found") || strings.Contains(text, "not tracked")) {
+		return true
+	}
+	return strings.Contains(text, "task:") && (strings.Contains(text, "not found") || strings.Contains(text, "not tracked"))
+}
+
+func compactToolResultForModel(result map[string]any) map[string]any {
+	if len(result) == 0 {
+		return result
+	}
+	if _, hasError := result["error"]; hasError {
+		out := map[string]any{
+			"error": result["error"],
+		}
+		for _, key := range []string{"tool", "error_code", "recoverable", "hint", "state"} {
+			if value, ok := result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				out[key] = value
+			}
+		}
+		return out
+	}
+	if isCompactTaskLikeResult(result) {
+		out := map[string]any{}
+		for _, key := range []string{"state", "task_id", "events", "msg"} {
+			if value, ok := result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				out[key] = value
+			}
+		}
+		if activeTaskStateForModel(firstString(result["state"])) {
+			return out
+		}
+		delete(out, "task_id")
+		for _, key := range []string{"exit_code", "stdout", "stderr", "output"} {
+			if value, ok := result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+				out[key] = value
+			}
+		}
+		appendVisibleTruncationMsg(out, result)
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if isMutationResult(result) {
+		out := map[string]any{}
+		for _, key := range []string{"path", "created", "replaced", "added_lines", "removed_lines"} {
+			if value, ok := result[key]; ok && value != nil {
+				out[key] = value
+			}
+		}
+		if path := firstString(result["path"]); path != "" {
+			out["summary"] = mutationSummaryForModel(result)
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return result
+}
+
+func appendVisibleTruncationMsg(out map[string]any, source map[string]any) {
+	if len(out) == 0 || out["msg"] != nil || len(source) == 0 {
+		return
+	}
+	raw, ok := source["output_meta"]
+	if !ok {
+		return
+	}
+	meta, ok := raw.(map[string]any)
+	if !ok || len(meta) == 0 {
+		return
+	}
+	if truncatedOutputMeta(meta) {
+		out["msg"] = "output truncated"
+	}
+}
+
+func truncatedOutputMeta(meta map[string]any) bool {
+	for _, key := range []string{
+		"truncated",
+		"capture_truncated",
+		"model_truncated",
+		"stdout_cap_reached",
+		"stderr_cap_reached",
+	} {
+		if boolFromAny(meta[key]) {
+			return true
+		}
+	}
+	for _, key := range []string{
+		"stdout_dropped_bytes",
+		"stderr_dropped_bytes",
+		"stdout_earliest_marker",
+		"stderr_earliest_marker",
+	} {
+		if intFromAny(meta[key]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func boolFromAny(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		value := strings.TrimSpace(strings.ToLower(typed))
+		return value == "1" || value == "true" || value == "yes" || value == "on"
+	case json.Number:
+		return typed == "1"
+	case int:
+		return typed != 0
+	case int8:
+		return typed != 0
+	case int16:
+		return typed != 0
+	case int32:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case uint:
+		return typed != 0
+	case uint8:
+		return typed != 0
+	case uint16:
+		return typed != 0
+	case uint32:
+		return typed != 0
+	case uint64:
+		return typed != 0
+	case float32:
+		return typed != 0
+	case float64:
+		return typed != 0
+	default:
+		return false
+	}
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int8:
+		return int(typed)
+	case int16:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case uint:
+		return int(typed)
+	case uint8:
+		return int(typed)
+	case uint16:
+		return int(typed)
+	case uint32:
+		return int(typed)
+	case uint64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return int(parsed)
+		}
+	}
+	return 0
+}
+
+func isCompactTaskLikeResult(result map[string]any) bool {
+	if len(result) == 0 {
+		return false
+	}
+	if _, ok := result["task_id"]; ok {
+		return true
+	}
+	if _, ok := result["state"]; ok {
+		if _, ok := result["stdout"]; ok {
+			return true
+		}
+		if _, ok := result["events"]; ok {
+			return true
+		}
+		if _, ok := result["output"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func activeTaskStateForModel(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "running", "waiting_input", "waiting_approval":
+		return true
+	default:
+		return false
+	}
+}
+
+func isMutationResult(result map[string]any) bool {
+	if len(result) == 0 {
+		return false
+	}
+	if _, ok := result["path"]; !ok {
+		return false
+	}
+	if _, ok := result["added_lines"]; ok {
+		return true
+	}
+	if _, ok := result["replaced"]; ok {
+		return true
+	}
+	if _, ok := result["bytes_written"]; ok {
+		return true
+	}
+	if _, ok := result["line_count"]; ok {
+		return true
+	}
+	return false
+}
+
+func mutationSummaryForModel(result map[string]any) string {
+	path := firstString(result["path"])
+	if path == "" {
+		return ""
+	}
+	if replaced := sprintNonEmpty(result["replaced"]); replaced != "" {
+		return fmt.Sprintf("Updated %s with %s replacement(s).", path, replaced)
+	}
+	added := sprintNonEmpty(result["added_lines"])
+	removed := sprintNonEmpty(result["removed_lines"])
+	switch {
+	case added != "" || removed != "":
+		return fmt.Sprintf("Updated %s (+%s/-%s lines).", path, fallbackNumber(added), fallbackNumber(removed))
+	default:
+		return "Updated " + path + "."
+	}
+}
+
+func sprintNonEmpty(value any) string {
+	if value == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return ""
+	}
+	return text
+}
+
+func fallbackNumber(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "0"
+	}
+	return value
 }
 
 func cloneArgs(input map[string]any) map[string]any {

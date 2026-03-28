@@ -57,6 +57,9 @@ func newSubagentRunner(r *Runtime, parent *session.Session, req RunRequest) agen
 }
 
 func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
+	if ctx == nil {
+		return agent.SubagentRunResult{}, fmt.Errorf("runtime: context is required")
+	}
 	if strings.TrimSpace(req.Agent) == "" {
 		req.Agent = "self"
 	}
@@ -81,9 +84,6 @@ func (r *runtimeSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	}()
 
 	waitCtx := ctx
-	if waitCtx == nil {
-		waitCtx = context.Background()
-	}
 	yielded := false
 	if req.Yield > 0 {
 		timer := time.NewTimer(req.Yield)
@@ -574,6 +574,7 @@ func (r *runtimeSubagentRunner) InspectSubagent(ctx context.Context, sessionID s
 	result := agent.SubagentRunResult{
 		SessionID: sessionID,
 		State:     string(state.Status),
+		Error:     strings.TrimSpace(state.Error),
 		Running:   state.Status == RunLifecycleStatusRunning || state.Status == RunLifecycleStatusWaitingApproval,
 		UpdatedAt: state.UpdatedAt,
 	}

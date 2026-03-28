@@ -26,10 +26,14 @@ type remoteSubagentState struct {
 	State           string
 	Running         bool
 	ApprovalPending bool
+	ToolCallPending bool
 	Assistant       string
 	Reasoning       string
 	LogSnapshot     string
+	LatestOutput    string
+	ProgressSeq     int
 	LastTool        string
+	toolCallCount   int
 	UpdatedAt       time.Time
 }
 
@@ -113,6 +117,42 @@ func (t *remoteSubagentTracker) clearApproval(agentName, sessionID string) {
 	state.UpdatedAt = time.Now()
 }
 
+func (t *remoteSubagentTracker) beginToolCall(agentName, sessionID string) {
+	state := t.ensure(agentName, sessionID)
+	if state == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state.toolCallCount++
+	state.ToolCallPending = state.toolCallCount > 0
+	if state.State == "" {
+		state.State = string(runtime.RunLifecycleStatusRunning)
+		state.Running = true
+	}
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, 0, state)
+	state.UpdatedAt = time.Now()
+}
+
+func (t *remoteSubagentTracker) endToolCall(agentName, sessionID string) {
+	state := t.ensure(agentName, sessionID)
+	if state == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state.toolCallCount > 0 {
+		state.toolCallCount--
+	}
+	state.ToolCallPending = state.toolCallCount > 0
+	if state.State == "" {
+		state.State = string(runtime.RunLifecycleStatusRunning)
+		state.Running = true
+	}
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, 0, state)
+	state.UpdatedAt = time.Now()
+}
+
 func (t *remoteSubagentTracker) updateAssistant(agentName, sessionID, text string) {
 	state := t.ensure(agentName, sessionID)
 	if state == nil {
@@ -120,12 +160,14 @@ func (t *remoteSubagentTracker) updateAssistant(agentName, sessionID, text strin
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	prevLen := len(state.Assistant)
 	state.Assistant = text
 	state.LogSnapshot = logSnapshot(state.Reasoning, state.Assistant)
 	if state.State == "" {
 		state.State = string(runtime.RunLifecycleStatusRunning)
 		state.Running = true
 	}
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, len(text)-prevLen, state)
 	state.UpdatedAt = time.Now()
 }
 
@@ -136,12 +178,14 @@ func (t *remoteSubagentTracker) updateReasoning(agentName, sessionID, text strin
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	prevLen := len(state.Reasoning)
 	state.Reasoning = text
 	state.LogSnapshot = logSnapshot(state.Reasoning, state.Assistant)
 	if state.State == "" {
 		state.State = string(runtime.RunLifecycleStatusRunning)
 		state.Running = true
 	}
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, len(text)-prevLen, state)
 	state.UpdatedAt = time.Now()
 }
 
@@ -157,6 +201,27 @@ func (t *remoteSubagentTracker) updateTool(agentName, sessionID, summary string)
 		state.State = string(runtime.RunLifecycleStatusRunning)
 		state.Running = true
 	}
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, 0, state)
+	state.UpdatedAt = time.Now()
+}
+
+func (t *remoteSubagentTracker) updateToolOutput(agentName, sessionID, chunk string) {
+	state := t.ensure(agentName, sessionID)
+	if state == nil {
+		return
+	}
+	chunk = strings.TrimSpace(chunk)
+	if chunk == "" {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state.LatestOutput = trackerLatestOutput(state.LatestOutput, chunk)
+	if state.State == "" {
+		state.State = string(runtime.RunLifecycleStatusRunning)
+		state.Running = true
+	}
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, len(chunk), state)
 	state.UpdatedAt = time.Now()
 }
 
@@ -181,6 +246,9 @@ func (t *remoteSubagentTracker) finish(agentName, sessionID, delegationID, child
 	state.State = strings.TrimSpace(stateName)
 	state.Running = false
 	state.ApprovalPending = false
+	state.ToolCallPending = false
+	state.toolCallCount = 0
+	state.ProgressSeq = trackerAdvanceSeq(state.ProgressSeq, 0, state)
 	state.UpdatedAt = time.Now()
 }
 
@@ -212,4 +280,35 @@ func logSnapshot(reasoning, assistant string) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+func trackerLatestOutput(existing, chunk string) string {
+	const maxLines = 8
+	lines := make([]string, 0, maxLines)
+	for _, part := range []string{existing, chunk} {
+		for _, line := range strings.Split(strings.ReplaceAll(part, "\r\n", "\n"), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			lines = append(lines, line)
+			if len(lines) > maxLines {
+				lines = lines[len(lines)-maxLines:]
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func trackerAdvanceSeq(current int, delta int, state *remoteSubagentState) int {
+	if delta > 0 {
+		return current + delta
+	}
+	if current > 0 {
+		return current
+	}
+	if state == nil {
+		return 0
+	}
+	return len(state.LogSnapshot) + len(state.LatestOutput)
 }

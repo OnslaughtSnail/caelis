@@ -84,6 +84,7 @@ type Config struct {
 	CancelRunning        func() bool
 	ToggleMode           func() (string, error)
 	ModeLabel            func() string
+	RefreshWorkspace     func() string
 	RefreshStatus        func() (string, string)
 	MentionComplete      func(string, int) ([]string, error)
 	FileComplete         func(string, int) ([]string, error)

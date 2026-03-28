@@ -19,6 +19,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
+	// Register the SQLite driver for sql.Open.
 	_ "modernc.org/sqlite"
 )
 
@@ -28,10 +29,6 @@ const (
 
 	sqliteMaxOpenConns = 8
 	sqliteMaxIdleConns = 4
-
-	sessionTable       = "sessions"
-	sessionStatesTable = "session_states"
-	taskTable          = "tasks"
 
 	namespaceSessionMode      = "session_mode"
 	namespaceRuntimeLifecycle = "runtime.lifecycle"
@@ -935,74 +932,6 @@ func (d *Database) execWrite(ctx context.Context, query string, args ...any) (sq
 	return result, err
 }
 
-func (d *Database) withWriteTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	if d == nil || d.db == nil {
-		return fmt.Errorf("localstore: db is nil")
-	}
-	if fn == nil {
-		return nil
-	}
-	return d.withWriteLock(ctx, func() error {
-		tx, err := d.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		if err := fn(tx); err != nil {
-			return err
-		}
-		return tx.Commit()
-	})
-}
-
-func (d *Database) withWriteLock(ctx context.Context, fn func() error) error {
-	if d == nil || d.db == nil {
-		return fmt.Errorf("localstore: db is nil")
-	}
-	if fn == nil {
-		return nil
-	}
-	d.writeMu.Lock()
-	defer d.writeMu.Unlock()
-	return retrySQLiteBusy(ctx, fn)
-}
-
-func retrySQLiteBusy(ctx context.Context, fn func() error) error {
-	delay := 10 * time.Millisecond
-	for attempt := 0; ; attempt++ {
-		err := fn()
-		if !isSQLiteBusy(err) || attempt >= 7 {
-			return err
-		}
-		if ctx == nil {
-			time.Sleep(delay)
-		} else {
-			timer := time.NewTimer(delay)
-			select {
-			case <-timer.C:
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			}
-		}
-		if delay < 250*time.Millisecond {
-			delay *= 2
-		}
-	}
-}
-
-func isSQLiteBusy(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "sqlite_locked") ||
-		strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") ||
-		strings.Contains(msg, "database schema is locked")
-}
-
 func readRolloutSnapshot(path string) (*sessionMeta, rolloutSnapshot, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1162,7 +1091,7 @@ func assembleStateMap(rows []stateRow) (map[string]any, error) {
 
 func splitStateMap(values map[string]any) (map[string]string, error) {
 	if len(values) == 0 {
-		return nil, nil
+		return map[string]string{}, nil
 	}
 	out := map[string]string{}
 	misc := map[string]any{}

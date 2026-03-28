@@ -123,9 +123,9 @@ type TurnHandle interface {
 }
 
 type WorkspaceSessionIndex interface {
-	ResolveWorkspaceSessionID(workspaceKey, prefix string) (string, bool, error)
-	MostRecentWorkspaceSessionID(workspaceKey, excludeSessionID string) (string, bool, error)
-	ListWorkspaceSessionsPage(workspaceKey string, page int, pageSize int) ([]SessionSummary, error)
+	ResolveWorkspaceSessionID(ctx context.Context, workspaceKey, prefix string) (string, bool, error)
+	MostRecentWorkspaceSessionID(ctx context.Context, workspaceKey, excludeSessionID string) (string, bool, error)
+	ListWorkspaceSessionsPage(ctx context.Context, workspaceKey string, page int, pageSize int) ([]SessionSummary, error)
 }
 
 type ServiceConfig struct {
@@ -207,7 +207,7 @@ func New(cfg ServiceConfig) (*Service, error) {
 
 func (s *Service) StartSession(ctx context.Context, req StartSessionRequest) (SessionInfo, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return SessionInfo{}, fmt.Errorf("sessionsvc: context is required")
 	}
 	ref := s.refFromStart(req)
 	if strings.TrimSpace(ref.SessionID) == "" {
@@ -231,7 +231,7 @@ func (s *Service) StartSession(ctx context.Context, req StartSessionRequest) (Se
 
 func (s *Service) LoadSession(ctx context.Context, req LoadSessionRequest) (LoadedSession, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return LoadedSession{}, fmt.Errorf("sessionsvc: context is required")
 	}
 	ref := s.normalizeRef(req.SessionRef)
 	if err := s.ensureSessionExists(ctx, ref); err != nil {
@@ -272,7 +272,7 @@ func (s *Service) RunTurn(ctx context.Context, req RunTurnRequest) (RunTurnResul
 		return RunTurnResult{}, fmt.Errorf("sessionsvc: service is nil")
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		return RunTurnResult{}, fmt.Errorf("sessionsvc: context is required")
 	}
 	if s.runtime == nil {
 		return RunTurnResult{}, fmt.Errorf("sessionsvc: runtime is not configured")
@@ -395,7 +395,7 @@ func (s *Service) ListSessions(ctx context.Context, req SessionListRequest) (Ses
 	if limit <= 0 {
 		limit = 20
 	}
-	items, err := s.index.ListWorkspaceSessionsPage(workspaceKey, 1, 200)
+	items, err := s.index.ListWorkspaceSessionsPage(ctx, workspaceKey, 1, 200)
 	if err != nil {
 		return SessionList{}, err
 	}
@@ -442,11 +442,10 @@ func (s *Service) InterruptSession(ctx context.Context, req InterruptSessionRequ
 }
 
 func (s *Service) ResolveWorkspaceSession(ctx context.Context, workspaceKey, prefix string) (SessionRef, bool, error) {
-	_ = ctx
 	if s == nil || s.index == nil {
 		return SessionRef{}, false, nil
 	}
-	sessionID, ok, err := s.index.ResolveWorkspaceSessionID(strings.TrimSpace(workspaceKey), strings.TrimSpace(prefix))
+	sessionID, ok, err := s.index.ResolveWorkspaceSessionID(ctx, strings.TrimSpace(workspaceKey), strings.TrimSpace(prefix))
 	if err != nil || !ok {
 		return SessionRef{}, ok, err
 	}
@@ -459,11 +458,10 @@ func (s *Service) ResolveWorkspaceSession(ctx context.Context, workspaceKey, pre
 }
 
 func (s *Service) MostRecentWorkspaceSession(ctx context.Context, workspaceKey, excludeSessionID string) (SessionRef, bool, error) {
-	_ = ctx
 	if s == nil || s.index == nil {
 		return SessionRef{}, false, nil
 	}
-	sessionID, ok, err := s.index.MostRecentWorkspaceSessionID(strings.TrimSpace(workspaceKey), strings.TrimSpace(excludeSessionID))
+	sessionID, ok, err := s.index.MostRecentWorkspaceSessionID(ctx, strings.TrimSpace(workspaceKey), strings.TrimSpace(excludeSessionID))
 	if err != nil || !ok {
 		return SessionRef{}, ok, err
 	}
@@ -645,7 +643,7 @@ func (s *Service) ensureSessionExists(ctx context.Context, ref SessionRef) error
 
 func (s *Service) sessionEvents(ctx context.Context, ref SessionRef, limit int, includeLifecycle bool) ([]*session.Event, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("sessionsvc: context is required")
 	}
 	if s.runtime != nil {
 		return s.runtime.SessionEvents(ctx, runtime.SessionEventsRequest{

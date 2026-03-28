@@ -67,7 +67,7 @@ func TestSelfSpawnToolStartsSelfChildSession(t *testing.T) {
 	result, err := toolImpl.Run(ctx, map[string]any{
 		"agent":         "self",
 		"prompt":        "child task",
-		"yield_seconds": 2,
+		"yield_time_ms": 2000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +95,40 @@ func TestSelfSpawnToolStartsSelfChildSession(t *testing.T) {
 	}
 }
 
+func TestSelfSpawnToolReturnsFinalResponseWhenChildAlreadyCompleted(t *testing.T) {
+	toolImpl, err := NewSelfSpawnTool("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := &stubTaskManager{
+		snapshot: task.Snapshot{
+			TaskID: "task-2",
+			Kind:   task.KindSpawn,
+			State:  task.StateCompleted,
+			Result: map[string]any{
+				"final_result": "55",
+			},
+		},
+	}
+	ctx := task.WithManager(context.Background(), manager)
+	result, err := toolImpl.Run(ctx, map[string]any{
+		"agent":  "self",
+		"prompt": "child task",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["state"] != string(task.StateCompleted) {
+		t.Fatalf("expected completed spawn state, got %#v", result)
+	}
+	if result["output"] != "55" {
+		t.Fatalf("expected completed spawn output, got %#v", result)
+	}
+	if _, exists := result["task_id"]; exists {
+		t.Fatalf("did not expect completed spawn task_id, got %#v", result)
+	}
+}
+
 func TestSelfSpawnToolRejectsLegacyContinuationArgs(t *testing.T) {
 	toolImpl, err := NewSelfSpawnTool("")
 	if err != nil {
@@ -108,8 +142,8 @@ func TestSelfSpawnToolRejectsLegacyContinuationArgs(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected legacy continuation args to be rejected")
 	}
-	if !strings.Contains(err.Error(), "TASK write") {
-		t.Fatalf("expected migration hint to TASK write, got %v", err)
+	if !strings.Contains(err.Error(), `arg "session_id" is no longer supported`) {
+		t.Fatalf("expected legacy arg rejection, got %v", err)
 	}
 }
 
@@ -127,6 +161,14 @@ func TestSelfSpawnToolDeclarationOmitsLegacyContinuationArgs(t *testing.T) {
 	}
 	if _, ok := props["idle_timeout_seconds"]; ok {
 		t.Fatal("did not expect idle timeout arg in SPAWN declaration")
+	}
+	yieldProp, _ := props["yield_time_ms"].(map[string]any)
+	timeoutProp, _ := props["timeout_ms"].(map[string]any)
+	if !strings.Contains(asString(yieldProp["description"]), "this call") {
+		t.Fatalf("expected yield_time_ms declaration to explain per-call wait, got %#v", yieldProp)
+	}
+	if !strings.Contains(asString(timeoutProp["description"]), "independent from yield_time_ms") {
+		t.Fatalf("expected timeout_ms declaration to explain total timeout, got %#v", timeoutProp)
 	}
 }
 
@@ -164,4 +206,9 @@ func TestSelfSpawnToolRejectsNestedSelfSpawnFromSessionState(t *testing.T) {
 	if manager.lastStart.Prompt != "" {
 		t.Fatalf("did not expect task manager to start a child run, got %+v", manager.lastStart)
 	}
+}
+
+func asString(value any) string {
+	text, _ := value.(string)
+	return text
 }

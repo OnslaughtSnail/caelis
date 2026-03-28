@@ -138,7 +138,7 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	return result, fmt.Errorf("tool: seatbelt sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
 }
 
-func (s *seatbeltRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+func (s *seatbeltRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
 	if req.TTY {
 		return "", fmt.Errorf("tool: seatbelt async tty is not supported")
 	}

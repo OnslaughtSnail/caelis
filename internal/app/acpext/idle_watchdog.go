@@ -16,7 +16,7 @@ type idleWatchdog struct {
 	startedAt time.Time
 	lastBeat  time.Time
 	seenBeat  bool
-	paused    bool
+	pauseRefs int
 	once      sync.Once
 }
 
@@ -86,7 +86,7 @@ func (w *idleWatchdog) Pause() {
 		return
 	}
 	w.mu.Lock()
-	w.paused = true
+	w.pauseRefs++
 	w.mu.Unlock()
 }
 
@@ -96,7 +96,13 @@ func (w *idleWatchdog) Resume() {
 	}
 	now := time.Now()
 	w.mu.Lock()
-	w.paused = false
+	if w.pauseRefs > 0 {
+		w.pauseRefs--
+	}
+	if w.pauseRefs > 0 {
+		w.mu.Unlock()
+		return
+	}
 	if w.seenBeat {
 		w.lastBeat = now
 	} else {
@@ -142,7 +148,7 @@ func (w *idleWatchdog) idleFor() (time.Duration, bool) {
 	now := time.Now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.paused {
+	if w.pauseRefs > 0 {
 		return 0, false
 	}
 	if w.seenBeat {

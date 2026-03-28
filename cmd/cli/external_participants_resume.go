@@ -32,6 +32,7 @@ func (c *cliConsole) resumeExternalParticipantStream(ctx context.Context, partic
 		return
 	}
 	var ready atomic.Bool
+	updateCtx := context.WithoutCancel(ctx)
 	client, err := acpclient.Start(ctx, acpclient.Config{
 		Command:   strings.TrimSpace(desc.Command),
 		Args:      append([]string(nil), desc.Args...),
@@ -43,7 +44,7 @@ func (c *cliConsole) resumeExternalParticipantStream(ctx context.Context, partic
 			if !ready.Load() {
 				return
 			}
-			c.forwardExternalAgentUpdate(&externalAgentTurn{
+			c.forwardExternalAgentUpdate(updateCtx, &externalAgentTurn{
 				mode:        externalAgentTurnLoad,
 				desc:        desc,
 				participant: participant,

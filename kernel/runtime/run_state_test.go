@@ -46,7 +46,7 @@ func TestRuntime_RunState_Completed(t *testing.T) {
 		t.Fatal(err)
 	}
 	llm := newRuntimeTestLLM("fake")
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-run-state-completed",
@@ -83,7 +83,7 @@ func TestRuntime_RunState_WaitingApproval(t *testing.T) {
 	}
 	llm := newRuntimeTestLLM("fake")
 	var gotErr error
-	for _, runErr := range runEvents(t, rt, context.Background(), RunRequest{
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
 		AppName:   "app",
 		UserID:    "u",
 		SessionID: "s-run-state-approval",

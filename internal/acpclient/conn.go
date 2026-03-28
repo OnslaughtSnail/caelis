@@ -100,11 +100,12 @@ func (c *Conn) Serve(ctx context.Context, onRequest requestHandler, onNotificati
 			}
 			result, rpcErr := onRequest(ctx, req)
 			resp := Message{JSONRPC: JSONRPCVersion, ID: req.ID}
-			if rpcErr != nil {
+			switch {
+			case rpcErr != nil:
 				resp.Error = rpcErr
-			} else if result == nil {
+			case result == nil:
 				resp.Result = map[string]any{}
-			} else {
+			default:
 				resp.Result = result
 			}
 			_ = c.writeMessage(resp)

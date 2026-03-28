@@ -20,6 +20,7 @@ func TestAssemble_PolicyProviderOnly(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected non-nil resolved spec")
+		return
 	}
 	if len(got.Tools) != 0 {
 		t.Fatalf("expected no assembled tools, got %d", len(got.Tools))
@@ -38,6 +39,7 @@ func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected non-nil resolved spec")
+		return
 	}
 	if len(got.Tools) != 0 {
 		t.Fatalf("expected no assembled tools, got %d", len(got.Tools))

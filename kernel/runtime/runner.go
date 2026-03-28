@@ -121,6 +121,26 @@ func (h *runHandle) runInterruptCleanup() {
 	}
 }
 
+func (h *runHandle) interruptCleanupForInvocation(ctx context.Context, inv *invocationContext) func() {
+	return func() {
+		if inv == nil || inv.tasks == nil {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		inv.tasks.interruptTurn(cleanupCtx)
+	}
+}
+
+func (h *runHandle) cleanupInvocation(ctx context.Context, inv *invocationContext) {
+	if inv == nil || inv.tasks == nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	inv.tasks.cleanupTurn(cleanupCtx)
+}
+
 func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
 	if h == nil {
 		return func(yield func(*session.Event, error) bool) {
@@ -252,7 +272,7 @@ func now() time.Time {
 
 func (r *Runtime) newRunner(ctx context.Context, req RunRequest) (*runHandle, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("runtime: context is required")
 	}
 	if err := validateRunRequest(req); err != nil {
 		return nil, err
@@ -291,11 +311,12 @@ func (r *Runtime) newRunner(ctx context.Context, req RunRequest) (*runHandle, er
 		submitNotifyCh: make(chan struct{}, 1),
 		doneCh:         make(chan struct{}),
 	}
-	go handle.runWorker(leaseKey)
+	go handle.runWorker(runCtx, leaseKey)
 	return handle, nil
 }
 
-func (h *runHandle) runWorker(leaseKey string) {
+func (h *runHandle) runWorker(ctx context.Context, leaseKey string) {
+	_ = ctx
 	defer close(h.doneCh)
 	defer h.runtime.releaseRunLease(leaseKey)
 	defer h.closed.Store(true)
@@ -365,27 +386,13 @@ func (h *runHandle) runWorker(leaseKey string) {
 	if !ok {
 		return
 	}
-	inv, err := h.runtime.buildInvocationContext(h.ctx, h.sess, h.req, allEvents)
+	inv, err := h.runtime.buildInvocationContext(ctx, h.sess, h.req, allEvents)
 	if err != nil {
 		h.emitTerminalError(err)
 		return
 	}
-	h.setInterruptCleanup(func() {
-		if inv == nil || inv.tasks == nil {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		inv.tasks.interruptTurn(cleanupCtx)
-	})
-	defer func() {
-		if inv == nil || inv.tasks == nil {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		inv.tasks.cleanupTurn(cleanupCtx)
-	}()
+	h.setInterruptCleanup(h.interruptCleanupForInvocation(ctx, inv))
+	defer h.cleanupInvocation(ctx, inv)
 
 	for {
 		restart, ok := h.driveAgentRun(inv)

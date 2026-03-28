@@ -23,6 +23,8 @@ type acpSessionUpdateBridge struct {
 	agentName      string
 	childCWD       string
 	tracker        *remoteSubagentTracker
+	onToolActive   func()
+	onToolIdle     func()
 
 	mu        sync.Mutex
 	assistant string
@@ -36,13 +38,15 @@ type acpToolCall struct {
 	rawInput any
 }
 
-func newACPSessionUpdateBridge(meta runtime.DelegationMetadata, agentName string, childSessionID string, childCWD string, tracker *remoteSubagentTracker) *acpSessionUpdateBridge {
+func newACPSessionUpdateBridge(meta runtime.DelegationMetadata, agentName string, childSessionID string, childCWD string, tracker *remoteSubagentTracker, onToolActive func(), onToolIdle func()) *acpSessionUpdateBridge {
 	return &acpSessionUpdateBridge{
 		meta:           meta,
 		childSessionID: strings.TrimSpace(childSessionID),
 		agentName:      strings.TrimSpace(agentName),
 		childCWD:       strings.TrimSpace(childCWD),
 		tracker:        tracker,
+		onToolActive:   onToolActive,
+		onToolIdle:     onToolIdle,
 		toolCalls:      map[string]acpToolCall{},
 	}
 }
@@ -103,13 +107,20 @@ func (b *acpSessionUpdateBridge) emitToolCall(ctx context.Context, sessionID str
 	if callID == "" {
 		return
 	}
+	shouldPause := false
 	b.mu.Lock()
+	if len(b.toolCalls) == 0 {
+		shouldPause = true
+	}
 	b.toolCalls[callID] = acpToolCall{
 		title:    strings.TrimSpace(update.Title),
 		kind:     strings.TrimSpace(update.Kind),
 		rawInput: update.RawInput,
 	}
 	b.mu.Unlock()
+	if shouldPause && b.onToolActive != nil {
+		b.onToolActive()
+	}
 	ev := &session.Event{
 		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
 			ID:   callID,
@@ -120,6 +131,7 @@ func (b *acpSessionUpdateBridge) emitToolCall(ctx context.Context, sessionID str
 	if b.tracker != nil {
 		b.tracker.markRunning(b.agentName, sessionID, b.meta.DelegationID, b.childCWD)
 		b.tracker.updateTool(b.agentName, sessionID, acpToolDisplayName(update.Title, update.Kind))
+		b.tracker.beginToolCall(b.agentName, sessionID)
 	}
 	b.emitCanonical(ctx, sessionID, ev)
 }
@@ -130,12 +142,16 @@ func (b *acpSessionUpdateBridge) emitToolCallUpdate(ctx context.Context, session
 		return
 	}
 	status := strings.ToLower(strings.TrimSpace(derefString(update.Status)))
-	if status != internalacp.ToolStatusCompleted && status != internalacp.ToolStatusFailed {
+	if status != internalacp.ToolStatusInProgress && status != internalacp.ToolStatusCompleted && status != internalacp.ToolStatusFailed {
 		return
 	}
+	shouldResume := false
 	b.mu.Lock()
 	snap := b.toolCalls[callID]
-	delete(b.toolCalls, callID)
+	if status == internalacp.ToolStatusCompleted || status == internalacp.ToolStatusFailed {
+		delete(b.toolCalls, callID)
+		shouldResume = len(b.toolCalls) == 0
+	}
 	b.mu.Unlock()
 	title := firstNonEmpty(strings.TrimSpace(derefString(update.Title)), snap.title)
 	kind := firstNonEmpty(strings.TrimSpace(derefString(update.Kind)), snap.kind)
@@ -149,11 +165,20 @@ func (b *acpSessionUpdateBridge) emitToolCallUpdate(ctx context.Context, session
 	if b.tracker != nil {
 		b.tracker.markRunning(b.agentName, sessionID, b.meta.DelegationID, b.childCWD)
 		b.tracker.updateTool(b.agentName, sessionID, acpToolDisplayName(title, kind))
+		if status == internalacp.ToolStatusCompleted || status == internalacp.ToolStatusFailed {
+			b.tracker.endToolCall(b.agentName, sessionID)
+		}
+	}
+	if status == internalacp.ToolStatusInProgress && toolCallTerminalID(update.Content) != "" {
+		return
+	}
+	if shouldResume && b.onToolIdle != nil {
+		b.onToolIdle()
 	}
 	b.emitCanonical(ctx, sessionID, ev)
 }
 
-func (b *acpSessionUpdateBridge) FlushAssistant(ctx context.Context) {
+func (b *acpSessionUpdateBridge) FlushAssistant(_ context.Context) {
 	if b == nil {
 		return
 	}
@@ -236,18 +261,13 @@ func acpToolDisplayName(title string, kind string) string {
 	return "TOOL"
 }
 
-func marshalACPValue(value any) string {
-	if value == nil {
-		return ""
+func toolCallTerminalID(items []acpclient.ToolCallContent) string {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.Type), "terminal") && strings.TrimSpace(item.TerminalID) != "" {
+			return strings.TrimSpace(item.TerminalID)
+		}
 	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return ""
-	}
-	return string(raw)
+	return ""
 }
 
 func marshalACPToolInput(title string, kind string, value any) string {

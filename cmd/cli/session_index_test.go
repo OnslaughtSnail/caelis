@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/app/storage/localstore"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"

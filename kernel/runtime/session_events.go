@@ -21,7 +21,7 @@ type SessionEventsRequest struct {
 // SessionEvents returns recent session events ordered from old to new.
 func (r *Runtime) SessionEvents(ctx context.Context, req SessionEventsRequest) ([]*session.Event, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("runtime: context is required")
 	}
 	if strings.TrimSpace(req.AppName) == "" || strings.TrimSpace(req.UserID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return nil, fmt.Errorf("runtime: app_name, user_id and session_id are required")

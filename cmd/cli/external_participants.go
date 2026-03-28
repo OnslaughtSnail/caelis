@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -145,7 +145,7 @@ func (c *cliConsole) loadSessionParticipants(ctx context.Context) ([]externalPar
 		return nil, nil
 	}
 	state, err := c.sessionStore.SnapshotState(ctx, c.currentSessionRef())
-	if err != nil && err != session.ErrSessionNotFound {
+	if err != nil && !errors.Is(err, session.ErrSessionNotFound) {
 		return nil, err
 	}
 	raw, _ := state[externalParticipantsStateKey].([]any)
@@ -185,7 +185,7 @@ func (c *cliConsole) updateSessionParticipants(ctx context.Context, fn func([]ex
 			return err
 		}
 		state, err := c.sessionStore.SnapshotState(ctx, c.currentSessionRef())
-		if err != nil && err != session.ErrSessionNotFound {
+		if err != nil && !errors.Is(err, session.ErrSessionNotFound) {
 			return err
 		}
 		if state == nil {
@@ -305,8 +305,8 @@ func (c *cliConsole) lookupParticipantByAlias(ctx context.Context, alias string)
 	return externalParticipant{}, false, nil
 }
 
-func (c *cliConsole) participantAliases(query string, limit int) ([]string, error) {
-	items, err := c.loadSessionParticipants(context.Background())
+func (c *cliConsole) participantAliasesContext(ctx context.Context, query string, limit int) ([]string, error) {
+	items, err := c.loadSessionParticipants(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -404,15 +404,4 @@ func routeMirrorUserEvent(routeText string, p externalParticipant, routeKind str
 		},
 	}
 	return session.MarkMirror(annotateParticipantEvent(ev, p))
-}
-
-func finalizeParticipantSessionRef(root string, value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return root
-	}
-	if filepath.IsAbs(value) {
-		return filepath.Clean(value)
-	}
-	return value
 }

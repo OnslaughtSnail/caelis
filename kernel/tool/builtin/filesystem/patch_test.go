@@ -181,3 +181,30 @@ func TestPatchTool_MissingFileRequiresEmptyOld(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestPatchTool_MissingExactMatchSuggestsReadAndReplaceAll(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "mismatch.txt")
+	if err := os.WriteFile(path, []byte("hello\nworld\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool, err := NewPatchWithRuntime(newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{
+		"path": path,
+		"old":  "missing",
+		"new":  "replacement",
+	})
+	if err == nil {
+		t.Fatal("expected PATCH exact-match failure")
+	}
+	text := err.Error()
+	for _, want := range []string{path, "READ", "replace_all=true"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected PATCH error to mention %q, got %v", want, err)
+		}
+	}
+}

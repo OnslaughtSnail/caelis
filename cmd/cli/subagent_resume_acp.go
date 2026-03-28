@@ -220,13 +220,13 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 		return
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		return
 	}
 	state := &resumedACPReplayState{
 		loading: true,
 		calls:   map[string]toolCallSnapshot{},
 	}
-	client, cleanup, err := c.startResumedSubagentACPClient(target, func(env acpclient.UpdateEnvelope) {
+	client, cleanup, err := c.startResumedSubagentACPClient(ctx, target, func(env acpclient.UpdateEnvelope) {
 		c.forwardResumedACPUpdate(ctx, rootSessionID, target, state, env)
 	})
 	if err != nil {
@@ -277,14 +277,13 @@ func resumedSubagentLoadTimeoutForAgent(agentName string) time.Duration {
 	return resumedSubagentACPLoadTimeout
 }
 
-func (c *cliConsole) startResumedSubagentACPClient(target resumedSubagentTarget, onUpdate func(acpclient.UpdateEnvelope)) (*acpclient.Client, func(), error) {
+func (c *cliConsole) startResumedSubagentACPClient(ctx context.Context, target resumedSubagentTarget, onUpdate func(acpclient.UpdateEnvelope)) (*acpclient.Client, func(), error) {
 	desc, err := c.resolveResumedSubagentDescriptor(target.Agent)
 	if err != nil {
 		return nil, nil, err
 	}
-	ctx := c.baseCtx
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, nil, fmt.Errorf("cli: context is required")
 	}
 	switch desc.Transport {
 	case appagents.TransportSelf:
@@ -317,7 +316,7 @@ func (c *cliConsole) startResumedSubagentACPClient(target resumedSubagentTarget,
 			_ = client.Close()
 			return nil, nil, err
 		}
-		serveCtx, serveCancel := context.WithCancel(context.Background())
+		serveCtx, serveCancel := context.WithCancel(context.WithoutCancel(ctx))
 		done := make(chan error, 1)
 		go func() {
 			done <- server.Serve(serveCtx)
@@ -538,14 +537,9 @@ func resumedSubagentProjectionTarget(rootSessionID string, target resumedSubagen
 	}
 }
 
-func (c *cliConsole) sendSubagentProjectionMsg(ctx context.Context, rootSessionID string, msg any) {
+func (c *cliConsole) sendSubagentProjectionMsg(_ context.Context, rootSessionID string, msg any) {
 	if c == nil || c.tuiSender == nil {
 		return
-	}
-	select {
-	case <-ctx.Done():
-		return
-	default:
 	}
 	if rootSessionID != "" && strings.TrimSpace(c.sessionID) != strings.TrimSpace(rootSessionID) {
 		return

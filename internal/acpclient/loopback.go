@@ -7,10 +7,13 @@ import (
 )
 
 func StartLoopback(ctx context.Context, cfg Config, reader io.Reader, writer io.Writer) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("acpclient: context is required")
+	}
 	if reader == nil || writer == nil {
 		return nil, fmt.Errorf("acpclient: loopback reader and writer are required")
 	}
-	serveCtx, cancel := context.WithCancel(context.Background())
+	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	client := &Client{
 		cfg:       cfg,
 		conn:      NewConn(reader, writer),

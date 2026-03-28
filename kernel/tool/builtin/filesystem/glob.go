@@ -2,6 +2,8 @@ package filesystem
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"path/filepath"
 	"sort"
 
@@ -50,6 +52,11 @@ func (t *GlobTool) Declaration() model.ToolDefinition {
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{"type": "string", "description": "glob pattern"},
+				"exclude": map[string]any{
+					"type":        "array",
+					"description": "Optional relative path patterns to exclude after gitignore filtering.",
+					"items":       map[string]any{"type": "string"},
+				},
 			},
 			"required": []string{"pattern"},
 		},
@@ -66,6 +73,10 @@ func (t *GlobTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	if err != nil {
 		return nil, err
 	}
+	exclude, err := parseStringSliceArg(args, "exclude")
+	if err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(pattern) {
 		wd, err := t.runtime.FileSystem().Getwd()
 		if err != nil {
@@ -74,32 +85,94 @@ func (t *GlobTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		pattern = filepath.Join(wd, pattern)
 	}
 	pattern = filepath.Clean(pattern)
-	matches, err := t.runtime.FileSystem().Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-	matcher, err := newGitignoreMatcher(t.runtime.FileSystem(), pattern)
-	if err != nil {
-		return nil, err
-	}
-	filtered := matches[:0]
-	for _, match := range matches {
-		info, statErr := t.runtime.FileSystem().Stat(match)
-		if statErr != nil {
-			continue
+	matches := make([]string, 0, 16)
+	if !hasPathGlobMeta(filepath.ToSlash(pattern)) {
+		if info, err := t.runtime.FileSystem().Stat(pattern); err == nil {
+			root := filepath.Dir(pattern)
+			if !shouldExcludePath(root, pattern, info.IsDir(), exclude) {
+				matcher, err := newGitignoreMatcher(t.runtime.FileSystem(), root)
+				if err != nil {
+					return nil, err
+				}
+				ignored := false
+				if matcher != nil {
+					ignored, err = matcher.Match(pattern, info.IsDir())
+					if err != nil {
+						return nil, err
+					}
+				}
+				if !ignored {
+					matches = append(matches, pattern)
+				}
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
 		}
-		if matcher != nil {
-			ignored, err := matcher.Match(match, info.IsDir())
+		sort.Strings(matches)
+		return map[string]any{
+			"pattern": pattern,
+			"matches": matches,
+			"count":   len(matches),
+		}, nil
+	}
+	root, relPattern := splitAbsoluteGlobPattern(pattern)
+	if relPattern == "" {
+		relPattern = filepath.Base(pattern)
+	}
+	if _, err := t.runtime.FileSystem().Stat(root); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return map[string]any{
+				"pattern": pattern,
+				"matches": matches,
+				"count":   0,
+			}, nil
+		}
+		return nil, err
+	}
+	matcher, err := newGitignoreMatcher(t.runtime.FileSystem(), root)
+	if err != nil {
+		return nil, err
+	}
+	err = walkDir(t.runtime.FileSystem(), root, func(candidate string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if d == nil {
+			return nil
+		}
+		if candidate != root && matcher != nil {
+			ignored, err := matcher.Match(candidate, d.IsDir())
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if ignored {
-				continue
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
 			}
 		}
-		filtered = append(filtered, match)
+		if candidate != root && shouldExcludePath(root, candidate, d.IsDir(), exclude) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, candidate)
+		if err != nil {
+			return nil
+		}
+		if rel == "." {
+			return nil
+		}
+		if pathGlobMatch(relPattern, rel) {
+			matches = append(matches, candidate)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	matches = filtered
 	sort.Strings(matches)
 	return map[string]any{
 		"pattern": pattern,

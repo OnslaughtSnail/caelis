@@ -63,7 +63,7 @@ func TestBuildMutationPreview_PatchFailsWhenExpectedTextMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected mismatch error")
 	}
-	if !strings.Contains(err.Error(), "old content not found") {
+	if !strings.Contains(err.Error(), `did not contain an exact match for "old"`) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

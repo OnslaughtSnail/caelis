@@ -12,6 +12,7 @@ import (
 	_ "image/gif"
 
 	"golang.org/x/image/draw"
+	// Register additional decoders for formats users may attach.
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 )

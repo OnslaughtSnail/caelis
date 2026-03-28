@@ -82,6 +82,9 @@ func toolCallContentForResult(toolName string, result map[string]any) []ToolCall
 	}
 	terminalID := strings.TrimSpace(stringValue(result["session_id"]))
 	if terminalID == "" {
+		terminalID = strings.TrimSpace(stringValue(result["_ui_exec_session_id"]))
+	}
+	if terminalID == "" {
 		return nil
 	}
 	return []ToolCallContent{{
@@ -312,6 +315,9 @@ func (s *serverSession) rememberAsyncToolResult(toolName string, callID string, 
 	}
 	taskID := strings.TrimSpace(stringValue(result["task_id"]))
 	sessionID := strings.TrimSpace(stringValue(result["session_id"]))
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(stringValue(result["_ui_exec_session_id"]))
+	}
 	if taskID == "" && sessionID == "" {
 		return
 	}
@@ -357,6 +363,11 @@ func (s *serverSession) asyncOriginCallID(result map[string]any) string {
 		}
 	}
 	if sessionID := strings.TrimSpace(stringValue(result["session_id"])); sessionID != "" && s.asyncSessions != nil {
+		if callID := strings.TrimSpace(s.asyncSessions[sessionID]); callID != "" {
+			return callID
+		}
+	}
+	if sessionID := strings.TrimSpace(stringValue(result["_ui_exec_session_id"])); sessionID != "" && s.asyncSessions != nil {
 		if callID := strings.TrimSpace(s.asyncSessions[sessionID]); callID != "" {
 			return callID
 		}

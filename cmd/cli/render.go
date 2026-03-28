@@ -318,8 +318,7 @@ func renderNoticeText(notice session.Notice) string {
 	if notice.Kind == "" {
 		return strings.TrimSpace(notice.Text)
 	}
-	switch notice.Kind {
-	case "compaction_notice":
+	if notice.Kind == "compaction_notice" {
 		phase, _ := notice.Meta["compaction_phase"].(string)
 		trigger, _ := notice.Meta["compaction_trigger"].(string)
 		before, beforeOK := noticeIntField(notice.Meta, "pre_tokens")
@@ -662,7 +661,7 @@ func summarizeToolResponseWithCall(toolName string, result map[string]any, callA
 		return fmt.Sprintf("listed %d entries in %s", count, displayFileName(path))
 	case "SPAWN":
 		summary := strings.TrimSpace(firstNonEmpty(result, "result", "output", "final_result", "final_summary", "summary"))
-		if firstNonEmpty(result, "task_id") != "" {
+		if firstNonEmpty(result, "task_id") != "" && taskStateIsActive(asString(result["state"])) {
 			if message := compactTaskPreview(userFacingTaskMessage(toolStatusMessage(result))); message != "" {
 				return message
 			}
@@ -847,7 +846,10 @@ func summarizeTaskAction(action string, _ map[string]any, result map[string]any)
 		if errText := strings.TrimSpace(asString(result["error"])); errText != "" {
 			return truncateInline(errText, 160)
 		}
-		if strings.TrimSpace(asString(result["task_id"])) != "" {
+		if output != "" && !taskStateIsActive(asString(result["state"])) {
+			return output
+		}
+		if strings.TrimSpace(asString(result["task_id"])) != "" && taskStateIsActive(asString(result["state"])) {
 			return "task yielded before completion"
 		}
 		if stateLabel != "" {
@@ -933,6 +935,15 @@ func toolStatusMessage(result map[string]any) string {
 
 func toolResultValue(result map[string]any) string {
 	return firstNonEmpty(result, "result", "output", "stdout", "stderr")
+}
+
+func taskStateIsActive(state string) bool {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "running", "waiting_input", "waiting_approval":
+		return true
+	default:
+		return false
+	}
 }
 
 func userFacingTaskMessage(text string) string {

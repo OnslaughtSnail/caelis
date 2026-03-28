@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +32,10 @@ func defaultModelCatalogOverridePath() string {
 }
 
 func initModelCatalogForCLI(baseCtx context.Context) modelcatalog.CatalogInitStatus {
-	ctx := baseCtx
-	if ctx == nil {
-		ctx = context.Background()
+	if baseCtx == nil {
+		return modelcatalog.CatalogInitStatus{RemoteError: fmt.Errorf("cli: context is required")}
 	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, modelCatalogBootstrapTimeout)
+	timeoutCtx, cancel := context.WithTimeout(baseCtx, modelCatalogBootstrapTimeout)
 	defer cancel()
 	status := modelcatalog.InitModelCatalogWithStatus(timeoutCtx, nil, defaultModelCatalogOverridePath())
 	if status.RemoteFetched {

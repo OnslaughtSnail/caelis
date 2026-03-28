@@ -14,7 +14,7 @@ func TestRefreshModelCatalogForConnect_UsesTTL(t *testing.T) {
 	prevLast := lastModelCatalogRefresh
 	lastModelCatalogRefresh = time.Time{}
 	calls := 0
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		calls++
 		lastModelCatalogRefresh = time.Now()
 		return modelcatalog.CatalogInitStatus{RemoteFetched: true}

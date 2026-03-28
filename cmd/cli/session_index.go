@@ -35,6 +35,13 @@ type sessionIndex struct {
 	mu     sync.Mutex
 }
 
+func sessionIndexQueryContext(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
 type sessionIndexRecord struct {
 	SessionID       string
 	AppName         string
@@ -89,9 +96,14 @@ func (s *sessionIndex) Close() error {
 }
 
 func (s *sessionIndex) UpsertSession(workspace workspaceContext, appName, userID, sessionID string, at time.Time) error {
+	return s.UpsertSessionContext(context.Background(), workspace, appName, userID, sessionID, at)
+}
+
+func (s *sessionIndex) UpsertSessionContext(ctx context.Context, workspace workspaceContext, appName, userID, sessionID string, at time.Time) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	if strings.TrimSpace(workspace.Key) == "" || strings.TrimSpace(sessionID) == "" {
 		return fmt.Errorf("session index: workspace and session_id are required")
 	}
@@ -114,7 +126,7 @@ ON CONFLICT(scope, workspace_key, app_name, user_id, session_id) DO UPDATE SET
 		WHEN sessions.last_event_at > excluded.last_event_at THEN sessions.last_event_at
 		ELSE excluded.last_event_at
 	END`
-	_, err := s.db.ExecContext(context.Background(), q,
+	_, err := s.db.ExecContext(ctx, q,
 		localstore.ScopeMain, workspace.Key, appName, userID, sessionID, workspace.CWD, path,
 		ts, ts, ts,
 	)
@@ -122,9 +134,14 @@ ON CONFLICT(scope, workspace_key, app_name, user_id, session_id) DO UPDATE SET
 }
 
 func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, sessionID string, ev *session.Event, at time.Time) error {
+	return s.TouchEventContext(context.Background(), workspace, appName, userID, sessionID, ev, at)
+}
+
+func (s *sessionIndex) TouchEventContext(ctx context.Context, workspace workspaceContext, appName, userID, sessionID string, ev *session.Event, at time.Time) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	if strings.TrimSpace(workspace.Key) == "" || strings.TrimSpace(sessionID) == "" {
 		return fmt.Errorf("session index: workspace and session_id are required")
 	}
@@ -138,7 +155,7 @@ func (s *sessionIndex) TouchEvent(workspace workspaceContext, appName, userID, s
 	ts := at.UnixMilli()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.UpsertSession(workspace, appName, userID, sessionID, at); err != nil {
+	if err := s.UpsertSessionContext(ctx, workspace, appName, userID, sessionID, at); err != nil {
 		return err
 	}
 	const q = `
@@ -151,13 +168,13 @@ UPDATE sessions SET
 		ELSE last_user_message
 	END
 WHERE scope = ? AND workspace_key = ? AND app_name = ? AND user_id = ? AND session_id = ?`
-	if _, err := s.db.ExecContext(context.Background(), q,
+	if _, err := s.db.ExecContext(ctx, q,
 		ts, ts, lastUser, lastUser, localstore.ScopeMain, workspace.Key, appName, userID, sessionID,
 	); err != nil {
 		return err
 	}
 	if sessionIndexHiddenForEvent(ev, sessionID) {
-		return s.setSessionHidden(workspace.Key, appName, userID, sessionID, true)
+		return s.setSessionHiddenContext(ctx, workspace.Key, appName, userID, sessionID, true)
 	}
 	return nil
 }
@@ -167,13 +184,18 @@ func isCompactionEventForIndex(ev *session.Event) bool {
 }
 
 func (s *sessionIndex) ListWorkspaceSessions(workspaceKey string, limit int) ([]sessionIndexRecord, error) {
-	return s.ListWorkspaceSessionsPage(workspaceKey, 1, limit)
+	return s.ListWorkspaceSessionsPageContext(context.Background(), workspaceKey, 1, limit)
 }
 
 func (s *sessionIndex) ListWorkspaceSessionsPage(workspaceKey string, page int, pageSize int) ([]sessionIndexRecord, error) {
+	return s.ListWorkspaceSessionsPageContext(context.Background(), workspaceKey, page, pageSize)
+}
+
+func (s *sessionIndex) ListWorkspaceSessionsPageContext(ctx context.Context, workspaceKey string, page int, pageSize int) ([]sessionIndexRecord, error) {
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	workspaceKey = strings.TrimSpace(workspaceKey)
 	if workspaceKey == "" {
 		return nil, fmt.Errorf("session index: workspace_key is required")
@@ -191,7 +213,7 @@ func (s *sessionIndex) ListWorkspaceSessionsPage(workspaceKey string, page int, 
 	WHERE scope = ? AND workspace_key = ? AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT ? OFFSET ?`
-	rows, err := s.db.QueryContext(context.Background(), q, localstore.ScopeMain, workspaceKey, pageSize, offset)
+	rows, err := s.db.QueryContext(ctx, q, localstore.ScopeMain, workspaceKey, pageSize, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -227,9 +249,14 @@ func (s *sessionIndex) CountWorkspaceSessions(workspaceKey string) (int, error) 
 }
 
 func (s *sessionIndex) MostRecentWorkspaceSession(workspaceKey string, excludeSessionID string) (sessionIndexRecord, bool, error) {
+	return s.MostRecentWorkspaceSessionContext(context.Background(), workspaceKey, excludeSessionID)
+}
+
+func (s *sessionIndex) MostRecentWorkspaceSessionContext(ctx context.Context, workspaceKey string, excludeSessionID string) (sessionIndexRecord, bool, error) {
 	if s == nil || s.db == nil {
 		return sessionIndexRecord{}, false, nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	workspaceKey = strings.TrimSpace(workspaceKey)
 	if workspaceKey == "" {
 		return sessionIndexRecord{}, false, fmt.Errorf("session index: workspace_key is required")
@@ -243,7 +270,7 @@ func (s *sessionIndex) MostRecentWorkspaceSession(workspaceKey string, excludeSe
 	LIMIT 1`
 	var rec sessionIndexRecord
 	var createdAt, lastEventAt int64
-	if err := s.db.QueryRowContext(context.Background(), q, localstore.ScopeMain, workspaceKey, excludeSessionID, excludeSessionID).Scan(
+	if err := s.db.QueryRowContext(ctx, q, localstore.ScopeMain, workspaceKey, excludeSessionID, excludeSessionID).Scan(
 		&rec.SessionID, &rec.AppName, &rec.UserID, &rec.WorkspaceCWD, &createdAt, &lastEventAt, &rec.EventCount, &rec.LastUserMessage,
 	); err != nil {
 		if err == sql.ErrNoRows {
@@ -277,9 +304,14 @@ func (s *sessionIndex) HasWorkspaceSession(workspaceKey, sessionID string) (bool
 }
 
 func (s *sessionIndex) ResolveWorkspaceSessionID(workspaceKey, prefix string) (string, bool, error) {
+	return s.ResolveWorkspaceSessionIDContext(context.Background(), workspaceKey, prefix)
+}
+
+func (s *sessionIndex) ResolveWorkspaceSessionIDContext(ctx context.Context, workspaceKey, prefix string) (string, bool, error) {
 	if s == nil || s.db == nil {
 		return "", false, nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	workspaceKey = strings.TrimSpace(workspaceKey)
 	prefix = strings.TrimSpace(prefix)
 	if workspaceKey == "" || prefix == "" {
@@ -291,7 +323,7 @@ func (s *sessionIndex) ResolveWorkspaceSessionID(workspaceKey, prefix string) (s
 	WHERE scope = ? AND workspace_key = ? AND session_id LIKE ? AND ` + sessionIndexVisibleFilter + `
 	ORDER BY last_event_at DESC, created_at DESC
 	LIMIT 3`
-	rows, err := s.db.QueryContext(context.Background(), q, localstore.ScopeMain, workspaceKey, prefix+"%")
+	rows, err := s.db.QueryContext(ctx, q, localstore.ScopeMain, workspaceKey, prefix+"%")
 	if err != nil {
 		return "", false, err
 	}
@@ -412,6 +444,7 @@ func (s *sessionIndex) migrate(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	const ddl = `
 CREATE TABLE IF NOT EXISTS sessions (
 	scope TEXT NOT NULL,
@@ -439,9 +472,14 @@ ON sessions(scope, workspace_key, hidden, last_event_at DESC, created_at DESC);`
 }
 
 func (s *sessionIndex) setSessionHidden(workspaceKey, appName, userID, sessionID string, hidden bool) error {
+	return s.setSessionHiddenContext(context.Background(), workspaceKey, appName, userID, sessionID, hidden)
+}
+
+func (s *sessionIndex) setSessionHiddenContext(ctx context.Context, workspaceKey, appName, userID, sessionID string, hidden bool) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	ctx = sessionIndexQueryContext(ctx)
 	workspaceKey = strings.TrimSpace(workspaceKey)
 	appName = strings.TrimSpace(appName)
 	userID = strings.TrimSpace(userID)
@@ -453,7 +491,7 @@ func (s *sessionIndex) setSessionHidden(workspaceKey, appName, userID, sessionID
 	if hidden {
 		hiddenValue = 1
 	}
-	_, err := s.db.ExecContext(context.Background(),
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE sessions SET hidden = ? WHERE scope = ? AND workspace_key = ? AND app_name = ? AND user_id = ? AND session_id = ?`,
 		hiddenValue, localstore.ScopeMain, workspaceKey, appName, userID, sessionID,
 	)
@@ -501,9 +539,7 @@ func rolloutPathFallback(workspace workspaceContext, sessionID string, at time.T
 	)
 }
 
-var osMkdirAll = func(path string, perm os.FileMode) error {
-	return os.MkdirAll(path, perm)
-}
+var osMkdirAll = os.MkdirAll
 
 func (s *sessionIndex) upsertSnapshot(workspace workspaceContext, appName, userID, sessionID string, at time.Time, snapshot sessionIndexSnapshot) error {
 	if err := s.UpsertSession(workspace, appName, userID, sessionID, at); err != nil {

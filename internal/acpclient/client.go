@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +69,12 @@ type clientTerminal struct {
 	outputByteLimit int
 }
 
+var errUnknownSessionUpdate = errors.New("acpclient: unknown session update")
+
 func Start(ctx context.Context, cfg Config) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("acpclient: context is required")
+	}
 	command := strings.TrimSpace(cfg.Command)
 	if command == "" {
 		return nil, fmt.Errorf("acpclient: command is required")
@@ -102,7 +108,7 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	serveCtx, cancel := context.WithCancel(context.Background())
+	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	client := &Client{
 		cfg:       cfg,
 		conn:      NewConn(stdout, stdin),
@@ -184,6 +190,28 @@ func (c *Client) Cancel(ctx context.Context, sessionID string) error {
 	return c.conn.Call(ctx, MethodSessionCancel, CancelRequest{SessionID: sessionID}, &CancelResponse{})
 }
 
+func (c *Client) TerminalOutput(ctx context.Context, sessionID, terminalID string) (TerminalOutputResponse, error) {
+	var resp TerminalOutputResponse
+	if c == nil || c.conn == nil {
+		return resp, fmt.Errorf("acpclient: client is unavailable")
+	}
+	err := c.conn.Call(ctx, MethodTerminalOutput, TerminalOutputRequest{
+		SessionID:  strings.TrimSpace(sessionID),
+		TerminalID: strings.TrimSpace(terminalID),
+	}, &resp)
+	return resp, err
+}
+
+func (c *Client) TerminalRelease(ctx context.Context, sessionID, terminalID string) error {
+	if c == nil || c.conn == nil {
+		return fmt.Errorf("acpclient: client is unavailable")
+	}
+	return c.conn.Call(ctx, MethodTerminalRelease, ReleaseTerminalRequest{
+		SessionID:  strings.TrimSpace(sessionID),
+		TerminalID: strings.TrimSpace(terminalID),
+	}, nil)
+}
+
 func (c *Client) Close() error {
 	if c == nil {
 		return nil
@@ -230,6 +258,9 @@ func (c *Client) handleNotification(ctx context.Context, msg Message) {
 	}
 	update, err := decodeUpdate(note.Update)
 	if err != nil {
+		if errors.Is(err, errUnknownSessionUpdate) {
+			return
+		}
 		return
 	}
 	if update == nil {
@@ -532,7 +563,7 @@ func decodeUpdate(raw json.RawMessage) (Update, error) {
 		}
 		return update, nil
 	default:
-		return nil, nil
+		return nil, fmt.Errorf("%w: %s", errUnknownSessionUpdate, probe.SessionUpdate)
 	}
 }
 
@@ -547,8 +578,8 @@ func sliceTextByLines(content string, line *int, limit *int) string {
 	}
 	end := len(lines)
 	if limit != nil && *limit >= 0 {
-		if max := start + *limit; max < end {
-			end = max
+		if limitEnd := start + *limit; limitEnd < end {
+			end = limitEnd
 		}
 	}
 	return strings.Join(lines[start:end], "\n")

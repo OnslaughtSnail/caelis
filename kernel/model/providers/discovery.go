@@ -24,7 +24,7 @@ type RemoteModel struct {
 // It returns an error when provider does not expose list APIs or auth is invalid.
 func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("providers: context is required")
 	}
 	token, err := resolveToken(cfg.Auth)
 	if err != nil {

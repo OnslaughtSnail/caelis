@@ -248,7 +248,7 @@ func TestBwrapRunner_RunReadOnlyDisablesNetwork(t *testing.T) {
 			WritableRoots:    nil,
 			ReadOnlySubpaths: nil,
 		},
-		execCommand: func(_ context.Context, name string, args ...string) *exec.Cmd {
+		execCommand: func(_ context.Context, _ string, args ...string) *exec.Cmd {
 			capturedArgs = append([]string(nil), args...)
 			return exec.Command("bash", "-lc", "echo ok")
 		},

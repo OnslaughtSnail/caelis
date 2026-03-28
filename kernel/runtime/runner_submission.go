@@ -88,8 +88,11 @@ func (h *runHandle) shouldPropagateOverlayError(baseInv *invocationContext, err 
 }
 
 func (h *runHandle) buildOverlayInvocation(baseInv *invocationContext, sub *Submission) (*invocationContext, error) {
-	if h == nil || sub == nil {
-		return nil, nil
+	if h == nil {
+		return nil, ErrRunnerClosed
+	}
+	if sub == nil {
+		return nil, fmt.Errorf("runtime: overlay submission is required")
 	}
 	baseEvents, err := h.overlayBaseEvents(baseInv)
 	if err != nil {

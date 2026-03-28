@@ -26,6 +26,7 @@ func TestSubagentStartBackfillsExistingPanelMetadata(t *testing.T) {
 	panel, _ := m.doc.Find(blockID).(*SubagentPanelBlock)
 	if panel == nil {
 		t.Fatal("expected subagent panel block in document")
+		return
 	}
 	if panel.Agent != "" || panel.CallID != "" {
 		t.Fatalf("expected initial panel metadata to be empty, got agent=%q callID=%q", panel.Agent, panel.CallID)
@@ -89,6 +90,7 @@ func TestSubagentStartUpdatesExistingPanelAgentWithoutReanchoring(t *testing.T) 
 	panel, _ := m.doc.Find(panelID).(*SubagentPanelBlock)
 	if panel == nil {
 		t.Fatal("expected subagent panel")
+		return
 	}
 	if panel.Agent != "copilot" {
 		t.Fatalf("expected authoritative agent update, got %q", panel.Agent)
@@ -249,6 +251,7 @@ func TestSubagentPanelClearsWaitingApprovalWhenWorkResumes(t *testing.T) {
 	panel, _ := m.doc.Find(m.subagentBlockIDs["spawn-1"]).(*SubagentPanelBlock)
 	if panel == nil {
 		t.Fatal("expected panel")
+		return
 	}
 	if panel.Status != "running" {
 		t.Fatalf("expected resumed panel state running, got %q", panel.Status)
@@ -309,6 +312,7 @@ func TestSubagentPanelAddsLatestReferenceForSameSession(t *testing.T) {
 	secondPanel, _ := m.doc.Find(latestID).(*SubagentPanelBlock)
 	if firstPanel == nil || secondPanel == nil {
 		t.Fatal("expected both panel refs to exist")
+		return
 	}
 	if firstPanel.sessionState() != secondPanel.sessionState() {
 		t.Fatal("expected both panel refs to share same session state")
@@ -344,6 +348,7 @@ func TestSubagentPanelEventsAreIndependentCopies(t *testing.T) {
 	panel1, _ := m.doc.Find(p1ID).(*SubagentPanelBlock)
 	if panel1 == nil {
 		t.Fatal("expected first panel")
+		return
 	}
 
 	m.handleSubagentStart(tuievents.SubagentStartMsg{
@@ -353,6 +358,7 @@ func TestSubagentPanelEventsAreIndependentCopies(t *testing.T) {
 	panel2, _ := m.doc.Find(p2ID).(*SubagentPanelBlock)
 	if panel2 == nil || p2ID == p1ID {
 		t.Fatal("expected distinct second panel")
+		return
 	}
 
 	// Stream into the shared session.
@@ -427,6 +433,7 @@ func TestSubagentStartPromotesProvisionalPanelToActualSession(t *testing.T) {
 	panel, _ := m.doc.Find(panelID).(*SubagentPanelBlock)
 	if panel == nil {
 		t.Fatal("expected promoted panel to exist")
+		return
 	}
 	if panel.SpawnID != "child-gemini" || panel.AttachID != "child-gemini" {
 		t.Fatalf("expected promoted panel to reflect actual child session ids, got %+v", panel)
@@ -513,6 +520,7 @@ func TestSubagentStartDefersAnchorClaimUntilAuthoritativeBootstrap(t *testing.T)
 	selfPanel, _ := m.doc.Find(selfPanelID).(*SubagentPanelBlock)
 	if codexPanel == nil || geminiPanel == nil || selfPanel == nil {
 		t.Fatal("expected all subagent panels to exist")
+		return
 	}
 	if codexPanel.Agent != "codex" || codexPanel.CallID != "call-codex" {
 		t.Fatalf("expected codex panel metadata to stay aligned, got %+v", codexPanel)

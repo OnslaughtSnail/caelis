@@ -32,7 +32,7 @@ func TestAgentOutboundTraceMatchesSanitizedMessages(t *testing.T) {
 			},
 		})},
 	}
-	llm := model.WrapRequestTrace(newTestLLM("trace-llm", func(req *model.Request) (*model.Response, error) {
+	llm := model.WrapRequestTrace(newTestLLM("trace-llm", func(_ *model.Request) (*model.Response, error) {
 		return &model.Response{
 			Message:      model.NewTextMessage(model.RoleAssistant, "answer"),
 			TurnComplete: true,

@@ -355,7 +355,7 @@ func TestDefaultMaxOutputHeuristic_CapsNonReasoningByContext(t *testing.T) {
 func TestInitModelCatalog_LoadsRemoteCatalog(t *testing.T) {
 	resetDynamicCatalog(t)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(minimalModelsDevPayload(t)) //nolint:errcheck
 	}))
@@ -383,7 +383,7 @@ func TestInitModelCatalog_FallsBackToEmbeddedSnapshot(t *testing.T) {
 	resetDynamicCatalog(t)
 
 	// Server returns 500 – remote fetch must fail.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -408,7 +408,7 @@ func TestInitModelCatalog_LocalOverrideLoaded(t *testing.T) {
 	resetDynamicCatalog(t)
 
 	// Remote fails so we know the interesting data only comes from overrides.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -440,7 +440,7 @@ func TestInitModelCatalog_LocalOverrideLoaded(t *testing.T) {
 func TestInitModelCatalog_MissingOverrideFileSilent(t *testing.T) {
 	resetDynamicCatalog(t)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -568,7 +568,7 @@ func TestInitModelCatalog_ConcurrentCallsSafe(t *testing.T) {
 		dynamicMu.Unlock()
 	}()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
 	defer srv.Close()

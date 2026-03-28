@@ -1,6 +1,7 @@
 package tuidiff
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -99,7 +100,7 @@ func TestRender_AddOnlyModelUsesSingleColumnEvenWhenWide(t *testing.T) {
 	if strings.Contains(text, " │ ") {
 		t.Fatalf("did not expect split separator for add-only model: %q", text)
 	}
-	if !strings.Contains(text, "+ new line") && !strings.Contains(text, "+ new line") {
+	if !strings.Contains(text, "+ new line") {
 		t.Fatalf("expected added line in output, got %q", text)
 	}
 }
@@ -152,5 +153,42 @@ func TestRender_FoldedHunksShowSeparator(t *testing.T) {
 	text := ansi.Strip(strings.Join(lines, "\n"))
 	if !strings.Contains(text, "@@ -") || !strings.Contains(text, "unchanged lines") {
 		t.Fatalf("expected folded separator in rendered diff, got %q", text)
+	}
+}
+
+func TestBuildModel_LargeCommonAffixesStayFolded(t *testing.T) {
+	oldLines := make([]string, 0, 6000)
+	newLines := make([]string, 0, 6001)
+	for i := 1; i <= 6000; i++ {
+		oldLines = append(oldLines, "line-"+strconv.Itoa(i))
+	}
+	newLines = append(newLines, oldLines[:3200]...)
+	newLines = append(newLines, "inserted")
+	newLines = append(newLines, oldLines[3200:]...)
+
+	model := BuildModel(Payload{
+		Tool: "PATCH",
+		Path: "huge.txt",
+		Old:  strings.Join(oldLines, "\n"),
+		New:  strings.Join(newLines, "\n"),
+	})
+	if len(model.Rows) >= 64 {
+		t.Fatalf("expected folded large affixes to keep row count compact, got %d", len(model.Rows))
+	}
+	foundFold := false
+	foundAdd := false
+	for _, row := range model.Rows {
+		if row.Kind == RowFold {
+			foundFold = true
+		}
+		if row.Kind == RowAdd && row.NewText == "inserted" {
+			foundAdd = true
+		}
+	}
+	if !foundFold {
+		t.Fatalf("expected folded rows around large unchanged regions, got %#v", model.Rows)
+	}
+	if !foundAdd {
+		t.Fatalf("expected inserted line in diff rows, got %#v", model.Rows)
 	}
 }

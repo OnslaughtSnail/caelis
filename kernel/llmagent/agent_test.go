@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	"github.com/OnslaughtSnail/caelis/kernel/tool/capability"
 )
@@ -316,9 +317,7 @@ func TestLLMAgent_WriteStaysSequentialAgainstConcurrentBatch(t *testing.T) {
 	writeDone := make(chan struct{})
 	writeTool := namedTool{
 		name: "WRITE",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			_ = ctx
-			_ = args
+		run: func(_ context.Context, _ map[string]any) (map[string]any, error) {
 			time.Sleep(40 * time.Millisecond)
 			close(writeDone)
 			return map[string]any{"tool": "WRITE"}, nil
@@ -326,9 +325,7 @@ func TestLLMAgent_WriteStaysSequentialAgainstConcurrentBatch(t *testing.T) {
 	}
 	bashTool := namedTool{
 		name: "BASH",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			_ = ctx
-			_ = args
+		run: func(_ context.Context, _ map[string]any) (map[string]any, error) {
 			select {
 			case <-writeDone:
 				return map[string]any{"tool": "BASH"}, nil
@@ -479,8 +476,7 @@ func TestLLMAgent_ExposesToolCallInfoAcrossPolicyLifecycle(t *testing.T) {
 	toolSeen := toolexec.ToolCallInfo{}
 	infoTool := namedTool{
 		name: "info_tool",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			_ = args
+		run: func(ctx context.Context, _ map[string]any) (map[string]any, error) {
 			toolSeen, _ = toolexec.ToolCallInfoFromContext(ctx)
 			return map[string]any{"ok": true}, nil
 		},
@@ -1456,7 +1452,7 @@ func TestLLMAgent_RawToolArgsCompatibilityParsing(t *testing.T) {
 	}
 
 	step := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+	llm := newTestLLM("fake", func(_ *model.Request) (*model.Response, error) {
 		step++
 		if step == 1 {
 			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
@@ -1636,7 +1632,7 @@ func TestLLMAgent_StopsWhenApprovalIsCanceled(t *testing.T) {
 			}}, "")}, nil
 		}
 		t.Fatalf("agent should stop after approval cancel, got last role=%s", last.Role)
-		return nil, nil
+		return nil, errors.New("unreachable")
 	})
 
 	ag, err := New(Config{Name: "test"})
@@ -1689,7 +1685,7 @@ func TestLLMAgent_UnknownToolReturnsErrorWithoutAuthorization(t *testing.T) {
 			return &model.Response{Message: model.NewTextMessage(model.RoleAssistant, "done")}, nil
 		default:
 			t.Fatalf("unexpected llm step %d", step)
-			return nil, nil
+			return nil, errors.New("unreachable")
 		}
 	})
 
@@ -1867,7 +1863,7 @@ func TestToMessagesWithSanitizer_UsesCustomSanitizer(t *testing.T) {
 func TestLLMAgent_DoesNotSendUIOnlyToolFieldsToModel(t *testing.T) {
 	previewTool := namedTool{
 		name: "preview_tool",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+		run: func(_ context.Context, _ map[string]any) (map[string]any, error) {
 			return map[string]any{
 				"value":       "ok",
 				"_ui_preview": "--- old\n+++ new",
@@ -1928,13 +1924,13 @@ func TestLLMAgent_DoesNotSendUIOnlyToolFieldsToModel(t *testing.T) {
 func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 	toolWithMinimalResult := namedTool{
 		name: "minimal_tool",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+		run: func(_ context.Context, _ map[string]any) (map[string]any, error) {
 			return map[string]any{"value": "ok"}, nil
 		},
 	}
 
 	step := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+	llm := newTestLLM("fake", func(_ *model.Request) (*model.Response, error) {
 		step++
 		switch step {
 		case 1:
@@ -1985,15 +1981,13 @@ func TestLLMAgent_AddsDefaultMetadataToToolResults(t *testing.T) {
 func TestLLMAgent_AddsErrorCodeToToolResultMetadata(t *testing.T) {
 	codedErrTool := namedTool{
 		name: "coded_tool",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-			_ = ctx
-			_ = args
+		run: func(_ context.Context, _ map[string]any) (map[string]any, error) {
 			return nil, &toolexec.ApprovalRequiredError{Reason: "needs approval"}
 		},
 	}
 
 	step := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+	llm := newTestLLM("fake", func(_ *model.Request) (*model.Response, error) {
 		step++
 		switch step {
 		case 1:
@@ -2052,7 +2046,7 @@ func TestLLMAgent_DoesNotAddErrorCodeForUncodedErrors(t *testing.T) {
 	}
 
 	step := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+	llm := newTestLLM("fake", func(_ *model.Request) (*model.Response, error) {
 		step++
 		switch step {
 		case 1:
@@ -2104,7 +2098,7 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 	dynamicTool := namedTool{name: "LSP_DIAGNOSTICS"}
 	activationTool := namedTool{
 		name: "ENABLE_EXTRA_TOOLS",
-		run: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+		run: func(ctx context.Context, _ map[string]any) (map[string]any, error) {
 			inv, ok := ctx.(*testCtx)
 			if !ok {
 				return nil, fmt.Errorf("unexpected context type %T", ctx)
@@ -2167,9 +2161,90 @@ func TestLLMAgent_RefreshesToolDeclarationsAfterActivation(t *testing.T) {
 	}
 }
 
+func TestClassifyToolError_TaskNotFoundUsesTaskHint(t *testing.T) {
+	code, recoverable, hint, _, _ := classifyToolError(task.ErrTaskNotFound)
+	if code != "state_invalid" {
+		t.Fatalf("expected state_invalid, got %q", code)
+	}
+	if !recoverable {
+		t.Fatal("expected task not found to remain recoverable")
+	}
+	if !strings.Contains(hint, "task state") && !strings.Contains(hint, "list available tasks") {
+		t.Fatalf("expected task-specific hint, got %q", hint)
+	}
+}
+
+func TestClassifyToolError_PatchNotFoundUsesGenericHint(t *testing.T) {
+	code, recoverable, hint, _, _ := classifyToolError(errors.New("tool: PATCH old content not found in file"))
+	if code == "state_invalid" {
+		t.Fatalf("did not expect task-state classification, got %q", code)
+	}
+	if !recoverable {
+		t.Fatal("expected patch mismatch to remain recoverable")
+	}
+	if strings.Contains(hint, "list available tasks") || strings.Contains(hint, "task state") {
+		t.Fatalf("expected non-task hint, got %q", hint)
+	}
+}
+
+func TestClassifyToolError_TaskWriteContinuationUsesTaskHint(t *testing.T) {
+	code, recoverable, hint, _, _ := classifyToolError(errors.New("task: TASK write can continue a spawn subagent only after it reaches completed; current state is running, use TASK wait while it is still running"))
+	if code != "state_invalid" {
+		t.Fatalf("expected state_invalid, got %q", code)
+	}
+	if !recoverable {
+		t.Fatal("expected TASK write continuation error to remain recoverable")
+	}
+	if !strings.Contains(hint, "TASK wait") {
+		t.Fatalf("expected TASK wait hint, got %q", hint)
+	}
+}
+
+func TestCompactToolResultForModel_PrefersTerminalFieldsOverTerminalTaskID(t *testing.T) {
+	out := compactToolResultForModel(map[string]any{
+		"task_id": "spawn-1",
+		"state":   string(task.StateCompleted),
+		"output":  "55",
+	})
+	if got := out["output"]; got != "55" {
+		t.Fatalf("expected terminal output to survive compaction, got %#v", out)
+	}
+	if _, exists := out["task_id"]; exists {
+		t.Fatalf("did not expect terminal task_id after compaction, got %#v", out)
+	}
+}
+
+func TestCompactToolResultForModel_KeepsRunningMsgWithoutTextPayload(t *testing.T) {
+	out := compactToolResultForModel(map[string]any{
+		"task_id": "spawn-1",
+		"state":   string(task.StateRunning),
+		"msg":     "subagent is still running",
+	})
+	if got := out["task_id"]; got != "spawn-1" {
+		t.Fatalf("expected running task_id to survive compaction, got %#v", out)
+	}
+	if got := out["msg"]; got != "subagent is still running" {
+		t.Fatalf("expected running msg to survive compaction, got %#v", out)
+	}
+}
+
+func TestCompactToolResultForModel_AddsVisibleTruncationMsg(t *testing.T) {
+	out := compactToolResultForModel(map[string]any{
+		"task_id": "bash-1",
+		"state":   string(task.StateCompleted),
+		"stdout":  "partial output",
+		"output_meta": map[string]any{
+			"model_truncated": true,
+		},
+	})
+	if got := out["msg"]; got != "output truncated" {
+		t.Fatalf("expected truncation msg to survive compaction, got %#v", out)
+	}
+}
+
 func TestLLMAgent_CompletesMultiTurnToolLoop(t *testing.T) {
 	turn := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+	llm := newTestLLM("fake", func(_ *model.Request) (*model.Response, error) {
 		turn++
 		if turn == 1 {
 			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
@@ -2213,7 +2288,7 @@ func TestLLMAgent_CompletesMultiTurnToolLoop(t *testing.T) {
 
 func TestLLMAgent_AllowsUnlimitedToolLoopByDefault(t *testing.T) {
 	turn := 0
-	llm := newTestLLM("fake", func(req *model.Request) (*model.Response, error) {
+	llm := newTestLLM("fake", func(_ *model.Request) (*model.Response, error) {
 		turn++
 		if turn == 1 {
 			return &model.Response{Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{

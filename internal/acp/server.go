@@ -240,9 +240,8 @@ func (s *Server) handleRequest(ctx context.Context, msg Message) (any, *RPCError
 	}
 }
 
-func (s *Server) handleNotification(ctx context.Context, msg Message) {
-	switch msg.Method {
-	case MethodSessionCancel:
+func (s *Server) handleNotification(_ context.Context, msg Message) {
+	if msg.Method == MethodSessionCancel {
 		var req CancelNotification
 		if err := decodeParams(msg.Params, &req); err == nil {
 			s.cancelSession(req.SessionID)
@@ -256,7 +255,7 @@ func (s *Server) prompt(ctx context.Context, req PromptRequest) (resp PromptResp
 		return PromptResponse{}, err
 	}
 	sess.resetPartialStreams()
-	input, err := s.promptInput(req.SessionID, req.Prompt)
+	input, err := s.promptInput(ctx, req.SessionID, req.Prompt)
 	if err != nil {
 		return PromptResponse{}, err
 	}

@@ -54,12 +54,25 @@ type externalAgentTurn struct {
 	routeKind   string
 	callID      string
 	runState    *activeExternalAgentRun
+	runCancel   context.CancelFunc
 
 	mu        sync.Mutex
 	assistant string
 	reasoning string
 	toolCalls map[string]toolCallSnapshot
 	ready     atomic.Bool
+}
+
+func (t *externalAgentTurn) stop() {
+	if t == nil {
+		return
+	}
+	if t.runState != nil {
+		t.runState.cancel()
+	}
+	if t.runCancel != nil {
+		t.runCancel()
+	}
 }
 
 func (r *activeExternalAgentRun) setClient(client *acpclient.Client) {
@@ -136,8 +149,11 @@ func (c *cliConsole) availableCommandNames() []string {
 }
 
 func (c *cliConsole) dynamicSlashAgents() []appagents.Descriptor {
+	if c == nil {
+		return nil
+	}
 	registry := c.agentRegistry
-	if c != nil && c.configStore != nil {
+	if c.configStore != nil {
 		if reg, err := c.configStore.AgentRegistry(); err == nil && reg != nil {
 			registry = reg
 		}
@@ -183,7 +199,8 @@ func (c *cliConsole) notifyCommandListChanged() {
 	c.tuiSender.Send(tuievents.SetCommandsMsg{Commands: c.availableCommandNames()})
 }
 
-func (c *cliConsole) runExternalAgentSlash(desc appagents.Descriptor, prompt string) error {
+func (c *cliConsole) runExternalAgentSlashContext(ctx context.Context, desc appagents.Descriptor, prompt string) error {
+	ctx = cliContext(ctx)
 	prompt, err := c.prepareExternalParticipantPrompt(prompt)
 	if err != nil {
 		return err
@@ -198,7 +215,7 @@ func (c *cliConsole) runExternalAgentSlash(desc appagents.Descriptor, prompt str
 	case runOccupancyExternalAgent:
 		return errExternalAgentRunBusy
 	}
-	participants, err := c.loadSessionParticipants(context.Background())
+	participants, err := c.loadSessionParticipants(ctx)
 	if err != nil {
 		return err
 	}
@@ -211,7 +228,7 @@ func (c *cliConsole) runExternalAgentSlash(desc appagents.Descriptor, prompt str
 	}
 	participant.DisplayLabel = participantDisplayLabel(participant.Alias, participant.AgentID)
 	routeText := "/" + strings.TrimSpace(desc.ID) + " " + prompt
-	return c.startExternalAgentTurnAsync(&externalAgentTurn{
+	return c.startExternalAgentTurnAsyncContext(ctx, &externalAgentTurn{
 		mode:        externalAgentTurnNew,
 		desc:        desc,
 		participant: participant,
@@ -224,7 +241,8 @@ func (c *cliConsole) runExternalAgentSlash(desc appagents.Descriptor, prompt str
 	})
 }
 
-func (c *cliConsole) routeExternalParticipant(alias string, prompt string) error {
+func (c *cliConsole) routeExternalParticipantContext(ctx context.Context, alias string, prompt string) error {
+	ctx = cliContext(ctx)
 	prompt, err := c.prepareExternalParticipantPrompt(prompt)
 	if err != nil {
 		return err
@@ -239,7 +257,7 @@ func (c *cliConsole) routeExternalParticipant(alias string, prompt string) error
 	case runOccupancyExternalAgent:
 		return errExternalAgentRunBusy
 	}
-	participant, ok, err := c.lookupParticipantByAlias(context.Background(), alias)
+	participant, ok, err := c.lookupParticipantByAlias(ctx, alias)
 	if err != nil {
 		return err
 	}
@@ -250,7 +268,7 @@ func (c *cliConsole) routeExternalParticipant(alias string, prompt string) error
 	if !ok {
 		return fmt.Errorf("configured agent %q is unavailable", participant.AgentID)
 	}
-	return c.startExternalAgentTurnAsync(&externalAgentTurn{
+	return c.startExternalAgentTurnAsyncContext(ctx, &externalAgentTurn{
 		mode:        externalAgentTurnLoad,
 		desc:        desc,
 		participant: participant,
@@ -275,23 +293,13 @@ func (c *cliConsole) prepareExternalParticipantPrompt(prompt string) (string, er
 	return strings.TrimSpace(result.Text), nil
 }
 
-func (c *cliConsole) startExternalAgentTurnAsync(turn *externalAgentTurn) error {
+func (c *cliConsole) startExternalAgentTurnAsyncContext(ctx context.Context, turn *externalAgentTurn) error {
 	if c == nil || turn == nil {
 		return fmt.Errorf("console is unavailable")
 	}
-
-	baseCtx := c.baseCtx
-	if baseCtx == nil {
-		baseCtx = context.Background()
-	}
-	runCtx, cancelCtx := context.WithCancel(baseCtx)
-	cancel := func() {
-		if turn.runState != nil {
-			turn.runState.cancel()
-		}
-		cancelCtx()
-	}
-	c.setActiveExternalRun(cancel)
+	runCtx, cancelCtx := context.WithCancel(cliContext(ctx))
+	turn.runCancel = cancelCtx
+	c.setActiveExternalRun(turn.stop)
 
 	go func() {
 		defer c.clearActiveRun()
@@ -336,6 +344,8 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	if turn == nil {
 		return fmt.Errorf("external agent turn is unavailable")
 	}
+	ctx = cliContext(ctx)
+	persistCtx := context.WithoutCancel(ctx)
 	if _, err := c.ensureSessionRecord(ctx, c.sessionID); err != nil {
 		return err
 	}
@@ -403,32 +413,35 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 
 	if _, err := client.Prompt(ctx, sessionID, turn.promptText, nil); err != nil {
 		if ctx.Err() != nil {
-			_ = c.updateParticipantStatus(context.Background(), sessionID, "interrupted")
-			c.finalizeExternalTurnStreams(turn, true)
+			_ = c.updateParticipantStatus(persistCtx, sessionID, "interrupted")
+			c.finalizeExternalTurnStreams(persistCtx, turn, true)
 			return ctx.Err()
 		}
-		_ = c.updateParticipantStatus(context.Background(), sessionID, "failed")
-		c.finalizeExternalTurnStreams(turn, true)
+		_ = c.updateParticipantStatus(persistCtx, sessionID, "failed")
+		c.finalizeExternalTurnStreams(persistCtx, turn, true)
 		return externalAgentRunError(err, client)
 	}
-	c.finalizeExternalTurnStreams(turn, false)
-	_ = c.updateParticipantStatus(context.Background(), sessionID, "completed")
+	c.finalizeExternalTurnStreams(persistCtx, turn, false)
+	_ = c.updateParticipantStatus(persistCtx, sessionID, "completed")
 	return nil
 }
 
 func (c *cliConsole) startExternalSlashACPClient(ctx context.Context, runState *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (*acpclient.Client, func(), error) {
+	ctx = cliContext(ctx)
+	updateCtx := context.WithoutCancel(ctx)
+	execRuntime := c.executionRuntimeForSession()
 	client, err := acpclient.Start(ctx, acpclient.Config{
 		Command:   strings.TrimSpace(desc.Command),
 		Args:      append([]string(nil), desc.Args...),
 		Env:       copyStringMap(desc.Env),
 		WorkDir:   c.resolveExternalAgentWorkDir(desc),
-		Runtime:   c.execRuntime,
+		Runtime:   execRuntime,
 		Workspace: c.workspace.CWD,
 		OnUpdate: func(env acpclient.UpdateEnvelope) {
 			if turn == nil || !turn.ready.Load() {
 				return
 			}
-			c.forwardExternalAgentUpdate(turn, env)
+			c.forwardExternalAgentUpdate(updateCtx, turn, env)
 		},
 		OnPermissionRequest: func(reqCtx context.Context, req acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
 			return c.handleExternalPermissionRequest(reqCtx, req, strings.TrimSpace(desc.ID), runState)
@@ -442,6 +455,8 @@ func (c *cliConsole) startExternalSlashACPClient(ctx context.Context, runState *
 }
 
 func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req acpclient.RequestPermissionRequest, agentID string, runState *activeExternalAgentRun) (acpclient.RequestPermissionResponse, error) {
+	ctx = cliContext(ctx)
+	statusCtx := context.WithoutCancel(ctx)
 	sessionID := ""
 	if runState != nil {
 		runState.mu.RLock()
@@ -450,7 +465,7 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 	}
 	approvalTool, approvalCommand := externalApprovalContext(req)
 	if sessionID != "" {
-		_ = c.updateParticipantStatus(context.Background(), sessionID, "waiting_approval")
+		_ = c.updateParticipantStatus(statusCtx, sessionID, "waiting_approval")
 		if c.tuiSender != nil {
 			hint := strings.TrimSpace(approvalTool)
 			if hint == "" {
@@ -473,7 +488,7 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 			})
 		}
 		defer func() {
-			_ = c.updateParticipantStatus(context.Background(), sessionID, "running")
+			_ = c.updateParticipantStatus(statusCtx, sessionID, "running")
 			if c.tuiSender != nil {
 				c.tuiSender.Send(tuievents.ParticipantStatusMsg{
 					SessionID: sessionID,
@@ -486,7 +501,7 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 	if isToolAuthorization && c.approver != nil {
 		allowed, err := c.approver.AuthorizeTool(ctx, externalAuthorizationRequestFromACP(req))
 		if err != nil {
-			_ = c.updateParticipantStatus(context.Background(), sessionID, "failed")
+			_ = c.updateParticipantStatus(statusCtx, sessionID, "failed")
 			return acpclient.RequestPermissionResponse{}, err
 		}
 		return externalPermissionOutcome(req, allowed), nil
@@ -494,7 +509,7 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 	if c.approver != nil {
 		allowed, err := c.approver.Approve(ctx, externalApprovalRequestFromACP(req))
 		if err != nil {
-			_ = c.updateParticipantStatus(context.Background(), sessionID, "failed")
+			_ = c.updateParticipantStatus(statusCtx, sessionID, "failed")
 			return acpclient.RequestPermissionResponse{}, err
 		}
 		return externalPermissionOutcome(req, allowed), nil
@@ -517,10 +532,11 @@ func (c *cliConsole) persistExternalParticipantRoute(ctx context.Context, turn *
 	return c.appendSessionEvent(ctx, c.childSessionRecord(turn.participant.ChildSessionID), childEvent)
 }
 
-func (c *cliConsole) forwardExternalAgentUpdate(turn *externalAgentTurn, env acpclient.UpdateEnvelope) {
+func (c *cliConsole) forwardExternalAgentUpdate(ctx context.Context, turn *externalAgentTurn, env acpclient.UpdateEnvelope) {
 	if c == nil || c.tuiSender == nil || env.Update == nil || turn == nil {
 		return
 	}
+	ctx = cliContext(ctx)
 	sessionID := strings.TrimSpace(env.SessionID)
 	if sessionID == "" {
 		sessionID = strings.TrimSpace(turn.participant.ChildSessionID)
@@ -563,11 +579,11 @@ func (c *cliConsole) forwardExternalAgentUpdate(turn *externalAgentTurn, env acp
 				Args: marshalResumeACPToolInput(args),
 			}}, ""),
 		}, c.sessionID, turn.participant)
-		if c.appendSessionEvent(context.Background(), c.childSessionRecord(sessionID), childEvent) == nil {
+		if c.appendSessionEvent(ctx, c.childSessionRecord(sessionID), childEvent) == nil {
 			mirror := mirrorParticipantEvent(&session.Event{
 				Message: childEvent.Message,
 			}, c.sessionID, turn.participant, childEvent.ID)
-			_ = c.appendSessionEvent(context.Background(), c.currentSessionRef(), mirror)
+			_ = c.appendSessionEvent(ctx, c.currentSessionRef(), mirror)
 		}
 		c.tuiSender.Send(tuievents.ParticipantToolMsg{
 			SessionID: sessionID,
@@ -598,11 +614,11 @@ func (c *cliConsole) forwardExternalAgentUpdate(turn *externalAgentTurn, env acp
 				Result: result,
 			}),
 		}, c.sessionID, turn.participant)
-		if c.appendSessionEvent(context.Background(), c.childSessionRecord(sessionID), childEvent) == nil {
+		if c.appendSessionEvent(ctx, c.childSessionRecord(sessionID), childEvent) == nil {
 			mirror := mirrorParticipantEvent(&session.Event{
 				Message: childEvent.Message,
 			}, c.sessionID, turn.participant, childEvent.ID)
-			_ = c.appendSessionEvent(context.Background(), c.currentSessionRef(), mirror)
+			_ = c.appendSessionEvent(ctx, c.currentSessionRef(), mirror)
 		}
 		c.tuiSender.Send(tuievents.ParticipantToolMsg{
 			SessionID: sessionID,
@@ -617,10 +633,11 @@ func (c *cliConsole) forwardExternalAgentUpdate(turn *externalAgentTurn, env acp
 	}
 }
 
-func (c *cliConsole) finalizeExternalTurnStreams(turn *externalAgentTurn, interrupted bool) {
+func (c *cliConsole) finalizeExternalTurnStreams(ctx context.Context, turn *externalAgentTurn, interrupted bool) {
 	if c == nil || c.tuiSender == nil || turn == nil {
 		return
 	}
+	ctx = cliContext(ctx)
 	displayLabel := participantDisplayLabel(turn.participant.Alias, turn.participant.AgentID)
 	turn.mu.Lock()
 	assistant := strings.TrimSpace(turn.assistant)
@@ -650,11 +667,11 @@ func (c *cliConsole) finalizeExternalTurnStreams(turn *externalAgentTurn, interr
 	childEvent := annotateChildParticipantEvent(&session.Event{
 		Message: model.NewTextMessage(model.RoleAssistant, assistant),
 	}, c.sessionID, turn.participant)
-	if c.appendSessionEvent(context.Background(), c.childSessionRecord(turn.participant.ChildSessionID), childEvent) == nil {
+	if c.appendSessionEvent(ctx, c.childSessionRecord(turn.participant.ChildSessionID), childEvent) == nil {
 		mirror := mirrorParticipantEvent(&session.Event{
 			Message: childEvent.Message,
 		}, c.sessionID, turn.participant, childEvent.ID)
-		_ = c.appendSessionEvent(context.Background(), c.currentSessionRef(), mirror)
+		_ = c.appendSessionEvent(ctx, c.currentSessionRef(), mirror)
 	}
 }
 
@@ -850,31 +867,6 @@ func externalACPTitleSummary(name string, kind string, title string) string {
 		}
 	}
 	return strings.TrimSpace(normalized)
-}
-
-func externalPlanEntries(update acpclient.ToolCallUpdate) []tuievents.PlanEntry {
-	raw, ok := update.RawOutput.(map[string]any)
-	if !ok || raw == nil {
-		return nil
-	}
-	items, ok := raw["entries"].([]any)
-	if !ok || len(items) == 0 {
-		return nil
-	}
-	entries := make([]tuievents.PlanEntry, 0, len(items))
-	for _, item := range items {
-		row, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		content := strings.TrimSpace(fmt.Sprint(row["content"]))
-		status := strings.TrimSpace(fmt.Sprint(row["status"]))
-		if content == "" || status == "" {
-			continue
-		}
-		entries = append(entries, tuievents.PlanEntry{Content: content, Status: status})
-	}
-	return entries
 }
 
 func externalApprovalRequestFromACP(req acpclient.RequestPermissionRequest) toolexec.ApprovalRequest {

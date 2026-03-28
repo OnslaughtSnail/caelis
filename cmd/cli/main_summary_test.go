@@ -176,6 +176,20 @@ func TestSummarizeToolResponse_SpawnRunningShowsYieldOnly(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolResponse_SpawnCompletedWithTaskIDShowsResult(t *testing.T) {
+	got := summarizeToolResponseWithCall("SPAWN", map[string]any{
+		"task_id": "t-1234567890ab",
+		"state":   "completed",
+		"summary": "55",
+	}, nil)
+	if !strings.Contains(got, "55") {
+		t.Fatalf("expected completed spawn summary to keep result, got %q", got)
+	}
+	if strings.Contains(got, "task yielded before completion") {
+		t.Fatalf("did not expect yielded summary for completed spawn, got %q", got)
+	}
+}
+
 func TestSummarizeToolResponse_BashYieldIsFriendly(t *testing.T) {
 	got := summarizeToolResponseWithCall("BASH", map[string]any{
 		"task_id": "t-1234567890ab",
@@ -261,6 +275,21 @@ func TestSummarizeToolResponse_TaskWaitCompletedDoesNotEchoRequestedDuration(t *
 	})
 	if got != "Completed" {
 		t.Fatalf("unexpected completed task wait summary: %q", got)
+	}
+}
+
+func TestSummarizeToolResponse_TaskWaitCompletedPrefersOutput(t *testing.T) {
+	got := summarizeToolResponseWithCall("TASK", map[string]any{
+		"task_id": "t-1234567890ab",
+		"state":   "completed",
+		"result":  "55",
+		"msg":     "task success",
+	}, map[string]any{
+		"action":  "wait",
+		"task_id": "t-1234567890ab",
+	})
+	if got != "55" {
+		t.Fatalf("expected completed task wait to keep output, got %q", got)
 	}
 }
 

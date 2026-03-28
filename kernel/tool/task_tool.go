@@ -27,7 +27,7 @@ func (t *taskTool) Name() string {
 }
 
 func (t *taskTool) Description() string {
-	return "Control a long-running task created by BASH, SPAWN, or future async tools. Use wait/status/write/cancel/list with task_id. For SPAWN tasks, action=write is only for continuing a completed child session; BASH tasks still use action=write while running."
+	return "Control async tasks from BASH or SPAWN. state is the task lifecycle status. Use wait to check progress, write to send bash stdin or continue a completed spawn session, cancel to stop a task, and list to inspect recent tasks."
 }
 
 func (t *taskTool) Declaration() model.ToolDefinition {
@@ -39,20 +39,28 @@ func (t *taskTool) Declaration() model.ToolDefinition {
 			"properties": map[string]any{
 				"action": map[string]any{
 					"type":        "string",
-					"enum":        []string{"wait", "status", "write", "cancel", "list"},
-					"description": "wait for a fresh task snapshot, inspect status, send input, cancel a task, or list tracked tasks",
+					"enum":        []string{"wait", "write", "cancel", "list"},
+					"description": "Task control action.",
 				},
 				"task_id": map[string]any{
 					"type":        "string",
-					"description": "Task handle returned by an earlier async-yielded tool call.",
+					"description": "Task handle from an earlier async tool call.",
 				},
 				"input": map[string]any{
 					"type":        "string",
-					"description": "Optional input text for action=write. For SPAWN tasks this only applies after the child session has completed; for BASH tasks write still targets a running process.",
+					"description": "For action=write: send stdin to a running BASH task, or send a follow-up prompt to a completed SPAWN task.",
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "For action=wait or action=write, how long to wait before returning an updated task snapshot. Values greater than 0 wait that many milliseconds. If omitted or set to 0 or a negative value, TASK waits 5 seconds.",
+					"description": "Optional wait before returning. Defaults to 5000 for wait/write.",
+				},
+				"offset": map[string]any{
+					"type":        "integer",
+					"description": "Pagination offset for action=list.",
+				},
+				"limit": map[string]any{
+					"type":        "integer",
+					"description": "Pagination limit for action=list. Defaults to 10 and is capped at 50.",
 				},
 			},
 			"required":             []string{"action"},
@@ -78,6 +86,8 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		TaskID: strings.TrimSpace(asStringArg(args, "task_id")),
 		Input:  asStringArg(args, "input"),
 	}
+	offset := asIntArg(args, "offset")
+	limit := asIntArg(args, "limit")
 	rawYield, yieldSpecified := args["yield_time_ms"]
 	yieldSpecified = yieldSpecified && rawYield != nil
 	yieldMS := asIntArg(args, "yield_time_ms")
@@ -98,16 +108,7 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if err != nil {
 			return nil, err
 		}
-		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
-	case "status":
-		if req.TaskID == "" {
-			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
-		}
-		snapshot, err := manager.Status(ctx, req)
-		if err != nil {
-			return nil, err
-		}
-		return SnapshotResultMap(snapshot), nil
+		return taskSnapshotResult(snapshot, true), nil
 	case "write":
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
@@ -116,7 +117,7 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if err != nil {
 			return nil, err
 		}
-		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
+		return taskSnapshotResult(snapshot, true), nil
 	case "cancel":
 		if req.TaskID == "" {
 			return nil, fmt.Errorf("tool: arg %q is required", "task_id")
@@ -125,20 +126,62 @@ func (t *taskTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if err != nil {
 			return nil, err
 		}
-		return AppendTaskSnapshotEvents(SnapshotResultMap(snapshot), snapshot), nil
+		return taskSnapshotResult(snapshot, false), nil
 	case "list":
 		items, err := manager.List(ctx)
 		if err != nil {
 			return nil, err
+		}
+		total := len(items)
+		if offset < 0 {
+			offset = 0
+		}
+		if limit <= 0 {
+			limit = 10
+		}
+		if limit > 50 {
+			limit = 50
+		}
+		if offset > len(items) {
+			offset = len(items)
+		}
+		items = items[offset:]
+		if len(items) > limit {
+			items = items[:limit]
 		}
 		out := make([]map[string]any, 0, len(items))
 		for _, item := range items {
 			out = append(out, CompactTaskListItem(item))
 		}
 		return map[string]any{
-			"tasks": out,
+			"tasks":  out,
+			"total":  total,
+			"offset": offset,
+			"limit":  limit,
 		}, nil
 	default:
 		return nil, fmt.Errorf("tool: invalid action %q", action)
+	}
+}
+
+func taskSnapshotResult(snapshot task.Snapshot, includeEvents bool) map[string]any {
+	result := SnapshotResultMap(snapshot)
+	if includeEvents && snapshot.Running && shouldExposeTaskEvents(snapshot) {
+		if events := PublicTaskActionEvents(snapshot); len(events) > 0 {
+			result["events"] = events
+		}
+	}
+	return AppendTaskSnapshotEvents(result, snapshot)
+}
+
+func shouldExposeTaskEvents(snapshot task.Snapshot) bool {
+	if snapshot.Kind != task.KindBash {
+		return false
+	}
+	switch snapshot.State {
+	case task.StateWaitingInput, task.StateWaitingApproval:
+		return true
+	default:
+		return false
 	}
 }

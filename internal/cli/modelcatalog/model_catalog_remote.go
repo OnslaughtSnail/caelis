@@ -112,13 +112,11 @@ func InitModelCatalog(ctx context.Context, client *http.Client, overridePath str
 func InitModelCatalogWithStatus(ctx context.Context, client *http.Client, overridePath string) CatalogInitStatus {
 	if client == nil {
 		client = &http.Client{Timeout: catalogFetchTimeout}
-	} else {
+	} else if client.Timeout == 0 {
 		// Ensure a timeout even if the caller's client has none.
-		if client.Timeout == 0 {
-			client = &http.Client{
-				Transport: client.Transport,
-				Timeout:   catalogFetchTimeout,
-			}
+		client = &http.Client{
+			Transport: client.Transport,
+			Timeout:   catalogFetchTimeout,
 		}
 	}
 

@@ -224,7 +224,7 @@ func (u *ui) ReasoningPrefix() string {
 }
 
 // ToolCallPrefix returns the cyan "▸ " prefix for tool calls.
-func (u *ui) ToolCallPrefix(index int) string {
+func (u *ui) ToolCallPrefix(_ int) string {
 	return u.labelColor.Sprint("▸ ")
 }
 

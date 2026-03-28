@@ -79,6 +79,9 @@ type responsePacket struct {
 }
 
 func Start(ctx context.Context, cfg Config) (*Client, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("lspclient: context is required")
+	}
 	command := strings.TrimSpace(cfg.Command)
 	if command == "" {
 		command = "gopls"
@@ -87,7 +90,8 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	if len(args) == 0 {
 		args = []string{"serve"}
 	}
-	cmd := exec.CommandContext(context.Background(), command, args...)
+	procCtx := context.WithoutCancel(ctx)
+	cmd := exec.CommandContext(procCtx, command, args...)
 	if cfg.WorkDir != "" {
 		cmd.Dir = cfg.WorkDir
 	}
@@ -122,7 +126,7 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 		pending: map[string]chan responsePacket{},
 		closed:  make(chan struct{}),
 	}
-	go c.readLoop()
+	go c.readLoop(procCtx)
 
 	initTimeout := cfg.InitTimeout
 	if initTimeout <= 0 {
@@ -143,14 +147,14 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	}
 	var initResp map[string]any
 	if err := c.Call(initCtx, "initialize", params, &initResp); err != nil {
-		_ = c.Close()
+		_ = c.closeWithContext(procCtx)
 		return nil, err
 	}
 	if caps, ok := initResp["capabilities"].(map[string]any); ok {
 		c.serverCaps = caps
 	}
 	if err := c.Notify(initCtx, "initialized", map[string]any{}); err != nil {
-		_ = c.Close()
+		_ = c.closeWithContext(procCtx)
 		return nil, err
 	}
 	return c, nil
@@ -228,12 +232,19 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 }
 
 func (c *Client) Close() error {
+	return c.closeWithContext(context.Background())
+}
+
+func (c *Client) closeWithContext(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
 	var closeErr error
 	c.closeMu.Do(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 1500*time.Millisecond)
 		defer cancel()
 		_ = c.Call(shutdownCtx, "shutdown", map[string]any{}, nil)
 		_ = c.Notify(shutdownCtx, "exit", map[string]any{})
@@ -275,11 +286,11 @@ func (c *Client) Close() error {
 	return closeErr
 }
 
-func (c *Client) readLoop() {
+func (c *Client) readLoop(ctx context.Context) {
 	for {
 		payload, err := readMessage(c.reader)
 		if err != nil {
-			_ = c.Close()
+			_ = c.closeWithContext(ctx)
 			return
 		}
 		var packet responsePacket
@@ -287,7 +298,7 @@ func (c *Client) readLoop() {
 			continue
 		}
 		if len(packet.ID) > 0 && packet.Method != "" {
-			go c.handleServerRequest(packet)
+			go c.handleServerRequest(ctx, packet)
 			continue
 		}
 		if len(packet.ID) > 0 {
@@ -306,12 +317,12 @@ func (c *Client) readLoop() {
 	}
 }
 
-func (c *Client) handleServerRequest(req responsePacket) {
+func (c *Client) handleServerRequest(ctx context.Context, req responsePacket) {
 	idKey := normalizeID(req.ID)
 	if idKey == "" {
 		return
 	}
-	var result any = nil
+	var result any
 	switch req.Method {
 	case "workspace/configuration":
 		var params struct {
@@ -331,9 +342,9 @@ func (c *Client) handleServerRequest(req responsePacket) {
 	default:
 		result = map[string]any{}
 	}
-	_ = c.writeRaw(responsePacket{
+	_ = c.writeRawWithContext(ctx, responsePacket{
 		JSONRPC: "2.0",
-		ID:      json.RawMessage(req.ID),
+		ID:      req.ID,
 		Result:  mustMarshalRaw(result),
 	})
 }
@@ -349,7 +360,7 @@ func (c *Client) writeMessage(ctx context.Context, packet requestPacket) error {
 	return c.writeFrame(ctx, payload)
 }
 
-func (c *Client) writeRaw(packet responsePacket) error {
+func (c *Client) writeRawWithContext(ctx context.Context, packet responsePacket) error {
 	if c.IsClosed() {
 		return ErrClientClosed
 	}
@@ -357,7 +368,7 @@ func (c *Client) writeRaw(packet responsePacket) error {
 	if err != nil {
 		return err
 	}
-	return c.writeFrame(context.Background(), payload)
+	return c.writeFrame(ctx, payload)
 }
 
 func (c *Client) writeFrame(ctx context.Context, payload []byte) error {

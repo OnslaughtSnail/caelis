@@ -26,9 +26,6 @@ type Matcher struct {
 
 func New(fs FileSystem, root string) (*Matcher, error) {
 	cleanRoot := filepath.Clean(strings.TrimSpace(root))
-	if fs == nil || cleanRoot == "" {
-		return nil, nil
-	}
 	return &Matcher{
 		fs:            fs,
 		root:          cleanRoot,
@@ -53,7 +50,7 @@ func (m *Matcher) Root() string {
 }
 
 func (m *Matcher) Match(path string, isDir bool) (bool, error) {
-	if m == nil || strings.TrimSpace(path) == "" {
+	if m == nil || m.fs == nil || strings.TrimSpace(m.root) == "" || strings.TrimSpace(path) == "" {
 		return false, nil
 	}
 	cleanPath := filepath.Clean(path)

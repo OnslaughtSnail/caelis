@@ -27,7 +27,7 @@ func NewSelfSpawnTool(defaultAgent string) (tool.Tool, error) {
 func (t *selfSpawnTool) Name() string { return tool.SpawnToolName }
 
 func (t *selfSpawnTool) Description() string {
-	return "Create a new ACP child session with a prompt."
+	return "Start a new ACP child session for bounded delegated work."
 }
 
 func (t *selfSpawnTool) Declaration() model.ToolDefinition {
@@ -39,19 +39,19 @@ func (t *selfSpawnTool) Declaration() model.ToolDefinition {
 			"properties": map[string]any{
 				"agent": map[string]any{
 					"type":        "string",
-					"description": "Target agent identifier. Defaults to defaultAgent, then falls back to \"self\".",
+					"description": "Optional target agent. Defaults to the configured default agent, then self.",
 				},
 				"prompt": map[string]any{
 					"type":        "string",
-					"description": "Prompt to send to the child session.",
+					"description": "Task prompt for the child session.",
 				},
-				"yield_seconds": map[string]any{
+				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "Optional wait time in seconds before yielding control back. Defaults to 30 if omitted or non-positive.",
+					"description": "Optional wait for this call before returning in milliseconds. Defaults to 30000.",
 				},
-				"timeout_seconds": map[string]any{
+				"timeout_ms": map[string]any{
 					"type":        "integer",
-					"description": "Optional timeout for the delegated prompt in seconds.",
+					"description": "Optional total timeout for the child task in milliseconds. This is independent from yield_time_ms.",
 				},
 			},
 			"required":             []string{"prompt"},
@@ -83,26 +83,26 @@ func (t *selfSpawnTool) Run(ctx context.Context, args map[string]any) (map[strin
 	if strings.EqualFold(agentName, "self") && appacpmeta.SelfSpawnDepthFromContext(ctx) >= coremeta.DefaultSelfSpawnMaxDepth {
 		return nil, fmt.Errorf("tool: SPAWN self exceeded max depth %d", coremeta.DefaultSelfSpawnMaxDepth)
 	}
-	for _, legacy := range []string{"session", "session_id", "new_session"} {
+	for _, legacy := range []string{"session", "session_id", "new_session", "yield_seconds", "timeout_seconds"} {
 		if _, ok := args[legacy]; ok {
-			return nil, fmt.Errorf("tool: arg %q is no longer supported; SPAWN only creates new child sessions, use TASK write with the SPAWN task_id to continue an existing child session", legacy)
+			return nil, fmt.Errorf("tool: arg %q is no longer supported", legacy)
 		}
 	}
-	rawYield, yieldSpecified := args["yield_seconds"]
+	rawYield, yieldSpecified := args["yield_time_ms"]
 	yieldSpecified = yieldSpecified && rawYield != nil
-	yieldSeconds := asIntArg(args, "yield_seconds")
-	if !yieldSpecified || yieldSeconds <= 0 {
-		yieldSeconds = int(defaultSpawnYield / time.Second)
+	yieldMS := asIntArg(args, "yield_time_ms")
+	if !yieldSpecified || yieldMS <= 0 {
+		yieldMS = int(defaultSpawnYield / time.Millisecond)
 	}
-	timeoutSeconds := asIntArg(args, "timeout_seconds")
+	timeoutMS := asIntArg(args, "timeout_ms")
 	var timeout time.Duration
-	if timeoutSeconds > 0 {
-		timeout = time.Duration(timeoutSeconds) * time.Second
+	if timeoutMS > 0 {
+		timeout = time.Duration(timeoutMS) * time.Millisecond
 	}
 	snapshot, err := manager.StartSpawn(ctx, task.SpawnStartRequest{
 		Agent:   agentName,
 		Prompt:  promptText,
-		Yield:   time.Duration(yieldSeconds) * time.Second,
+		Yield:   time.Duration(yieldMS) * time.Millisecond,
 		Timeout: timeout,
 		Kind:    task.KindSpawn,
 	})

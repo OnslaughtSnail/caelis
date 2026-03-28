@@ -62,7 +62,7 @@ func (t *BashTool) Name() string {
 }
 
 func (t *BashTool) Description() string {
-	return "Execute a shell command and return stdout/stderr."
+	return "Run a shell command. Use it for commands that are simpler in the shell than via file tools."
 }
 
 func (t *BashTool) Capability() capability.Capability {
@@ -80,18 +80,18 @@ func (t *BashTool) Declaration() model.ToolDefinition {
 			"type": "object",
 			"properties": map[string]any{
 				"command": map[string]any{"type": "string", "description": "shell command to execute"},
-				"workdir": map[string]any{"type": "string", "description": "working directory"},
+				"workdir": map[string]any{"type": "string", "description": "Optional working directory."},
 				"require_escalated": map[string]any{
 					"type":        "boolean",
-					"description": "request host execution only when sandbox limits are blocking the task",
+					"description": "Request host execution only when sandbox limits block the task.",
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "optional wait time before yielding control. Values greater than 0 wait that many milliseconds. If omitted or set to 0 or a negative value, BASH waits 5 seconds and returns a task_id if still running.",
+					"description": "Optional wait before returning. Defaults to 5000; long runs return a task_id.",
 				},
-				"tty": map[string]any{
-					"type":        "boolean",
-					"description": "allocate a pseudo-terminal for interactive commands.",
+				"timeout_ms": map[string]any{
+					"type":        "integer",
+					"description": "Optional total command timeout in milliseconds. Defaults to 1800000.",
 				},
 			},
 			"required":             []string{"command"},
@@ -126,16 +126,18 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		return nil, yErr
 	}
 	explicitYieldMS := yieldMS
-	asyncYieldRequested := yieldSpecified && explicitYieldMS > 0
-	tty, ttyErr := argparse.Bool(args, "tty", false)
-	if ttyErr != nil {
-		return nil, ttyErr
-	}
 	if !yieldSpecified || explicitYieldMS <= 0 {
 		yieldMS = int(defaultBashWait / time.Millisecond)
 	}
+	timeoutMS, err := argparse.Int(args, "timeout_ms", 0)
+	if err != nil {
+		return nil, err
+	}
 
 	timeout := t.cfg.Timeout
+	if timeoutMS > 0 {
+		timeout = time.Duration(timeoutMS) * time.Millisecond
+	}
 	idleTimeout := t.cfg.IdleTimeout
 	if t.cfg.PreRun != nil {
 		if err := t.cfg.PreRun(command, workingDir); err != nil {
@@ -151,15 +153,6 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		return nil, &toolexec.ApprovalRequiredError{
 			Reason: "acpx must run outside the Caelis sandbox: operation not permitted; rerun this command with require_escalated=true",
 		}
-	}
-
-	// Interactive async commands still require host execution because sandbox
-	// backends currently do not provide PTY sessions.
-	if tty && decision.Route != toolexec.ExecutionRouteHost {
-		if decision.Route != toolexec.ExecutionRouteHost {
-			decision.NeedApproval = true
-		}
-		decision.Route = toolexec.ExecutionRouteHost
 	}
 
 	if policyDecision.Effect == policy.DecisionEffectRequireApproval && decision.Route == toolexec.ExecutionRouteSandbox {
@@ -180,81 +173,53 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 			return nil, err
 		}
 	}
-
-	if _, ok := runner.(toolexec.AsyncCommandRunner); !ok {
-		if asyncYieldRequested {
-			return nil, fmt.Errorf("tool: BASH failed (route=%s): async execution is not supported", decision.Route)
-		}
-	} else {
-		manager, ok := task.ManagerFromContext(ctx)
-		if !ok || manager == nil {
-			if asyncYieldRequested {
-				return nil, fmt.Errorf("tool: task manager is unavailable")
-			}
-		} else {
-			snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
-				Command:     command,
-				Workdir:     workingDir,
-				Yield:       time.Duration(yieldMS) * time.Millisecond,
-				Timeout:     timeout,
-				IdleTimeout: idleTimeout,
-				TTY:         tty,
-				Route:       string(decision.Route),
-			})
-			if err != nil {
-				return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
-			}
-			result := ktoolSnapshotResult(snapshot, string(decision.Route))
-			return ktoolAppendTaskEvents(result, snapshot), nil
-		}
+	asyncRunner, ok := runner.(toolexec.AsyncCommandRunner)
+	if !ok || asyncRunner == nil {
+		return nil, fmt.Errorf("tool: BASH failed (route=%s): async execution is not supported", decision.Route)
 	}
-
-	result, err := runner.Run(ctx, toolexec.CommandRequest{
-		Command:     command,
-		Dir:         workingDir,
-		Timeout:     timeout,
-		IdleTimeout: idleTimeout,
-		TTY:         tty,
-		OnOutput: func(chunk toolexec.CommandOutputChunk) {
-			toolexec.EmitOutputChunk(ctx, chunk)
-		},
-	})
-	if err != nil && shouldEscalateWhenSandboxUnavailable(decision, command, result, policyDecision) {
-		hostRunner := t.runtime.HostRunner()
-		if hostRunner == nil {
-			return nil, fmt.Errorf("tool: host runner is unavailable")
-		}
-		base := commandBaseName(command)
-		reason := fmt.Sprintf("sandbox image lacks command %q; approve host execution", base)
-		if reqErr := requestApproval(ctx, command, reason); reqErr != nil {
-			return nil, reqErr
-		}
-		result, err = hostRunner.Run(ctx, toolexec.CommandRequest{
+	manager, ok := task.ManagerFromContext(ctx)
+	if !ok || manager == nil {
+		sessionID, err := asyncRunner.StartAsync(ctx, toolexec.CommandRequest{
 			Command:     command,
 			Dir:         workingDir,
 			Timeout:     timeout,
 			IdleTimeout: idleTimeout,
-			TTY:         tty,
 			OnOutput: func(chunk toolexec.CommandOutputChunk) {
 				toolexec.EmitOutputChunk(ctx, chunk)
 			},
 		})
+		if err != nil {
+			return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
+		}
+		waited, waitErr := asyncRunner.WaitSession(ctx, sessionID, time.Duration(yieldMS)*time.Millisecond)
+		if waitErr != nil {
+			return nil, fmt.Errorf("tool: task manager is unavailable")
+		}
+		return ktoolSnapshotResult(task.Snapshot{
+			Kind:  task.KindBash,
+			State: task.StateCompleted,
+			Output: task.Output{
+				Stdout: waited.Stdout,
+				Stderr: waited.Stderr,
+			},
+			Result: map[string]any{
+				"exit_code": waited.ExitCode,
+			},
+		}, string(decision.Route)), nil
 	}
+	snapshot, err := manager.StartBash(ctx, task.BashStartRequest{
+		Command:     command,
+		Workdir:     workingDir,
+		Yield:       time.Duration(yieldMS) * time.Millisecond,
+		Timeout:     timeout,
+		IdleTimeout: idleTimeout,
+		Route:       string(decision.Route),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
 	}
-	return ktoolSnapshotResult(task.Snapshot{
-		Kind:           task.KindBash,
-		State:          task.StateCompleted,
-		Running:        false,
-		SupportsInput:  false,
-		SupportsCancel: false,
-		Output:         task.Output{Stdout: result.Stdout, Stderr: result.Stderr},
-		Result: map[string]any{
-			"exit_code":   result.ExitCode,
-			"output_meta": syncOutputMeta(result, tty),
-		},
-	}, string(decision.Route)), nil
+	result := ktoolSnapshotResult(snapshot, string(decision.Route))
+	return ktoolAppendTaskEvents(result, snapshot), nil
 }
 
 func (t *BashTool) WithRuntime(runtime toolexec.Runtime) (*BashTool, error) {
@@ -294,14 +259,6 @@ func appendTaskSnapshotEvents(result map[string]any, snapshot task.Snapshot) map
 			state = "terminated"
 		}
 	}
-	if snapshotOutputMetaTTY(snapshot.Result) {
-		return taskstream.AppendResultEvent(result, taskstream.Event{
-			Label:  "BASH",
-			TaskID: snapshot.TaskID,
-			State:  state,
-			Final:  !snapshot.Running,
-		})
-	}
 	return taskstream.AppendResultEvent(result, taskstream.Event{
 		Label:  "BASH",
 		TaskID: snapshot.TaskID,
@@ -319,33 +276,10 @@ func snapshotResultMap(snapshot task.Snapshot) map[string]any {
 		if id := strings.TrimSpace(snapshot.TaskID); id != "" {
 			result["task_id"] = id
 		}
-		if msg := snapshotStatusMessage(snapshot); msg != "" {
-			result["msg"] = msg
-		}
-		if value := snapshotProgressValue(snapshot); value != "" {
-			result["result"] = value
-		}
-		// Propagate fields needed by the TUI bash-watch poller.
-		if snapshot.Result != nil {
-			if v, ok := snapshot.Result["session_id"]; ok {
-				result["session_id"] = v
-			}
-			if v, ok := snapshot.Result["route"]; ok {
-				result["route"] = v
-			}
-		}
 		return result
 	}
-	if snapshotOutputMetaTTY(snapshot.Result) {
-		if value := snapshotProgressValue(snapshot); value != "" {
-			result["result"] = value
-		}
-	} else {
-		appendTerminalOutputFields(result, snapshot)
-	}
-	if msg := snapshotStatusMessage(snapshot); msg != "" {
-		result["msg"] = msg
-	}
+	appendTerminalOutputFields(result, snapshot)
+	appendSnapshotTruncationMessage(result, snapshot)
 	return result
 }
 
@@ -461,6 +395,23 @@ func appendTerminalOutputFields(result map[string]any, snapshot task.Snapshot) {
 	}
 }
 
+func appendSnapshotTruncationMessage(result map[string]any, snapshot task.Snapshot) {
+	if result == nil || len(snapshot.Result) == 0 {
+		return
+	}
+	raw, ok := snapshot.Result["output_meta"]
+	if !ok {
+		return
+	}
+	meta, ok := raw.(map[string]any)
+	if !ok || len(meta) == 0 {
+		return
+	}
+	if compacted := visiblemeta.CompactVisible(meta); len(compacted) > 0 {
+		result["msg"] = "output truncated"
+	}
+}
+
 func appendSnapshotMetaFields(result map[string]any, snapshot task.Snapshot) {
 	if result == nil || len(snapshot.Result) == 0 {
 		return
@@ -468,29 +419,11 @@ func appendSnapshotMetaFields(result map[string]any, snapshot task.Snapshot) {
 	if value, ok := snapshot.Result["exit_code"]; ok && value != nil {
 		result["exit_code"] = value
 	}
-	if raw, ok := snapshot.Result["output_meta"]; ok {
-		if meta, ok := raw.(map[string]any); ok && len(meta) > 0 {
-			if compacted := visiblemeta.CompactVisible(meta); len(compacted) > 0 {
-				result["output_meta"] = compacted
-			}
+	for _, key := range []string{"_ui_exec_session_id", "_ui_route"} {
+		if value, ok := snapshot.Result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
+			result[key] = value
 		}
 	}
-}
-
-func snapshotOutputMetaTTY(values map[string]any) bool {
-	if len(values) == 0 {
-		return false
-	}
-	raw, ok := values["output_meta"]
-	if !ok {
-		return false
-	}
-	meta, ok := raw.(map[string]any)
-	if !ok || len(meta) == 0 {
-		return false
-	}
-	typed, ok := meta["tty"].(bool)
-	return ok && typed
 }
 
 func syncOutputMeta(result toolexec.CommandResult, tty bool) map[string]any {

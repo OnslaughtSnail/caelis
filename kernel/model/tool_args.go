@@ -30,11 +30,11 @@ func ParseToolCallArgs(raw string) (map[string]any, error) {
 		if c == "" {
 			continue
 		}
-		if parsed, err := decodeJSONObject(c); err == nil {
+		parsed, err := decodeJSONObject(c)
+		if err == nil {
 			return parsed, nil
-		} else {
-			lastErr = err
 		}
+		lastErr = err
 	}
 
 	if lastErr == nil {

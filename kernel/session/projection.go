@@ -145,7 +145,7 @@ func PendingToolCalls(events Events) []PendingToolCall {
 }
 
 // Messages projects invocation-visible events into model input messages.
-func Messages(events Events, systemPrompt string, sanitizer func(map[string]any) map[string]any) []model.Message {
+func Messages(events Events, _ string, sanitizer func(map[string]any) map[string]any) []model.Message {
 	if sanitizer == nil {
 		sanitizer = func(result map[string]any) map[string]any { return result }
 	}

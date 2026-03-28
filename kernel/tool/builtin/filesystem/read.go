@@ -68,7 +68,7 @@ func (t *ReadTool) Name() string {
 }
 
 func (t *ReadTool) Description() string {
-	return "Read a text file segment by path with offset/limit/token caps."
+	return "Read part of a text file. READ first slices by lines, then truncates further to fit the token budget."
 }
 
 func (t *ReadTool) Capability() capability.Capability {
@@ -85,10 +85,10 @@ func (t *ReadTool) Declaration() model.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":       map[string]any{"type": "string", "description": "file path, absolute or relative"},
-				"offset":     map[string]any{"type": "integer", "description": "start line offset, zero-based"},
-				"limit":      map[string]any{"type": "integer", "description": "max lines requested"},
-				"max_tokens": map[string]any{"type": "integer", "description": "max token budget requested"},
+				"path":       map[string]any{"type": "string", "description": "File path, absolute or relative."},
+				"offset":     map[string]any{"type": "integer", "description": "Zero-based starting line offset."},
+				"limit":      map[string]any{"type": "integer", "description": "Optional max lines to read before token truncation."},
+				"max_tokens": map[string]any{"type": "integer", "description": "Optional token budget applied after line slicing."},
 			},
 			"required": []string{"path"},
 		},
@@ -200,8 +200,9 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 	}
 	nextOffset := endLine
 	if len(lines) == 0 {
-		nextOffset = offset
+		nextOffset = lineNo
 	}
+	exhausted := len(lines) == 0 && offset >= lineNo
 
 	return map[string]any{
 		"path":        targetPath,
@@ -209,6 +210,7 @@ func (t *ReadTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		"end_line":    endLine,
 		"next_offset": nextOffset,
 		"has_more":    hasMore,
+		"exhausted":   exhausted,
 		"content":     content.String(),
 	}, nil
 }

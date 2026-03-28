@@ -17,8 +17,9 @@ type LogChunkMsg struct {
 }
 
 type SetStatusMsg struct {
-	Model   string
-	Context string
+	Workspace string
+	Model     string
+	Context   string
 }
 
 type SetCommandsMsg struct {

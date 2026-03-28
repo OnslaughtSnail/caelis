@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
@@ -11,29 +12,29 @@ type cliSessionIndexAdapter struct {
 	index *sessionIndex
 }
 
-func (a *cliSessionIndexAdapter) ResolveWorkspaceSessionID(workspaceKey, prefix string) (string, bool, error) {
+func (a *cliSessionIndexAdapter) ResolveWorkspaceSessionID(ctx context.Context, workspaceKey, prefix string) (string, bool, error) {
 	if a == nil || a.index == nil {
 		return "", false, nil
 	}
-	return a.index.ResolveWorkspaceSessionID(workspaceKey, prefix)
+	return a.index.ResolveWorkspaceSessionIDContext(ctx, workspaceKey, prefix)
 }
 
-func (a *cliSessionIndexAdapter) MostRecentWorkspaceSessionID(workspaceKey, excludeSessionID string) (string, bool, error) {
+func (a *cliSessionIndexAdapter) MostRecentWorkspaceSessionID(ctx context.Context, workspaceKey, excludeSessionID string) (string, bool, error) {
 	if a == nil || a.index == nil {
 		return "", false, nil
 	}
-	rec, ok, err := a.index.MostRecentWorkspaceSession(workspaceKey, excludeSessionID)
+	rec, ok, err := a.index.MostRecentWorkspaceSessionContext(ctx, workspaceKey, excludeSessionID)
 	if err != nil || !ok {
 		return "", ok, err
 	}
 	return strings.TrimSpace(rec.SessionID), true, nil
 }
 
-func (a *cliSessionIndexAdapter) ListWorkspaceSessionsPage(workspaceKey string, page int, pageSize int) ([]sessionsvc.SessionSummary, error) {
+func (a *cliSessionIndexAdapter) ListWorkspaceSessionsPage(ctx context.Context, workspaceKey string, page int, pageSize int) ([]sessionsvc.SessionSummary, error) {
 	if a == nil || a.index == nil {
 		return []sessionsvc.SessionSummary{}, nil
 	}
-	records, err := a.index.ListWorkspaceSessionsPage(workspaceKey, page, pageSize)
+	records, err := a.index.ListWorkspaceSessionsPageContext(ctx, workspaceKey, page, pageSize)
 	if err != nil {
 		return nil, err
 	}

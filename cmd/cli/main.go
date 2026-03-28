@@ -37,7 +37,7 @@ func main() {
 
 func runCLI(ctx context.Context, args []string) error {
 	if ctx == nil {
-		ctx = context.Background()
+		return fmt.Errorf("cli: context is required")
 	}
 	initialAppName := appNameFromArgs(args, "caelis")
 	configStore, err := loadOrInitAppConfig(initialAppName)
@@ -217,14 +217,14 @@ func runCLI(ctx context.Context, args []string) error {
 		}
 	}
 
-	sessionRT, err := setupSessionRuntime(*storeDir, workspace.Key, *appName, *userID, *sessionIndexFile, *compactWatermark, workspace)
+	sessionRT, err := setupSessionRuntime(ctx, *storeDir, workspace.Key, *appName, *userID, *sessionIndexFile, *compactWatermark, workspace)
 	if err != nil {
 		return err
 	}
 	store := sessionRT.Store
 	index := sessionRT.Index
 	if flagProvided(args, "session") {
-		if resolvedSessionID, ok, resolveErr := index.ResolveWorkspaceSessionID(workspace.Key, *sessionID); resolveErr != nil {
+		if resolvedSessionID, ok, resolveErr := index.ResolveWorkspaceSessionIDContext(ctx, workspace.Key, *sessionID); resolveErr != nil {
 			return resolveErr
 		} else if ok {
 			*sessionID = resolvedSessionID
@@ -256,7 +256,7 @@ func runCLI(ctx context.Context, args []string) error {
 		Store:                store,
 		WorkspaceRoot:        resolvedWorkspaceRoot,
 		WorkspaceCWD:         workspace.CWD,
-		ClientRuntime:        execRuntime,
+		ClientRuntime:        execRuntimeView,
 		ResolveAgentRegistry: configStore.AgentRegistry,
 		NewAdapter: func(conn *internalacp.Conn) (internalacp.Adapter, error) {
 			if newACPAdapter == nil {
@@ -290,6 +290,7 @@ func runCLI(ctx context.Context, args []string) error {
 			BuildSystemPrompt: func(sessionCWD string) (string, error) {
 				return resolveSystemPrompt(buildAgentInput{
 					AppName:                     *appName,
+					PromptRole:                  promptRoleACPServer,
 					WorkspaceDir:                sessionCWD,
 					EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 					BasePrompt:                  *systemPrompt,
@@ -316,8 +317,7 @@ func runCLI(ctx context.Context, args []string) error {
 				return acpModelSupportsImages(factory, selectedAlias)
 			},
 			ListSessions: func(ctx context.Context, req internalacp.SessionListRequest) (internalacp.SessionListResponse, error) {
-				_ = ctx
-				return buildACPSessionList(index, workspace, req), nil
+				return buildACPSessionList(ctx, index, workspace, req), nil
 			},
 			NewAgent: func(stream bool, sessionCWD string, frozenPrompt string, sessionCfg internalacp.AgentSessionConfig) (agent.Agent, error) {
 				selectedAlias := resolveACPSelectedModelAlias(alias, sessionCfg.ConfigValues, configStore)
@@ -328,6 +328,7 @@ func runCLI(ctx context.Context, args []string) error {
 				resolvedReasoningEffort := resolveACPSessionReasoning(sessionRuntime, sessionCfg.ConfigValues)
 				return buildAgent(buildAgentInput{
 					AppName:                     *appName,
+					PromptRole:                  promptRoleACPServer,
 					WorkspaceDir:                sessionCWD,
 					EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 					BasePrompt:                  *systemPrompt,
@@ -387,7 +388,7 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 	newACPAdapter = serviceSet.NewACPAdapter
 	defer func() {
-		if closeErr := serviceSet.Close(context.Background()); closeErr != nil {
+		if closeErr := serviceSet.Close(context.WithoutCancel(ctx)); closeErr != nil {
 			fmt.Fprintf(os.Stderr, "warn: close assembled providers failed: %v\n", closeErr)
 		}
 	}()
@@ -432,6 +433,7 @@ func runCLI(ctx context.Context, args []string) error {
 		}
 		ag, err := buildAgent(buildAgentInput{
 			AppName:                     *appName,
+			PromptRole:                  promptRoleMainSession,
 			WorkspaceDir:                workspace.CWD,
 			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
 			BasePrompt:                  *systemPrompt,
@@ -539,5 +541,5 @@ func runCLI(ctx context.Context, args []string) error {
 			return serviceSet.NewACPAdapter(conn)
 		},
 	})
-	return console.loop()
+	return console.loop(ctx)
 }

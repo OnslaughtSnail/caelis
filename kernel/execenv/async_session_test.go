@@ -2,6 +2,7 @@ package execenv
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -346,7 +347,7 @@ func TestHostRunner_StartAsync_ReopensClosedSessionManager(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected StartAsync to fail after session manager close")
 	}
-	if err != ErrSessionManagerClosed {
+	if !errors.Is(err, ErrSessionManagerClosed) {
 		t.Fatalf("expected ErrSessionManagerClosed, got %v", err)
 	}
 }

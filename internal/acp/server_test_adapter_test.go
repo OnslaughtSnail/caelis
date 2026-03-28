@@ -276,10 +276,10 @@ func (a *harnessAdapter) StartPrompt(ctx context.Context, req StartPromptRequest
 	if err != nil {
 		return StartPromptResult{}, err
 	}
-	runCtx := ctx
-	if runCtx == nil {
-		runCtx = context.Background()
+	if ctx == nil {
+		return StartPromptResult{}, fmt.Errorf("acp harness: context is required")
 	}
+	runCtx := ctx
 	if req.OnSessionStream != nil {
 		runCtx = sessionstream.WithStreamer(runCtx, sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
 			_ = req.OnSessionStream(update)

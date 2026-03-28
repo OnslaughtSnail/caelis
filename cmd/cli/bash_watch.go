@@ -14,19 +14,19 @@ import (
 
 const bashWatchPollInterval = 120 * time.Millisecond
 
-func (c *cliConsole) syncBashTaskWatch(respToolID string, _ string, result map[string]any) {
+func (c *cliConsole) syncBashTaskWatchContext(ctx context.Context, respToolID string, _ string, result map[string]any) {
 	if c == nil || c.tuiSender == nil || c.execRuntime == nil {
 		return
 	}
 	taskID := strings.TrimSpace(fmt.Sprint(result["task_id"]))
-	sessionID := strings.TrimSpace(fmt.Sprint(result["session_id"]))
+	sessionID := strings.TrimSpace(fmt.Sprint(firstNonEmpty(result, "_ui_exec_session_id", "session_id")))
 	if taskID == "" || sessionID == "" {
 		return
 	}
 	state := strings.ToLower(strings.TrimSpace(fmt.Sprint(result["state"])))
-	route := strings.TrimSpace(fmt.Sprint(result["route"]))
+	route := strings.TrimSpace(fmt.Sprint(firstNonEmpty(result, "_ui_route", "route")))
 	if state == "" || state == "running" || state == "waiting_input" || state == "waiting_approval" {
-		c.ensureBashTaskWatch(taskID, respToolID, sessionID, route)
+		c.ensureBashTaskWatchContext(ctx, taskID, respToolID, sessionID, route)
 		return
 	}
 	c.stopBashTaskWatch(taskID)
@@ -52,7 +52,7 @@ func (c *cliConsole) shouldSuppressWatchedBashTaskStream(respToolName string, ev
 	return ok
 }
 
-func (c *cliConsole) ensureBashTaskWatch(taskID string, callID string, sessionID string, route string) {
+func (c *cliConsole) ensureBashTaskWatchContext(ctx context.Context, taskID string, callID string, sessionID string, route string) {
 	taskID = strings.TrimSpace(taskID)
 	sessionID = strings.TrimSpace(sessionID)
 	if taskID == "" || sessionID == "" {
@@ -67,14 +67,10 @@ func (c *cliConsole) ensureBashTaskWatch(taskID string, callID string, sessionID
 		c.bashWatchMu.Unlock()
 		return
 	}
-	base := c.baseCtx
-	if base == nil {
-		base = context.Background()
-	}
-	ctx, cancel := context.WithCancel(base)
+	watchCtx, cancel := context.WithCancel(context.WithoutCancel(cliContext(ctx)))
 	c.bashTaskWatches[taskID] = cancel
 	c.bashWatchMu.Unlock()
-	go c.runBashTaskWatch(ctx, runner, taskID, strings.TrimSpace(callID), sessionID)
+	go c.runBashTaskWatch(watchCtx, runner, taskID, strings.TrimSpace(callID), sessionID)
 }
 
 func (c *cliConsole) stopBashTaskWatch(taskID string) {

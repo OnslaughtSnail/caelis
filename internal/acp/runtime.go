@@ -215,6 +215,7 @@ func (r *clientCommandRunner) Run(ctx context.Context, req toolexec.CommandReque
 	command, args := shellCommand(req.Command)
 	outputLimit := 256 * 1024
 	var created CreateTerminalResponse
+	releaseCtx := context.WithoutCancel(ctx)
 	if err := r.conn.Call(ctx, MethodTerminalCreate, CreateTerminalRequest{
 		SessionID:       r.sessionID,
 		Command:         command,
@@ -225,7 +226,7 @@ func (r *clientCommandRunner) Run(ctx context.Context, req toolexec.CommandReque
 		return toolexec.CommandResult{}, err
 	}
 	defer func() {
-		_ = r.conn.Call(context.Background(), MethodTerminalRelease, ReleaseTerminalRequest{
+		_ = r.conn.Call(releaseCtx, MethodTerminalRelease, ReleaseTerminalRequest{
 			SessionID:  r.sessionID,
 			TerminalID: created.TerminalID,
 		}, nil)
@@ -385,7 +386,7 @@ func (r *clientAsyncCommandRunner) StartAsync(ctx context.Context, req toolexec.
 	return created.TerminalID, nil
 }
 
-func (r *clientAsyncCommandRunner) WriteInput(sessionID string, input []byte) error {
+func (r *clientAsyncCommandRunner) WriteInput(_ string, input []byte) error {
 	_ = input
 	return fmt.Errorf("acp terminal does not support interactive input")
 }

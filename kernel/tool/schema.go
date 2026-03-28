@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 )
@@ -45,7 +46,9 @@ func schemaForReflectType(t reflect.Type) map[string]any {
 			} else {
 				required = append(required, name)
 			}
-			properties[name] = schemaForReflectType(field.Type)
+			schema := schemaForReflectType(field.Type)
+			applyFieldSchemaTags(schema, field)
+			properties[name] = schema
 		}
 		out := map[string]any{
 			"type":       "object",
@@ -77,6 +80,66 @@ func schemaForReflectType(t reflect.Type) map[string]any {
 	default:
 		return map[string]any{"type": "string"}
 	}
+}
+
+func applyFieldSchemaTags(schema map[string]any, field reflect.StructField) {
+	if len(schema) == 0 {
+		return
+	}
+	description := strings.TrimSpace(field.Tag.Get("desc"))
+	if extra := strings.TrimSpace(field.Tag.Get("required_if")); extra != "" {
+		if description != "" {
+			description += " "
+		}
+		description += "Required when " + extra + "."
+	}
+	if extra := strings.TrimSpace(field.Tag.Get("conflicts_with")); extra != "" {
+		if description != "" {
+			description += " "
+		}
+		description += "Do not use with " + extra + "."
+	}
+	if description != "" {
+		schema["description"] = description
+	}
+	if enumValues := parseEnumTag(field.Tag.Get("enum")); len(enumValues) > 0 {
+		schema["enum"] = enumValues
+	}
+	if defaultValue := parseSchemaLiteral(field.Tag.Get("default")); defaultValue != nil {
+		schema["default"] = defaultValue
+	}
+	if exampleValue := parseSchemaLiteral(field.Tag.Get("example")); exampleValue != nil {
+		schema["examples"] = []any{exampleValue}
+	}
+}
+
+func parseEnumTag(raw string) []any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]any, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
+}
+
+func parseSchemaLiteral(raw string) any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err == nil {
+		return value
+	}
+	return raw
 }
 
 func contains(items []string, target string) bool {

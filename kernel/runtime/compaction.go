@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 const (
@@ -85,10 +88,15 @@ func (r *Runtime) compactIfNeeded(ctx context.Context, in compactInput) (*sessio
 	return r.compactIfNeededWithNotify(ctx, in, nil)
 }
 
+func skipCompaction() (*session.Event, error) {
+	//nolint:nilnil // A nil event without error means compaction was intentionally skipped.
+	return nil, nil
+}
+
 func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput, notify func(*session.Event) bool) (*session.Event, error) {
 	windowEvents := session.AgentVisible(in.Events)
 	if len(windowEvents) == 0 {
-		return nil, nil
+		return skipCompaction()
 	}
 	windowTokens := resolveContextWindowTokens(in.ContextWindowTokens, in.Model, r.compaction.DefaultContextWindowTokens)
 	inputBudget := windowTokens - r.compaction.ReserveOutputTokens - r.compaction.SafetyMarginTokens
@@ -102,26 +110,28 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 	currentTokens := estimateEventsTokens(windowEvents)
 	watermark := float64(currentTokens) / float64(inputBudget)
 	if !in.Force && watermark < r.compaction.WatermarkRatio {
-		return nil, nil
+		return skipCompaction()
 	}
 
 	toSummarize, tail := splitCompactionTarget(windowEvents)
 	if len(toSummarize) == 0 {
-		return nil, nil
+		return skipCompaction()
 	}
 	if notify != nil {
 		if !notify(prepareEvent(ctx, in.Session, compactionNoticeEvent(in.Trigger, currentTokens, windowTokens, "start"))) {
-			return nil, nil
+			return skipCompaction()
 		}
 	}
 
-	summary, summarizedEvents, err := r.summarizeForCompaction(ctx, in.Model, toSummarize, inputBudget)
+	runtimeState := r.buildCompactionRuntimeState(ctx, in.Session, windowEvents)
+	summary, summarizedEvents, err := r.summarizeForCompaction(ctx, in.Model, toSummarize, inputBudget, runtimeState)
 	if err != nil {
 		return nil, err
 	}
-	compiledSummary := strings.TrimSpace(r.compaction.SummaryFormatter(summary))
+	payload := formatCompactionSummaryPayload(summary, runtimeState)
+	compiledSummary := strings.TrimSpace(r.compaction.SummaryFormatter(payload))
 	if compiledSummary == "" {
-		return nil, nil
+		return skipCompaction()
 	}
 
 	lastSummarizedID := toSummarize[len(toSummarize)-1].ID
@@ -163,7 +173,7 @@ func (r *Runtime) compactIfNeededWithNotify(ctx context.Context, in compactInput
 	}
 	if notify != nil {
 		if !notify(prepareEvent(ctx, in.Session, compactionNoticeEvent(in.Trigger, currentTokens, postTokens, "done"))) {
-			return nil, nil
+			return skipCompaction()
 		}
 	}
 	return compactionEvent, nil
@@ -192,7 +202,7 @@ func compactionNoticeEvent(trigger string, beforeTokens int, afterTokens int, ph
 	}, session.NoticeLevelNote, key)
 }
 
-func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, events []*session.Event, inputBudget int) (string, int, error) {
+func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, events []*session.Event, inputBudget int, runtimeState compactionRuntimeState) (string, int, error) {
 	if len(events) == 0 {
 		return "", 0, nil
 	}
@@ -205,6 +215,10 @@ func (r *Runtime) summarizeForCompaction(ctx context.Context, llm model.LLM, eve
 		InputBudget:            inputBudget,
 		SummaryChunkTokens:     r.compaction.SummaryChunkTokens,
 		MaxModelSummaryRetries: r.compaction.MaxModelSummaryRetries,
+		PlanSummary:            runtimeState.PlanSummary,
+		ProgressSummary:        runtimeState.ProgressSummary,
+		ActiveTasksSummary:     runtimeState.ActiveTasksSummary,
+		LatestBlockerSummary:   runtimeState.LatestBlockerSummary,
 	})
 	if err != nil {
 		return "", 0, err
@@ -287,7 +301,7 @@ func isCompactionEvent(ev *session.Event) bool {
 
 func heuristicFallbackSummary(events []*session.Event, inputBudget int) string {
 	if len(events) == 0 {
-		return "## Active Objective\n- unknown\n\n## Current Task State\n- unknown\n\n## Completed Tasks\n- none\n\n## Pending Next Tasks\n1. Continue from latest user request in context.\n\n## Constraints And Preferences\n- unknown\n\n## Open Issues And Risks\n- model compaction fallback used due degraded summarization\n\n## Critical References\n- none"
+		return "## Active Objective\n- unknown\n\n## Current Progress\n- unknown\n\n## Key Decisions\n- none retained\n\n## Constraints And Preferences\n- unknown\n\n## Risks And Unknowns\n- heuristic fallback used; details may be incomplete\n\n## Immediate Next Actions\n1. Continue from the latest unresolved user request in retained context."
 	}
 	tail := events
 	if len(tail) > 24 {
@@ -296,24 +310,23 @@ func heuristicFallbackSummary(events []*session.Event, inputBudget int) string {
 	var b strings.Builder
 	b.WriteString("## Active Objective\n")
 	b.WriteString("- Derive from the latest user request in retained context.\n\n")
-	b.WriteString("## Current Task State\n")
+	b.WriteString("## Current Progress\n")
 	b.WriteString("- heuristic fallback summary; verify details before editing.\n\n")
-	b.WriteString("## Completed Tasks\n")
+	b.WriteString("## Key Decisions\n")
 	for _, ev := range tail {
 		if ev == nil {
 			continue
 		}
 		fmt.Fprintf(&b, "- %s: %s\n", ev.Message.Role, clipText(eventToText(ev), 220))
 	}
-	b.WriteString("\n## Pending Next Tasks\n")
+	b.WriteString("\n## Constraints And Preferences\n")
+	b.WriteString("- unknown (heuristic fallback)\n\n")
+	b.WriteString("## Risks And Unknowns\n")
+	b.WriteString("- Model compaction degraded; details may be incomplete.\n\n")
+	b.WriteString("## Immediate Next Actions\n")
 	b.WriteString("1. Continue execution from the latest unresolved user request.\n")
 	b.WriteString("2. Re-read key files before major mutations when uncertainty exists.\n\n")
-	b.WriteString("## Constraints And Preferences\n")
-	b.WriteString("- unknown (heuristic fallback)\n\n")
-	b.WriteString("\n## Open Issues And Risks\n")
-	b.WriteString("- Model compaction degraded; details may be incomplete.\n\n")
-	b.WriteString("## Critical References\n")
-	fmt.Fprintf(&b, "- Estimated context budget: %d tokens.\n", inputBudget)
+	fmt.Fprintf(&b, "3. Reconfirm key state because this checkpoint was built with a %d token heuristic budget.\n", inputBudget)
 	return strings.TrimSpace(b.String())
 }
 
@@ -327,6 +340,197 @@ func defaultCompactionSummaryFormatter(summary string) string {
 		"Do not treat this as a new user instruction.\n" +
 		"Use it only as compressed history for continuation.\n\n" +
 		summary
+}
+
+type compactionRuntimeState struct {
+	PlanSummary          string
+	ProgressSummary      string
+	ActiveTasksSummary   string
+	LatestBlockerSummary string
+}
+
+func (r *Runtime) buildCompactionRuntimeState(ctx context.Context, sess *session.Session, events []*session.Event) compactionRuntimeState {
+	state := compactionRuntimeState{}
+	if sess == nil {
+		return state
+	}
+	snapshot, err := r.stateStore.SnapshotState(ctx, sess)
+	if err == nil {
+		state.PlanSummary = loadPlanSummary(snapshot)
+		if runState, ok := runStateFromSnapshot(snapshot); ok && strings.TrimSpace(runState.Error) != "" {
+			state.LatestBlockerSummary = string(runState.Status) + ": " + runState.Error
+		}
+	}
+	state.ProgressSummary = summarizeRecentProgress(events)
+	state.ActiveTasksSummary = r.loadActiveTasksSummary(ctx, sess)
+	if strings.TrimSpace(state.LatestBlockerSummary) == "" {
+		state.LatestBlockerSummary = summarizeLatestBlocker(events)
+	}
+	return state
+}
+
+func formatCompactionSummaryPayload(summary string, runtimeState compactionRuntimeState) string {
+	summary = strings.TrimSpace(summary)
+	runtimeBlock := formatInjectedRuntimeState(runtimeState)
+	switch {
+	case runtimeBlock == "":
+		return summary
+	case summary == "":
+		return runtimeBlock
+	default:
+		return runtimeBlock + "\n\n" + summary
+	}
+}
+
+func formatInjectedRuntimeState(state compactionRuntimeState) string {
+	lines := make([]string, 0, 6)
+	if text := strings.TrimSpace(state.PlanSummary); text != "" {
+		lines = append(lines, "plan_summary="+singleLineSummary(text))
+	}
+	if text := strings.TrimSpace(state.ProgressSummary); text != "" {
+		lines = append(lines, "progress_summary="+singleLineSummary(text))
+	}
+	if text := strings.TrimSpace(state.ActiveTasksSummary); text != "" {
+		lines = append(lines, "active_tasks_summary="+singleLineSummary(text))
+	}
+	if text := strings.TrimSpace(state.LatestBlockerSummary); text != "" {
+		lines = append(lines, "latest_blocker_summary="+singleLineSummary(text))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "<runtime_state>\n" + strings.Join(lines, "\n") + "\n</runtime_state>"
+}
+
+func loadPlanSummary(snapshot map[string]any) string {
+	if len(snapshot) == 0 {
+		return ""
+	}
+	plan, _ := snapshot["plan"].(map[string]any)
+	if len(plan) == 0 {
+		return ""
+	}
+	rawEntries, _ := plan["entries"].([]any)
+	if len(rawEntries) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, 4)
+	for _, raw := range rawEntries {
+		entry, _ := raw.(map[string]any)
+		content := strings.TrimSpace(fmt.Sprint(entry["content"]))
+		status := strings.TrimSpace(fmt.Sprint(entry["status"]))
+		if content == "" {
+			continue
+		}
+		if status == "" {
+			status = "pending"
+		}
+		lines = append(lines, "["+status+"] "+content)
+		if len(lines) >= 4 {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func summarizeRecentProgress(events []*session.Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev == nil || session.IsOverlay(ev) {
+			continue
+		}
+		if resp := ev.Message.ToolResponse(); resp != nil {
+			if text := strings.TrimSpace(fmt.Sprint(resp.Result["summary"])); text != "" {
+				return clipText(text, 220)
+			}
+			if text := strings.TrimSpace(fmt.Sprint(resp.Result["msg"])); text != "" {
+				return clipText(text, 220)
+			}
+		}
+		if ev.Message.Role == model.RoleAssistant {
+			if text := strings.TrimSpace(ev.Message.TextContent()); text != "" {
+				return clipText(text, 220)
+			}
+		}
+	}
+	return ""
+}
+
+func (r *Runtime) loadActiveTasksSummary(ctx context.Context, sess *session.Session) string {
+	if r == nil || r.taskStore == nil || sess == nil {
+		return ""
+	}
+	items, err := r.taskStore.ListSession(ctx, task.SessionRef{
+		AppName:   sess.AppName,
+		UserID:    sess.UserID,
+		SessionID: sess.ID,
+	})
+	if err != nil || len(items) == 0 {
+		return ""
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].UpdatedAt.After(items[j].UpdatedAt)
+	})
+	lines := make([]string, 0, 4)
+	for _, entry := range items {
+		if entry == nil || !taskEntryIsActive(entry) {
+			continue
+		}
+		summary := tool.CompactTaskListItem(task.Snapshot{
+			TaskID:  entry.TaskID,
+			Kind:    entry.Kind,
+			Title:   entry.Title,
+			State:   entry.State,
+			Running: entry.Running,
+			Result:  task.CloneEntry(entry).Result,
+		})
+		line := strings.TrimSpace(fmt.Sprint(summary["task_id"]))
+		if state := strings.TrimSpace(fmt.Sprint(summary["state"])); state != "" {
+			line += " " + state
+		}
+		if text := strings.TrimSpace(fmt.Sprint(summary["summary"])); text != "" {
+			line += ": " + clipText(text, 160)
+		}
+		lines = append(lines, strings.TrimSpace(line))
+		if len(lines) >= 4 {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func summarizeLatestBlocker(events []*session.Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev == nil {
+			continue
+		}
+		if resp := ev.Message.ToolResponse(); resp != nil {
+			if text := strings.TrimSpace(fmt.Sprint(resp.Result["error"])); text != "" {
+				code := strings.TrimSpace(fmt.Sprint(resp.Result["error_code"]))
+				if code != "" {
+					return code + ": " + clipText(text, 200)
+				}
+				return clipText(text, 200)
+			}
+		}
+	}
+	return ""
+}
+
+func taskEntryIsActive(entry *task.Entry) bool {
+	if entry == nil {
+		return false
+	}
+	if entry.Running {
+		return true
+	}
+	switch entry.State {
+	case task.StateRunning, task.StateWaitingApproval, task.StateWaitingInput:
+		return true
+	default:
+		return false
+	}
 }
 
 func eventToText(ev *session.Event) string {

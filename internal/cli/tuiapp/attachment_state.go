@@ -172,7 +172,6 @@ func composeInputDisplay(value string, cursor int, attachments []inputAttachment
 		displayCount += len(segment)
 		if !cursorAssigned {
 			displayCursor = displayCount - (len(valueRunes) - cursor)
-			cursorAssigned = true
 		}
 	} else if !cursorAssigned {
 		displayCursor = displayCount

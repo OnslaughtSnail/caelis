@@ -19,9 +19,7 @@ import (
 )
 
 func requestBackgroundColorCmd() tea.Cmd {
-	return func() tea.Msg {
-		return tea.RequestBackgroundColor()
-	}
+	return tea.RequestBackgroundColor
 }
 
 func NewModel(cfg Config) *Model {
@@ -121,6 +119,11 @@ func NewModel(cfg Config) *Model {
 
 	if cfg.RefreshStatus != nil {
 		m.statusModel, m.statusContext = cfg.RefreshStatus()
+	}
+	if cfg.RefreshWorkspace != nil {
+		if workspace := strings.TrimSpace(cfg.RefreshWorkspace()); workspace != "" {
+			m.cfg.Workspace = workspace
+		}
 	}
 	if strings.TrimSpace(m.statusModel) == "" {
 		m.statusModel = "not configured"
@@ -375,6 +378,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuievents.SetStatusMsg:
+		if workspace := strings.TrimSpace(typed.Workspace); workspace != "" {
+			m.cfg.Workspace = workspace
+		}
 		if strings.TrimSpace(typed.Model) != "" {
 			m.statusModel = typed.Model
 		}
@@ -501,6 +507,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case tuievents.TickStatusMsg:
+		if m.cfg.RefreshWorkspace != nil {
+			if workspace := strings.TrimSpace(m.cfg.RefreshWorkspace()); workspace != "" {
+				m.cfg.Workspace = workspace
+			}
+		}
 		if m.cfg.RefreshStatus != nil {
 			modelText, contextText := m.cfg.RefreshStatus()
 			if strings.TrimSpace(modelText) != "" {

@@ -34,7 +34,7 @@ func (s *indexedSessionStore) GetOrCreate(ctx context.Context, req *session.Sess
 		return nil, err
 	}
 	if sess != nil {
-		_ = s.index.UpsertSession(s.workspace, sess.AppName, sess.UserID, sess.ID, sessNow())
+		_ = s.index.UpsertSessionContext(ctx, s.workspace, sess.AppName, sess.UserID, sess.ID, sessNow())
 	}
 	return sess, nil
 }
@@ -44,7 +44,7 @@ func (s *indexedSessionStore) AppendEvent(ctx context.Context, req *session.Sess
 		return err
 	}
 	if req != nil && ev != nil {
-		_ = s.index.TouchEvent(s.workspace, req.AppName, req.UserID, req.ID, ev, ev.Time)
+		_ = s.index.TouchEventContext(ctx, s.workspace, req.AppName, req.UserID, req.ID, ev, ev.Time)
 	}
 	return nil
 }

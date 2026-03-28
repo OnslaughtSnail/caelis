@@ -64,3 +64,45 @@ func TestReadTool_TokenLimit(t *testing.T) {
 		t.Fatalf("expected has_more=true, got %#v", out)
 	}
 }
+
+func TestReadTool_OffsetPastEOFReturnsExhausted(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "c.txt")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	readTool, err := NewReadWithRuntime(DefaultReadConfig(), newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := readTool.Run(context.Background(), map[string]any{
+		"path":   path,
+		"offset": 99,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["exhausted"] != true {
+		t.Fatalf("expected exhausted=true, got %#v", out)
+	}
+	if out["content"] != "" {
+		t.Fatalf("expected empty content past EOF, got %#v", out)
+	}
+	if out["start_line"] != 0 || out["end_line"] != 0 {
+		t.Fatalf("expected zero line range past EOF, got %#v", out)
+	}
+	if out["next_offset"] != 2 {
+		t.Fatalf("expected next_offset to clamp to file length, got %#v", out)
+	}
+}
+
+func TestReadToolDeclaration_ExplainsLineThenTokenBudget(t *testing.T) {
+	readTool, err := NewReadWithRuntime(DefaultReadConfig(), newTestRuntime(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readTool.Description(); !strings.Contains(got, "first slices by lines") {
+		t.Fatalf("expected updated READ description, got %q", got)
+	}
+}

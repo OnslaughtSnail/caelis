@@ -30,7 +30,7 @@ type ContextUsage struct {
 // ContextUsage returns current session context usage estimation.
 func (r *Runtime) ContextUsage(ctx context.Context, req UsageRequest) (ContextUsage, error) {
 	if ctx == nil {
-		ctx = context.Background()
+		return ContextUsage{}, fmt.Errorf("runtime: context is required")
 	}
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return ContextUsage{}, fmt.Errorf("runtime: app_name, user_id and session_id are required")

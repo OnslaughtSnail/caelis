@@ -187,7 +187,10 @@ func (b *teaPromptBroker) Close() {
 	}
 }
 
-func (c *cliConsole) loopTUITea() error {
+func (c *cliConsole) loopTUITea(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("cli: context is required")
+	}
 	if !isTTY(os.Stdin) || !isTTY(os.Stdout) {
 		return fmt.Errorf("tui mode requires an interactive terminal")
 	}
@@ -238,7 +241,7 @@ func (c *cliConsole) loopTUITea() error {
 		ExecuteLine: func(submission tuiapp.Submission) tuievents.TaskResultMsg {
 			line := strings.TrimSpace(submission.Text)
 			if submission.Mode == tuiapp.SubmissionModeOverlay {
-				err := c.runBTW(line, submission.Attachments)
+				err := c.runBTWContext(ctx, line, submission.Attachments)
 				if err != nil {
 					if c.tuiSender != nil {
 						c.tuiSender.Send(tuievents.BTWErrorMsg{Text: err.Error()})
@@ -251,7 +254,7 @@ func (c *cliConsole) loopTUITea() error {
 				return tuievents.TaskResultMsg{ContinueRunning: true}
 			}
 			if c.shouldHandleAsSlashCommand(line) {
-				exitNow, err := c.handleSlash(line)
+				exitNow, err := c.handleSlashContext(ctx, line)
 				if err == nil && c.currentRunKind() == runOccupancyExternalAgent {
 					return tuievents.TaskResultMsg{ContinueRunning: true}
 				}
@@ -264,17 +267,17 @@ func (c *cliConsole) loopTUITea() error {
 				if prompt == "" {
 					return tuievents.TaskResultMsg{Err: fmt.Errorf("usage: @%s <prompt>", alias), ContinueRunning: true}
 				}
-				err := c.routeExternalParticipant(alias, prompt)
+				err := c.routeExternalParticipantContext(ctx, alias, prompt)
 				if err == nil {
 					return tuievents.TaskResultMsg{ContinueRunning: true}
 				}
 				return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
 			}
 			if c.getActiveRunner() != nil {
-				err := c.runPromptWithAttachments(line, submission.Attachments)
+				err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
 				return tuievents.TaskResultMsg{Err: err, ContinueRunning: true}
 			}
-			err := c.runPromptWithAttachments(line, submission.Attachments)
+			err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
 			if errors.Is(err, context.Canceled) {
 				return tuievents.TaskResultMsg{Interrupted: true}
 			}
@@ -289,12 +292,15 @@ func (c *cliConsole) loopTUITea() error {
 		ModeLabel: func() string {
 			return c.sessionModeLabel()
 		},
+		RefreshWorkspace: func() string {
+			return c.readWorkspaceStatusLine()
+		},
 		RefreshStatus: func() (string, string) {
 			return c.readTUIStatus()
 		},
 		MentionComplete: func(query string, limit int) ([]string, error) {
 			begin := time.Now()
-			candidates, err := c.participantAliases(query, limit)
+			candidates, err := c.participantAliasesContext(ctx, query, limit)
 			if c.tuiDiag != nil {
 				c.tuiDiag.ObserveMentionLatency(time.Since(begin))
 			}
@@ -328,7 +334,7 @@ func (c *cliConsole) loopTUITea() error {
 			return c.completeResumeCandidates(query, limit)
 		},
 		SlashArgComplete: func(command string, query string, limit int) ([]tuiapp.SlashArgCandidate, error) {
-			return c.completeSlashArgCandidates(command, query, limit)
+			return c.completeSlashArgCandidatesContext(ctx, command, query, limit)
 		},
 		PasteClipboardImage: func() ([]string, string, error) {
 			return c.pasteClipboardImage()
@@ -406,7 +412,8 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 	}
 	cw := c.resolveContextWindowForDisplay()
 	var contextStr string
-	if cw > 0 {
+	switch {
+	case cw > 0:
 		pct := int(float64(pt) / float64(cw) * 100)
 		used := formatTokenCount(pt)
 		if used == "" {
@@ -417,9 +424,9 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 			total = "0"
 		}
 		contextStr = fmt.Sprintf("%s/%s(%d%%)", used, total, pct)
-	} else if pt > 0 {
+	case pt > 0:
 		contextStr = formatTokenCount(pt)
-	} else {
+	default:
 		contextStr = "0"
 	}
 	return modelLabel, contextStr
@@ -432,13 +439,20 @@ func workspaceStatusLine(cwd string) string {
 	}
 	label := shortenHomeDir(cwd)
 	if branch, dirty := gitBranchStatus(cwd); branch != "" {
-		label += " [" + branch
+		label += " [⎇ " + branch
 		if dirty {
 			label += "*"
 		}
 		label += "]"
 	}
 	return label
+}
+
+func (c *cliConsole) readWorkspaceStatusLine() string {
+	if c == nil {
+		return ""
+	}
+	return workspaceStatusLine(c.workspace.CWD)
 }
 
 func shortenHomeDir(path string) string {
@@ -452,13 +466,17 @@ func shortenHomeDir(path string) string {
 func gitBranchStatus(cwd string) (string, bool) {
 	branchOut, err := exec.Command("git", "-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
 	if err != nil {
-		return "", false
+		branchOut, err = exec.Command("git", "-C", cwd, "rev-parse", "--short", "HEAD").Output()
+		if err != nil {
+			return "", false
+		}
 	}
 	branch := strings.TrimSpace(string(branchOut))
 	if branch == "" {
 		return "", false
 	}
-	dirty := exec.Command("git", "-C", cwd, "diff", "--quiet", "--ignore-submodules", "HEAD", "--").Run() != nil
+	statusOut, err := exec.Command("git", "-C", cwd, "status", "--porcelain", "--ignore-submodules=dirty").Output()
+	dirty := err == nil && strings.TrimSpace(string(statusOut)) != ""
 	return branch, dirty
 }
 
@@ -516,7 +534,7 @@ func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp
 	if limit <= 0 {
 		limit = 20
 	}
-	records, err := c.sessionIndex.ListWorkspaceSessionsPage(c.workspace.Key, 1, 200)
+	records, err := c.sessionIndex.ListWorkspaceSessionsPageContext(c.baseCtx, c.workspace.Key, 1, 200)
 	if err != nil {
 		return nil, err
 	}
@@ -553,6 +571,10 @@ func (c *cliConsole) completeResumeCandidates(query string, limit int) ([]tuiapp
 }
 
 func (c *cliConsole) completeSlashArgCandidates(command string, query string, limit int) ([]tuiapp.SlashArgCandidate, error) {
+	return c.completeSlashArgCandidatesContext(c.baseCtx, command, query, limit)
+}
+
+func (c *cliConsole) completeSlashArgCandidatesContext(ctx context.Context, command string, query string, limit int) ([]tuiapp.SlashArgCandidate, error) {
 	if c == nil {
 		return nil, nil
 	}
@@ -593,7 +615,7 @@ func (c *cliConsole) completeSlashArgCandidates(command string, query string, li
 		payload := strings.TrimPrefix(rawCmd, "connect-model:")
 		provider, baseURL, timeoutSeconds, apiKey, hasRemoteContext := parseConnectModelPayload(payload)
 		if hasRemoteContext {
-			return c.completeConnectModelCandidatesRemote(provider, baseURL, timeoutSeconds, apiKey, query, limit), nil
+			return c.completeConnectModelCandidatesRemoteContext(ctx, provider, baseURL, timeoutSeconds, apiKey, query, limit), nil
 		}
 		return c.completeConnectModelCandidates(provider, query, limit), nil
 	case strings.HasPrefix(cmd, "connect-context:"):
@@ -1194,6 +1216,10 @@ func (c *cliConsole) completeConnectModelCandidates(provider string, query strin
 }
 
 func (c *cliConsole) completeConnectModelCandidatesRemote(provider, baseURL string, timeoutSeconds int, apiKey, query string, limit int) []tuiapp.SlashArgCandidate {
+	return c.completeConnectModelCandidatesRemoteContext(c.baseCtx, provider, baseURL, timeoutSeconds, apiKey, query, limit)
+}
+
+func (c *cliConsole) completeConnectModelCandidatesRemoteContext(ctx context.Context, provider, baseURL string, timeoutSeconds int, apiKey, query string, limit int) []tuiapp.SlashArgCandidate {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1232,9 +1258,8 @@ func (c *cliConsole) completeConnectModelCandidatesRemote(provider, baseURL stri
 		Timeout:  time.Duration(timeoutSeconds) * time.Second,
 		Auth:     authCfg,
 	}
-	ctx := c.baseCtx
 	if ctx == nil {
-		ctx = context.Background()
+		return nil
 	}
 	models, err := discoverModelsFn(ctx, cfg)
 	if err != nil || len(models) == 0 {
@@ -1292,10 +1317,7 @@ func connectWizardSuggestedSettings(provider, model string) (contextWindowTokens
 	return contextWindowTokens, maxOutputTokens, reasoningLevels
 }
 
-func (c *cliConsole) completeConnectContextCandidates(payload string, query string, limit int) []tuiapp.SlashArgCandidate {
-	if limit <= 0 {
-		limit = 20
-	}
+func (c *cliConsole) completeConnectContextCandidates(payload string, query string, _ int) []tuiapp.SlashArgCandidate {
 	provider, _, _, _, model, ok := parseConnectSettingsPayload(payload)
 	if !ok {
 		return nil
@@ -1309,10 +1331,7 @@ func (c *cliConsole) completeConnectContextCandidates(payload string, query stri
 	return []tuiapp.SlashArgCandidate{{Value: value, Display: value}}
 }
 
-func (c *cliConsole) completeConnectMaxOutputCandidates(payload string, query string, limit int) []tuiapp.SlashArgCandidate {
-	if limit <= 0 {
-		limit = 20
-	}
+func (c *cliConsole) completeConnectMaxOutputCandidates(payload string, query string, _ int) []tuiapp.SlashArgCandidate {
 	provider, _, _, _, model, ok := parseConnectSettingsPayload(payload)
 	if !ok {
 		return nil

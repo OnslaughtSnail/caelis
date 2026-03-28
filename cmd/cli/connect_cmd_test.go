@@ -217,15 +217,15 @@ func TestNormalizeConnectModelName_OpenRouter(t *testing.T) {
 func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return []modelproviders.RemoteModel{
 			{Name: "deepseek-chat"},
 			{Name: "deepseek-reasoner"},
 		}, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
-		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	initModelCatalogFn = func(ctx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.InitModelCatalogWithStatus(ctx, &http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return nil, io.EOF
 			}),
 		}, "")
@@ -268,10 +268,10 @@ func TestHandleConnect_InteractiveMultiModel(t *testing.T) {
 func TestHandleConnect_ReinitializesReasoningDefaultsAndOmitsNotes(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return []modelproviders.RemoteModel{{Name: "deepseek-reasoner"}}, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {
@@ -331,13 +331,13 @@ func TestHandleConnect_VolcengineStandardUsesManualModelWithoutDiscovery(t *test
 	prevDiscover := discoverModelsFn
 	prevRefresh := connectModelCatalogRefreshFn
 	discoverCalled := false
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		discoverCalled = true
 		return nil, errors.New("should not discover volcengine models")
 	}
-	connectModelCatalogRefreshFn = func(baseCtx context.Context) (modelcatalog.CatalogInitStatus, bool) {
-		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	connectModelCatalogRefreshFn = func(ctx context.Context) (modelcatalog.CatalogInitStatus, bool) {
+		return modelcatalog.InitModelCatalogWithStatus(ctx, &http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return nil, io.EOF
 			}),
 		}, ""), true
@@ -377,10 +377,10 @@ func TestHandleConnect_VolcengineStandardUsesManualModelWithoutDiscovery(t *test
 func TestHandleConnect_TUIReportsTransientCatalogFallbackHint(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevRefresh := connectModelCatalogRefreshFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return []modelproviders.RemoteModel{{Name: "deepseek-chat"}}, nil
 	}
-	connectModelCatalogRefreshFn = func(baseCtx context.Context) (modelcatalog.CatalogInitStatus, bool) {
+	connectModelCatalogRefreshFn = func(_ context.Context) (modelcatalog.CatalogInitStatus, bool) {
 		return modelcatalog.CatalogInitStatus{RemoteError: errors.New("models.dev timeout")}, true
 	}
 	t.Cleanup(func() {
@@ -436,12 +436,12 @@ func TestHandleConnect_TUIReportsTransientCatalogFallbackHint(t *testing.T) {
 func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return nil, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
-		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	initModelCatalogFn = func(ctx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.InitModelCatalogWithStatus(ctx, &http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return nil, io.EOF
 			}),
 		}, "")
@@ -506,12 +506,12 @@ func TestHandleConnect_UnknownModelPromptsAdvancedDefaults(t *testing.T) {
 func TestHandleConnect_NoDiscoveredModelsPromptsManualInputAndStripsProviderPrefix(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return nil, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
-		return modelcatalog.InitModelCatalogWithStatus(context.Background(), &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	initModelCatalogFn = func(ctx context.Context) modelcatalog.CatalogInitStatus {
+		return modelcatalog.InitModelCatalogWithStatus(ctx, &http.Client{
+			Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
 				return nil, io.EOF
 			}),
 		}, "")
@@ -550,7 +550,7 @@ func TestHandleConnect_NoDiscoveredModelsPromptsManualInputAndStripsProviderPref
 func TestHandleConnect_AnthropicCompatiblePromptsBaseURLAndManualModel(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return []modelproviders.RemoteModel{{
 			Name:                "test-model",
 			ContextWindowTokens: 200000,
@@ -558,7 +558,7 @@ func TestHandleConnect_AnthropicCompatiblePromptsBaseURLAndManualModel(t *testin
 			Capabilities:        []string{"reasoning", "tools"},
 		}}, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {
@@ -604,10 +604,10 @@ func TestHandleConnect_AnthropicCompatiblePromptsBaseURLAndManualModel(t *testin
 func TestHandleConnect_MiniMaxUsesBundledModelsWhenDiscoveryFails(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return nil, fmt.Errorf("http status 404")
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {
@@ -661,10 +661,10 @@ func TestHandleConnect_MiniMaxUsesBundledModelsWhenDiscoveryFails(t *testing.T) 
 func TestHandleConnect_OpenRouterUsesDefaultBaseURL(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return nil, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {
@@ -707,7 +707,7 @@ func TestHandleConnect_OpenRouterUsesDefaultBaseURL(t *testing.T) {
 func TestHandleConnect_OpenRouterDiscoveredNativeModelPreservesModelID(t *testing.T) {
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return []modelproviders.RemoteModel{{
 			Name:                "openrouter/healer-alpha",
 			ContextWindowTokens: 262144,
@@ -715,7 +715,7 @@ func TestHandleConnect_OpenRouterDiscoveredNativeModelPreservesModelID(t *testin
 			Capabilities:        []string{"reasoning", "tools", "response_format"},
 		}}, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {
@@ -759,14 +759,14 @@ func TestHandleConnect_OpenRouterRemotePartialCapabilitiesFallsBackToManualReaso
 	const modelName = "codex-openrouter-partial-capability-fallback"
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return []modelproviders.RemoteModel{{
 			Name:                modelName,
 			ContextWindowTokens: 262144,
 			MaxOutputTokens:     65536,
 		}}, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {
@@ -811,10 +811,10 @@ func TestHandleConnect_UsesModelScopedAdvancedPrompts(t *testing.T) {
 
 	prevDiscover := discoverModelsFn
 	prevInit := initModelCatalogFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		return nil, nil
 	}
-	initModelCatalogFn = func(baseCtx context.Context) modelcatalog.CatalogInitStatus {
+	initModelCatalogFn = func(_ context.Context) modelcatalog.CatalogInitStatus {
 		return modelcatalog.CatalogInitStatus{}
 	}
 	t.Cleanup(func() {

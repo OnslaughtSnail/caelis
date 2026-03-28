@@ -281,7 +281,11 @@ func inlineBashAnchorLabel(raw string, expanded bool) string {
 	if expanded {
 		next = "▾"
 	}
-	leading := raw[:strings.Index(raw, trimmed)]
+	leadingEnd := strings.Index(raw, trimmed)
+	if leadingEnd < 0 {
+		return next + " " + rest
+	}
+	leading := raw[:leadingEnd]
 	return leading + next + " " + rest
 }
 

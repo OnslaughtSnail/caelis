@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -450,7 +453,7 @@ func TestFindProviderTemplate(t *testing.T) {
 func TestCompleteConnectModelCandidatesRemote_UsesCache(t *testing.T) {
 	calls := 0
 	previous := discoverModelsFn
-	discoverModelsFn = func(ctx context.Context, cfg modelproviders.Config) ([]modelproviders.RemoteModel, error) {
+	discoverModelsFn = func(_ context.Context, _ modelproviders.Config) ([]modelproviders.RemoteModel, error) {
 		calls++
 		return []modelproviders.RemoteModel{
 			{Name: "gpt-4o"},
@@ -548,5 +551,51 @@ func TestReadTUIStatus_ShowsFixedReasoningState(t *testing.T) {
 	modelText, _ := c.readTUIStatus()
 	if modelText != "deepseek/deepseek-reasoner [reasoning on]" {
 		t.Fatalf("unexpected fixed model text %q", modelText)
+	}
+}
+
+func TestWorkspaceStatusLineTracksBranchSwitchAndDirtyFiles(t *testing.T) {
+	repo := initGitRepo(t)
+
+	if got := workspaceStatusLine(repo); !strings.Contains(got, "[⎇ main]") {
+		t.Fatalf("expected main branch in workspace status, got %q", got)
+	}
+
+	writeTestFile(t, repo, "dirty.txt", "pending\n")
+	if got := workspaceStatusLine(repo); !strings.Contains(got, "[⎇ main*]") {
+		t.Fatalf("expected dirty marker for untracked file, got %q", got)
+	}
+
+	runGit(t, repo, "checkout", "-b", "feature/status-refresh")
+	if got := workspaceStatusLine(repo); !strings.Contains(got, "[⎇ feature/status-refresh*]") {
+		t.Fatalf("expected switched branch in workspace status, got %q", got)
+	}
+}
+
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	runGit(t, repo, "init", "-b", "main")
+	runGit(t, repo, "config", "user.name", "Caelis Test")
+	runGit(t, repo, "config", "user.email", "caelis@example.com")
+	writeTestFile(t, repo, "README.md", "seed\n")
+	runGit(t, repo, "add", "README.md")
+	runGit(t, repo, "commit", "-m", "init")
+	return repo
+}
+
+func writeTestFile(t *testing.T, repo string, name string, content string) {
+	t.Helper()
+	path := filepath.Join(repo, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
+func runGit(t *testing.T, repo string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, strings.TrimSpace(string(out)))
 	}
 }

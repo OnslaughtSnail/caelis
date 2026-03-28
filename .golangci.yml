@@ -5,11 +5,17 @@ run:
 linters:
   disable-all: true
   enable:
+    - bodyclose
+    - contextcheck
     - errcheck
+    - errorlint
     - gofmt
+    - gocritic
     - govet
     - ineffassign
     - misspell
+    - nilnil
+    - revive
     - staticcheck
     - unconvert
     - unused
@@ -17,3 +23,12 @@ linters:
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
+  exclude-rules:
+    - path: ^kernel/session/catalog\.go$
+      linters:
+        - revive
+      text: "SessionSummary|SessionCatalogStore"
+    - path: ^kernel/session/session\.go$
+      linters:
+        - revive
+      text: "SessionStateStore"

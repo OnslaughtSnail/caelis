@@ -125,7 +125,7 @@ func (l *anthropicSDKLLM) generateNonStreaming(ctx context.Context, params anthr
 			Status:          model.ResponseStatusCompleted,
 			FinishReason:    finishReason,
 			RawFinishReason: rawFinishReason,
-			Model:           string(resp.Model),
+			Model:           resp.Model,
 			Provider:        l.provider,
 			Usage:           usage,
 		},
@@ -142,7 +142,6 @@ func (l *anthropicSDKLLM) generateStreaming(ctx context.Context, params anthropi
 	defer stream.Close()
 
 	acc := anthropic.Message{}
-	stopped := false
 	for stream.Next() {
 		event := stream.Current()
 		if err := acc.Accumulate(event); err != nil {
@@ -152,18 +151,13 @@ func (l *anthropicSDKLLM) generateStreaming(ctx context.Context, params anthropi
 		switch ev := event.AsAny().(type) {
 		case anthropic.ContentBlockStartEvent:
 			if !l.emitStreamingStartBlock(ev, yield) {
-				stopped = true
 				return
 			}
 		case anthropic.ContentBlockDeltaEvent:
 			if !l.emitStreamingDeltaBlock(ev, yield) {
-				stopped = true
 				return
 			}
 		}
-	}
-	if stopped {
-		return
 	}
 	if err := stream.Err(); err != nil {
 		yield(nil, err)
@@ -183,7 +177,7 @@ func (l *anthropicSDKLLM) generateStreaming(ctx context.Context, params anthropi
 			Status:          model.ResponseStatusCompleted,
 			FinishReason:    finishReason,
 			RawFinishReason: rawFinishReason,
-			Model:           string(acc.Model),
+			Model:           acc.Model,
 			Provider:        l.provider,
 			Usage:           usage,
 		},
@@ -250,7 +244,7 @@ func anthropicReplayMeta(provider string, token string) *model.ReplayMeta {
 
 func (l *anthropicSDKLLM) buildRequest(req *model.Request) (anthropic.MessageNewParams, error) {
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(l.name),
+		Model:     l.name,
 		MaxTokens: int64(l.maxOutputTok),
 		Messages:  toAnthropicMessages(req.Messages),
 		System:    toAnthropicSystem(req.Instructions),
@@ -584,7 +578,7 @@ func anthropicMessageToKernel(provider string, resp *anthropic.Message) (model.M
 		Parts: parts,
 		Origin: &model.MessageOrigin{
 			Provider:        provider,
-			Model:           string(resp.Model),
+			Model:           resp.Model,
 			RawFinishReason: string(resp.StopReason),
 		},
 	}

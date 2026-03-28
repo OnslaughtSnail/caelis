@@ -4,10 +4,13 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/task"
+	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 )
 
 type captureCompactionStrategy struct {
@@ -145,5 +148,98 @@ func TestRuntime_Compact_UsesCustomSummaryFormatter(t *testing.T) {
 	}
 	if !strings.HasPrefix(ev.Message.TextContent(), "CHECKPOINT:\n\n") {
 		t.Fatalf("expected formatter prefix, got %q", ev.Message.TextContent())
+	}
+}
+
+func TestRuntime_Compact_InjectsRuntimeStateIntoCompactionInput(t *testing.T) {
+	store := inmemory.New()
+	taskStore := taskinmemory.New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-compact-runtime-state"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceState(context.Background(), sess, map[string]any{
+		"plan": map[string]any{
+			"version": 1,
+			"entries": []any{
+				map[string]any{"content": "Inspect prompt pipeline", "status": "completed"},
+				map[string]any{"content": "Implement compaction runtime injection", "status": "in_progress"},
+			},
+		},
+		runtimeLifecycleStateKey: map[string]any{
+			"status":     string(RunLifecycleStatusWaitingApproval),
+			"phase":      "tool",
+			"error":      "approval pending for shell command",
+			"error_code": "ERR_APPROVAL_REQUIRED",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := taskStore.Upsert(context.Background(), &task.Entry{
+		TaskID:    "task-1",
+		Kind:      task.KindSpawn,
+		Title:     "delegate",
+		Session:   task.SessionRef{AppName: sess.AppName, UserID: sess.UserID, SessionID: sess.ID},
+		State:     task.StateWaitingInput,
+		Running:   true,
+		UpdatedAt: time.Now(),
+		Result: map[string]any{
+			"latest_output": "Need confirmation before continuing",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:      "u1",
+		Message: model.NewTextMessage(model.RoleUser, "continue"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:      "a1",
+		Message: model.NewTextMessage(model.RoleAssistant, "editing prompt files"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	strategy := &captureCompactionStrategy{text: "custom summary"}
+	rt, err := New(Config{
+		Store:      store,
+		TaskStore:  taskStore,
+		Compaction: CompactionConfig{Strategy: strategy},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ev, err := rt.Compact(context.Background(), CompactRequest{
+		AppName:   sess.AppName,
+		UserID:    sess.UserID,
+		SessionID: sess.ID,
+		Model:     newRuntimeTestLLM("fake"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev == nil {
+		t.Fatal("expected compaction event")
+	}
+	if !strings.Contains(strategy.last.PlanSummary, "Implement compaction runtime injection") {
+		t.Fatalf("expected plan summary, got %q", strategy.last.PlanSummary)
+	}
+	if !strings.Contains(strategy.last.ProgressSummary, "editing prompt files") {
+		t.Fatalf("expected progress summary, got %q", strategy.last.ProgressSummary)
+	}
+	if !strings.Contains(strategy.last.ActiveTasksSummary, "task-1") {
+		t.Fatalf("expected active task summary, got %q", strategy.last.ActiveTasksSummary)
+	}
+	if !strings.Contains(strategy.last.ActiveTasksSummary, "Need confirmation before continuing") {
+		t.Fatalf("expected active task preview in runtime summary, got %q", strategy.last.ActiveTasksSummary)
+	}
+	if !strings.Contains(strategy.last.LatestBlockerSummary, "approval pending for shell command") {
+		t.Fatalf("expected blocker summary, got %q", strategy.last.LatestBlockerSummary)
+	}
+	if !strings.Contains(ev.Message.TextContent(), "<runtime_state>") {
+		t.Fatalf("expected injected runtime state block in compaction text, got %q", ev.Message.TextContent())
 	}
 }

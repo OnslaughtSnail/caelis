@@ -17,6 +17,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -84,6 +85,16 @@ type sharedACPSubagentState struct {
 	mu      sync.Mutex
 	active  map[string]context.CancelFunc
 	tracker *remoteSubagentTracker
+}
+
+type acpTerminalOutputClient interface {
+	TerminalOutput(context.Context, string, string) (acpclient.TerminalOutputResponse, error)
+	TerminalRelease(context.Context, string, string) error
+}
+
+type terminalBridgeManager struct {
+	mu      sync.Mutex
+	pollers map[string]context.CancelFunc
 }
 
 const (
@@ -175,6 +186,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	}
 	baseCtx, baseCancel := context.WithCancel(runtime.DetachDelegationContext(ctx, metaBase))
 	runCtx := baseCtx
+	cancelRPCContext := context.WithoutCancel(runCtx)
 	timeoutCancel := func() {}
 	if req.Timeout > 0 {
 		runCtx, timeoutCancel = context.WithTimeout(runCtx, req.Timeout)
@@ -217,7 +229,7 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		sessionID := actualID
 		idMu.RUnlock()
 		if activeClient != nil && strings.TrimSpace(sessionID) != "" {
-			_ = activeClient.Cancel(context.Background(), sessionID)
+			_ = activeClient.Cancel(cancelRPCContext, sessionID)
 		}
 		cancel()
 	}
@@ -253,9 +265,6 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	}()
 
 	waitCtx := ctx
-	if waitCtx == nil {
-		waitCtx = context.Background()
-	}
 	var (
 		childSessionID string
 		meta           runtime.DelegationMetadata
@@ -273,6 +282,9 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 			outcome.err = cause
 		}
 		if outcome.err != nil {
+			if recovered, ok := r.recoverReadyChildTimeout(context.WithoutCancel(ctx), firstNonEmpty(strings.TrimSpace(outcome.sessionID), childSessionID), outcome.meta, agentName, target.childCWD, req.Timeout, idleTimeout, outcome.err); ok {
+				return recovered, nil
+			}
 			return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 		}
 		childSessionID = strings.TrimSpace(outcome.sessionID)
@@ -303,6 +315,9 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 				outcome.err = cause
 			}
 			if outcome.err != nil {
+				if recovered, ok := r.recoverReadyChildTimeout(context.WithoutCancel(ctx), firstNonEmpty(strings.TrimSpace(outcome.sessionID), childSessionID), outcome.meta, agentName, target.childCWD, req.Timeout, idleTimeout, outcome.err); ok {
+					return recovered, nil
+				}
 				return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 			}
 		case <-timer.C:
@@ -317,6 +332,9 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 				outcome.err = cause
 			}
 			if outcome.err != nil {
+				if recovered, ok := r.recoverReadyChildTimeout(context.WithoutCancel(ctx), firstNonEmpty(strings.TrimSpace(outcome.sessionID), childSessionID), outcome.meta, agentName, target.childCWD, req.Timeout, idleTimeout, outcome.err); ok {
+					return recovered, nil
+				}
 				return r.failedResult(ctx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 			}
 		default:
@@ -324,15 +342,15 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 		}
 	}
 	if yielded {
-		go func() {
+		go func(detachedCtx context.Context) {
 			outcome := <-done
 			if cause := loadIdleErr(); cause != nil && (errors.Is(outcome.err, context.Canceled) || errors.Is(outcome.err, context.DeadlineExceeded)) {
 				outcome.err = cause
 			}
 			if outcome.err != nil {
-				_, _ = r.failedResult(context.Background(), outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
+				_, _ = r.failedResult(detachedCtx, outcome.sessionID, outcome.created, outcome.meta, agentName, req.Timeout, idleTimeout, outcome.err)
 			}
-		}()
+		}(context.WithoutCancel(ctx))
 		return agent.SubagentRunResult{
 			SessionID:    childSessionID,
 			DelegationID: meta.DelegationID,
@@ -389,7 +407,12 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		sessionIDForPermissions string
 		watchdogMu              sync.RWMutex
 		watchdog                *idleWatchdog
+		terminalBridge          terminalBridgeManager
+		client                  *acpclient.Client
+		actualSessionID         string
+		terminalMeta            = metaBase
 	)
+	cancelRPCContext := context.WithoutCancel(ctx)
 	onUpdate := func(env acpclient.UpdateEnvelope) {
 		watchdogMu.RLock()
 		activeWatchdog := watchdog
@@ -402,6 +425,23 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		bridgeMu.RUnlock()
 		if activeBridge != nil {
 			activeBridge.Emit(ctx, env)
+		}
+		terminalBridge.observe(ctx, client, r.shared.tracker, firstNonEmpty(strings.TrimSpace(env.SessionID), actualSessionID), desc.ID, terminalMeta, env.Update)
+	}
+	pauseWatchdog := func() {
+		watchdogMu.RLock()
+		activeWatchdog := watchdog
+		watchdogMu.RUnlock()
+		if activeWatchdog != nil {
+			activeWatchdog.Pause()
+		}
+	}
+	resumeWatchdog := func() {
+		watchdogMu.RLock()
+		activeWatchdog := watchdog
+		watchdogMu.RUnlock()
+		if activeWatchdog != nil {
+			activeWatchdog.Resume()
 		}
 	}
 
@@ -416,22 +456,6 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	}
 
 	startClient := func() (*acpclient.Client, func(), error) {
-		pauseWatchdog := func() {
-			watchdogMu.RLock()
-			activeWatchdog := watchdog
-			watchdogMu.RUnlock()
-			if activeWatchdog != nil {
-				activeWatchdog.Pause()
-			}
-		}
-		resumeWatchdog := func() {
-			watchdogMu.RLock()
-			activeWatchdog := watchdog
-			watchdogMu.RUnlock()
-			if activeWatchdog != nil {
-				activeWatchdog.Resume()
-			}
-		}
 		if desc.Transport == appagents.TransportSelf {
 			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, sessionMeta, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient, pauseWatchdog, resumeWatchdog)
 		}
@@ -460,11 +484,11 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		return "", metaBase, false, err
 	}
 	defer cleanup()
+	defer terminalBridge.stopAll()
 
 	if _, err := client.Initialize(ctx); err != nil {
 		return "", metaBase, false, err
 	}
-	actualSessionID := ""
 	created := false
 	requestedSessionID := strings.TrimSpace(target.requestedSessionID)
 	if requestedSessionID != "" {
@@ -490,11 +514,12 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	sessionIDForPermissions = actualSessionID
 	meta := metaBase
 	meta.ChildSessionID = actualSessionID
+	terminalMeta = meta
 	if target.childCWD == "" {
 		target.childCWD = r.resolveWorkspaceCWD()
 	}
 	bridgeMu.Lock()
-	bridge = newACPSessionUpdateBridge(meta, desc.ID, actualSessionID, target.childCWD, r.shared.tracker)
+	bridge = newACPSessionUpdateBridge(meta, desc.ID, actualSessionID, target.childCWD, r.shared.tracker, pauseWatchdog, resumeWatchdog)
 	bridgeMu.Unlock()
 	r.shared.tracker.markRunning(desc.ID, actualSessionID, meta.DelegationID, target.childCWD)
 	if onReady != nil {
@@ -506,7 +531,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 			if onIdle != nil {
 				onIdle(cause)
 			}
-			_ = client.Cancel(context.Background(), actualSessionID)
+			_ = client.Cancel(cancelRPCContext, actualSessionID)
 		})
 		watchdogMu.Lock()
 		watchdog = activeWatchdog
@@ -514,6 +539,13 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		activeWatchdog.Start()
 		defer activeWatchdog.Stop()
 	}
+	stopDeadlineCancel := context.AfterFunc(ctx, func() {
+		if ctx.Err() == nil {
+			return
+		}
+		_ = client.Cancel(cancelRPCContext, actualSessionID)
+	})
+	defer stopDeadlineCancel()
 	_, err = client.Prompt(ctx, actualSessionID, promptText, sessionMeta)
 	bridgeMu.RLock()
 	activeBridge := bridge
@@ -580,9 +612,7 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 	cleanup := func() {
 		serveCancel()
 		select {
-		case serveErr := <-serverDone:
-			if serveErr != nil && serveErr != context.Canceled {
-			}
+		case <-serverDone:
 		case <-time.After(100 * time.Millisecond):
 		}
 		_ = client.Close()
@@ -712,7 +742,6 @@ func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessio
 	if r == nil || r.shared == nil || r.shared.tracker == nil {
 		return agent.SubagentRunResult{}, fmt.Errorf("acpext: subagent tracker is unavailable")
 	}
-	agentName := "self"
 	if state, ok := r.shared.tracker.inspect("self", childSessionID); ok {
 		return agent.SubagentRunResult{
 			SessionID:       state.SessionID,
@@ -723,23 +752,28 @@ func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessio
 			State:           state.State,
 			Running:         state.Running,
 			ApprovalPending: state.ApprovalPending,
+			ToolCallPending: state.ToolCallPending,
 			LogSnapshot:     state.LogSnapshot,
+			LatestOutput:    state.LatestOutput,
+			ProgressSeq:     state.ProgressSeq,
 			UpdatedAt:       state.UpdatedAt,
 		}, nil
 	}
 	for _, descAgent := range r.knownAgents() {
-		agentName = descAgent
-		if state, ok := r.shared.tracker.inspect(agentName, childSessionID); ok {
+		if state, ok := r.shared.tracker.inspect(descAgent, childSessionID); ok {
 			return agent.SubagentRunResult{
 				SessionID:       state.SessionID,
 				DelegationID:    state.DelegationID,
-				Agent:           firstNonEmpty(state.Agent, agentName),
+				Agent:           firstNonEmpty(state.Agent, descAgent),
 				ChildCWD:        state.ChildCWD,
 				Assistant:       state.Assistant,
 				State:           state.State,
 				Running:         state.Running,
 				ApprovalPending: state.ApprovalPending,
+				ToolCallPending: state.ToolCallPending,
 				LogSnapshot:     state.LogSnapshot,
+				LatestOutput:    state.LatestOutput,
+				ProgressSeq:     state.ProgressSeq,
 				UpdatedAt:       state.UpdatedAt,
 			}, nil
 		}
@@ -771,6 +805,40 @@ func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID
 		Timeout:      timeout,
 		IdleTimeout:  idleTimeout,
 	}, cause
+}
+
+func (r *selfACPSubagentRunner) recoverReadyChildTimeout(ctx context.Context, childSessionID string, meta runtime.DelegationMetadata, agentName string, childCWD string, timeout, idleTimeout time.Duration, cause error) (agent.SubagentRunResult, bool) {
+	if strings.TrimSpace(childSessionID) == "" {
+		return agent.SubagentRunResult{}, false
+	}
+	if !errors.Is(cause, context.Canceled) && !errors.Is(cause, context.DeadlineExceeded) {
+		return agent.SubagentRunResult{}, false
+	}
+	result, err := r.InspectSubagent(ctx, childSessionID)
+	if err == nil {
+		result.Agent = firstNonEmpty(strings.TrimSpace(result.Agent), agentName)
+		result.ChildCWD = firstNonEmpty(strings.TrimSpace(result.ChildCWD), childCWD)
+		result.Timeout = timeout
+		result.IdleTimeout = idleTimeout
+		if result.DelegationID == "" {
+			result.DelegationID = meta.DelegationID
+		}
+		if result.Running {
+			result.Yielded = true
+		}
+		return result, true
+	}
+	return agent.SubagentRunResult{
+		SessionID:    strings.TrimSpace(childSessionID),
+		DelegationID: meta.DelegationID,
+		Agent:        agentName,
+		ChildCWD:     strings.TrimSpace(childCWD),
+		State:        string(runtime.RunLifecycleStatusRunning),
+		Running:      true,
+		Yielded:      true,
+		Timeout:      timeout,
+		IdleTimeout:  idleTimeout,
+	}, true
 }
 
 func (r *selfACPSubagentRunner) inspectPersisted(ctx context.Context, childSessionID string) (agent.SubagentRunResult, bool, error) {
@@ -853,6 +921,149 @@ func (r *selfACPSubagentRunner) emitLifecycleState(ctx context.Context, childSes
 		}
 	}
 	sessionstream.Emit(ctx, childSessionID, ev)
+}
+
+func (m *terminalBridgeManager) observe(ctx context.Context, client acpTerminalOutputClient, tracker *remoteSubagentTracker, sessionID string, agentName string, meta runtime.DelegationMetadata, update acpclient.Update) {
+	if m == nil || client == nil || strings.TrimSpace(sessionID) == "" || update == nil {
+		return
+	}
+	callID, toolName, terminalID, active, ok := terminalBridgeSpec(update)
+	if !ok {
+		return
+	}
+	key := strings.TrimSpace(callID)
+	if key == "" {
+		key = strings.TrimSpace(terminalID)
+	}
+	if key == "" {
+		return
+	}
+	if !active {
+		m.stop(key)
+		return
+	}
+	m.mu.Lock()
+	if m.pollers == nil {
+		m.pollers = map[string]context.CancelFunc{}
+	}
+	if _, exists := m.pollers[key]; exists {
+		m.mu.Unlock()
+		return
+	}
+	pollCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	m.pollers[key] = cancel
+	m.mu.Unlock()
+	go m.pollTerminalOutput(pollCtx, client, tracker, sessionID, agentName, meta, key, callID, toolName, terminalID)
+}
+
+func (m *terminalBridgeManager) pollTerminalOutput(ctx context.Context, client acpTerminalOutputClient, tracker *remoteSubagentTracker, sessionID string, agentName string, meta runtime.DelegationMetadata, key, callID, toolName, terminalID string) {
+	defer m.stop(key)
+	defer func() {
+		_ = client.TerminalRelease(context.WithoutCancel(ctx), sessionID, terminalID)
+	}()
+	var cursor int
+	ticker := time.NewTicker(120 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		resp, err := client.TerminalOutput(ctx, sessionID, terminalID)
+		if err == nil {
+			if chunk := terminalOutputDelta(resp.Output, &cursor); chunk != "" {
+				if tracker != nil {
+					tracker.updateToolOutput(agentName, sessionID, chunk)
+				}
+				emitTerminalBridgeChunk(ctx, sessionID, agentName, meta, callID, toolName, chunk)
+			}
+			if resp.ExitStatus != nil {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *terminalBridgeManager) stop(key string) {
+	if m == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	m.mu.Lock()
+	cancel, ok := m.pollers[strings.TrimSpace(key)]
+	if ok {
+		delete(m.pollers, strings.TrimSpace(key))
+	}
+	m.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
+}
+
+func (m *terminalBridgeManager) stopAll() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(m.pollers))
+	for key, cancel := range m.pollers {
+		if cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+		delete(m.pollers, key)
+	}
+	m.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func terminalBridgeSpec(update acpclient.Update) (callID, toolName, terminalID string, active bool, ok bool) {
+	switch typed := update.(type) {
+	case acpclient.ToolCallUpdate:
+		terminalID = toolCallTerminalID(typed.Content)
+		if terminalID == "" {
+			return "", "", "", false, false
+		}
+		callID = strings.TrimSpace(typed.ToolCallID)
+		toolName = acpToolDisplayName(strings.TrimSpace(derefString(typed.Title)), strings.TrimSpace(derefString(typed.Kind)))
+		status := strings.ToLower(strings.TrimSpace(derefString(typed.Status)))
+		return callID, toolName, terminalID, status == internalacp.ToolStatusInProgress || status == "", true
+	default:
+		return "", "", "", false, false
+	}
+}
+
+func terminalOutputDelta(output string, cursor *int) string {
+	if cursor == nil {
+		return output
+	}
+	if *cursor < 0 || *cursor > len(output) {
+		*cursor = 0
+	}
+	if len(output) <= *cursor {
+		return ""
+	}
+	chunk := output[*cursor:]
+	*cursor = len(output)
+	return chunk
+}
+
+func emitTerminalBridgeChunk(ctx context.Context, sessionID, agentName string, meta runtime.DelegationMetadata, callID, toolName, chunk string) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(callID) == "" || chunk == "" {
+		return
+	}
+	ev := &session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   strings.TrimSpace(callID),
+			Name: firstNonEmpty(strings.TrimSpace(toolName), "BASH"),
+			Result: map[string]any{
+				"state":  string(runtime.RunLifecycleStatusRunning),
+				"stdout": chunk,
+			},
+		}),
+	}
+	sessionstream.Emit(ctx, sessionID, annotateAgentEventMeta(annotateDelegationEvent(ev, meta), agentName))
 }
 
 func (r *selfACPSubagentRunner) persistFailureState(ctx context.Context, childSessionID string, meta runtime.DelegationMetadata, status runtime.RunLifecycleStatus, cause error) {

@@ -49,7 +49,23 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}
 	warnings = append(warnings, discovered.Warnings...)
 
-	additional := make([]appprompting.PromptFragment, 0, 4)
+	additional := make([]appprompting.PromptFragment, 0, 6)
+	if rolePrompt := builtInRolePrompt(in.PromptRole); rolePrompt != "" {
+		additional = append(additional, appprompting.PromptFragment{
+			Kind:    appprompting.PromptFragmentKindSystem,
+			Stage:   "capability_guidance",
+			Source:  "cli:role-guidance",
+			Content: rolePrompt,
+		})
+	}
+	if capabilityPrompt := builtInCapabilityGuidancePrompt(); capabilityPrompt != "" {
+		additional = append(additional, appprompting.PromptFragment{
+			Kind:    appprompting.PromptFragmentKindSystem,
+			Stage:   "capability_guidance",
+			Source:  "cli:capability-guidance",
+			Content: capabilityPrompt,
+		})
+	}
 	if userInstructions := buildUserCustomInstructionsPrompt(in.BasePrompt, workspaceAgents, globalAgents); userInstructions != "" {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindUser,
@@ -61,7 +77,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	if agentSupport := buildSystemAgentDelegationPrompt(in.DefaultAgent, in.AgentDescriptors); agentSupport != "" {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindSystem,
-			Stage:   "acp_agents",
+			Stage:   "capability_guidance",
 			Source:  "cli:acp-agent-support",
 			Content: agentSupport,
 		})
@@ -69,7 +85,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	if workspaceContext := builtInEnvironmentContextPrompt(workspaceDir); workspaceContext != "" {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindContext,
-			Stage:   "workspace_context",
+			Stage:   "dynamic_runtime_context",
 			Source:  "cli:workspace-context",
 			Content: workspaceContext,
 		})
@@ -77,7 +93,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	if in.EnableExperimentalLSPPrompt {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindSystem,
-			Stage:   "experimental_lsp",
+			Stage:   "capability_guidance",
 			Source:  "cli:experimental-lsp-routing",
 			Content: "## Experimental LSP Routing\n\n" + defaultExperimentalLSPRoutingPrompt,
 		})
@@ -217,9 +233,9 @@ func buildSystemAgentDelegationPrompt(defaultAgent string, configured []appagent
 		lines = append(lines, line)
 	}
 	lines = append(lines,
-		"- Use SPAWN to start a delegated child session when the task benefits from delegation.",
-		"- SPAWN accepts prompt(required), agent, yield_seconds, timeout_seconds.",
-		"- Use TASK write with the SPAWN task_id only after that child session has completed; while it is still running, use TASK wait/status instead.",
+		"- Use SPAWN only for bounded delegated work or specialization.",
+		"- If a spawned child is still running, use TASK wait instead of TASK write.",
+		"- Use TASK write only after a spawned child has completed and needs a follow-up prompt.",
 	)
 	return strings.Join(lines, "\n")
 }

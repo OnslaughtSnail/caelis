@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"path/filepath"
 	"strings"
 
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -36,7 +37,7 @@ func (t *SearchTool) Name() string {
 }
 
 func (t *SearchTool) Description() string {
-	return "Search text in a file or directory recursively."
+	return "Search text in one file or a directory tree."
 }
 
 func (t *SearchTool) Capability() capability.Capability {
@@ -53,10 +54,15 @@ func (t *SearchTool) Declaration() model.ToolDefinition {
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":           map[string]any{"type": "string", "description": "target file or directory path"},
-				"query":          map[string]any{"type": "string", "description": "search text"},
-				"limit":          map[string]any{"type": "integer", "description": "max results"},
-				"case_sensitive": map[string]any{"type": "boolean", "description": "case sensitive search"},
+				"path":           map[string]any{"type": "string", "description": "Target file or directory path."},
+				"query":          map[string]any{"type": "string", "description": "Search text."},
+				"limit":          map[string]any{"type": "integer", "description": "Optional max results."},
+				"case_sensitive": map[string]any{"type": "boolean", "description": "Set true for case-sensitive search."},
+				"exclude": map[string]any{
+					"type":        "array",
+					"description": "Optional relative path patterns to exclude after gitignore filtering.",
+					"items":       map[string]any{"type": "string"},
+				},
 			},
 			"required": []string{"path", "query"},
 		},
@@ -90,6 +96,10 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 	caseSensitive := false
 	if raw, ok := args["case_sensitive"].(bool); ok {
 		caseSensitive = raw
+	}
+	exclude, err := parseStringSliceArg(args, "exclude")
+	if err != nil {
+		return nil, err
 	}
 	target, err := normalizePathWithFS(t.runtime.FileSystem(), pathArg)
 	if err != nil {
@@ -125,6 +135,10 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 		return len(results) >= limit
 	}
 	scannedFiles := 0
+	root := target
+	if !info.IsDir() {
+		root = filepath.Dir(target)
+	}
 
 	if info.IsDir() {
 		walkErr := walkDir(t.runtime.FileSystem(), target, func(path string, d fs.DirEntry, walkErr error) error {
@@ -143,6 +157,12 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 					return nil
 				}
 			}
+			if path != target && shouldExcludePath(root, path, d != nil && d.IsDir(), exclude) {
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			if d == nil || d.IsDir() {
 				return nil
 			}
@@ -158,6 +178,16 @@ func (t *SearchTool) Run(ctx context.Context, args map[string]any) (map[string]a
 			return nil, walkErr
 		}
 	} else {
+		if shouldExcludePath(root, target, false, exclude) {
+			return map[string]any{
+				"path":       target,
+				"query":      query,
+				"count":      0,
+				"file_count": 0,
+				"truncated":  false,
+				"hits":       []map[string]any{},
+			}, nil
+		}
 		scannedFiles = 1
 		_, stop := searchInFile(t.runtime.FileSystem(), target, queryToMatch, caseSensitive, appendMatch)
 		if stop {

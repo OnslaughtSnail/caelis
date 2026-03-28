@@ -122,6 +122,13 @@ const (
 	btwControlCloseTag = "</caelis-btw>"
 )
 
+func cliContext(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
 type slashCommand struct {
 	Usage       string
 	Description string
@@ -269,10 +276,13 @@ type cliConsoleConfig struct {
 	NewACPAdapter         acpext.AdapterFactory
 }
 
-func (c *cliConsole) loop() error {
+func (c *cliConsole) loop(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("cli: context is required")
+	}
 	switch c.uiMode {
 	case uiModeTUI:
-		return c.loopTUITea()
+		return c.loopTUITea(ctx)
 	default:
 		return fmt.Errorf("unsupported ui mode %q", c.uiMode)
 	}
@@ -303,7 +313,8 @@ func (c *cliConsole) handleInterruptSignals(sigCh <-chan os.Signal, exitCh chan<
 	}
 }
 
-func (c *cliConsole) handleSlash(line string) (bool, error) {
+func (c *cliConsole) handleSlashContext(ctx context.Context, line string) (bool, error) {
+	ctx = cliContext(ctx)
 	parts := strings.Fields(strings.TrimPrefix(line, "/"))
 	if len(parts) == 0 {
 		return false, nil
@@ -312,7 +323,7 @@ func (c *cliConsole) handleSlash(line string) (bool, error) {
 	handler, ok := c.commands[cmd]
 	if !ok {
 		if desc, ok := c.dynamicSlashAgentDescriptor(cmd); ok {
-			return false, c.runExternalAgentSlash(desc, strings.TrimSpace(strings.Join(parts[1:], " ")))
+			return false, c.runExternalAgentSlashContext(ctx, desc, strings.TrimSpace(strings.Join(parts[1:], " ")))
 		}
 		if suggestion := closestCommand(cmd, c.availableCommandNames()); suggestion != "" {
 			return false, fmt.Errorf("unknown command %q -- did you mean /%s?", cmd, suggestion)
@@ -361,6 +372,10 @@ func looksLikeSlashCommandToken(token string) bool {
 }
 
 func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp.Attachment) error {
+	return c.runPromptWithAttachmentsContext(c.baseCtx, input, attachments)
+}
+
+func (c *cliConsole) runPromptWithAttachmentsContext(ctx context.Context, input string, attachments []tuiapp.Attachment) error {
 	if c.currentRunKind() == runOccupancyExternalAgent {
 		return errExternalAgentRunBusy
 	}
@@ -379,7 +394,7 @@ func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp
 		// goroutine is responsible for its lifecycle.
 		return runner.Submit(submission)
 	}
-	return c.runPreparedSubmission(prepared, submission)
+	return c.runPreparedSubmissionContext(ctx, prepared, submission)
 }
 
 type preparedPromptSubmission struct {
@@ -526,6 +541,7 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	}
 	ag, err := buildAgent(buildAgentInput{
 		AppName:                     c.appName,
+		PromptRole:                  promptRoleMainSession,
 		WorkspaceDir:                c.workspace.CWD,
 		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
 		BasePrompt:                  c.systemPrompt,
@@ -556,8 +572,9 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	}, nil
 }
 
-func (c *cliConsole) runPreparedSubmission(prepared preparedPromptSubmission, submission runtime.Submission) error {
-	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
+func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared preparedPromptSubmission, submission runtime.Submission) error {
+	ctx = cliContext(ctx)
+	ctx = toolexec.WithApprover(ctx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
 	if c.tuiSender != nil {
 		ctx = taskstream.WithStreamer(ctx, taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
@@ -612,8 +629,9 @@ func (c *cliConsole) runPreparedSubmission(prepared preparedPromptSubmission, su
 	}
 	c.sessionID = runResult.Session.SessionID
 	runner := runResult.Handle
+	interruptCtx := context.WithoutCancel(ctx)
 	cancel := func() {
-		_ = gw.InterruptSession(context.Background(), c.gatewayChannel(), "console interrupt")
+		_ = gw.InterruptSession(interruptCtx, c.gatewayChannel(), "console interrupt")
 	}
 	c.setActiveRun(cancel, runner)
 	defer func() {
@@ -627,7 +645,7 @@ func (c *cliConsole) runPreparedSubmission(prepared preparedPromptSubmission, su
 		UI:            c.ui,
 		OnEvent: func(ev *session.Event) bool {
 			c.refreshContextUsageFromEvent(ev)
-			return c.forwardEventToTUI(ev, pendingTUIToolCalls)
+			return c.forwardEventToTUIContext(ctx, ev, pendingTUIToolCalls)
 		},
 		OnUsage: func(floor int) {
 			c.refreshContextUsageEstimate(floor)
@@ -636,6 +654,10 @@ func (c *cliConsole) runPreparedSubmission(prepared preparedPromptSubmission, su
 }
 
 func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) error {
+	return c.runBTWContext(c.baseCtx, question, attachments)
+}
+
+func (c *cliConsole) runBTWContext(ctx context.Context, question string, attachments []tuiapp.Attachment) error {
 	if c.currentRunKind() == runOccupancyExternalAgent {
 		return errExternalAgentRunBusy
 	}
@@ -659,13 +681,14 @@ func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) er
 		return runner.Submit(submission)
 	}
 	if c.tuiSender != nil {
-		return c.startBTWAsync(prepared, submission)
+		return c.startBTWAsyncContext(ctx, prepared, submission)
 	}
-	return c.runBTWBlocking(prepared, submission)
+	return c.runBTWBlockingContext(ctx, prepared, submission)
 }
 
-func (c *cliConsole) startBTWAsync(prepared preparedPromptSubmission, submission runtime.Submission) error {
-	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
+func (c *cliConsole) startBTWAsyncContext(ctx context.Context, prepared preparedPromptSubmission, submission runtime.Submission) error {
+	ctx = cliContext(ctx)
+	ctx = toolexec.WithApprover(ctx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
 	if c.tuiSender != nil {
 		ctx = taskstream.WithStreamer(ctx, taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
@@ -717,15 +740,16 @@ func (c *cliConsole) startBTWAsync(prepared preparedPromptSubmission, submission
 	}
 	c.sessionID = runResult.Session.SessionID
 	runner := runResult.Handle
+	interruptCtx := context.WithoutCancel(ctx)
 	if err := runner.Submit(submission); err != nil {
 		_ = runner.Close()
 		return err
 	}
 	cancel := func() {
-		_ = gw.InterruptSession(context.Background(), c.gatewayChannel(), "console interrupt")
+		_ = gw.InterruptSession(interruptCtx, c.gatewayChannel(), "console interrupt")
 	}
 	c.setActiveRun(cancel, runner)
-	go func() {
+	go func(ctx context.Context) {
 		defer func() {
 			c.clearActiveRun()
 			_ = runner.Close()
@@ -741,7 +765,7 @@ func (c *cliConsole) startBTWAsync(prepared preparedPromptSubmission, submission
 			UI:            c.ui,
 			OnEvent: func(ev *session.Event) bool {
 				c.refreshContextUsageFromEvent(ev)
-				return c.forwardEventToTUI(ev, pendingTUIToolCalls)
+				return c.forwardEventToTUIContext(ctx, ev, pendingTUIToolCalls)
 			},
 			OnUsage: func(floor int) {
 				c.refreshContextUsageEstimate(floor)
@@ -750,12 +774,13 @@ func (c *cliConsole) startBTWAsync(prepared preparedPromptSubmission, submission
 		if err != nil && c.tuiSender != nil {
 			c.tuiSender.Send(tuievents.BTWErrorMsg{Text: err.Error()})
 		}
-	}()
+	}(ctx)
 	return nil
 }
 
-func (c *cliConsole) runBTWBlocking(prepared preparedPromptSubmission, submission runtime.Submission) error {
-	ctx := toolexec.WithApprover(c.baseCtx, c.approver)
+func (c *cliConsole) runBTWBlockingContext(ctx context.Context, prepared preparedPromptSubmission, submission runtime.Submission) error {
+	ctx = cliContext(ctx)
+	ctx = toolexec.WithApprover(ctx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
 	gw, err := c.sessionGateway()
 	if err != nil {
@@ -777,8 +802,9 @@ func (c *cliConsole) runBTWBlocking(prepared preparedPromptSubmission, submissio
 		_ = runner.Close()
 		return err
 	}
+	interruptCtx := context.WithoutCancel(ctx)
 	cancel := func() {
-		_ = gw.InterruptSession(context.Background(), c.gatewayChannel(), "console interrupt")
+		_ = gw.InterruptSession(interruptCtx, c.gatewayChannel(), "console interrupt")
 	}
 	c.setActiveRun(cancel, runner)
 	defer func() {
@@ -907,10 +933,6 @@ func isParticipantMirrorEvent(ev *session.Event) bool {
 	return ev != nil && session.IsMirror(ev) && strings.TrimSpace(eventParticipantDisplay(ev)) != ""
 }
 
-func (c *cliConsole) emitAssistantChunkToTUI(kind string, actor string, text string, final bool) {
-	c.emitAssistantChunkToTUIWithScope(kind, "", actor, text, final)
-}
-
 func (c *cliConsole) emitAssistantChunkToTUIWithScope(kind string, scopeID string, actor string, text string, final bool) {
 	if c == nil || c.tuiSender == nil || text == "" {
 		return
@@ -947,12 +969,22 @@ type tuiForwardOptions struct {
 }
 
 func (c *cliConsole) forwardEventToTUI(ev *session.Event, pendingToolCalls map[string]toolCallSnapshot) bool {
-	return c.forwardEventToTUIWithOptions(ev, pendingToolCalls, tuiForwardOptions{
+	return c.forwardEventToTUIContext(c.baseCtx, ev, pendingToolCalls)
+}
+
+func (c *cliConsole) forwardEventToTUIContext(ctx context.Context, ev *session.Event, pendingToolCalls map[string]toolCallSnapshot) bool {
+	ctx = cliContext(ctx)
+	return c.forwardEventToTUIWithOptionsContext(ctx, ev, pendingToolCalls, tuiForwardOptions{
 		ShowMutationDiff: true,
 	})
 }
 
 func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingToolCalls map[string]toolCallSnapshot, opts tuiForwardOptions) bool {
+	return c.forwardEventToTUIWithOptionsContext(c.baseCtx, ev, pendingToolCalls, opts)
+}
+
+func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev *session.Event, pendingToolCalls map[string]toolCallSnapshot, opts tuiForwardOptions) bool {
+	ctx = cliContext(ctx)
 	if c == nil || c.tuiSender == nil || ev == nil {
 		return false
 	}
@@ -1018,7 +1050,6 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 						Args: cloneAnyMap(parseToolArgsForDisplay(call.Args)),
 					}
 				}
-				handled = true
 				continue
 			}
 			parsedArgs := parseToolArgsForDisplay(call.Args)
@@ -1047,7 +1078,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			})
 			if strings.EqualFold(strings.TrimSpace(call.Name), tool.SpawnToolName) {
 				if update, ok := subagentDomainUpdateFromSpawnToolCall(c.sessionID, call, parsedArgs, defaultSpawnAgent); ok {
-					c.dispatchSubagentDomainUpdate(context.Background(), update)
+					c.dispatchSubagentDomainUpdate(ctx, update)
 				}
 			}
 			if strings.EqualFold(strings.TrimSpace(call.Name), toolshell.BashToolName) ||
@@ -1081,7 +1112,7 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 			})
 			return true
 		}
-		c.syncBashTaskWatch(resp.ID, resp.Name, resp.Result)
+		c.syncBashTaskWatchContext(ctx, resp.ID, resp.Name, resp.Result)
 		var (
 			callArgs      map[string]any
 			richDiffShown bool
@@ -1099,14 +1130,14 @@ func (c *cliConsole) forwardEventToTUIWithOptions(ev *session.Event, pendingTool
 		toolName := strings.TrimSpace(resp.Name)
 		if strings.EqualFold(toolName, tool.SpawnToolName) {
 			if update, ok := subagentDomainUpdateFromSpawnToolResponse(c.sessionID, resp); ok {
-				c.dispatchSubagentDomainUpdate(context.Background(), update)
+				c.dispatchSubagentDomainUpdate(ctx, update)
 			}
 			for _, update := range subagentDomainUpdatesFromSpawnToolError(c.sessionID, resp) {
-				c.dispatchSubagentDomainUpdate(context.Background(), update)
+				c.dispatchSubagentDomainUpdate(ctx, update)
 			}
 		} else if strings.EqualFold(toolName, tool.TaskToolName) {
 			for _, update := range subagentDomainUpdatesFromTaskToolResponse(c.sessionID, resp, callArgs) {
-				c.dispatchSubagentDomainUpdate(context.Background(), update)
+				c.dispatchSubagentDomainUpdate(ctx, update)
 			}
 		}
 		if strings.EqualFold(strings.TrimSpace(resp.Name), toolshell.BashToolName) {
@@ -1523,7 +1554,11 @@ func handleNew(c *cliConsole, args []string) (bool, error) {
 		c.tuiSender.Send(tuievents.PlanUpdateMsg{})
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 		modelText, contextText := c.readTUIStatus()
-		c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
+		c.tuiSender.Send(tuievents.SetStatusMsg{
+			Workspace: c.readWorkspaceStatusLine(),
+			Model:     modelText,
+			Context:   contextText,
+		})
 		c.tuiSender.Send(tuievents.SetHintMsg{Hint: "started new session", ClearAfter: transientHintDuration})
 		return false, nil
 	}
@@ -1614,7 +1649,11 @@ func (c *cliConsole) syncTUIStatus() {
 		return
 	}
 	modelText, contextText := c.readTUIStatus()
-	c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
+	c.tuiSender.Send(tuievents.SetStatusMsg{
+		Workspace: c.readWorkspaceStatusLine(),
+		Model:     modelText,
+		Context:   contextText,
+	})
 }
 
 func handleStatus(c *cliConsole, args []string) (bool, error) {
@@ -2076,7 +2115,7 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 			if target == "" {
 				return false, fmt.Errorf("session-id is required")
 			}
-			resolved, ok, resolveErr := c.sessionIndex.ResolveWorkspaceSessionID(c.workspace.Key, target)
+			resolved, ok, resolveErr := c.sessionIndex.ResolveWorkspaceSessionIDContext(c.baseCtx, c.workspace.Key, target)
 			if resolveErr != nil {
 				return false, resolveErr
 			}
@@ -2085,7 +2124,7 @@ func handleResume(c *cliConsole, args []string) (bool, error) {
 			}
 			target = resolved
 		} else {
-			rec, ok, recentErr := c.sessionIndex.MostRecentWorkspaceSession(c.workspace.Key, c.sessionID)
+			rec, ok, recentErr := c.sessionIndex.MostRecentWorkspaceSessionContext(c.baseCtx, c.workspace.Key, c.sessionID)
 			if recentErr != nil {
 				return false, recentErr
 			}
@@ -2193,7 +2232,11 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 	replayCtx := c.resetResumeReplayContext()
 	rootSessionID := strings.TrimSpace(c.sessionID)
 	modelText, contextText := c.readTUIStatus()
-	c.tuiSender.Send(tuievents.SetStatusMsg{Model: modelText, Context: contextText})
+	c.tuiSender.Send(tuievents.SetStatusMsg{
+		Workspace: c.readWorkspaceStatusLine(),
+		Model:     modelText,
+		Context:   contextText,
+	})
 	pendingToolCalls := map[string]toolCallSnapshot{}
 	for _, ev := range events {
 		if ev == nil || eventIsPartial(ev) {

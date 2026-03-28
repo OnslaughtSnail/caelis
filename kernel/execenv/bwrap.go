@@ -236,7 +236,8 @@ func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResul
 	effectivePolicy := sandboxPolicyForCommand(b.policy, req)
 	bwrapArgs := buildBwrapArgs(effectivePolicy, workDir)
 
-	args := append(bwrapArgs, "--", "bash", "-lc", req.Command)
+	bwrapArgs = append(bwrapArgs, "--", "bash", "-lc", req.Command)
+	args := bwrapArgs
 	cmd := b.execCommand(runCtx, "bwrap", args...)
 	applyNonInteractiveCommandDefaults(cmd)
 	if strings.TrimSpace(req.Dir) != "" {
@@ -292,7 +293,7 @@ func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResul
 	return result, fmt.Errorf("tool: bwrap sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
 }
 
-func (b *bwrapRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+func (b *bwrapRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
 	if req.TTY {
 		return "", fmt.Errorf("tool: bwrap async tty is not supported")
 	}
@@ -310,7 +311,8 @@ func (b *bwrapRunner) StartAsync(ctx context.Context, req CommandRequest) (strin
 		IdleTimeout:     req.IdleTimeout,
 		BuildCommand: func(ctx context.Context, cfg AsyncSessionConfig) (*exec.Cmd, error) {
 			bwrapArgs := buildBwrapArgs(effectivePolicy, workDir)
-			args := append(bwrapArgs, "--", "bash", "-lc", cfg.Command)
+			bwrapArgs = append(bwrapArgs, "--", "bash", "-lc", cfg.Command)
+			args := bwrapArgs
 			cmd := b.execCommand(ctx, "bwrap", args...)
 			if strings.TrimSpace(cfg.Dir) != "" {
 				cmd.Dir = cfg.Dir

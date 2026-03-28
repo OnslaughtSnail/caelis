@@ -30,6 +30,7 @@ func TestNewEvents_DeepCopyIsolation(t *testing.T) {
 	got := view.At(0)
 	if got == nil {
 		t.Fatal("At(0) returned nil")
+		return
 	}
 	if got.Meta["key"] != "original" {
 		t.Fatalf("view.Meta['key'] = %v, want 'original'", got.Meta["key"])
@@ -45,10 +46,10 @@ func TestNewEvents_DeepCopyIsolation(t *testing.T) {
 
 func TestNewEvents_AtReturnsIndependentCopies(t *testing.T) {
 	src := &Event{
-		ID:   "ev-1",
-		Time: time.Now(),
+		ID:      "ev-1",
+		Time:    time.Now(),
 		Message: model.NewTextMessage(model.RoleAssistant, "hello"),
-		Meta: map[string]any{"key": "original"},
+		Meta:    map[string]any{"key": "original"},
 	}
 	view := NewEvents([]*Event{src})
 

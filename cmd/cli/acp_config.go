@@ -432,11 +432,11 @@ func formatACPModelDescription(cfg modelproviders.Config) string {
 	return strings.Join(parts, " ")
 }
 
-func buildACPSessionList(index *sessionIndex, workspace workspaceContext, req internalacp.SessionListRequest) internalacp.SessionListResponse {
+func buildACPSessionList(ctx context.Context, index *sessionIndex, workspace workspaceContext, req internalacp.SessionListRequest) internalacp.SessionListResponse {
 	if index == nil {
 		return internalacp.SessionListResponse{Sessions: []internalacp.SessionSummary{}}
 	}
-	records, err := index.ListWorkspaceSessionsPage(workspace.Key, 1, 200)
+	records, err := index.ListWorkspaceSessionsPageContext(ctx, workspace.Key, 1, 200)
 	if err != nil {
 		return internalacp.SessionListResponse{Sessions: []internalacp.SessionSummary{}}
 	}
