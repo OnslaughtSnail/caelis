@@ -10,6 +10,7 @@ const (
 	MethodSessionNew           = "session/new"
 	MethodSessionList          = "session/list"
 	MethodSessionLoad          = "session/load"
+	MethodSessionSetMode       = "session/set_mode"
 	MethodSessionPrompt        = "session/prompt"
 	MethodSessionCancel        = "session/cancel"
 	MethodSessionUpdate        = "session/update"
@@ -127,7 +128,9 @@ type NewSessionRequest struct {
 }
 
 type NewSessionResponse struct {
-	SessionID string `json:"sessionId"`
+	SessionID     string                `json:"sessionId"`
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	Modes         *SessionModeState     `json:"modes,omitempty"`
 }
 
 type LoadSessionRequest struct {
@@ -137,7 +140,17 @@ type LoadSessionRequest struct {
 	Meta       map[string]any `json:"_meta,omitempty"`
 }
 
-type LoadSessionResponse struct{}
+type LoadSessionResponse struct {
+	ConfigOptions []SessionConfigOption `json:"configOptions,omitempty"`
+	Modes         *SessionModeState     `json:"modes,omitempty"`
+}
+
+type SetSessionModeRequest struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId"`
+}
+
+type SetSessionModeResponse struct{}
 
 type SessionListRequest struct {
 	Cursor string `json:"cursor,omitempty"`
@@ -169,6 +182,33 @@ type PromptRequest struct {
 
 type PromptResponse struct {
 	StopReason string `json:"stopReason"`
+}
+
+type SessionMode struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type SessionModeState struct {
+	AvailableModes []SessionMode `json:"availableModes"`
+	CurrentModeID  string        `json:"currentModeId"`
+}
+
+type SessionConfigSelectOption struct {
+	Value       string `json:"value"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type SessionConfigOption struct {
+	Type         string                      `json:"type"`
+	ID           string                      `json:"id"`
+	Name         string                      `json:"name"`
+	Description  string                      `json:"description,omitempty"`
+	Category     string                      `json:"category,omitempty"`
+	CurrentValue string                      `json:"currentValue"`
+	Options      []SessionConfigSelectOption `json:"options"`
 }
 
 type CancelRequest struct {
@@ -258,14 +298,16 @@ type SessionInfoUpdate struct {
 	UpdatedAt     *string `json:"updatedAt,omitempty"`
 }
 
+type PermissionOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+}
+
 type RequestPermissionRequest struct {
-	SessionID string         `json:"sessionId"`
-	ToolCall  ToolCallUpdate `json:"toolCall"`
-	Options   []struct {
-		OptionID string `json:"optionId"`
-		Name     string `json:"name"`
-		Kind     string `json:"kind"`
-	} `json:"options"`
+	SessionID string             `json:"sessionId"`
+	ToolCall  ToolCallUpdate     `json:"toolCall"`
+	Options   []PermissionOption `json:"options"`
 }
 
 type RequestPermissionResponse struct {

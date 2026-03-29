@@ -27,6 +27,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -275,11 +276,17 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 			}
 			if c.getActiveRunner() != nil {
 				err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
+				if shouldSuppressPromptErrorInTUI(err) {
+					return tuievents.TaskResultMsg{ContinueRunning: true}
+				}
 				return tuievents.TaskResultMsg{Err: err, ContinueRunning: true}
 			}
 			err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
 			if errors.Is(err, context.Canceled) {
 				return tuievents.TaskResultMsg{Interrupted: true}
+			}
+			if shouldSuppressPromptErrorInTUI(err) {
+				return tuievents.TaskResultMsg{}
 			}
 			return tuievents.TaskResultMsg{Err: err}
 		},
@@ -395,6 +402,10 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func shouldSuppressPromptErrorInTUI(err error) bool {
+	return llmagent.IsInterruptedPartialResponseError(err)
 }
 
 // readTUIStatus returns the model label and context summary for the TUI status bar.

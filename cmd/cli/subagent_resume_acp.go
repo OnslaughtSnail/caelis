@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -31,7 +30,7 @@ type resumedSubagentTarget struct {
 	ChildCWD     string
 }
 
-const (
+var (
 	resumedSubagentSelfLoadTimeout = 5 * time.Second
 	resumedSubagentACPLoadTimeout  = 30 * time.Second
 )
@@ -222,49 +221,31 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 	if ctx == nil {
 		return
 	}
+	observationCtx := context.WithoutCancel(ctx)
 	state := &resumedACPReplayState{
 		loading: true,
 		calls:   map[string]toolCallSnapshot{},
 	}
-	client, cleanup, err := c.startResumedSubagentACPClient(ctx, target, func(env acpclient.UpdateEnvelope) {
-		c.forwardResumedACPUpdate(ctx, rootSessionID, target, state, env)
+	client, cleanup, err := c.startResumedSubagentACPClient(observationCtx, target, func(env acpclient.UpdateEnvelope) {
+		c.forwardResumedACPUpdate(observationCtx, rootSessionID, target, state, env)
 	})
 	if err != nil {
-		c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
-			Kind:   subagentDomainTerminal,
-			Target: resumedSubagentProjectionTarget(rootSessionID, target),
-			Status: "failed",
-		})
 		return
 	}
 	defer cleanup()
 
-	initCtx, initCancel := context.WithTimeout(ctx, resumedSubagentLoadTimeoutForAgent(target.Agent))
+	initCtx, initCancel := context.WithTimeout(observationCtx, resumedSubagentLoadTimeoutForAgent(target.Agent))
 	defer initCancel()
 	if _, err := client.Initialize(initCtx); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
-				Kind:   subagentDomainTerminal,
-				Target: resumedSubagentProjectionTarget(rootSessionID, target),
-				Status: "failed",
-			})
-		}
 		return
 	}
-	loadCtx, loadCancel := context.WithTimeout(ctx, resumedSubagentLoadTimeoutForAgent(target.Agent))
+	loadCtx, loadCancel := context.WithTimeout(observationCtx, resumedSubagentLoadTimeoutForAgent(target.Agent))
 	defer loadCancel()
 	loadCWD := strings.TrimSpace(target.ChildCWD)
 	if loadCWD == "" {
 		loadCWD = c.workspace.CWD
 	}
 	if _, err := client.LoadSession(loadCtx, target.SessionID, loadCWD, nil); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
-				Kind:   subagentDomainTerminal,
-				Target: resumedSubagentProjectionTarget(rootSessionID, target),
-				Status: "failed",
-			})
-		}
 		return
 	}
 	state.markLoaded()

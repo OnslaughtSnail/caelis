@@ -16,6 +16,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	"github.com/OnslaughtSnail/caelis/internal/app/acpadapter"
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -207,6 +208,129 @@ func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 	}
 }
 
+func TestACPSpawnLeavesChildSessionInDefaultMode(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+
+	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &testACPSpawnLLM{}
+	adapterFactory := func(conn *internalacp.Conn) (internalacp.Adapter, error) {
+		return acpadapter.New(acpadapter.Config{
+			Runtime:       rt,
+			Store:         store,
+			Model:         llm,
+			AppName:       "app",
+			UserID:        "u",
+			WorkspaceRoot: "/workspace",
+			SessionModes: []internalacp.SessionMode{
+				{ID: sessionmode.DefaultMode, Name: "Default"},
+				{ID: sessionmode.PlanMode, Name: "Plan"},
+				{ID: sessionmode.FullMode, Name: "Full Access"},
+			},
+			DefaultModeID: sessionmode.DefaultMode,
+			BuildSystemPrompt: func(string) (string, error) {
+				return "test self acp prompt", nil
+			},
+			NewAgent: func(bool, string, string, internalacp.AgentSessionConfig) (agent.Agent, error) {
+				return ag, nil
+			},
+			NewSessionResources: func(_ context.Context, sessionID string, sessionCWD string, caps internalacp.ClientCapabilities, modeResolver func() string) (*internalacp.SessionResources, error) {
+				execRuntimeACP := internalacp.NewRuntime(execRT, conn, sessionID, "/workspace", sessionCWD, caps, modeResolver)
+				return &internalacp.SessionResources{Runtime: execRuntimeACP}, nil
+			},
+			EnablePlan:      true,
+			EnableSelfSpawn: true,
+		})
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Runtime:         rt,
+		Store:           store,
+		AppName:         "app",
+		UserID:          "u",
+		WorkspaceCWD:    "/workspace",
+		Execution:       execRT,
+		EnableSelfSpawn: true,
+		SubagentRunnerFactory: NewACPSubagentRunnerFactory(Config{
+			Store:         store,
+			WorkspaceCWD:  "/workspace",
+			ClientRuntime: execRT,
+			NewAdapter:    adapterFactory,
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceState(context.Background(), parent, sessionmode.StoreSnapshot(map[string]any{}, sessionmode.FullMode)); err != nil {
+		t.Fatal(err)
+	}
+
+	runResult, err := svc.RunTurn(context.Background(), sessionsvc.RunTurnRequest{
+		SessionRef: sessionsvc.SessionRef{
+			AppName:      "app",
+			UserID:       "u",
+			SessionID:    "parent",
+			WorkspaceKey: "wk",
+		},
+		Input: "delegate please",
+		Agent: ag,
+		Model: llm,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runErr := range drainTurn(runResult.Handle.Events()) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	if err := runResult.Handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	delegations, err := svc.ListDelegations(context.Background(), sessionsvc.SessionRef{
+		AppName:      "app",
+		UserID:       "u",
+		SessionID:    "parent",
+		WorkspaceKey: "wk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delegations) != 1 {
+		t.Fatalf("expected 1 delegation, got %d", len(delegations))
+	}
+
+	childState, err := store.SnapshotState(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      delegations[0].ChildSessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionmode.LoadSnapshot(childState); got != sessionmode.DefaultMode {
+		t.Fatalf("expected child session mode %q, got %q", sessionmode.DefaultMode, got)
+	}
+}
+
 func TestPermissionRequestHandler_PrefersToolAuthorizerForFileEdits(t *testing.T) {
 	approver := &recordingApprover{allow: false}
 	authorizer := &recordingToolAuthorizer{allow: true}
@@ -227,11 +351,7 @@ func TestPermissionRequestHandler_PrefersToolAuthorizerForFileEdits(t *testing.T
 				"path": "/tmp/demo.txt",
 			},
 		},
-		Options: []struct {
-			OptionID string `json:"optionId"`
-			Name     string `json:"name"`
-			Kind     string `json:"kind"`
-		}{
+		Options: []acpclient.PermissionOption{
 			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
 			{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
 		},
@@ -287,11 +407,7 @@ func TestPermissionRequestHandler_InvokesApprovalWatchdogHooks(t *testing.T) {
 				"command": "echo hi",
 			},
 		},
-		Options: []struct {
-			OptionID string `json:"optionId"`
-			Name     string `json:"name"`
-			Kind     string `json:"kind"`
-		}{
+		Options: []acpclient.PermissionOption{
 			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
 			{OptionID: "reject_once", Name: "Reject", Kind: "reject_once"},
 		},
@@ -578,11 +694,7 @@ func TestSelfACPSubagentRunner_PermissionApprovalEmitsRunningLifecycle(t *testin
 				"command": "echo hi",
 			},
 		},
-		Options: []struct {
-			OptionID string `json:"optionId"`
-			Name     string `json:"name"`
-			Kind     string `json:"kind"`
-		}{
+		Options: []acpclient.PermissionOption{
 			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
 			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
 		},
@@ -623,6 +735,82 @@ func TestSelfACPSubagentRunner_PermissionApprovalEmitsRunningLifecycle(t *testin
 	meta, ok := runtime.DelegationMetadataFromEvent(events[len(events)-1])
 	if !ok || meta.ParentToolCall != "call-task-write-1" || meta.ParentToolName != tool.TaskToolName {
 		t.Fatalf("expected persisted lifecycle event to preserve parent tool lineage, got %+v", events[len(events)-1])
+	}
+}
+
+func TestPermissionRequestHandler_FullAccessAutoAllowsKnownSingleUseOption(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceState(context.Background(), parent, sessionmode.StoreSnapshot(map[string]any{}, sessionmode.FullMode)); err != nil {
+		t.Fatal(err)
+	}
+	approver := &recordingApprover{allow: false}
+	ctx := toolexec.WithApprover(context.Background(), approver)
+	runner := &selfACPSubagentRunner{
+		store:  store,
+		parent: parent,
+		shared: &sharedACPSubagentState{tracker: newRemoteSubagentTracker()},
+	}
+
+	handler := runner.permissionRequestHandler(ctx, "copilot", func() string { return "child" }, runtime.DelegationMetadata{DelegationID: "dlg-auto"}, "/workspace", nil, nil)
+	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child",
+		Options: []acpclient.PermissionOption{
+			{OptionID: "allow_always", Name: "Always allow", Kind: "allow_always"},
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if got := acpclient.PermissionSelectedOptionID(resp); got != "allow_once" {
+		t.Fatalf("expected allow_once, got %q", got)
+	}
+	if approver.calls != 0 {
+		t.Fatalf("expected auto-allow to bypass approver, got %d calls", approver.calls)
+	}
+}
+
+func TestPermissionRequestHandler_FullAccessUnknownOptionsFallbackToInteractiveApproval(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceState(context.Background(), parent, sessionmode.StoreSnapshot(map[string]any{}, sessionmode.FullMode)); err != nil {
+		t.Fatal(err)
+	}
+	approver := &recordingApprover{allow: true}
+	ctx := toolexec.WithApprover(context.Background(), approver)
+	runner := &selfACPSubagentRunner{
+		store:  store,
+		parent: parent,
+		shared: &sharedACPSubagentState{tracker: newRemoteSubagentTracker()},
+	}
+
+	handler := runner.permissionRequestHandler(ctx, "unknown-agent", func() string { return "child" }, runtime.DelegationMetadata{DelegationID: "dlg-fallback"}, "/workspace", nil, nil)
+	resp, err := handler(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child",
+		Options: []acpclient.PermissionOption{
+			{OptionID: "approve", Name: "Approve"},
+			{OptionID: "reject", Name: "Reject"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if got := acpclient.PermissionSelectedOptionID(resp); got != "approve" {
+		t.Fatalf("expected fallback approver to select approve, got %q", got)
+	}
+	if approver.calls != 1 {
+		t.Fatalf("expected one approver call, got %d", approver.calls)
+	}
+	if !approver.lastInteractive {
+		t.Fatal("expected fallback approval to require interactive approval")
 	}
 }
 
@@ -761,6 +949,119 @@ func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected RunSubagent to return after timeout")
 	}
+}
+
+func TestSelfACPSubagentRunner_CallerTimeoutDoesNotCancelDetachedChild(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-existing"}
+	for _, sess := range []*session.Session{parent, child} {
+		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &controlledACPSpawnLLM{
+		started:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+		finished: make(chan struct{}, 1),
+	}
+	factory := NewACPSubagentRunnerFactory(Config{
+		Store:         store,
+		WorkspaceCWD:  "/workspace",
+		ClientRuntime: execRT,
+		NewAdapter:    newTestACPAdapterFactory(rt, store, execRT, "/workspace", ag, llm, nil),
+	})
+	runner := factory(rt, parent, runtime.RunRequest{
+		AppName: "app",
+		UserID:  "u",
+		CoreTools: tool.CoreToolsConfig{
+			Runtime: execRT,
+		},
+	})
+	if runner == nil {
+		t.Fatal("expected self ACP subagent runner")
+	}
+
+	runCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, runErr := runner.RunSubagent(runCtx, agent.SubagentRunRequest{
+			Agent:     "self",
+			SessionID: child.ID,
+			Prompt:    "slow child",
+			Yield:     5 * time.Second,
+		})
+		done <- runErr
+	}()
+
+	select {
+	case <-llm.started:
+	case <-time.After(time.Second):
+		t.Fatal("expected child prompt to start")
+	}
+	select {
+	case runErr := <-done:
+		if !errors.Is(runErr, context.DeadlineExceeded) {
+			t.Fatalf("expected caller timeout from RunSubagent, got %v", runErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected RunSubagent to stop waiting after caller timeout")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got, inspectErr := runner.InspectSubagent(context.Background(), child.ID)
+		if inspectErr == nil && got.Running && got.State == string(runtime.RunLifecycleStatusRunning) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got, err := runner.InspectSubagent(context.Background(), child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Running || got.State != string(runtime.RunLifecycleStatusRunning) {
+		t.Fatalf("expected child to remain running after caller timeout, got %+v", got)
+	}
+
+	close(llm.release)
+	select {
+	case <-llm.finished:
+	case <-time.After(time.Second):
+		t.Fatal("expected detached child to keep running and finish after release")
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got, inspectErr := runner.InspectSubagent(context.Background(), child.ID)
+		if inspectErr == nil && !got.Running && got.State == string(runtime.RunLifecycleStatusCompleted) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got, err = runner.InspectSubagent(context.Background(), child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Fatalf("expected child to finish after release, got %+v", got)
 }
 
 func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
@@ -1036,23 +1337,6 @@ func TestSelfACPSpawnRejectsNestedSelfSpawnWithoutBreakingChildSession(t *testin
 	}
 }
 
-func TestSelectPermissionOptionIDPrefersAdvertisedAllowAndRejectOptions(t *testing.T) {
-	options := []struct {
-		OptionID string `json:"optionId"`
-		Name     string `json:"name"`
-		Kind     string `json:"kind"`
-	}{
-		{OptionID: "approve", Name: "Approve", Kind: "allow_once"},
-		{OptionID: "deny", Name: "Deny", Kind: "reject_once"},
-	}
-	if got := selectPermissionOptionID(options, true); got != "approve" {
-		t.Fatalf("expected approve option id, got %q", got)
-	}
-	if got := selectPermissionOptionID(options, false); got != "deny" {
-		t.Fatalf("expected deny option id, got %q", got)
-	}
-}
-
 type testACPSpawnLLM struct{}
 
 type testACPListGlobLLM struct{}
@@ -1062,6 +1346,12 @@ type testACPNestedSelfSpawnLLM struct{}
 type timeoutAwareACPSpawnLLM struct {
 	started  chan struct{}
 	canceled chan struct{}
+}
+
+type controlledACPSpawnLLM struct {
+	started  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
 }
 
 type fakeTerminalOutputClient struct {
@@ -1135,6 +1425,8 @@ func (l *testACPListGlobLLM) Name() string { return "test-acp-list-glob" }
 func (l *testACPNestedSelfSpawnLLM) Name() string { return "test-acp-nested-self-spawn" }
 
 func (l *timeoutAwareACPSpawnLLM) Name() string { return "test-acp-timeout" }
+
+func (l *controlledACPSpawnLLM) Name() string { return "test-acp-controlled" }
 
 func TestTerminalBridgeManager_StreamsTerminalOutputIntoSessionUpdates(t *testing.T) {
 	client := &fakeTerminalOutputClient{
@@ -1350,6 +1642,36 @@ func (l *timeoutAwareACPSpawnLLM) Generate(ctx context.Context, req *model.Reque
 	}
 }
 
+func (l *controlledACPSpawnLLM) Generate(ctx context.Context, req *model.Request) iter.Seq2[*model.StreamEvent, error] {
+	return func(yield func(*model.StreamEvent, error) bool) {
+		last := req.Messages[len(req.Messages)-1]
+		if last.Role == model.RoleUser && last.TextContent() == "slow child" {
+			select {
+			case l.started <- struct{}{}:
+			default:
+			}
+			select {
+			case <-l.release:
+				select {
+				case l.finished <- struct{}{}:
+				default:
+				}
+				yield(model.StreamEventFromResponse(&model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "child done"),
+					TurnComplete: true,
+				}), nil)
+			case <-ctx.Done():
+				yield(nil, ctx.Err())
+			}
+			return
+		}
+		yield(model.StreamEventFromResponse(&model.Response{
+			Message:      model.NewTextMessage(model.RoleAssistant, "fallback"),
+			TurnComplete: true,
+		}), nil)
+	}
+}
+
 func intValue(v any) int {
 	switch n := v.(type) {
 	case int:
@@ -1384,25 +1706,29 @@ func drainTurn(seq iter.Seq2[*session.Event, error]) []error {
 }
 
 type recordingApprover struct {
-	allow bool
-	calls int
-	last  toolexec.ApprovalRequest
+	allow           bool
+	calls           int
+	last            toolexec.ApprovalRequest
+	lastInteractive bool
 }
 
-func (a *recordingApprover) Approve(_ context.Context, req toolexec.ApprovalRequest) (bool, error) {
+func (a *recordingApprover) Approve(ctx context.Context, req toolexec.ApprovalRequest) (bool, error) {
 	a.calls++
 	a.last = req
+	a.lastInteractive = toolexec.InteractiveApprovalRequired(ctx)
 	return a.allow, nil
 }
 
 type recordingToolAuthorizer struct {
-	allow bool
-	calls int
-	last  kernelpolicy.ToolAuthorizationRequest
+	allow           bool
+	calls           int
+	last            kernelpolicy.ToolAuthorizationRequest
+	lastInteractive bool
 }
 
-func (a *recordingToolAuthorizer) AuthorizeTool(_ context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
+func (a *recordingToolAuthorizer) AuthorizeTool(ctx context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
 	a.calls++
 	a.last = req
+	a.lastInteractive = toolexec.InteractiveApprovalRequired(ctx)
 	return a.allow, nil
 }

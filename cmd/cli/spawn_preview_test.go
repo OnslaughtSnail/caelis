@@ -241,8 +241,17 @@ func TestSubagentDomainUpdatesFromSpawnToolError_Timeout(t *testing.T) {
 			"error": "context deadline exceeded",
 		},
 	})
-	if len(updates) != 0 {
-		t.Fatalf("expected no detached subagent panel updates when spawn failed before child session creation, got %#v", updates)
+	if len(updates) != 3 {
+		t.Fatalf("expected provisional bootstrap + error + terminal updates, got %#v", updates)
+	}
+	if updates[0].Kind != subagentDomainBootstrap || !updates[0].Provisional {
+		t.Fatalf("expected provisional bootstrap update, got %#v", updates[0])
+	}
+	if updates[0].Target.SpawnID != "call-spawn-1" {
+		t.Fatalf("expected provisional spawn id to use tool call id, got %#v", updates[0].Target)
+	}
+	if updates[2].Kind != subagentDomainTerminal || updates[2].Status != "timed_out" {
+		t.Fatalf("expected timed_out terminal update, got %#v", updates[2])
 	}
 }
 

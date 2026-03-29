@@ -31,6 +31,18 @@
 
 **流式平滑播放策略把同一行切得过碎，暴露了宽字符和 emoji 在增量重绘中的脆弱边界。**
 
+后续继续排查后，又确认这类“TUI 丢字”其实已经分成两条独立链路：
+
+1. **主回答流式输出的残余边界问题**
+   - smoothing 已切到 grapheme cluster，但 reveal 决策过去仍只看“原始逻辑行”和 cluster 数量。
+   - 在窄终端、列表前缀、heading/blockquote 前缀、同一逻辑行内软换行时，仍可能停在“新渲染行刚打开、正文还太少”的脆弱帧。
+   - 这类问题依然属于 streaming intermediate frame 不稳定，不是最终文本丢失。
+
+2. **composer 输入框的独立可见性问题**
+   - 输入框曾长期混用三套坐标：textarea 的 rune offset、attachment/display 的展示偏移、wrap 后的显示列。
+   - 尤其 composer 旧逻辑按 rune 切行，但整个 TUI 其他关键路径已经改成 grapheme-aware。
+   - 复杂 emoji、ZWJ、variation selector、combining mark、attachment token 和尾部窗口裁剪叠加时，就会出现“文字实际存在，但可见输入窗口没有正确带出来”的现象。
+
 ## 已排除方向
 
 排查过程中，以下方向已经做过实验，结论是否定的：
@@ -153,9 +165,10 @@
 
 1. 先确认最终文本是否正确
 2. 再确认问题是否只发生在 streaming 阶段
-3. 优先检查 reveal 粒度，而不是先怀疑 markdown/wrap/theme
-4. 避免新增“按字符类型特判”的分支
-5. 优先从“更稳定的帧边界”入手修复
+3. 如果是主回答区，再优先检查 reveal 粒度和“渲染行边界”是否稳定，而不是先怀疑 markdown/wrap/theme
+4. 如果是输入框，再检查 composer 是否把编辑坐标、显示坐标、wrap 坐标混在一起
+5. 避免新增“按字符类型特判”的分支
+6. 优先从“更稳定的帧边界”和“统一坐标系”入手修复
 
 ## 不建议的修法
 

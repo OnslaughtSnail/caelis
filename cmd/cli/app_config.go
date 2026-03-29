@@ -1220,6 +1220,16 @@ func normalizeSandboxType(sandboxType string) string {
 	}
 }
 
+func canonicalSandboxSelection(sandboxType string) string {
+	value := strings.TrimSpace(strings.ToLower(sandboxType))
+	switch value {
+	case "", "auto", "default":
+		return ""
+	default:
+		return value
+	}
+}
+
 func platformDefaultSandboxType() string {
 	if stdruntime.GOOS == "darwin" {
 		return "seatbelt"

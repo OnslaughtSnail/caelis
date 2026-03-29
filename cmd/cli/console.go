@@ -50,12 +50,14 @@ type cliConsole struct {
 	workspace     workspaceContext
 	workspaceLine string
 
-	resolved          *appassembly.ResolvedSpec
-	sessionStore      session.Store
-	execRuntime       toolexec.Runtime
-	execRuntimeView   *swappableRuntime
-	sandboxType       string
-	sandboxHelperPath string
+	resolved              *appassembly.ResolvedSpec
+	sessionStore          session.Store
+	execRuntime           toolexec.Runtime
+	execRuntimeView       *swappableRuntime
+	sandboxType           string
+	appliedSandboxType    string
+	appliedSandboxTypeSet bool
+	sandboxHelperPath     string
 
 	modelAlias            string
 	llm                   model.LLM
@@ -175,6 +177,8 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		execRuntime:           cfg.ExecRuntime,
 		execRuntimeView:       cfg.ExecRuntimeView,
 		sandboxType:           strings.TrimSpace(cfg.SandboxType),
+		appliedSandboxType:    canonicalSandboxSelection(cfg.AppliedSandboxType),
+		appliedSandboxTypeSet: true,
 		sandboxHelperPath:     strings.TrimSpace(cfg.SandboxHelperPath),
 		modelAlias:            cfg.ModelAlias,
 		llm:                   cfg.Model,
@@ -251,6 +255,7 @@ type cliConsoleConfig struct {
 	ExecRuntime           toolexec.Runtime
 	ExecRuntimeView       *swappableRuntime
 	SandboxType           string
+	AppliedSandboxType    string
 	SandboxHelperPath     string
 	ModelAlias            string
 	Model                 model.LLM
@@ -448,6 +453,16 @@ func (c *cliConsole) executionRuntimeForSession() toolexec.Runtime {
 		return c.execRuntimeView
 	}
 	return c.execRuntime
+}
+
+func (c *cliConsole) currentAppliedSandboxType() string {
+	if c == nil {
+		return ""
+	}
+	if c.appliedSandboxTypeSet {
+		return canonicalSandboxSelection(c.appliedSandboxType)
+	}
+	return canonicalSandboxSelection(c.sandboxType)
 }
 
 func (c *cliConsole) sessionGateway() (*appgateway.Gateway, error) {
@@ -2299,11 +2314,8 @@ func (c *cliConsole) resetResumeReplayContext() context.Context {
 }
 
 func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandboxType string) error {
-	currentSandbox := ""
-	if c != nil && c.execRuntime != nil {
-		currentSandbox = c.execRuntime.SandboxType()
-	}
-	if c.execRuntime != nil && normalizeSandboxType(currentSandbox) == normalizeSandboxType(sandboxType) {
+	requestedSandboxType := canonicalSandboxSelection(sandboxType)
+	if c.execRuntime != nil && c.currentAppliedSandboxType() == requestedSandboxType {
 		if setter, ok := c.execRuntime.(toolexec.PermissionModeSetter); ok {
 			if err := setter.SetPermissionMode(mode); err != nil {
 				return err
@@ -2320,14 +2332,18 @@ func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandbo
 	if c.execRuntimeView != nil {
 		c.execRuntimeView.Set(nextRuntime)
 	}
-	if err := c.refreshShellToolRuntime(); err != nil {
-		c.execRuntime = prevRuntime
-		if c.execRuntimeView != nil {
-			c.execRuntimeView.Set(prevRuntime)
+	if c.execRuntimeView == nil {
+		if err := c.refreshShellToolRuntime(); err != nil {
+			c.execRuntime = prevRuntime
+			if c.execRuntimeView != nil {
+				c.execRuntimeView.Set(prevRuntime)
+			}
+			_ = toolexec.Close(nextRuntime)
+			return err
 		}
-		_ = toolexec.Close(nextRuntime)
-		return err
 	}
+	c.appliedSandboxType = requestedSandboxType
+	c.appliedSandboxTypeSet = true
 	if prevRuntime != nil && prevRuntime != nextRuntime {
 		if closeErr := toolexec.Close(prevRuntime); closeErr != nil {
 			c.printf("warn: close previous runtime failed: %v\n", closeErr)
@@ -2355,11 +2371,12 @@ func (c *cliConsole) refreshShellToolRuntime() error {
 	if c.resolved == nil || len(c.resolved.Tools) == 0 {
 		return nil
 	}
+	runtime := c.executionRuntimeForSession()
 	for i, one := range c.resolved.Tools {
 		if one == nil || one.Name() != toolshell.BashToolName {
 			continue
 		}
-		bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: c.execRuntime})
+		bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: runtime})
 		if err != nil {
 			return err
 		}
@@ -2392,7 +2409,7 @@ func newTerminalApprover(prompter promptReader, out io.Writer, u *ui) *terminalA
 
 func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalRequest) (bool, error) {
 	_ = ctx
-	if sessionmode.IsFullAccess(a.currentMode()) {
+	if sessionmode.IsFullAccess(a.currentMode()) && !toolexec.InteractiveApprovalRequired(ctx) {
 		if sessionmode.IsDangerousCommand(req.Command) {
 			return false, &toolexec.ApprovalAbortedError{Reason: "dangerous command blocked in full_access mode"}
 		}
@@ -2447,7 +2464,7 @@ func (a *terminalApprover) Approve(ctx context.Context, req toolexec.ApprovalReq
 
 func (a *terminalApprover) AuthorizeTool(ctx context.Context, req kernelpolicy.ToolAuthorizationRequest) (bool, error) {
 	_ = ctx
-	if sessionmode.IsFullAccess(a.currentMode()) {
+	if sessionmode.IsFullAccess(a.currentMode()) && !toolexec.InteractiveApprovalRequired(ctx) {
 		return true, nil
 	}
 	scopeKey := toolAuthorizationScopeKey(req)

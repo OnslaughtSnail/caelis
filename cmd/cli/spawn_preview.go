@@ -383,10 +383,15 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 		"_ui_child_session_id",
 		"child_session_id",
 	))
-	if childSessionID == "" {
+	spawnID := childSessionID
+	provisional := false
+	if spawnID == "" {
+		spawnID = strings.TrimSpace(resp.ID)
+		provisional = true
+	}
+	if spawnID == "" {
 		return nil
 	}
-	spawnID := childSessionID
 	attachTarget := strings.TrimSpace(firstNonEmpty(
 		resp.Result,
 		"_ui_child_session_id",
@@ -394,6 +399,9 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 		"_ui_delegation_id",
 		"delegation_id",
 	))
+	if provisional && attachTarget == "" {
+		attachTarget = spawnID
+	}
 	target := subagentProjectionTarget{
 		RootSessionID: strings.TrimSpace(rootSessionID),
 		SpawnID:       spawnID,
@@ -410,6 +418,7 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 			Kind:        subagentDomainBootstrap,
 			Target:      target,
 			ClaimAnchor: true,
+			Provisional: provisional,
 		},
 		{
 			Kind:       subagentDomainToolCall,
