@@ -22,6 +22,11 @@ func (c *cliConsole) forwardSessionEventToTUI(rootSessionID string, update sessi
 	if strings.TrimSpace(update.SessionID) == "" || strings.TrimSpace(update.SessionID) == strings.TrimSpace(rootSessionID) {
 		return
 	}
+	if meta, ok := runtime.DelegationMetadataFromEvent(update.Event); ok {
+		if parent := strings.TrimSpace(meta.ParentSessionID); parent != "" && parent != strings.TrimSpace(rootSessionID) {
+			return
+		}
+	}
 	for _, msg := range c.projectSubagentUpdate(update) {
 		c.tuiSender.Send(msg)
 	}
@@ -383,10 +388,15 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 		"_ui_child_session_id",
 		"child_session_id",
 	))
-	if childSessionID == "" {
+	spawnID := childSessionID
+	provisional := false
+	if spawnID == "" {
+		spawnID = strings.TrimSpace(resp.ID)
+		provisional = true
+	}
+	if spawnID == "" {
 		return nil
 	}
-	spawnID := childSessionID
 	attachTarget := strings.TrimSpace(firstNonEmpty(
 		resp.Result,
 		"_ui_child_session_id",
@@ -394,6 +404,9 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 		"_ui_delegation_id",
 		"delegation_id",
 	))
+	if provisional && attachTarget == "" {
+		attachTarget = spawnID
+	}
 	target := subagentProjectionTarget{
 		RootSessionID: strings.TrimSpace(rootSessionID),
 		SpawnID:       spawnID,
@@ -410,6 +423,7 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 			Kind:        subagentDomainBootstrap,
 			Target:      target,
 			ClaimAnchor: true,
+			Provisional: provisional,
 		},
 		{
 			Kind:       subagentDomainToolCall,
@@ -813,6 +827,9 @@ func projectSpawnToolActivity(state *spawnPreviewState, target subagentProjectio
 }
 
 func spawnToolResponseProjection(state *spawnPreviewState, callID, toolName string, result map[string]any, callArgs map[string]any) (string, bool) {
+	if suppressNestedSubagentTaskPreview(toolName, result) {
+		return "", !taskStateIsActive(asString(result["state"]))
+	}
 	if taskStateIsActive(asString(result["state"])) {
 		preview := strings.TrimSpace(firstNonEmpty(result, "latest_output", "result", "output", "stdout", "stderr"))
 		if preview == "" {
@@ -841,6 +858,14 @@ func spawnToolResponseProjection(state *spawnPreviewState, callID, toolName stri
 		delete(state.toolPreviews, callID)
 	}
 	return summarizeToolResponseWithCall(toolName, result, callArgs), true
+}
+
+func suppressNestedSubagentTaskPreview(toolName string, result map[string]any) bool {
+	if !strings.EqualFold(strings.TrimSpace(toolName), tool.TaskToolName) {
+		return false
+	}
+	childSessionID := strings.TrimSpace(firstNonEmpty(result, "_ui_child_session_id", "child_session_id"))
+	return childSessionID != ""
 }
 
 func subagentPlanEntriesFromToolPayload(callArgs map[string]any, result map[string]any) []tuievents.PlanEntry {

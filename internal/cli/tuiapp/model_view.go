@@ -108,7 +108,7 @@ func (m *Model) View() tea.View {
 	frame.ReportFocus = true
 	frame.WindowTitle = m.windowTitle()
 	if cursor := m.regularInputCursor(); cursor != nil {
-		cursor.Position.Y += m.viewport.Height() + m.preComposerFixedHeight() + tuikit.ComposerPadTop
+		cursor.Y += m.viewport.Height() + m.preComposerFixedHeight() + tuikit.ComposerPadTop
 		frame.Cursor = cursor
 	}
 	return frame

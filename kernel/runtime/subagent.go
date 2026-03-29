@@ -433,12 +433,11 @@ func (r *runtimeSubagentRunner) childSessionMeta(ctx context.Context, childSessi
 	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
 		return meta
 	}
-	parentMeta := r.sessionMeta(ctx, r.parent.ID)
-	depth := coremeta.SelfSpawnDepthFromMeta(parentMeta)
+	meta := coremeta.CloneMeta(r.sessionMeta(ctx, r.parent.ID))
 	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
-		depth++
+		return coremeta.WithDelegatedChild(meta, true)
 	}
-	return coremeta.WithSelfSpawnDepth(parentMeta, depth)
+	return meta
 }
 
 func (r *runtimeSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {

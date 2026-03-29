@@ -1,14 +1,32 @@
 package acpclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+type notifyWriteBuffer struct {
+	bytes.Buffer
+	wrote chan struct{}
+}
+
+func (b *notifyWriteBuffer) Write(p []byte) (int, error) {
+	n, err := b.Buffer.Write(p)
+	if n > 0 && b != nil && b.wrote != nil {
+		select {
+		case b.wrote <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
 
 func TestConnServe_ReturnsContextErrorWhenCanceledDuringRead(t *testing.T) {
 	reader, writer := io.Pipe()
@@ -143,5 +161,89 @@ func TestConnCall_IncludesRPCErrorData(t *testing.T) {
 	got := err.Error()
 	if got != `acp rpc error -32603: Internal error (data: {"statusCode":900,"traceId":"trace-123"})` {
 		t.Fatalf("unexpected error text: %q", got)
+	}
+}
+
+func TestConnCall_FailsPendingRequestWhenPeerCloses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	clientConn := NewConn(s2cR, c2sW)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- clientConn.Serve(ctx, nil, nil)
+	}()
+
+	callDone := make(chan error, 1)
+	go func() {
+		callDone <- clientConn.Call(context.Background(), "session/prompt", map[string]any{"x": 1}, nil)
+	}()
+
+	if _, err := bufio.NewReader(c2sR).ReadBytes('\n'); err != nil {
+		t.Fatalf("read request: %v", err)
+	}
+	_ = s2cW.Close()
+	_ = c2sR.Close()
+
+	select {
+	case err := <-callDone:
+		if err == nil || !strings.Contains(err.Error(), "connection closed before response") {
+			t.Fatalf("expected pending call to fail on peer close, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected pending call to be released after peer close")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return")
+	}
+}
+
+func TestConnCall_FailsPendingRequestWhenServeContextIsCanceled(t *testing.T) {
+	writer := &notifyWriteBuffer{wrote: make(chan struct{}, 1)}
+	conn := NewConn(bytes.NewBufferString("{\"jsonrpc\":\"2.0\",\"method\":\"tick\"}\n"), writer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	callDone := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Serve(ctx, nil, func(callCtx context.Context, _ Message) {
+			go func(callCtx context.Context) {
+				callDone <- conn.Call(callCtx, "session/prompt", map[string]any{"x": 1}, nil)
+			}(callCtx)
+			select {
+			case <-writer.wrote:
+			case <-time.After(time.Second):
+				callDone <- errors.New("timed out waiting for outbound call write")
+				return
+			}
+			cancel()
+		})
+	}()
+
+	select {
+	case err := <-callDone:
+		if err == nil || !strings.Contains(err.Error(), "context canceled") {
+			t.Fatalf("expected pending call to fail on serve cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected pending call to be released after serve cancellation")
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected Serve to return context cancellation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return after cancellation")
 	}
 }

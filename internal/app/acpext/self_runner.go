@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -101,6 +102,8 @@ const (
 	defaultRemoteACPIdleTimeout = 3 * time.Minute
 	defaultRemoteACPInitTimeout = 6 * time.Minute
 )
+
+var startACPClient = acpclient.Start
 
 type readyState struct {
 	sessionID string
@@ -459,7 +462,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		if desc.Transport == appagents.TransportSelf {
 			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, sessionMeta, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient, pauseWatchdog, resumeWatchdog)
 		}
-		client, err := acpclient.Start(ctx, acpclient.Config{
+		client, err := startACPClient(ctx, acpclient.Config{
 			Command:             strings.TrimSpace(desc.Command),
 			Args:                append([]string(nil), desc.Args...),
 			Env:                 copyStringMap(desc.Env),
@@ -492,9 +495,8 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	created := false
 	requestedSessionID := strings.TrimSpace(target.requestedSessionID)
 	if requestedSessionID != "" {
-		loadResp, loadErr := client.LoadSession(ctx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()), sessionMeta)
+		_, loadErr := client.LoadSession(ctx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()), sessionMeta)
 		if loadErr == nil {
-			_ = loadResp
 			actualSessionID = requestedSessionID
 		} else {
 			return "", metaBase, false, fmt.Errorf("acpext: load child session %q: %w", requestedSessionID, loadErr)
@@ -556,9 +558,9 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	if err == nil {
 		r.emitLifecycleState(ctx, actualSessionID, meta, desc.ID, runtime.RunLifecycleStatusCompleted, nil)
 		if snapshot, ok := r.shared.tracker.inspect(desc.ID, actualSessionID); ok {
-			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), snapshot.Assistant)
+			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), snapshot.Assistant, "")
 		} else {
-			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), "")
+			r.shared.tracker.finish(desc.ID, actualSessionID, meta.DelegationID, target.childCWD, string(runtime.RunLifecycleStatusCompleted), "", "")
 		}
 	}
 	return actualSessionID, meta, created, err
@@ -598,13 +600,13 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		return nil, nil, err
 	}
 
-	serveCtx, serveCancel := context.WithCancel(runtime.AttachDelegationContext(ctx, runtime.DelegationMetadata{
+	serveCtx, serveCancel := newLoopbackServeContext(ctx, runtime.DelegationMetadata{
 		ParentSessionID: meta.ParentSessionID,
 		ChildSessionID:  requestedSessionID,
 		ParentToolCall:  meta.ParentToolCall,
 		ParentToolName:  meta.ParentToolName,
 		DelegationID:    meta.DelegationID,
-	}))
+	})
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- server.Serve(serveCtx)
@@ -618,6 +620,28 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		_ = client.Close()
 	}
 	return client, cleanup, nil
+}
+
+func newLoopbackServeContext(ctx context.Context, meta runtime.DelegationMetadata) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if approver, ok := toolexec.ApproverFromContext(ctx); ok {
+		base = toolexec.WithApprover(base, approver)
+	}
+	if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
+		base = policy.WithToolAuthorizer(base, authorizer)
+	}
+	var cancel context.CancelFunc
+	if deadline, ok := ctx.Deadline(); ok {
+		base, cancel = context.WithDeadline(base, deadline)
+	} else {
+		base, cancel = context.WithCancel(base)
+	}
+	stop := context.AfterFunc(ctx, cancel)
+	serveCtx := runtime.AttachDelegationContext(base, meta)
+	return serveCtx, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (r *selfACPSubagentRunner) newACPAdapter(conn *internalacp.Conn) (internalacp.Adapter, error) {
@@ -702,12 +726,11 @@ func (r *selfACPSubagentRunner) childSessionMeta(ctx context.Context, childSessi
 	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
 		return meta
 	}
-	parentMeta := r.sessionMeta(ctx, r.parent.ID)
-	depth := internalacp.SelfSpawnDepthFromMeta(parentMeta)
+	meta := internalacp.CloneMeta(r.sessionMeta(ctx, r.parent.ID))
 	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
-		depth++
+		return internalacp.WithDelegatedChild(meta, true)
 	}
-	return internalacp.WithSelfSpawnDepth(parentMeta, depth)
+	return meta
 }
 
 func (r *selfACPSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {
@@ -734,6 +757,21 @@ func (r *selfACPSubagentRunner) sessionMeta(ctx context.Context, sessionID strin
 	return internalacp.CloneMeta(meta)
 }
 
+func (r *selfACPSubagentRunner) currentParentSessionMode(ctx context.Context) string {
+	if r == nil || r.store == nil || r.parent == nil {
+		return sessionmode.DefaultMode
+	}
+	values, err := r.store.SnapshotState(ctx, &session.Session{
+		AppName: r.parent.AppName,
+		UserID:  r.parent.UserID,
+		ID:      r.parent.ID,
+	})
+	if err != nil {
+		return sessionmode.DefaultMode
+	}
+	return sessionmode.LoadSnapshot(values)
+}
+
 func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessionID string) (agent.SubagentRunResult, error) {
 	childSessionID = strings.TrimSpace(childSessionID)
 	if childSessionID == "" {
@@ -749,6 +787,7 @@ func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessio
 			Agent:           firstNonEmpty(state.Agent, "self"),
 			ChildCWD:        state.ChildCWD,
 			Assistant:       state.Assistant,
+			Error:           state.Error,
 			State:           state.State,
 			Running:         state.Running,
 			ApprovalPending: state.ApprovalPending,
@@ -767,6 +806,7 @@ func (r *selfACPSubagentRunner) InspectSubagent(ctx context.Context, childSessio
 				Agent:           firstNonEmpty(state.Agent, descAgent),
 				ChildCWD:        state.ChildCWD,
 				Assistant:       state.Assistant,
+				Error:           state.Error,
 				State:           state.State,
 				Running:         state.Running,
 				ApprovalPending: state.ApprovalPending,
@@ -792,7 +832,7 @@ func (r *selfACPSubagentRunner) failedResult(ctx context.Context, childSessionID
 		status = runtime.RunLifecycleStatusInterrupted
 	}
 	if strings.TrimSpace(childSessionID) != "" && r != nil && r.shared != nil && r.shared.tracker != nil {
-		r.shared.tracker.finish(agentName, childSessionID, meta.DelegationID, "", string(status), "")
+		r.shared.tracker.finish(agentName, childSessionID, meta.DelegationID, "", string(status), "", fmt.Sprint(cause))
 	}
 	if childCreated || strings.TrimSpace(childSessionID) != "" {
 		r.persistFailureState(ctx, childSessionID, meta, status, cause)
@@ -882,6 +922,11 @@ func (r *selfACPSubagentRunner) inspectPersisted(ctx context.Context, childSessi
 		}
 		if ev.Time.After(result.UpdatedAt) {
 			result.UpdatedAt = ev.Time
+		}
+		if info, ok := runtime.LifecycleFromEvent(ev); ok {
+			if strings.TrimSpace(info.Error) != "" {
+				result.Error = strings.TrimSpace(info.Error)
+			}
 		}
 		if result.DelegationID == "" {
 			if meta, ok := runtime.DelegationMetadataFromEvent(ev); ok {
@@ -1118,10 +1163,23 @@ func approvalLifecycleMeta(parentSessionID, childSessionID, delegationID string,
 
 func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, agentName string, sessionID func() string, meta runtime.DelegationMetadata, childCWD string, onApprovalStart func(), onApprovalDone func()) func(context.Context, acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
 	return func(reqCtx context.Context, req acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+		delegationID := strings.TrimSpace(meta.DelegationID)
+		mode := r.currentParentSessionMode(reqCtx)
+		decision := acpclient.ResolveApproveAllOnce(mode, agentName, req)
+		if decision.Decision == acpclient.PermissionDecisionAutoAllowOnce {
+			if r != nil && r.parent != nil && sessionID != nil {
+				r.emitLifecycleState(ctx, sessionID(), approvalLifecycleMeta(r.parent.ID, sessionID(), delegationID, meta), agentName, runtime.RunLifecycleStatusRunning, nil)
+			}
+			return acpclient.PermissionSelectedOutcome(decision.OptionID), nil
+		}
+
+		if decision.Decision == acpclient.PermissionDecisionAskUser {
+			reqCtx = toolexec.WithInteractiveApprovalRequired(reqCtx)
+		}
+
 		if onApprovalStart != nil {
 			onApprovalStart()
 		}
-		delegationID := strings.TrimSpace(meta.DelegationID)
 		if r != nil && r.shared != nil && r.shared.tracker != nil && sessionID != nil {
 			r.shared.tracker.markApprovalPending(agentName, sessionID(), delegationID, childCWD)
 		}
@@ -1183,42 +1241,7 @@ func maxDuration(values ...time.Duration) time.Duration {
 }
 
 func permissionOutcome(req acpclient.RequestPermissionRequest, allowed bool) acpclient.RequestPermissionResponse {
-	optionID := selectPermissionOptionID(req.Options, allowed)
-	return acpclient.RequestPermissionResponse{
-		Outcome: mustMarshalRaw(map[string]any{
-			"outcome":  "selected",
-			"optionId": optionID,
-		}),
-	}
-}
-
-func selectPermissionOptionID(options []struct {
-	OptionID string `json:"optionId"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-}, allowed bool) string {
-	wantKind := "reject"
-	fallback := "reject_once"
-	if allowed {
-		wantKind = "allow"
-		fallback = "allow_once"
-	}
-	for _, option := range options {
-		kind := strings.ToLower(strings.TrimSpace(option.Kind))
-		if strings.Contains(kind, wantKind) && strings.TrimSpace(option.OptionID) != "" {
-			return strings.TrimSpace(option.OptionID)
-		}
-	}
-	for _, option := range options {
-		candidate := strings.ToLower(strings.TrimSpace(option.OptionID + " " + option.Name))
-		if strings.Contains(candidate, wantKind) && strings.TrimSpace(option.OptionID) != "" {
-			return strings.TrimSpace(option.OptionID)
-		}
-	}
-	if len(options) > 0 && strings.TrimSpace(options[0].OptionID) != "" {
-		return strings.TrimSpace(options[0].OptionID)
-	}
-	return fallback
+	return acpclient.PermissionSelectedOutcome(acpclient.SelectPermissionOptionID(req.Options, allowed))
 }
 
 func approvalRequestFromACP(req acpclient.RequestPermissionRequest) toolexec.ApprovalRequest {

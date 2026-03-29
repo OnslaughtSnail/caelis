@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -594,6 +595,34 @@ func TestTaskManager_StatusUsesSubagentProgressFromNestedToolOutput(t *testing.T
 	}
 }
 
+func TestTaskManager_WaitRejectsTaskFromOtherSession(t *testing.T) {
+	store := taskinmemory.New()
+	entry := &task.Entry{
+		TaskID:         "t-other-session",
+		Kind:           task.KindSpawn,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "child"},
+		Title:          "spawn job",
+		State:          task.StateCompleted,
+		Running:        false,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Result: map[string]any{
+			"state": string(task.StateCompleted),
+		},
+	}
+	if err := store.Upsert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTaskManager(nil, nil, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	_, err := manager.Wait(context.Background(), task.ControlRequest{TaskID: entry.TaskID})
+	if !errors.Is(err, task.ErrTaskNotFound) {
+		t.Fatalf("expected cross-session task lookup to be hidden as not found, got %v", err)
+	}
+}
+
 func TestTaskManager_BashWaitDetectsWaitingInputPrompt(t *testing.T) {
 	runner := &stubAsyncTaskRunner{
 		stdoutByMarker: map[int64][]byte{
@@ -797,7 +826,7 @@ func TestSubagentTaskController_StatusKeepsStaleSilentRunRunning(t *testing.T) {
 	}
 }
 
-func TestSubagentTaskController_StatusFailsIdleTimedOutRun(t *testing.T) {
+func TestSubagentTaskController_StatusSurfacesRunnerIdleTimedOutRun(t *testing.T) {
 	record := &task.Record{
 		ID:          "t-idle-subagent",
 		Kind:        task.KindSpawn,
@@ -819,8 +848,9 @@ func TestSubagentTaskController_StatusFailsIdleTimedOutRun(t *testing.T) {
 		runner: stubSubagentRunner{
 			inspectResult: agent.SubagentRunResult{
 				SessionID: "child-1",
-				State:     string(task.StateRunning),
-				Running:   true,
+				State:     string(task.StateFailed),
+				Running:   false,
+				Error:     "acpext: delegated child session \"child-1\" idle timeout exceeded after 2m0s without updates",
 				UpdatedAt: time.Now().Add(-2 * time.Minute),
 			},
 		},
@@ -831,13 +861,16 @@ func TestSubagentTaskController_StatusFailsIdleTimedOutRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.Running || snapshot.State != task.StateFailed {
-		t.Fatalf("expected idle timed out subagent to fail, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+		t.Fatalf("expected runner-reported idle timed out subagent to fail, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
 	}
 	if snapshot.Result["idle_timed_out"] != true {
 		t.Fatalf("expected idle timeout marker, got %#v", snapshot.Result)
 	}
-	if !cancelled {
-		t.Fatal("expected idle timeout to trigger cancel")
+	if snapshot.Result["error_reason"] != "runner_idle_timeout" {
+		t.Fatalf("expected runner_idle_timeout reason, got %#v", snapshot.Result)
+	}
+	if cancelled {
+		t.Fatal("did not expect task-side inspect to trigger cancel")
 	}
 }
 
@@ -875,15 +908,59 @@ func TestSubagentTaskController_StatusPollDoesNotExtendIdleWindow(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Running || snapshot.State != task.StateFailed {
-		t.Fatalf("expected stale polled subagent to fail idle timeout, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
+	if !snapshot.Running || snapshot.State != task.StateRunning {
+		t.Fatalf("expected stale polled subagent to remain running, got state=%q running=%v result=%#v", snapshot.State, snapshot.Running, snapshot.Result)
 	}
-	if snapshot.Result["idle_timed_out"] != true {
-		t.Fatalf("expected idle timeout marker after stale polling, got %#v", snapshot.Result)
+	if snapshot.Result["idle_timed_out"] == true {
+		t.Fatalf("did not expect task-side idle timeout marker after stale polling, got %#v", snapshot.Result)
 	}
-	if !cancelled {
-		t.Fatal("expected stale polled subagent to be cancelled")
+	if cancelled {
+		t.Fatal("did not expect stale polling to cancel the child")
 	}
+}
+
+func TestSubagentTaskController_WaitCallerTimeoutDoesNotCancelRun(t *testing.T) {
+	record := &task.Record{
+		ID:          "t-wait-timeout-subagent",
+		Kind:        task.KindSpawn,
+		Title:       "spawn job",
+		State:       task.StateRunning,
+		Running:     true,
+		CreatedAt:   time.Now().Add(-30 * time.Second),
+		HeartbeatAt: time.Now().Add(-30 * time.Second),
+		Session:     task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+	}
+	cancelled := false
+	controller := &subagentTaskController{
+		sessionID:    "child-1",
+		delegationID: "d-1",
+		agent:        "copilot",
+		childCWD:     "/tmp",
+		cancel:       func() { cancelled = true },
+		runner: stubSubagentRunner{
+			inspectResult: agent.SubagentRunResult{
+				SessionID: "child-1",
+				State:     string(task.StateRunning),
+				Running:   true,
+				UpdatedAt: time.Now().Add(-30 * time.Second),
+			},
+		},
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := controller.Wait(waitCtx, record, 5*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected wait caller timeout, got %v", err)
+	}
+	if cancelled {
+		t.Fatal("did not expect caller timeout to cancel the child")
+	}
+	record.WithLock(func(one *task.Record) {
+		if !one.Running || one.State != task.StateRunning {
+			t.Fatalf("expected task record to remain running, got state=%q running=%v", one.State, one.Running)
+		}
+	})
 }
 
 func TestSubagentTaskController_StatusDoesNotIdleTimeoutApprovalWait(t *testing.T) {

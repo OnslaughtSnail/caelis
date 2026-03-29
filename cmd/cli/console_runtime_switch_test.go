@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +50,10 @@ func (r fakeRuntime) SandboxRunner() toolexec.CommandRunner {
 		return r.hostRunner
 	}
 	return r.sandboxRunner
+}
+func (r *fakeRuntime) SetPermissionMode(mode toolexec.PermissionMode) error {
+	r.permissionMode = mode
+	return nil
 }
 func (r fakeRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	if r.permissionMode == toolexec.PermissionModeFullControl {
@@ -600,6 +605,83 @@ func TestUpdateExecutionRuntime_ReusesRuntimeForPermissionOnlySwitch(t *testing.
 	}
 }
 
+func TestUpdateExecutionRuntime_ReusesRuntimeForPermissionOnlySwitchWithAutoSelection(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		t.Fatalf("unexpected runtime rebuild: %+v", cfg)
+		return nil, errors.New("unexpected runtime rebuild")
+	}
+
+	rt := &fakeRuntime{
+		permissionMode: toolexec.PermissionModeDefault,
+		sandboxType:    "bwrap",
+	}
+	console := &cliConsole{
+		baseCtx:               context.Background(),
+		execRuntime:           rt,
+		sandboxType:           "",
+		appliedSandboxType:    "",
+		appliedSandboxTypeSet: true,
+		resolved:              &appassembly.ResolvedSpec{},
+	}
+	if err := console.updateExecutionRuntime(toolexec.PermissionModeFullControl, ""); err != nil {
+		t.Fatal(err)
+	}
+	if console.execRuntime != rt {
+		t.Fatal("expected auto-selection permission switch to keep the same runtime instance")
+	}
+	if console.execRuntime.PermissionMode() != toolexec.PermissionModeFullControl {
+		t.Fatalf("expected runtime mode to switch in place, got %q", console.execRuntime.PermissionMode())
+	}
+}
+
+func TestUpdateExecutionRuntime_RebuildsOnceAfterDeferredSandboxChange(t *testing.T) {
+	prevBuilder := cliExecRuntimeBuilder
+	t.Cleanup(func() {
+		cliExecRuntimeBuilder = prevBuilder
+	})
+
+	builds := 0
+	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
+		builds++
+		return &fakeRuntime{
+			permissionMode: cfg.PermissionMode,
+			sandboxType:    cfg.SandboxType,
+		}, nil
+	}
+
+	current := &fakeRuntime{
+		permissionMode: toolexec.PermissionModeFullControl,
+		sandboxType:    "bwrap",
+	}
+	console := &cliConsole{
+		baseCtx:               context.Background(),
+		execRuntime:           current,
+		sandboxType:           "landlock",
+		appliedSandboxType:    "",
+		appliedSandboxTypeSet: true,
+		resolved:              &appassembly.ResolvedSpec{},
+	}
+	if err := console.updateExecutionRuntime(toolexec.PermissionModeDefault, console.sandboxType); err != nil {
+		t.Fatal(err)
+	}
+	if builds != 1 {
+		t.Fatalf("expected exactly one rebuild, got %d", builds)
+	}
+	if console.execRuntime == current {
+		t.Fatal("expected deferred sandbox change to rebuild runtime")
+	}
+	if console.execRuntime.SandboxType() != "landlock" {
+		t.Fatalf("expected rebuilt runtime to use deferred sandbox selection, got %q", console.execRuntime.SandboxType())
+	}
+	if console.appliedSandboxType != "landlock" {
+		t.Fatalf("expected applied sandbox selection updated after rebuild, got %q", console.appliedSandboxType)
+	}
+}
+
 func TestUpdateExecutionRuntime_RebuildsWhenRequestedSandboxChanged(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
 	t.Cleanup(func() {
@@ -619,10 +701,12 @@ func TestUpdateExecutionRuntime_RebuildsWhenRequestedSandboxChanged(t *testing.T
 		t.Fatal(err)
 	}
 	console := &cliConsole{
-		baseCtx:     context.Background(),
-		execRuntime: rt,
-		sandboxType: "other-sandbox",
-		resolved:    &appassembly.ResolvedSpec{},
+		baseCtx:               context.Background(),
+		execRuntime:           rt,
+		sandboxType:           "other-sandbox",
+		appliedSandboxType:    cliTestSandboxType(),
+		appliedSandboxTypeSet: true,
+		resolved:              &appassembly.ResolvedSpec{},
 	}
 	if err := console.updateExecutionRuntime(toolexec.PermissionModeDefault, console.sandboxType); err != nil {
 		t.Fatal(err)

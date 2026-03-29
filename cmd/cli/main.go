@@ -274,7 +274,7 @@ func runCLI(ctx context.Context, args []string) error {
 		UserID:                *userID,
 		DefaultAgent:          configStore.DefaultAgent(),
 		WorkspaceCWD:          workspace.CWD,
-		Execution:             execRuntime,
+		Execution:             execRuntimeView,
 		Tools:                 resolved.Tools,
 		Policies:              resolved.Policies,
 		Resolved:              resolved,
@@ -351,7 +351,7 @@ func runCLI(ctx context.Context, args []string) error {
 				})
 			},
 			NewSessionResources: func(ctx context.Context, acpConn *internalacp.Conn, sessionID string, sessionCWD string, caps internalacp.ClientCapabilities, modeResolver func() string) (*internalacp.SessionResources, error) {
-				execRuntimeACP := internalacp.NewRuntime(execRuntime, acpConn, sessionID, resolvedWorkspaceRoot, sessionCWD, caps, modeResolver)
+				execRuntimeACP := internalacp.NewRuntime(execRuntimeView, acpConn, sessionID, resolvedWorkspaceRoot, sessionCWD, caps, modeResolver)
 				registry := plugin.NewRegistry()
 				if err := appassembly.RegisterBuiltinProviders(registry, appassembly.RegisterOptions{
 					ExecutionRuntime: execRuntimeACP,
@@ -515,6 +515,7 @@ func runCLI(ctx context.Context, args []string) error {
 		ExecRuntime:           execRuntime,
 		ExecRuntimeView:       execRuntimeView,
 		SandboxType:           strings.TrimSpace(*sandboxType),
+		AppliedSandboxType:    strings.TrimSpace(*sandboxType),
 		SandboxHelperPath:     sandboxHelperPath,
 		ModelAlias:            alias,
 		Model:                 llm,

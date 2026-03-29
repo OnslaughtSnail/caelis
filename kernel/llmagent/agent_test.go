@@ -906,8 +906,8 @@ func TestLLMAgent_PartialStreamInterruptionWarnsAndSkipsRetry(t *testing.T) {
 	if len(warnings) == 0 || !strings.Contains(warnings[len(warnings)-1], "automatic retry was skipped") {
 		t.Fatalf("expected interrupted-response warning, got %#v", warnings)
 	}
-	if !strings.Contains(warnings[len(warnings)-1], "/continue") {
-		t.Fatalf("expected recovery hint in warning, got %#v", warnings)
+	if strings.Contains(warnings[len(warnings)-1], "/continue") {
+		t.Fatalf("did not expect unsupported /continue hint in warning, got %#v", warnings)
 	}
 }
 
@@ -1025,8 +1025,56 @@ func TestLLMAgent_FinishReasonLengthWarnsAndSkipsRetry(t *testing.T) {
 	if !strings.Contains(last, "configured token limit") {
 		t.Fatalf("expected token-limit warning, got %#v", warnings)
 	}
-	if !strings.Contains(last, "/continue") {
-		t.Fatalf("expected continue hint in warning, got %#v", warnings)
+	if strings.Contains(last, "/continue") {
+		t.Fatalf("did not expect unsupported /continue hint in warning, got %#v", warnings)
+	}
+}
+
+func TestIsInterruptedPartialResponseError(t *testing.T) {
+	attempts := 0
+	llm := newSeqLLM("fake", func(req *model.Request) []seqResult {
+		_ = req
+		attempts++
+		return []seqResult{
+			{
+				resp: &model.Response{
+					Message:      model.NewTextMessage(model.RoleAssistant, "hello"),
+					TurnComplete: false,
+					Model:        "fake",
+					Provider:     "test-provider",
+				},
+			},
+			{err: errors.New("unexpected EOF while reading stream")},
+		}
+	})
+	ag, err := New(Config{Name: "test", EmitPartialEvents: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &testCtx{
+		Context: context.Background(),
+		session: &session.Session{AppName: "a", UserID: "u", ID: "s"},
+		history: []*session.Event{{Message: model.NewTextMessage(model.RoleUser, "hi")}},
+		llm:     llm,
+		toolMap: map[string]tool.Tool{},
+	}
+	var gotErr error
+	for _, runErr := range ag.Run(ctx) {
+		if runErr != nil {
+			gotErr = runErr
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected interrupted response error")
+	}
+	if !IsInterruptedPartialResponseError(gotErr) {
+		t.Fatalf("expected helper to recognize interrupted partial response, got %v", gotErr)
+	}
+	if IsInterruptedPartialResponseError(errors.New("plain error")) {
+		t.Fatal("did not expect helper to match plain errors")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected no automatic retry after partial output, got %d attempts", attempts)
 	}
 }
 

@@ -514,9 +514,7 @@ func splitContentLines(text string) []string {
 		return nil
 	}
 	normalized := strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
-	if strings.HasSuffix(normalized, "\n") {
-		normalized = strings.TrimSuffix(normalized, "\n")
-	}
+	normalized = strings.TrimSuffix(normalized, "\n")
 	return strings.Split(normalized, "\n")
 }
 

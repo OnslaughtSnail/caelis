@@ -241,8 +241,17 @@ func TestSubagentDomainUpdatesFromSpawnToolError_Timeout(t *testing.T) {
 			"error": "context deadline exceeded",
 		},
 	})
-	if len(updates) != 0 {
-		t.Fatalf("expected no detached subagent panel updates when spawn failed before child session creation, got %#v", updates)
+	if len(updates) != 3 {
+		t.Fatalf("expected provisional bootstrap + error + terminal updates, got %#v", updates)
+	}
+	if updates[0].Kind != subagentDomainBootstrap || !updates[0].Provisional {
+		t.Fatalf("expected provisional bootstrap update, got %#v", updates[0])
+	}
+	if updates[0].Target.SpawnID != "call-spawn-1" {
+		t.Fatalf("expected provisional spawn id to use tool call id, got %#v", updates[0].Target)
+	}
+	if updates[2].Kind != subagentDomainTerminal || updates[2].Status != "timed_out" {
+		t.Fatalf("expected timed_out terminal update, got %#v", updates[2])
 	}
 }
 
@@ -775,6 +784,41 @@ func TestSpawnPreviewProjector_DropsUnchangedRunningToolPreview(t *testing.T) {
 	}
 }
 
+func TestSpawnPreviewProjector_SuppressesNestedTaskSubagentPreview(t *testing.T) {
+	proj := newSpawnPreviewProjector()
+	msgs := proj.Project(sessionstream.Update{
+		SessionID: "child-1",
+		Event: &session.Event{
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "tc-task-1",
+				Name: tool.TaskToolName,
+				Result: map[string]any{
+					"state":            "running",
+					"task_id":          "task-spawn-1",
+					"child_session_id": "grandchild-1",
+					"latest_output":    "Executed the command successfully. The file now contains nested_codex_call.",
+				},
+			}),
+			Meta: map[string]any{
+				"parent_session_id":   "parent",
+				"child_session_id":    "child-1",
+				"parent_tool_call_id": "call-spawn-1",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-1",
+			},
+		},
+	})
+	for _, raw := range msgs {
+		msg, ok := raw.(tuievents.SubagentToolCallMsg)
+		if !ok {
+			continue
+		}
+		if msg.CallID == "tc-task-1" && strings.TrimSpace(msg.Chunk) != "" {
+			t.Fatalf("expected nested TASK preview to be suppressed, got %+v", msg)
+		}
+	}
+}
+
 func TestSpawnPreviewProjector_ProjectsWaitingApprovalStatus(t *testing.T) {
 	proj := newSpawnPreviewProjector()
 	msgs := proj.Project(sessionstream.Update{
@@ -852,6 +896,32 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 	}
 	if !hasStream {
 		t.Fatal("expected SubagentStreamMsg from spawn projector")
+	}
+}
+
+func TestForwardSessionEventToTUI_IgnoresNestedGrandchildEvents(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{
+		sessionID:      "root-session",
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	c.forwardSessionEventToTUI("root-session", sessionstream.Update{
+		SessionID: "grandchild-session",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "nested codex output"),
+			Meta: map[string]any{
+				"parent_session_id":   "child-session",
+				"child_session_id":    "grandchild-session",
+				"parent_tool_call_id": "call-spawn-codex",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-codex",
+				"agent_id":            "codex",
+			},
+		},
+	})
+	if len(sender.msgs) != 0 {
+		t.Fatalf("expected nested grandchild events to stay out of root TUI projection, got %#v", sender.msgs)
 	}
 }
 

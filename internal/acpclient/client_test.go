@@ -16,7 +16,7 @@ func TestClientNewSessionMatchesACPXRequestShape(t *testing.T) {
 	defer cleanup()
 	meta := map[string]any{
 		"caelis": map[string]any{
-			"selfSpawnDepth": 1,
+			"delegatedChild": true,
 		},
 	}
 
@@ -48,7 +48,7 @@ func TestClientNewSessionMatchesACPXRequestShape(t *testing.T) {
 		}
 		if !reflect.DeepEqual(params["_meta"], map[string]any{
 			"caelis": map[string]any{
-				"selfSpawnDepth": float64(1),
+				"delegatedChild": true,
 			},
 		}) {
 			done <- fmt.Errorf("unexpected _meta %#v", params["_meta"])
@@ -74,7 +74,7 @@ func TestClientLoadSessionIncludesMCPServers(t *testing.T) {
 	defer cleanup()
 	meta := map[string]any{
 		"caelis": map[string]any{
-			"selfSpawnDepth": 1,
+			"delegatedChild": true,
 			"trace":          "load",
 		},
 	}
@@ -103,7 +103,7 @@ func TestClientLoadSessionIncludesMCPServers(t *testing.T) {
 		}
 		if !reflect.DeepEqual(params["_meta"], map[string]any{
 			"caelis": map[string]any{
-				"selfSpawnDepth": float64(1),
+				"delegatedChild": true,
 				"trace":          "load",
 			},
 		}) {

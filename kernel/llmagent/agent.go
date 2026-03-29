@@ -1389,7 +1389,7 @@ func interruptedResponseWarning(err *interruptedModelResponseError) string {
 	switch err.finishReason {
 	case model.FinishReasonLength:
 		if err.partialEmitted {
-			return "warn: model output hit the configured token limit before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content. You can send /continue to resume or increase max_output_tokens."
+			return "warn: model output hit the configured token limit before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content. Send another prompt if you want it to continue from the partial output, or increase max_output_tokens."
 		}
 		return "warn: model output hit the configured token limit before completion. The request was retried automatically when safe."
 	case model.FinishReasonContentFilter:
@@ -1401,7 +1401,7 @@ func interruptedResponseWarning(err *interruptedModelResponseError) string {
 	cause := summarizeRetryCause(err.cause)
 	if err.partialEmitted {
 		return fmt.Sprintf(
-			"warn: model response was interrupted before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content. Cause: %s. You can send /continue to resume.",
+			"warn: model response was interrupted before completion. Some partial output was already shown, so automatic retry was skipped to avoid duplicate content. Cause: %s. Send another prompt if you want it to continue from the partial output.",
 			cause,
 		)
 	}
@@ -1409,6 +1409,11 @@ func interruptedResponseWarning(err *interruptedModelResponseError) string {
 		"warn: model returned incomplete output. The request was retried automatically when safe. Last cause: %s.",
 		cause,
 	)
+}
+
+func IsInterruptedPartialResponseError(err error) bool {
+	target := interruptedResponseError(err)
+	return target != nil && target.partialEmitted
 }
 
 func shouldSuppressInterruptedResponseWarning(err *interruptedModelResponseError) bool {

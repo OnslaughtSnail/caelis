@@ -219,23 +219,6 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 			}
 		}
 	}
-	if c.idleTimeout > 0 && runResult.Running && !runResult.ApprovalPending && !runResult.ToolCallPending && runtimeTaskStateName(runResult.State) != task.StateWaitingApproval {
-		progressAt := latestSubagentProgressTime(runResult.UpdatedAt, subagentLastSeenAt(record))
-		if progressAt.Add(c.idleTimeout).Before(now) {
-			if c.cancel != nil {
-				c.cancel()
-			}
-			runResult = agent.SubagentRunResult{
-				SessionID:    c.sessionID,
-				DelegationID: c.delegationID,
-				Agent:        c.agent,
-				ChildCWD:     c.childCWD,
-				State:        string(RunLifecycleStatusFailed),
-				Running:      false,
-				UpdatedAt:    progressAt,
-			}
-		}
-	}
 	var snapshot task.Snapshot
 	var output task.Output
 	var assistant string
@@ -250,6 +233,7 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 	if final := strings.TrimSpace(runResult.Assistant); final != "" {
 		assistant = final
 	}
+	errorReason := subagentErrorReason(runResult)
 	record.WithLock(func(one *task.Record) {
 		if preview == "" {
 			preview = task.FormatLatestOutput(fmt.Sprint(one.Result["latest_output"]))
@@ -289,6 +273,10 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		if text := strings.TrimSpace(runResult.Error); text != "" {
 			one.Result["error"] = text
 		}
+		if errorReason != "" {
+			one.Result["error_reason"] = errorReason
+			one.Result["_ui_error_reason"] = errorReason
+		}
 		if callID := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolCall)); callID != "" {
 			one.Result["_ui_parent_tool_call_id"] = callID
 		}
@@ -318,25 +306,42 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 			one.Result["interrupted"] = true
 			delete(one.Result, "error")
 		}
-		if c.idleTimeout > 0 && one.State == task.StateFailed && !runResult.Running {
-			progressAt := latestSubagentProgressTime(runResult.UpdatedAt, one.HeartbeatAt, one.CreatedAt)
-			if progressAt.Add(c.idleTimeout).Before(now) {
-				one.Result["error"] = fmt.Sprintf("subagent idle timeout exceeded after %s without updates", c.idleTimeout.Round(time.Second))
-				one.Result["idle_timed_out"] = true
-				one.Result["_ui_idle_timed_out"] = true
-			}
+		if errorReason == "runner_idle_timeout" {
+			one.Result["idle_timed_out"] = true
+			one.Result["_ui_idle_timed_out"] = true
 		}
 		if !one.Running && assistant != "" {
 			one.Result["final_result"] = assistant
 			one.Result["final_summary"] = assistant
-		} else if one.State != task.StateFailed {
+		}
+		if errorReason != "runner_idle_timeout" {
 			delete(one.Result, "idle_timed_out")
 			delete(one.Result, "_ui_idle_timed_out")
+		}
+		if errorReason == "" {
+			delete(one.Result, "error_reason")
+			delete(one.Result, "_ui_error_reason")
 		}
 		snapshot = one.LockedSnapshot(output)
 	})
 	_ = persistControllerRecord(ctx, c.store, record)
 	return snapshot, nil
+}
+
+func subagentErrorReason(runResult agent.SubagentRunResult) string {
+	errText := strings.ToLower(strings.TrimSpace(runResult.Error))
+	switch {
+	case errText == "":
+		return ""
+	case strings.Contains(errText, "idle timeout exceeded"):
+		return "runner_idle_timeout"
+	case strings.Contains(errText, "context deadline exceeded"), strings.Contains(errText, "deadline exceeded"), strings.Contains(errText, "timed out"), strings.Contains(errText, "timeout"):
+		return "child_timeout"
+	case strings.Contains(errText, "context canceled"), strings.Contains(errText, "cancelled"), strings.Contains(errText, "canceled"):
+		return "child_cancelled"
+	default:
+		return "child_failed"
+	}
 }
 
 func progressAgeSeconds(last time.Time, now time.Time) int {

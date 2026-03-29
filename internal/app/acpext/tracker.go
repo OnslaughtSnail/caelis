@@ -24,6 +24,7 @@ type remoteSubagentState struct {
 	Agent           string
 	ChildCWD        string
 	State           string
+	Error           string
 	Running         bool
 	ApprovalPending bool
 	ToolCallPending bool
@@ -225,7 +226,7 @@ func (t *remoteSubagentTracker) updateToolOutput(agentName, sessionID, chunk str
 	state.UpdatedAt = time.Now()
 }
 
-func (t *remoteSubagentTracker) finish(agentName, sessionID, delegationID, childCWD, stateName, assistant string) {
+func (t *remoteSubagentTracker) finish(agentName, sessionID, delegationID, childCWD, stateName, assistant, failure string) {
 	state := t.ensure(agentName, sessionID)
 	if state == nil {
 		return
@@ -239,6 +240,7 @@ func (t *remoteSubagentTracker) finish(agentName, sessionID, delegationID, child
 	if strings.TrimSpace(assistant) != "" {
 		state.Assistant = strings.TrimSpace(assistant)
 	}
+	state.Error = strings.TrimSpace(failure)
 	state.LogSnapshot = logSnapshot(state.Reasoning, state.Assistant)
 	if strings.TrimSpace(stateName) == "" {
 		stateName = string(runtime.RunLifecycleStatusCompleted)

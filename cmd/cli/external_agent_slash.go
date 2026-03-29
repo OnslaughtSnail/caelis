@@ -463,8 +463,13 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 		sessionID = runState.sessionID
 		runState.mu.RUnlock()
 	}
+	decision := acpclient.ResolveApproveAllOnce(c.sessionMode, agentID, req)
+	if decision.Decision == acpclient.PermissionDecisionAutoAllowOnce {
+		return acpclient.PermissionSelectedOutcome(decision.OptionID), nil
+	}
+	requireInteractive := decision.Decision == acpclient.PermissionDecisionAskUser
 	approvalTool, approvalCommand := externalApprovalContext(req)
-	if sessionID != "" {
+	if requireInteractive && sessionID != "" {
 		_ = c.updateParticipantStatus(statusCtx, sessionID, "waiting_approval")
 		if c.tuiSender != nil {
 			hint := strings.TrimSpace(approvalTool)
@@ -497,6 +502,9 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 			}
 		}()
 	}
+	if requireInteractive {
+		ctx = toolexec.WithInteractiveApprovalRequired(ctx)
+	}
 	isToolAuthorization := externalRequestLooksLikeToolAuthorization(req)
 	if isToolAuthorization && c.approver != nil {
 		allowed, err := c.approver.AuthorizeTool(ctx, externalAuthorizationRequestFromACP(req))
@@ -514,7 +522,6 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 		}
 		return externalPermissionOutcome(req, allowed), nil
 	}
-	_ = agentID
 	return externalPermissionOutcome(req, true), nil
 }
 
@@ -915,26 +922,7 @@ func externalApprovalContext(req acpclient.RequestPermissionRequest) (tool strin
 }
 
 func externalPermissionOutcome(req acpclient.RequestPermissionRequest, allowed bool) acpclient.RequestPermissionResponse {
-	wantKind := "reject"
-	fallback := "reject_once"
-	if allowed {
-		wantKind = "allow"
-		fallback = "allow_once"
-	}
-	optionID := fallback
-	for _, option := range req.Options {
-		kind := strings.ToLower(strings.TrimSpace(option.Kind))
-		if strings.Contains(kind, wantKind) && strings.TrimSpace(option.OptionID) != "" {
-			optionID = strings.TrimSpace(option.OptionID)
-			break
-		}
-	}
-	return acpclient.RequestPermissionResponse{
-		Outcome: mustMarshalRaw(map[string]any{
-			"outcome":  "selected",
-			"optionId": optionID,
-		}),
-	}
+	return acpclient.PermissionSelectedOutcome(acpclient.SelectPermissionOptionID(req.Options, allowed))
 }
 
 func externalRawStringField(raw any, key string) string {
@@ -978,14 +966,6 @@ func decodeACPTextChunk(raw json.RawMessage) string {
 		return ""
 	}
 	return chunk.Text
-}
-
-func mustMarshalRaw(v any) json.RawMessage {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return json.RawMessage("null")
-	}
-	return raw
 }
 
 func derefString(value *string) string {

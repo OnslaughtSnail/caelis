@@ -174,6 +174,13 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string, cwd string, 
 	return resp, err
 }
 
+func (c *Client) SetMode(ctx context.Context, sessionID string, modeID string) error {
+	return c.conn.Call(ctx, MethodSessionSetMode, SetSessionModeRequest{
+		SessionID: sessionID,
+		ModeID:    modeID,
+	}, &SetSessionModeResponse{})
+}
+
 func (c *Client) Prompt(ctx context.Context, sessionID string, text string, meta map[string]any) (PromptResponse, error) {
 	var resp PromptResponse
 	err := c.conn.Call(ctx, MethodSessionPrompt, PromptRequest{

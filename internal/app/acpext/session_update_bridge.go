@@ -79,14 +79,14 @@ func (b *acpSessionUpdateBridge) emitContent(ctx context.Context, sessionID stri
 	switch strings.TrimSpace(update.SessionUpdate) {
 	case acpclient.UpdateAgentMessage:
 		b.assistant += text
-		ev.Message = model.NewTextMessage(model.RoleAssistant, b.assistant)
+		ev.Message = model.NewTextMessage(model.RoleAssistant, text)
 		ev.Meta["channel"] = "answer"
 		if b.tracker != nil {
 			b.tracker.updateAssistant(b.agentName, sessionID, b.assistant)
 		}
 	case acpclient.UpdateAgentThought:
 		b.reasoning += text
-		ev.Message = model.NewReasoningMessage(model.RoleAssistant, b.reasoning, model.ReasoningVisibilityVisible)
+		ev.Message = model.NewReasoningMessage(model.RoleAssistant, text, model.ReasoningVisibilityVisible)
 		ev.Meta["channel"] = "reasoning"
 		if b.tracker != nil {
 			b.tracker.updateReasoning(b.agentName, sessionID, b.reasoning)

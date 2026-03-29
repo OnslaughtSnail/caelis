@@ -12,6 +12,13 @@ type composerRender struct {
 	cursor      *tea.Cursor
 }
 
+type composerLayout struct {
+	rows      []string
+	cursorRow int
+	cursorCol int
+	totalRows int
+}
+
 func (r composerRender) styledText() string {
 	return strings.Join(r.styledLines, "\n")
 }
@@ -40,7 +47,7 @@ func (m *Model) regularInputCursor() *tea.Cursor {
 		return nil
 	}
 	cursor := *render.cursor
-	cursor.Position.X += inputHorizontalInset
+	cursor.X += inputHorizontalInset
 	return &cursor
 }
 
@@ -57,7 +64,10 @@ func (m *Model) composeInputRender() composerRender {
 	cursorIndex := m.textareaCursorIndex()
 	width := m.composerContentWidth()
 	displayValue, displayCursor := composeInputDisplay(value, cursorIndex, m.inputAttachments)
-	rows, cursorRow, cursorCol := wrapComposerRows("", displayValue, displayCursor, width)
+	layout := layoutComposerDisplay(displayValue, displayCursor, width)
+	rows := layout.rows
+	cursorRow := layout.cursorRow
+	cursorCol := layout.cursorCol
 	if len(rows) == 0 {
 		rows = []string{""}
 		cursorRow = 0
@@ -141,111 +151,113 @@ func composerWindowStart(cursorRow int, totalRows int, maxRows int) int {
 	return start
 }
 
-func wrapComposerRows(attachment string, value string, cursor int, width int) ([]string, int, int) {
+func layoutComposerDisplay(value string, cursor int, width int) composerLayout {
 	if width <= 0 {
 		width = 1
 	}
 	if cursor < 0 {
 		cursor = 0
 	}
-
-	lines := strings.Split(value, "\n")
-	if len(lines) == 0 {
-		lines = []string{""}
+	valueRunes := []rune(value)
+	if cursor > len(valueRunes) {
+		cursor = len(valueRunes)
 	}
 
-	rows := make([]string, 0, len(lines))
+	rows := make([]string, 0, 4)
 	cursorRow := 0
 	cursorCol := 0
-	globalIndex := 0
 	cursorAssigned := false
+	globalRune := 0
+	rowStartRune := 0
+	rowWidth := 0
+	var row strings.Builder
 
-	for lineIdx, line := range lines {
-		runes := []rune(line)
-		prefix := ""
-		if lineIdx == 0 {
-			prefix = attachment
+	appendRow := func(rowText string, rowEndRune int) {
+		rows = append(rows, rowText)
+		if cursorAssigned {
+			return
 		}
-
-		if len(runes) == 0 {
-			rows = append(rows, prefix)
-			if !cursorAssigned && cursor == globalIndex {
-				cursorRow = len(rows) - 1
-				cursorCol = displayColumns(prefix)
-				cursorAssigned = true
-			}
-		} else {
-			for segStart := 0; segStart < len(runes); {
-				rowPrefix := prefix
-				rowPrefixWidth := displayColumns(rowPrefix)
-				rowWidth := rowPrefixWidth
-				segEnd := segStart
-
-				for segEnd < len(runes) {
-					runeWidth := maxInt(1, displayColumns(string(runes[segEnd])))
-					if rowWidth > 0 && rowWidth+runeWidth > width {
-						break
-					}
-					rowWidth += runeWidth
-					segEnd++
-				}
-				if segEnd == segStart {
-					segEnd++
-				}
-
-				rowText := rowPrefix + string(runes[segStart:segEnd])
-				rows = append(rows, rowText)
-				rowIndex := len(rows) - 1
-				rowStart := globalIndex + segStart
-				rowEnd := globalIndex + segEnd
-				if !cursorAssigned && cursor >= rowStart && cursor <= rowEnd {
-					cursorRow = rowIndex
-					consumed := max(cursor-rowStart, 0)
-					consumed = min(consumed, segEnd-segStart)
-					cursorCol = displayColumns(rowPrefix + string(runes[segStart:segStart+consumed]))
-					cursorAssigned = true
-				}
-
-				prefix = ""
-				segStart = segEnd
-			}
+		if cursor < rowStartRune || cursor > rowEndRune {
+			return
 		}
-
-		if !cursorAssigned && cursor == globalIndex+len(runes) {
-			cursorRow = len(rows) - 1
-			cursorCol = displayColumns(rows[len(rows)-1])
-			cursorAssigned = true
-		}
-
-		globalIndex += len(runes)
-		if lineIdx < len(lines)-1 {
-			globalIndex++
-		}
+		cursorRow = len(rows) - 1
+		cursorCol = displayColumns(composerCursorPrefix(rowText, cursor-rowStartRune))
+		cursorAssigned = true
 	}
 
+	for _, cluster := range splitGraphemeClusters(value) {
+		clusterRuneLen := len([]rune(cluster))
+		clusterEndRune := globalRune + clusterRuneLen
+		if cluster == "\n" {
+			appendRow(row.String(), globalRune)
+			row.Reset()
+			rowWidth = 0
+			globalRune = clusterEndRune
+			rowStartRune = globalRune
+			continue
+		}
+
+		clusterWidth := maxInt(0, graphemeWidth(cluster))
+		if rowWidth > 0 && rowWidth+clusterWidth > width {
+			appendRow(row.String(), globalRune)
+			row.Reset()
+			rowWidth = 0
+			rowStartRune = globalRune
+		}
+		row.WriteString(cluster)
+		rowWidth += clusterWidth
+		globalRune = clusterEndRune
+	}
+
+	appendRow(row.String(), globalRune)
+
 	if len(rows) == 0 {
-		rows = []string{attachment}
-		cursorRow = 0
-		cursorCol = displayColumns(attachment)
-		cursorAssigned = true
+		rows = []string{""}
 	}
 	if !cursorAssigned {
 		cursorRow = len(rows) - 1
 		cursorCol = displayColumns(rows[len(rows)-1])
 	}
 
-	return rows, cursorRow, cursorCol
+	return composerLayout{
+		rows:      rows,
+		cursorRow: cursorRow,
+		cursorCol: cursorCol,
+		totalRows: len(rows),
+	}
+}
+
+func composerCursorPrefix(row string, cursor int) string {
+	if cursor <= 0 || row == "" {
+		return ""
+	}
+	rowRunes := []rune(row)
+	if cursor >= len(rowRunes) {
+		return row
+	}
+	consumedRunes := 0
+	var out strings.Builder
+	for _, cluster := range splitGraphemeClusters(row) {
+		clusterRunes := len([]rune(cluster))
+		next := consumedRunes + clusterRunes
+		if cursor < next {
+			break
+		}
+		out.WriteString(cluster)
+		consumedRunes = next
+	}
+	return out.String()
 }
 
 func desiredComposerRows(value string, _ string, width int, maxRows int) int {
-	rows, _, _ := wrapComposerRows("", value, len([]rune(value)), width)
-	if len(rows) < 1 {
+	layout := layoutComposerDisplay(value, len([]rune(value)), width)
+	if layout.totalRows < 1 {
 		return 1
 	}
-	if maxRows > 0 && len(rows) > maxRows {
+	if maxRows > 0 && layout.totalRows > maxRows {
 		return maxRows
 	}
-	return len(rows)
+	return layout.totalRows
 }
 
 func (m *Model) textareaCursorIndex() int {

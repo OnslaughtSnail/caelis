@@ -140,7 +140,37 @@ func TestTaskTool_DescriptionExplainsWriteSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := tool.Description(); !strings.Contains(got, "send bash stdin") || !strings.Contains(got, "completed spawn session") {
-		t.Fatalf("expected TASK description to explain write semantics, got %q", got)
+	got := tool.Description()
+	for _, want := range []string{
+		"send stdin to a running BASH task",
+		"start a new follow-up turn on a completed SPAWN child session",
+		"multiple times",
+		"running again until it yields or completes",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected TASK description to mention %q, got %q", want, got)
+		}
 	}
+}
+
+func TestTaskTool_DeclarationExplainsWriteAndWaitFlow(t *testing.T) {
+	tool, err := NewTaskTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := tool.Declaration()
+	props, _ := decl.Parameters["properties"].(map[string]any)
+	inputProp, _ := props["input"].(map[string]any)
+	yieldProp, _ := props["yield_time_ms"].(map[string]any)
+	if got := taskToolString(inputProp["description"]); !strings.Contains(got, "new follow-up prompt") || !strings.Contains(got, "use TASK wait until it completes first") {
+		t.Fatalf("expected TASK input declaration to explain SPAWN continuation rules, got %q", got)
+	}
+	if got := taskToolString(yieldProp["description"]); !strings.Contains(got, "per-call wait") || !strings.Contains(got, "result keeps task_id") {
+		t.Fatalf("expected TASK yield declaration to explain per-call wait/task_id semantics, got %q", got)
+	}
+}
+
+func taskToolString(value any) string {
+	text, _ := value.(string)
+	return text
 }

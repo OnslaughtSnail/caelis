@@ -419,7 +419,7 @@ func TestSubagentPanelKeepsToolResultsInChronologicalOrder(t *testing.T) {
 	if startIdx < 0 || assistantIdx < 0 || resultIdx < 0 {
 		t.Fatalf("expected start, assistant, and result lines in view, got:\n%s", view)
 	}
-	if !(startIdx < assistantIdx && assistantIdx < resultIdx) {
+	if startIdx >= assistantIdx || assistantIdx >= resultIdx {
 		t.Fatalf("expected chronological order start < assistant < result, got:\n%s", view)
 	}
 }
@@ -1660,7 +1660,7 @@ func TestSubagentPanelChronologicalOrder(t *testing.T) {
 	if strings.Contains(combined, "step 1") || strings.Contains(combined, "step 2") {
 		t.Errorf("did not expect superseded reasoning to remain visible:\n%s", combined)
 	}
-	if !(readFileIdx < answerIdx) {
+	if readFileIdx >= answerIdx {
 		t.Errorf("visible events not in chronological order: readFile=%d answer=%d\n%s",
 			readFileIdx, answerIdx, combined)
 	}

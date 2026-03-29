@@ -646,12 +646,94 @@ func TestResumedSubagentLoadTimeoutForAgent(t *testing.T) {
 	}
 }
 
+func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *testing.T) {
+	prev := resumedSubagentSelfLoadTimeout
+	resumedSubagentSelfLoadTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		resumedSubagentSelfLoadTimeout = prev
+	})
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "parent",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			return blockingResumeAdapter{loadDelay: 200 * time.Millisecond}, nil
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		console.restoreResumedSubagentPanelFromACP(context.Background(), "parent", resumedSubagentTarget{
+			SpawnID:   "child-1",
+			SessionID: "child-1",
+			Agent:     "self",
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("expected replay attach to stop after local load timeout")
+	}
+
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.SubagentDoneMsg)
+		if !ok {
+			continue
+		}
+		if msg.SpawnID == "child-1" && msg.State == "failed" {
+			t.Fatalf("expected resume load timeout to avoid terminal failed update, got %#v", msg)
+		}
+	}
+}
+
+func TestRestoreResumedSubagentPanelFromACP_LoadFailureEmitsFailed(t *testing.T) {
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "parent",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			return blockingResumeAdapter{loadErr: errors.New("load failed")}, nil
+		},
+	}
+
+	console.restoreResumedSubagentPanelFromACP(context.Background(), "parent", resumedSubagentTarget{
+		SpawnID:   "child-1",
+		SessionID: "child-1",
+		Agent:     "self",
+	})
+
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.SubagentDoneMsg)
+		if !ok {
+			continue
+		}
+		if msg.SpawnID == "child-1" && msg.State == "failed" {
+			return
+		}
+	}
+	t.Fatalf("expected failed terminal update after non-timeout load failure, got %#v", sender.Snapshot())
+}
+
 type resumeIndexStub struct {
 	resolveID string
 }
 
 type blockingResumeAdapter struct {
 	loadDelay time.Duration
+	loadErr   error
 	events    []*session.Event
 }
 
@@ -672,6 +754,9 @@ func (a blockingResumeAdapter) LoadSession(ctx context.Context, req internalacp.
 	case <-ctx.Done():
 		return internalacp.LoadedSessionState{}, ctx.Err()
 	case <-time.After(a.loadDelay):
+	}
+	if a.loadErr != nil {
+		return internalacp.LoadedSessionState{}, a.loadErr
 	}
 	return internalacp.LoadedSessionState{
 		Session: internalacp.AdapterSessionState{

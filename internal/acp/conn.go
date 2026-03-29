@@ -43,19 +43,26 @@ func (c *Conn) Serve(ctx context.Context, onRequest requestHandler, onNotificati
 	if c == nil {
 		return fmt.Errorf("acp: conn is nil")
 	}
+	var serveErr error
+	defer func() {
+		c.failPending(serveErr)
+	}()
 	reader := bufio.NewReader(c.reader)
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			serveErr = ctx.Err()
+			return serveErr
 		default:
 		}
 		line, err := reader.ReadBytes('\n')
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				serveErr = io.EOF
 				return nil
 			}
-			return err
+			serveErr = err
+			return serveErr
 		}
 		if len(line) == 0 {
 			continue
@@ -221,6 +228,42 @@ func (c *Conn) resolvePending(msg Message) {
 				pending.(pendingCall).ch <- msg
 			}
 		}
+	}
+}
+
+func (c *Conn) failPending(cause error) {
+	if c == nil {
+		return
+	}
+	rpcErr := pendingRPCError(cause)
+	c.pending.Range(func(key, value any) bool {
+		call, ok := value.(pendingCall)
+		if !ok {
+			c.pending.Delete(key)
+			return true
+		}
+		msg := Message{
+			JSONRPC: JSONRPCVersion,
+			ID:      key,
+			Error:   rpcErr,
+		}
+		select {
+		case call.ch <- msg:
+		default:
+		}
+		c.pending.Delete(key)
+		return true
+	})
+}
+
+func pendingRPCError(cause error) *RPCError {
+	switch {
+	case cause == nil:
+		return nil
+	case errors.Is(cause, io.EOF):
+		return &RPCError{Code: -32000, Message: "connection closed before response"}
+	default:
+		return &RPCError{Code: -32000, Message: cause.Error()}
 	}
 }
 

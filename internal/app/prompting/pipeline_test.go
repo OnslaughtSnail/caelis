@@ -81,7 +81,7 @@ func TestAssembleBuildsOrderedPrompt(t *testing.T) {
 	idxUser := strings.Index(text, "<user_custom_instructions>")
 	idxSkills := strings.Index(text, "Skills Metadata (auto-loaded, all active):")
 	idxContext := strings.Index(text, "<environment_context>")
-	if !(idxSystem >= 0 && idxSystem < idxUser && idxUser < idxSkills && idxSkills < idxContext) {
+	if idxSystem < 0 || idxSystem >= idxUser || idxUser >= idxSkills || idxSkills >= idxContext {
 		t.Fatalf("unexpected section order: system=%d user=%d skills=%d context=%d", idxSystem, idxUser, idxSkills, idxContext)
 	}
 }

@@ -2,13 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"path/filepath"
 	"slices"
 	"testing"
 
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 )
 
 func TestAvailableCommandNames_IncludesConfiguredExternalAgents(t *testing.T) {
@@ -130,4 +135,68 @@ func TestFormatExternalToolStart_UsesACPQuerySummary(t *testing.T) {
 	if got != `for "Shanghai weather"` {
 		t.Fatalf("expected ACP query summary, got %q", got)
 	}
+}
+
+func TestHandleExternalPermissionRequest_FullAccessAutoAllowsOnceWithoutPrompt(t *testing.T) {
+	prompter := &stubLineEditor{lines: []string{"n"}}
+	console := &cliConsole{
+		sessionMode: sessionmode.FullMode,
+		approver:    newTerminalApprover(prompter, io.Discard, newUI(io.Discard, true, false)),
+	}
+	console.approver.modeResolver = func() string { return console.sessionMode }
+
+	resp, err := console.handleExternalPermissionRequest(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child-copilot",
+		Options: []acpclient.PermissionOption{
+			{OptionID: "allow_always", Name: "Always allow", Kind: "allow_always"},
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
+		},
+	}, "copilot", &activeExternalAgentRun{sessionID: "child-copilot"})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if got := selectedPermissionOptionID(t, resp); got != "allow_once" {
+		t.Fatalf("expected allow_once, got %q", got)
+	}
+	if prompter.reads != 0 {
+		t.Fatalf("expected no interactive prompt, got %d reads", prompter.reads)
+	}
+}
+
+func TestHandleExternalPermissionRequest_FullAccessFallbackPromptsUser(t *testing.T) {
+	prompter := &stubLineEditor{lines: []string{"y"}}
+	console := &cliConsole{
+		sessionMode: sessionmode.FullMode,
+		approver:    newTerminalApprover(prompter, io.Discard, newUI(io.Discard, true, false)),
+	}
+	console.approver.modeResolver = func() string { return console.sessionMode }
+
+	resp, err := console.handleExternalPermissionRequest(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child-unknown",
+		Options: []acpclient.PermissionOption{
+			{OptionID: "approve", Name: "Approve"},
+			{OptionID: "reject", Name: "Reject"},
+		},
+	}, "unknown-agent", &activeExternalAgentRun{sessionID: "child-unknown"})
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if got := selectedPermissionOptionID(t, resp); got != "approve" {
+		t.Fatalf("expected prompted approval to choose approve, got %q", got)
+	}
+	if prompter.reads != 1 {
+		t.Fatalf("expected one interactive prompt, got %d reads", prompter.reads)
+	}
+}
+
+func selectedPermissionOptionID(t *testing.T, resp acpclient.RequestPermissionResponse) string {
+	t.Helper()
+	var selected struct {
+		OptionID string `json:"optionId"`
+	}
+	if err := json.Unmarshal(resp.Outcome, &selected); err != nil {
+		t.Fatalf("unmarshal permission outcome: %v", err)
+	}
+	return selected.OptionID
 }

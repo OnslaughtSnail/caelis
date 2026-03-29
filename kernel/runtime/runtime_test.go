@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
+	internalacp "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -897,10 +897,8 @@ func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	childACPState, _ := childState["acp"].(map[string]any)
-	childMeta, _ := childACPState["meta"].(map[string]any)
-	if got := coremeta.SelfSpawnDepthFromMeta(childMeta); got != 1 {
-		t.Fatalf("expected delegated self child to persist selfSpawnDepth=1, got %d in %#v", got, childState)
+	if !internalacp.IsDelegatedChild(anyMap(anyMap(childState["acp"])["meta"])) {
+		t.Fatalf("expected delegated child marker in child session state, got %#v", childState)
 	}
 	liveMu.Lock()
 	liveSnapshot := append([]sessionstream.Update(nil), liveUpdates...)
@@ -928,6 +926,13 @@ func asStringValue(value any) string {
 		return text
 	}
 	return ""
+}
+
+func anyMap(value any) map[string]any {
+	if typed, ok := value.(map[string]any); ok {
+		return typed
+	}
+	return nil
 }
 
 func TestRuntime_BuildInvocationContext_DisablesDelegateForChildRuns(t *testing.T) {

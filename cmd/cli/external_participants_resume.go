@@ -32,13 +32,16 @@ func (c *cliConsole) resumeExternalParticipantStream(ctx context.Context, partic
 		return
 	}
 	var ready atomic.Bool
-	updateCtx := context.WithoutCancel(ctx)
-	client, err := acpclient.Start(ctx, acpclient.Config{
+	observationCtx := context.WithoutCancel(ctx)
+	updateCtx := observationCtx
+	runState := &activeExternalAgentRun{}
+	runState.setSessionID(participant.ChildSessionID)
+	client, err := acpclient.Start(observationCtx, acpclient.Config{
 		Command:   strings.TrimSpace(desc.Command),
 		Args:      append([]string(nil), desc.Args...),
 		Env:       copyStringMap(desc.Env),
 		WorkDir:   c.resolveExternalAgentWorkDir(desc),
-		Runtime:   c.execRuntime,
+		Runtime:   c.executionRuntimeForSession(),
 		Workspace: c.workspace.CWD,
 		OnUpdate: func(env acpclient.UpdateEnvelope) {
 			if !ready.Load() {
@@ -51,15 +54,23 @@ func (c *cliConsole) resumeExternalParticipantStream(ctx context.Context, partic
 				toolCalls:   map[string]toolCallSnapshot{},
 			}, env)
 		},
+		OnPermissionRequest: func(reqCtx context.Context, req acpclient.RequestPermissionRequest) (acpclient.RequestPermissionResponse, error) {
+			return c.handleExternalPermissionRequest(reqCtx, req, strings.TrimSpace(desc.ID), runState)
+		},
 	})
 	if err != nil {
 		return
 	}
+	runState.setClient(client)
 	defer func() { _ = client.Close() }()
-	if _, err := client.Initialize(ctx); err != nil {
+	initCtx, initCancel := context.WithTimeout(observationCtx, resumedSubagentLoadTimeoutForAgent(participant.AgentID))
+	defer initCancel()
+	if _, err := client.Initialize(initCtx); err != nil {
 		return
 	}
-	if _, err := client.LoadSession(ctx, participant.ChildSessionID, c.resolveExternalAgentWorkDir(desc), nil); err != nil {
+	loadCtx, loadCancel := context.WithTimeout(observationCtx, resumedSubagentLoadTimeoutForAgent(participant.AgentID))
+	defer loadCancel()
+	if _, err := client.LoadSession(loadCtx, participant.ChildSessionID, c.resolveExternalAgentWorkDir(desc), nil); err != nil {
 		return
 	}
 	ready.Store(true)
