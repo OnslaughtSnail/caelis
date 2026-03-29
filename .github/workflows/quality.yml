@@ -21,7 +21,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5
+          version: v1.64.8
           args: ./...
 
       - name: Vet
