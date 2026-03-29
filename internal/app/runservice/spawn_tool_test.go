@@ -6,9 +6,6 @@ import (
 	"testing"
 	"time"
 
-	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
-	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
@@ -162,49 +159,20 @@ func TestSelfSpawnToolDeclarationOmitsLegacyContinuationArgs(t *testing.T) {
 	if _, ok := props["idle_timeout_seconds"]; ok {
 		t.Fatal("did not expect idle timeout arg in SPAWN declaration")
 	}
+	if got := toolImpl.Description(); !strings.Contains(got, "self or any configured ACP agent id such as codex, copilot, or gemini") || !strings.Contains(got, "result includes task_id; continue with TASK wait") || !strings.Contains(got, "use TASK write to start another turn in the same child session") {
+		t.Fatalf("expected SPAWN description to explain agent values and TASK flow, got %q", got)
+	}
+	agentProp, _ := props["agent"].(map[string]any)
 	yieldProp, _ := props["yield_time_ms"].(map[string]any)
 	timeoutProp, _ := props["timeout_ms"].(map[string]any)
-	if !strings.Contains(asString(yieldProp["description"]), "this call") {
+	if !strings.Contains(asString(agentProp["description"]), "codex, copilot, or gemini") {
+		t.Fatalf("expected agent declaration to include concrete examples, got %#v", agentProp)
+	}
+	if !strings.Contains(asString(yieldProp["description"]), "per-call wait") || !strings.Contains(asString(yieldProp["description"]), "result includes task_id") {
 		t.Fatalf("expected yield_time_ms declaration to explain per-call wait, got %#v", yieldProp)
 	}
-	if !strings.Contains(asString(timeoutProp["description"]), "independent from yield_time_ms") {
+	if !strings.Contains(asString(timeoutProp["description"]), "independent from yield_time_ms") || !strings.Contains(asString(timeoutProp["description"]), "task snapshot") {
 		t.Fatalf("expected timeout_ms declaration to explain total timeout, got %#v", timeoutProp)
-	}
-}
-
-func TestSelfSpawnToolRejectsNestedSelfSpawnFromSessionState(t *testing.T) {
-	toolImpl, err := NewSelfSpawnTool("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := &stubTaskManager{}
-	store := inmemory.New()
-	sess := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
-	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ReplaceState(context.Background(), sess, map[string]any{
-		"acp": map[string]any{
-			"meta": coremeta.WithSelfSpawnDepth(nil, 1),
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx := task.WithManager(context.Background(), manager)
-	ctx = session.WithStateContext(ctx, sess, store)
-	_, err = toolImpl.Run(ctx, map[string]any{
-		"agent":  "self",
-		"prompt": "nested child task",
-	})
-	if err == nil {
-		t.Fatal("expected nested self spawn to be rejected")
-	}
-	if !strings.Contains(err.Error(), "exceeded max depth 1") {
-		t.Fatalf("expected depth rejection, got %v", err)
-	}
-	if manager.lastStart.Prompt != "" {
-		t.Fatalf("did not expect task manager to start a child run, got %+v", manager.lastStart)
 	}
 }
 

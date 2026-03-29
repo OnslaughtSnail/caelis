@@ -27,7 +27,7 @@ func (t *taskTool) Name() string {
 }
 
 func (t *taskTool) Description() string {
-	return "Control async tasks from BASH or SPAWN. state is the task lifecycle status. Use wait to check progress, write to send bash stdin or continue a completed spawn session, cancel to stop a task, and list to inspect recent tasks."
+	return "Control async tasks from BASH or SPAWN. state is the task lifecycle status. Use wait to check progress on a running task. Use write to send stdin to a running BASH task, or to start a new follow-up turn on a completed SPAWN child session; you can do that multiple times, and each write makes the spawn task running again until it yields or completes. Use cancel to stop a task, and list to inspect recent tasks."
 }
 
 func (t *taskTool) Declaration() model.ToolDefinition {
@@ -48,11 +48,11 @@ func (t *taskTool) Declaration() model.ToolDefinition {
 				},
 				"input": map[string]any{
 					"type":        "string",
-					"description": "For action=write: send stdin to a running BASH task, or send a follow-up prompt to a completed SPAWN task.",
+					"description": "For action=write: send stdin to a running BASH task, or send a new follow-up prompt to a completed SPAWN task. SPAWN write is not valid while the child is still running; use TASK wait until it completes first.",
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "Optional wait before returning. Defaults to 5000 for wait/write.",
+					"description": "For action=wait or write: optional per-call wait before returning. Defaults to 5000. If the task is still active when this wait expires, the result keeps task_id so TASK can be called again.",
 				},
 				"offset": map[string]any{
 					"type":        "integer",

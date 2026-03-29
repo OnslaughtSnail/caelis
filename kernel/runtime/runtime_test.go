@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -888,19 +887,6 @@ func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 		if strings.TrimSpace(asStringValue(ev.Meta[metaDelegationID])) == "" {
 			t.Fatalf("expected delegation_id metadata, got %+v", ev.Meta)
 		}
-	}
-	childState, err := store.SnapshotState(context.Background(), &session.Session{
-		AppName: "app",
-		UserID:  "u",
-		ID:      childSessionID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	childACPState, _ := childState["acp"].(map[string]any)
-	childMeta, _ := childACPState["meta"].(map[string]any)
-	if got := coremeta.SelfSpawnDepthFromMeta(childMeta); got != 1 {
-		t.Fatalf("expected delegated self child to persist selfSpawnDepth=1, got %d in %#v", got, childState)
 	}
 	liveMu.Lock()
 	liveSnapshot := append([]sessionstream.Update(nil), liveUpdates...)

@@ -4,9 +4,7 @@ import "strings"
 
 const (
 	metaKeyRoot           = "caelis"
-	metaKeySelfSpawnDepth = "selfSpawnDepth"
-
-	DefaultSelfSpawnMaxDepth = 1
+	metaKeyDelegatedChild = "delegatedChild"
 )
 
 func CloneMeta(meta map[string]any) map[string]any {
@@ -28,21 +26,18 @@ func CloneMeta(meta map[string]any) map[string]any {
 	return out
 }
 
-func SelfSpawnDepthFromMeta(meta map[string]any) int {
+func IsDelegatedChild(meta map[string]any) bool {
 	if len(meta) == 0 {
-		return 0
+		return false
 	}
 	root, ok := meta[strings.TrimSpace(metaKeyRoot)].(map[string]any)
 	if !ok || len(root) == 0 {
-		return 0
+		return false
 	}
-	return metaIntValue(root[metaKeySelfSpawnDepth])
+	return metaBoolValue(root[metaKeyDelegatedChild])
 }
 
-func WithSelfSpawnDepth(meta map[string]any, depth int) map[string]any {
-	if depth < 0 {
-		depth = 0
-	}
+func WithDelegatedChild(meta map[string]any, delegated bool) map[string]any {
 	out := CloneMeta(meta)
 	if out == nil {
 		out = map[string]any{}
@@ -51,20 +46,18 @@ func WithSelfSpawnDepth(meta map[string]any, depth int) map[string]any {
 	if root == nil {
 		root = map[string]any{}
 	}
-	root[metaKeySelfSpawnDepth] = depth
+	root[metaKeyDelegatedChild] = delegated
 	out[metaKeyRoot] = root
 	return out
 }
 
-func metaIntValue(value any) int {
+func metaBoolValue(value any) bool {
 	switch typed := value.(type) {
-	case int:
+	case bool:
 		return typed
-	case int64:
-		return int(typed)
-	case float64:
-		return int(typed)
+	case string:
+		return strings.EqualFold(strings.TrimSpace(typed), "true")
 	default:
-		return 0
+		return false
 	}
 }

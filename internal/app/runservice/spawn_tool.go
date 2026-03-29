@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
-	appacpmeta "github.com/OnslaughtSnail/caelis/internal/app/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
@@ -27,7 +25,7 @@ func NewSelfSpawnTool(defaultAgent string) (tool.Tool, error) {
 func (t *selfSpawnTool) Name() string { return tool.SpawnToolName }
 
 func (t *selfSpawnTool) Description() string {
-	return "Start a new ACP child session for bounded delegated work."
+	return "Start a new ACP child session for bounded delegated work. agent accepts self or any configured ACP agent id such as codex, copilot, or gemini. If the child is still running when yield_time_ms elapses, the result includes task_id; continue with TASK wait, and once that child session reaches completed you can use TASK write to start another turn in the same child session."
 }
 
 func (t *selfSpawnTool) Declaration() model.ToolDefinition {
@@ -39,7 +37,7 @@ func (t *selfSpawnTool) Declaration() model.ToolDefinition {
 			"properties": map[string]any{
 				"agent": map[string]any{
 					"type":        "string",
-					"description": "Optional target agent. Defaults to the configured default agent, then self.",
+					"description": "Optional target agent id. Use self or any configured ACP agent id such as codex, copilot, or gemini. Defaults to the configured default agent, then self.",
 				},
 				"prompt": map[string]any{
 					"type":        "string",
@@ -47,11 +45,11 @@ func (t *selfSpawnTool) Declaration() model.ToolDefinition {
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",
-					"description": "Optional wait for this call before returning in milliseconds. Defaults to 30000.",
+					"description": "Optional per-call wait for this SPAWN before returning in milliseconds. Defaults to 30000. If the child is still running when this wait expires, the result includes task_id and you continue with TASK wait.",
 				},
 				"timeout_ms": map[string]any{
 					"type":        "integer",
-					"description": "Optional total timeout for the child task in milliseconds. This is independent from yield_time_ms.",
+					"description": "Optional total timeout for the child task in milliseconds. This is independent from yield_time_ms. If that total timeout is reached, the returned payload is still a task snapshot; inspect state and msg/output to see the terminal timeout result.",
 				},
 			},
 			"required":             []string{"prompt"},
@@ -79,9 +77,6 @@ func (t *selfSpawnTool) Run(ctx context.Context, args map[string]any) (map[strin
 	}
 	if agentName == "" {
 		agentName = "self"
-	}
-	if strings.EqualFold(agentName, "self") && appacpmeta.SelfSpawnDepthFromContext(ctx) >= coremeta.DefaultSelfSpawnMaxDepth {
-		return nil, fmt.Errorf("tool: SPAWN self exceeded max depth %d", coremeta.DefaultSelfSpawnMaxDepth)
 	}
 	for _, legacy := range []string{"session", "session_id", "new_session", "yield_seconds", "timeout_seconds"} {
 		if _, ok := args[legacy]; ok {

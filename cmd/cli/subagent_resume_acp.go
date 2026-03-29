@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -230,6 +231,7 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 		c.forwardResumedACPUpdate(observationCtx, rootSessionID, target, state, env)
 	})
 	if err != nil {
+		c.handleResumedSubagentAttachFailure(observationCtx, rootSessionID, target, err)
 		return
 	}
 	defer cleanup()
@@ -237,6 +239,7 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 	initCtx, initCancel := context.WithTimeout(observationCtx, resumedSubagentLoadTimeoutForAgent(target.Agent))
 	defer initCancel()
 	if _, err := client.Initialize(initCtx); err != nil {
+		c.handleResumedSubagentAttachFailure(observationCtx, rootSessionID, target, err)
 		return
 	}
 	loadCtx, loadCancel := context.WithTimeout(observationCtx, resumedSubagentLoadTimeoutForAgent(target.Agent))
@@ -246,9 +249,25 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 		loadCWD = c.workspace.CWD
 	}
 	if _, err := client.LoadSession(loadCtx, target.SessionID, loadCWD, nil); err != nil {
+		c.handleResumedSubagentAttachFailure(observationCtx, rootSessionID, target, err)
 		return
 	}
 	state.markLoaded()
+}
+
+func (c *cliConsole) handleResumedSubagentAttachFailure(ctx context.Context, rootSessionID string, target resumedSubagentTarget, err error) {
+	if c == nil || shouldSuppressResumedSubagentAttachFailure(err) {
+		return
+	}
+	c.dispatchSubagentDomainUpdate(ctx, subagentDomainUpdate{
+		Kind:   subagentDomainTerminal,
+		Target: resumedSubagentProjectionTarget(rootSessionID, target),
+		Status: "failed",
+	})
+}
+
+func shouldSuppressResumedSubagentAttachFailure(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func resumedSubagentLoadTimeoutForAgent(agentName string) time.Duration {
@@ -266,6 +285,7 @@ func (c *cliConsole) startResumedSubagentACPClient(ctx context.Context, target r
 	if ctx == nil {
 		return nil, nil, fmt.Errorf("cli: context is required")
 	}
+	runtime := c.executionRuntimeForSession()
 	switch desc.Transport {
 	case appagents.TransportSelf:
 		if c.newACPAdapter == nil {
@@ -275,7 +295,7 @@ func (c *cliConsole) startResumedSubagentACPClient(ctx context.Context, target r
 		clientReader, serverWriter := io.Pipe()
 		serverConn := internalacp.NewConn(serverReader, serverWriter)
 		client, err := acpclient.StartLoopback(ctx, acpclient.Config{
-			Runtime:   c.execRuntime,
+			Runtime:   runtime,
 			Workspace: c.workspace.CWD,
 			WorkDir:   c.workspace.CWD,
 			OnUpdate:  onUpdate,
@@ -317,7 +337,7 @@ func (c *cliConsole) startResumedSubagentACPClient(ctx context.Context, target r
 			Args:      append([]string(nil), desc.Args...),
 			Env:       copyStringMap(desc.Env),
 			WorkDir:   c.resolveResumedSubagentWorkDir(desc),
-			Runtime:   c.execRuntime,
+			Runtime:   runtime,
 			Workspace: c.workspace.CWD,
 			OnUpdate:  onUpdate,
 		})
@@ -432,7 +452,8 @@ func (s *resumedACPReplayState) contentEvent(update acpclient.ContentChunk) *ses
 			ev.Message = model.NewTextMessage(model.RoleAssistant, replaceSubagentReplayText(&s.assistant, text))
 			return ev
 		}
-		ev.Message = model.NewTextMessage(model.RoleAssistant, appendSubagentReplayText(&s.assistant, text))
+		appendSubagentReplayText(&s.assistant, text)
+		ev.Message = model.NewTextMessage(model.RoleAssistant, text)
 		ev.Meta = map[string]any{"partial": true, "channel": "answer"}
 		return ev
 	case acpclient.UpdateAgentThought:
@@ -440,7 +461,8 @@ func (s *resumedACPReplayState) contentEvent(update acpclient.ContentChunk) *ses
 			ev.Message = model.NewReasoningMessage(model.RoleAssistant, replaceSubagentReplayText(&s.reasoning, text), model.ReasoningVisibilityVisible)
 			return ev
 		}
-		ev.Message = model.NewReasoningMessage(model.RoleAssistant, appendSubagentReplayText(&s.reasoning, text), model.ReasoningVisibilityVisible)
+		appendSubagentReplayText(&s.reasoning, text)
+		ev.Message = model.NewReasoningMessage(model.RoleAssistant, text, model.ReasoningVisibilityVisible)
 		ev.Meta = map[string]any{"partial": true, "channel": "reasoning"}
 		return ev
 	default:

@@ -103,6 +103,8 @@ const (
 	defaultRemoteACPInitTimeout = 6 * time.Minute
 )
 
+var startACPClient = acpclient.Start
+
 type readyState struct {
 	sessionID string
 	meta      runtime.DelegationMetadata
@@ -460,7 +462,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		if desc.Transport == appagents.TransportSelf {
 			return r.startLoopbackClient(ctx, target.requestedSessionID, metaBase, target.childCWD, sessionMeta, func() string { return strings.TrimSpace(sessionIDForPermissions) }, onUpdate, onClient, pauseWatchdog, resumeWatchdog)
 		}
-		client, err := acpclient.Start(ctx, acpclient.Config{
+		client, err := startACPClient(ctx, acpclient.Config{
 			Command:             strings.TrimSpace(desc.Command),
 			Args:                append([]string(nil), desc.Args...),
 			Env:                 copyStringMap(desc.Env),
@@ -598,13 +600,13 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		return nil, nil, err
 	}
 
-	serveCtx, serveCancel := context.WithCancel(runtime.AttachDelegationContext(ctx, runtime.DelegationMetadata{
+	serveCtx, serveCancel := newLoopbackServeContext(ctx, runtime.DelegationMetadata{
 		ParentSessionID: meta.ParentSessionID,
 		ChildSessionID:  requestedSessionID,
 		ParentToolCall:  meta.ParentToolCall,
 		ParentToolName:  meta.ParentToolName,
 		DelegationID:    meta.DelegationID,
-	}))
+	})
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- server.Serve(serveCtx)
@@ -618,6 +620,28 @@ func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, request
 		_ = client.Close()
 	}
 	return client, cleanup, nil
+}
+
+func newLoopbackServeContext(ctx context.Context, meta runtime.DelegationMetadata) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if approver, ok := toolexec.ApproverFromContext(ctx); ok {
+		base = toolexec.WithApprover(base, approver)
+	}
+	if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
+		base = policy.WithToolAuthorizer(base, authorizer)
+	}
+	var cancel context.CancelFunc
+	if deadline, ok := ctx.Deadline(); ok {
+		base, cancel = context.WithDeadline(base, deadline)
+	} else {
+		base, cancel = context.WithCancel(base)
+	}
+	stop := context.AfterFunc(ctx, cancel)
+	serveCtx := runtime.AttachDelegationContext(base, meta)
+	return serveCtx, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (r *selfACPSubagentRunner) newACPAdapter(conn *internalacp.Conn) (internalacp.Adapter, error) {
@@ -702,12 +726,11 @@ func (r *selfACPSubagentRunner) childSessionMeta(ctx context.Context, childSessi
 	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
 		return meta
 	}
-	parentMeta := r.sessionMeta(ctx, r.parent.ID)
-	depth := internalacp.SelfSpawnDepthFromMeta(parentMeta)
+	meta := internalacp.CloneMeta(r.sessionMeta(ctx, r.parent.ID))
 	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
-		depth++
+		return internalacp.WithDelegatedChild(meta, true)
 	}
-	return internalacp.WithSelfSpawnDepth(parentMeta, depth)
+	return meta
 }
 
 func (r *selfACPSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {

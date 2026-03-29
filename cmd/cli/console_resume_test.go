@@ -658,6 +658,7 @@ func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *test
 		baseCtx:        context.Background(),
 		appName:        "app",
 		userID:         "u",
+		sessionID:      "parent",
 		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
@@ -693,12 +694,46 @@ func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *test
 	}
 }
 
+func TestRestoreResumedSubagentPanelFromACP_LoadFailureEmitsFailed(t *testing.T) {
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "parent",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
+			return blockingResumeAdapter{loadErr: errors.New("load failed")}, nil
+		},
+	}
+
+	console.restoreResumedSubagentPanelFromACP(context.Background(), "parent", resumedSubagentTarget{
+		SpawnID:   "child-1",
+		SessionID: "child-1",
+		Agent:     "self",
+	})
+
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.SubagentDoneMsg)
+		if !ok {
+			continue
+		}
+		if msg.SpawnID == "child-1" && msg.State == "failed" {
+			return
+		}
+	}
+	t.Fatalf("expected failed terminal update after non-timeout load failure, got %#v", sender.Snapshot())
+}
+
 type resumeIndexStub struct {
 	resolveID string
 }
 
 type blockingResumeAdapter struct {
 	loadDelay time.Duration
+	loadErr   error
 	events    []*session.Event
 }
 
@@ -719,6 +754,9 @@ func (a blockingResumeAdapter) LoadSession(ctx context.Context, req internalacp.
 	case <-ctx.Done():
 		return internalacp.LoadedSessionState{}, ctx.Err()
 	case <-time.After(a.loadDelay):
+	}
+	if a.loadErr != nil {
+		return internalacp.LoadedSessionState{}, a.loadErr
 	}
 	return internalacp.LoadedSessionState{
 		Session: internalacp.AdapterSessionState{

@@ -57,6 +57,47 @@ func TestACPSessionUpdateBridge_EmitsAssistantStream(t *testing.T) {
 	}
 }
 
+func TestACPSessionUpdateBridge_EmitsDeltaChunks(t *testing.T) {
+	bridge := newACPSessionUpdateBridge(runtime.DelegationMetadata{
+		ParentSessionID: "parent",
+		ChildSessionID:  "child",
+		ParentToolCall:  "call-spawn-1",
+		ParentToolName:  tool.SpawnToolName,
+		DelegationID:    "dlg-1",
+	}, "self", "child", "/workspace", newRemoteSubagentTracker(), nil, nil)
+	var (
+		mu      sync.Mutex
+		updates []sessionstream.Update
+	)
+	ctx := sessionstream.WithStreamer(context.Background(), sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
+		mu.Lock()
+		updates = append(updates, update)
+		mu.Unlock()
+	}))
+
+	for _, chunk := range []string{"alpha", " beta"} {
+		bridge.Emit(ctx, acpclient.UpdateEnvelope{
+			SessionID: "child",
+			Update: acpclient.ContentChunk{
+				SessionUpdate: acpclient.UpdateAgentMessage,
+				Content:       mustMarshalRaw(acpclient.TextChunk{Type: "text", Text: chunk}),
+			},
+		})
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(updates) != 2 {
+		t.Fatalf("expected 2 updates, got %d", len(updates))
+	}
+	if got := updates[0].Event.Message.TextContent(); got != "alpha" {
+		t.Fatalf("expected first delta chunk, got %q", got)
+	}
+	if got := updates[1].Event.Message.TextContent(); got != " beta" {
+		t.Fatalf("expected second delta chunk, got %q", got)
+	}
+}
+
 func TestACPSessionUpdateBridge_EmitsToolLifecycle(t *testing.T) {
 	bridge := newACPSessionUpdateBridge(runtime.DelegationMetadata{
 		ParentSessionID: "parent",

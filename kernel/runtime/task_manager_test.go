@@ -595,6 +595,34 @@ func TestTaskManager_StatusUsesSubagentProgressFromNestedToolOutput(t *testing.T
 	}
 }
 
+func TestTaskManager_WaitRejectsTaskFromOtherSession(t *testing.T) {
+	store := taskinmemory.New()
+	entry := &task.Entry{
+		TaskID:         "t-other-session",
+		Kind:           task.KindSpawn,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "child"},
+		Title:          "spawn job",
+		State:          task.StateCompleted,
+		Running:        false,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Result: map[string]any{
+			"state": string(task.StateCompleted),
+		},
+	}
+	if err := store.Upsert(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := newTaskManager(nil, nil, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, nil)
+	_, err := manager.Wait(context.Background(), task.ControlRequest{TaskID: entry.TaskID})
+	if !errors.Is(err, task.ErrTaskNotFound) {
+		t.Fatalf("expected cross-session task lookup to be hidden as not found, got %v", err)
+	}
+}
+
 func TestTaskManager_BashWaitDetectsWaitingInputPrompt(t *testing.T) {
 	runner := &stubAsyncTaskRunner{
 		stdoutByMarker: map[int64][]byte{

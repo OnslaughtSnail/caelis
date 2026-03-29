@@ -17,6 +17,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 func TestServiceNewLoadAndRestoreState(t *testing.T) {
@@ -312,22 +313,22 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 		CWD: "/workspace/project",
 		Meta: map[string]any{
 			"caelis": map[string]any{
-				"selfSpawnDepth": 0,
+				"delegatedChild": true,
 			},
 		},
 	}, internalacp.ClientCapabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertMeta := func(wantDepth int, wantTrace string, wantRequest string) {
+	assertMeta := func(wantDelegated bool, wantTrace string, wantRequest string) {
 		t.Helper()
 		values, err := svc.store.SnapshotState(ctx, svc.sessionRef(created.SessionID))
 		if err != nil {
 			t.Fatal(err)
 		}
 		meta := anyMap(anyMap(values["acp"])["meta"])
-		if got := internalacp.SelfSpawnDepthFromMeta(meta); got != wantDepth {
-			t.Fatalf("expected self spawn depth %d, got %d", wantDepth, got)
+		if got := internalacp.IsDelegatedChild(meta); got != wantDelegated {
+			t.Fatalf("expected delegatedChild=%t, got %#v", wantDelegated, meta)
 		}
 		caelisMeta := anyMap(meta["caelis"])
 		traceValue, _ := caelisMeta["trace"].(string)
@@ -340,7 +341,7 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 		}
 	}
 
-	assertMeta(0, "", "")
+	assertMeta(true, "", "")
 
 	if _, err := svc.LoadSession(ctx, internalacp.LoadSessionRequest{
 		SessionID: created.SessionID,
@@ -353,7 +354,7 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 	}, internalacp.ClientCapabilities{}); err != nil {
 		t.Fatal(err)
 	}
-	assertMeta(0, "load-1", "")
+	assertMeta(true, "load-1", "")
 
 	result, err := svc.StartPrompt(ctx, internalacp.StartPromptRequest{
 		SessionID: created.SessionID,
@@ -373,12 +374,178 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	assertMeta(0, "load-1", "prompt-1")
+	assertMeta(true, "load-1", "prompt-1")
+}
+
+func TestServiceSessionServiceDisablesSpawnForDelegatedChildSessions(t *testing.T) {
+	svc, cleanup := newTestService(t, testServiceConfig{})
+	defer cleanup()
+
+	ctx := context.Background()
+	rootState, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+		CWD: "/workspace/project",
+	}, internalacp.ClientCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootSess, err := svc.session(rootState.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootSvc, err := svc.sessionService(rootSess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootTools, err := rootSvc.VisibleTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !toolListContains(rootTools, tool.SpawnToolName) {
+		t.Fatalf("expected top-level ACP session to expose %q, got %+v", tool.SpawnToolName, toolNames(rootTools))
+	}
+
+	childState, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+		CWD: "/workspace/project",
+		Meta: map[string]any{
+			"caelis": map[string]any{
+				"delegatedChild": true,
+			},
+		},
+	}, internalacp.ClientCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childSess, err := svc.session(childState.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childSvc, err := svc.sessionService(childSess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childTools, err := childSvc.VisibleTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if toolListContains(childTools, tool.SpawnToolName) {
+		t.Fatalf("expected delegated child ACP session to hide %q, got %+v", tool.SpawnToolName, toolNames(childTools))
+	}
+}
+
+func TestServiceDelegatedChildPromptRemovesSpawnGuidance(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = toolexec.Close(execRT) }()
+
+	llm := &scriptedLLM{
+		calls: [][]*model.Response{
+			{{Message: model.NewTextMessage(model.RoleAssistant, "child done")}},
+		},
+	}
+	var capturedPrompt string
+	svc, err := New(Config{
+		Runtime:         rt,
+		Store:           store,
+		Model:           llm,
+		AppName:         "app",
+		UserID:          "u",
+		WorkspaceRoot:   "/workspace",
+		DefaultModeID:   "default",
+		SessionModes:    []internalacp.SessionMode{{ID: "default", Name: "Default"}},
+		EnableSelfSpawn: true,
+		BuildSystemPrompt: func(string) (string, error) {
+			return strings.Join([]string{
+				"## Capability Guidance",
+				"",
+				"- Tool families: use READ/SEARCH/GLOB/LIST to inspect, WRITE/PATCH for targeted file changes, BASH for shell work, TASK for async follow-up, and SPAWN for delegated child sessions.",
+				"- Delegation: keep critical-path decisions in the current session and use child sessions for bounded side work or specialization.",
+				"",
+				"## Agent Delegation",
+				"",
+				"- Use SPAWN only for bounded delegated work or specialization.",
+			}, "\n"), nil
+		},
+		NewSessionResources: func(context.Context, string, string, internalacp.ClientCapabilities, func() string) (*internalacp.SessionResources, error) {
+			return &internalacp.SessionResources{Runtime: execRT}, nil
+		},
+		NewAgent: func(stream bool, _ string, systemPrompt string, _ internalacp.AgentSessionConfig) (agent.Agent, error) {
+			capturedPrompt = systemPrompt
+			return llmagent.New(llmagent.Config{
+				Name:              "test-agent",
+				SystemPrompt:      systemPrompt,
+				StreamModel:       stream,
+				EmitPartialEvents: stream,
+			})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := svc.NewSession(context.Background(), internalacp.NewSessionRequest{
+		CWD: "/workspace/project",
+		Meta: map[string]any{
+			"caelis": map[string]any{
+				"delegatedChild": true,
+			},
+		},
+	}, internalacp.ClientCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.StartPrompt(context.Background(), internalacp.StartPromptRequest{
+		SessionID: created.SessionID,
+		InputText: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = result.Handle.Close() }()
+	_, errs := drainPromptEvents(result.Handle.Events())
+	if len(errs) > 0 {
+		t.Fatalf("unexpected prompt errors: %v", errs)
+	}
+	if strings.Contains(capturedPrompt, "SPAWN for delegated child sessions") {
+		t.Fatalf("expected delegated child prompt to drop SPAWN tool guidance, got %q", capturedPrompt)
+	}
+	if strings.Contains(capturedPrompt, "## Agent Delegation") {
+		t.Fatalf("expected delegated child prompt to drop agent delegation section, got %q", capturedPrompt)
+	}
+	if !strings.Contains(capturedPrompt, "cannot call SPAWN") {
+		t.Fatalf("expected delegated child prompt to explain SPAWN is unavailable, got %q", capturedPrompt)
+	}
 }
 
 type testServiceConfig struct {
 	llm          model.LLM
 	listSessions internalacp.SessionListFactory
+}
+
+func toolListContains(tools []tool.Tool, name string) bool {
+	for _, one := range tools {
+		if one != nil && strings.EqualFold(one.Name(), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolNames(tools []tool.Tool) []string {
+	out := make([]string, 0, len(tools))
+	for _, one := range tools {
+		if one == nil {
+			continue
+		}
+		out = append(out, one.Name())
+	}
+	return out
 }
 
 func newTestService(t *testing.T, cfg testServiceConfig) (*Service, func()) {
@@ -416,7 +583,8 @@ func newTestService(t *testing.T, cfg testServiceConfig) (*Service, func()) {
 			{ID: "default", Name: "Default"},
 			{ID: "plan", Name: "Plan"},
 		},
-		DefaultModeID: "default",
+		DefaultModeID:   "default",
+		EnableSelfSpawn: true,
 		SessionConfig: []internalacp.SessionConfigOptionTemplate{
 			{
 				ID:           "mode",

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/task"
@@ -41,6 +42,9 @@ func (m *runtimeTaskManager) persistRecord(ctx context.Context, record *task.Rec
 func (m *runtimeTaskManager) ensureRecord(ctx context.Context, taskID string) (*task.Record, error) {
 	record, err := m.registry.Get(taskID)
 	if err == nil {
+		if !m.taskBelongsToCurrentSession(record) {
+			return nil, task.ErrTaskNotFound
+		}
 		return record, nil
 	}
 	if m == nil || m.store == nil {
@@ -48,12 +52,32 @@ func (m *runtimeTaskManager) ensureRecord(ctx context.Context, taskID string) (*
 	}
 	entry, storeErr := m.store.Get(ctx, taskID)
 	if storeErr != nil {
+		if errors.Is(storeErr, task.ErrTaskNotFound) {
+			return nil, task.ErrTaskNotFound
+		}
 		return nil, storeErr
 	}
 	record = entryToRecord(entry)
+	if !m.taskBelongsToCurrentSession(record) {
+		return nil, task.ErrTaskNotFound
+	}
 	record.Backend = m.rebuildController(entry)
 	m.registry.Put(record)
 	return record, nil
+}
+
+func (m *runtimeTaskManager) taskBelongsToCurrentSession(record *task.Record) bool {
+	if m == nil || record == nil {
+		return false
+	}
+	if m.parent == nil {
+		return true
+	}
+	return sameTaskSession(record.Session, task.SessionRef{
+		AppName:   m.parent.appName,
+		UserID:    m.parent.userID,
+		SessionID: m.parent.sessionID,
+	})
 }
 
 func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controller {

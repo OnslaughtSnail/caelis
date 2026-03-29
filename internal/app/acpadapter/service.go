@@ -578,7 +578,7 @@ func (s *Service) sessionService(sess *managedSession) (*sessionsvc.Service, err
 		WorkspaceRoot:         s.workspaceRoot,
 		TaskRegistry:          s.taskRegistry,
 		EnablePlan:            s.enablePlan,
-		EnableSelfSpawn:       s.enableSelfSpawn,
+		EnableSelfSpawn:       s.enableSelfSpawnForSession(sess),
 		SubagentRunnerFactory: s.subagentRunnerFactory,
 	}
 	if sess != nil && sess.resources != nil {
@@ -592,6 +592,16 @@ func (s *Service) sessionService(sess *managedSession) (*sessionsvc.Service, err
 		return nil, fmt.Errorf("acpadapter: session service: %w", err)
 	}
 	return service, nil
+}
+
+func (s *Service) enableSelfSpawnForSession(sess *managedSession) bool {
+	if s == nil || !s.enableSelfSpawn {
+		return false
+	}
+	if sess == nil {
+		return true
+	}
+	return !internalacp.IsDelegatedChild(sess.metaSnapshot())
 }
 
 func (s *Service) baseSessionService(sess *managedSession) (*sessionsvc.Service, error) {
@@ -778,6 +788,7 @@ func (s *Service) ensurePromptSnapshot(_ context.Context, sess *managedSession) 
 	if err != nil {
 		return "", err
 	}
+	promptText = s.adjustSystemPrompt(sess, promptText)
 	promptText = strings.TrimSpace(promptText)
 	if promptText == "" {
 		return "", fmt.Errorf("acpadapter: system prompt is empty")
@@ -790,6 +801,58 @@ func (s *Service) ensurePromptSnapshot(_ context.Context, sess *managedSession) 
 	sess.promptText = promptText
 	sess.stateMu.Unlock()
 	return promptText, nil
+}
+
+func (s *Service) adjustSystemPrompt(sess *managedSession, promptText string) string {
+	if sess == nil || !internalacp.IsDelegatedChild(sess.metaSnapshot()) {
+		return strings.TrimSpace(promptText)
+	}
+	promptText = stripMarkdownSection(promptText, "## Agent Delegation")
+	promptText = stripPromptLines(promptText, func(line string) bool {
+		trimmed := strings.TrimSpace(line)
+		return strings.Contains(trimmed, "SPAWN for delegated child sessions") ||
+			strings.Contains(trimmed, "use child sessions for bounded side work or specialization")
+	})
+	promptText = strings.TrimSpace(promptText)
+	const constraint = "## Session Constraints\n\nThis delegated ACP child session cannot call SPAWN. Complete the assigned task with the tools available in this session."
+	if promptText == "" {
+		return constraint
+	}
+	return strings.TrimSpace(promptText + "\n\n" + constraint)
+}
+
+func stripMarkdownSection(text string, heading string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	heading = strings.TrimSpace(heading)
+	skip := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == heading {
+			skip = true
+			continue
+		}
+		if skip && strings.HasPrefix(trimmed, "## ") {
+			skip = false
+		}
+		if skip {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func stripPromptLines(text string, drop func(string) bool) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if drop != nil && drop(line) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func (s *Service) restoreSessionState(state map[string]any) (string, map[string]string, string, []internalacp.PlanEntry, map[string]any) {

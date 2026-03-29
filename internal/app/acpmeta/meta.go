@@ -30,7 +30,3 @@ func SessionMetaFromContext(ctx context.Context) map[string]any {
 	}
 	return SessionMetaFromState(values)
 }
-
-func SelfSpawnDepthFromContext(ctx context.Context) int {
-	return coremeta.SelfSpawnDepthFromMeta(SessionMetaFromContext(ctx))
-}
