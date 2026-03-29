@@ -146,7 +146,7 @@ func (l *landlockRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 	return result, fmt.Errorf("tool: landlock sandbox command failed: %w; %s", waitErr, commandOutputSummary(result))
 }
 
-func (l *landlockRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+func (l *landlockRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
 	if req.TTY {
 		return "", fmt.Errorf("tool: landlock async tty is not supported")
 	}
@@ -256,7 +256,7 @@ func (l *landlockRunner) probeHelper(ctx context.Context) error {
 		return fmt.Errorf("resolve landlock helper path: %w", err)
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		return fmt.Errorf("landlock helper probe requires context")
 	}
 	cmd := l.execCommand(ctx, helperPath, internalHelperCommand, "--probe")
 	var stderr bytes.Buffer
@@ -532,7 +532,7 @@ func installRestrictedNetworkSeccomp() error {
 }
 
 func buildRestrictedNetworkSeccompProgram() (unix.SockFprog, error) {
-	deny := uint32(unix.SECCOMP_RET_ERRNO | (uint32(unix.EPERM) & unix.SECCOMP_RET_DATA))
+	deny := uint32(unix.SECCOMP_RET_ERRNO | (unix.EPERM & unix.SECCOMP_RET_DATA))
 	allow := uint32(unix.SECCOMP_RET_ALLOW)
 	kill := uint32(unix.SECCOMP_RET_KILL_PROCESS)
 
