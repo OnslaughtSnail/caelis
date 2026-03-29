@@ -242,9 +242,7 @@ func reasoningProfileForConfig(cfg modelproviders.Config) reasoningProfile {
 	if profile.Mode == "" {
 		levels := normalizeReasoningLevels(cfg.ReasoningLevels)
 		efforts := make([]string, 0, len(levels))
-		for _, level := range levels {
-			efforts = append(efforts, level)
-		}
+		efforts = append(efforts, levels...)
 		switch {
 		case len(efforts) > 0:
 			profile.Mode = reasoningModeEffort

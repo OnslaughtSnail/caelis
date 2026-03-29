@@ -686,18 +686,18 @@ func TestSlashArgOverlayEnterBuildsModelCommand(t *testing.T) {
 			return tuievents.TaskResultMsg{}
 		},
 		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
-			switch {
-			case command == "model":
+			switch command {
+			case "model":
 				return []SlashArgCandidate{
 					{Value: "use", Display: "use"},
 					{Value: "del", Display: "del"},
 				}, nil
-			case command == "model use":
+			case "model use":
 				return []SlashArgCandidate{
 					{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
 					{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
 				}, nil
-			case command == "model use xiaomi/mimo-v2-flash":
+			case "model use xiaomi/mimo-v2-flash":
 				return []SlashArgCandidate{
 					{Value: "off", Display: "off"},
 					{Value: "on", Display: "on"},
@@ -763,13 +763,13 @@ func TestModelWizardOpensOnTrailingSpaceAndAdvancesToAliasStep(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
 		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
-			switch {
-			case command == "model":
+			switch command {
+			case "model":
 				return []SlashArgCandidate{
 					{Value: "use", Display: "use"},
 					{Value: "del", Display: "del"},
 				}, nil
-			case command == "model use":
+			case "model use":
 				return []SlashArgCandidate{
 					{Value: "deepseek/deepseek-chat", Display: "deepseek/deepseek-chat"},
 					{Value: "xiaomi/mimo-v2-flash", Display: "xiaomi/mimo-v2-flash"},
@@ -2810,7 +2810,7 @@ func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 	if bashIdx < 0 || bashLineIdx < 0 || spawnCallIdx < 0 || spawnLineIdx < 0 {
 		t.Fatalf("expected call lines and anchored outputs, got:\n%s", view)
 	}
-	if !(bashIdx < bashLineIdx && bashLineIdx < spawnCallIdx && spawnCallIdx < spawnLineIdx) {
+	if bashIdx >= bashLineIdx || bashLineIdx >= spawnCallIdx || spawnCallIdx >= spawnLineIdx {
 		t.Fatalf("expected each tool output block below its own call line, got:\n%s", view)
 	}
 }
@@ -3815,7 +3815,7 @@ func TestCursorPositionAccountsForPendingQueueDrawer(t *testing.T) {
 	if expectedY < 0 {
 		t.Fatalf("failed to locate input line %q in rendered view", inputLine)
 	}
-	if got := view.Cursor.Position.Y; got != expectedY {
+	if got := view.Cursor.Y; got != expectedY {
 		start := maxInt(0, expectedY-4)
 		end := minInt(len(lines), expectedY+3)
 		t.Fatalf("expected cursor Y to match input line with pending drawer, got %d want %d; lines=%q", got, expectedY, lines[start:end])

@@ -235,7 +235,7 @@ func (m *Model) applyStreamBlockImmediate(streamKind string, actor string, text 
 	if m.activeActivityID != "" && streamKind == "answer" && strings.TrimSpace(text) != "" {
 		m.finalizeActivityBlock()
 	}
-	if text == "" && !(streamKind == "reasoning" && final) {
+	if text == "" && (streamKind != "reasoning" || !final) {
 		return m, nil
 	}
 	if streamKind == "reasoning" {

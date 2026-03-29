@@ -213,7 +213,7 @@ func normalizeMap(m map[string]any) string {
 		}
 		sb.WriteString(k)
 		sb.WriteByte(':')
-		sb.WriteString(fmt.Sprintf("%v", m[k]))
+		fmt.Fprintf(&sb, "%v", m[k])
 	}
 	sb.WriteByte('}')
 	return sb.String()

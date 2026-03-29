@@ -458,10 +458,7 @@ func isDangerousPathTarget(target string) bool {
 	case "/", "/*", "/.", "~", "~/", "~/*", ".", "./", "./*", "..", "../", "../*", "/root", "/root/":
 		return true
 	}
-	if strings.HasPrefix(trimmed, "/root/") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(trimmed, "/root/")
 }
 
 func hasArgPrefix(args []string, prefix string) bool {

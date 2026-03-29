@@ -3,7 +3,6 @@ package shell
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -295,91 +294,6 @@ func snapshotIsActive(snapshot task.Snapshot) bool {
 	}
 }
 
-func compactSnippet(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	lines := strings.Split(text, "\n")
-	if len(lines) > 4 {
-		lines = lines[len(lines)-4:]
-	}
-	for i := range lines {
-		lines[i] = strings.TrimRight(lines[i], " \t")
-	}
-	text = strings.Join(lines, "\n")
-	rs := []rune(text)
-	if len(rs) > 240 {
-		return string(rs[:237]) + "..."
-	}
-	return text
-}
-
-func firstNonEmptyText(values ...string) string {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" && value != "<nil>" {
-			return value
-		}
-	}
-	return ""
-}
-
-func snapshotYieldMessage(snapshot task.Snapshot) string {
-	id := strings.TrimSpace(snapshot.TaskID)
-	snippet := compactSnippet(firstNonEmptyText(snapshot.Output.Stdout, snapshot.Output.Stderr, snapshot.Output.Log))
-	base := "task yielded before completion"
-	if id != "" {
-		base += "; use TASK with task_id " + id
-	}
-	if snippet == "" {
-		return base
-	}
-	return base + "\n" + snippet
-}
-
-func snapshotStatusMessage(snapshot task.Snapshot) string {
-	id := strings.TrimSpace(snapshot.TaskID)
-	switch snapshot.State {
-	case task.StateCompleted:
-		return "task success"
-	case task.StateFailed:
-		return "task failed"
-	case task.StateCancelled:
-		return "cancelled"
-	case task.StateInterrupted:
-		return "interrupted"
-	case task.StateTerminated:
-		return "terminated"
-	case task.StateWaitingInput:
-		if id != "" {
-			return "waiting for input; use TASK write with task_id " + id
-		}
-		return "waiting for input"
-	case task.StateWaitingApproval:
-		if id != "" {
-			return "waiting for approval; use TASK with task_id " + id
-		}
-		return "waiting for approval"
-	default:
-		if id != "" {
-			return "task yielded before completion; use TASK with task_id " + id
-		}
-		return "task yielded before completion"
-	}
-}
-
-func snapshotProgressValue(snapshot task.Snapshot) string {
-	if preview := strings.TrimSpace(fmt.Sprint(snapshot.Result["latest_output"])); preview != "" && preview != "<nil>" {
-		return preview
-	}
-	return compactSnippet(firstNonEmptyText(snapshot.Output.Stdout, snapshot.Output.Stderr, snapshot.Output.Log))
-}
-
-func snapshotTerminalOutput(snapshot task.Snapshot) string {
-	return compactSnippet(firstNonEmptyText(snapshot.Output.Stdout, snapshot.Output.Stderr, snapshot.Output.Log))
-}
-
 func appendTerminalOutputFields(result map[string]any, snapshot task.Snapshot) {
 	if result == nil {
 		return
@@ -424,81 +338,6 @@ func appendSnapshotMetaFields(result map[string]any, snapshot task.Snapshot) {
 			result[key] = value
 		}
 	}
-}
-
-func syncOutputMeta(result toolexec.CommandResult, tty bool) map[string]any {
-	return map[string]any{
-		"streamed":              false,
-		"tty":                   tty,
-		"capture_cap_bytes":     0,
-		"stdout_captured_bytes": len(result.Stdout),
-		"stderr_captured_bytes": len(result.Stderr),
-		"stdout_retained_bytes": len(result.Stdout),
-		"stderr_retained_bytes": len(result.Stderr),
-		"stdout_cap_reached":    false,
-		"stderr_cap_reached":    false,
-		"stdout_dropped_bytes":  0,
-		"stderr_dropped_bytes":  0,
-		"capture_truncated":     false,
-		"model_truncated":       false,
-	}
-}
-
-func shouldEscalateWhenSandboxUnavailable(
-	decision toolexec.CommandDecision,
-	command string,
-	result toolexec.CommandResult,
-	policyDecision policy.Decision,
-) bool {
-	if decision.Route != toolexec.ExecutionRouteSandbox {
-		return false
-	}
-	if !fallbackOnCommandNotFoundEnabled(policyDecision) {
-		return false
-	}
-	base := commandBaseName(command)
-	if base == "" {
-		return false
-	}
-	if result.ExitCode != 127 {
-		return false
-	}
-	lowerErr := strings.ToLower(strings.TrimSpace(result.Stderr))
-	if lowerErr == "" {
-		return false
-	}
-	// Common shell errors: "go: not found", "sh: go: command not found", etc.
-	if strings.Contains(lowerErr, "not found") || strings.Contains(lowerErr, "command not found") {
-		return true
-	}
-	return false
-}
-
-func fallbackOnCommandNotFoundEnabled(decision policy.Decision) bool {
-	if decision.Metadata == nil {
-		return false
-	}
-	raw, ok := decision.Metadata[policy.DecisionMetaFallbackOnCommandNotFound]
-	if !ok {
-		return false
-	}
-	switch typed := raw.(type) {
-	case bool:
-		return typed
-	case string:
-		value := strings.TrimSpace(strings.ToLower(typed))
-		return value == "1" || value == "true" || value == "yes" || value == "on"
-	default:
-		return false
-	}
-}
-
-func commandBaseName(command string) string {
-	fields := strings.Fields(strings.TrimSpace(command))
-	if len(fields) == 0 {
-		return ""
-	}
-	return filepath.Base(fields[0])
 }
 
 func (t *BashTool) resolveCommandDecision(

@@ -1,15 +1,13 @@
+version: "2"
 run:
-  timeout: 5m
   tests: true
-
 linters:
-  disable-all: true
+  default: none
   enable:
     - bodyclose
     - contextcheck
     - errcheck
     - errorlint
-    - gofmt
     - gocritic
     - govet
     - ineffassign
@@ -19,16 +17,35 @@ linters:
     - staticcheck
     - unconvert
     - unused
-
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - revive
+        path: ^kernel/session/catalog\.go$
+        text: SessionSummary|SessionCatalogStore
+      - linters:
+          - revive
+        path: ^kernel/session/session\.go$
+        text: SessionStateStore
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    - path: ^kernel/session/catalog\.go$
-      linters:
-        - revive
-      text: "SessionSummary|SessionCatalogStore"
-    - path: ^kernel/session/session\.go$
-      linters:
-        - revive
-      text: "SessionStateStore"
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

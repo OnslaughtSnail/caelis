@@ -23,7 +23,7 @@ func (r previewTestRuntime) SandboxPolicy() toolexec.SandboxPolicy { return tool
 func (r previewTestRuntime) FallbackToHost() bool                  { return false }
 func (r previewTestRuntime) FallbackReason() string                { return "" }
 func (r previewTestRuntime) FileSystem() toolexec.FileSystem {
-	return previewTestFS{cwd: r.cwd}
+	return previewTestFS(r)
 }
 func (r previewTestRuntime) HostRunner() toolexec.CommandRunner    { return nil }
 func (r previewTestRuntime) SandboxRunner() toolexec.CommandRunner { return nil }

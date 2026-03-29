@@ -183,9 +183,7 @@ func linuxDistributionIDs(readFileFn func(string) ([]byte, error)) []string {
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		switch key {
 		case "ID", "ID_LIKE":
-			for _, one := range strings.Fields(strings.ToLower(value)) {
-				values = append(values, one)
-			}
+			values = append(values, strings.Fields(strings.ToLower(value))...)
 		}
 	}
 	return normalizeStringList(values)

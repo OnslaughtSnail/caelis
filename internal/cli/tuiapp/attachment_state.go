@@ -259,10 +259,7 @@ func inputAttachmentsToSubmission(items []inputAttachment) []Attachment {
 	}
 	out := make([]Attachment, 0, len(items))
 	for _, item := range cloneInputAttachments(items) {
-		out = append(out, Attachment{
-			Name:   item.Name,
-			Offset: item.Offset,
-		})
+		out = append(out, Attachment(item))
 	}
 	return out
 }
@@ -273,10 +270,7 @@ func attachmentsToInputAttachments(items []Attachment) []inputAttachment {
 	}
 	out := make([]inputAttachment, 0, len(items))
 	for _, item := range cloneAttachments(items) {
-		out = append(out, inputAttachment{
-			Name:   item.Name,
-			Offset: item.Offset,
-		})
+		out = append(out, inputAttachment(item))
 	}
 	return out
 }

@@ -47,7 +47,7 @@ func (m *Model) regularInputCursor() *tea.Cursor {
 		return nil
 	}
 	cursor := *render.cursor
-	cursor.Position.X += inputHorizontalInset
+	cursor.X += inputHorizontalInset
 	return &cursor
 }
 

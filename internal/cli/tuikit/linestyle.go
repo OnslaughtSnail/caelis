@@ -163,10 +163,7 @@ func colorizeAssistantLine(line string, theme Theme) string {
 }
 
 func colorizeUserLine(line string, theme Theme) string {
-	content := line
-	if strings.HasPrefix(content, "> ") {
-		content = content[len("> "):]
-	}
+	content := strings.TrimPrefix(line, "> ")
 	if content == "" {
 		return theme.UserPrefixStyle().Render("> ")
 	}

@@ -63,7 +63,7 @@ func (a toolFileSystemAdapter) Stat(path string) (fs.FileInfo, error) {
 
 func newGitignoreMatcher(fsys toolexec.FileSystem, target string) (*gitignorefilter.Matcher, error) {
 	if fsys == nil {
-		return nil, nil
+		return gitignorefilter.New(nil, "")
 	}
 	return gitignorefilter.NewForPath(toolFileSystemAdapter{fsys: fsys}, target)
 }
