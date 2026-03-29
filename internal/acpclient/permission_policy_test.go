@@ -37,6 +37,23 @@ func TestResolveApproveAllOnce_UsesKnownAgentAliasWhenKindMissing(t *testing.T) 
 	}
 }
 
+func TestResolveApproveAllOnce_DoesNotTreatAllowAlwaysAliasAsAllowOnce(t *testing.T) {
+	req := RequestPermissionRequest{
+		Options: []PermissionOption{
+			{OptionID: "allow", Name: "Allow", Kind: "allow_always"},
+			{OptionID: "deny", Name: "Deny", Kind: "reject_once"},
+		},
+	}
+
+	got := ResolveApproveAllOnce("full_access", "copilot", req)
+	if got.Decision != PermissionDecisionAskUser {
+		t.Fatalf("expected ask_user fallback, got %q", got.Decision)
+	}
+	if got.OptionID != "" {
+		t.Fatalf("expected empty option id on fallback, got %q", got.OptionID)
+	}
+}
+
 func TestResolveApproveAllOnce_UnknownAgentFallsBackToUserApproval(t *testing.T) {
 	req := RequestPermissionRequest{
 		Options: []PermissionOption{

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	internalacp "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -888,6 +889,17 @@ func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 			t.Fatalf("expected delegation_id metadata, got %+v", ev.Meta)
 		}
 	}
+	childState, err := store.SnapshotState(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      childSessionID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !internalacp.IsDelegatedChild(anyMap(anyMap(childState["acp"])["meta"])) {
+		t.Fatalf("expected delegated child marker in child session state, got %#v", childState)
+	}
 	liveMu.Lock()
 	liveSnapshot := append([]sessionstream.Update(nil), liveUpdates...)
 	liveMu.Unlock()
@@ -914,6 +926,13 @@ func asStringValue(value any) string {
 		return text
 	}
 	return ""
+}
+
+func anyMap(value any) map[string]any {
+	if typed, ok := value.(map[string]any); ok {
+		return typed
+	}
+	return nil
 }
 
 func TestRuntime_BuildInvocationContext_DisablesDelegateForChildRuns(t *testing.T) {

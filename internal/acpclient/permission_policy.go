@@ -128,7 +128,7 @@ func selectPermissionOptionID(options []PermissionOption, allowed bool, singleUs
 		if optionID, ok := findOptionByKinds(options, "allow_once"); ok {
 			return optionID, true
 		}
-		if optionID, ok := findOptionByAliases(options, knownAllowOnceAliases(agentID)); ok {
+		if optionID, ok := findOptionByAliases(options, knownAllowOnceAliases(agentID), "allow_always"); ok {
 			return optionID, true
 		}
 		if !singleUseOnly {
@@ -178,7 +178,7 @@ func findOptionByKinds(options []PermissionOption, wantKinds ...string) (string,
 	return "", false
 }
 
-func findOptionByAliases(options []PermissionOption, aliases []string) (string, bool) {
+func findOptionByAliases(options []PermissionOption, aliases []string, excludeKinds ...string) (string, bool) {
 	if len(aliases) == 0 {
 		return "", false
 	}
@@ -188,8 +188,17 @@ func findOptionByAliases(options []PermissionOption, aliases []string) (string, 
 			normalizedAliases = append(normalizedAliases, normalized)
 		}
 	}
+	normalizedExcludedKinds := make([]string, 0, len(excludeKinds))
+	for _, kind := range excludeKinds {
+		if normalized := normalizePermissionToken(kind); normalized != "" && !slices.Contains(normalizedExcludedKinds, normalized) {
+			normalizedExcludedKinds = append(normalizedExcludedKinds, normalized)
+		}
+	}
 	for _, option := range options {
 		if strings.TrimSpace(option.OptionID) == "" {
+			continue
+		}
+		if slices.Contains(normalizedExcludedKinds, normalizePermissionToken(option.Kind)) {
 			continue
 		}
 		for _, candidate := range []string{option.OptionID, option.Name} {
