@@ -28,6 +28,8 @@ The codebase is organized around a small runtime kernel plus CLI-owned applicati
 
 ## Build
 
+Requires Go `1.25.1`.
+
 ```bash
 make build
 make vet
@@ -160,7 +162,7 @@ Example MCP config:
 
 ## Release
 
-- Current release: `v0.0.29`
+- Current release: `v0.0.31`
 - Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
@@ -170,7 +172,7 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.29`.
+CI release is triggered by pushing a version tag such as `v0.0.31`.
 
 ## npm Package
 

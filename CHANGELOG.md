@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## v0.0.31 - 2026-03-29
+
+### ACP Delegation, Permissions, And Resume Hardening
+- Tightened ACP and runtime child-session delegation handling so delegated-child markers, lineage metadata, and pending RPC cleanup stay correct when self-managed child sessions are reused or interrupted during shutdown.
+- Hardened ACP permission-option selection in full-access mode so auto-approve-once never aliases a persistent `allow_always` choice, avoiding accidental escalation from single-use approval paths.
+- Improved resumed ACP participant and child-session recovery coverage so external-agent sessions, runtime tracking, and delegated task inspection stay consistent after reconnects and restarts.
+
+### Tooling And Quality Baseline
+- Upgraded the repository quality workflow to Go `1.25.1` with `golangci-lint` v2, then fixed the newly surfaced lint issues across runtime, ACP, shell, filesystem, and TUI code.
+- Cleaned up Linux `landlock` lint findings exposed by the new lint baseline so local and CI quality checks stay aligned.
+
+### Release Metadata
+- Bumped the repository release metadata to `v0.0.31` in `CHANGELOG.md`, `README.md`, and `VERSION` for the tagged release.
+
 ## v0.0.29 - 2026-03-26
 
 ### ACP And Headless Compatibility Fixes
