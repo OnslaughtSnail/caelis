@@ -601,13 +601,21 @@ func TestHandleSandbox_UnknownType(t *testing.T) {
 
 func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
+	prevSelector := cliSandboxSelector
 	t.Cleanup(func() {
 		cliExecRuntimeBuilder = prevBuilder
+		cliSandboxSelector = prevSelector
 	})
 	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
 		return fakeRuntime{
 			permissionMode: cfg.PermissionMode,
 			sandboxType:    cfg.SandboxType,
+		}, nil
+	}
+	cliSandboxSelector = func(cfg toolexec.Config) (toolexec.CommandRunner, toolexec.SandboxDiagnostics, error) {
+		return nil, toolexec.SandboxDiagnostics{
+			RequestedType: cfg.SandboxType,
+			ResolvedType:  cfg.SandboxType,
 		}, nil
 	}
 
