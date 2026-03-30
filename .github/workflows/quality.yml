@@ -45,7 +45,8 @@ jobs:
 
       - name: Test
         env:
-          # Keep some concurrency for throughput, but avoid the default
-          # package fan-out that has been unstable on GitHub-hosted runners.
-          GOFLAGS: -p=2
+          # Package-level test fan-out still trips runner process limits on
+          # GitHub-hosted Linux; keep the standard `go test ./...` path but
+          # force a single package worker.
+          GOFLAGS: -p=1
         run: make test
