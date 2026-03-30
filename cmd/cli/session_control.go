@@ -20,14 +20,30 @@ func (c *cliConsole) currentSessionRef() *session.Session {
 }
 
 func (c *cliConsole) loadSessionMode() string {
+	mode, persisted := c.loadPersistedSessionMode()
+	if persisted {
+		return mode
+	}
+	permissionMode := toolexec.PermissionModeDefault
+	if c != nil && c.execRuntime != nil {
+		permissionMode = c.execRuntime.PermissionMode()
+	}
+	return sessionmode.ModeForPermission(permissionMode, c.sessionMode)
+}
+
+func (c *cliConsole) loadPersistedSessionMode() (string, bool) {
 	if c == nil || c.sessionStore == nil {
-		return sessionmode.DefaultMode
+		return sessionmode.DefaultMode, false
 	}
 	values, err := c.sessionStore.SnapshotState(c.baseCtx, c.currentSessionRef())
-	if err != nil {
-		return sessionmode.DefaultMode
+	if err != nil || values == nil {
+		return sessionmode.DefaultMode, false
 	}
-	return sessionmode.LoadSnapshot(values)
+	mode, ok := values["session_mode"].(string)
+	if !ok {
+		return sessionmode.DefaultMode, false
+	}
+	return sessionmode.Normalize(mode), true
 }
 
 func (c *cliConsole) persistSessionMode() error {

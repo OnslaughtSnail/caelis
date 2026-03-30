@@ -295,6 +295,7 @@ type Model struct {
 	// of its corresponding "▸ TOOL ..." line. Once a pending anchor is claimed,
 	// it's stored here for stable future lookups.
 	callAnchorIndex map[string]string
+	diffAnchorIndex map[string]string
 
 	// taskOriginCallID maps a background TaskID to the CallID of the original
 	// BASH tool invocation that yielded it. This ensures that subsequent

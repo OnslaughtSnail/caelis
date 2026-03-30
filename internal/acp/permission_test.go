@@ -208,6 +208,62 @@ func TestPermissionBridge_QueuesConcurrentPermissionRequests(t *testing.T) {
 	}
 }
 
+func TestPermissionBridge_KeepsRequestsScopedPerSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	clientConn := NewConn(s2cR, c2sW)
+	serverConn := NewConn(c2sR, s2cW)
+
+	requests := make(chan RequestPermissionRequest, 2)
+	go func() {
+		_ = serverConn.Serve(ctx, func(_ context.Context, msg Message) (any, *RPCError) {
+			if msg.Method != MethodSessionReqPermission {
+				return nil, &RPCError{Code: -32601, Message: "method not found"}
+			}
+			var req RequestPermissionRequest
+			if err := decodeParams(msg.Params, &req); err != nil {
+				return nil, invalidParamsError(err)
+			}
+			requests <- req
+			return RequestPermissionResponse{
+				Outcome: mustMarshalRaw(SelectedPermissionOutcome{
+					Outcome:  "selected",
+					OptionID: "allow_once",
+				}),
+			}, nil
+		}, func(context.Context, Message) {})
+	}()
+	go func() {
+		_ = clientConn.Serve(ctx, func(context.Context, Message) (any, *RPCError) {
+			return nil, &RPCError{Code: -32601, Message: "method not found"}
+		}, func(context.Context, Message) {})
+	}()
+
+	bridgeA := newPermissionBridge(clientConn, "child-a", nil)
+	bridgeB := newPermissionBridge(clientConn, "child-b", nil)
+	if _, err := bridgeA.Approve(context.Background(), toolexec.ApprovalRequest{ToolName: "BASH", Command: "echo a"}); err != nil {
+		t.Fatalf("bridgeA approve: %v", err)
+	}
+	if _, err := bridgeB.Approve(context.Background(), toolexec.ApprovalRequest{ToolName: "BASH", Command: "echo b"}); err != nil {
+		t.Fatalf("bridgeB approve: %v", err)
+	}
+
+	first := <-requests
+	second := <-requests
+	if first.SessionID == second.SessionID {
+		t.Fatalf("expected distinct session-scoped permission requests, got %+v and %+v", first, second)
+	}
+	if first.SessionID != "child-a" && second.SessionID != "child-a" {
+		t.Fatalf("expected one request for child-a, got %+v and %+v", first, second)
+	}
+	if first.SessionID != "child-b" && second.SessionID != "child-b" {
+		t.Fatalf("expected one request for child-b, got %+v and %+v", first, second)
+	}
+}
+
 func TestPermissionBridge_ApproveRequestUsesOriginalToolMetadata(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

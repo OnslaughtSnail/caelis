@@ -7,7 +7,7 @@ import (
 )
 
 func TestResolveSingleShotInput_FromPromptFlag(t *testing.T) {
-	got, singleShot, err := resolveSingleShotInput("hello", "", strings.NewReader(""), true, true)
+	got, singleShot, err := resolveSingleShotInput("hello", strings.NewReader(""), true, true)
 	if err != nil {
 		t.Fatalf("resolve input failed: %v", err)
 	}
@@ -20,7 +20,7 @@ func TestResolveSingleShotInput_FromPromptFlag(t *testing.T) {
 }
 
 func TestResolveSingleShotInput_FromPipedStdin(t *testing.T) {
-	got, singleShot, err := resolveSingleShotInput("", "", strings.NewReader("from pipe\n"), false, false)
+	got, singleShot, err := resolveSingleShotInput("", strings.NewReader("from pipe\n"), false, false)
 	if err != nil {
 		t.Fatalf("resolve input failed: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestResolveSingleShotInput_FromPipedStdin(t *testing.T) {
 }
 
 func TestResolveSingleShotInput_RejectsMissingPromptWhenStdoutNonTTY(t *testing.T) {
-	_, _, err := resolveSingleShotInput("", "", strings.NewReader(""), true, false)
+	_, _, err := resolveSingleShotInput("", strings.NewReader(""), true, false)
 	if err == nil {
 		t.Fatal("expected error for non-interactive output without input")
 	}

@@ -160,6 +160,27 @@ func (a overlayErrorAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.E
 	}
 }
 
+func TestNew_RequiresExplicitStores(t *testing.T) {
+	_, err := New(Config{})
+	if err == nil {
+		t.Fatal("expected constructor to reject missing stores")
+	}
+	if !strings.Contains(err.Error(), "log store") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNew_UsesExplicitStores(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{LogStore: store, StateStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.logStore != store || rt.stateStore != store {
+		t.Fatalf("expected explicit stores to be retained, got log=%T state=%T", rt.logStore, rt.stateStore)
+	}
+}
+
 func TestShouldPersistEvent_SkipsUIOnly(t *testing.T) {
 	ev := session.MarkNotice(&session.Event{}, session.NoticeLevelWarn, "retrying in 1s")
 	if shouldPersistEvent(ev) {
@@ -285,7 +306,7 @@ func runEvents(ctx context.Context, t *testing.T, rt *Runtime, req RunRequest) i
 
 func TestRuntime_Run(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +351,7 @@ func TestRuntimeRunnerEvents_ReplaysAllDroppedDurablePages(t *testing.T) {
 	const assistantCount = replayFetchLimit + 300
 
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +405,7 @@ func TestRuntimeRunnerEvents_ReplaysAllDroppedDurablePages(t *testing.T) {
 
 func TestRuntimeRunPreservesProvidedContentPartOrder(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +452,7 @@ func TestRuntimeRunPreservesProvidedContentPartOrder(t *testing.T) {
 
 func TestRuntimeRunPrependsInputWhenContentPartsHaveNoText(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +497,7 @@ func TestRuntimeRunPrependsInputWhenContentPartsHaveNoText(t *testing.T) {
 
 func TestRuntime_RunState_UsesInMemoryLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +533,7 @@ func TestRuntime_RunState_UsesInMemoryLifecycle(t *testing.T) {
 
 func TestRuntime_OverlaySubmission_IsEphemeral(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,7 +604,7 @@ func TestRuntime_OverlaySubmission_IsEphemeral(t *testing.T) {
 
 func TestRuntime_OverlaySubmission_PropagatesStandaloneFailure(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +657,7 @@ func TestRuntime_OverlaySubmission_PropagatesStandaloneFailure(t *testing.T) {
 
 func TestRuntime_OverlaySubmission_PropagatesStandaloneCancellation(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +701,7 @@ func TestRuntime_OverlaySubmission_PropagatesStandaloneCancellation(t *testing.T
 
 func TestRuntime_Run_ApprovalRequiredLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +737,7 @@ func TestRuntime_Run_ApprovalRequiredLifecycle(t *testing.T) {
 
 func TestRuntime_Run_ApprovalAbortedLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,7 +773,7 @@ func TestRuntime_Run_ApprovalAbortedLifecycle(t *testing.T) {
 
 func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,10 +857,7 @@ func TestRuntime_Run_SpawnChildRunPersistsLineage(t *testing.T) {
 		if ev == nil || ev.Message.ToolResponse() == nil || ev.Message.ToolResponse().Name != tool.SpawnToolName {
 			continue
 		}
-		childSessionID, _ = ev.Message.ToolResponse().Result["_ui_child_session_id"].(string)
-		if childSessionID == "" {
-			childSessionID, _ = ev.Message.ToolResponse().Result["child_session_id"].(string)
-		}
+		childSessionID, _ = ev.Message.ToolResponse().Result["child_session_id"].(string)
 		if childSessionID == "" {
 			t.Logf("spawn result payload: %#v", ev.Message.ToolResponse().Result)
 		}
@@ -937,7 +955,7 @@ func anyMap(value any) map[string]any {
 
 func TestRuntime_BuildInvocationContext_DisablesDelegateForChildRuns(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1098,7 +1116,7 @@ func TestRunSubagent_NoOrphanContextOnTimeout(t *testing.T) {
 	// Verify that the timeout path creates exactly one detached context,
 	// not two (which would leak the first cancel func).
 	store := inmemory.New()
-	rt, err := New(Config{Store: store, TaskStore: taskinmemory.New()})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskinmemory.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1177,7 +1195,7 @@ func TestRunSubagent_ContextBranchingIsExclusive(t *testing.T) {
 
 func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1236,7 +1254,7 @@ func TestRuntime_Run_PreAgentSetupFailureAppendsFailedLifecycle(t *testing.T) {
 
 func TestRuntime_InjectsCoreReadTool(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1276,7 @@ func TestRuntime_InjectsCoreReadTool(t *testing.T) {
 
 func TestRuntime_ContextUsage(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1298,7 +1316,7 @@ func TestRuntime_ContextUsage(t *testing.T) {
 
 func TestDetachedSubagentPanicPersistsFailedLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1349,7 +1367,7 @@ func TestDetachedSubagentPanicPersistsFailedLifecycle(t *testing.T) {
 
 func TestDetachedSubagentStartupFailurePersistsFailedLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1399,7 +1417,7 @@ func TestDetachedSubagentStartupFailurePersistsFailedLifecycle(t *testing.T) {
 
 func TestPrepareChildRunUsesCurrentTaskWriteLineageForExistingSessionContinuation(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1458,7 +1476,7 @@ func TestPrepareChildRunUsesCurrentTaskWriteLineageForExistingSessionContinuatio
 
 func TestRuntime_ContextUsage_MissingSessionReturnsEmpty(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1479,7 +1497,7 @@ func TestRuntime_ContextUsage_MissingSessionReturnsEmpty(t *testing.T) {
 
 func TestRuntime_RunState_MissingSessionReturnsNone(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1498,7 +1516,7 @@ func TestRuntime_RunState_MissingSessionReturnsNone(t *testing.T) {
 
 func TestRuntime_Run_SessionSingleFlight(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1556,7 +1574,7 @@ func TestRuntime_Run_SessionSingleFlight(t *testing.T) {
 func TestRuntime_Run_CleansUpTurnScopedBackgroundTasks(t *testing.T) {
 	store := inmemory.New()
 	taskStore := taskinmemory.New()
-	rt, err := New(Config{Store: store, TaskStore: taskStore})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskStore})
 	if err != nil {
 		t.Fatal(err)
 	}

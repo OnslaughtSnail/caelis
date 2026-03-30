@@ -183,8 +183,12 @@ func TestForwardEventToTUI_FileToolCallEmitsDiffPreviewBeforeToolResponse(t *tes
 	if len(sender.msgs) != 2 {
 		t.Fatalf("expected tool call and diff block messages, got %d", len(sender.msgs))
 	}
-	if _, ok := sender.msgs[0].(tuievents.LogChunkMsg); !ok {
+	logMsg, ok := sender.msgs[0].(tuievents.LogChunkMsg)
+	if !ok {
 		t.Fatalf("expected first message LogChunkMsg, got %T", sender.msgs[0])
+	}
+	if !strings.Contains(logMsg.Chunk, "▸ WRITE a.txt +1 -1") {
+		t.Fatalf("expected mutation call summary with diff counts, got %q", logMsg.Chunk)
 	}
 	diffMsg, ok := sender.msgs[1].(tuievents.DiffBlockMsg)
 	if !ok {
@@ -712,10 +716,10 @@ func TestForwardEventToTUI_SpawnYieldDoesNotEmitTranscriptResultLine(t *testing.
 
 	handled := c.forwardEventToTUI(&session.Event{
 		Message: model.NewMessage(model.RoleAssistant, model.NewToolResultJSONPart("call_spawn", tool.SpawnToolName, map[string]any{
-			"task_id":              "t-1234567890ab",
-			"_ui_child_session_id": "s-child-1",
-			"_ui_agent":            "self",
-			"state":                "running",
+			"task_id":          "t-1234567890ab",
+			"child_session_id": "s-child-1",
+			"agent":            "self",
+			"state":            "running",
 		}, false)),
 	}, map[string]toolCallSnapshot{})
 	if !handled {
@@ -997,7 +1001,7 @@ func TestForwardEventToTUI_TaskListEmitsFriendlySummary(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected LogChunkMsg, got %T", sender.msgs[0])
 	}
-	if !strings.Contains(logMsg.Chunk, "✓ LIST Listed 2 tasks (1 active)") {
+	if !strings.Contains(logMsg.Chunk, "✓ TASK listed 2 tasks (1 active)") {
 		t.Fatalf("unexpected TASK list log chunk: %q", logMsg.Chunk)
 	}
 }

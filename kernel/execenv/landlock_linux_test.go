@@ -5,7 +5,9 @@ package execenv
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -161,5 +163,40 @@ func TestLandlockFileReadWriteMaskForABI_GuardsTruncate(t *testing.T) {
 	}
 	if mask := landlockFileReadWriteMaskForABI(3); mask&unix.LANDLOCK_ACCESS_FS_TRUNCATE == 0 {
 		t.Fatalf("truncate should be enabled for abi 3: %#x", mask)
+	}
+}
+
+func TestShellReadableRoots_ExplicitReadableRootsIncludeWorkspaceAndSystemRoots(t *testing.T) {
+	workDir := t.TempDir()
+	readable := shellReadableRoots(SandboxPolicy{
+		Type:          SandboxPolicyWorkspaceWrite,
+		ReadableRoots: []string{"."},
+		WritableRoots: []string{"."},
+	}, workDir)
+	if !containsString(readable, filepath.Clean(workDir)) {
+		t.Fatalf("expected workspace readable root, got %v", readable)
+	}
+	if !containsString(readable, "/usr") && !containsString(readable, filepath.Clean("/usr")) {
+		t.Fatalf("expected /usr readable root, got %v", readable)
+	}
+}
+
+func TestShellReadableRoots_EmptyWithoutExplicitReadableRoots(t *testing.T) {
+	if roots := shellReadableRoots(SandboxPolicy{
+		Type:          SandboxPolicyWorkspaceWrite,
+		WritableRoots: []string{"."},
+	}, t.TempDir()); len(roots) != 0 {
+		t.Fatalf("expected no shell readable roots without explicit policy, got %v", roots)
+	}
+}
+
+func TestScratchReadableRootsIncludeHomeCache(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		t.Skip("cannot determine home dir")
+	}
+	cacheRoot := filepath.Join(home, ".cache")
+	if !containsString(scratchReadableRoots(), filepath.Clean(cacheRoot)) {
+		t.Fatalf("expected scratch roots to include %q", cacheRoot)
 	}
 }

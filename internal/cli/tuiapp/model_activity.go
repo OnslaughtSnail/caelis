@@ -928,7 +928,7 @@ func looksLikeTaskList(remainder string, result bool) bool {
 	if !result {
 		return trimmed == ""
 	}
-	return strings.Contains(trimmed, "task")
+	return strings.HasPrefix(trimmed, "listed ") && strings.Contains(trimmed, "task")
 }
 
 func splitPathAndQuery(remainder string) (string, string) {

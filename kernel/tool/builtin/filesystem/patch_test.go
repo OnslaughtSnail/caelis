@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -206,5 +207,31 @@ func TestPatchTool_MissingExactMatchSuggestsReadAndReplaceAll(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected PATCH error to mention %q, got %v", want, err)
 		}
+	}
+}
+
+func TestPatchTool_DefaultWorkspaceRuntimeRejectsGitWrites(t *testing.T) {
+	rt, ws := newDefaultWorkspaceRuntime(t)
+	tool, err := NewPatchWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitPath := filepath.Join(ws, ".git", "config")
+	if err := os.MkdirAll(filepath.Dir(gitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitPath, []byte("[core]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{
+		"path": gitPath,
+		"old":  "[core]",
+		"new":  "[user]",
+	})
+	if err == nil {
+		t.Fatal("expected .git patch write to be rejected")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected permission error, got %v", err)
 	}
 }

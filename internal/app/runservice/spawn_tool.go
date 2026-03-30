@@ -47,10 +47,6 @@ func (t *selfSpawnTool) Declaration() model.ToolDefinition {
 					"type":        "integer",
 					"description": "Optional per-call wait for this SPAWN before returning in milliseconds. Defaults to 30000. If the child is still running when this wait expires, the result includes task_id and you continue with TASK wait.",
 				},
-				"timeout_ms": map[string]any{
-					"type":        "integer",
-					"description": "Optional total timeout for the child task in milliseconds. This is independent from yield_time_ms. If that total timeout is reached, the returned payload is still a task snapshot; inspect state and msg/output to see the terminal timeout result.",
-				},
 			},
 			"required":             []string{"prompt"},
 			"additionalProperties": false,
@@ -78,7 +74,7 @@ func (t *selfSpawnTool) Run(ctx context.Context, args map[string]any) (map[strin
 	if agentName == "" {
 		agentName = "self"
 	}
-	for _, legacy := range []string{"session", "session_id", "new_session", "yield_seconds", "timeout_seconds"} {
+	for _, legacy := range []string{"session", "session_id", "new_session", "yield_seconds", "timeout_seconds", "timeout_ms"} {
 		if _, ok := args[legacy]; ok {
 			return nil, fmt.Errorf("tool: arg %q is no longer supported", legacy)
 		}
@@ -89,17 +85,11 @@ func (t *selfSpawnTool) Run(ctx context.Context, args map[string]any) (map[strin
 	if !yieldSpecified || yieldMS <= 0 {
 		yieldMS = int(defaultSpawnYield / time.Millisecond)
 	}
-	timeoutMS := asIntArg(args, "timeout_ms")
-	var timeout time.Duration
-	if timeoutMS > 0 {
-		timeout = time.Duration(timeoutMS) * time.Millisecond
-	}
 	snapshot, err := manager.StartSpawn(ctx, task.SpawnStartRequest{
-		Agent:   agentName,
-		Prompt:  promptText,
-		Yield:   time.Duration(yieldMS) * time.Millisecond,
-		Timeout: timeout,
-		Kind:    task.KindSpawn,
+		Agent:  agentName,
+		Prompt: promptText,
+		Yield:  time.Duration(yieldMS) * time.Millisecond,
+		Kind:   task.KindSpawn,
 	})
 	if err != nil {
 		return nil, err

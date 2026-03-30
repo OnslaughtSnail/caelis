@@ -1,10 +1,13 @@
 package runtime
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"strings"
 	"time"
 
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 )
 
@@ -86,18 +89,23 @@ func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controlle
 	}
 	switch entry.Kind {
 	case task.KindBash:
-		runner, ok := asyncBashRunnerForRoute(m.execenv, stringValue(entry.Spec, taskSpecRoute))
-		if !ok || runner == nil {
+		backendName := recoverBashBackendName(entry.Spec, entry.Result, m.execenv)
+		sessionRef, err := openBashSession(
+			m.execenv,
+			backendName,
+			stringValue(entry.Spec, taskSpecExecSessionID),
+		)
+		if err != nil {
 			return nil
 		}
 		return &bashTaskController{
-			runner:    runner,
-			sessionID: stringValue(entry.Spec, taskSpecExecSessionID),
-			command:   stringValue(entry.Spec, taskSpecCommand),
-			workdir:   stringValue(entry.Spec, taskSpecWorkdir),
-			tty:       boolValue(entry.Spec, taskSpecTTY),
-			route:     stringValue(entry.Spec, taskSpecRoute),
-			store:     m.store,
+			session: sessionRef,
+			command: stringValue(entry.Spec, taskSpecCommand),
+			workdir: stringValue(entry.Spec, taskSpecWorkdir),
+			tty:     boolValue(entry.Spec, taskSpecTTY),
+			route:   stringValue(entry.Spec, taskSpecRoute),
+			backend: cmp.Or(strings.TrimSpace(backendName), strings.TrimSpace(sessionRef.Ref().Backend)),
+			store:   m.store,
 		}
 	case task.KindSpawn:
 		return &subagentTaskController{
@@ -108,14 +116,52 @@ func (m *runtimeTaskManager) rebuildController(entry *task.Entry) task.Controlle
 			delegationID: stringValue(entry.Spec, taskSpecDelegationID),
 			runner:       m.subagents,
 			store:        m.store,
-			agent:        stringValueFallback(entry.Spec, taskSpecAgent, entry.Result),
-			childCWD:     stringValueFallback(entry.Spec, taskSpecChildCWD, entry.Result),
-			timeout:      time.Duration(intValue(entry.Spec, taskSpecTimeout)) * time.Second,
+			agent:        stringValue(entry.Spec, taskSpecAgent),
+			childCWD:     stringValue(entry.Spec, taskSpecChildCWD),
 			idleTimeout:  time.Duration(intValue(entry.Spec, taskSpecIdleTimeout)) * time.Second,
 		}
 	default:
 		return nil
 	}
+}
+
+func recoverBashBackendName(spec map[string]any, result map[string]any, execRuntime toolexec.Runtime) string {
+	if backend := strings.TrimSpace(stringValue(spec, taskSpecBackend)); backend != "" {
+		return backend
+	}
+	route := cmp.Or(
+		strings.TrimSpace(stringValue(spec, taskSpecRoute)),
+		strings.TrimSpace(stringValue(result, "route")),
+	)
+	sessionID := cmp.Or(
+		strings.TrimSpace(stringValue(result, "session_id")),
+		strings.TrimSpace(stringValue(spec, taskSpecExecSessionID)),
+	)
+	switch route {
+	case string(toolexec.ExecutionRouteHost):
+		return "host"
+	case "", string(toolexec.ExecutionRouteSandbox):
+		if usesLegacyACPTerminalBackend(route, sessionID) {
+			return "acp_terminal"
+		}
+		if execRuntime != nil {
+			if resolved := strings.TrimSpace(execRuntime.State().ResolvedSandbox); resolved != "" {
+				return resolved
+			}
+		}
+		return "sandbox"
+	default:
+		return ""
+	}
+}
+
+func usesLegacyACPTerminalBackend(route string, sessionID string) bool {
+	switch strings.TrimSpace(route) {
+	case "", string(toolexec.ExecutionRouteSandbox):
+	default:
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sessionID)), "term-")
 }
 
 func entryToRecord(entry *task.Entry) *task.Record {

@@ -20,6 +20,12 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
 func TestServiceNewLoadAndRestoreState(t *testing.T) {
 	svc, cleanup := newTestService(t, testServiceConfig{
 		llm: &scriptedLLM{
@@ -224,11 +230,14 @@ func TestServiceCancelPromptStopsActiveRun(t *testing.T) {
 
 func TestServiceStartPromptFreezesSystemPromptPerLoadedSession(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,11 +443,14 @@ func TestServiceSessionServiceDisablesSpawnForDelegatedChildSessions(t *testing.
 
 func TestServiceDelegatedChildPromptRemovesSpawnGuidance(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,12 +564,13 @@ func newTestService(t *testing.T, cfg testServiceConfig) (*Service, func()) {
 	t.Helper()
 
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
 	execRT, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

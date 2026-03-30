@@ -163,26 +163,21 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 			return nil, err
 		}
 	}
-	runner, needApproval, reason, err := t.resolveRunner(decision)
-	if err != nil {
-		return nil, err
-	}
-	if needApproval {
+	if needApproval, reason := needsRuntimeApproval(t.runtime, decision); needApproval {
 		if err := requestApproval(ctx, command, reason); err != nil {
 			return nil, err
 		}
 	}
-	asyncRunner, ok := runner.(toolexec.AsyncCommandRunner)
-	if !ok || asyncRunner == nil {
-		return nil, fmt.Errorf("tool: BASH failed (route=%s): async execution is not supported", decision.Route)
-	}
 	manager, ok := task.ManagerFromContext(ctx)
 	if !ok || manager == nil {
-		sessionID, err := asyncRunner.StartAsync(ctx, toolexec.CommandRequest{
-			Command:     command,
-			Dir:         workingDir,
-			Timeout:     timeout,
-			IdleTimeout: idleTimeout,
+		sessionRef, err := t.runtime.Start(ctx, toolexec.CommandRequest{
+			Command:           command,
+			Dir:               workingDir,
+			Timeout:           timeout,
+			IdleTimeout:       idleTimeout,
+			SandboxPermission: sandboxPermission,
+			RouteHint:         decision.Route,
+			BackendName:       decision.Backend,
 			OnOutput: func(chunk toolexec.CommandOutputChunk) {
 				toolexec.EmitOutputChunk(ctx, chunk)
 			},
@@ -190,7 +185,7 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		if err != nil {
 			return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
 		}
-		waited, waitErr := asyncRunner.WaitSession(ctx, sessionID, time.Duration(yieldMS)*time.Millisecond)
+		waited, waitErr := sessionRef.Wait(ctx, time.Duration(yieldMS)*time.Millisecond)
 		if waitErr != nil {
 			return nil, fmt.Errorf("tool: task manager is unavailable")
 		}
@@ -213,6 +208,7 @@ func (t *BashTool) Run(ctx context.Context, args map[string]any) (map[string]any
 		Timeout:     timeout,
 		IdleTimeout: idleTimeout,
 		Route:       string(decision.Route),
+		Backend:     decision.Backend,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("tool: BASH failed (route=%s): %w", decision.Route, err)
@@ -333,7 +329,7 @@ func appendSnapshotMetaFields(result map[string]any, snapshot task.Snapshot) {
 	if value, ok := snapshot.Result["exit_code"]; ok && value != nil {
 		result["exit_code"] = value
 	}
-	for _, key := range []string{"_ui_exec_session_id", "_ui_route"} {
+	for _, key := range []string{"session_id", "route", "backend"} {
 		if value, ok := snapshot.Result[key]; ok && value != nil && strings.TrimSpace(fmt.Sprint(value)) != "" {
 			result[key] = value
 		}
@@ -357,10 +353,18 @@ func (t *BashTool) resolveCommandDecision(
 		if route, ok := policy.DecisionRouteFromMetadata(decision); ok {
 			switch route {
 			case policy.DecisionRouteSandbox:
-				return toolexec.CommandDecision{Route: toolexec.ExecutionRouteSandbox}, decision, nil
+				runtimeDecision := t.runtime.DecideRoute(command, sandboxPermission)
+				out := runtimeDecision
+				out.Route = toolexec.ExecutionRouteSandbox
+				out.Backend = sandboxBackendName(t.runtime, out.Backend)
+				return out, decision, nil
 			case policy.DecisionRouteHost:
-				out := toolexec.CommandDecision{Route: toolexec.ExecutionRouteHost}
-				if decision.Effect == policy.DecisionEffectRequireApproval {
+				runtimeDecision := t.runtime.DecideRoute(command, sandboxPermission)
+				out := runtimeDecision
+				out.Route = toolexec.ExecutionRouteHost
+				out.Backend = hostBackendName(t.runtime, out.Backend)
+				if policy.DecisionHasAnnotation(decision, policy.DecisionAnnotationHostExecutionRequiresApproval) ||
+					decision.Effect == policy.DecisionEffectRequireApproval {
 					out.Escalation = &toolexec.EscalationReason{
 						Message: strings.TrimSpace(decision.Reason),
 					}
@@ -370,8 +374,10 @@ func (t *BashTool) resolveCommandDecision(
 			}
 		}
 		if decision.Effect == policy.DecisionEffectRequireApproval {
+			runtimeDecision := t.runtime.DecideRoute(command, sandboxPermission)
 			return toolexec.CommandDecision{
 				Route:        toolexec.ExecutionRouteHost,
+				Backend:      hostBackendName(t.runtime, runtimeDecision.Backend),
 				NeedApproval: true,
 				Escalation: &toolexec.EscalationReason{
 					Message: strings.TrimSpace(decision.Reason),
@@ -393,37 +399,47 @@ func parseSandboxPermissionArgs(args map[string]any) (toolexec.SandboxPermission
 	return toolexec.SandboxPermissionAuto, nil
 }
 
-func (t *BashTool) resolveRunner(decision toolexec.CommandDecision) (toolexec.CommandRunner, bool, string, error) {
+func needsRuntimeApproval(runtime toolexec.Runtime, decision toolexec.CommandDecision) (bool, string) {
+	if runtime == nil || runtime.PermissionMode() == toolexec.PermissionModeFullControl || !decision.NeedApproval {
+		return false, ""
+	}
 	reason := ""
 	if decision.Escalation != nil {
 		reason = strings.TrimSpace(decision.Escalation.Message)
 	}
-
-	switch decision.Route {
-	case toolexec.ExecutionRouteSandbox:
-		runner := t.runtime.SandboxRunner()
-		if runner == nil {
-			return nil, false, "", fmt.Errorf("tool: sandbox runner is unavailable")
-		}
-		return runner, false, "", nil
-	case toolexec.ExecutionRouteHost:
-		runner := t.runtime.HostRunner()
-		if runner == nil {
-			return nil, false, "", fmt.Errorf("tool: host runner is unavailable")
-		}
-		if t.runtime.PermissionMode() == toolexec.PermissionModeFullControl {
-			return runner, false, "", nil
-		}
-		if !decision.NeedApproval {
-			return runner, false, "", nil
-		}
-		if reason == "" {
-			reason = "host execution requires approval in default permission mode"
-		}
-		return runner, true, reason, nil
-	default:
-		return nil, false, "", fmt.Errorf("tool: unsupported execution route %q", decision.Route)
+	if reason == "" {
+		reason = "host execution requires approval in default permission mode"
 	}
+	return true, reason
+}
+
+func hostBackendName(runtime toolexec.Runtime, fallback string) string {
+	return backendNameByKind(runtime, toolexec.BackendKindHost, fallback, "host")
+}
+
+func sandboxBackendName(runtime toolexec.Runtime, fallback string) string {
+	return backendNameByKind(runtime, toolexec.BackendKindSandbox, fallback, "sandbox")
+}
+
+func backendNameByKind(runtime toolexec.Runtime, kind toolexec.BackendKind, fallback string, defaultName string) string {
+	if name := strings.TrimSpace(fallback); name != "" {
+		if runtime == nil {
+			return name
+		}
+		for _, backend := range runtime.State().Backends {
+			if strings.EqualFold(backend.Name, name) && backend.Kind == kind {
+				return name
+			}
+		}
+	}
+	if runtime != nil {
+		for _, backend := range runtime.State().Backends {
+			if backend.Kind == kind && strings.TrimSpace(backend.Name) != "" {
+				return backend.Name
+			}
+		}
+	}
+	return defaultName
 }
 
 func requestApproval(ctx context.Context, command string, reason string) error {

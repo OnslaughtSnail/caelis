@@ -16,7 +16,7 @@ import (
 
 func TestHandleStatus_UsesRunStateCompleted(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,11 +26,7 @@ func TestHandleStatus_UsesRunStateCompleted(t *testing.T) {
 	if err := appendLifecycleState(store, app, user, sid, runtime.RunLifecycleStatusCompleted, "run", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = toolexec.Close(execRT) }()
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	var out bytes.Buffer
 	console := &cliConsole{
 		baseCtx:     context.Background(),
@@ -60,7 +56,7 @@ func TestHandleStatus_UsesRunStateCompleted(t *testing.T) {
 
 func TestHandleStatus_UsesRunStateWaitingApprovalWithCode(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +66,7 @@ func TestHandleStatus_UsesRunStateWaitingApprovalWithCode(t *testing.T) {
 	if err := appendLifecycleState(store, app, user, sid, runtime.RunLifecycleStatusWaitingApproval, "run", "approval required", string(toolexec.ErrorCodeApprovalRequired)); err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = toolexec.Close(execRT) }()
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	var out bytes.Buffer
 	console := &cliConsole{
 		baseCtx:     context.Background(),
@@ -104,7 +96,7 @@ func TestHandleStatus_UsesRunStateWaitingApprovalWithCode(t *testing.T) {
 
 func TestHandleStatus_UsesRunStateNoneWhenMissing(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,11 +107,7 @@ func TestHandleStatus_UsesRunStateNoneWhenMissing(t *testing.T) {
 	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = toolexec.Close(execRT) }()
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	var out bytes.Buffer
 	console := &cliConsole{
 		baseCtx:     context.Background(),
@@ -183,7 +171,7 @@ func appendLifecycleState(
 
 func TestRefreshContextUsageFromEvent_FallsBackToRuntimeEstimateWithoutUsage(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

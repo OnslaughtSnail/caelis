@@ -415,6 +415,39 @@ func TestBuildBwrapArgsWorkspaceWrite(t *testing.T) {
 	}
 }
 
+func TestBuildBwrapArgs_ExplicitReadableRootsUsesScopedRootfs(t *testing.T) {
+	workDir := t.TempDir()
+	gitDir := filepath.Join(workDir, ".git")
+	if err := os.Mkdir(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	args := buildBwrapArgs(SandboxPolicy{
+		Type:             SandboxPolicyWorkspaceWrite,
+		NetworkAccess:    true,
+		ReadableRoots:    []string{"."},
+		WritableRoots:    []string{"."},
+		ReadOnlySubpaths: []string{".git"},
+	}, workDir)
+
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--ro-bind / /") {
+		t.Fatalf("did not expect global read-only root with explicit readable roots, got %q", joined)
+	}
+	if !strings.Contains(joined, "--tmpfs /") {
+		t.Fatalf("expected tmpfs root with explicit readable roots, got %q", joined)
+	}
+	if !strings.Contains(joined, "--bind "+workDir+" "+workDir) {
+		t.Fatalf("expected writable bind for workspace, got %q", joined)
+	}
+	if !strings.Contains(joined, "--ro-bind /usr /usr") {
+		t.Fatalf("expected system readable root /usr, got %q", joined)
+	}
+	if !strings.Contains(joined, "--ro-bind "+gitDir+" "+gitDir) {
+		t.Fatalf("expected read-only bind for .git, got %q", joined)
+	}
+}
+
 func TestBuildBwrapArgsDangerFullNetwork(t *testing.T) {
 	args := buildBwrapArgs(SandboxPolicy{
 		Type:          SandboxPolicyDangerFull,
@@ -537,6 +570,19 @@ func TestBwrapReadOnlySubpathsResolved(t *testing.T) {
 	}
 	if subs[1] != sub2 {
 		t.Fatalf("expected %q, got %q", sub2, subs[1])
+	}
+}
+
+func TestBwrapMountParentDirsOrdersParentsShallowFirst(t *testing.T) {
+	dirs := bwrapMountParentDirs([]string{"/Users/demo/work/repo", "/usr/local/bin"})
+	if len(dirs) == 0 {
+		t.Fatal("expected parent dirs")
+	}
+	if dirs[0] != "/Users" && dirs[0] != "/usr" {
+		t.Fatalf("expected shallow parent first, got %v", dirs)
+	}
+	if !containsString(dirs, "/Users/demo/work") {
+		t.Fatalf("expected nested parent in dirs, got %v", dirs)
 	}
 }
 

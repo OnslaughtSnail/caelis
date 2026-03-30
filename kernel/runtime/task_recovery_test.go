@@ -16,7 +16,7 @@ import (
 func TestRuntime_ReconcileSession_InterruptsStaleBashTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestRuntime_ReconcileSession_InterruptsStaleBashTask(t *testing.T) {
 func TestRuntime_ReconcileSession_KeepsRunningSpawnChild(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestRuntime_ReconcileSession_KeepsRunningSpawnChild(t *testing.T) {
 func TestRuntime_ReconcileSession_RecoversCompletedSpawnChild(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestRuntime_ReconcileSession_RecoversCompletedSpawnChild(t *testing.T) {
 func TestRuntime_ReconcileSession_ReattachesRecoverableBashTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,10 +286,87 @@ func TestRuntime_ReconcileSession_ReattachesRecoverableBashTask(t *testing.T) {
 	}
 }
 
+func TestRuntime_ReconcileSession_ReattachesLegacyACPTerminalBashTask(t *testing.T) {
+	sessions := sessionstore.New()
+	tasks := taskstore.New()
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := sessions.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-bash-acp-recover",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "sleep 30",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecCommand:       "sleep 30",
+			taskSpecWorkdir:       "/workspace",
+			taskSpecRoute:         string(toolexec.ExecutionRouteSandbox),
+			taskSpecExecSessionID: "term-123",
+		},
+		Result: map[string]any{
+			"session_id": "term-123",
+			"route":      string(toolexec.ExecutionRouteSandbox),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	terminalRunner := &stubAsyncTaskRunner{
+		status: toolexec.SessionStatus{
+			ID:        "term-123",
+			Command:   "sleep 30",
+			Dir:       "/workspace",
+			State:     toolexec.SessionStateRunning,
+			StartTime: time.Now(),
+		},
+	}
+	execRuntime := taskTestRuntime{
+		backends: map[string]toolexec.AsyncCommandRunner{
+			"acp_terminal": terminalRunner,
+		},
+	}
+	entries, err := rt.ReconcileSession(context.Background(), ReconcileSessionRequest{
+		AppName:     "app",
+		UserID:      "u",
+		SessionID:   "parent",
+		ExecRuntime: execRuntime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 task entry, got %d", len(entries))
+	}
+	got, err := tasks.Get(context.Background(), "t-bash-acp-recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != task.StateRunning || !got.Running {
+		t.Fatalf("expected recovered ACP bash task to remain running, got state=%q running=%v", got.State, got.Running)
+	}
+	if got.Result["session_id"] != "term-123" || got.Result["interrupted"] != nil {
+		t.Fatalf("unexpected recovered result payload: %#v", got.Result)
+	}
+	if got.Result["backend"] != "acp_terminal" {
+		t.Fatalf("expected recovered backend acp_terminal, got %#v", got.Result["backend"])
+	}
+}
+
 func TestRuntime_ReconcileSession_KeepsLiveSpawnTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,10 +416,10 @@ func TestRuntime_ReconcileSession_KeepsLiveSpawnTask(t *testing.T) {
 	}
 }
 
-func TestRuntime_ReconcileSession_InterruptsLegacyDelegateTask(t *testing.T) {
+func TestRuntime_ReconcileSession_InterruptsUnknownDelegateTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +440,7 @@ func TestRuntime_ReconcileSession_InterruptsLegacyDelegateTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := tasks.Upsert(context.Background(), &task.Entry{
-		TaskID:         "t-delegate-legacy",
+		TaskID:         "t-delegate-unknown",
 		Kind:           task.Kind("delegate"),
 		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
 		Title:          "inspect repo",
@@ -396,92 +473,11 @@ func TestRuntime_ReconcileSession_InterruptsLegacyDelegateTask(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 task entry, got %d", len(entries))
 	}
-	gotTask, err := tasks.Get(context.Background(), "t-delegate-legacy")
+	gotTask, err := tasks.Get(context.Background(), "t-delegate-unknown")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotTask.State != task.StateInterrupted || gotTask.Running {
-		t.Fatalf("expected legacy delegate task to be interrupted, got state=%q running=%v", gotTask.State, gotTask.Running)
-	}
-}
-
-func TestRuntime_ReconcileSession_LegacySpawnSpecFallback(t *testing.T) {
-	// Old persisted spawn records stored agent and child_cwd only in Result,
-	// not in Spec. Verify reconciliation still picks them up.
-	sessions := sessionstore.New()
-	tasks := taskstore.New()
-	rt, err := New(Config{Store: sessions, TaskStore: tasks})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
-	child := &session.Session{AppName: "app", UserID: "u", ID: "child"}
-	if _, err := sessions.GetOrCreate(context.Background(), parent); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sessions.GetOrCreate(context.Background(), child); err != nil {
-		t.Fatal(err)
-	}
-	if err := sessions.ReplaceState(context.Background(), child, runStateSnapshot(RunState{
-		HasLifecycle: true,
-		Status:       RunLifecycleStatusRunning,
-		Phase:        "run",
-		UpdatedAt:    time.Now(),
-	})); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a legacy entry: Spec has old "task" key instead of "prompt",
-	// and agent/child_cwd are only in Result.
-	if err := tasks.Upsert(context.Background(), &task.Entry{
-		TaskID:         "t-spawn-legacy",
-		Kind:           task.KindSpawn,
-		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
-		Title:          "old prompt",
-		State:          task.StateRunning,
-		Running:        true,
-		SupportsCancel: true,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-		Spec: map[string]any{
-			taskSpecLegacyPrompt: "old prompt",
-			taskSpecChildSession: "child",
-			taskSpecDelegationID: "dlg-1",
-			// No taskSpecAgent, no taskSpecChildCWD, no taskSpecTimeout — old format.
-		},
-		Result: map[string]any{
-			"child_session_id":     "child",
-			"delegation_id":        "dlg-1",
-			"_ui_agent":            "code-review",
-			"_ui_child_session_id": "child",
-			"child_cwd":            "/tmp/work",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, err := rt.ReconcileSession(context.Background(), ReconcileSessionRequest{
-		AppName:   "app",
-		UserID:    "u",
-		SessionID: "parent",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 task entry, got %d", len(entries))
-	}
-	gotTask, err := tasks.Get(context.Background(), "t-spawn-legacy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotTask.State != task.StateRunning || !gotTask.Running {
-		t.Fatalf("expected legacy spawn task to remain recoverable, got state=%q running=%v", gotTask.State, gotTask.Running)
-	}
-	// Verify agent and child_cwd were recovered from Result fallback.
-	if got := gotTask.Result["agent"]; got != "code-review" {
-		t.Fatalf("expected agent recovered from Result fallback, got %q", got)
-	}
-	if got := gotTask.Result["child_cwd"]; got != "/tmp/work" {
-		t.Fatalf("expected child_cwd recovered from Result fallback, got %q", got)
+		t.Fatalf("expected unknown delegate task to be interrupted, got state=%q running=%v", gotTask.State, gotTask.Running)
 	}
 }

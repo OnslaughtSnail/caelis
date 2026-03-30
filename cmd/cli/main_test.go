@@ -96,10 +96,7 @@ func TestBuildRuntimePromptHint_IncludesPolicySummary(t *testing.T) {
 }
 
 func TestBuildRuntimePromptHint_FullControl(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	hint := buildRuntimePromptHint(rt)
 	if !strings.Contains(hint, "permission_mode=full_control route=host") {
 		t.Fatalf("expected full control route hint, got %q", hint)

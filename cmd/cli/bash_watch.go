@@ -19,14 +19,15 @@ func (c *cliConsole) syncBashTaskWatchContext(ctx context.Context, respToolID st
 		return
 	}
 	taskID := strings.TrimSpace(fmt.Sprint(result["task_id"]))
-	sessionID := strings.TrimSpace(fmt.Sprint(firstNonEmpty(result, "_ui_exec_session_id", "session_id")))
+	sessionID := strings.TrimSpace(fmt.Sprint(result["session_id"]))
+	backendName := strings.TrimSpace(fmt.Sprint(result["backend"]))
 	if taskID == "" || sessionID == "" {
 		return
 	}
 	state := strings.ToLower(strings.TrimSpace(fmt.Sprint(result["state"])))
-	route := strings.TrimSpace(fmt.Sprint(firstNonEmpty(result, "_ui_route", "route")))
+	route := strings.TrimSpace(fmt.Sprint(result["route"]))
 	if state == "" || state == "running" || state == "waiting_input" || state == "waiting_approval" {
-		c.ensureBashTaskWatchContext(ctx, taskID, respToolID, sessionID, route)
+		c.ensureBashTaskWatchContext(ctx, taskID, respToolID, sessionID, backendName, route)
 		return
 	}
 	c.stopBashTaskWatch(taskID)
@@ -52,14 +53,14 @@ func (c *cliConsole) shouldSuppressWatchedBashTaskStream(respToolName string, ev
 	return ok
 }
 
-func (c *cliConsole) ensureBashTaskWatchContext(ctx context.Context, taskID string, callID string, sessionID string, route string) {
+func (c *cliConsole) ensureBashTaskWatchContext(ctx context.Context, taskID string, callID string, sessionID string, backendName string, route string) {
 	taskID = strings.TrimSpace(taskID)
 	sessionID = strings.TrimSpace(sessionID)
 	if taskID == "" || sessionID == "" {
 		return
 	}
-	runner, ok := asyncBashRunnerForConsole(c.execRuntime, route)
-	if !ok || runner == nil {
+	sessionRef, err := openConsoleBashSession(c.execRuntime, backendName, route, sessionID)
+	if err != nil || sessionRef == nil {
 		return
 	}
 	c.bashWatchMu.Lock()
@@ -70,7 +71,7 @@ func (c *cliConsole) ensureBashTaskWatchContext(ctx context.Context, taskID stri
 	watchCtx, cancel := context.WithCancel(context.WithoutCancel(cliContext(ctx)))
 	c.bashTaskWatches[taskID] = cancel
 	c.bashWatchMu.Unlock()
-	go c.runBashTaskWatch(watchCtx, runner, taskID, strings.TrimSpace(callID), sessionID)
+	go c.runBashTaskWatch(watchCtx, sessionRef, taskID, strings.TrimSpace(callID))
 }
 
 func (c *cliConsole) stopBashTaskWatch(taskID string) {
@@ -99,14 +100,14 @@ func (c *cliConsole) finishBashTaskWatch(taskID string) {
 	c.bashWatchMu.Unlock()
 }
 
-func (c *cliConsole) runBashTaskWatch(ctx context.Context, runner toolexec.AsyncCommandRunner, taskID string, callID string, sessionID string) {
+func (c *cliConsole) runBashTaskWatch(ctx context.Context, sessionRef toolexec.Session, taskID string, callID string) {
 	defer c.finishBashTaskWatch(taskID)
 	var stdoutMarker, stderrMarker int64
 	lastState := ""
 	ticker := time.NewTicker(bashWatchPollInterval)
 	defer ticker.Stop()
 	for {
-		stdout, stderr, nextStdout, nextStderr, err := runner.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+		stdout, stderr, nextStdout, nextStderr, err := sessionRef.ReadOutput(stdoutMarker, stderrMarker)
 		if err == nil {
 			stdoutMarker, stderrMarker = nextStdout, nextStderr
 			if text := string(stdout); strings.TrimSpace(text) != "" {
@@ -128,7 +129,7 @@ func (c *cliConsole) runBashTaskWatch(ctx context.Context, runner toolexec.Async
 				})
 			}
 		}
-		status, statusErr := runner.GetSessionStatus(sessionID)
+		status, statusErr := sessionRef.Status()
 		if statusErr == nil {
 			state := bashWatchState(status.State)
 			if state != "" && state != lastState {
@@ -159,26 +160,40 @@ func (c *cliConsole) runBashTaskWatch(ctx context.Context, runner toolexec.Async
 	}
 }
 
-func asyncBashRunnerForConsole(execRuntime toolexec.Runtime, route string) (toolexec.AsyncCommandRunner, bool) {
+func openConsoleBashSession(execRuntime toolexec.Runtime, backendName string, route string, sessionID string) (toolexec.Session, error) {
 	if execRuntime == nil {
-		return nil, false
+		return nil, fmt.Errorf("runtime unavailable")
 	}
+	backendName = strings.TrimSpace(backendName)
+	if backendName == "" {
+		switch strings.TrimSpace(route) {
+		case string(toolexec.ExecutionRouteHost):
+			backendName = "host"
+		default:
+			if usesLegacyConsoleACPTerminalBackend(route, sessionID) {
+				backendName = "acp_terminal"
+				break
+			}
+			state := execRuntime.State()
+			backendName = strings.TrimSpace(state.ResolvedSandbox)
+			if backendName == "" {
+				backendName = "sandbox"
+			}
+		}
+	}
+	return execRuntime.OpenSession(toolexec.CommandSessionRef{
+		Backend:   backendName,
+		SessionID: strings.TrimSpace(sessionID),
+	})
+}
+
+func usesLegacyConsoleACPTerminalBackend(route string, sessionID string) bool {
 	switch strings.TrimSpace(route) {
 	case "", string(toolexec.ExecutionRouteSandbox):
-		if execRuntime.SandboxRunner() == nil {
-			return nil, false
-		}
-		runner, ok := execRuntime.SandboxRunner().(toolexec.AsyncCommandRunner)
-		return runner, ok
-	case string(toolexec.ExecutionRouteHost):
-		if execRuntime.HostRunner() == nil {
-			return nil, false
-		}
-		runner, ok := execRuntime.HostRunner().(toolexec.AsyncCommandRunner)
-		return runner, ok
 	default:
-		return nil, false
+		return false
 	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sessionID)), "term-")
 }
 
 func bashWatchState(state toolexec.SessionState) string {

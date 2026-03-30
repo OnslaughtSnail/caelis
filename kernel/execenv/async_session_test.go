@@ -2,7 +2,6 @@ package execenv
 
 import (
 	"context"
-	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -335,7 +334,7 @@ func TestHostRunner_ListSessions(t *testing.T) {
 	}
 }
 
-func TestHostRunner_StartAsync_ReopensClosedSessionManager(t *testing.T) {
+func TestHostRunner_StartAsync_FailsAfterRunnerClose(t *testing.T) {
 	runner := newHostRunnerWithConfig(DefaultHostRunnerConfig())
 	if err := runner.Close(); err != nil {
 		t.Fatalf("Close failed: %v", err)
@@ -347,8 +346,8 @@ func TestHostRunner_StartAsync_ReopensClosedSessionManager(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected StartAsync to fail after session manager close")
 	}
-	if !errors.Is(err, ErrSessionManagerClosed) {
-		t.Fatalf("expected ErrSessionManagerClosed, got %v", err)
+	if !strings.Contains(err.Error(), "host runner is closed") {
+		t.Fatalf("expected host runner closed error, got %v", err)
 	}
 }
 

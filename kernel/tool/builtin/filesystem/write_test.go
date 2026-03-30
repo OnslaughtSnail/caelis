@@ -2,6 +2,7 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -77,5 +78,50 @@ func TestWriteTool_OverwriteExistingFile(t *testing.T) {
 	}
 	if string(content) != "new" {
 		t.Fatalf("expected content 'new', got %q", string(content))
+	}
+}
+
+func TestWriteTool_DefaultWorkspaceRuntimeRejectsOutsideWorkspace(t *testing.T) {
+	rt, _ := newDefaultWorkspaceRuntime(t)
+	tool, err := NewWriteWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, err := rt.FileSystem().UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(home, "outside-workspace-write-test.txt")
+	_, err = tool.Run(context.Background(), map[string]any{
+		"path":    outside,
+		"content": "blocked",
+	})
+	if err == nil {
+		t.Fatal("expected outside-workspace write to be rejected")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected permission error, got %v", err)
+	}
+}
+
+func TestWriteTool_DefaultWorkspaceRuntimeRejectsGitWrites(t *testing.T) {
+	rt, ws := newDefaultWorkspaceRuntime(t)
+	tool, err := NewWriteWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitPath := filepath.Join(ws, ".git", "config")
+	if err := os.MkdirAll(filepath.Dir(gitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{
+		"path":    gitPath,
+		"content": "[core]\n",
+	})
+	if err == nil {
+		t.Fatal("expected .git write to be rejected")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected permission error, got %v", err)
 	}
 }

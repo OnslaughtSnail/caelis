@@ -41,7 +41,7 @@ func TestLifecycleFromEvent_Parses(t *testing.T) {
 
 func TestRuntime_RunState_Completed(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestRuntime_RunState_Completed(t *testing.T) {
 
 func TestRuntime_RunState_WaitingApproval(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestRuntime_RunState_WaitingApproval(t *testing.T) {
 
 func TestRuntime_RunState_NoLifecycle(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestRuntime_RunState_NoLifecycle(t *testing.T) {
 
 func TestRuntime_RunState_FromSnapshot(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

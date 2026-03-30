@@ -61,7 +61,8 @@ func TestRuntimeRun_AutoCompaction(t *testing.T) {
 	}
 
 	rt, err := New(Config{
-		Store: store,
+		LogStore:   store,
+		StateStore: store,
 		Compaction: CompactionConfig{
 			WatermarkRatio:    0.01,
 			MinWatermarkRatio: 0.01,
@@ -119,7 +120,8 @@ func TestRuntimeRun_OverflowCompactionRetry(t *testing.T) {
 	}
 
 	rt, err := New(Config{
-		Store: store,
+		LogStore:   store,
+		StateStore: store,
 		Compaction: CompactionConfig{
 			WatermarkRatio: 0.99,
 		},
@@ -206,7 +208,8 @@ func TestRuntimeCompact_ReplacesWindowWithCheckpoint(t *testing.T) {
 	}
 
 	rt, err := New(Config{
-		Store:      store,
+		LogStore:   store,
+		StateStore: store,
 		Compaction: CompactionConfig{},
 	})
 	if err != nil {
@@ -368,7 +371,7 @@ func TestCompactionEvent_StructuredMarkdownFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rt, err := New(Config{Store: store, Compaction: CompactionConfig{}})
+	rt, err := New(Config{LogStore: store, StateStore: store, Compaction: CompactionConfig{}})
 	if err != nil {
 		t.Fatal(err)
 	}

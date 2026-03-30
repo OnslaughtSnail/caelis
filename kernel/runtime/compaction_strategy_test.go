@@ -61,7 +61,8 @@ func TestRuntime_Compact_UsesWindowEventsAndCustomStrategy(t *testing.T) {
 
 	strategy := &captureCompactionStrategy{text: "custom summary"}
 	rt, err := New(Config{
-		Store: store,
+		LogStore:   store,
+		StateStore: store,
 		Compaction: CompactionConfig{
 			Strategy: strategy,
 		},
@@ -118,7 +119,8 @@ func TestRuntime_Compact_UsesCustomSummaryFormatter(t *testing.T) {
 
 	strategy := &captureCompactionStrategy{text: "custom summary"}
 	rt, err := New(Config{
-		Store: store,
+		LogStore:   store,
+		StateStore: store,
 		Compaction: CompactionConfig{
 			Strategy: strategy,
 			SummaryFormatter: func(summary string) string {
@@ -204,7 +206,8 @@ func TestRuntime_Compact_InjectsRuntimeStateIntoCompactionInput(t *testing.T) {
 
 	strategy := &captureCompactionStrategy{text: "custom summary"}
 	rt, err := New(Config{
-		Store:      store,
+		LogStore:   store,
+		StateStore: store,
 		TaskStore:  taskStore,
 		Compaction: CompactionConfig{Strategy: strategy},
 	})

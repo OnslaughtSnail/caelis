@@ -286,16 +286,15 @@ func TestACPSessionUpdateBridge_EmitsInProgressToolUpdate(t *testing.T) {
 	}
 }
 
-func TestACPSessionUpdateBridge_TracksPendingToolCallsAndHooks(t *testing.T) {
+func TestACPSessionUpdateBridge_TracksPendingToolCalls(t *testing.T) {
 	tracker := newRemoteSubagentTracker()
-	var pauses, resumes int
 	bridge := newACPSessionUpdateBridge(runtime.DelegationMetadata{
 		ParentSessionID: "parent",
 		ChildSessionID:  "child",
 		ParentToolCall:  "call-spawn-1",
 		ParentToolName:  tool.SpawnToolName,
 		DelegationID:    "dlg-1",
-	}, "self", "child", "/workspace", tracker, func() { pauses++ }, func() { resumes++ })
+	}, "self", "child", "/workspace", tracker, nil, nil)
 
 	ctx := context.Background()
 	bridge.Emit(ctx, acpclient.UpdateEnvelope{
@@ -311,9 +310,6 @@ func TestACPSessionUpdateBridge_TracksPendingToolCallsAndHooks(t *testing.T) {
 	if !ok || !state.ToolCallPending {
 		t.Fatalf("expected pending tool call state, got %#v", state)
 	}
-	if pauses != 1 || resumes != 0 {
-		t.Fatalf("expected one pause and no resume after tool start, got pauses=%d resumes=%d", pauses, resumes)
-	}
 
 	bridge.Emit(ctx, acpclient.UpdateEnvelope{
 		SessionID: "child",
@@ -326,9 +322,6 @@ func TestACPSessionUpdateBridge_TracksPendingToolCallsAndHooks(t *testing.T) {
 	state, ok = tracker.inspect("self", "child")
 	if !ok || state.ToolCallPending {
 		t.Fatalf("expected tool call pending flag to clear, got %#v", state)
-	}
-	if pauses != 1 || resumes != 1 {
-		t.Fatalf("expected one resume after last tool completed, got pauses=%d resumes=%d", pauses, resumes)
 	}
 }
 

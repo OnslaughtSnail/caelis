@@ -183,9 +183,10 @@ func runtimePolicyHint(policy toolexec.SandboxPolicy) string {
 		network = "on"
 	}
 	return fmt.Sprintf(
-		"sandbox_policy=%s network=%s writable_roots=%s read_only_subpaths=%s",
+		"sandbox_policy=%s network=%s readable_roots=%s writable_roots=%s read_only_subpaths=%s",
 		policyType,
 		network,
+		csvOrDash(policy.ReadableRoots),
 		csvOrDash(policy.WritableRoots),
 		csvOrDash(policy.ReadOnlySubpaths),
 	)
@@ -407,8 +408,9 @@ func setupSessionRuntime(ctx context.Context, storeDir, workspaceKey, _, _ strin
 		fmt.Fprintf(os.Stderr, "warn: backfill ACP session catalog failed: %v\n", err)
 	}
 	rt, err := runtime.New(runtime.Config{
-		Store:     mainStore,
-		TaskStore: mainStore,
+		LogStore:   mainStore,
+		StateStore: mainStore,
+		TaskStore:  mainStore,
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio: compactWatermark,
 		},
@@ -418,8 +420,9 @@ func setupSessionRuntime(ctx context.Context, storeDir, workspaceKey, _, _ strin
 		return nil, err
 	}
 	acpRuntime, err := runtime.New(runtime.Config{
-		Store:     acpStore,
-		TaskStore: acpStore,
+		LogStore:   acpStore,
+		StateStore: acpStore,
+		TaskStore:  acpStore,
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio: compactWatermark,
 		},

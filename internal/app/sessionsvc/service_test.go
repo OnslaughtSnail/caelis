@@ -2,6 +2,8 @@ package sessionsvc
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"iter"
 	"sync"
 	"testing"
@@ -14,6 +16,12 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 )
+
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
 
 func TestServiceListDelegations(t *testing.T) {
 	store := inmemory.New()
@@ -99,7 +107,7 @@ func TestServiceListDelegationsSkipsDuplicates(t *testing.T) {
 			},
 		})
 	}
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +184,12 @@ func (r *switchingExecRuntime) FallbackReason() string {
 	}
 	return ""
 }
+func (r *switchingExecRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	if current := r.Current(); current != nil {
+		return current.Diagnostics()
+	}
+	return toolexec.SandboxDiagnostics{}
+}
 
 func (r *switchingExecRuntime) FileSystem() toolexec.FileSystem {
 	if current := r.Current(); current != nil {
@@ -184,18 +198,32 @@ func (r *switchingExecRuntime) FileSystem() toolexec.FileSystem {
 	return nil
 }
 
-func (r *switchingExecRuntime) HostRunner() toolexec.CommandRunner {
+func (r *switchingExecRuntime) State() toolexec.RuntimeState {
 	if current := r.Current(); current != nil {
-		return current.HostRunner()
+		return current.State()
 	}
-	return nil
+	return toolexec.RuntimeState{}
 }
 
-func (r *switchingExecRuntime) SandboxRunner() toolexec.CommandRunner {
+func (r *switchingExecRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
 	if current := r.Current(); current != nil {
-		return current.SandboxRunner()
+		return current.Execute(ctx, req)
 	}
-	return nil
+	return toolexec.CommandResult{}, fmt.Errorf("runtime unavailable")
+}
+
+func (r *switchingExecRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	if current := r.Current(); current != nil {
+		return current.Start(ctx, req)
+	}
+	return nil, fmt.Errorf("runtime unavailable")
+}
+
+func (r *switchingExecRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if current := r.Current(); current != nil {
+		return current.OpenSession(ref)
+	}
+	return nil, fmt.Errorf("runtime unavailable")
 }
 
 func (r *switchingExecRuntime) DecideRoute(command string, sandboxPermission toolexec.SandboxPermission) toolexec.CommandDecision {
@@ -242,6 +270,8 @@ type closeableAsyncRunner struct {
 	result  toolexec.CommandResult
 }
 
+var errTestRunnerClosed = errors.New("test async runner is closed")
+
 func (r *closeableAsyncRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
 	return toolexec.CommandResult{}, nil
 }
@@ -250,7 +280,7 @@ func (r *closeableAsyncRunner) StartAsync(_ context.Context, req toolexec.Comman
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return "", toolexec.ErrSessionManagerClosed
+		return "", errTestRunnerClosed
 	}
 	r.calls = append(r.calls, req)
 	if r.session == "" {
@@ -290,7 +320,7 @@ func (r *closeableAsyncRunner) WaitSession(context.Context, string, time.Duratio
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return toolexec.CommandResult{}, toolexec.ErrSessionManagerClosed
+		return toolexec.CommandResult{}, errTestRunnerClosed
 	}
 	return r.result, nil
 }
@@ -318,7 +348,7 @@ func drainTurnErrors(seq iter.Seq2[*session.Event, error]) []error {
 
 func TestServiceRunTurnUsesSwappableExecutionRuntime(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,6 +366,7 @@ func TestServiceRunTurnUsesSwappableExecutionRuntime(t *testing.T) {
 	newRuntime, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     newRunner,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

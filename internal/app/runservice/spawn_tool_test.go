@@ -132,15 +132,17 @@ func TestSelfSpawnToolRejectsLegacyContinuationArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := task.WithManager(context.Background(), &stubTaskManager{})
-	_, err = toolImpl.Run(ctx, map[string]any{
-		"prompt":     "child task",
-		"session_id": "child-1",
-	})
-	if err == nil {
-		t.Fatal("expected legacy continuation args to be rejected")
-	}
-	if !strings.Contains(err.Error(), `arg "session_id" is no longer supported`) {
-		t.Fatalf("expected legacy arg rejection, got %v", err)
+	for _, key := range []string{"session_id", "timeout_ms", "timeout_seconds"} {
+		_, err = toolImpl.Run(ctx, map[string]any{
+			"prompt": "child task",
+			key:      "child-1",
+		})
+		if err == nil {
+			t.Fatalf("expected unsupported arg %q to be rejected", key)
+		}
+		if !strings.Contains(err.Error(), `arg "`+key+`" is no longer supported`) {
+			t.Fatalf("expected arg rejection for %q, got %v", key, err)
+		}
 	}
 }
 
@@ -164,15 +166,14 @@ func TestSelfSpawnToolDeclarationOmitsLegacyContinuationArgs(t *testing.T) {
 	}
 	agentProp, _ := props["agent"].(map[string]any)
 	yieldProp, _ := props["yield_time_ms"].(map[string]any)
-	timeoutProp, _ := props["timeout_ms"].(map[string]any)
 	if !strings.Contains(asString(agentProp["description"]), "codex, copilot, or gemini") {
 		t.Fatalf("expected agent declaration to include concrete examples, got %#v", agentProp)
 	}
 	if !strings.Contains(asString(yieldProp["description"]), "per-call wait") || !strings.Contains(asString(yieldProp["description"]), "result includes task_id") {
 		t.Fatalf("expected yield_time_ms declaration to explain per-call wait, got %#v", yieldProp)
 	}
-	if !strings.Contains(asString(timeoutProp["description"]), "independent from yield_time_ms") || !strings.Contains(asString(timeoutProp["description"]), "task snapshot") {
-		t.Fatalf("expected timeout_ms declaration to explain total timeout, got %#v", timeoutProp)
+	if _, ok := props["timeout_ms"]; ok {
+		t.Fatalf("did not expect timeout_ms in SPAWN declaration, got %#v", props["timeout_ms"])
 	}
 }
 

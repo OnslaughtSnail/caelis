@@ -64,6 +64,7 @@ type BashStartRequest struct {
 	IdleTimeout           time.Duration
 	TTY                   bool
 	Route                 string
+	Backend               string
 	EnvOverrides          map[string]string
 	SandboxPolicyOverride *toolexec.SandboxPolicy
 }

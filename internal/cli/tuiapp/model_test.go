@@ -1292,6 +1292,33 @@ func TestShiftTabTogglesModeAndRefreshesStatus(t *testing.T) {
 	}
 }
 
+func TestBacktabTogglesModeAndRefreshesStatus(t *testing.T) {
+	toggled := false
+	m := NewModel(Config{
+		ToggleMode: func() (string, error) {
+			toggled = true
+			return "full access mode enabled", nil
+		},
+		RefreshStatus: func() (string, string) {
+			return "model {full_access}", "42/128k"
+		},
+	})
+	updated, cmd := m.Update(keyText("backtab"))
+	next := updated.(*Model)
+	if !toggled {
+		t.Fatal("expected toggle callback")
+	}
+	if next.hint != "full access mode enabled" {
+		t.Fatalf("expected mode hint, got %q", next.hint)
+	}
+	if next.statusModel != "model {full_access}" || next.statusContext != "42/128k" {
+		t.Fatalf("unexpected refreshed status %q %q", next.statusModel, next.statusContext)
+	}
+	if cmd == nil {
+		t.Fatal("expected hint clear command")
+	}
+}
+
 func TestObserveRenderStats(t *testing.T) {
 	m := NewModel(Config{})
 	m.observeRender(5*time.Millisecond, 100, "incremental")
@@ -2241,6 +2268,35 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected prompt response after enter")
+	}
+}
+
+func TestApprovalPromptBacktabMovesSelectionUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt:        "Would you like to run the following command?",
+		DefaultChoice: "a",
+		Choices: []tuievents.PromptChoice{
+			{Label: "approve", Value: "y"},
+			{Label: "always", Value: "a"},
+			{Label: "reject", Value: "n"},
+		},
+		Response: respCh,
+	})
+	if m.activePrompt == nil {
+		t.Fatal("expected active prompt")
+	}
+	if m.activePrompt.choiceIndex != 1 {
+		t.Fatalf("expected default selection at always, got %d", m.activePrompt.choiceIndex)
+	}
+
+	_, _ = m.Update(keyText("backtab"))
+
+	if m.activePrompt.choiceIndex != 0 {
+		t.Fatalf("expected backtab to move selection up, got %d", m.activePrompt.choiceIndex)
 	}
 }
 
@@ -4737,6 +4793,23 @@ func TestTaskMonitorBlockCollapsesToSummary(t *testing.T) {
 	}
 	if strings.Contains(view, "Standby") || strings.Contains(view, "Checking task status") {
 		t.Fatalf("expected task monitor rendered as compact single line, got:\n%s", view)
+	}
+}
+
+func TestTaskListActivityStaysInTaskMonitor(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ TASK list\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ TASK listed 1 task (1 active)\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Listed 1 task") {
+		t.Fatalf("expected task list summary in task monitor, got:\n%s", view)
+	}
+	if strings.Contains(view, "Explored 1 paths") {
+		t.Fatalf("did not expect TASK list to fall back to exploration summary, got:\n%s", view)
 	}
 }
 

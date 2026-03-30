@@ -2,9 +2,12 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
 func TestSearchTool_ReportsTruncationAndFileStats(t *testing.T) {
@@ -151,5 +154,53 @@ func TestSearchTool_ExcludeFiltersRelativePaths(t *testing.T) {
 	}
 	if hits[0]["path"] != filepath.Join(tmpDir, "keep.txt") {
 		t.Fatalf("expected keep.txt to remain visible, got %#v", hits[0]["path"])
+	}
+}
+
+func TestSearchTool_DefaultWorkspaceRuntime_AllowsSearchOutsideWorkspace(t *testing.T) {
+	rt, _ := newDefaultWorkspaceRuntime(t)
+	tool, err := NewSearchWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := newOutsideScratchFilePath(t, "outside.txt")
+	if err := os.WriteFile(path, []byte("needle\nhay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := tool.Run(context.Background(), map[string]any{
+		"path":  path,
+		"query": "needle",
+	})
+	if err != nil {
+		t.Fatalf("expected outside-workspace search to stay allowed, got %v", err)
+	}
+	if got := out["count"]; got != 1 {
+		t.Fatalf("expected one hit, got %v", got)
+	}
+}
+
+func TestSearchTool_RestrictedReadableRootsRejectOutsideWorkspace(t *testing.T) {
+	rt, _ := newWorkspaceRuntimeWithPolicy(t, toolexec.SandboxPolicy{
+		Type:          toolexec.SandboxPolicyWorkspaceWrite,
+		ReadableRoots: []string{"."},
+	})
+	tool, err := NewSearchWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := newOutsideScratchFilePath(t, "outside.txt")
+	if err := os.WriteFile(path, []byte("needle\nhay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = tool.Run(context.Background(), map[string]any{
+		"path":  path,
+		"query": "needle",
+	})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected permission error for outside-workspace search, got %v", err)
 	}
 }

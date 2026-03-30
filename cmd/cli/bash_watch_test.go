@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,8 +12,9 @@ import (
 )
 
 type bashWatchTestRuntime struct {
-	cwd  string
-	host toolexec.AsyncCommandRunner
+	cwd      string
+	host     toolexec.AsyncCommandRunner
+	backends map[string]toolexec.AsyncCommandRunner
 }
 
 func (r bashWatchTestRuntime) PermissionMode() toolexec.PermissionMode {
@@ -22,9 +24,25 @@ func (r bashWatchTestRuntime) SandboxType() string                   { return "t
 func (r bashWatchTestRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
 func (r bashWatchTestRuntime) FallbackToHost() bool                  { return false }
 func (r bashWatchTestRuntime) FallbackReason() string                { return "" }
-func (r bashWatchTestRuntime) FileSystem() toolexec.FileSystem       { return previewTestFS{cwd: r.cwd} }
-func (r bashWatchTestRuntime) HostRunner() toolexec.CommandRunner    { return r.host }
-func (r bashWatchTestRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
+func (r bashWatchTestRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{}
+}
+func (r bashWatchTestRuntime) FileSystem() toolexec.FileSystem { return previewTestFS{cwd: r.cwd} }
+func (r bashWatchTestRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{Mode: toolexec.PermissionModeDefault, ResolvedSandbox: "test"}
+}
+func (r bashWatchTestRuntime) Execute(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+func (r bashWatchTestRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	return runtimeSessionFromRunner(ctx, "host", r.host, req)
+}
+func (r bashWatchTestRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if runner := r.backends[strings.TrimSpace(ref.Backend)]; runner != nil {
+		return runtimeSessionFromRef(strings.TrimSpace(ref.Backend), runner, ref)
+	}
+	return runtimeSessionFromRef("host", r.host, ref)
+}
 func (r bashWatchTestRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{}
 }
@@ -47,7 +65,7 @@ func (r *bashWatchMockRunner) Run(context.Context, toolexec.CommandRequest) (too
 }
 
 func (r *bashWatchMockRunner) StartAsync(context.Context, toolexec.CommandRequest) (string, error) {
-	return "", nil
+	return "watch-session-1", nil
 }
 
 func (r *bashWatchMockRunner) WriteInput(string, []byte) error { return nil }
@@ -116,7 +134,7 @@ func TestEnsureBashTaskWatchContext_UsesBaseContextAfterTurnCancel(t *testing.T)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	c.ensureBashTaskWatchContext(ctx, "task-1", "call-1", "session-1", string(toolexec.ExecutionRouteHost))
+	c.ensureBashTaskWatchContext(ctx, "task-1", "call-1", "session-1", "host", string(toolexec.ExecutionRouteHost))
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		for _, raw := range sender.Snapshot() {
@@ -155,10 +173,10 @@ func TestSyncBashTaskWatchContext_UsesHiddenUIWatchFields(t *testing.T) {
 	}
 
 	c.syncBashTaskWatchContext(context.Background(), "call-1", "BASH", map[string]any{
-		"task_id":             "task-1",
-		"state":               "running",
-		"_ui_exec_session_id": "session-1",
-		"_ui_route":           string(toolexec.ExecutionRouteHost),
+		"task_id":    "task-1",
+		"state":      "running",
+		"session_id": "session-1",
+		"route":      string(toolexec.ExecutionRouteHost),
 	})
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
@@ -175,4 +193,27 @@ func TestSyncBashTaskWatchContext_UsesHiddenUIWatchFields(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("expected bash watch to start from hidden ui fields, got %#v", sender.Snapshot())
+}
+
+func TestOpenConsoleBashSession_LegacyACPWatchUsesTerminalBackend(t *testing.T) {
+	terminal := &bashWatchMockRunner{
+		statuses: []toolexec.SessionState{toolexec.SessionStateRunning},
+	}
+	sessionRef, err := openConsoleBashSession(
+		bashWatchTestRuntime{
+			cwd: t.TempDir(),
+			backends: map[string]toolexec.AsyncCommandRunner{
+				"acp_terminal": terminal,
+			},
+		},
+		"",
+		string(toolexec.ExecutionRouteSandbox),
+		"term-123",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionRef.Ref().Backend; got != "acp_terminal" {
+		t.Fatalf("expected acp_terminal backend, got %q", got)
+	}
 }

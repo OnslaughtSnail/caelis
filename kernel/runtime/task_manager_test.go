@@ -438,7 +438,7 @@ func TestTaskManager_WaitSuppressesTTYTranscriptWhenTaskCompletes(t *testing.T) 
 
 func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) {
 	sessStore := sessioninmemory.New()
-	rt, err := New(Config{Store: sessStore})
+	rt, err := New(Config{LogStore: sessStore, StateStore: sessStore})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,6 +500,44 @@ func TestSubagentTaskController_WaitDoesNotReturnEarlyOnNewEvents(t *testing.T) 
 	}
 	if got := snapshot.Result["latest_output"]; got != "still working" {
 		t.Fatalf("expected running spawn latest_output slice, got %#v", snapshot.Result)
+	}
+}
+
+func TestTaskManager_StartSpawnDoesNotPersistPublicTimeoutMetadata(t *testing.T) {
+	store := taskinmemory.New()
+	runner := &trackingSubagentRunner{
+		runResult: agent.SubagentRunResult{
+			SessionID:    "child-1",
+			DelegationID: "d-1",
+			Agent:        "gemini",
+			ChildCWD:     "/workspace",
+			State:        string(task.StateRunning),
+			Running:      true,
+			Timeout:      2 * time.Minute,
+			IdleTimeout:  30 * time.Second,
+		},
+	}
+	manager := newTaskManager(nil, nil, nil, store, &sessionContext{appName: "app", userID: "u", sessionID: "parent"}, RunRequest{}, runner)
+
+	snapshot, err := manager.StartSpawn(context.Background(), task.SpawnStartRequest{
+		Agent:   "gemini",
+		Prompt:  "inspect child",
+		Yield:   0,
+		Timeout: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Result["_ui_timeout_seconds"] != nil {
+		t.Fatalf("did not expect public timeout metadata on fresh spawn snapshot, got %#v", snapshot.Result)
+	}
+
+	entry, err := store.Get(context.Background(), snapshot.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := entry.Spec["timeout_seconds"]; ok {
+		t.Fatalf("did not expect timeout_seconds persisted for new spawn tasks, got %#v", entry.Spec)
 	}
 }
 
@@ -632,10 +670,13 @@ func TestTaskManager_BashWaitDetectsWaitingInputPrompt(t *testing.T) {
 		sessionID: "sess-prompt-1",
 	}
 	controller := &bashTaskController{
-		runner:    runner,
-		sessionID: "sess-prompt-1",
-		command:   "read name",
-		route:     string(toolexec.ExecutionRouteHost),
+		session: openRuntimeTestSession("host", runner, toolexec.CommandSessionRef{
+			Backend:   "host",
+			SessionID: "sess-prompt-1",
+		}),
+		command: "read name",
+		route:   string(toolexec.ExecutionRouteHost),
+		backend: "host",
 	}
 	record := &task.Record{
 		ID:      "t-bash-prompt",
@@ -657,7 +698,7 @@ func TestTaskManager_BashWaitDetectsWaitingInputPrompt(t *testing.T) {
 func TestTaskManager_WaitRebuildsPersistedSpawnController(t *testing.T) {
 	sessStore := sessioninmemory.New()
 	taskStore := taskinmemory.New()
-	rt, err := New(Config{Store: sessStore, TaskStore: taskStore})
+	rt, err := New(Config{LogStore: sessStore, StateStore: sessStore, TaskStore: taskStore})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +761,7 @@ func TestTaskManager_WaitRebuildsPersistedSpawnController(t *testing.T) {
 	if !snapshot.Running || snapshot.State != task.StateRunning {
 		t.Fatalf("expected persisted spawn task to remain controllable, got state=%q running=%v", snapshot.State, snapshot.Running)
 	}
-	if got := snapshot.Result["_ui_child_session_id"]; got != "child" {
+	if got := snapshot.Result["child_session_id"]; got != "child" {
 		t.Fatalf("expected child session metadata, got %#v", snapshot.Result)
 	}
 }
@@ -1168,7 +1209,9 @@ type assertErrString string
 func (e assertErrString) Error() string { return string(e) }
 
 type taskTestRuntime struct {
-	host toolexec.AsyncCommandRunner
+	host     toolexec.AsyncCommandRunner
+	backends map[string]toolexec.AsyncCommandRunner
+	state    toolexec.RuntimeState
 }
 
 func (r taskTestRuntime) PermissionMode() toolexec.PermissionMode {
@@ -1178,11 +1221,33 @@ func (r taskTestRuntime) SandboxType() string                   { return "" }
 func (r taskTestRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
 func (r taskTestRuntime) FallbackToHost() bool                  { return false }
 func (r taskTestRuntime) FallbackReason() string                { return "" }
-func (r taskTestRuntime) FileSystem() toolexec.FileSystem       { return nil }
-func (r taskTestRuntime) HostRunner() toolexec.CommandRunner    { return r.host }
-func (r taskTestRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
+func (r taskTestRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{}
+}
+func (r taskTestRuntime) FileSystem() toolexec.FileSystem { return nil }
 func (r taskTestRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{}
+}
+func (r taskTestRuntime) State() toolexec.RuntimeState {
+	if len(r.state.Backends) > 0 || r.state.ResolvedSandbox != "" || r.state.RequestedSandbox != "" || r.state.SandboxStatus != "" || r.state.FallbackReason != "" {
+		return r.state
+	}
+	return toolexec.RuntimeState{Mode: toolexec.PermissionModeDefault}
+}
+func (r taskTestRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return r.host.Run(ctx, req)
+}
+func (r taskTestRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	return newRuntimeTestSession(ctx, "host", r.host, req)
+}
+func (r taskTestRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if runner := r.backends[strings.TrimSpace(ref.Backend)]; runner != nil {
+		return openRuntimeTestSession(strings.TrimSpace(ref.Backend), runner, ref), nil
+	}
+	if r.host == nil {
+		return nil, errors.New("runner unavailable")
+	}
+	return openRuntimeTestSession("host", r.host, ref), nil
 }
 
 type stubAsyncTaskRunner struct {

@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+type idleWatchdogPauseReason string
+
+const (
+	idleWatchdogPauseApproval     idleWatchdogPauseReason = "approval"
+	idleWatchdogPauseTerminalTool idleWatchdogPauseReason = "terminal_tool"
+)
+
 type idleWatchdog struct {
 	idleTimeout time.Duration
 	initTimeout time.Duration
@@ -16,7 +23,7 @@ type idleWatchdog struct {
 	startedAt time.Time
 	lastBeat  time.Time
 	seenBeat  bool
-	pauseRefs int
+	pausedBy  map[idleWatchdogPauseReason]int
 	once      sync.Once
 }
 
@@ -82,24 +89,38 @@ func (w *idleWatchdog) Beat() {
 }
 
 func (w *idleWatchdog) Pause() {
+	w.PauseWithReason(idleWatchdogPauseApproval)
+}
+
+func (w *idleWatchdog) PauseWithReason(reason idleWatchdogPauseReason) {
 	if w == nil {
 		return
 	}
 	w.mu.Lock()
-	w.pauseRefs++
+	if w.pausedBy == nil {
+		w.pausedBy = map[idleWatchdogPauseReason]int{}
+	}
+	w.pausedBy[reason]++
 	w.mu.Unlock()
 }
 
 func (w *idleWatchdog) Resume() {
+	w.ResumeWithReason(idleWatchdogPauseApproval)
+}
+
+func (w *idleWatchdog) ResumeWithReason(reason idleWatchdogPauseReason) {
 	if w == nil {
 		return
 	}
 	now := time.Now()
 	w.mu.Lock()
-	if w.pauseRefs > 0 {
-		w.pauseRefs--
+	if w.pausedBy[reason] > 0 {
+		w.pausedBy[reason]--
+		if w.pausedBy[reason] == 0 {
+			delete(w.pausedBy, reason)
+		}
 	}
-	if w.pauseRefs > 0 {
+	if len(w.pausedBy) > 0 {
 		w.mu.Unlock()
 		return
 	}
@@ -148,7 +169,7 @@ func (w *idleWatchdog) idleFor() (time.Duration, bool) {
 	now := time.Now()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.pauseRefs > 0 {
+	if len(w.pausedBy) > 0 {
 		return 0, false
 	}
 	if w.seenBeat {

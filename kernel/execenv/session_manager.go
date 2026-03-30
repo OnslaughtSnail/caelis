@@ -13,8 +13,7 @@ var (
 	ErrSessionNotFound = errors.New("session not found")
 	// ErrSessionAlreadyExists is returned when trying to register a duplicate session.
 	ErrSessionAlreadyExists = errors.New("session already exists")
-	// ErrSessionManagerClosed is returned when starting a session after the manager was closed.
-	ErrSessionManagerClosed = errors.New("session manager is closed")
+	errSessionServiceClosed = errors.New("async session service is closed")
 )
 
 // SessionManager manages multiple async sessions.
@@ -99,7 +98,7 @@ func (sm *SessionManager) StartSession(cfg AsyncSessionConfig) (*AsyncSession, e
 	defer sm.mu.Unlock()
 
 	if sm.closed {
-		return nil, ErrSessionManagerClosed
+		return nil, errSessionServiceClosed
 	}
 
 	// Check session limit
@@ -279,31 +278,4 @@ func (sm *SessionManager) Close() error {
 	}
 
 	return firstErr
-}
-
-// Global session manager instance
-var (
-	globalSessionManager     *SessionManager
-	globalSessionManagerOnce sync.Once
-	globalSessionManagerMu   sync.Mutex
-)
-
-// GetGlobalSessionManager returns the global session manager instance.
-func GetGlobalSessionManager() *SessionManager {
-	globalSessionManagerOnce.Do(func() {
-		globalSessionManager = NewSessionManager(DefaultSessionManagerConfig())
-	})
-	return globalSessionManager
-}
-
-// SetGlobalSessionManager replaces the global session manager.
-// This should only be called during initialization.
-func SetGlobalSessionManager(sm *SessionManager) {
-	globalSessionManagerMu.Lock()
-	defer globalSessionManagerMu.Unlock()
-
-	if globalSessionManager != nil {
-		globalSessionManager.Close()
-	}
-	globalSessionManager = sm
 }

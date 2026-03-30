@@ -146,6 +146,44 @@ type traceTaskRuntime struct {
 	host toolexec.AsyncCommandRunner
 }
 
+type runtimeTestSession struct {
+	ref    toolexec.CommandSessionRef
+	runner toolexec.AsyncCommandRunner
+}
+
+func (s *runtimeTestSession) Ref() toolexec.CommandSessionRef { return s.ref }
+func (s *runtimeTestSession) WriteInput(input []byte) error {
+	return s.runner.WriteInput(s.ref.SessionID, input)
+}
+func (s *runtimeTestSession) ReadOutput(stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
+	return s.runner.ReadOutput(s.ref.SessionID, stdoutMarker, stderrMarker)
+}
+func (s *runtimeTestSession) Status() (toolexec.SessionStatus, error) {
+	return s.runner.GetSessionStatus(s.ref.SessionID)
+}
+func (s *runtimeTestSession) Wait(ctx context.Context, timeout time.Duration) (toolexec.CommandResult, error) {
+	return s.runner.WaitSession(ctx, s.ref.SessionID, timeout)
+}
+func (s *runtimeTestSession) Terminate() error { return s.runner.TerminateSession(s.ref.SessionID) }
+
+func newRuntimeTestSession(ctx context.Context, backend string, runner toolexec.AsyncCommandRunner, req toolexec.CommandRequest) (toolexec.Session, error) {
+	sessionID, err := runner.StartAsync(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeTestSession{
+		ref:    toolexec.CommandSessionRef{Backend: backend, SessionID: sessionID},
+		runner: runner,
+	}, nil
+}
+
+func openRuntimeTestSession(backend string, runner toolexec.AsyncCommandRunner, ref toolexec.CommandSessionRef) toolexec.Session {
+	return &runtimeTestSession{
+		ref:    toolexec.CommandSessionRef{Backend: backend, SessionID: strings.TrimSpace(ref.SessionID)},
+		runner: runner,
+	}
+}
+
 func (r traceTaskRuntime) PermissionMode() toolexec.PermissionMode {
 	return toolexec.PermissionModeDefault
 }
@@ -154,11 +192,27 @@ func (r traceTaskRuntime) SandboxType() string                   { return "" }
 func (r traceTaskRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
 func (r traceTaskRuntime) FallbackToHost() bool                  { return false }
 func (r traceTaskRuntime) FallbackReason() string                { return "" }
-func (r traceTaskRuntime) FileSystem() toolexec.FileSystem       { return nil }
-func (r traceTaskRuntime) HostRunner() toolexec.CommandRunner    { return r.host }
-func (r traceTaskRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
+func (r traceTaskRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{}
+}
+func (r traceTaskRuntime) FileSystem() toolexec.FileSystem { return nil }
 func (r traceTaskRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{Route: toolexec.ExecutionRouteHost}
+}
+func (r traceTaskRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{Mode: toolexec.PermissionModeDefault}
+}
+func (r traceTaskRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return r.host.Run(ctx, req)
+}
+func (r traceTaskRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	return newRuntimeTestSession(ctx, "host", r.host, req)
+}
+func (r traceTaskRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if r.host == nil {
+		return nil, fmt.Errorf("runner unavailable")
+	}
+	return openRuntimeTestSession("host", r.host, ref), nil
 }
 
 type traceSpawnRunner struct {
@@ -169,20 +223,20 @@ type traceSpawnRunner struct {
 
 func (r *traceSpawnRunner) RunSubagent(ctx context.Context, _ agent.SubagentRunRequest) (agent.SubagentRunResult, error) {
 	child := &session.Session{AppName: r.appName, UserID: r.userID, ID: "child-1"}
-	if _, err := r.runtime.store.GetOrCreate(ctx, child); err != nil {
+	if _, err := r.runtime.logStore.GetOrCreate(ctx, child); err != nil {
 		return agent.SubagentRunResult{}, err
 	}
-	if err := r.runtime.store.AppendEvent(ctx, child, lifecycleEvent(child, RunLifecycleStatusRunning, "run", nil)); err != nil {
+	if err := r.runtime.logStore.AppendEvent(ctx, child, lifecycleEvent(child, RunLifecycleStatusRunning, "run", nil)); err != nil {
 		return agent.SubagentRunResult{}, err
 	}
 	go func(ctx context.Context) {
 		time.Sleep(30 * time.Millisecond)
-		_ = r.runtime.store.AppendEvent(ctx, child, &session.Event{
+		_ = r.runtime.logStore.AppendEvent(ctx, child, &session.Event{
 			ID:      "child-assistant",
 			Time:    time.Now(),
 			Message: model.NewTextMessage(model.RoleAssistant, "child final output"),
 		})
-		_ = r.runtime.store.AppendEvent(ctx, child, lifecycleEvent(child, RunLifecycleStatusCompleted, "run", nil))
+		_ = r.runtime.logStore.AppendEvent(ctx, child, lifecycleEvent(child, RunLifecycleStatusCompleted, "run", nil))
 	}(context.WithoutCancel(ctx))
 	return agent.SubagentRunResult{
 		SessionID:    child.ID,
@@ -222,7 +276,7 @@ func (r *traceSpawnRunner) runtimeSubagentInspect(ctx context.Context, sessionID
 func TestRuntimeRequestTraceMatchesPersistedToolContext(t *testing.T) {
 	t.Setenv(model.RequestTraceEnvVar, "1")
 	store := newTraceFileStore(t)
-	rt, err := New(Config{Store: store, TaskStore: taskinmemory.New()})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskinmemory.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +347,7 @@ func TestRuntimeRequestTraceMatchesPersistedToolContext(t *testing.T) {
 func TestRuntimeRequestTraceExcludesPartialEventsFromNextRequest(t *testing.T) {
 	t.Setenv(model.RequestTraceEnvVar, "1")
 	store := newTraceFileStore(t)
-	rt, err := New(Config{Store: store, TaskStore: taskinmemory.New()})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskinmemory.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +439,7 @@ func TestRuntimeRequestTraceExcludesPartialEventsFromNextRequest(t *testing.T) {
 func TestRuntimeRequestTraceBashYieldUsesLatestPersistedTaskResult(t *testing.T) {
 	t.Setenv(model.RequestTraceEnvVar, "1")
 	store := newTraceFileStore(t)
-	rt, err := New(Config{Store: store, TaskStore: taskinmemory.New()})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskinmemory.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +521,7 @@ func TestRuntimeRequestTraceBashYieldUsesLatestPersistedTaskResult(t *testing.T)
 func TestRuntimeRequestTraceSpawnYieldUsesLatestPersistedTaskResult(t *testing.T) {
 	t.Setenv(model.RequestTraceEnvVar, "1")
 	store := newTraceFileStore(t)
-	rt, err := New(Config{Store: store, TaskStore: taskinmemory.New()})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskinmemory.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +605,7 @@ func TestRuntimeRequestTraceSpawnYieldUsesLatestPersistedTaskResult(t *testing.T
 func TestRuntimeRequestTraceOverlayDoesNotPersistMainHistory(t *testing.T) {
 	t.Setenv(model.RequestTraceEnvVar, "1")
 	store := newTraceFileStore(t)
-	rt, err := New(Config{Store: store, TaskStore: taskinmemory.New()})
+	rt, err := New(Config{LogStore: store, StateStore: store, TaskStore: taskinmemory.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +679,10 @@ func newTraceFileStore(t *testing.T) *filestore.Store {
 
 func newTraceExecRuntime(t *testing.T) toolexec.Runtime {
 	t.Helper()
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -772,6 +829,11 @@ func traceSanitizeToolResult(result map[string]any) map[string]any {
 		}
 		if taskID, exists := out["task_id"]; exists {
 			compact["task_id"] = taskID
+		}
+		for _, key := range []string{"child_session_id", "delegation_id", "agent", "child_cwd"} {
+			if value, exists := out[key]; exists {
+				compact[key] = value
+			}
 		}
 		if events, exists := out["events"]; exists {
 			compact["events"] = events

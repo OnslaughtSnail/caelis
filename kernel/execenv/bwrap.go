@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	stdruntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -27,7 +28,7 @@ func (f bwrapSandboxFactory) Type() string {
 }
 
 func (f bwrapSandboxFactory) Build(cfg Config) (CommandRunner, error) {
-	return newBwrapRunner(cfg.SandboxPolicy), nil
+	return newBwrapRunner(deriveSandboxPolicy(PermissionModeDefault, cloneSandboxPolicy(cfg.SandboxPolicy))), nil
 }
 
 type bwrapRunner struct {
@@ -38,6 +39,7 @@ type bwrapRunner struct {
 	goos           string
 	policy         SandboxPolicy
 	sessionManager *SessionManager
+	closed         atomic.Bool
 }
 
 func newBwrapRunner(policy SandboxPolicy) CommandRunner {
@@ -292,6 +294,10 @@ func (b *bwrapRunner) Run(ctx context.Context, req CommandRequest) (CommandResul
 }
 
 func (b *bwrapRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return "", err
+	}
 	if req.TTY {
 		return "", fmt.Errorf("tool: bwrap async tty is not supported")
 	}
@@ -300,7 +306,7 @@ func (b *bwrapRunner) StartAsync(_ context.Context, req CommandRequest) (string,
 		return "", fmt.Errorf("tool: resolve bwrap workdir failed: %w", err)
 	}
 	effectivePolicy := sandboxPolicyForCommand(b.policy, req)
-	session, err := b.sessionManager.StartSession(AsyncSessionConfig{
+	session, err := manager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
 		Env:             mergeCommandEnv(req.EnvOverrides),
@@ -326,29 +332,45 @@ func (b *bwrapRunner) StartAsync(_ context.Context, req CommandRequest) (string,
 }
 
 func (b *bwrapRunner) WriteInput(sessionID string, input []byte) error {
-	return b.sessionManager.WriteInput(sessionID, input)
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.WriteInput(sessionID, input)
 }
 
 func (b *bwrapRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
-	return b.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	return manager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
 }
 
 func (b *bwrapRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
-	return b.sessionManager.GetSessionStatus(sessionID)
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	return manager.GetSessionStatus(sessionID)
 }
 
 func (b *bwrapRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return CommandResult{}, err
+	}
 	waitCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		waitCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	exitCode, err := b.sessionManager.WaitSession(waitCtx, sessionID)
+	exitCode, err := manager.WaitSession(waitCtx, sessionID)
 	if err != nil {
 		return CommandResult{}, err
 	}
-	result, err := b.sessionManager.GetResult(sessionID)
+	result, err := manager.GetResult(sessionID)
 	if err != nil {
 		return CommandResult{ExitCode: exitCode}, nil
 	}
@@ -356,18 +378,34 @@ func (b *bwrapRunner) WaitSession(ctx context.Context, sessionID string, timeout
 }
 
 func (b *bwrapRunner) TerminateSession(sessionID string) error {
-	return b.sessionManager.TerminateSession(sessionID)
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.TerminateSession(sessionID)
 }
 
 func (b *bwrapRunner) ListSessions() []SessionInfo {
-	return b.sessionManager.ListSessions()
+	manager, err := b.asyncSessionManager()
+	if err != nil {
+		return nil
+	}
+	return manager.ListSessions()
 }
 
 func (b *bwrapRunner) Close() error {
+	b.closed.Store(true)
 	if b.sessionManager != nil {
 		return b.sessionManager.Close()
 	}
 	return nil
+}
+
+func (b *bwrapRunner) asyncSessionManager() (*SessionManager, error) {
+	if b == nil || b.closed.Load() || b.sessionManager == nil {
+		return nil, fmt.Errorf("execenv: bwrap runner is closed")
+	}
+	return b.sessionManager, nil
 }
 
 // buildBwrapArgs constructs bubblewrap arguments from the sandbox policy.
@@ -386,12 +424,16 @@ func buildBwrapArgs(policy SandboxPolicy, workDir string) []string {
 		args = append(args, "--unshare-net")
 	}
 
-	// Always read-only root; writable access is granted via scoped binds.
-	args = append(args, "--ro-bind", "/", "/")
+	if hasExplicitReadableRoots(policy) {
+		args = append(args, buildScopedBwrapRootArgs(policy, workDir)...)
+	} else {
+		// Always read-only root; writable access is granted via scoped binds.
+		args = append(args, "--ro-bind", "/", "/")
 
-	// /dev and /proc
-	args = append(args, "--dev", "/dev")
-	args = append(args, "--proc", "/proc")
+		// /dev and /proc
+		args = append(args, "--dev", "/dev")
+		args = append(args, "--proc", "/proc")
+	}
 
 	if policy.Type != SandboxPolicyReadOnly {
 		// Writable roots (scoped)
@@ -405,6 +447,25 @@ func buildBwrapArgs(policy SandboxPolicy, workDir string) []string {
 		args = append(args, "--ro-bind", sub, sub)
 	}
 
+	return args
+}
+
+func buildScopedBwrapRootArgs(policy SandboxPolicy, workDir string) []string {
+	readableRoots := shellReadableRoots(policy, workDir)
+	writableRoots := bwrapWritableRoots(policy, workDir)
+	readOnlySubpaths := bwrapReadOnlySubpaths(policy, workDir)
+
+	destParents := bwrapMountParentDirs(readableRoots, writableRoots, readOnlySubpaths)
+
+	args := []string{"--tmpfs", "/"}
+	for _, dir := range destParents {
+		args = append(args, "--dir", dir)
+	}
+	args = append(args, "--dev", "/dev")
+	args = append(args, "--proc", "/proc")
+	for _, root := range readableRoots {
+		args = append(args, "--ro-bind", root, root)
+	}
 	return args
 }
 
@@ -451,6 +512,36 @@ func bwrapReadOnlySubpaths(policy SandboxPolicy, workDir string) []string {
 		}
 	}
 	return filterExistingPaths(normalizeStringList(values))
+}
+
+func bwrapMountParentDirs(pathGroups ...[]string) []string {
+	dirs := make([]string, 0, 32)
+	seen := map[string]struct{}{}
+	for _, paths := range pathGroups {
+		for _, target := range paths {
+			current := filepath.Dir(filepath.Clean(strings.TrimSpace(target)))
+			for current != "" && current != "." && current != string(filepath.Separator) {
+				if _, ok := seen[current]; !ok {
+					seen[current] = struct{}{}
+					dirs = append(dirs, current)
+				}
+				parent := filepath.Dir(current)
+				if parent == current {
+					break
+				}
+				current = parent
+			}
+		}
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		leftDepth := strings.Count(dirs[i], string(filepath.Separator))
+		rightDepth := strings.Count(dirs[j], string(filepath.Separator))
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return dirs[i] < dirs[j]
+	})
+	return dirs
 }
 
 // filterExistingPaths returns only the paths that exist on the host.

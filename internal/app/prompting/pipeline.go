@@ -38,11 +38,13 @@ type AssembleSpec struct {
 
 // PromptFragment is one assembled prompt section.
 type PromptFragment struct {
-	Kind    PromptFragmentKind
-	Stage   string
-	Title   string
-	Source  string
-	Content string
+	Kind          PromptFragmentKind
+	Stage         string
+	Title         string
+	Source        string
+	Content       string
+	SourceVersion string
+	Precedence    int
 }
 
 // Conflict represents one dropped lower-priority instruction.
@@ -68,56 +70,7 @@ func Assemble(spec AssembleSpec) (AssembleResult, error) {
 		Warnings:         []error{},
 		DroppedConflicts: []Conflict{},
 	}
-
-	if text := normalizeText(spec.IdentityPrompt); text != "" {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Kind:    PromptFragmentKindSystem,
-			Stage:   "identity",
-			Source:  strings.TrimSpace(spec.IdentitySource),
-			Content: text,
-		})
-	}
-
-	if text := normalizeText(spec.GlobalAgentsPrompt); text != "" {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Kind:    PromptFragmentKindUser,
-			Stage:   "global_agents",
-			Source:  strings.TrimSpace(spec.GlobalAgentsSource),
-			Content: text,
-		})
-	}
-
-	if text := normalizeText(spec.WorkspaceAgentsPrompt); text != "" {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Kind:    PromptFragmentKindUser,
-			Stage:   "workspace_agents",
-			Source:  strings.TrimSpace(spec.WorkspaceAgentsSource),
-			Content: text,
-		})
-	}
-
-	for _, fragment := range spec.Additional {
-		if text := normalizeText(fragment.Content); text != "" {
-			fragment.Kind = normalizeFragmentKind(fragment.Kind, fragment.Stage, text)
-			out.Fragments = append(out.Fragments, PromptFragment{
-				Kind:    fragment.Kind,
-				Stage:   strings.TrimSpace(fragment.Stage),
-				Title:   strings.TrimSpace(fragment.Title),
-				Source:  strings.TrimSpace(fragment.Source),
-				Content: text,
-			})
-		}
-	}
-
-	if skillText := normalizeText(spec.SkillsMetaPrompt); skillText != "" {
-		out.Fragments = append(out.Fragments, PromptFragment{
-			Kind:    PromptFragmentKindMetadata,
-			Stage:   "skills_meta",
-			Source:  strings.TrimSpace(spec.SkillsMetaSource),
-			Content: skillText,
-		})
-	}
-
+	out.Fragments = compatNormalizeFragments(spec)
 	out.Prompt = renderPrompt(out.Fragments)
 	return out, nil
 }
@@ -129,7 +82,7 @@ func renderPrompt(fragments []PromptFragment) string {
 	metadataFragments := make([]PromptFragment, 0, len(fragments))
 
 	for _, f := range fragments {
-		switch normalizeFragmentKind(f.Kind, f.Stage, f.Content) {
+		switch f.Kind {
 		case PromptFragmentKindUser:
 			userFragments = append(userFragments, f)
 		case PromptFragmentKindContext:
@@ -145,7 +98,7 @@ func renderPrompt(fragments []PromptFragment) string {
 	if block := renderInstructionBlock("system_instructions", systemFragments, ""); block != "" {
 		parts = append(parts, block)
 	}
-	if block := renderInstructionBlock("user_custom_instructions", userFragments, renderLegacyUserPrecedenceNote(userFragments)); block != "" {
+	if block := renderInstructionBlock("user_custom_instructions", userFragments, ""); block != "" {
 		parts = append(parts, block)
 	}
 	if block := renderRawFragments(metadataFragments); block != "" {
@@ -157,7 +110,74 @@ func renderPrompt(fragments []PromptFragment) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func normalizeFragmentKind(kind PromptFragmentKind, stage string, content string) PromptFragmentKind {
+func compatNormalizeFragments(spec AssembleSpec) []PromptFragment {
+	fragments := make([]PromptFragment, 0, len(spec.Additional)+5)
+	if note := legacyUserPrecedenceNote(spec); note != "" {
+		fragments = append(fragments, PromptFragment{
+			Kind:          PromptFragmentKindUser,
+			Stage:         "user_precedence_notice",
+			Content:       note,
+			SourceVersion: "legacy",
+			Precedence:    0,
+		})
+	}
+	if text := normalizeText(spec.IdentityPrompt); text != "" {
+		fragments = append(fragments, PromptFragment{
+			Kind:          PromptFragmentKindSystem,
+			Stage:         "identity",
+			Source:        strings.TrimSpace(spec.IdentitySource),
+			Content:       text,
+			SourceVersion: "legacy",
+			Precedence:    10,
+		})
+	}
+	if text := normalizeText(spec.GlobalAgentsPrompt); text != "" {
+		fragments = append(fragments, PromptFragment{
+			Kind:          PromptFragmentKindUser,
+			Stage:         "global_agents",
+			Source:        strings.TrimSpace(spec.GlobalAgentsSource),
+			Content:       text,
+			SourceVersion: "legacy",
+			Precedence:    20,
+		})
+	}
+	if text := normalizeText(spec.WorkspaceAgentsPrompt); text != "" {
+		fragments = append(fragments, PromptFragment{
+			Kind:          PromptFragmentKindUser,
+			Stage:         "workspace_agents",
+			Source:        strings.TrimSpace(spec.WorkspaceAgentsSource),
+			Content:       text,
+			SourceVersion: "legacy",
+			Precedence:    30,
+		})
+	}
+	for _, fragment := range spec.Additional {
+		if text := normalizeText(fragment.Content); text != "" {
+			fragments = append(fragments, PromptFragment{
+				Kind:          normalizeFragmentKind(fragment.Kind, fragment.Stage),
+				Stage:         strings.TrimSpace(fragment.Stage),
+				Title:         strings.TrimSpace(fragment.Title),
+				Source:        strings.TrimSpace(fragment.Source),
+				Content:       text,
+				SourceVersion: firstNonEmpty(strings.TrimSpace(fragment.SourceVersion), "vnext"),
+				Precedence:    fragment.Precedence,
+			})
+		}
+	}
+	if skillText := normalizeText(spec.SkillsMetaPrompt); skillText != "" {
+		fragments = append(fragments, PromptFragment{
+			Kind:          PromptFragmentKindMetadata,
+			Stage:         "skills_meta",
+			Source:        strings.TrimSpace(spec.SkillsMetaSource),
+			Content:       skillText,
+			SourceVersion: "legacy",
+			Precedence:    40,
+		})
+	}
+	return fragments
+}
+
+func normalizeFragmentKind(kind PromptFragmentKind, stage string) PromptFragmentKind {
 	switch kind {
 	case PromptFragmentKindSystem, PromptFragmentKindUser, PromptFragmentKindContext, PromptFragmentKindMetadata:
 		return kind
@@ -172,9 +192,6 @@ func normalizeFragmentKind(kind PromptFragmentKind, stage string, content string
 	case "skills_meta", "metadata":
 		return PromptFragmentKindMetadata
 	default:
-		if strings.HasPrefix(strings.TrimSpace(content), "<environment_context>") {
-			return PromptFragmentKindContext
-		}
 		return PromptFragmentKindSystem
 	}
 }
@@ -212,18 +229,18 @@ func renderRawFragments(fragments []PromptFragment) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func renderLegacyUserPrecedenceNote(fragments []PromptFragment) string {
+func legacyUserPrecedenceNote(spec AssembleSpec) string {
 	hasSession := false
-	hasWorkspace := false
-	hasGlobal := false
-	for _, f := range fragments {
+	hasWorkspace := normalizeText(spec.WorkspaceAgentsPrompt) != ""
+	hasGlobal := normalizeText(spec.GlobalAgentsPrompt) != ""
+	for _, f := range spec.Additional {
 		switch strings.ToLower(strings.TrimSpace(f.Stage)) {
 		case "session_overrides":
-			hasSession = true
+			hasSession = normalizeText(f.Content) != ""
 		case "workspace_agents":
-			hasWorkspace = true
+			hasWorkspace = hasWorkspace || normalizeText(f.Content) != ""
 		case "global_agents":
-			hasGlobal = true
+			hasGlobal = hasGlobal || normalizeText(f.Content) != ""
 		}
 	}
 	count := 0
@@ -240,6 +257,15 @@ func renderLegacyUserPrecedenceNote(fragments []PromptFragment) string {
 		return ""
 	}
 	return "Session overrides workspace instructions, and workspace instructions override global instructions on conflict."
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func normalizeText(input string) string {

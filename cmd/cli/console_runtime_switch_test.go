@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,18 +39,98 @@ type fakeRuntime struct {
 	sandboxRunner  toolexec.CommandRunner
 }
 
+type testRuntimeSession struct {
+	ref    toolexec.CommandSessionRef
+	runner toolexec.AsyncCommandRunner
+}
+
+func (s *testRuntimeSession) Ref() toolexec.CommandSessionRef { return s.ref }
+func (s *testRuntimeSession) WriteInput(input []byte) error {
+	return s.runner.WriteInput(s.ref.SessionID, input)
+}
+func (s *testRuntimeSession) ReadOutput(stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
+	return s.runner.ReadOutput(s.ref.SessionID, stdoutMarker, stderrMarker)
+}
+func (s *testRuntimeSession) Status() (toolexec.SessionStatus, error) {
+	return s.runner.GetSessionStatus(s.ref.SessionID)
+}
+func (s *testRuntimeSession) Wait(ctx context.Context, timeout time.Duration) (toolexec.CommandResult, error) {
+	return s.runner.WaitSession(ctx, s.ref.SessionID, timeout)
+}
+func (s *testRuntimeSession) Terminate() error { return s.runner.TerminateSession(s.ref.SessionID) }
+
+func runtimeSessionFromRunner(ctx context.Context, backend string, runner toolexec.CommandRunner, req toolexec.CommandRequest) (toolexec.Session, error) {
+	async, ok := runner.(toolexec.AsyncCommandRunner)
+	if !ok || async == nil {
+		return nil, fmt.Errorf("async execution unavailable")
+	}
+	sessionID, err := async.StartAsync(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &testRuntimeSession{
+		ref:    toolexec.CommandSessionRef{Backend: backend, SessionID: sessionID},
+		runner: async,
+	}, nil
+}
+
+func runtimeSessionFromRef(backend string, runner toolexec.CommandRunner, ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	async, ok := runner.(toolexec.AsyncCommandRunner)
+	if !ok || async == nil {
+		return nil, fmt.Errorf("async execution unavailable")
+	}
+	return &testRuntimeSession{
+		ref:    toolexec.CommandSessionRef{Backend: backend, SessionID: strings.TrimSpace(ref.SessionID)},
+		runner: async,
+	}, nil
+}
+
 func (r fakeRuntime) PermissionMode() toolexec.PermissionMode { return r.permissionMode }
 func (r fakeRuntime) SandboxType() string                     { return r.sandboxType }
 func (r fakeRuntime) SandboxPolicy() toolexec.SandboxPolicy   { return toolexec.SandboxPolicy{} }
 func (r fakeRuntime) FallbackToHost() bool                    { return r.fallbackToHost }
 func (r fakeRuntime) FallbackReason() string                  { return r.fallbackReason }
-func (r fakeRuntime) FileSystem() toolexec.FileSystem         { return nil }
-func (r fakeRuntime) HostRunner() toolexec.CommandRunner      { return r.hostRunner }
-func (r fakeRuntime) SandboxRunner() toolexec.CommandRunner {
-	if r.permissionMode == toolexec.PermissionModeFullControl && r.hostRunner != nil {
-		return r.hostRunner
+func (r fakeRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{
+		ResolvedType:   r.sandboxType,
+		FallbackToHost: r.fallbackToHost,
+		FallbackReason: r.fallbackReason,
 	}
-	return r.sandboxRunner
+}
+func (r fakeRuntime) FileSystem() toolexec.FileSystem { return nil }
+func (r fakeRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{
+		Mode:             r.permissionMode,
+		RequestedSandbox: r.sandboxType,
+		ResolvedSandbox:  r.sandboxType,
+		FallbackReason:   r.fallbackReason,
+	}
+}
+func (r fakeRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	if decision := r.DecideRoute(req.Command, req.SandboxPermission); decision.Route == toolexec.ExecutionRouteHost && r.hostRunner != nil {
+		return r.hostRunner.Run(ctx, req)
+	}
+	runner := r.sandboxRunner
+	if r.permissionMode == toolexec.PermissionModeFullControl && r.hostRunner != nil {
+		runner = r.hostRunner
+	}
+	if runner != nil {
+		return runner.Run(ctx, req)
+	}
+	return toolexec.CommandResult{}, fmt.Errorf("runner unavailable")
+}
+func (r fakeRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	decision := r.DecideRoute(req.Command, req.SandboxPermission)
+	if decision.Route == toolexec.ExecutionRouteHost {
+		return runtimeSessionFromRunner(ctx, "host", r.hostRunner, req)
+	}
+	return runtimeSessionFromRunner(ctx, strings.TrimSpace(r.sandboxType), r.sandboxRunner, req)
+}
+func (r fakeRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if strings.EqualFold(strings.TrimSpace(ref.Backend), "host") || strings.TrimSpace(ref.Backend) == "" {
+		return runtimeSessionFromRef("host", r.hostRunner, ref)
+	}
+	return runtimeSessionFromRef(strings.TrimSpace(ref.Backend), r.sandboxRunner, ref)
 }
 func (r *fakeRuntime) SetPermissionMode(mode toolexec.PermissionMode) error {
 	r.permissionMode = mode
@@ -124,10 +205,7 @@ func TestHandlePermission_SwitchMode(t *testing.T) {
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: rt})
 	if err != nil {
 		t.Fatal(err)
@@ -166,10 +244,7 @@ func TestHandlePermission_FullControlEnablesFullAccessSessionMode(t *testing.T) 
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		execRuntime: rt,
@@ -177,7 +252,7 @@ func TestHandlePermission_FullControlEnablesFullAccessSessionMode(t *testing.T) 
 		sessionMode: sessionmode.DefaultMode,
 		resolved:    &appassembly.ResolvedSpec{},
 	}
-	_, err = handlePermission(console, []string{"full_control"})
+	_, err := handlePermission(console, []string{"full_control"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,10 +276,7 @@ func TestHandlePermission_DefaultPreservesPlanMode(t *testing.T) {
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		execRuntime: rt,
@@ -212,7 +284,7 @@ func TestHandlePermission_DefaultPreservesPlanMode(t *testing.T) {
 		sessionMode: sessionmode.PlanMode,
 		resolved:    &appassembly.ResolvedSpec{},
 	}
-	_, err = handlePermission(console, []string{"default"})
+	_, err := handlePermission(console, []string{"default"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,10 +303,7 @@ func TestSyncSessionModeFromStore_ClampsPersistedFullAccessToCurrentPermission(t
 		sessionStore: store,
 		sessionMode:  sessionmode.DefaultMode,
 	}
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	defer func() { _ = toolexec.Close(rt) }()
 	console.execRuntime = rt
 	sess := &session.Session{AppName: console.appName, UserID: console.userID, ID: console.sessionID}
@@ -272,10 +341,7 @@ func TestSyncSessionModeFromStore_DoesNotPersistRuntimeDefaults(t *testing.T) {
 		sessionStore: store,
 		configStore:  cfg,
 	}
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	defer func() { _ = toolexec.Close(rt) }()
 	console.execRuntime = rt
 	sess := &session.Session{AppName: console.appName, UserID: console.userID, ID: console.sessionID}
@@ -290,6 +356,34 @@ func TestSyncSessionModeFromStore_DoesNotPersistRuntimeDefaults(t *testing.T) {
 
 	if cfg.PermissionMode() != "default" {
 		t.Fatalf("expected global permission default to stay unchanged, got %q", cfg.PermissionMode())
+	}
+}
+
+func TestSyncSessionModeFromStore_DerivesFullAccessFromRuntimePermissionWithoutSnapshot(t *testing.T) {
+	store := inmemory.New()
+	console := &cliConsole{
+		baseCtx:      context.Background(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "s-full-control",
+		sessionStore: store,
+		sessionMode:  sessionmode.DefaultMode,
+	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
+	defer func() { _ = toolexec.Close(rt) }()
+	console.execRuntime = rt
+	sess := &session.Session{AppName: console.appName, UserID: console.userID, ID: console.sessionID}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+
+	console.syncSessionModeFromStore()
+
+	if console.execRuntime.PermissionMode() != toolexec.PermissionModeFullControl {
+		t.Fatalf("expected runtime permission to remain full_control, got %q", console.execRuntime.PermissionMode())
+	}
+	if console.sessionMode != sessionmode.FullMode {
+		t.Fatalf("expected session mode %q, got %q", sessionmode.FullMode, console.sessionMode)
 	}
 }
 
@@ -313,10 +407,7 @@ func TestSetSessionMode_FullAccessDoesNotPersistGlobalRuntimeDefaults(t *testing
 		t.Fatal(err)
 	}
 	store := inmemory.New()
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:      context.Background(),
 		appName:      "app",
@@ -361,10 +452,7 @@ func TestSetSessionMode_DoesNotSendTUIStatusInline(t *testing.T) {
 	}
 
 	store := inmemory.New()
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:      context.Background(),
 		appName:      "app",
@@ -467,10 +555,7 @@ func TestHandlePermission_PersistsGlobalRuntimeDefaults(t *testing.T) {
 	if err := cfg.save(); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		configStore: cfg,
@@ -490,24 +575,18 @@ func TestHandlePermission_PersistsGlobalRuntimeDefaults(t *testing.T) {
 }
 
 func TestHandlePermission_InvalidMode(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handlePermission(console, []string{"invalid"})
+	_, err := handlePermission(console, []string{"invalid"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestHandleSandbox_UnknownType(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{"unknown-type"})
+	_, err := handleSandbox(console, []string{"unknown-type"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -520,8 +599,10 @@ func TestHandleSandbox_UnknownType(t *testing.T) {
 
 func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
+	prevSelector := cliSandboxSelector
 	t.Cleanup(func() {
 		cliExecRuntimeBuilder = prevBuilder
+		cliSandboxSelector = prevSelector
 	})
 	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
 		return fakeRuntime{
@@ -529,13 +610,16 @@ func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 			sandboxType:    cfg.SandboxType,
 		}, nil
 	}
-
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
+	cliSandboxSelector = func(cfg toolexec.Config) (toolexec.CommandRunner, toolexec.SandboxDiagnostics, error) {
+		return nil, toolexec.SandboxDiagnostics{
+			RequestedType: cfg.SandboxType,
+			ResolvedType:  cfg.SandboxType,
+		}, nil
 	}
+
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{cliTestSandboxType()})
+	_, err := handleSandbox(console, []string{cliTestSandboxType()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,8 +633,10 @@ func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 
 func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
+	prevSelector := cliSandboxSelector
 	t.Cleanup(func() {
 		cliExecRuntimeBuilder = prevBuilder
+		cliSandboxSelector = prevSelector
 	})
 	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
 		return fakeRuntime{
@@ -560,13 +646,18 @@ func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 			fallbackReason: "probe failed",
 		}, nil
 	}
-
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
+	cliSandboxSelector = func(cfg toolexec.Config) (toolexec.CommandRunner, toolexec.SandboxDiagnostics, error) {
+		return nil, toolexec.SandboxDiagnostics{
+			RequestedType:  cfg.SandboxType,
+			ResolvedType:   cfg.SandboxType,
+			FallbackToHost: true,
+			FallbackReason: "probe failed",
+		}, nil
 	}
+
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{"bwrap"})
+	_, err := handleSandbox(console, []string{cliTestSandboxType()})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -577,7 +668,7 @@ func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 
 func TestUpdateExecutionRuntime_ReusesRuntimeForPermissionOnlySwitch(t *testing.T) {
 	sandboxRunner := &closeableSwitchRunner{}
-	rt, err := toolexec.NewModeSwitchable(toolexec.Config{
+	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  sandboxRunner,
@@ -692,7 +783,7 @@ func TestUpdateExecutionRuntime_RebuildsWhenRequestedSandboxChanged(t *testing.T
 	}
 
 	sandboxRunner := &closeableSwitchRunner{}
-	rt, err := toolexec.NewModeSwitchable(toolexec.Config{
+	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  sandboxRunner,

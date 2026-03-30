@@ -22,14 +22,25 @@ type stubRuntime struct {
 	fs         toolexec.FileSystem
 }
 
-func (r *stubRuntime) PermissionMode() toolexec.PermissionMode { return r.permission }
-func (r *stubRuntime) SandboxType() string                     { return "stub" }
-func (r *stubRuntime) SandboxPolicy() toolexec.SandboxPolicy   { return r.policy }
-func (r *stubRuntime) FallbackToHost() bool                    { return false }
-func (r *stubRuntime) FallbackReason() string                  { return "" }
-func (r *stubRuntime) FileSystem() toolexec.FileSystem         { return r.fs }
-func (r *stubRuntime) HostRunner() toolexec.CommandRunner      { return nil }
-func (r *stubRuntime) SandboxRunner() toolexec.CommandRunner   { return nil }
+func (r *stubRuntime) PermissionMode() toolexec.PermissionMode  { return r.permission }
+func (r *stubRuntime) SandboxType() string                      { return "stub" }
+func (r *stubRuntime) SandboxPolicy() toolexec.SandboxPolicy    { return r.policy }
+func (r *stubRuntime) FallbackToHost() bool                     { return false }
+func (r *stubRuntime) FallbackReason() string                   { return "" }
+func (r *stubRuntime) Diagnostics() toolexec.SandboxDiagnostics { return toolexec.SandboxDiagnostics{} }
+func (r *stubRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{Mode: r.permission, ResolvedSandbox: "stub"}
+}
+func (r *stubRuntime) FileSystem() toolexec.FileSystem { return r.fs }
+func (r *stubRuntime) Execute(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+func (r *stubRuntime) Start(context.Context, toolexec.CommandRequest) (toolexec.Session, error) {
+	return nil, errors.New("not implemented")
+}
+func (r *stubRuntime) OpenSession(toolexec.CommandSessionRef) (toolexec.Session, error) {
+	return nil, errors.New("not implemented")
+}
 func (r *stubRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{}
 }
@@ -108,6 +119,29 @@ func TestWorkspaceBoundary_RequiresApprovalOutsideWorkspace(t *testing.T) {
 	var approvalErr *toolexec.ApprovalRequiredError
 	if !errors.As(err, &approvalErr) {
 		t.Fatalf("expected ApprovalRequiredError, got %T: %v", err, err)
+	}
+}
+
+func TestWorkspaceBoundary_RejectsReadOnlySubpathWithinWorkspace(t *testing.T) {
+	ws := t.TempDir()
+	rt := &stubRuntime{
+		policy: toolexec.SandboxPolicy{
+			Type:             toolexec.SandboxPolicyWorkspaceWrite,
+			WritableRoots:    []string{ws},
+			ReadOnlySubpaths: []string{filepath.Join(ws, ".git")},
+		},
+		permission: toolexec.PermissionModeDefault,
+		fs:         &stubFS{cwd: ws, home: "/home/user"},
+	}
+	hook := WorkspaceBoundary(WorkspaceBoundaryConfig{Runtime: rt})
+
+	in := writeToolInput(filepath.Join(ws, ".git", "config"))
+	_, err := hook.BeforeTool(context.Background(), in)
+	if err == nil {
+		t.Fatal("expected readonly subpath write to be rejected")
+	}
+	if !strings.Contains(err.Error(), "read-only path") {
+		t.Fatalf("expected readonly path error, got %v", err)
 	}
 }
 

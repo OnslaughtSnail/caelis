@@ -85,6 +85,7 @@ func (h *hostFileSystem) WalkDir(root string, fn fs.WalkDirFunc) error {
 type hostRunner struct {
 	sessionManager  *SessionManager
 	smartIdleConfig SmartIdleConfig
+	closed          atomic.Bool
 }
 
 // HostRunnerConfig configures the host runner.
@@ -277,7 +278,11 @@ func (h *hostRunner) waitWithSmartIdleDetection(
 
 // StartAsync starts a command asynchronously and returns a session ID.
 func (h *hostRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
-	session, err := h.sessionManager.StartSession(AsyncSessionConfig{
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return "", err
+	}
+	session, err := manager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
 		Env:             mergeCommandEnv(req.EnvOverrides),
@@ -294,21 +299,37 @@ func (h *hostRunner) StartAsync(_ context.Context, req CommandRequest) (string, 
 
 // WriteInput sends input to an async session's stdin.
 func (h *hostRunner) WriteInput(sessionID string, input []byte) error {
-	return h.sessionManager.WriteInput(sessionID, input)
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.WriteInput(sessionID, input)
 }
 
 // ReadOutput reads new output from an async session.
 func (h *hostRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
-	return h.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	return manager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
 }
 
 // GetSessionStatus returns the status of an async session.
 func (h *hostRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
-	return h.sessionManager.GetSessionStatus(sessionID)
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	return manager.GetSessionStatus(sessionID)
 }
 
 // WaitSession waits for an async session to complete with optional timeout.
 func (h *hostRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return CommandResult{}, err
+	}
 	waitCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -316,12 +337,12 @@ func (h *hostRunner) WaitSession(ctx context.Context, sessionID string, timeout 
 		defer cancel()
 	}
 
-	exitCode, err := h.sessionManager.WaitSession(waitCtx, sessionID)
+	exitCode, err := manager.WaitSession(waitCtx, sessionID)
 	if err != nil {
 		return CommandResult{}, err
 	}
 
-	result, err := h.sessionManager.GetResult(sessionID)
+	result, err := manager.GetResult(sessionID)
 	if err != nil {
 		return CommandResult{ExitCode: exitCode}, nil
 	}
@@ -330,20 +351,36 @@ func (h *hostRunner) WaitSession(ctx context.Context, sessionID string, timeout 
 
 // TerminateSession forcefully terminates an async session.
 func (h *hostRunner) TerminateSession(sessionID string) error {
-	return h.sessionManager.TerminateSession(sessionID)
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.TerminateSession(sessionID)
 }
 
 // ListSessions returns information about all active sessions.
 func (h *hostRunner) ListSessions() []SessionInfo {
-	return h.sessionManager.ListSessions()
+	manager, err := h.asyncSessionManager()
+	if err != nil {
+		return nil
+	}
+	return manager.ListSessions()
 }
 
 // Close closes the host runner and all its sessions.
 func (h *hostRunner) Close() error {
+	h.closed.Store(true)
 	if h.sessionManager != nil {
 		return h.sessionManager.Close()
 	}
 	return nil
+}
+
+func (h *hostRunner) asyncSessionManager() (*SessionManager, error) {
+	if h == nil || h.closed.Load() || h.sessionManager == nil {
+		return nil, fmt.Errorf("execenv: host runner is closed")
+	}
+	return h.sessionManager, nil
 }
 
 func resolveExitCode(err error) int {

@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,18 @@ import (
 
 func fullTerminalCapabilities() bool {
 	return true
+}
+
+type probeFailRunner struct{}
+
+func (probeFailRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	_ = ctx
+	_ = req
+	return toolexec.CommandResult{}, nil
+}
+
+func (probeFailRunner) Probe(context.Context) error {
+	return errors.New("sandbox probe failed")
 }
 
 func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.T) {
@@ -69,30 +82,30 @@ func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.
 	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace", ClientCapabilities{
 		Terminal: fullTerminalCapabilities(),
 	}, nil)
-	asyncRunner, ok := rt.HostRunner().(toolexec.AsyncCommandRunner)
+	bridge, ok := rt.(*runtimeBridge)
 	if !ok {
-		t.Fatal("expected host runner to implement AsyncCommandRunner")
+		t.Fatalf("expected runtime bridge, got %T", rt)
 	}
-	sandboxAsync, ok := rt.SandboxRunner().(toolexec.AsyncCommandRunner)
-	if !ok {
-		t.Fatal("expected sandbox runner to implement AsyncCommandRunner")
-	}
-	if _, ok := sandboxAsync.(*sessionAsyncCommandRunner); !ok {
-		t.Fatalf("expected sandbox runner to be wrapped ACP async runner, got %T", sandboxAsync)
+	if bridge.takeoverBackend() == nil {
+		t.Fatal("expected terminal takeover backend")
 	}
 
-	sessionID, err := asyncRunner.StartAsync(context.Background(), toolexec.CommandRequest{
-		Command: "echo hi",
-		Dir:     "/workspace",
+	session, err := rt.Start(context.Background(), toolexec.CommandRequest{
+		Command:   "echo hi",
+		Dir:       "/workspace",
+		RouteHint: toolexec.ExecutionRouteHost,
 	})
 	if err != nil {
 		t.Fatalf("start async: %v", err)
 	}
-	if sessionID != "term-async-1" {
-		t.Fatalf("unexpected session id %q", sessionID)
+	if got := session.Ref().Backend; got != "acp_terminal" {
+		t.Fatalf("unexpected backend %q", got)
+	}
+	if got := session.Ref().SessionID; got != "term-async-1" {
+		t.Fatalf("unexpected session id %q", got)
 	}
 
-	stdout, stderr, stdoutMarker, stderrMarker, err := asyncRunner.ReadOutput(sessionID, 0, 0)
+	stdout, stderr, stdoutMarker, stderrMarker, err := session.ReadOutput(0, 0)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
@@ -106,7 +119,7 @@ func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.
 		t.Fatal("expected stdout marker to advance")
 	}
 
-	status, err := asyncRunner.GetSessionStatus(sessionID)
+	status, err := session.Status()
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
@@ -117,7 +130,7 @@ func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.
 		t.Fatalf("unexpected status metadata: %+v", status)
 	}
 
-	result, err := asyncRunner.WaitSession(context.Background(), sessionID, time.Second)
+	result, err := session.Wait(context.Background(), time.Second)
 	if err != nil {
 		t.Fatalf("wait session: %v", err)
 	}
@@ -125,12 +138,15 @@ func TestNewRuntime_TerminalCapabilityUsesACPBridgeForHostAndSandbox(t *testing.
 		t.Fatalf("unexpected wait result: %+v", result)
 	}
 
-	if err := asyncRunner.TerminateSession(sessionID); err != nil {
+	if err := session.Terminate(); err != nil {
 		t.Fatalf("terminate session: %v", err)
 	}
-	sessions := asyncRunner.ListSessions()
-	if len(sessions) != 1 || sessions[0].State != toolexec.SessionStateTerminated {
-		t.Fatalf("unexpected sessions list: %+v", sessions)
+	status, err = session.Status()
+	if err != nil {
+		t.Fatalf("status after terminate: %v", err)
+	}
+	if status.State != toolexec.SessionStateTerminated && status.State != toolexec.SessionStateCompleted {
+		t.Fatalf("expected completed or terminated status, got %q", status.State)
 	}
 
 	cancel()
@@ -192,31 +208,29 @@ func TestNewRuntime_TerminalCapabilityRoutesSandboxAsyncThroughACPBridge(t *test
 	rt := NewRuntime(baseRuntime, clientConn, "session-1", "/workspace", "/workspace/subdir", ClientCapabilities{
 		Terminal: fullTerminalCapabilities(),
 	}, nil)
-
-	hostRunner, ok := rt.HostRunner().(*sessionAsyncCommandRunner)
+	bridge, ok := rt.(*runtimeBridge)
 	if !ok {
-		t.Fatalf("expected async host runner wrapper, got %T", rt.HostRunner())
+		t.Fatalf("expected runtime bridge, got %T", rt)
 	}
-	if _, ok := hostRunner.AsyncCommandRunner.(*clientAsyncCommandRunner); !ok {
-		t.Fatalf("expected host runner to use ACP terminal bridge, got %T", hostRunner.AsyncCommandRunner)
+	backend := bridge.takeoverBackend()
+	if backend == nil {
+		t.Fatal("expected terminal takeover backend")
 	}
-
-	sandboxAsync, ok := rt.SandboxRunner().(*sessionAsyncCommandRunner)
-	if !ok {
-		t.Fatalf("expected async sandbox runner wrapper, got %T", rt.SandboxRunner())
-	}
-	if _, ok := sandboxAsync.AsyncCommandRunner.(*clientAsyncCommandRunner); !ok {
-		t.Fatalf("expected sandbox runner to use ACP terminal bridge, got %T", sandboxAsync.AsyncCommandRunner)
+	if _, ok := backend.(*runtimeBridgeBackend); !ok {
+		t.Fatalf("expected ACP terminal backend, got %T", backend)
 	}
 
-	sessionID, err := sandboxAsync.StartAsync(context.Background(), toolexec.CommandRequest{
+	session, err := rt.Start(context.Background(), toolexec.CommandRequest{
 		Command: "echo from sandbox",
 	})
 	if err != nil {
 		t.Fatalf("start async on sandbox runner: %v", err)
 	}
-	if sessionID != "term-should-not-be-used" {
-		t.Fatalf("unexpected sandbox session id %q", sessionID)
+	if got := session.Ref().SessionID; got != "term-should-not-be-used" {
+		t.Fatalf("unexpected sandbox session id %q", got)
+	}
+	if got := session.Ref().Backend; got != "acp_terminal" {
+		t.Fatalf("unexpected sandbox backend %q", got)
 	}
 	if terminalCreates != 1 {
 		t.Fatalf("expected terminal/create for sandbox async, got %d", terminalCreates)
@@ -241,14 +255,18 @@ func TestNewRuntime_FallsBackWithoutTerminalCapability(t *testing.T) {
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace", ClientCapabilities{}, nil)
-	if _, ok := rt.HostRunner().(toolexec.AsyncCommandRunner); ok {
-		t.Fatal("did not expect async host runner without terminal capability")
+	bridge, ok := rt.(*runtimeBridge)
+	if !ok {
+		t.Fatalf("expected runtime bridge, got %T", rt)
 	}
-	if rt.HostRunner() == nil {
-		t.Fatal("expected host runner fallback to stay available")
+	if bridge.takeoverBackend() != nil {
+		t.Fatal("did not expect terminal takeover backend without capability")
 	}
-	if rt.SandboxRunner() == nil {
-		t.Fatal("expected sandbox runner fallback to stay available")
+	if bridge.BridgeStrategy() != BridgeStrategyBaseOnly {
+		t.Fatalf("expected base-only bridge strategy, got %q", bridge.BridgeStrategy())
+	}
+	if _, err := rt.Execute(context.Background(), toolexec.CommandRequest{Command: "pwd"}); err != nil {
+		t.Fatalf("execute via base runtime: %v", err)
 	}
 }
 
@@ -348,21 +366,25 @@ func TestNewRuntime_FullAccessModeBypassesSandbox(t *testing.T) {
 	if rt.PermissionMode() != toolexec.PermissionModeFullControl {
 		t.Fatalf("expected full_control permission mode, got %q", rt.PermissionMode())
 	}
-	if rt.SandboxRunner() == nil {
-		t.Fatal("expected sandbox runner fallback to host runner in full_access mode")
-	}
-	if rt.SandboxRunner() != rt.HostRunner() {
-		t.Fatal("expected sandbox runner to reuse host runner in full_access mode")
-	}
 	decision := rt.DecideRoute("pwd", toolexec.SandboxPermissionAuto)
 	if decision.Route != toolexec.ExecutionRouteHost {
 		t.Fatalf("expected host route in full_access mode, got %q", decision.Route)
+	}
+	if decision.Backend != "host" {
+		t.Fatalf("expected host backend in full_access mode, got %q", decision.Backend)
 	}
 	if rt.FallbackToHost() {
 		t.Fatal("did not expect fallback mode in full_access")
 	}
 	if rt.SandboxPolicy().Type != toolexec.SandboxPolicyDangerFull {
 		t.Fatalf("expected danger_full_access sandbox policy, got %q", rt.SandboxPolicy().Type)
+	}
+	bridge, ok := rt.(*runtimeBridge)
+	if !ok {
+		t.Fatalf("expected runtime bridge, got %T", rt)
+	}
+	if bridge.BridgeStrategy() != BridgeStrategyFullAccessBypass {
+		t.Fatalf("expected full access bypass strategy, got %q", bridge.BridgeStrategy())
 	}
 }
 
@@ -375,7 +397,7 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 	clientConn := NewConn(s2cR, c2sW)
 	serverConn := NewConn(c2sR, s2cW)
 
-	baseHost := stubRunner{}
+	baseHost := &recordingRunner{}
 	baseSandbox := stubRunner{}
 	baseRuntime, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
@@ -417,11 +439,21 @@ func TestNewRuntime_FullAccessModeKeepsLocalHostRunnerEvenWithTerminalCapability
 	}, func() string {
 		return "full_access"
 	})
-	if _, ok := rt.HostRunner().(toolexec.AsyncCommandRunner); !ok {
-		t.Fatal("expected full_access host runner to stay on ACP terminal bridge")
+	if _, err := rt.Execute(context.Background(), toolexec.CommandRequest{Command: "pwd"}); err != nil {
+		t.Fatalf("execute via full_access runtime: %v", err)
 	}
-	if rt.SandboxRunner() != rt.HostRunner() {
-		t.Fatal("expected sandbox runner to collapse to host route runner in full_access mode")
+	if baseHost.lastDir != "/workspace" {
+		t.Fatalf("expected local host backend to receive session cwd, got %q", baseHost.lastDir)
+	}
+	bridge, ok := rt.(*runtimeBridge)
+	if !ok {
+		t.Fatalf("expected runtime bridge, got %T", rt)
+	}
+	if bridge.BridgeStrategy() != BridgeStrategyFullAccessBypass {
+		t.Fatalf("expected full access bypass strategy, got %q", bridge.BridgeStrategy())
+	}
+	if bridge.takeoverBackend() != nil {
+		t.Fatal("expected terminal takeover to be disabled in full_access mode")
 	}
 }
 
@@ -579,11 +611,16 @@ func TestNewRuntime_BaseFullControlOverridesDefaultSessionMode(t *testing.T) {
 	if rt.PermissionMode() != toolexec.PermissionModeFullControl {
 		t.Fatalf("expected base full_control permission mode to be preserved, got %q", rt.PermissionMode())
 	}
-	if rt.HostRunner() == nil {
-		t.Fatal("expected host runner to stay available when base permission is full_control")
+	decision := rt.DecideRoute("pwd", toolexec.SandboxPermissionAuto)
+	if decision.Route != toolexec.ExecutionRouteHost || decision.Backend != "host" {
+		t.Fatalf("expected host route decision under base full_control, got %+v", decision)
 	}
-	if rt.SandboxRunner() != rt.HostRunner() {
-		t.Fatal("expected sandbox runner to collapse to host runner when base permission is full_control")
+	bridge, ok := rt.(*runtimeBridge)
+	if !ok {
+		t.Fatalf("expected runtime bridge, got %T", rt)
+	}
+	if bridge.BridgeStrategy() != BridgeStrategyFullAccessBypass {
+		t.Fatalf("expected full access bypass strategy, got %q", bridge.BridgeStrategy())
 	}
 }
 
@@ -623,7 +660,11 @@ func TestNewRuntime_DefaultsCommandDirToSessionCWD(t *testing.T) {
 	defer func() { _ = toolexec.Close(baseRuntime) }()
 
 	rt := NewRuntime(baseRuntime, nil, "session-1", "/workspace", "/workspace/subdir", ClientCapabilities{}, nil)
-	if _, err := rt.HostRunner().Run(context.Background(), toolexec.CommandRequest{Command: "pwd"}); err != nil {
+	if _, err := rt.Execute(context.Background(), toolexec.CommandRequest{
+		Command:     "pwd",
+		RouteHint:   toolexec.ExecutionRouteHost,
+		BackendName: "host",
+	}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if host.lastDir != "/workspace/subdir" {
@@ -712,5 +753,43 @@ func TestNewRuntime_BaseFullControlKeepsACPFileSystemBridge(t *testing.T) {
 	}
 	if string(readBack) != "bridged-data" {
 		t.Fatalf("unexpected runtime fs contents %q", string(readBack))
+	}
+}
+
+func TestNewRuntime_TerminalCapabilityPreservesBaseFallbackDecision(t *testing.T) {
+	c2sR, c2sW := io.Pipe()
+	s2cR, s2cW := io.Pipe()
+	defer c2sR.Close()
+	defer c2sW.Close()
+	defer s2cR.Close()
+	defer s2cW.Close()
+
+	baseRuntime, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		SandboxType:    testSandboxType(),
+		HostRunner:     stubRunner{},
+		SandboxRunner:  probeFailRunner{},
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer func() { _ = toolexec.Close(baseRuntime) }()
+
+	rt := NewRuntime(baseRuntime, NewConn(s2cR, c2sW), "session-1", "/workspace", "/workspace", ClientCapabilities{
+		Terminal: fullTerminalCapabilities(),
+	}, nil)
+	decision := rt.DecideRoute("ls", toolexec.SandboxPermissionAuto)
+	if decision.Route != toolexec.ExecutionRouteHost {
+		t.Fatalf("expected fallback host route, got %q", decision.Route)
+	}
+	if !decision.NeedApproval {
+		t.Fatal("expected fallback route to require approval")
+	}
+	bridge, ok := rt.(*runtimeBridge)
+	if !ok {
+		t.Fatalf("expected runtime bridge, got %T", rt)
+	}
+	if bridge.BridgeStrategy() != BridgeStrategyTerminalTakeover {
+		t.Fatalf("expected terminal takeover strategy, got %q", bridge.BridgeStrategy())
 	}
 }

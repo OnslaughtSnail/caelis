@@ -63,19 +63,32 @@ func newTestACPAdapterFactory(rt *runtime.Runtime, store session.Store, execRT t
 	}
 }
 
-func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
-	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
-	if err != nil {
-		t.Fatal(err)
-	}
-	execRT, err := toolexec.New(toolexec.Config{
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
+func newFullControlExecRuntime(t *testing.T) toolexec.Runtime {
+	t.Helper()
+	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	t.Cleanup(func() { _ = toolexec.Close(rt) })
+	return rt
+}
+
+func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -161,17 +174,11 @@ func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
 
 func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	sentinel := errors.New("adapter factory invoked")
 	var factoryCalled bool
@@ -213,17 +220,11 @@ func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 
 func TestACPSpawnLeavesChildSessionInDefaultMode(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -425,17 +426,11 @@ func TestPermissionRequestHandler_InvokesApprovalWatchdogHooks(t *testing.T) {
 
 func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -524,7 +519,7 @@ func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 
 func TestSelfACPSubagentRunner_UsesCurrentTaskWriteLineageWhenReusingChildSession(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +567,7 @@ func TestSelfACPSubagentRunner_UsesCurrentTaskWriteLineageWhenReusingChildSessio
 
 func TestSelfACPSubagentRunner_InspectFallsBackToPersistedState(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,17 +818,11 @@ func TestPermissionRequestHandler_FullAccessUnknownOptionsFallbackToInteractiveA
 
 func TestSelfACPSubagentRunner_ReturnsSessionHandleWhenPromptTimeoutHitsAfterReady(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -886,17 +875,11 @@ func TestSelfACPSubagentRunner_ReturnsSessionHandleWhenPromptTimeoutHitsAfterRea
 
 func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -960,17 +943,11 @@ func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
 
 func TestSelfACPSubagentRunner_CallerTimeoutDoesNotCancelDetachedChild(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	child := &session.Session{AppName: "app", UserID: "u", ID: "child-existing"}
@@ -1110,17 +1087,11 @@ func TestACPTransportRunSubagent_FailsPromptWhenPeerDisconnectsAfterPartialOutpu
 	defer func() { startACPClient = origStart }()
 
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -1180,17 +1151,11 @@ func TestACPTransportRunSubagent_FailsPromptWhenPeerDisconnectsAfterPartialOutpu
 
 func TestDelegatedSelfChildSessionCannotSpawnExternalACPChild(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -1320,17 +1285,11 @@ func TestDelegatedSelfChildSessionCannotSpawnExternalACPChild(t *testing.T) {
 
 func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "one.txt"), []byte("one"), 0o644); err != nil {
@@ -1455,17 +1414,11 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 
 func TestSelfACPSpawnRejectsNestedSelfSpawnWithoutBreakingChildSession(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "one.txt"), []byte("one"), 0o644); err != nil {
@@ -1766,6 +1719,50 @@ func TestTerminalBridgeManager_StreamsTerminalOutputIntoSessionUpdates(t *testin
 	}
 	if !strings.Contains(state.LatestOutput, "heartbeat 2/2") {
 		t.Fatalf("expected tracker latest output to include terminal progress, got %+v", state)
+	}
+}
+
+func TestTerminalBridgeManager_OnlyPausesWatchdogForActiveTerminalSession(t *testing.T) {
+	client := &fakeTerminalOutputClient{
+		outputs: []acpclient.TerminalOutputResponse{
+			{
+				Output: "[10s] heartbeat\n",
+				ExitStatus: &acpclient.TerminalExitStatus{
+					ExitCode: intPtr(0),
+				},
+			},
+		},
+	}
+	var starts, stops int
+	manager := &terminalBridgeManager{
+		onStart: func() { starts++ },
+		onStop:  func() { stops++ },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	title := "BASH python long_job.py"
+	kind := "execute"
+	update := acpclient.ToolCallUpdate{
+		ToolCallID: "call-bash-1",
+		Title:      &title,
+		Kind:       &kind,
+		Status:     strPtr("in_progress"),
+		Content: []acpclient.ToolCallContent{{
+			Type:       "terminal",
+			TerminalID: "term-child-1",
+		}},
+	}
+	manager.observe(ctx, client, newRemoteSubagentTracker(), "child-1", "self", runtime.DelegationMetadata{}, update)
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if starts == 1 && stops == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if starts != 1 || stops != 1 {
+		t.Fatalf("expected one start and one stop callback for terminal-backed tool, got starts=%d stops=%d", starts, stops)
 	}
 }
 

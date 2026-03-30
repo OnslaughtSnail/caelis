@@ -706,6 +706,61 @@ func TestBashPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	}
 }
 
+func TestInlineDiffBlockTogglesFromToolCallAnchor(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ PATCH build.sh +1 -1\n"})
+	_, _ = m.Update(tuievents.DiffBlockMsg{
+		Tool:    "PATCH",
+		Path:    "build.sh",
+		Hunk:    "@@ -1,1 +1,1 @@",
+		Old:     "old\n",
+		New:     "new\n",
+		Preview: "--- old\n+++ new\n-old\n+new\n",
+	})
+
+	var (
+		anchorLine = -1
+		diff       *DiffBlock
+	)
+	for i, id := range m.viewportBlockIDs {
+		if tb, ok := m.doc.Find(id).(*TranscriptBlock); ok && strings.Contains(tb.Raw, "PATCH build.sh +1 -1") {
+			anchorLine = i
+			break
+		}
+	}
+	if anchorLine < 0 {
+		t.Fatal("expected PATCH tool call anchor in viewport")
+	}
+	for _, block := range m.doc.Blocks() {
+		if candidate, ok := block.(*DiffBlock); ok {
+			diff = candidate
+			break
+		}
+	}
+	if diff == nil {
+		t.Fatal("expected inline diff block")
+	}
+	if !diff.Inline || !diff.Expanded {
+		t.Fatalf("expected inline diff block to start expanded, got inline=%v expanded=%v", diff.Inline, diff.Expanded)
+	}
+
+	vy := anchorLine - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+	if diff.Expanded {
+		t.Fatal("expected diff block collapsed after clicking PATCH anchor")
+	}
+
+	m.syncViewportContent()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+	if !diff.Expanded {
+		t.Fatal("expected diff block re-expanded after second click")
+	}
+}
+
 func TestSubagentPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

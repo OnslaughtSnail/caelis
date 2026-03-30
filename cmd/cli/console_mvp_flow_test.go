@@ -47,17 +47,11 @@ func newConsoleFlowAdapterFactory(rt *runtime.Runtime, store session.Store, exec
 
 func TestConsoleGatewaySpawnAttachBackContinueFlow(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
 		t.Fatal(err)
