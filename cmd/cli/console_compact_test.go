@@ -35,7 +35,8 @@ func (l compactOnlyLLM) Generate(context.Context, *model.Request) iter.Seq2[*mod
 func TestHandleCompact_ShowsTokenDeltaAndRefreshesStatus(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{
-		Store: store,
+		LogStore:   store,
+		StateStore: store,
 		Compaction: runtime.CompactionConfig{
 			WatermarkRatio:    0.01,
 			MinWatermarkRatio: 0.01,

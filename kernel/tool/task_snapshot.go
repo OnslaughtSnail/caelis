@@ -103,6 +103,8 @@ func AppendTaskSnapshotEvents(result map[string]any, snapshot task.Snapshot) map
 func SnapshotResultMap(snapshot task.Snapshot) map[string]any {
 	result := map[string]any{}
 	appendHiddenSnapshotFields(result, snapshot)
+	appendBashIdentityFields(result, snapshot)
+	appendSpawnIdentityFields(result, snapshot)
 	appendSnapshotStateFields(result, snapshot)
 	if taskID := strings.TrimSpace(snapshot.TaskID); taskID != "" && snapshotIsActive(snapshot) {
 		result["task_id"] = taskID
@@ -132,6 +134,32 @@ func SnapshotResultMap(snapshot task.Snapshot) map[string]any {
 		}
 	}
 	return result
+}
+
+func appendSpawnIdentityFields(result map[string]any, snapshot task.Snapshot) {
+	if result == nil || !snapshotIsSubagent(snapshot) || len(snapshot.Result) == 0 {
+		return
+	}
+	for _, key := range []string{"child_session_id", "delegation_id", "agent", "child_cwd"} {
+		value, ok := snapshot.Result[key]
+		if !ok || value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		result[key] = value
+	}
+}
+
+func appendBashIdentityFields(result map[string]any, snapshot task.Snapshot) {
+	if result == nil || snapshot.Kind != task.KindBash || len(snapshot.Result) == 0 {
+		return
+	}
+	for _, key := range []string{"session_id", "backend", "route"} {
+		value, ok := snapshot.Result[key]
+		if !ok || value == nil || strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		result[key] = value
+	}
 }
 
 func snapshotIsActive(snapshot task.Snapshot) bool {

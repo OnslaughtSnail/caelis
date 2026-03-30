@@ -723,15 +723,9 @@ func delegationRefFromParentEvent(parentSessionID string, ev *session.Event) (De
 	}
 	childSessionID := resultString(resp.Result, "child_session_id")
 	if childSessionID == "" {
-		childSessionID = resultString(resp.Result, "_ui_child_session_id")
-	}
-	if childSessionID == "" {
 		return DelegationRef{}, false
 	}
 	delegationID := resultString(resp.Result, "delegation_id")
-	if delegationID == "" {
-		delegationID = resultString(resp.Result, "_ui_delegation_id")
-	}
 	return DelegationRef{
 		ParentSessionID:  strings.TrimSpace(parentSessionID),
 		ChildSessionID:   childSessionID,

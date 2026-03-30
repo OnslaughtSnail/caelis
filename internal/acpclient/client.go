@@ -65,6 +65,7 @@ type Client struct {
 }
 
 type clientTerminal struct {
+	backendName     string
 	sessionID       string
 	outputByteLimit int
 }
@@ -388,11 +389,7 @@ func (c *Client) handleTerminalCreate(ctx context.Context, msg Message) (any, *R
 	if err := decodeParams(msg.Params, &req); err != nil {
 		return nil, &RPCError{Code: -32602, Message: err.Error()}
 	}
-	runner, err := asyncRunner(c.cfg.Runtime)
-	if err != nil {
-		return nil, &RPCError{Code: -32000, Message: err.Error()}
-	}
-	sessionID, err := runner.StartAsync(ctx, toolexec.CommandRequest{
+	sessionRef, err := c.cfg.Runtime.Start(ctx, toolexec.CommandRequest{
 		Command:      buildShellCommand(req.Command, req.Args),
 		Dir:          strings.TrimSpace(req.CWD),
 		TTY:          false,
@@ -401,6 +398,8 @@ func (c *Client) handleTerminalCreate(ctx context.Context, msg Message) (any, *R
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
+	ref := sessionRef.Ref()
+	sessionID := ref.SessionID
 	terminalID := "term-" + sessionID
 	c.terminalMu.Lock()
 	limit := 0
@@ -408,6 +407,7 @@ func (c *Client) handleTerminalCreate(ctx context.Context, msg Message) (any, *R
 		limit = *req.OutputByteLimit
 	}
 	c.terminals[terminalID] = clientTerminal{
+		backendName:     ref.Backend,
 		sessionID:       sessionID,
 		outputByteLimit: limit,
 	}
@@ -420,19 +420,22 @@ func (c *Client) handleTerminalOutput(msg Message) (any, *RPCError) {
 	if err := decodeParams(msg.Params, &req); err != nil {
 		return nil, &RPCError{Code: -32602, Message: err.Error()}
 	}
-	runner, err := asyncRunner(c.cfg.Runtime)
-	if err != nil {
-		return nil, &RPCError{Code: -32000, Message: err.Error()}
-	}
 	terminal, ok := c.lookupTerminal(req.TerminalID)
 	if !ok {
 		return nil, &RPCError{Code: -32000, Message: "unknown terminal"}
 	}
-	stdout, stderr, _, _, err := runner.ReadOutput(terminal.sessionID, 0, 0)
+	sessionRef, err := c.cfg.Runtime.OpenSession(toolexec.CommandSessionRef{
+		Backend:   terminal.backendName,
+		SessionID: terminal.sessionID,
+	})
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
-	status, _ := runner.GetSessionStatus(terminal.sessionID)
+	stdout, stderr, _, _, err := sessionRef.ReadOutput(0, 0)
+	if err != nil {
+		return nil, &RPCError{Code: -32000, Message: err.Error()}
+	}
+	status, _ := sessionRef.Status()
 	output := string(stdout)
 	if len(stderr) > 0 {
 		output += string(stderr)
@@ -453,15 +456,18 @@ func (c *Client) handleTerminalWait(ctx context.Context, msg Message) (any, *RPC
 	if err := decodeParams(msg.Params, &req); err != nil {
 		return nil, &RPCError{Code: -32602, Message: err.Error()}
 	}
-	runner, err := asyncRunner(c.cfg.Runtime)
-	if err != nil {
-		return nil, &RPCError{Code: -32000, Message: err.Error()}
-	}
 	terminal, ok := c.lookupTerminal(req.TerminalID)
 	if !ok {
 		return nil, &RPCError{Code: -32000, Message: "unknown terminal"}
 	}
-	result, err := runner.WaitSession(ctx, terminal.sessionID, 0)
+	sessionRef, err := c.cfg.Runtime.OpenSession(toolexec.CommandSessionRef{
+		Backend:   terminal.backendName,
+		SessionID: terminal.sessionID,
+	})
+	if err != nil {
+		return nil, &RPCError{Code: -32000, Message: err.Error()}
+	}
+	result, err := sessionRef.Wait(ctx, 0)
 	if err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
@@ -474,15 +480,18 @@ func (c *Client) handleTerminalKill(msg Message) (any, *RPCError) {
 	if err := decodeParams(msg.Params, &req); err != nil {
 		return nil, &RPCError{Code: -32602, Message: err.Error()}
 	}
-	runner, err := asyncRunner(c.cfg.Runtime)
-	if err != nil {
-		return nil, &RPCError{Code: -32000, Message: err.Error()}
-	}
 	terminal, ok := c.lookupTerminal(req.TerminalID)
 	if !ok {
 		return map[string]any{}, nil
 	}
-	if err := runner.TerminateSession(terminal.sessionID); err != nil {
+	sessionRef, err := c.cfg.Runtime.OpenSession(toolexec.CommandSessionRef{
+		Backend:   terminal.backendName,
+		SessionID: terminal.sessionID,
+	})
+	if err != nil {
+		return nil, &RPCError{Code: -32000, Message: err.Error()}
+	}
+	if err := sessionRef.Terminate(); err != nil {
 		return nil, &RPCError{Code: -32000, Message: err.Error()}
 	}
 	return map[string]any{}, nil
@@ -619,19 +628,6 @@ func envSliceToMap(items []EnvVariable) map[string]string {
 		out[name] = item.Value
 	}
 	return out
-}
-
-func asyncRunner(rt toolexec.Runtime) (toolexec.AsyncCommandRunner, error) {
-	if rt == nil {
-		return nil, fmt.Errorf("runtime unavailable")
-	}
-	if runner, ok := rt.SandboxRunner().(toolexec.AsyncCommandRunner); ok && runner != nil {
-		return runner, nil
-	}
-	if runner, ok := rt.HostRunner().(toolexec.AsyncCommandRunner); ok && runner != nil {
-		return runner, nil
-	}
-	return nil, fmt.Errorf("async command runner unavailable")
 }
 
 func buildShellCommand(command string, args []string) string {

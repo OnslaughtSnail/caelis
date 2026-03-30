@@ -113,15 +113,7 @@ func (r *inputReferenceResolver) RewriteInput(input string) (RewriteResult, erro
 	if err != nil {
 		return RewriteResult{Text: input}, err
 	}
-	legacyRewritten, legacyResolved, legacyNotes, err := r.rewriteLegacyFileMentions(rewritten)
-	if err != nil {
-		return RewriteResult{Text: input}, err
-	}
-	rewritten = legacyRewritten
 	for _, one := range resolved {
-		addReference(one)
-	}
-	for _, one := range legacyResolved {
 		addReference(one)
 	}
 	if len(unresolved) > 0 {
@@ -129,7 +121,6 @@ func (r *inputReferenceResolver) RewriteInput(input string) (RewriteResult, erro
 			notes = append(notes, fmt.Sprintf("unresolved file reference #%s", one))
 		}
 	}
-	notes = append(notes, legacyNotes...)
 
 	return RewriteResult{
 		Text:          strings.TrimSpace(rewritten),
@@ -186,40 +177,6 @@ func (r *inputReferenceResolver) rewriteFileMentions(text string) (string, []str
 		i++
 	}
 	return b.String(), resolved, unresolved, nil
-}
-
-func (r *inputReferenceResolver) rewriteLegacyFileMentions(text string) (string, []string, []string, error) {
-	runes := []rune(text)
-	var b strings.Builder
-	resolved := make([]string, 0, 4)
-	resolvedSet := map[string]struct{}{}
-	notes := make([]string, 0, 2)
-	for i := 0; i < len(runes); {
-		if runes[i] == '@' && isMentionBoundary(runes, i) {
-			j := i + 1
-			for j < len(runes) && isMentionQueryRune(runes[j]) {
-				j++
-			}
-			if j > i+1 {
-				query := string(runes[i+1 : j])
-				if resolvedPath, ok, err := r.ResolveMention(query); err != nil {
-					return "", nil, nil, err
-				} else if ok {
-					b.WriteString(formatResolvedMentionPrompt(r.AbsPath(resolvedPath)))
-					if _, exists := resolvedSet[resolvedPath]; !exists {
-						resolvedSet[resolvedPath] = struct{}{}
-						resolved = append(resolved, resolvedPath)
-						notes = append(notes, fmt.Sprintf("file references now use #%s (legacy @%s rewritten)", resolvedPath, query))
-					}
-					i = j
-					continue
-				}
-			}
-		}
-		b.WriteRune(runes[i])
-		i++
-	}
-	return b.String(), resolved, notes, nil
 }
 
 func formatResolvedMentionPrompt(absPath string) string {
@@ -466,7 +423,7 @@ func mentionQueryAtCursor(input []rune, cursor int) (int, int, string, bool) {
 	for start > 0 && isMentionQueryRune(input[start-1]) {
 		start--
 	}
-	if start == 0 || input[start-1] != '@' {
+	if start == 0 || input[start-1] != '#' {
 		return 0, 0, "", false
 	}
 	at := start - 1

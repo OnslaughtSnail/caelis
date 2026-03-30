@@ -88,18 +88,22 @@ func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, exec
 	if execRuntime == nil {
 		return r.markTaskInterrupted(ctx, entry, "async bash runtime is unavailable for recovery")
 	}
-	runner, ok := asyncBashRunnerForRoute(execRuntime, stringValue(entry.Spec, taskSpecRoute))
-	if !ok || runner == nil {
+	sessionRef, err := openBashSession(
+		execRuntime,
+		recoverBashBackendName(entry.Spec, entry.Result, execRuntime),
+		sessionID,
+	)
+	if err != nil {
 		return r.markTaskInterrupted(ctx, entry, "async bash runner is unavailable for recovery")
 	}
-	status, err := runner.GetSessionStatus(sessionID)
+	status, err := sessionRef.Status()
 	if err != nil {
 		if errors.Is(err, toolexec.ErrSessionNotFound) {
 			return r.markTaskInterrupted(ctx, entry, "async bash session no longer exists")
 		}
 		return nil, err
 	}
-	preview := recoveredBashPreview(runner, sessionID)
+	preview := recoveredBashPreview(sessionRef)
 	entry.State = bashTaskState(status, preview)
 	entry.Running = status.State == toolexec.SessionStateRunning
 	entry.UpdatedAt = time.Now()
@@ -111,6 +115,7 @@ func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, exec
 	entry.Result["workdir"] = stringValue(entry.Spec, taskSpecWorkdir)
 	entry.Result["tty"] = boolValue(entry.Spec, taskSpecTTY)
 	entry.Result["route"] = stringValue(entry.Spec, taskSpecRoute)
+	entry.Result["backend"] = strings.TrimSpace(sessionRef.Ref().Backend)
 	entry.Result["state"] = string(entry.State)
 	entry.Result["exit_code"] = status.ExitCode
 	entry.Result["session_id"] = sessionID
@@ -132,12 +137,9 @@ func (r *Runtime) reconcileBashTask(ctx context.Context, entry *task.Entry, exec
 }
 
 func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) (*task.Entry, error) {
-	childSessionID := strings.TrimSpace(stringValue(entry.Result, "child_session_id"))
+	childSessionID := strings.TrimSpace(stringValue(entry.Spec, taskSpecChildSession))
 	if childSessionID == "" {
-		childSessionID = strings.TrimSpace(stringValue(entry.Result, "_ui_child_session_id"))
-	}
-	if childSessionID == "" {
-		childSessionID = strings.TrimSpace(stringValue(entry.Spec, "child_session_id"))
+		childSessionID = strings.TrimSpace(stringValue(entry.Result, "child_session_id"))
 	}
 	if childSessionID == "" {
 		return r.markTaskInterrupted(ctx, entry, "child session reference is missing")
@@ -170,29 +172,20 @@ func (r *Runtime) reconcileSubagentTask(ctx context.Context, entry *task.Entry) 
 		entry.Result = map[string]any{}
 	}
 	entry.Result["child_session_id"] = childSessionID
-	entry.Result["_ui_child_session_id"] = childSessionID
 	if delegationID := strings.TrimSpace(stringValue(entry.Spec, taskSpecDelegationID)); delegationID != "" {
 		entry.Result["delegation_id"] = delegationID
-		entry.Result["_ui_delegation_id"] = delegationID
 	}
 	agentName := strings.TrimSpace(stringValue(entry.Spec, taskSpecAgent))
 	if agentName == "" {
 		agentName = strings.TrimSpace(stringValue(entry.Result, "agent"))
 	}
-	if agentName == "" {
-		agentName = strings.TrimSpace(stringValue(entry.Result, "_ui_agent"))
-	}
 	if agentName != "" {
 		entry.Result["agent"] = agentName
-		entry.Result["_ui_agent"] = agentName
-	}
-	if timeoutSeconds := intValue(entry.Spec, taskSpecTimeout); timeoutSeconds > 0 {
-		entry.Result["_ui_timeout_seconds"] = timeoutSeconds
 	}
 	if idleTimeoutSeconds := intValue(entry.Spec, taskSpecIdleTimeout); idleTimeoutSeconds > 0 {
 		entry.Result["_ui_idle_timeout_seconds"] = idleTimeoutSeconds
 	}
-	if childCWD := strings.TrimSpace(stringValueFallback(entry.Spec, taskSpecChildCWD, entry.Result)); childCWD != "" {
+	if childCWD := strings.TrimSpace(stringValue(entry.Spec, taskSpecChildCWD)); childCWD != "" {
 		entry.Result["child_cwd"] = childCWD
 	}
 	entry.Result["state"] = string(entry.State)
@@ -266,20 +259,6 @@ func stringValue(values map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprint(raw))
 }
 
-// stringValueFallback looks up key in primary, then in fallbacks (maps and
-// alternate keys). Used for backward-compatible reads of renamed spec keys.
-func stringValueFallback(primary map[string]any, key string, fallbacks ...map[string]any) string {
-	if v := stringValue(primary, key); v != "" {
-		return v
-	}
-	for _, m := range fallbacks {
-		if v := stringValue(m, key); v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
 func boolValue(values map[string]any, key string) bool {
 	if len(values) == 0 {
 		return false
@@ -292,11 +271,11 @@ func boolValue(values map[string]any, key string) bool {
 	return ok && value
 }
 
-func recoveredBashPreview(runner toolexec.AsyncCommandRunner, sessionID string) string {
-	if runner == nil || strings.TrimSpace(sessionID) == "" {
+func recoveredBashPreview(session toolexec.Session) string {
+	if session == nil || strings.TrimSpace(session.Ref().SessionID) == "" {
 		return ""
 	}
-	stdout, stderr, _, _, err := runner.ReadOutput(sessionID, 0, 0)
+	stdout, stderr, _, _, err := session.ReadOutput(0, 0)
 	if err != nil {
 		return ""
 	}

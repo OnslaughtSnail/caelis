@@ -55,12 +55,12 @@ func TestInputReferenceResolver_RewriteInput_FileMentionFuzzy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := resolver.RewriteInput("看一下 @schema.go")
+	result, err := resolver.RewriteInput("看一下 #schema.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Notes) != 1 || !strings.Contains(result.Notes[0], "now use #") {
-		t.Fatalf("expected legacy @file migration note, got %v", result.Notes)
+	if len(result.Notes) != 0 {
+		t.Fatalf("did not expect rewrite notes, got %v", result.Notes)
 	}
 	want := "请阅读文件: " + filepath.ToSlash(filepath.Join(workspace, "kernel", "tool", "schema.go"))
 	if !strings.Contains(result.Text, want) {
@@ -77,12 +77,12 @@ func TestInputReferenceResolver_RewriteInput_ImageMention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := resolver.RewriteInput("看这个截图 @screenshot.png 和代码 @main.go")
+	result, err := resolver.RewriteInput("看这个截图 #screenshot.png 和代码 #main.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Notes) != 2 {
-		t.Fatalf("expected 2 legacy @file migration notes, got %v", result.Notes)
+	if len(result.Notes) != 0 {
+		t.Fatalf("did not expect rewrite notes, got %v", result.Notes)
 	}
 	if len(result.ResolvedPaths) != 2 {
 		t.Fatalf("expected 2 resolved paths, got %d: %v", len(result.ResolvedPaths), result.ResolvedPaths)
@@ -107,7 +107,7 @@ func TestInputReferenceResolver_RewriteInput_ImageMention(t *testing.T) {
 }
 
 func TestMentionQueryAtCursor(t *testing.T) {
-	input := []rune("请检查 @kernel/to")
+	input := []rune("请检查 #kernel/to")
 	start, end, query, ok := mentionQueryAtCursor(input, len(input))
 	if !ok {
 		t.Fatal("expected mention query found")

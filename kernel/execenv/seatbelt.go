@@ -26,7 +26,7 @@ func (f seatbeltSandboxFactory) Type() string {
 }
 
 func (f seatbeltSandboxFactory) Build(cfg Config) (CommandRunner, error) {
-	return newSeatbeltRunner(cfg.SandboxPolicy), nil
+	return newSeatbeltRunner(deriveSandboxPolicy(PermissionModeDefault, cloneSandboxPolicy(cfg.SandboxPolicy))), nil
 }
 
 type seatbeltRunner struct {
@@ -35,6 +35,7 @@ type seatbeltRunner struct {
 	goos           string
 	policy         SandboxPolicy
 	sessionManager *SessionManager
+	closed         atomic.Bool
 }
 
 func newSeatbeltRunner(policy SandboxPolicy) CommandRunner {
@@ -139,6 +140,10 @@ func (s *seatbeltRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 }
 
 func (s *seatbeltRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return "", err
+	}
 	if req.TTY {
 		return "", fmt.Errorf("tool: seatbelt async tty is not supported")
 	}
@@ -147,7 +152,7 @@ func (s *seatbeltRunner) StartAsync(_ context.Context, req CommandRequest) (stri
 		return "", fmt.Errorf("tool: resolve seatbelt workdir failed: %w", err)
 	}
 	effectivePolicy := sandboxPolicyForCommand(s.policy, req)
-	session, err := s.sessionManager.StartSession(AsyncSessionConfig{
+	session, err := manager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
 		Env:             mergeCommandEnv(req.EnvOverrides),
@@ -171,29 +176,45 @@ func (s *seatbeltRunner) StartAsync(_ context.Context, req CommandRequest) (stri
 }
 
 func (s *seatbeltRunner) WriteInput(sessionID string, input []byte) error {
-	return s.sessionManager.WriteInput(sessionID, input)
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.WriteInput(sessionID, input)
 }
 
 func (s *seatbeltRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
-	return s.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	return manager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
 }
 
 func (s *seatbeltRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
-	return s.sessionManager.GetSessionStatus(sessionID)
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	return manager.GetSessionStatus(sessionID)
 }
 
 func (s *seatbeltRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return CommandResult{}, err
+	}
 	waitCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		waitCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	exitCode, err := s.sessionManager.WaitSession(waitCtx, sessionID)
+	exitCode, err := manager.WaitSession(waitCtx, sessionID)
 	if err != nil {
 		return CommandResult{}, err
 	}
-	result, err := s.sessionManager.GetResult(sessionID)
+	result, err := manager.GetResult(sessionID)
 	if err != nil {
 		return CommandResult{ExitCode: exitCode}, nil
 	}
@@ -201,18 +222,34 @@ func (s *seatbeltRunner) WaitSession(ctx context.Context, sessionID string, time
 }
 
 func (s *seatbeltRunner) TerminateSession(sessionID string) error {
-	return s.sessionManager.TerminateSession(sessionID)
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.TerminateSession(sessionID)
 }
 
 func (s *seatbeltRunner) ListSessions() []SessionInfo {
-	return s.sessionManager.ListSessions()
+	manager, err := s.asyncSessionManager()
+	if err != nil {
+		return nil
+	}
+	return manager.ListSessions()
 }
 
 func (s *seatbeltRunner) Close() error {
+	s.closed.Store(true)
 	if s.sessionManager != nil {
 		return s.sessionManager.Close()
 	}
 	return nil
+}
+
+func (s *seatbeltRunner) asyncSessionManager() (*SessionManager, error) {
+	if s == nil || s.closed.Load() || s.sessionManager == nil {
+		return nil, fmt.Errorf("execenv: seatbelt runner is closed")
+	}
+	return s.sessionManager, nil
 }
 
 func buildSeatbeltProfile(policy SandboxPolicy, workDir string) string {
@@ -226,7 +263,14 @@ func buildSeatbeltProfile(policy SandboxPolicy, workDir string) string {
 	b.WriteString("(allow process*)\n")
 	b.WriteString("(allow signal (target same-sandbox))\n")
 	b.WriteString("(allow sysctl-read)\n")
-	b.WriteString("(allow file-read*)\n")
+	if roots := shellReadableRoots(policy, workDir); len(roots) > 0 {
+		for _, root := range roots {
+			fmt.Fprintf(&b, "(allow file-read* (subpath %s))\n", sbplString(root))
+			fmt.Fprintf(&b, "(allow file-read-metadata file-test-existence (subpath %s))\n", sbplString(root))
+		}
+	} else {
+		b.WriteString("(allow file-read*)\n")
+	}
 
 	// Core extensions: PTY, IPC, IOKit, system calls.
 	b.WriteString(seatbeltCoreExtensions)
@@ -264,22 +308,22 @@ func seatbeltWritableRoots(policy SandboxPolicy, workDir string) []string {
 
 	// User-declared writable roots.
 	for _, one := range policy.WritableRoots {
-		resolved := resolveSeatbeltPath(workDir, one)
+		resolved := resolveSandboxPath(workDir, one)
 		if resolved != "" {
-			roots = append(roots, seatbeltPathVariants(resolved)...)
+			roots = append(roots, sandboxPathVariants(resolved)...)
 		}
 	}
 
 	// Temp directories — always writable.
 	tmp := strings.TrimSpace(os.TempDir())
 	if tmp != "" {
-		roots = append(roots, seatbeltPathVariants(tmp)...)
+		roots = append(roots, sandboxPathVariants(tmp)...)
 	}
 	// On macOS /tmp is a symlink to /private/tmp; os.TempDir() returns
 	// $TMPDIR (e.g. /var/folders/...) which does NOT cover /tmp.
-	roots = append(roots, seatbeltPathVariants("/tmp")...)
+	roots = append(roots, sandboxPathVariants("/tmp")...)
 	// /var/tmp is another common temp location used by system tools.
-	roots = append(roots, seatbeltPathVariants("/var/tmp")...)
+	roots = append(roots, sandboxPathVariants("/var/tmp")...)
 
 	// Cache directories — low-risk, regenerable data that many dev tools
 	// (pip, npm, go build, homebrew, playwright) require for normal
@@ -287,8 +331,8 @@ func seatbeltWritableRoots(policy SandboxPolicy, workDir string) []string {
 	// or ~/.local because those contain persistent app state.
 	home, err := os.UserHomeDir()
 	if err == nil && strings.TrimSpace(home) != "" {
-		roots = append(roots, seatbeltPathVariants(filepath.Join(home, "Library", "Caches"))...)
-		roots = append(roots, seatbeltPathVariants(filepath.Join(home, ".cache"))...)
+		roots = append(roots, sandboxPathVariants(filepath.Join(home, "Library", "Caches"))...)
+		roots = append(roots, sandboxPathVariants(filepath.Join(home, ".cache"))...)
 	}
 
 	// macOS per-user cache dir (/var/folders/xx/xxx/C/) — needed for TLS
@@ -296,7 +340,7 @@ func seatbeltWritableRoots(policy SandboxPolicy, workDir string) []string {
 	// DARWIN_USER_CACHE_DIR behaviour.
 	if policy.NetworkAccess {
 		if cacheDir := darwinUserCacheDir(); cacheDir != "" {
-			roots = append(roots, seatbeltPathVariants(cacheDir)...)
+			roots = append(roots, sandboxPathVariants(cacheDir)...)
 		}
 	}
 
@@ -323,38 +367,12 @@ func darwinUserCacheDir() string {
 func seatbeltReadOnlySubpaths(policy SandboxPolicy, workDir string) []string {
 	values := make([]string, 0, len(policy.ReadOnlySubpaths))
 	for _, one := range policy.ReadOnlySubpaths {
-		resolved := resolveSeatbeltPath(workDir, one)
+		resolved := resolveSandboxPath(workDir, one)
 		if resolved != "" {
-			values = append(values, seatbeltPathVariants(resolved)...)
+			values = append(values, sandboxPathVariants(resolved)...)
 		}
 	}
 	return normalizeStringList(values)
-}
-
-func seatbeltPathVariants(path string) []string {
-	cleaned := filepath.Clean(strings.TrimSpace(path))
-	if cleaned == "" || cleaned == "." {
-		return nil
-	}
-	variants := []string{cleaned}
-	if resolved, err := filepath.EvalSymlinks(cleaned); err == nil && strings.TrimSpace(resolved) != "" {
-		variants = append(variants, filepath.Clean(resolved))
-	}
-	return normalizeStringList(variants)
-}
-
-func resolveSeatbeltPath(baseDir, value string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return ""
-	}
-	if filepath.IsAbs(trimmed) {
-		return filepath.Clean(trimmed)
-	}
-	if strings.TrimSpace(baseDir) == "" {
-		return ""
-	}
-	return filepath.Clean(filepath.Join(baseDir, trimmed))
 }
 
 func sbplString(v string) string {

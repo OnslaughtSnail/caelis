@@ -15,6 +15,14 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
+type BridgeStrategy string
+
+const (
+	BridgeStrategyBaseOnly         BridgeStrategy = "base_only"
+	BridgeStrategyTerminalTakeover BridgeStrategy = "terminal_takeover"
+	BridgeStrategyFullAccessBypass BridgeStrategy = "full_access_bypass"
+)
+
 func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceRoot, sessionCWD string, caps ClientCapabilities, modeResolver func() string) toolexec.Runtime {
 	if base == nil {
 		return nil
@@ -25,42 +33,45 @@ func NewRuntime(base toolexec.Runtime, conn *Conn, sessionID, workspaceRoot, ses
 		sessionCWD = normalizeSessionDir(workspaceRoot)
 	}
 	baseFS := base.FileSystem()
+	bridge := &runtimeBridge{
+		base:          base,
+		workspaceRoot: workspaceRoot,
+		sessionCWD:    sessionCWD,
+		modeResolver:  modeResolver,
+		strategy:      BridgeStrategyBaseOnly,
+	}
 	fileSystem := &clientFileSystem{
 		base:      baseFS,
 		conn:      conn,
 		sessionID: strings.TrimSpace(sessionID),
 		cwd:       sessionCWD,
 		caps:      caps,
+		owner:     bridge,
 	}
-	hostRunner := wrapSessionCommandRunner(base.HostRunner(), sessionCWD)
-	sandboxRunner := wrapSessionCommandRunner(base.SandboxRunner(), sessionCWD)
-	var terminalRunner toolexec.AsyncCommandRunner
+	var terminalBackend toolexec.Backend
 	if caps.Terminal && conn != nil && base.PermissionMode() != toolexec.PermissionModeFullControl {
-		terminalRunner = wrapSessionAsyncCommandRunner(NewAsyncCommandRunner(conn, sessionID), sessionCWD)
-		hostRunner = terminalRunner
-		sandboxRunner = terminalRunner
+		terminalRunner := wrapSessionAsyncCommandRunner(NewAsyncCommandRunner(conn, sessionID), sessionCWD)
+		terminalBackend = newRuntimeBridgeBackend("acp_terminal", toolexec.BackendKindHost, terminalRunner)
+		bridge.strategy = BridgeStrategyTerminalTakeover
 	}
-	return &runtimeBridge{
-		base:           base,
-		workspaceRoot:  workspaceRoot,
-		sessionCWD:     sessionCWD,
-		fileSystem:     fileSystem,
-		hostRunner:     hostRunner,
-		sandboxRunner:  sandboxRunner,
-		terminalRunner: terminalRunner,
-		modeResolver:   modeResolver,
+	bridge.fileSystem = fileSystem
+	bridge.terminalBackend = terminalBackend
+	if bridge.PermissionMode() == toolexec.PermissionModeFullControl {
+		bridge.strategy = BridgeStrategyFullAccessBypass
 	}
+	return bridge
 }
 
 type runtimeBridge struct {
-	base           toolexec.Runtime
-	workspaceRoot  string
-	sessionCWD     string
-	fileSystem     toolexec.FileSystem
-	hostRunner     toolexec.CommandRunner
-	sandboxRunner  toolexec.CommandRunner
-	terminalRunner toolexec.AsyncCommandRunner
-	modeResolver   func() string
+	base            toolexec.Runtime
+	workspaceRoot   string
+	sessionCWD      string
+	fileSystem      toolexec.FileSystem
+	terminalBackend toolexec.Backend
+	modeResolver    func() string
+	strategy        BridgeStrategy
+	mu              sync.Mutex
+	tempFiles       []string
 }
 
 func (r *runtimeBridge) PermissionMode() toolexec.PermissionMode {
@@ -97,31 +108,113 @@ func (r *runtimeBridge) FallbackReason() string {
 	}
 	return r.base.FallbackReason()
 }
-func (r *runtimeBridge) FileSystem() toolexec.FileSystem { return r.fileSystem }
-func (r *runtimeBridge) HostRunner() toolexec.CommandRunner {
-	if r.terminalRunner != nil {
-		return r.terminalRunner
-	}
-	return r.hostRunner
-}
-func (r *runtimeBridge) SandboxRunner() toolexec.CommandRunner {
+func (r *runtimeBridge) Diagnostics() toolexec.SandboxDiagnostics {
 	if r.PermissionMode() == toolexec.PermissionModeFullControl {
-		return r.HostRunner()
+		return toolexec.SandboxDiagnostics{}
 	}
-	return r.sandboxRunner
+	return r.base.Diagnostics()
+}
+
+func (r *runtimeBridge) State() toolexec.RuntimeState {
+	state := r.base.State()
+	state.Mode = r.PermissionMode()
+	return state
+}
+
+func (r *runtimeBridge) FileSystem() toolexec.FileSystem { return r.fileSystem }
+
+func (r *runtimeBridge) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	if backend := r.takeoverBackend(); backend != nil {
+		req.BackendName = backend.Name()
+		return backend.Execute(ctx, sessionCommandRequest(req, r.sessionCWD))
+	}
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		req.RouteHint = toolexec.ExecutionRouteHost
+		req.BackendName = "host"
+	}
+	return r.base.Execute(ctx, sessionCommandRequest(req, r.sessionCWD))
+}
+
+func (r *runtimeBridge) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	if backend := r.takeoverBackend(); backend != nil {
+		req.BackendName = backend.Name()
+		return backend.Start(ctx, sessionCommandRequest(req, r.sessionCWD))
+	}
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		req.RouteHint = toolexec.ExecutionRouteHost
+		req.BackendName = "host"
+	}
+	return r.base.Start(ctx, sessionCommandRequest(req, r.sessionCWD))
+}
+
+func (r *runtimeBridge) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if backend := r.takeoverBackend(); backend != nil && strings.EqualFold(strings.TrimSpace(ref.Backend), backend.Name()) {
+		return backend.OpenSession(ref.SessionID)
+	}
+	return r.base.OpenSession(ref)
+}
+
+func (r *runtimeBridge) Decide(ctx context.Context, req toolexec.RouteRequest) (toolexec.CommandDecision, error) {
+	_ = ctx
+	if r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return toolexec.CommandDecision{Route: toolexec.ExecutionRouteHost, Backend: "host"}, nil
+	}
+	decision := r.base.DecideRoute(req.Command, req.SandboxPermission)
+	if backend := r.takeoverBackend(); backend != nil {
+		decision.Backend = backend.Name()
+	}
+	return decision, nil
 }
 
 func (r *runtimeBridge) DecideRoute(command string, sandboxPermission toolexec.SandboxPermission) toolexec.CommandDecision {
-	if r.PermissionMode() == toolexec.PermissionModeFullControl {
-		return toolexec.CommandDecision{Route: toolexec.ExecutionRouteHost}
+	decision, _ := r.Decide(context.Background(), toolexec.RouteRequest{
+		Command:           command,
+		SandboxPermission: sandboxPermission,
+	})
+	return decision
+}
+
+func (r *runtimeBridge) BridgeStrategy() BridgeStrategy {
+	if r == nil {
+		return BridgeStrategyBaseOnly
 	}
-	if sandboxPermission == toolexec.SandboxPermissionRequireEscalated {
-		return r.base.DecideRoute(command, sandboxPermission)
+	return r.strategy
+}
+
+func (r *runtimeBridge) trackTempFile(path string) {
+	if r == nil || strings.TrimSpace(path) == "" {
+		return
 	}
-	if r.sandboxRunner != nil {
-		return toolexec.CommandDecision{Route: toolexec.ExecutionRouteSandbox}
+	r.mu.Lock()
+	r.tempFiles = append(r.tempFiles, path)
+	r.mu.Unlock()
+}
+
+func (r *runtimeBridge) Close() error {
+	if r == nil {
+		return nil
 	}
-	return r.base.DecideRoute(command, sandboxPermission)
+	r.mu.Lock()
+	tempFiles := append([]string(nil), r.tempFiles...)
+	r.tempFiles = nil
+	r.mu.Unlock()
+	var firstErr error
+	for _, path := range tempFiles {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := toolexec.Close(r.base); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+func (r *runtimeBridge) takeoverBackend() toolexec.Backend {
+	if r == nil || r.PermissionMode() == toolexec.PermissionModeFullControl {
+		return nil
+	}
+	return r.terminalBackend
 }
 
 type clientFileSystem struct {
@@ -130,6 +223,70 @@ type clientFileSystem struct {
 	sessionID string
 	cwd       string
 	caps      ClientCapabilities
+	owner     *runtimeBridge
+}
+
+type runtimeBridgeBackend struct {
+	name   string
+	kind   toolexec.BackendKind
+	runner toolexec.AsyncCommandRunner
+}
+
+func newRuntimeBridgeBackend(name string, kind toolexec.BackendKind, runner toolexec.AsyncCommandRunner) *runtimeBridgeBackend {
+	if runner == nil {
+		return nil
+	}
+	return &runtimeBridgeBackend{name: strings.TrimSpace(name), kind: kind, runner: runner}
+}
+
+func (b *runtimeBridgeBackend) Name() string               { return b.name }
+func (b *runtimeBridgeBackend) Kind() toolexec.BackendKind { return b.kind }
+func (b *runtimeBridgeBackend) Capabilities() toolexec.BackendCapabilities {
+	return toolexec.BackendCapabilities{Async: b.runner != nil}
+}
+func (b *runtimeBridgeBackend) Health(context.Context) toolexec.BackendHealth {
+	return toolexec.BackendHealth{Ready: b.runner != nil}
+}
+func (b *runtimeBridgeBackend) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return b.runner.Run(ctx, req)
+}
+func (b *runtimeBridgeBackend) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	sessionID, err := b.runner.StartAsync(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeBridgeSession{
+		ref:    toolexec.CommandSessionRef{Backend: b.name, SessionID: sessionID},
+		runner: b.runner,
+	}, nil
+}
+func (b *runtimeBridgeBackend) OpenSession(sessionID string) (toolexec.Session, error) {
+	return &runtimeBridgeSession{
+		ref:    toolexec.CommandSessionRef{Backend: b.name, SessionID: strings.TrimSpace(sessionID)},
+		runner: b.runner,
+	}, nil
+}
+
+type runtimeBridgeSession struct {
+	ref    toolexec.CommandSessionRef
+	runner toolexec.AsyncCommandRunner
+}
+
+func (s *runtimeBridgeSession) Ref() toolexec.CommandSessionRef { return s.ref }
+func (s *runtimeBridgeSession) WriteInput(input []byte) error {
+	return s.runner.WriteInput(s.ref.SessionID, input)
+}
+func (s *runtimeBridgeSession) ReadOutput(stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
+	return s.runner.ReadOutput(s.ref.SessionID, stdoutMarker, stderrMarker)
+}
+func (s *runtimeBridgeSession) Status() (toolexec.SessionStatus, error) {
+	return s.runner.GetSessionStatus(s.ref.SessionID)
+}
+func (s *runtimeBridgeSession) Wait(ctx context.Context, timeout time.Duration) (toolexec.CommandResult, error) {
+	return s.runner.WaitSession(ctx, s.ref.SessionID, timeout)
+}
+func (s *runtimeBridgeSession) Terminate() error {
+	return s.runner.TerminateSession(s.ref.SessionID)
 }
 
 func (f *clientFileSystem) Getwd() (string, error) {
@@ -159,15 +316,23 @@ func (f *clientFileSystem) Open(path string) (*os.File, error) {
 		return nil, err
 	}
 	if _, err := file.Write(data); err != nil {
+		if stdruntime.GOOS == "windows" {
+			_ = os.Remove(file.Name())
+		}
 		file.Close()
 		return nil, err
 	}
 	if _, err := file.Seek(0, 0); err != nil {
+		if stdruntime.GOOS == "windows" {
+			_ = os.Remove(file.Name())
+		}
 		file.Close()
 		return nil, err
 	}
 	if stdruntime.GOOS != "windows" {
 		_ = os.Remove(file.Name())
+	} else if f.owner != nil {
+		f.owner.trackTempFile(file.Name())
 	}
 	return file, nil
 }
@@ -264,31 +429,6 @@ func shellCommand(input string) (string, []string) {
 		return "cmd.exe", []string{"/C", input}
 	}
 	return "sh", []string{"-lc", input}
-}
-
-type sessionCommandRunner struct {
-	base       toolexec.CommandRunner
-	sessionCWD string
-}
-
-func wrapSessionCommandRunner(base toolexec.CommandRunner, sessionCWD string) toolexec.CommandRunner {
-	if base == nil {
-		return nil
-	}
-	if async, ok := base.(toolexec.AsyncCommandRunner); ok {
-		return &sessionAsyncCommandRunner{
-			AsyncCommandRunner: async,
-			sessionCWD:         normalizeSessionDir(sessionCWD),
-		}
-	}
-	return &sessionCommandRunner{
-		base:       base,
-		sessionCWD: normalizeSessionDir(sessionCWD),
-	}
-}
-
-func (r *sessionCommandRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
-	return r.base.Run(ctx, sessionCommandRequest(req, r.sessionCWD))
 }
 
 type sessionAsyncCommandRunner struct {

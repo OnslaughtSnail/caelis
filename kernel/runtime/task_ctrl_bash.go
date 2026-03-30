@@ -19,17 +19,17 @@ const (
 )
 
 type bashTaskController struct {
-	runner    toolexec.AsyncCommandRunner
-	sessionID string
-	command   string
-	workdir   string
-	tty       bool
-	route     string
-	store     task.Store
+	session toolexec.Session
+	command string
+	workdir string
+	tty     bool
+	route   string
+	backend string
+	store   task.Store
 }
 
 func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yield time.Duration) (task.Snapshot, error) {
-	if c == nil || c.runner == nil {
+	if c == nil || c.session == nil {
 		record.WithLock(func(one *task.Record) {
 			one.State = task.StateInterrupted
 			one.Running = false
@@ -65,7 +65,7 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 			previousPreview = strings.TrimSpace(fmt.Sprint(one.Result["latest_output"]))
 		})
 
-		stdout, stderr, nextStdout, nextStderr, err := c.runner.ReadOutput(c.sessionID, stdoutMarker, stderrMarker)
+		stdout, stderr, nextStdout, nextStderr, err := c.session.ReadOutput(stdoutMarker, stderrMarker)
 		if err != nil {
 			if errors.Is(err, toolexec.ErrSessionNotFound) {
 				record.WithLock(func(one *task.Record) {
@@ -83,7 +83,7 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 			}
 			return task.Snapshot{}, err
 		}
-		status, err := c.runner.GetSessionStatus(c.sessionID)
+		status, err := c.session.Status()
 		if err != nil {
 			return task.Snapshot{}, err
 		}
@@ -95,7 +95,7 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 			outputMeta   = bashTaskOutputMeta(status, c.tty)
 		)
 		if status.State != toolexec.SessionStateRunning && !c.tty {
-			finalOutput = readRetainedOutput(c.runner, c.sessionID)
+			finalOutput = readRetainedOutput(c.session)
 			latestOutput = task.MergeLatestOutput(previousPreview, bashOutputPreview([]byte(finalOutput.Stdout), []byte(finalOutput.Stderr)))
 		}
 		record.WithLock(func(one *task.Record) {
@@ -113,11 +113,10 @@ func (c *bashTaskController) Wait(ctx context.Context, record *task.Record, yiel
 				"workdir":              c.workdir,
 				"tty":                  c.tty,
 				"route":                c.route,
+				"backend":              c.backend,
 				"state":                string(one.State),
 				"exit_code":            status.ExitCode,
-				"session_id":           c.sessionID,
-				"_ui_exec_session_id":  c.sessionID,
-				"_ui_route":            c.route,
+				"session_id":           c.session.Ref().SessionID,
 				"output_meta":          outputMeta,
 				"stdout_bytes":         status.StdoutBytes,
 				"stderr_bytes":         status.StderrBytes,
@@ -253,23 +252,23 @@ func (s *bashTaskLiveStream) emit(ctx context.Context, snapshot task.Snapshot) {
 }
 
 func (c *bashTaskController) Write(ctx context.Context, record *task.Record, input string, yield time.Duration) (task.Snapshot, error) {
-	if c == nil || c.runner == nil {
+	if c == nil || c.session == nil {
 		return task.Snapshot{}, fmt.Errorf("task: bash controller is unavailable")
 	}
-	if err := c.runner.WriteInput(c.sessionID, []byte(input)); err != nil {
+	if err := c.session.WriteInput([]byte(input)); err != nil {
 		return task.Snapshot{}, err
 	}
 	return c.Wait(ctx, record, yield)
 }
 
 func (c *bashTaskController) Cancel(ctx context.Context, record *task.Record) (task.Snapshot, error) {
-	if c == nil || c.runner == nil {
+	if c == nil || c.session == nil {
 		return task.Snapshot{}, fmt.Errorf("task: bash controller is unavailable")
 	}
-	if err := c.runner.TerminateSession(c.sessionID); err != nil {
+	if err := c.session.Terminate(); err != nil {
 		return task.Snapshot{}, err
 	}
-	status, _ := c.runner.GetSessionStatus(c.sessionID)
+	status, _ := c.session.Status()
 	preview, _ := c.previewOutput()
 	var snapshot task.Snapshot
 	record.WithLock(func(one *task.Record) {
@@ -277,15 +276,14 @@ func (c *bashTaskController) Cancel(ctx context.Context, record *task.Record) (t
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"command":             c.command,
-			"workdir":             c.workdir,
-			"tty":                 c.tty,
-			"route":               c.route,
-			"state":               string(one.State),
-			"session_id":          c.sessionID,
-			"_ui_exec_session_id": c.sessionID,
-			"_ui_route":           c.route,
-			"output_meta":         bashTaskOutputMeta(status, c.tty),
+			"command":     c.command,
+			"workdir":     c.workdir,
+			"tty":         c.tty,
+			"route":       c.route,
+			"backend":     c.backend,
+			"state":       string(one.State),
+			"session_id":  c.session.Ref().SessionID,
+			"output_meta": bashTaskOutputMeta(status, c.tty),
 		}
 		if preview != "" {
 			one.Result["latest_output"] = preview
@@ -297,10 +295,10 @@ func (c *bashTaskController) Cancel(ctx context.Context, record *task.Record) (t
 }
 
 func (c *bashTaskController) previewOutput() (string, error) {
-	if c == nil || c.runner == nil {
+	if c == nil || c.session == nil {
 		return "", nil
 	}
-	stdout, stderr, _, _, err := c.runner.ReadOutput(c.sessionID, 0, 0)
+	stdout, stderr, _, _, err := c.session.ReadOutput(0, 0)
 	if err != nil {
 		if errors.Is(err, toolexec.ErrSessionNotFound) {
 			return "", nil
@@ -355,37 +353,33 @@ func bashTaskOutputMeta(status toolexec.SessionStatus, tty bool) map[string]any 
 	}
 }
 
-func readRetainedOutput(runner toolexec.AsyncCommandRunner, sessionID string) task.Output {
-	if runner == nil || strings.TrimSpace(sessionID) == "" {
+func readRetainedOutput(session toolexec.Session) task.Output {
+	if session == nil || strings.TrimSpace(session.Ref().SessionID) == "" {
 		return task.Output{}
 	}
-	stdout, stderr, _, _, err := runner.ReadOutput(sessionID, 0, 0)
+	stdout, stderr, _, _, err := session.ReadOutput(0, 0)
 	if err != nil {
 		return task.Output{}
 	}
 	return task.Output{Stdout: string(stdout), Stderr: string(stderr)}
 }
 
-func asyncBashRunnerForRoute(execRuntime toolexec.Runtime, route string) (toolexec.AsyncCommandRunner, bool) {
+func openBashSession(execRuntime toolexec.Runtime, backendName string, sessionID string) (toolexec.Session, error) {
 	if execRuntime == nil {
-		return nil, false
+		return nil, fmt.Errorf("task: exec runtime is unavailable")
 	}
-	switch strings.TrimSpace(route) {
-	case "", string(toolexec.ExecutionRouteSandbox):
-		if execRuntime.SandboxRunner() == nil {
-			return nil, false
-		}
-		runner, ok := execRuntime.SandboxRunner().(toolexec.AsyncCommandRunner)
-		return runner, ok
-	case string(toolexec.ExecutionRouteHost):
-		if execRuntime.HostRunner() == nil {
-			return nil, false
-		}
-		runner, ok := execRuntime.HostRunner().(toolexec.AsyncCommandRunner)
-		return runner, ok
-	default:
-		return nil, false
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("task: async bash session reference is missing")
 	}
+	backendName = strings.TrimSpace(backendName)
+	if backendName == "" {
+		return nil, fmt.Errorf("task: async bash backend reference is missing")
+	}
+	return execRuntime.OpenSession(toolexec.CommandSessionRef{
+		Backend:   backendName,
+		SessionID: sessionID,
+	})
 }
 
 func bashTaskState(status toolexec.SessionStatus, latestOutput string) task.State {

@@ -205,6 +205,10 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 		return false
 	}
 	if _, ok := blk.(*TranscriptBlock); ok {
+		if diff := m.findInlineDiffBlockByAnchorBlockID(bid); diff != nil {
+			diff.Expanded = !diff.Expanded
+			return true
+		}
 		if panel := m.findInlineBashPanelByAnchorBlockID(bid); panel != nil {
 			m.toggleInlineBashPanel(panel)
 			return true
@@ -1013,4 +1017,19 @@ func (m *Model) tryOpenSlashArgPicker(line string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Model) findInlineDiffBlockByAnchorBlockID(anchorID string) *DiffBlock {
+	if m == nil || strings.TrimSpace(anchorID) == "" || m.diffAnchorIndex == nil {
+		return nil
+	}
+	blockID := strings.TrimSpace(m.diffAnchorIndex[anchorID])
+	if blockID == "" {
+		return nil
+	}
+	block, _ := m.doc.Find(blockID).(*DiffBlock)
+	if block == nil || !block.Inline {
+		return nil
+	}
+	return block
 }

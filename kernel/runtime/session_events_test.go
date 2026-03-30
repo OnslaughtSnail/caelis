@@ -12,7 +12,7 @@ import (
 
 func TestRuntime_SessionEvents_FilterLifecycleAndLimit(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestRuntime_SessionEvents_FilterLifecycleAndLimit(t *testing.T) {
 
 func TestRuntime_SessionEvents_MissingSessionReturnsEmpty(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

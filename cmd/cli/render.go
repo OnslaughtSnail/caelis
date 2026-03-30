@@ -441,6 +441,8 @@ func summarizeToolArgs(toolName string, args map[string]any) string {
 			return ""
 		}
 		switch strings.ToLower(action) {
+		case "list":
+			return "list"
 		case "status", "cancel":
 			return ""
 		case "write":
@@ -892,17 +894,17 @@ func summarizeTaskAction(action string, _ map[string]any, result map[string]any)
 		runningCount := countRunningTasks(result["tasks"])
 		if count == 1 {
 			if runningCount == 1 {
-				return "Listed 1 task (1 active)"
+				return "listed 1 task (1 active)"
 			}
-			return "Listed 1 task"
+			return "listed 1 task"
 		}
 		if count > 0 {
 			if runningCount > 0 {
-				return fmt.Sprintf("Listed %d tasks (%d active)", count, runningCount)
+				return fmt.Sprintf("listed %d tasks (%d active)", count, runningCount)
 			}
-			return fmt.Sprintf("Listed %d tasks", count)
+			return fmt.Sprintf("listed %d tasks", count)
 		}
-		return "Listed tasks"
+		return "listed tasks"
 	}
 	return ""
 }
@@ -980,7 +982,7 @@ func taskActionCallDisplayName(action string) string {
 	case "cancel":
 		return "CANCEL"
 	case "list":
-		return "LIST"
+		return "TASK"
 	default:
 		return "TASK"
 	}

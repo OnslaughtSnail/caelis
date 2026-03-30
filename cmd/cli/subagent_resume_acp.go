@@ -120,17 +120,17 @@ func resumedSubagentTargetFromToolResponse(resp *model.ToolResponse, liveStates 
 	}
 	switch {
 	case strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName):
-		sessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+		sessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id"))
 		if sessionID == "" || !shouldResumeSubagentTarget(resp.Result, liveStates[sessionID]) {
 			return resumedSubagentTarget{}, false
 		}
 		target := resumedSubagentTarget{
 			SpawnID:      sessionID,
 			SessionID:    sessionID,
-			AttachTarget: strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id", "_ui_delegation_id", "delegation_id")),
+			AttachTarget: strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id", "delegation_id")),
 			CallID:       strings.TrimSpace(resp.ID),
 			AnchorTool:   tool.SpawnToolName,
-			Agent:        strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+			Agent:        strings.TrimSpace(firstNonEmpty(resp.Result, "agent")),
 			ChildCWD:     strings.TrimSpace(firstNonEmpty(resp.Result, "child_cwd")),
 		}
 		if target.Agent == "" {
@@ -138,7 +138,7 @@ func resumedSubagentTargetFromToolResponse(resp *model.ToolResponse, liveStates 
 		}
 		return target, true
 	case strings.EqualFold(strings.TrimSpace(resp.Name), tool.TaskToolName):
-		sessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+		sessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id"))
 		spawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_spawn_id"))
 		callID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_parent_tool_call_id"))
 		if sessionID == "" || spawnID == "" || callID == "" || !shouldResumeSubagentTarget(resp.Result, liveStates[sessionID]) {
@@ -147,10 +147,10 @@ func resumedSubagentTargetFromToolResponse(resp *model.ToolResponse, liveStates 
 		target := resumedSubagentTarget{
 			SpawnID:      spawnID,
 			SessionID:    sessionID,
-			AttachTarget: strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id", "_ui_delegation_id", "delegation_id")),
+			AttachTarget: strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id", "delegation_id")),
 			CallID:       callID,
 			AnchorTool:   strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_anchor_tool")),
-			Agent:        strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+			Agent:        strings.TrimSpace(firstNonEmpty(resp.Result, "agent")),
 			ChildCWD:     strings.TrimSpace(firstNonEmpty(resp.Result, "child_cwd")),
 		}
 		if target.AnchorTool == "" {
@@ -186,7 +186,7 @@ func resumedSubagentLiveStateIndex(events []*session.Event) map[string]string {
 		if resp == nil {
 			continue
 		}
-		childSessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+		childSessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id"))
 		if childSessionID == "" {
 			continue
 		}

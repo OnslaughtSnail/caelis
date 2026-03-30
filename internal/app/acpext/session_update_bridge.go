@@ -23,8 +23,6 @@ type acpSessionUpdateBridge struct {
 	agentName      string
 	childCWD       string
 	tracker        *remoteSubagentTracker
-	onToolActive   func()
-	onToolIdle     func()
 
 	mu        sync.Mutex
 	assistant string
@@ -38,15 +36,13 @@ type acpToolCall struct {
 	rawInput any
 }
 
-func newACPSessionUpdateBridge(meta runtime.DelegationMetadata, agentName string, childSessionID string, childCWD string, tracker *remoteSubagentTracker, onToolActive func(), onToolIdle func()) *acpSessionUpdateBridge {
+func newACPSessionUpdateBridge(meta runtime.DelegationMetadata, agentName string, childSessionID string, childCWD string, tracker *remoteSubagentTracker, _ func(), _ func()) *acpSessionUpdateBridge {
 	return &acpSessionUpdateBridge{
 		meta:           meta,
 		childSessionID: strings.TrimSpace(childSessionID),
 		agentName:      strings.TrimSpace(agentName),
 		childCWD:       strings.TrimSpace(childCWD),
 		tracker:        tracker,
-		onToolActive:   onToolActive,
-		onToolIdle:     onToolIdle,
 		toolCalls:      map[string]acpToolCall{},
 	}
 }
@@ -107,20 +103,13 @@ func (b *acpSessionUpdateBridge) emitToolCall(ctx context.Context, sessionID str
 	if callID == "" {
 		return
 	}
-	shouldPause := false
 	b.mu.Lock()
-	if len(b.toolCalls) == 0 {
-		shouldPause = true
-	}
 	b.toolCalls[callID] = acpToolCall{
 		title:    strings.TrimSpace(update.Title),
 		kind:     strings.TrimSpace(update.Kind),
 		rawInput: update.RawInput,
 	}
 	b.mu.Unlock()
-	if shouldPause && b.onToolActive != nil {
-		b.onToolActive()
-	}
 	ev := &session.Event{
 		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
 			ID:   callID,
@@ -145,12 +134,10 @@ func (b *acpSessionUpdateBridge) emitToolCallUpdate(ctx context.Context, session
 	if status != internalacp.ToolStatusInProgress && status != internalacp.ToolStatusCompleted && status != internalacp.ToolStatusFailed {
 		return
 	}
-	shouldResume := false
 	b.mu.Lock()
 	snap := b.toolCalls[callID]
 	if status == internalacp.ToolStatusCompleted || status == internalacp.ToolStatusFailed {
 		delete(b.toolCalls, callID)
-		shouldResume = len(b.toolCalls) == 0
 	}
 	b.mu.Unlock()
 	title := firstNonEmpty(strings.TrimSpace(derefString(update.Title)), snap.title)
@@ -171,9 +158,6 @@ func (b *acpSessionUpdateBridge) emitToolCallUpdate(ctx context.Context, session
 	}
 	if status == internalacp.ToolStatusInProgress && toolCallTerminalID(update.Content) != "" {
 		return
-	}
-	if shouldResume && b.onToolIdle != nil {
-		b.onToolIdle()
 	}
 	b.emitCanonical(ctx, sessionID, ev)
 }

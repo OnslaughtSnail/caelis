@@ -54,6 +54,12 @@ func TestRouteCommandExecution_SafeCommandSandboxAllow(t *testing.T) {
 	if !ok || route != DecisionRouteSandbox {
 		t.Fatalf("expected sandbox route metadata, got route=%q ok=%v", route, ok)
 	}
+	if !DecisionHasAnnotation(in.Decision, DecisionAnnotationExecutionRouteSandbox) {
+		t.Fatal("expected sandbox route annotation")
+	}
+	if !DecisionHasAnnotation(in.Decision, DecisionAnnotationFallbackOnCommandNotFound) {
+		t.Fatal("expected fallback annotation")
+	}
 	if v, ok := in.Decision.Metadata[DecisionMetaFallbackOnCommandNotFound].(bool); !ok || !v {
 		t.Fatalf("expected sandbox fallback metadata enabled, got %v", in.Decision.Metadata[DecisionMetaFallbackOnCommandNotFound])
 	}
@@ -151,6 +157,9 @@ func TestRouteCommandExecution_RequireEscalatedBoolAccepted(t *testing.T) {
 	route, ok := DecisionRouteFromMetadata(in.Decision)
 	if !ok || route != DecisionRouteHost {
 		t.Fatalf("expected host route metadata, got route=%q ok=%v", route, ok)
+	}
+	if !DecisionHasAnnotation(in.Decision, DecisionAnnotationHostExecutionRequiresApproval) {
+		t.Fatal("expected host approval annotation")
 	}
 }
 

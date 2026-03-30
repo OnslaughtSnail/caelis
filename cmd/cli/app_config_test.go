@@ -3,11 +3,13 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -48,6 +50,9 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	}
 	if store.SandboxType() != platformDefaultSandboxType() {
 		t.Fatalf("unexpected default sandbox type: %q", store.SandboxType())
+	}
+	if got := store.SandboxPolicy(); !reflect.DeepEqual(got, toolexec.SandboxPolicy{}) {
+		t.Fatalf("unexpected default sandbox policy: %#v", got)
 	}
 
 	cfgPath, err := configPath("demo-app")
@@ -133,6 +138,26 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	}
 	if store3.PermissionMode() != "full_control" {
 		t.Fatalf("expected permission mode full_control, got %q", store3.PermissionMode())
+	}
+	store3.data.SandboxReadableRoots = []string{"${HOME}/repo"}
+	store3.data.SandboxWritableRoots = []string{"."}
+	store3.data.SandboxReadOnlySubpaths = []string{".git"}
+	if err := store3.save(); err != nil {
+		t.Fatal(err)
+	}
+	storeWithPolicy, err := loadOrInitAppConfig("demo-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := storeWithPolicy.SandboxPolicy()
+	if len(policy.ReadableRoots) != 1 || !strings.HasSuffix(policy.ReadableRoots[0], "/repo") {
+		t.Fatalf("expected resolved readable root, got %#v", policy)
+	}
+	if len(policy.WritableRoots) != 1 || policy.WritableRoots[0] != "." {
+		t.Fatalf("expected writable roots preserved, got %#v", policy)
+	}
+	if len(policy.ReadOnlySubpaths) != 1 || policy.ReadOnlySubpaths[0] != ".git" {
+		t.Fatalf("expected readonly subpaths preserved, got %#v", policy)
 	}
 	settings = store3.ModelRuntimeSettings("openai/gpt-4o-mini")
 	if settings.ThinkingBudget != 2048 || settings.ReasoningEffort != "high" {

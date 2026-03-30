@@ -477,7 +477,7 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 				hint = "approval required"
 			}
 			if approvalCommand != "" {
-				hint += ": " + truncateInline(approvalCommand, 120)
+				hint += ": " + approvalInlinePreview(approvalCommand, approvalPreviewMaxLineCols)
 			}
 			c.tuiSender.Send(tuievents.SetHintMsg{
 				Hint:           hint,

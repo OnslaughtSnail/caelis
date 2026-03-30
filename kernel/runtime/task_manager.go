@@ -39,22 +39,18 @@ const (
 	taskSpecWorkdir        = "workdir"
 	taskSpecTTY            = "tty"
 	taskSpecRoute          = "route"
+	taskSpecBackend        = "backend"
 	taskSpecExecSessionID  = "exec_session_id"
 	taskSpecChildSession   = "child_session_id"
 	taskSpecDelegationID   = "delegation_id"
 	taskSpecAgent          = "agent"
 	taskSpecChildCWD       = "child_cwd"
 	taskSpecPrompt         = "prompt"
-	taskSpecTimeout        = "timeout_seconds"
 	taskSpecIdleTimeout    = "idle_timeout_seconds"
 	taskSpecParentToolCall = "parent_tool_call_id"
 	taskSpecParentToolName = "parent_tool_name"
 	taskSpecUISpawnID      = "ui_spawn_id"
 	taskSpecUIAnchorTool   = "ui_anchor_tool"
-
-	// taskSpecLegacyPrompt is the pre-rename key for the spawn prompt text.
-	// Kept for backward-compatible reads of persisted task records.
-	taskSpecLegacyPrompt = "task"
 )
 
 func newTaskManager(r *Runtime, execRuntime toolexec.Runtime, registry *task.Registry, store task.Store, parent *sessionContext, req RunRequest, runner agent.SubagentRunner) *runtimeTaskManager {
@@ -79,16 +75,14 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 	if req.Yield < 0 {
 		req.Yield = 0
 	}
-	asyncRunner, ok := asyncBashRunnerForRoute(m.execenv, strings.TrimSpace(req.Route))
-	if !ok || asyncRunner == nil {
-		return task.Snapshot{}, fmt.Errorf("task: async bash is not supported for route %q", strings.TrimSpace(req.Route))
-	}
-	sessionID, err := asyncRunner.StartAsync(ctx, toolexec.CommandRequest{
+	sessionRef, err := m.execenv.Start(ctx, toolexec.CommandRequest{
 		Command:               req.Command,
 		Dir:                   req.Workdir,
 		Timeout:               req.Timeout,
 		IdleTimeout:           req.IdleTimeout,
 		TTY:                   req.TTY,
+		RouteHint:             toolexec.ExecutionRoute(strings.TrimSpace(req.Route)),
+		BackendName:           strings.TrimSpace(req.Backend),
 		EnvOverrides:          req.EnvOverrides,
 		SandboxPolicyOverride: req.SandboxPolicyOverride,
 	})
@@ -96,13 +90,13 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 		return task.Snapshot{}, err
 	}
 	controller := &bashTaskController{
-		runner:    asyncRunner,
-		sessionID: sessionID,
-		command:   req.Command,
-		workdir:   req.Workdir,
-		tty:       req.TTY,
-		route:     strings.TrimSpace(req.Route),
-		store:     m.store,
+		session: sessionRef,
+		command: req.Command,
+		workdir: req.Workdir,
+		tty:     req.TTY,
+		route:   strings.TrimSpace(req.Route),
+		backend: strings.TrimSpace(sessionRef.Ref().Backend),
+		store:   m.store,
 	}
 	record := m.registry.Create(task.KindBash, req.Command, controller, true, true)
 	m.trackTurnTask(record.ID)
@@ -112,7 +106,8 @@ func (m *runtimeTaskManager) StartBash(ctx context.Context, req task.BashStartRe
 		taskSpecWorkdir:       req.Workdir,
 		taskSpecTTY:           req.TTY,
 		taskSpecRoute:         strings.TrimSpace(req.Route),
-		taskSpecExecSessionID: sessionID,
+		taskSpecBackend:       strings.TrimSpace(sessionRef.Ref().Backend),
+		taskSpecExecSessionID: strings.TrimSpace(sessionRef.Ref().SessionID),
 	}
 	if err := m.persistRecord(ctx, record); err != nil {
 		return task.Snapshot{}, err
@@ -172,7 +167,6 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 		store:        m.store,
 		agent:        runResult.Agent,
 		childCWD:     runResult.ChildCWD,
-		timeout:      runResult.Timeout,
 		idleTimeout:  runResult.IdleTimeout,
 	}
 	record.Backend = controller
@@ -183,9 +177,6 @@ func (m *runtimeTaskManager) StartSpawn(ctx context.Context, req task.SpawnStart
 		taskSpecDelegationID: runResult.DelegationID,
 		taskSpecAgent:        runResult.Agent,
 		taskSpecChildCWD:     runResult.ChildCWD,
-	}
-	if runResult.Timeout > 0 {
-		record.Spec[taskSpecTimeout] = int(runResult.Timeout / time.Second)
 	}
 	if runResult.IdleTimeout > 0 {
 		record.Spec[taskSpecIdleTimeout] = int(runResult.IdleTimeout / time.Second)

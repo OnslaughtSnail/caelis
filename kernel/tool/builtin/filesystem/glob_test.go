@@ -2,9 +2,12 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
 func TestGlobTool_SupportsRecursiveDoubleStar(t *testing.T) {
@@ -70,5 +73,54 @@ func TestGlobTool_ExcludeFiltersRelativePaths(t *testing.T) {
 	}
 	if len(matches) != 1 || matches[0] != filepath.Join(tmpDir, "docs", "keep.md") {
 		t.Fatalf("expected exclude to keep only keep.md, got %#v", matches)
+	}
+}
+
+func TestGlobTool_DefaultWorkspaceRuntime_AllowsGlobOutsideWorkspace(t *testing.T) {
+	rt, _ := newDefaultWorkspaceRuntime(t)
+	tool, err := NewGlobWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := filepath.Dir(newOutsideScratchFilePath(t, "a.txt"))
+	if err := os.WriteFile(filepath.Join(outsideDir, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "b.txt"), []byte("b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := tool.Run(context.Background(), map[string]any{
+		"pattern": filepath.Join(outsideDir, "*.txt"),
+	})
+	if err != nil {
+		t.Fatalf("expected outside-workspace glob to stay allowed, got %v", err)
+	}
+	if got := out["count"]; got != 2 {
+		t.Fatalf("expected two matches, got %v", got)
+	}
+}
+
+func TestGlobTool_RestrictedReadableRootsRejectOutsideWorkspace(t *testing.T) {
+	rt, _ := newWorkspaceRuntimeWithPolicy(t, toolexec.SandboxPolicy{
+		Type:          toolexec.SandboxPolicyWorkspaceWrite,
+		ReadableRoots: []string{"."},
+	})
+	tool, err := NewGlobWithRuntime(rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := filepath.Dir(newOutsideScratchFilePath(t, "a.txt"))
+	if err := os.WriteFile(filepath.Join(outsideDir, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = tool.Run(context.Background(), map[string]any{
+		"pattern": filepath.Join(outsideDir, "*.txt"),
+	})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected permission error for outside-workspace glob, got %v", err)
 	}
 }

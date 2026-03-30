@@ -4740,6 +4740,23 @@ func TestTaskMonitorBlockCollapsesToSummary(t *testing.T) {
 	}
 }
 
+func TestTaskListActivityStaysInTaskMonitor(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ TASK list\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ TASK listed 1 task (1 active)\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "Listed 1 task") {
+		t.Fatalf("expected task list summary in task monitor, got:\n%s", view)
+	}
+	if strings.Contains(view, "Explored 1 paths") {
+		t.Fatalf("did not expect TASK list to fall back to exploration summary, got:\n%s", view)
+	}
+}
+
 func TestExplorationBlockIncludesReadInSummary(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

@@ -95,6 +95,7 @@ func runACP(ctx context.Context, args []string) error {
 		toolexec.PermissionMode(strings.TrimSpace(*permissionMode)),
 		strings.TrimSpace(*sandboxType),
 		sandboxHelperPath,
+		configStore.SandboxPolicy(),
 	)
 	if err != nil {
 		return err

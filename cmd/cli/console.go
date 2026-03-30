@@ -55,6 +55,7 @@ type cliConsole struct {
 	execRuntime           toolexec.Runtime
 	execRuntimeView       *swappableRuntime
 	sandboxType           string
+	sandboxPolicy         toolexec.SandboxPolicy
 	appliedSandboxType    string
 	appliedSandboxTypeSet bool
 	sandboxHelperPath     string
@@ -177,6 +178,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		execRuntime:           cfg.ExecRuntime,
 		execRuntimeView:       cfg.ExecRuntimeView,
 		sandboxType:           strings.TrimSpace(cfg.SandboxType),
+		sandboxPolicy:         cfg.SandboxPolicy,
 		appliedSandboxType:    canonicalSandboxSelection(cfg.AppliedSandboxType),
 		appliedSandboxTypeSet: true,
 		sandboxHelperPath:     strings.TrimSpace(cfg.SandboxHelperPath),
@@ -255,6 +257,7 @@ type cliConsoleConfig struct {
 	ExecRuntime           toolexec.Runtime
 	ExecRuntimeView       *swappableRuntime
 	SandboxType           string
+	SandboxPolicy         toolexec.SandboxPolicy
 	AppliedSandboxType    string
 	SandboxHelperPath     string
 	ModelAlias            string
@@ -1088,8 +1091,17 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 			if c.configStore != nil {
 				defaultSpawnAgent = c.configStore.DefaultAgent()
 			}
+			displayName := displayToolCallName(call.Name, parsedArgs)
+			summary := formatToolCallSummary(c.ui, call.Name, parsedArgs, defaultSpawnAgent)
+			if visualsOK && strings.TrimSpace(visuals.CallSummary) != "" {
+				summary = visuals.CallSummary
+			}
+			callLine := "▸ " + displayName
+			if strings.TrimSpace(summary) != "" {
+				callLine += " " + summary
+			}
 			c.tuiSender.Send(tuievents.LogChunkMsg{
-				Chunk: fmt.Sprintf("▸ %s %s\n", displayToolCallName(call.Name, parsedArgs), formatToolCallSummary(c.ui, call.Name, parsedArgs, defaultSpawnAgent)),
+				Chunk: callLine + "\n",
 			})
 			if strings.EqualFold(strings.TrimSpace(call.Name), tool.SpawnToolName) {
 				if update, ok := subagentDomainUpdateFromSpawnToolCall(c.sessionID, call, parsedArgs, defaultSpawnAgent); ok {
@@ -1179,10 +1191,6 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 			}
 			if resultCounts := mutationChangeCountsFromResult(resp.Name, resp.Result, callArgs); resultCounts != (mutationChangeCounts{}) {
 				changeCounts = resultCounts
-			} else if opts.ReplayMode && strings.EqualFold(resp.Name, "WRITE") {
-				if legacyCounts := legacyWriteMutationChangeCounts(resp.Result, callArgs); legacyCounts != (mutationChangeCounts{}) {
-					changeCounts = legacyCounts
-				}
 			}
 			summary := formatMutationChangeSummary(changeCounts)
 			if changeCounts == (mutationChangeCounts{}) {
@@ -2324,7 +2332,7 @@ func (c *cliConsole) updateExecutionRuntime(mode toolexec.PermissionMode, sandbo
 		}
 	}
 	prevRuntime := c.execRuntime
-	nextRuntime, err := newExecutionRuntime(mode, sandboxType, c.sandboxHelperPath)
+	nextRuntime, err := newExecutionRuntime(mode, sandboxType, c.sandboxHelperPath, c.sandboxPolicy)
 	if err != nil {
 		return err
 	}
@@ -2781,7 +2789,7 @@ func approvalReasonText(reason string) string {
 	case "require_escalated requested":
 		return ""
 	default:
-		return reason
+		return approvalInlinePreview(reason, approvalReasonMaxInlineCols)
 	}
 }
 
@@ -2792,10 +2800,10 @@ func commandApprovalSummary(req toolexec.ApprovalRequest) (label string, value s
 	}
 	value = strings.TrimSpace(req.Command)
 	if value != "" {
-		return label, value
+		return label, approvalPreview(value)
 	}
 	if action := strings.TrimSpace(req.Action); action != "" {
-		return label, strings.ReplaceAll(action, "_", " ")
+		return label, approvalPreview(strings.ReplaceAll(action, "_", " "))
 	}
 	return "", ""
 }
@@ -2807,11 +2815,11 @@ func toolAuthorizationSummary(req kernelpolicy.ToolAuthorizationRequest) (label 
 	}
 	switch {
 	case strings.TrimSpace(req.Path) != "":
-		value = strings.TrimSpace(req.Path)
+		value = approvalPreview(strings.TrimSpace(req.Path))
 	case strings.TrimSpace(req.Target) != "":
-		value = strings.TrimSpace(req.Target)
+		value = approvalPreview(strings.TrimSpace(req.Target))
 	case strings.TrimSpace(req.Preview) != "":
-		value = strings.TrimSpace(req.Preview)
+		value = approvalPreview(strings.TrimSpace(req.Preview))
 	default:
 		value = approvalReasonText(req.Reason)
 	}
@@ -2819,6 +2827,87 @@ func toolAuthorizationSummary(req kernelpolicy.ToolAuthorizationRequest) (label 
 		return "", ""
 	}
 	return label, value
+}
+
+const (
+	approvalPreviewMaxLines     = 8
+	approvalPreviewMaxLineCols  = 120
+	approvalPreviewMaxTotalCols = 320
+	approvalReasonMaxInlineCols = 160
+)
+
+func approvalPreview(input string) string {
+	return approvalPreviewWithLimits(input, approvalPreviewMaxLines, approvalPreviewMaxLineCols, approvalPreviewMaxTotalCols)
+}
+
+func approvalInlinePreview(input string, limit int) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
+	return truncateDisplayWidth(text, limit)
+}
+
+func approvalPreviewWithLimits(input string, maxLines int, maxLineCols int, maxTotalCols int) string {
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.ReplaceAll(input, "\r", "\n")
+	lines := strings.Split(strings.TrimSpace(input), "\n")
+	out := make([]string, 0, min(maxLines, len(lines)))
+	totalCols := 0
+	usedAllLines := true
+	for idx, raw := range lines {
+		if idx >= maxLines {
+			usedAllLines = false
+			break
+		}
+		line := strings.TrimRight(raw, " \t")
+		line = truncateDisplayWidth(line, maxLineCols)
+		if strings.TrimSpace(line) == "" {
+			line = ""
+		}
+		lineCols := displayWidth(line)
+		if maxTotalCols > 0 && totalCols+lineCols > maxTotalCols {
+			remaining := max(maxTotalCols-totalCols, 0)
+			line = truncateDisplayWidth(line, remaining)
+			lineCols = displayWidth(line)
+			if strings.TrimSpace(line) != "" {
+				out = append(out, line)
+			}
+			usedAllLines = idx == len(lines)-1
+			totalCols += lineCols
+			break
+		}
+		out = append(out, line)
+		totalCols += lineCols
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	extraLines := len(lines) - len(out)
+	switch {
+	case extraLines > 0:
+		out = append(out, fmt.Sprintf("... %d more lines", extraLines))
+	case !usedAllLines:
+		out = append(out, "... truncated")
+	case maxTotalCols > 0 && totalCols >= maxTotalCols:
+		out = append(out, "... truncated")
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func truncateDisplayWidth(input string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(input)
+	if len(runes) <= limit {
+		return input
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func displayWidth(input string) int {
+	return len([]rune(input))
 }
 
 func toolApprovalOutcomeTarget(req kernelpolicy.ToolAuthorizationRequest) string {

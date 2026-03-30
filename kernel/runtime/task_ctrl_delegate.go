@@ -23,7 +23,6 @@ type subagentTaskController struct {
 	store        task.Store
 	agent        string
 	childCWD     string
-	timeout      time.Duration
 	idleTimeout  time.Duration
 }
 
@@ -89,7 +88,6 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 		SessionID:   c.sessionID,
 		ChildCWD:    c.childCWD,
 		Yield:       yield,
-		Timeout:     c.timeout,
 		IdleTimeout: c.idleTimeout,
 	})
 	if err != nil {
@@ -129,9 +127,6 @@ func (c *subagentTaskController) Write(ctx context.Context, record *task.Record,
 		if toolName := strings.TrimSpace(callInfo.Name); toolName != "" {
 			one.Spec[taskSpecParentToolName] = toolName
 		}
-		if c.timeout > 0 {
-			one.Spec[taskSpecTimeout] = int(c.timeout / time.Second)
-		}
 		if c.idleTimeout > 0 {
 			one.Spec[taskSpecIdleTimeout] = int(c.idleTimeout / time.Second)
 		}
@@ -153,14 +148,11 @@ func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record
 		one.Running = false
 		one.UpdatedAt = time.Now()
 		one.Result = map[string]any{
-			"child_session_id":     c.sessionID,
-			"delegation_id":        c.delegationID,
-			"agent":                c.agent,
-			"child_cwd":            c.childCWD,
-			"_ui_child_session_id": c.sessionID,
-			"_ui_delegation_id":    c.delegationID,
-			"_ui_agent":            c.agent,
-			"progress_state":       string(task.StateCancelled),
+			"child_session_id": c.sessionID,
+			"delegation_id":    c.delegationID,
+			"agent":            c.agent,
+			"child_cwd":        c.childCWD,
+			"progress_state":   string(task.StateCancelled),
 		}
 		if callID := strings.TrimSpace(stringValue(one.Spec, taskSpecParentToolCall)); callID != "" {
 			one.Result["_ui_parent_tool_call_id"] = callID
@@ -173,9 +165,6 @@ func (c *subagentTaskController) Cancel(ctx context.Context, record *task.Record
 		}
 		if anchorTool := strings.TrimSpace(stringValue(one.Spec, taskSpecUIAnchorTool)); anchorTool != "" {
 			one.Result["_ui_anchor_tool"] = anchorTool
-		}
-		if c.timeout > 0 {
-			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
 		if c.idleTimeout > 0 {
 			one.Result["_ui_idle_timeout_seconds"] = int(c.idleTimeout / time.Second)
@@ -263,9 +252,6 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 			"delegation_id":        c.delegationID,
 			"agent":                c.agent,
 			"child_cwd":            c.childCWD,
-			"_ui_child_session_id": c.sessionID,
-			"_ui_delegation_id":    c.delegationID,
-			"_ui_agent":            c.agent,
 			"progress_state":       string(one.State),
 			"progress_seq":         progressSeq,
 			"progress_age_seconds": progressAgeSeconds(progressAt, now),
@@ -288,9 +274,6 @@ func (c *subagentTaskController) inspect(ctx context.Context, record *task.Recor
 		}
 		if anchorTool := strings.TrimSpace(stringValue(one.Spec, taskSpecUIAnchorTool)); anchorTool != "" {
 			one.Result["_ui_anchor_tool"] = anchorTool
-		}
-		if c.timeout > 0 {
-			one.Result["_ui_timeout_seconds"] = int(c.timeout / time.Second)
 		}
 		if c.idleTimeout > 0 {
 			one.Result["_ui_idle_timeout_seconds"] = int(c.idleTimeout / time.Second)

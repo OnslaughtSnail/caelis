@@ -96,6 +96,8 @@ type acpTerminalOutputClient interface {
 type terminalBridgeManager struct {
 	mu      sync.Mutex
 	pollers map[string]context.CancelFunc
+	onStart func()
+	onStop  func()
 }
 
 const (
@@ -436,7 +438,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		activeWatchdog := watchdog
 		watchdogMu.RUnlock()
 		if activeWatchdog != nil {
-			activeWatchdog.Pause()
+			activeWatchdog.PauseWithReason(idleWatchdogPauseApproval)
 		}
 	}
 	resumeWatchdog := func() {
@@ -444,7 +446,23 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		activeWatchdog := watchdog
 		watchdogMu.RUnlock()
 		if activeWatchdog != nil {
-			activeWatchdog.Resume()
+			activeWatchdog.ResumeWithReason(idleWatchdogPauseApproval)
+		}
+	}
+	terminalBridge.onStart = func() {
+		watchdogMu.RLock()
+		activeWatchdog := watchdog
+		watchdogMu.RUnlock()
+		if activeWatchdog != nil {
+			activeWatchdog.PauseWithReason(idleWatchdogPauseTerminalTool)
+		}
+	}
+	terminalBridge.onStop = func() {
+		watchdogMu.RLock()
+		activeWatchdog := watchdog
+		watchdogMu.RUnlock()
+		if activeWatchdog != nil {
+			activeWatchdog.ResumeWithReason(idleWatchdogPauseTerminalTool)
 		}
 	}
 
@@ -521,7 +539,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		target.childCWD = r.resolveWorkspaceCWD()
 	}
 	bridgeMu.Lock()
-	bridge = newACPSessionUpdateBridge(meta, desc.ID, actualSessionID, target.childCWD, r.shared.tracker, pauseWatchdog, resumeWatchdog)
+	bridge = newACPSessionUpdateBridge(meta, desc.ID, actualSessionID, target.childCWD, r.shared.tracker, nil, nil)
 	bridgeMu.Unlock()
 	r.shared.tracker.markRunning(desc.ID, actualSessionID, meta.DelegationID, target.childCWD)
 	if onReady != nil {
@@ -995,9 +1013,13 @@ func (m *terminalBridgeManager) observe(ctx context.Context, client acpTerminalO
 		m.mu.Unlock()
 		return
 	}
+	shouldStart := len(m.pollers) == 0
 	pollCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	m.pollers[key] = cancel
 	m.mu.Unlock()
+	if shouldStart && m.onStart != nil {
+		m.onStart()
+	}
 	go m.pollTerminalOutput(pollCtx, client, tracker, sessionID, agentName, meta, key, callID, toolName, terminalID)
 }
 
@@ -1039,9 +1061,13 @@ func (m *terminalBridgeManager) stop(key string) {
 	if ok {
 		delete(m.pollers, strings.TrimSpace(key))
 	}
+	shouldStop := ok && len(m.pollers) == 0
 	m.mu.Unlock()
 	if ok && cancel != nil {
 		cancel()
+	}
+	if shouldStop && m.onStop != nil {
+		m.onStop()
 	}
 }
 
@@ -1051,6 +1077,7 @@ func (m *terminalBridgeManager) stopAll() {
 	}
 	m.mu.Lock()
 	cancels := make([]context.CancelFunc, 0, len(m.pollers))
+	shouldStop := len(m.pollers) > 0
 	for key, cancel := range m.pollers {
 		if cancel != nil {
 			cancels = append(cancels, cancel)
@@ -1060,6 +1087,9 @@ func (m *terminalBridgeManager) stopAll() {
 	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
+	}
+	if shouldStop && m.onStop != nil {
+		m.onStop()
 	}
 }
 

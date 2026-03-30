@@ -439,17 +439,22 @@ func renderParticipantTurnFooter(b *ParticipantTurnBlock, ctx BlockRenderContext
 // ---------------------------------------------------------------------------
 
 type DiffBlock struct {
-	id  string
-	Msg tuievents.DiffBlockMsg
+	id       string
+	Msg      tuievents.DiffBlockMsg
+	Inline   bool
+	Expanded bool
 }
 
 func NewDiffBlock(msg tuievents.DiffBlockMsg) *DiffBlock {
-	return &DiffBlock{id: nextBlockID(), Msg: msg}
+	return &DiffBlock{id: nextBlockID(), Msg: msg, Expanded: true}
 }
 
 func (b *DiffBlock) BlockID() string { return b.id }
 func (b *DiffBlock) Kind() BlockKind { return BlockDiff }
 func (b *DiffBlock) Render(ctx BlockRenderContext) []RenderedRow {
+	if b.Inline && !b.Expanded {
+		return nil
+	}
 	model := tuidiff.BuildModel(tuidiff.Payload{
 		Tool:      b.Msg.Tool,
 		Path:      b.Msg.Path,
@@ -462,6 +467,9 @@ func (b *DiffBlock) Render(ctx BlockRenderContext) []RenderedRow {
 	})
 	wrapWidth := maxInt(40, ctx.Width)
 	lines := tuidiff.Render(model, wrapWidth, ctx.Theme)
+	if b.Inline && len(lines) > 0 {
+		lines = lines[1:]
+	}
 	rows := make([]RenderedRow, len(lines))
 	for i, line := range lines {
 		rows[i] = StyledRow(b.id, line)

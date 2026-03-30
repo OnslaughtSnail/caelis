@@ -1,6 +1,7 @@
 package execenv
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io/fs"
@@ -34,6 +35,7 @@ const (
 type SandboxPolicy struct {
 	Type             SandboxPolicyType `json:"type"`
 	NetworkAccess    bool              `json:"network_access"`
+	ReadableRoots    []string          `json:"readable_roots"`
 	WritableRoots    []string          `json:"writable_roots"`
 	ReadOnlySubpaths []string          `json:"read_only_subpaths"`
 }
@@ -62,8 +64,19 @@ type EscalationReason struct {
 // CommandDecision is runtime routing result for one command request.
 type CommandDecision struct {
 	Route        ExecutionRoute
+	Backend      string
 	Escalation   *EscalationReason
 	NeedApproval bool
+}
+
+// SandboxDiagnostics captures backend selection attempts and fallback state.
+type SandboxDiagnostics struct {
+	RequestedType  string
+	ResolvedType   string
+	Candidates     []string
+	Failures       []string
+	FallbackToHost bool
+	FallbackReason string
 }
 
 // Config builds an execution runtime.
@@ -99,6 +112,9 @@ type CommandRequest struct {
 	Timeout               time.Duration
 	IdleTimeout           time.Duration
 	TTY                   bool
+	SandboxPermission     SandboxPermission
+	RouteHint             ExecutionRoute
+	BackendName           string
 	EnvOverrides          map[string]string
 	SandboxPolicyOverride *SandboxPolicy
 	OnOutput              func(CommandOutputChunk)
@@ -116,9 +132,95 @@ type CommandResult struct {
 	ExitCode int
 }
 
+type BackendKind string
+
+const (
+	BackendKindHost    BackendKind = "host"
+	BackendKindSandbox BackendKind = "sandbox"
+)
+
+type BackendCapabilities struct {
+	Async bool
+}
+
+type BackendHealth struct {
+	Ready   bool
+	Message string
+}
+
+type BackendSnapshot struct {
+	Name         string
+	Kind         BackendKind
+	Capabilities BackendCapabilities
+	Health       BackendHealth
+}
+
+type SandboxStatus string
+
+const (
+	SandboxStatusReady       SandboxStatus = "ready"
+	SandboxStatusFallback    SandboxStatus = "fallback"
+	SandboxStatusUnavailable SandboxStatus = "unavailable"
+)
+
+type RouterState struct {
+	Diagnostics SandboxDiagnostics
+}
+
+type RuntimeState struct {
+	Mode             PermissionMode
+	RequestedSandbox string
+	ResolvedSandbox  string
+	SandboxStatus    SandboxStatus
+	FallbackReason   string
+	Backends         []BackendSnapshot
+	RouterState      RouterState
+}
+
+type RouteRequest struct {
+	Command           string
+	SandboxPermission SandboxPermission
+}
+
+type CommandSessionRef struct {
+	Backend   string
+	SessionID string
+}
+
+type Session interface {
+	Ref() CommandSessionRef
+	WriteInput(input []byte) error
+	ReadOutput(stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error)
+	Status() (SessionStatus, error)
+	Wait(ctx context.Context, timeout time.Duration) (CommandResult, error)
+	Terminate() error
+}
+
 // CommandRunner executes shell commands for tools.
 type CommandRunner interface {
 	Run(context.Context, CommandRequest) (CommandResult, error)
+}
+
+type Backend interface {
+	Name() string
+	Kind() BackendKind
+	Capabilities() BackendCapabilities
+	Health(context.Context) BackendHealth
+	Execute(context.Context, CommandRequest) (CommandResult, error)
+	Start(context.Context, CommandRequest) (Session, error)
+	OpenSession(sessionID string) (Session, error)
+}
+
+type BackendSet interface {
+	Backend(name string) (Backend, bool)
+	DefaultHost() Backend
+	DefaultSandbox() (Backend, bool)
+	Snapshot() []BackendSnapshot
+	Close() error
+}
+
+type Router interface {
+	Decide(context.Context, RouteRequest) (CommandDecision, error)
 }
 
 // Runtime exposes execution primitives and derived security policies.
@@ -128,9 +230,12 @@ type Runtime interface {
 	SandboxPolicy() SandboxPolicy
 	FallbackToHost() bool
 	FallbackReason() string
+	Diagnostics() SandboxDiagnostics
 	FileSystem() FileSystem
-	HostRunner() CommandRunner
-	SandboxRunner() CommandRunner
+	Execute(context.Context, CommandRequest) (CommandResult, error)
+	Start(context.Context, CommandRequest) (Session, error)
+	OpenSession(CommandSessionRef) (Session, error)
+	State() RuntimeState
 	DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision
 }
 
@@ -154,29 +259,8 @@ func (e *ApprovalRequiredError) Code() ErrorCode {
 	return ErrorCodeApprovalRequired
 }
 
-type runtimeImpl struct {
-	permissionMode PermissionMode
-	sandboxType    string
-	fallbackToHost bool
-	fallbackReason string
-	sandboxPolicy  SandboxPolicy
-	fs             FileSystem
-	hostRunner     CommandRunner
-	sandboxRunner  CommandRunner
-	closers        []runtimeCloser
-	closeOnce      sync.Once
-	closeErr       error
-}
-
-type modeSwitchableRuntime struct {
-	config         Config
-	hostRuntime    Runtime
-	defaultRuntime Runtime
-	mu             sync.RWMutex
-	permissionMode PermissionMode
-}
-
 func cloneSandboxPolicy(policy SandboxPolicy) SandboxPolicy {
+	policy.ReadableRoots = append([]string(nil), policy.ReadableRoots...)
 	policy.WritableRoots = append([]string(nil), policy.WritableRoots...)
 	policy.ReadOnlySubpaths = append([]string(nil), policy.ReadOnlySubpaths...)
 	return policy
@@ -215,76 +299,6 @@ func mergeCommandEnv(overrides map[string]string) []string {
 		env = append(env, entry)
 	}
 	return env
-}
-
-func (r *runtimeImpl) PermissionMode() PermissionMode {
-	return r.permissionMode
-}
-
-func (r *runtimeImpl) SandboxType() string {
-	return r.sandboxType
-}
-
-func (r *runtimeImpl) SandboxPolicy() SandboxPolicy {
-	policy := r.sandboxPolicy
-	policy.WritableRoots = append([]string(nil), policy.WritableRoots...)
-	policy.ReadOnlySubpaths = append([]string(nil), policy.ReadOnlySubpaths...)
-	return policy
-}
-
-func (r *runtimeImpl) FallbackToHost() bool {
-	return r.fallbackToHost
-}
-
-func (r *runtimeImpl) FallbackReason() string {
-	return r.fallbackReason
-}
-
-func (r *runtimeImpl) FileSystem() FileSystem {
-	return r.fs
-}
-
-func (r *runtimeImpl) HostRunner() CommandRunner {
-	return r.hostRunner
-}
-
-func (r *runtimeImpl) SandboxRunner() CommandRunner {
-	if r.permissionMode == PermissionModeFullControl {
-		return r.hostRunner
-	}
-	return r.sandboxRunner
-}
-
-func (r *runtimeImpl) DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision {
-	if r.permissionMode == PermissionModeFullControl {
-		return CommandDecision{Route: ExecutionRouteHost}
-	}
-
-	if r.fallbackToHost {
-		message := "sandbox unavailable, host execution requires approval"
-		if strings.TrimSpace(r.fallbackReason) != "" {
-			message = message + ": " + strings.TrimSpace(r.fallbackReason)
-		}
-		return CommandDecision{
-			Route: ExecutionRouteHost,
-			Escalation: &EscalationReason{
-				Message: message,
-			},
-			NeedApproval: true,
-		}
-	}
-
-	if sandboxPermission == SandboxPermissionRequireEscalated {
-		if commandIsApprovalWhitelisted(command) {
-			return CommandDecision{Route: ExecutionRouteHost}
-		}
-		return CommandDecision{
-			Route:        ExecutionRouteHost,
-			Escalation:   &EscalationReason{Message: "require_escalated requested"},
-			NeedApproval: true,
-		}
-	}
-	return CommandDecision{Route: ExecutionRouteSandbox}
 }
 
 func commandIsApprovalWhitelisted(command string) bool {
@@ -446,20 +460,6 @@ func shellSegmentTokens(segment string) []string {
 	return tokens
 }
 
-func (r *runtimeImpl) Close() error {
-	r.closeOnce.Do(func() {
-		for _, closer := range r.closers {
-			if closer == nil {
-				continue
-			}
-			if err := closer.Close(); err != nil && r.closeErr == nil {
-				r.closeErr = err
-			}
-		}
-	})
-	return r.closeErr
-}
-
 func normalizePermissionMode(mode PermissionMode) (PermissionMode, error) {
 	if mode == "" {
 		mode = PermissionModeDefault
@@ -468,267 +468,6 @@ func normalizePermissionMode(mode PermissionMode) (PermissionMode, error) {
 		return "", fmt.Errorf("execenv: invalid permission mode %q", mode)
 	}
 	return mode, nil
-}
-
-// NewModeSwitchable builds one runtime whose underlying resources remain
-// stable while callers switch between permission modes.
-func NewModeSwitchable(cfg Config) (Runtime, error) {
-	mode, err := normalizePermissionMode(cfg.PermissionMode)
-	if err != nil {
-		return nil, err
-	}
-	sharedCfg := cfg
-	if sharedCfg.FileSystem == nil {
-		sharedCfg.FileSystem = newHostFileSystem()
-	}
-	if sharedCfg.HostRunner == nil {
-		sharedCfg.HostRunner = newHostRunner()
-	}
-	hostCfg := sharedCfg
-	hostCfg.PermissionMode = PermissionModeFullControl
-	hostRuntime, err := New(hostCfg)
-	if err != nil {
-		return nil, err
-	}
-	runtime := &modeSwitchableRuntime{
-		config:         sharedCfg,
-		hostRuntime:    hostRuntime,
-		permissionMode: mode,
-	}
-	if mode != PermissionModeFullControl {
-		if err := runtime.initDefaultRuntimeLocked(); err != nil {
-			_ = Close(hostRuntime)
-			return nil, err
-		}
-	}
-	return runtime, nil
-}
-
-func (r *modeSwitchableRuntime) initDefaultRuntimeLocked() error {
-	if r == nil || r.defaultRuntime != nil {
-		return nil
-	}
-	defaultCfg := r.config
-	defaultCfg.PermissionMode = PermissionModeDefault
-	defaultRuntime, err := New(defaultCfg)
-	if err != nil {
-		return err
-	}
-	r.defaultRuntime = defaultRuntime
-	return nil
-}
-
-func (r *modeSwitchableRuntime) SetPermissionMode(mode PermissionMode) error {
-	normalized, err := normalizePermissionMode(mode)
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	if normalized != PermissionModeFullControl {
-		if err := r.initDefaultRuntimeLocked(); err != nil {
-			r.mu.Unlock()
-			return err
-		}
-	}
-	r.permissionMode = normalized
-	r.mu.Unlock()
-	return nil
-}
-
-func (r *modeSwitchableRuntime) currentPermissionMode() PermissionMode {
-	if r == nil {
-		return PermissionModeDefault
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.permissionMode == "" {
-		return PermissionModeDefault
-	}
-	return r.permissionMode
-}
-
-func (r *modeSwitchableRuntime) PermissionMode() PermissionMode {
-	return r.currentPermissionMode()
-}
-
-func (r *modeSwitchableRuntime) SandboxType() string {
-	if r == nil {
-		return ""
-	}
-	r.mu.RLock()
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	if defaultRuntime != nil {
-		return defaultRuntime.SandboxType()
-	}
-	return strings.TrimSpace(strings.ToLower(r.config.SandboxType))
-}
-
-func (r *modeSwitchableRuntime) SandboxPolicy() SandboxPolicy {
-	if r == nil {
-		return SandboxPolicy{}
-	}
-	if r.currentPermissionMode() == PermissionModeFullControl {
-		return deriveSandboxPolicy(PermissionModeFullControl, SandboxPolicy{})
-	}
-	r.mu.RLock()
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	if defaultRuntime == nil {
-		return SandboxPolicy{}
-	}
-	return defaultRuntime.SandboxPolicy()
-}
-
-func (r *modeSwitchableRuntime) FallbackToHost() bool {
-	if r == nil {
-		return false
-	}
-	if r.currentPermissionMode() == PermissionModeFullControl {
-		return false
-	}
-	r.mu.RLock()
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	if defaultRuntime == nil {
-		return false
-	}
-	return defaultRuntime.FallbackToHost()
-}
-
-func (r *modeSwitchableRuntime) FallbackReason() string {
-	if r == nil {
-		return ""
-	}
-	if r.currentPermissionMode() == PermissionModeFullControl {
-		return ""
-	}
-	r.mu.RLock()
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	if defaultRuntime == nil {
-		return ""
-	}
-	return defaultRuntime.FallbackReason()
-}
-
-func (r *modeSwitchableRuntime) FileSystem() FileSystem {
-	if r == nil {
-		return nil
-	}
-	if r.currentPermissionMode() != PermissionModeFullControl {
-		r.mu.RLock()
-		defaultRuntime := r.defaultRuntime
-		r.mu.RUnlock()
-		if defaultRuntime != nil {
-			return defaultRuntime.FileSystem()
-		}
-	}
-	if r.hostRuntime == nil {
-		return nil
-	}
-	return r.hostRuntime.FileSystem()
-}
-
-func (r *modeSwitchableRuntime) HostRunner() CommandRunner {
-	if r == nil {
-		return nil
-	}
-	if r.currentPermissionMode() != PermissionModeFullControl {
-		r.mu.RLock()
-		defaultRuntime := r.defaultRuntime
-		r.mu.RUnlock()
-		if defaultRuntime != nil {
-			return defaultRuntime.HostRunner()
-		}
-	}
-	if r.hostRuntime == nil {
-		return nil
-	}
-	return r.hostRuntime.HostRunner()
-}
-
-func (r *modeSwitchableRuntime) SandboxRunner() CommandRunner {
-	if r == nil {
-		return nil
-	}
-	if r.currentPermissionMode() == PermissionModeFullControl {
-		if r.hostRuntime == nil {
-			return nil
-		}
-		return r.hostRuntime.HostRunner()
-	}
-	r.mu.RLock()
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	if defaultRuntime == nil {
-		return nil
-	}
-	return defaultRuntime.SandboxRunner()
-}
-
-func (r *modeSwitchableRuntime) DecideRoute(command string, sandboxPermission SandboxPermission) CommandDecision {
-	mode := r.currentPermissionMode()
-	if mode == PermissionModeFullControl {
-		return CommandDecision{Route: ExecutionRouteHost}
-	}
-	if r == nil {
-		return CommandDecision{}
-	}
-	r.mu.RLock()
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	if defaultRuntime == nil {
-		return CommandDecision{}
-	}
-	if defaultRuntime.FallbackToHost() {
-		message := "sandbox unavailable, host execution requires approval"
-		if strings.TrimSpace(defaultRuntime.FallbackReason()) != "" {
-			message = message + ": " + strings.TrimSpace(defaultRuntime.FallbackReason())
-		}
-		return CommandDecision{
-			Route: ExecutionRouteHost,
-			Escalation: &EscalationReason{
-				Message: message,
-			},
-			NeedApproval: true,
-		}
-	}
-	if sandboxPermission == SandboxPermissionRequireEscalated {
-		if commandIsApprovalWhitelisted(command) {
-			return CommandDecision{Route: ExecutionRouteHost}
-		}
-		return CommandDecision{
-			Route:        ExecutionRouteHost,
-			Escalation:   &EscalationReason{Message: "require_escalated requested"},
-			NeedApproval: true,
-		}
-	}
-	return CommandDecision{Route: ExecutionRouteSandbox}
-}
-
-func (r *modeSwitchableRuntime) Close() error {
-	if r == nil {
-		return nil
-	}
-	r.mu.RLock()
-	hostRuntime := r.hostRuntime
-	defaultRuntime := r.defaultRuntime
-	r.mu.RUnlock()
-	var firstErr error
-	if defaultRuntime != nil {
-		closeErr := Close(defaultRuntime)
-		if closeErr != nil {
-			firstErr = closeErr
-		}
-	}
-	if hostRuntime != nil {
-		closeErr := Close(hostRuntime)
-		if closeErr != nil && firstErr == nil {
-			firstErr = closeErr
-		}
-	}
-	return firstErr
 }
 
 // SandboxFactory builds one sandbox command runner by type.
@@ -758,11 +497,139 @@ func Close(rt Runtime) error {
 	return closer.Close()
 }
 
+func cloneSandboxDiagnostics(diag SandboxDiagnostics) SandboxDiagnostics {
+	diag.Candidates = append([]string(nil), diag.Candidates...)
+	diag.Failures = append([]string(nil), diag.Failures...)
+	return diag
+}
+
+func fallbackApprovalMessage(reason string) string {
+	message := "sandbox unavailable, host execution requires approval"
+	if strings.TrimSpace(reason) != "" {
+		message = message + ": " + strings.TrimSpace(reason)
+	}
+	return message
+}
+
+func decideRoute(mode PermissionMode, diagnostics SandboxDiagnostics, hostBackend string, sandboxBackend string, command string, sandboxPermission SandboxPermission) CommandDecision {
+	hostBackend = cmp.Or(strings.TrimSpace(hostBackend), hostBackendName)
+	sandboxBackend = cmp.Or(strings.TrimSpace(sandboxBackend), "sandbox")
+	if mode == PermissionModeFullControl {
+		return CommandDecision{Route: ExecutionRouteHost, Backend: hostBackend}
+	}
+	if diagnostics.FallbackToHost {
+		return CommandDecision{
+			Route:   ExecutionRouteHost,
+			Backend: hostBackend,
+			Escalation: &EscalationReason{
+				Message: fallbackApprovalMessage(diagnostics.FallbackReason),
+			},
+			NeedApproval: true,
+		}
+	}
+	if sandboxPermission == SandboxPermissionRequireEscalated {
+		if commandIsApprovalWhitelisted(command) {
+			return CommandDecision{Route: ExecutionRouteHost, Backend: hostBackend}
+		}
+		return CommandDecision{
+			Route:        ExecutionRouteHost,
+			Backend:      hostBackend,
+			Escalation:   &EscalationReason{Message: "require_escalated requested"},
+			NeedApproval: true,
+		}
+	}
+	return CommandDecision{Route: ExecutionRouteSandbox, Backend: sandboxBackend}
+}
+
 var (
 	sandboxFactoriesMu sync.RWMutex
 	sandboxFactories   = map[string]SandboxFactory{}
 	runtimeGOOS        = stdruntime.GOOS
 )
+
+// SelectSandbox resolves one sandbox backend and returns structured selection
+// diagnostics. A nil runner with FallbackToHost=true indicates successful
+// fallback to host mode in default permission mode.
+func SelectSandbox(cfg Config) (CommandRunner, SandboxDiagnostics, error) {
+	requestedSandboxType := strings.TrimSpace(strings.ToLower(cfg.SandboxType))
+	if strings.EqualFold(runtimeGOOS, "darwin") && requestedSandboxType != "" && requestedSandboxType != seatbeltSandboxType {
+		return nil, SandboxDiagnostics{}, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on darwin, expected %q", requestedSandboxType, seatbeltSandboxType)
+	}
+	if strings.EqualFold(runtimeGOOS, "linux") &&
+		requestedSandboxType != "" &&
+		requestedSandboxType != landlockSandboxType &&
+		requestedSandboxType != bwrapSandboxType {
+		return nil, SandboxDiagnostics{}, NewCodedError(
+			ErrorCodeSandboxUnsupported,
+			"execenv: sandbox type %q is unsupported on linux, expected %q or %q",
+			requestedSandboxType,
+			landlockSandboxType,
+			bwrapSandboxType,
+		)
+	}
+
+	diagnostics := SandboxDiagnostics{
+		RequestedType: requestedSandboxType,
+		Candidates:    selectSandboxCandidates(cfg, requestedSandboxType),
+	}
+	if len(diagnostics.Candidates) == 0 {
+		return nil, diagnostics, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: no sandbox backend candidates")
+	}
+	diagnostics.ResolvedType = diagnostics.Candidates[0]
+
+	if cfg.SandboxRunner != nil {
+		if prober, ok := cfg.SandboxRunner.(sandboxProber); ok {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			probeErr := prober.Probe(probeCtx)
+			cancel()
+			if probeErr != nil {
+				diagnostics.Failures = append(diagnostics.Failures, fmt.Sprintf("%s: unavailable: %v", diagnostics.ResolvedType, probeErr))
+				diagnostics.FallbackToHost = true
+				diagnostics.FallbackReason = fmt.Sprintf("sandbox backend %q unavailable: %v", diagnostics.ResolvedType, probeErr)
+				return nil, diagnostics, nil
+			}
+		}
+		return cfg.SandboxRunner, diagnostics, nil
+	}
+
+	for _, candidate := range diagnostics.Candidates {
+		sandboxFactoriesMu.RLock()
+		factory, ok := sandboxFactories[candidate]
+		sandboxFactoriesMu.RUnlock()
+		if !ok {
+			if requestedSandboxType == candidate {
+				return nil, diagnostics, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: unknown sandbox type %q", candidate)
+			}
+			diagnostics.Failures = append(diagnostics.Failures, fmt.Sprintf("%s: unknown sandbox type", candidate))
+			continue
+		}
+		buildCfg := cfg
+		buildCfg.SandboxType = candidate
+		builtRunner, err := factory.Build(buildCfg)
+		if err != nil {
+			diagnostics.Failures = append(diagnostics.Failures, fmt.Sprintf("%s: init failed: %v", candidate, err))
+			continue
+		}
+		if prober, ok := builtRunner.(sandboxProber); ok {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			probeErr := prober.Probe(probeCtx)
+			cancel()
+			if probeErr != nil {
+				diagnostics.Failures = append(diagnostics.Failures, fmt.Sprintf("%s: unavailable: %v", candidate, probeErr))
+				if closer, ok := builtRunner.(runtimeCloser); ok {
+					_ = closer.Close()
+				}
+				continue
+			}
+		}
+		diagnostics.ResolvedType = candidate
+		return builtRunner, diagnostics, nil
+	}
+
+	diagnostics.FallbackToHost = true
+	diagnostics.FallbackReason = strings.Join(diagnostics.Failures, "; ")
+	return nil, diagnostics, nil
+}
 
 // RegisterSandboxFactory registers one sandbox backend factory.
 func RegisterSandboxFactory(factory SandboxFactory) error {
@@ -780,124 +647,24 @@ func RegisterSandboxFactory(factory SandboxFactory) error {
 
 // New builds runtime based on permission mode and optional sandbox type.
 func New(cfg Config) (Runtime, error) {
-	mode, err := normalizePermissionMode(cfg.PermissionMode)
-	if err != nil {
-		return nil, err
-	}
-
-	filesystem := cfg.FileSystem
-	if filesystem == nil {
-		filesystem = newHostFileSystem()
-	}
-	hostRunner := cfg.HostRunner
-	if hostRunner == nil {
-		hostRunner = newHostRunner()
-	}
-
-	resolvedPolicy := deriveSandboxPolicy(mode, cfg.SandboxPolicy)
-
-	runtime := &runtimeImpl{
-		permissionMode: mode,
-		sandboxPolicy:  resolvedPolicy,
-		fs:             filesystem,
-		hostRunner:     hostRunner,
-	}
-
-	// Register host runner for cleanup if it implements runtimeCloser
-	// (e.g. to terminate async sessions on shutdown).
-	if closer, ok := hostRunner.(runtimeCloser); ok {
-		runtime.closers = append(runtime.closers, closer)
-	}
-
-	if mode == PermissionModeFullControl {
-		return runtime, nil
-	}
-
-	requestedSandboxType := strings.TrimSpace(strings.ToLower(cfg.SandboxType))
-	if strings.EqualFold(runtimeGOOS, "darwin") && requestedSandboxType != "" && requestedSandboxType != seatbeltSandboxType {
-		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: sandbox type %q is unsupported on darwin, expected %q", requestedSandboxType, seatbeltSandboxType)
-	}
-	if strings.EqualFold(runtimeGOOS, "linux") &&
-		requestedSandboxType != "" &&
-		requestedSandboxType != landlockSandboxType &&
-		requestedSandboxType != bwrapSandboxType {
-		return nil, NewCodedError(
-			ErrorCodeSandboxUnsupported,
-			"execenv: sandbox type %q is unsupported on linux, expected %q or %q",
-			requestedSandboxType,
-			landlockSandboxType,
-			bwrapSandboxType,
-		)
-	}
-	candidates := sandboxTypeCandidates(requestedSandboxType)
-	if len(candidates) == 0 {
-		return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: no sandbox backend candidates")
-	}
-	runtime.sandboxType = candidates[0]
-
-	sandboxRunner := cfg.SandboxRunner
-	if sandboxRunner == nil {
-		failures := make([]string, 0, len(candidates))
-		for _, candidate := range candidates {
-			sandboxFactoriesMu.RLock()
-			factory, ok := sandboxFactories[candidate]
-			sandboxFactoriesMu.RUnlock()
-			if !ok {
-				if requestedSandboxType == candidate {
-					return nil, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: unknown sandbox type %q", candidate)
-				}
-				failures = append(failures, fmt.Sprintf("%s: unknown sandbox type", candidate))
-				continue
-			}
-			buildCfg := cfg
-			buildCfg.PermissionMode = mode
-			buildCfg.SandboxType = candidate
-			buildCfg.SandboxPolicy = resolvedPolicy
-			builtRunner, err := factory.Build(buildCfg)
-			if err != nil {
-				failures = append(failures, fmt.Sprintf("%s: init failed: %v", candidate, err))
-				continue
-			}
-			if prober, ok := builtRunner.(sandboxProber); ok {
-				probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				probeErr := prober.Probe(probeCtx)
-				cancel()
-				if probeErr != nil {
-					failures = append(failures, fmt.Sprintf("%s: unavailable: %v", candidate, probeErr))
-					continue
-				}
-			}
-			runtime.sandboxType = candidate
-			sandboxRunner = builtRunner
-			break
-		}
-		if sandboxRunner == nil {
-			runtime.fallbackToHost = true
-			runtime.fallbackReason = strings.Join(failures, "; ")
-			return runtime, nil
-		}
-	} else {
-		if prober, ok := sandboxRunner.(sandboxProber); ok {
-			probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			probeErr := prober.Probe(probeCtx)
-			cancel()
-			if probeErr != nil {
-				runtime.fallbackToHost = true
-				runtime.fallbackReason = fmt.Sprintf("sandbox backend %q unavailable: %v", runtime.sandboxType, probeErr)
-				return runtime, nil
-			}
-		}
-	}
-
-	runtime.sandboxRunner = sandboxRunner
-	if closer, ok := sandboxRunner.(runtimeCloser); ok {
-		runtime.closers = append(runtime.closers, closer)
-	}
-	return runtime, nil
+	return newRuntimeView(cfg)
 }
 
 func sandboxTypeCandidates(requested string) []string {
 	return sandboxTypeCandidatesForPlatform(requested, runtimeGOOS)
+}
+
+func selectSandboxCandidates(cfg Config, requested string) []string {
+	candidates := sandboxTypeCandidatesForPlatform(requested, runtimeGOOS)
+	if strings.TrimSpace(strings.ToLower(runtimeGOOS)) != "linux" {
+		return candidates
+	}
+	if strings.TrimSpace(requested) != "" {
+		return candidates
+	}
+	// Keep the platform default order here: bwrap can enforce read-only
+	// subpaths inside writable roots, while the current landlock backend cannot.
+	return candidates
 }
 
 func sandboxTypeCandidatesForPlatform(requested string, goos string) []string {
@@ -952,9 +719,11 @@ func deriveSandboxPolicy(mode PermissionMode, policy SandboxPolicy) SandboxPolic
 	default:
 		policy.Type = SandboxPolicyDangerFull
 		policy.NetworkAccess = true
+		policy.ReadableRoots = nil
 		policy.WritableRoots = nil
 		policy.ReadOnlySubpaths = nil
 	}
+	policy.ReadableRoots = normalizeStringList(policy.ReadableRoots)
 	policy.WritableRoots = normalizeStringList(policy.WritableRoots)
 	policy.ReadOnlySubpaths = normalizeStringList(policy.ReadOnlySubpaths)
 	return policy

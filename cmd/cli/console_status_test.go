@@ -16,7 +16,7 @@ import (
 
 func TestHandleStatus_UsesRunStateCompleted(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestHandleStatus_UsesRunStateCompleted(t *testing.T) {
 
 func TestHandleStatus_UsesRunStateWaitingApprovalWithCode(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestHandleStatus_UsesRunStateWaitingApprovalWithCode(t *testing.T) {
 
 func TestHandleStatus_UsesRunStateNoneWhenMissing(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func appendLifecycleState(
 
 func TestRefreshContextUsageFromEvent_FallsBackToRuntimeEstimateWithoutUsage(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

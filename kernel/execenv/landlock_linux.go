@@ -31,7 +31,7 @@ func (f landlockSandboxFactory) Type() string {
 }
 
 func (f landlockSandboxFactory) Build(cfg Config) (CommandRunner, error) {
-	return newLandlockRunner(cfg.SandboxPolicy, cfg.SandboxHelperPath), nil
+	return newLandlockRunner(deriveSandboxPolicy(PermissionModeDefault, cloneSandboxPolicy(cfg.SandboxPolicy)), cfg.SandboxHelperPath), nil
 }
 
 type landlockRunner struct {
@@ -42,6 +42,7 @@ type landlockRunner struct {
 	goos           string
 	policy         SandboxPolicy
 	sessionManager *SessionManager
+	closed         atomic.Bool
 }
 
 func newLandlockRunner(policy SandboxPolicy, helperPath string) CommandRunner {
@@ -147,6 +148,10 @@ func (l *landlockRunner) Run(ctx context.Context, req CommandRequest) (CommandRe
 }
 
 func (l *landlockRunner) StartAsync(_ context.Context, req CommandRequest) (string, error) {
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return "", err
+	}
 	if req.TTY {
 		return "", fmt.Errorf("tool: landlock async tty is not supported")
 	}
@@ -159,7 +164,7 @@ func (l *landlockRunner) StartAsync(_ context.Context, req CommandRequest) (stri
 	if err != nil {
 		return "", fmt.Errorf("tool: resolve landlock helper path failed: %w", err)
 	}
-	session, err := l.sessionManager.StartSession(AsyncSessionConfig{
+	session, err := manager.StartSession(AsyncSessionConfig{
 		Command:         req.Command,
 		Dir:             req.Dir,
 		Env:             mergeCommandEnv(req.EnvOverrides),
@@ -183,29 +188,45 @@ func (l *landlockRunner) StartAsync(_ context.Context, req CommandRequest) (stri
 }
 
 func (l *landlockRunner) WriteInput(sessionID string, input []byte) error {
-	return l.sessionManager.WriteInput(sessionID, input)
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.WriteInput(sessionID, input)
 }
 
 func (l *landlockRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
-	return l.sessionManager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return nil, nil, 0, 0, err
+	}
+	return manager.ReadOutput(sessionID, stdoutMarker, stderrMarker)
 }
 
 func (l *landlockRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
-	return l.sessionManager.GetSessionStatus(sessionID)
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return SessionStatus{}, err
+	}
+	return manager.GetSessionStatus(sessionID)
 }
 
 func (l *landlockRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return CommandResult{}, err
+	}
 	waitCtx := ctx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		waitCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	exitCode, err := l.sessionManager.WaitSession(waitCtx, sessionID)
+	exitCode, err := manager.WaitSession(waitCtx, sessionID)
 	if err != nil {
 		return CommandResult{}, err
 	}
-	result, err := l.sessionManager.GetResult(sessionID)
+	result, err := manager.GetResult(sessionID)
 	if err != nil {
 		return CommandResult{ExitCode: exitCode}, nil
 	}
@@ -213,18 +234,34 @@ func (l *landlockRunner) WaitSession(ctx context.Context, sessionID string, time
 }
 
 func (l *landlockRunner) TerminateSession(sessionID string) error {
-	return l.sessionManager.TerminateSession(sessionID)
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return err
+	}
+	return manager.TerminateSession(sessionID)
 }
 
 func (l *landlockRunner) ListSessions() []SessionInfo {
-	return l.sessionManager.ListSessions()
+	manager, err := l.asyncSessionManager()
+	if err != nil {
+		return nil
+	}
+	return manager.ListSessions()
 }
 
 func (l *landlockRunner) Close() error {
+	l.closed.Store(true)
 	if l.sessionManager != nil {
 		return l.sessionManager.Close()
 	}
 	return nil
+}
+
+func (l *landlockRunner) asyncSessionManager() (*SessionManager, error) {
+	if l == nil || l.closed.Load() || l.sessionManager == nil {
+		return nil, fmt.Errorf("execenv: landlock runner is closed")
+	}
+	return l.sessionManager, nil
 }
 
 func buildLandlockHelperArgs(policy SandboxPolicy, policyCWD, commandCWD, command string) ([]string, error) {
@@ -380,7 +417,13 @@ func applyLandlockFilesystemPolicy(policy SandboxPolicy, policyCWD string) error
 	}
 	defer unix.Close(rulesetFD)
 
-	if err := landlockAddPathRule(rulesetFD, "/", landlockReadOnlyMaskForABI(abi)); err != nil {
+	if readableRoots := shellReadableRoots(policy, policyCWD); len(readableRoots) > 0 {
+		for _, root := range readableRoots {
+			if err := landlockAddPathRule(rulesetFD, root, landlockReadOnlyMaskForABI(abi)); err != nil {
+				return fmt.Errorf("allow readable root %s: %w", root, err)
+			}
+		}
+	} else if err := landlockAddPathRule(rulesetFD, "/", landlockReadOnlyMaskForABI(abi)); err != nil {
 		return fmt.Errorf("allow read-only root: %w", err)
 	}
 	if err := landlockAddPathRule(rulesetFD, "/dev/null", landlockFileReadWriteMaskForABI(abi)); err != nil {
@@ -403,7 +446,7 @@ func landlockWritableRoots(policy SandboxPolicy, workDir string) []string {
 	}
 	roots := make([]string, 0, len(policy.WritableRoots)+8)
 	for _, one := range policy.WritableRoots {
-		resolved := resolveBwrapPath(workDir, one)
+		resolved := resolveSandboxPath(workDir, one)
 		if resolved != "" {
 			roots = append(roots, resolved)
 		}

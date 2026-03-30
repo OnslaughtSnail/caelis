@@ -84,21 +84,20 @@ func (h commandExecutionHook) BeforeTool(ctx context.Context, in ToolInput) (Too
 		decision := DecisionWithRoute(Decision{
 			Effect: DecisionEffectAllow,
 		}, DecisionRouteSandbox)
-		if decision.Metadata == nil {
-			decision.Metadata = map[string]any{}
-		}
-		decision.Metadata[DecisionMetaFallbackOnCommandNotFound] = true
+		decision = DecisionWithAnnotation(decision, DecisionAnnotationFallbackOnCommandNotFound)
 		in.Decision = decision
 	case toolexec.ExecutionRouteHost:
 		if routeDecision.Escalation != nil {
-			in.Decision = DecisionWithRoute(Decision{
+			decision := DecisionWithRoute(Decision{
 				Effect: DecisionEffectRequireApproval,
 				Reason: strings.TrimSpace(routeDecision.Escalation.Message),
 			}, DecisionRouteHost)
+			in.Decision = DecisionWithAnnotation(decision, DecisionAnnotationHostExecutionRequiresApproval)
 		} else {
-			in.Decision = DecisionWithRoute(Decision{
+			decision := DecisionWithRoute(Decision{
 				Effect: DecisionEffectAllow,
 			}, DecisionRouteHost)
+			in.Decision = DecisionWithAnnotation(decision, DecisionAnnotationHostExecutionWithoutApproval)
 		}
 	default:
 		in.Decision = Decision{

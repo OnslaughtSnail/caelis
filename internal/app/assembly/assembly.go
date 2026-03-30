@@ -30,16 +30,11 @@ func (r *ResolvedSpec) Close(ctx context.Context) error {
 	return r.closeFn(ctx)
 }
 
-// Assemble resolves runtime capabilities from plugin providers.
+// Assemble resolves runtime capabilities from an explicit registry.
 func Assemble(ctx context.Context, spec AssembleSpec) (*ResolvedSpec, error) {
 	preg := spec.Registry
 	if preg == nil {
-		preg = plugin.NewRegistry()
-		// Keep backward-compatible behavior for non-CLI callsites (e.g. eval),
-		// while CLI can still inject a pre-registered registry explicitly.
-		if err := RegisterBuiltinProviders(preg, RegisterOptions{}); err != nil {
-			return nil, err
-		}
+		return nil, fmt.Errorf("assembly: registry is required")
 	}
 	toolProviders, err := preg.ToolProviders(spec.ToolProviders)
 	if err != nil {

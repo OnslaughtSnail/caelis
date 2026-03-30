@@ -531,3 +531,24 @@ func TestCommandApprovalPromptRequestOmitsGenericReasonAndPermission(t *testing.
 		t.Fatalf("unexpected compact detail %+v", got)
 	}
 }
+
+func TestCommandApprovalPromptRequestTruncatesLongCommandPreview(t *testing.T) {
+	command := "cat <<EOF > /tmp/report.md\n" + strings.Repeat("line\n", 16) + "EOF\n"
+	req := commandApprovalPromptRequest(toolexec.ApprovalRequest{
+		ToolName: "BASH",
+		Command:  command,
+		Reason:   strings.Repeat("host escalation required because this command mutates files ", 8),
+	}, "cat")
+	if len(req.Details) != 2 {
+		t.Fatalf("expected command and reason details, got %+v", req.Details)
+	}
+	if strings.Count(req.Details[0].Value, "\n") > approvalPreviewMaxLines {
+		t.Fatalf("expected preview line count to stay bounded, got %q", req.Details[0].Value)
+	}
+	if !strings.Contains(req.Details[0].Value, "...") {
+		t.Fatalf("expected long command preview to be truncated, got %q", req.Details[0].Value)
+	}
+	if got := len([]rune(req.Details[1].Value)); got > approvalReasonMaxInlineCols {
+		t.Fatalf("expected reason to be compact, got len=%d value=%q", got, req.Details[1].Value)
+	}
+}

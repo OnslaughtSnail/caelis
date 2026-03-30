@@ -7,6 +7,7 @@ import (
 	stdruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type probeRunner struct {
@@ -44,6 +45,57 @@ func (r *closeableRunner) Run(ctx context.Context, req CommandRequest) (CommandR
 
 func (r *closeableRunner) Close() error {
 	r.closed++
+	return nil
+}
+
+type captureAsyncRunner struct {
+	lastRunReq   CommandRequest
+	lastStartReq CommandRequest
+}
+
+func (r *captureAsyncRunner) Run(ctx context.Context, req CommandRequest) (CommandResult, error) {
+	_ = ctx
+	r.lastRunReq = req
+	return CommandResult{}, nil
+}
+
+func (r *captureAsyncRunner) StartAsync(ctx context.Context, req CommandRequest) (string, error) {
+	_ = ctx
+	r.lastStartReq = req
+	return "session-1", nil
+}
+
+func (r *captureAsyncRunner) WriteInput(sessionID string, input []byte) error {
+	_ = sessionID
+	_ = input
+	return nil
+}
+
+func (r *captureAsyncRunner) ReadOutput(sessionID string, stdoutMarker, stderrMarker int64) (stdout, stderr []byte, newStdoutMarker, newStderrMarker int64, err error) {
+	_ = sessionID
+	_ = stdoutMarker
+	_ = stderrMarker
+	return nil, nil, 0, 0, nil
+}
+
+func (r *captureAsyncRunner) GetSessionStatus(sessionID string) (SessionStatus, error) {
+	_ = sessionID
+	return SessionStatus{State: SessionStateRunning}, nil
+}
+
+func (r *captureAsyncRunner) WaitSession(ctx context.Context, sessionID string, timeout time.Duration) (CommandResult, error) {
+	_ = ctx
+	_ = sessionID
+	_ = timeout
+	return CommandResult{}, nil
+}
+
+func (r *captureAsyncRunner) TerminateSession(sessionID string) error {
+	_ = sessionID
+	return nil
+}
+
+func (r *captureAsyncRunner) ListSessions() []SessionInfo {
 	return nil
 }
 
@@ -101,8 +153,8 @@ func TestNew_FullControlSandboxRunnerFallsBackToHostRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rt.SandboxRunner() != host {
-		t.Fatalf("expected sandbox runner to reuse host runner in full_control mode, got %#v", rt.SandboxRunner())
+	if _, err := rt.Execute(t.Context(), CommandRequest{Command: "echo hi"}); err != nil {
+		t.Fatalf("expected full_control runtime to execute via host backend, got %v", err)
 	}
 }
 
@@ -244,6 +296,44 @@ func TestNew_DefaultDerivesWorkspaceWritePolicy(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultStartInjectsDerivedWorkspaceWritePolicyIntoSandboxRequests(t *testing.T) {
+	sandboxRunner := &captureAsyncRunner{}
+	rt, err := New(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    platformDefaultSandboxType(),
+		SandboxRunner:  sandboxRunner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := rt.Start(t.Context(), CommandRequest{
+		Command: "echo hi > nested_result.txt",
+		Dir:     "/workspace/demo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session == nil {
+		t.Fatal("expected session")
+	}
+	override := sandboxRunner.lastStartReq.SandboxPolicyOverride
+	if override == nil {
+		t.Fatal("expected sandbox policy override on sandbox start request")
+	}
+	if override.Type != SandboxPolicyWorkspaceWrite {
+		t.Fatalf("expected workspace_write override, got %q", override.Type)
+	}
+	if !override.NetworkAccess {
+		t.Fatal("expected workspace_write override to keep network enabled")
+	}
+	if !reflect.DeepEqual(override.WritableRoots, []string{"."}) {
+		t.Fatalf("expected writable roots ['.'], got %v", override.WritableRoots)
+	}
+	if !reflect.DeepEqual(override.ReadOnlySubpaths, []string{".git"}) {
+		t.Fatalf("expected readonly subpaths ['.git'], got %v", override.ReadOnlySubpaths)
+	}
+}
+
 func TestSandboxTypeCandidatesForPlatform_LinuxDefaultUsesBwrapThenLandlock(t *testing.T) {
 	got := sandboxTypeCandidatesForPlatform("", "linux")
 	want := []string{bwrapSandboxType, landlockSandboxType}
@@ -257,6 +347,23 @@ func TestSandboxTypeCandidatesForPlatform_LinuxExplicitBwrap(t *testing.T) {
 	want := []string{bwrapSandboxType}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected linux bwrap candidates: got=%v want=%v", got, want)
+	}
+}
+
+func TestSelectSandboxCandidates_LinuxReadableRootsKeepDefaultOrder(t *testing.T) {
+	oldGoos := runtimeGOOS
+	runtimeGOOS = "linux"
+	defer func() { runtimeGOOS = oldGoos }()
+
+	got := selectSandboxCandidates(Config{
+		SandboxPolicy: SandboxPolicy{
+			Type:          SandboxPolicyWorkspaceWrite,
+			ReadableRoots: []string{"."},
+		},
+	}, "")
+	want := []string{bwrapSandboxType, landlockSandboxType}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected readable-roots candidates: got=%v want=%v", got, want)
 	}
 }
 
@@ -274,14 +381,14 @@ func TestNew_FullControlDerivesDangerFullPolicy(t *testing.T) {
 	}
 }
 
-func TestNewModeSwitchable_FullControlIgnoresUnsupportedSandboxUntilDefaultMode(t *testing.T) {
+func TestNewModeSwitchable_FullControlStartsWithDegradedUnsupportedSandbox(t *testing.T) {
 	oldGoos := runtimeGOOS
 	runtimeGOOS = "darwin"
 	defer func() {
 		runtimeGOOS = oldGoos
 	}()
 
-	rt, err := NewModeSwitchable(Config{
+	rt, err := New(Config{
 		PermissionMode: PermissionModeFullControl,
 		SandboxType:    bwrapSandboxType,
 	})
@@ -303,14 +410,20 @@ func TestNewModeSwitchable_FullControlIgnoresUnsupportedSandboxUntilDefaultMode(
 	if !ok {
 		t.Fatal("expected PermissionModeSetter support")
 	}
-	if err := setter.SetPermissionMode(PermissionModeDefault); err == nil {
-		t.Fatal("expected switching into default mode to validate sandbox and fail")
+	if err := setter.SetPermissionMode(PermissionModeDefault); err != nil {
+		t.Fatalf("expected mode switch to stay lightweight, got %v", err)
+	}
+	if decision := rt.DecideRoute("echo hi", SandboxPermissionAuto); decision.Route != ExecutionRouteHost || !decision.NeedApproval {
+		t.Fatalf("expected degraded default mode to fall back to approved host route, got %+v", decision)
+	}
+	if !rt.FallbackToHost() {
+		t.Fatal("expected unsupported sandbox to remain degraded after switching into default mode")
 	}
 }
 
 func TestNewModeSwitchable_DefaultModeReusesProvidedHostRunnerAcrossSwitches(t *testing.T) {
 	hostRunner := &closeableRunner{}
-	rt, err := NewModeSwitchable(Config{
+	rt, err := New(Config{
 		PermissionMode: PermissionModeDefault,
 		SandboxType:    platformDefaultSandboxType(),
 		SandboxRunner:  noopRunner{},
@@ -323,9 +436,6 @@ func TestNewModeSwitchable_DefaultModeReusesProvidedHostRunnerAcrossSwitches(t *
 		_ = Close(rt)
 	})
 
-	if rt.HostRunner() != hostRunner {
-		t.Fatalf("expected shared host runner, got %#v", rt.HostRunner())
-	}
 	setter, ok := rt.(PermissionModeSetter)
 	if !ok {
 		t.Fatal("expected PermissionModeSetter support")
@@ -333,14 +443,14 @@ func TestNewModeSwitchable_DefaultModeReusesProvidedHostRunnerAcrossSwitches(t *
 	if err := setter.SetPermissionMode(PermissionModeFullControl); err != nil {
 		t.Fatal(err)
 	}
-	if rt.HostRunner() != hostRunner {
-		t.Fatalf("expected host runner preserved in full_control, got %#v", rt.HostRunner())
+	if hostRunner.closed != 0 {
+		t.Fatalf("expected host runner to stay open after switching to full_control, got %d closes", hostRunner.closed)
 	}
 	if err := setter.SetPermissionMode(PermissionModeDefault); err != nil {
 		t.Fatal(err)
 	}
-	if rt.HostRunner() != hostRunner {
-		t.Fatalf("expected host runner preserved after switching back, got %#v", rt.HostRunner())
+	if hostRunner.closed != 0 {
+		t.Fatalf("expected host runner to stay open after switching back, got %d closes", hostRunner.closed)
 	}
 }
 
@@ -427,6 +537,36 @@ func TestNew_DarwinSeatbeltUnavailableFallsBackToHost(t *testing.T) {
 	reason := rt.FallbackReason()
 	if !strings.Contains(reason, "seatbelt") {
 		t.Fatalf("expected fallback reason to include seatbelt failure, got %q", reason)
+	}
+	diagnostics := rt.Diagnostics()
+	if !diagnostics.FallbackToHost {
+		t.Fatal("expected diagnostics to report host fallback")
+	}
+	if diagnostics.ResolvedType != seatbeltSandboxType {
+		t.Fatalf("expected resolved type %q, got %q", seatbeltSandboxType, diagnostics.ResolvedType)
+	}
+}
+
+func TestSelectSandbox_ProvidedRunnerProbeFailureReturnsFallbackDiagnostics(t *testing.T) {
+	runner, diagnostics, err := SelectSandbox(Config{
+		PermissionMode: PermissionModeDefault,
+		SandboxType:    platformDefaultSandboxType(),
+		SandboxRunner:  probeRunner{probeErr: errors.New("daemon unavailable")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runner != nil {
+		t.Fatalf("expected no sandbox runner on probe failure, got %#v", runner)
+	}
+	if !diagnostics.FallbackToHost {
+		t.Fatal("expected fallback diagnostics")
+	}
+	if !strings.Contains(diagnostics.FallbackReason, "daemon unavailable") {
+		t.Fatalf("unexpected fallback reason %q", diagnostics.FallbackReason)
+	}
+	if len(diagnostics.Failures) != 1 {
+		t.Fatalf("expected one failure entry, got %v", diagnostics.Failures)
 	}
 }
 
