@@ -332,7 +332,7 @@ func TestSummarizeToolResponse_TaskListRendersFriendlySummary(t *testing.T) {
 	}, map[string]any{
 		"action": "list",
 	})
-	if got != "Listed 2 tasks (1 active)" {
+	if got != "listed 2 tasks (1 active)" {
 		t.Fatalf("unexpected task list summary: %q", got)
 	}
 }
@@ -345,6 +345,13 @@ func TestSummarizeToolArgs_TaskWaitRendersDuration(t *testing.T) {
 	})
 	if got != "5 s" {
 		t.Fatalf("unexpected task wait args summary: %q", got)
+	}
+}
+
+func TestSummarizeToolArgs_TaskListRendersExplicitAction(t *testing.T) {
+	got := summarizeToolArgs("TASK", map[string]any{"action": "list"})
+	if got != "list" {
+		t.Fatalf("unexpected task list args summary: %q", got)
 	}
 }
 

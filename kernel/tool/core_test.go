@@ -28,7 +28,11 @@ func TestEnsureCoreTools_AddRead(t *testing.T) {
 	t.Cleanup(func() {
 		_ = toolexec.Close(rt)
 	})
-	tools, err := EnsureCoreTools([]Tool{echoTool}, CoreToolsConfig{Runtime: rt})
+	builtins, err := BuildCoreTools(CoreToolsConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := EnsureCoreTools([]Tool{echoTool}, builtins)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,9 +69,13 @@ func TestEnsureCoreTools_AddKernelCoreTools(t *testing.T) {
 	t.Cleanup(func() {
 		_ = toolexec.Close(rt)
 	})
-	tools, err := EnsureCoreTools(nil, CoreToolsConfig{
+	builtins, err := BuildCoreTools(CoreToolsConfig{
 		Runtime: rt,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := EnsureCoreTools(nil, builtins)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +114,11 @@ func TestEnsureCoreTools_RejectsReservedNames(t *testing.T) {
 	t.Cleanup(func() {
 		_ = toolexec.Close(rt)
 	})
-
-	_, err = EnsureCoreTools([]Tool{readTool}, CoreToolsConfig{Runtime: rt})
+	builtins, err := BuildCoreTools(CoreToolsConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = EnsureCoreTools([]Tool{readTool}, builtins)
 	if err == nil {
 		t.Fatal("expected reserved core tool name to fail")
 	}
@@ -132,7 +143,11 @@ func TestEnsureCoreTools_DedupesBuiltinBashTool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tools, err := EnsureCoreTools([]Tool{bashTool}, CoreToolsConfig{Runtime: rt})
+	builtins, err := BuildCoreTools(CoreToolsConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := EnsureCoreTools([]Tool{bashTool}, builtins)
 	if err != nil {
 		t.Fatal(err)
 	}

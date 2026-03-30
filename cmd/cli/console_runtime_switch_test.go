@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,18 +39,98 @@ type fakeRuntime struct {
 	sandboxRunner  toolexec.CommandRunner
 }
 
+type testRuntimeSession struct {
+	ref    toolexec.CommandSessionRef
+	runner toolexec.AsyncCommandRunner
+}
+
+func (s *testRuntimeSession) Ref() toolexec.CommandSessionRef { return s.ref }
+func (s *testRuntimeSession) WriteInput(input []byte) error {
+	return s.runner.WriteInput(s.ref.SessionID, input)
+}
+func (s *testRuntimeSession) ReadOutput(stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
+	return s.runner.ReadOutput(s.ref.SessionID, stdoutMarker, stderrMarker)
+}
+func (s *testRuntimeSession) Status() (toolexec.SessionStatus, error) {
+	return s.runner.GetSessionStatus(s.ref.SessionID)
+}
+func (s *testRuntimeSession) Wait(ctx context.Context, timeout time.Duration) (toolexec.CommandResult, error) {
+	return s.runner.WaitSession(ctx, s.ref.SessionID, timeout)
+}
+func (s *testRuntimeSession) Terminate() error { return s.runner.TerminateSession(s.ref.SessionID) }
+
+func runtimeSessionFromRunner(ctx context.Context, backend string, runner toolexec.CommandRunner, req toolexec.CommandRequest) (toolexec.Session, error) {
+	async, ok := runner.(toolexec.AsyncCommandRunner)
+	if !ok || async == nil {
+		return nil, fmt.Errorf("async execution unavailable")
+	}
+	sessionID, err := async.StartAsync(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return &testRuntimeSession{
+		ref:    toolexec.CommandSessionRef{Backend: backend, SessionID: sessionID},
+		runner: async,
+	}, nil
+}
+
+func runtimeSessionFromRef(backend string, runner toolexec.CommandRunner, ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	async, ok := runner.(toolexec.AsyncCommandRunner)
+	if !ok || async == nil {
+		return nil, fmt.Errorf("async execution unavailable")
+	}
+	return &testRuntimeSession{
+		ref:    toolexec.CommandSessionRef{Backend: backend, SessionID: strings.TrimSpace(ref.SessionID)},
+		runner: async,
+	}, nil
+}
+
 func (r fakeRuntime) PermissionMode() toolexec.PermissionMode { return r.permissionMode }
 func (r fakeRuntime) SandboxType() string                     { return r.sandboxType }
 func (r fakeRuntime) SandboxPolicy() toolexec.SandboxPolicy   { return toolexec.SandboxPolicy{} }
 func (r fakeRuntime) FallbackToHost() bool                    { return r.fallbackToHost }
 func (r fakeRuntime) FallbackReason() string                  { return r.fallbackReason }
-func (r fakeRuntime) FileSystem() toolexec.FileSystem         { return nil }
-func (r fakeRuntime) HostRunner() toolexec.CommandRunner      { return r.hostRunner }
-func (r fakeRuntime) SandboxRunner() toolexec.CommandRunner {
-	if r.permissionMode == toolexec.PermissionModeFullControl && r.hostRunner != nil {
-		return r.hostRunner
+func (r fakeRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{
+		ResolvedType:   r.sandboxType,
+		FallbackToHost: r.fallbackToHost,
+		FallbackReason: r.fallbackReason,
 	}
-	return r.sandboxRunner
+}
+func (r fakeRuntime) FileSystem() toolexec.FileSystem { return nil }
+func (r fakeRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{
+		Mode:             r.permissionMode,
+		RequestedSandbox: r.sandboxType,
+		ResolvedSandbox:  r.sandboxType,
+		FallbackReason:   r.fallbackReason,
+	}
+}
+func (r fakeRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	if decision := r.DecideRoute(req.Command, req.SandboxPermission); decision.Route == toolexec.ExecutionRouteHost && r.hostRunner != nil {
+		return r.hostRunner.Run(ctx, req)
+	}
+	runner := r.sandboxRunner
+	if r.permissionMode == toolexec.PermissionModeFullControl && r.hostRunner != nil {
+		runner = r.hostRunner
+	}
+	if runner != nil {
+		return runner.Run(ctx, req)
+	}
+	return toolexec.CommandResult{}, fmt.Errorf("runner unavailable")
+}
+func (r fakeRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	decision := r.DecideRoute(req.Command, req.SandboxPermission)
+	if decision.Route == toolexec.ExecutionRouteHost {
+		return runtimeSessionFromRunner(ctx, "host", r.hostRunner, req)
+	}
+	return runtimeSessionFromRunner(ctx, strings.TrimSpace(r.sandboxType), r.sandboxRunner, req)
+}
+func (r fakeRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if strings.EqualFold(strings.TrimSpace(ref.Backend), "host") || strings.TrimSpace(ref.Backend) == "" {
+		return runtimeSessionFromRef("host", r.hostRunner, ref)
+	}
+	return runtimeSessionFromRef(strings.TrimSpace(ref.Backend), r.sandboxRunner, ref)
 }
 func (r *fakeRuntime) SetPermissionMode(mode toolexec.PermissionMode) error {
 	r.permissionMode = mode
@@ -520,13 +601,21 @@ func TestHandleSandbox_UnknownType(t *testing.T) {
 
 func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
+	prevSelector := cliSandboxSelector
 	t.Cleanup(func() {
 		cliExecRuntimeBuilder = prevBuilder
+		cliSandboxSelector = prevSelector
 	})
 	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
 		return fakeRuntime{
 			permissionMode: cfg.PermissionMode,
 			sandboxType:    cfg.SandboxType,
+		}, nil
+	}
+	cliSandboxSelector = func(cfg toolexec.Config) (toolexec.CommandRunner, toolexec.SandboxDiagnostics, error) {
+		return nil, toolexec.SandboxDiagnostics{
+			RequestedType: cfg.SandboxType,
+			ResolvedType:  cfg.SandboxType,
 		}, nil
 	}
 
@@ -549,8 +638,10 @@ func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 
 func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 	prevBuilder := cliExecRuntimeBuilder
+	prevSelector := cliSandboxSelector
 	t.Cleanup(func() {
 		cliExecRuntimeBuilder = prevBuilder
+		cliSandboxSelector = prevSelector
 	})
 	cliExecRuntimeBuilder = func(cfg toolexec.Config) (toolexec.Runtime, error) {
 		return fakeRuntime{
@@ -560,13 +651,21 @@ func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 			fallbackReason: "probe failed",
 		}, nil
 	}
+	cliSandboxSelector = func(cfg toolexec.Config) (toolexec.CommandRunner, toolexec.SandboxDiagnostics, error) {
+		return nil, toolexec.SandboxDiagnostics{
+			RequestedType:  cfg.SandboxType,
+			ResolvedType:   cfg.SandboxType,
+			FallbackToHost: true,
+			FallbackReason: "probe failed",
+		}, nil
+	}
 
 	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
 	if err != nil {
 		t.Fatal(err)
 	}
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{"bwrap"})
+	_, err = handleSandbox(console, []string{cliTestSandboxType()})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -577,7 +676,7 @@ func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 
 func TestUpdateExecutionRuntime_ReusesRuntimeForPermissionOnlySwitch(t *testing.T) {
 	sandboxRunner := &closeableSwitchRunner{}
-	rt, err := toolexec.NewModeSwitchable(toolexec.Config{
+	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  sandboxRunner,
@@ -692,7 +791,7 @@ func TestUpdateExecutionRuntime_RebuildsWhenRequestedSandboxChanged(t *testing.T
 	}
 
 	sandboxRunner := &closeableSwitchRunner{}
-	rt, err := toolexec.NewModeSwitchable(toolexec.Config{
+	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeDefault,
 		SandboxType:    cliTestSandboxType(),
 		SandboxRunner:  sandboxRunner,

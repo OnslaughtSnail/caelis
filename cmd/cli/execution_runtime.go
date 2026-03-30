@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -8,7 +9,8 @@ import (
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
-var cliExecRuntimeBuilder = toolexec.NewModeSwitchable
+var cliExecRuntimeBuilder = toolexec.New
+var cliSandboxSelector = toolexec.SelectSandbox
 
 type swappableRuntime struct {
 	mu      sync.RWMutex
@@ -72,6 +74,20 @@ func (r *swappableRuntime) FallbackReason() string {
 	return ""
 }
 
+func (r *swappableRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	if current := r.Current(); current != nil {
+		return current.Diagnostics()
+	}
+	return toolexec.SandboxDiagnostics{}
+}
+
+func (r *swappableRuntime) State() toolexec.RuntimeState {
+	if current := r.Current(); current != nil {
+		return current.State()
+	}
+	return toolexec.RuntimeState{}
+}
+
 func (r *swappableRuntime) FileSystem() toolexec.FileSystem {
 	if current := r.Current(); current != nil {
 		return current.FileSystem()
@@ -79,45 +95,68 @@ func (r *swappableRuntime) FileSystem() toolexec.FileSystem {
 	return nil
 }
 
-func (r *swappableRuntime) HostRunner() toolexec.CommandRunner {
+func (r *swappableRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
 	if current := r.Current(); current != nil {
-		return current.HostRunner()
+		return current.Execute(ctx, req)
 	}
-	return nil
+	return toolexec.CommandResult{}, fmt.Errorf("runtime unavailable")
 }
 
-func (r *swappableRuntime) SandboxRunner() toolexec.CommandRunner {
+func (r *swappableRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
 	if current := r.Current(); current != nil {
-		return current.SandboxRunner()
+		return current.Start(ctx, req)
 	}
-	return nil
+	return nil, fmt.Errorf("runtime unavailable")
+}
+
+func (r *swappableRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if current := r.Current(); current != nil {
+		return current.OpenSession(ref)
+	}
+	return nil, fmt.Errorf("runtime unavailable")
+}
+
+func (r *swappableRuntime) Decide(ctx context.Context, req toolexec.RouteRequest) (toolexec.CommandDecision, error) {
+	_ = ctx
+	if current := r.Current(); current != nil {
+		return current.DecideRoute(req.Command, req.SandboxPermission), nil
+	}
+	return toolexec.CommandDecision{}, fmt.Errorf("runtime unavailable")
 }
 
 func (r *swappableRuntime) DecideRoute(command string, sandboxPermission toolexec.SandboxPermission) toolexec.CommandDecision {
-	if current := r.Current(); current != nil {
-		return current.DecideRoute(command, sandboxPermission)
-	}
-	return toolexec.CommandDecision{}
+	decision, _ := r.Decide(context.Background(), toolexec.RouteRequest{
+		Command:           command,
+		SandboxPermission: sandboxPermission,
+	})
+	return decision
 }
 
-func newExecutionRuntime(mode toolexec.PermissionMode, sandboxType string, sandboxHelperPath string) (toolexec.Runtime, error) {
+func newExecutionRuntime(mode toolexec.PermissionMode, sandboxType string, sandboxHelperPath string, sandboxPolicy toolexec.SandboxPolicy) (toolexec.Runtime, error) {
 	return cliExecRuntimeBuilder(toolexec.Config{
 		PermissionMode:    mode,
 		SandboxType:       normalizeSandboxType(strings.TrimSpace(sandboxType)),
+		SandboxPolicy:     sandboxPolicy,
 		SandboxHelperPath: strings.TrimSpace(sandboxHelperPath),
 	})
 }
 
 func validateExplicitSandboxType(sandboxType string, sandboxHelperPath string) error {
-	rt, err := newExecutionRuntime(toolexec.PermissionModeDefault, sandboxType, sandboxHelperPath)
+	runner, diagnostics, err := cliSandboxSelector(toolexec.Config{
+		PermissionMode:    toolexec.PermissionModeDefault,
+		SandboxType:       normalizeSandboxType(strings.TrimSpace(sandboxType)),
+		SandboxHelperPath: strings.TrimSpace(sandboxHelperPath),
+	})
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = toolexec.Close(rt)
-	}()
-	if rt.FallbackToHost() {
-		return fmt.Errorf("sandbox type %q is unavailable: %s", sandboxType, rt.FallbackReason())
+	if closer, ok := runner.(interface{ Close() error }); ok {
+		defer func() {
+			_ = closer.Close()
+		}()
+	}
+	if diagnostics.FallbackToHost {
+		return fmt.Errorf("sandbox type %q is unavailable: %s", sandboxType, diagnostics.FallbackReason)
 	}
 	return nil
 }

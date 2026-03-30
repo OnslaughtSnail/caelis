@@ -10,10 +10,13 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 )
 
+const richDiffMaxLines = 800
+
 type toolCallMutationVisuals struct {
 	DiffMsg      tuievents.DiffBlockMsg
 	DiffShown    bool
 	ChangeCounts mutationChangeCounts
+	CallSummary  string
 	PreviewPath  string
 	PreviewNew   string
 }
@@ -23,8 +26,9 @@ type mutationPreviewRender struct {
 	Counts  mutationChangeCounts
 	DiffMsg tuievents.DiffBlockMsg
 
-	HasChanges bool
-	TooLarge   bool
+	HasChanges  bool
+	TooLarge    bool
+	CallSummary string
 }
 
 type mutationChangeCounts struct {
@@ -39,6 +43,7 @@ func buildToolCallMutationVisuals(runtime toolexec.Runtime, toolName string, cal
 	}
 	visuals := toolCallMutationVisuals{
 		ChangeCounts: render.Counts,
+		CallSummary:  render.CallSummary,
 		PreviewPath:  render.Preview.Path,
 		PreviewNew:   render.Preview.New,
 	}
@@ -57,9 +62,10 @@ func buildMutationPreviewRender(runtime toolexec.Runtime, toolName string, callA
 	}
 	counts := mutationChangeCountsForTool(strings.ToUpper(strings.TrimSpace(toolName)), preview, callArgs)
 	render := mutationPreviewRender{
-		Preview:    preview,
-		Counts:     counts,
-		HasChanges: !mutationHasNoChanges(preview, counts),
+		Preview:     preview,
+		Counts:      counts,
+		HasChanges:  !mutationHasNoChanges(preview, counts),
+		CallSummary: mutationToolCallSummary(preview, counts),
 	}
 	if !render.HasChanges {
 		return render, nil
@@ -79,6 +85,20 @@ func buildMutationPreviewRender(runtime toolexec.Runtime, toolName string, callA
 		render.DiffMsg.Tool = strings.ToUpper(strings.TrimSpace(toolName))
 	}
 	return render, nil
+}
+
+func buildToolCallDiffBlockMsg(runtime toolexec.Runtime, toolName string, callArgs map[string]any) (tuievents.DiffBlockMsg, bool, bool) {
+	render, err := buildMutationPreviewRender(runtime, toolName, callArgs)
+	if err != nil {
+		return tuievents.DiffBlockMsg{}, false, false
+	}
+	if !render.HasChanges {
+		return tuievents.DiffBlockMsg{}, false, false
+	}
+	if render.TooLarge {
+		return tuievents.DiffBlockMsg{}, true, true
+	}
+	return render.DiffMsg, false, true
 }
 
 func mutationChangeCountsForTool(toolName string, preview toolfs.MutationPreview, _ map[string]any) mutationChangeCounts {
@@ -117,24 +137,19 @@ func mutationChangeCountsFromResult(toolName string, result map[string]any, call
 	}
 }
 
-func legacyWriteMutationChangeCounts(result map[string]any, callArgs map[string]any) mutationChangeCounts {
-	if _, addedOK := asInt(result["added_lines"]); addedOK {
-		if _, removedOK := asInt(result["removed_lines"]); removedOK {
-			return mutationChangeCounts{}
-		}
-	}
-	added, ok := asInt(result["line_count"])
-	if !ok || added < 0 {
-		added = countLines(asString(callArgs["content"]))
-	}
-	if added < 0 {
-		added = 0
-	}
-	return mutationChangeCounts{Added: added, Removed: 0}
-}
-
 func formatMutationChangeSummary(counts mutationChangeCounts) string {
 	return fmt.Sprintf("+%d -%d", max(0, counts.Added), max(0, counts.Removed))
+}
+
+func mutationToolCallSummary(preview toolfs.MutationPreview, counts mutationChangeCounts) string {
+	display := displayFileName(preview.Path)
+	if display == "" {
+		return ""
+	}
+	if mutationHasNoChanges(preview, counts) {
+		return display
+	}
+	return strings.TrimSpace(display + " " + formatMutationChangeSummary(counts))
 }
 
 func shouldSkipRichDiff(preview toolfs.MutationPreview, counts mutationChangeCounts) bool {

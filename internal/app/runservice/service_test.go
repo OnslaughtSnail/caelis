@@ -11,7 +11,8 @@ import (
 )
 
 func TestServiceAssembleTools_AddsOptionalPlanAndSpawn(t *testing.T) {
-	rt, err := runtime.New(runtime.Config{Store: inmemory.New()})
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

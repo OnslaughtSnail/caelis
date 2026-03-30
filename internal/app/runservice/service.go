@@ -112,10 +112,14 @@ func (s *Service) VisibleTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return tool.EnsureCoreTools(tools, tool.CoreToolsConfig{
+	builtins, err := tool.BuildCoreTools(tool.CoreToolsConfig{
 		Runtime:      s.execution,
 		TaskRegistry: s.taskRegistry,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return tool.EnsureCoreTools(tools, builtins)
 }
 
 func (s *Service) RunTurn(ctx context.Context, req RunTurnRequest) (RunTurnResult, error) {

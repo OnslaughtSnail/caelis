@@ -224,7 +224,7 @@ func TestServiceCancelPromptStopsActiveRun(t *testing.T) {
 
 func TestServiceStartPromptFreezesSystemPromptPerLoadedSession(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestServiceSessionServiceDisablesSpawnForDelegatedChildSessions(t *testing.
 
 func TestServiceDelegatedChildPromptRemovesSpawnGuidance(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func newTestService(t *testing.T, cfg testServiceConfig) (*Service, func()) {
 	t.Helper()
 
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

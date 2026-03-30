@@ -199,11 +199,7 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.SpawnToolName) {
 		return subagentDomainUpdate{}, false
 	}
-	childSessionID := strings.TrimSpace(firstNonEmpty(
-		resp.Result,
-		"_ui_child_session_id",
-		"child_session_id",
-	))
+	childSessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id"))
 	if hasToolError(resp.Result) && childSessionID == "" {
 		return subagentDomainUpdate{}, false
 	}
@@ -218,9 +214,7 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 	}
 	attachTarget := strings.TrimSpace(firstNonEmpty(
 		resp.Result,
-		"_ui_child_session_id",
 		"child_session_id",
-		"_ui_delegation_id",
 		"delegation_id",
 	))
 	if provisional && attachTarget == "" {
@@ -246,7 +240,7 @@ func subagentDomainUpdateFromSpawnToolResponse(rootSessionID string, resp *model
 		AttachTarget:  attachTarget,
 		CallID:        strings.TrimSpace(resp.ID),
 		AnchorTool:    tool.SpawnToolName,
-		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "agent")),
 	}
 	if target.Agent == "" {
 		target.Agent = "self"
@@ -266,7 +260,7 @@ func subagentDomainUpdatesFromTaskToolResponse(rootSessionID string, resp *model
 	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), tool.TaskToolName) {
 		return nil
 	}
-	spawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id"))
+	spawnID := strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id"))
 	if spawnID == "" {
 		return nil
 	}
@@ -289,10 +283,10 @@ func subagentDomainUpdatesFromTaskToolResponse(rootSessionID string, resp *model
 	target := subagentProjectionTarget{
 		RootSessionID: strings.TrimSpace(rootSessionID),
 		SpawnID:       panelSpawnID,
-		AttachTarget:  strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_child_session_id", "child_session_id", "_ui_delegation_id", "delegation_id")),
+		AttachTarget:  strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id", "delegation_id")),
 		CallID:        callID,
 		AnchorTool:    anchorTool,
-		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "agent")),
 	}
 	if target.Agent == "" {
 		target.Agent = "self"
@@ -383,11 +377,7 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 	if errText == "" {
 		return nil
 	}
-	childSessionID := strings.TrimSpace(firstNonEmpty(
-		resp.Result,
-		"_ui_child_session_id",
-		"child_session_id",
-	))
+	childSessionID := strings.TrimSpace(firstNonEmpty(resp.Result, "child_session_id"))
 	spawnID := childSessionID
 	provisional := false
 	if spawnID == "" {
@@ -399,9 +389,7 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 	}
 	attachTarget := strings.TrimSpace(firstNonEmpty(
 		resp.Result,
-		"_ui_child_session_id",
 		"child_session_id",
-		"_ui_delegation_id",
 		"delegation_id",
 	))
 	if provisional && attachTarget == "" {
@@ -413,7 +401,7 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 		AttachTarget:  attachTarget,
 		CallID:        strings.TrimSpace(resp.ID),
 		AnchorTool:    tool.SpawnToolName,
-		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "_ui_agent", "agent")),
+		Agent:         strings.TrimSpace(firstNonEmpty(resp.Result, "agent")),
 	}
 	if target.Agent == "" {
 		target.Agent = "self"
@@ -864,7 +852,7 @@ func suppressNestedSubagentTaskPreview(toolName string, result map[string]any) b
 	if !strings.EqualFold(strings.TrimSpace(toolName), tool.TaskToolName) {
 		return false
 	}
-	childSessionID := strings.TrimSpace(firstNonEmpty(result, "_ui_child_session_id", "child_session_id"))
+	childSessionID := strings.TrimSpace(firstNonEmpty(result, "child_session_id"))
 	return childSessionID != ""
 }
 

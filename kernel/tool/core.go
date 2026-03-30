@@ -41,21 +41,8 @@ type CoreToolsConfig struct {
 	TaskRegistry *task.Registry
 }
 
-// EnsureCoreTools injects mandatory kernel tools and returns a new tool list.
-func EnsureCoreTools(userTools []Tool, cfg CoreToolsConfig) ([]Tool, error) {
-	filteredTools := make([]Tool, 0, len(userTools))
-	for _, t := range userTools {
-		if t == nil {
-			continue
-		}
-		if isReservedCoreToolName(t.Name()) {
-			if isBuiltinCoreTool(t) {
-				continue
-			}
-			return nil, fmt.Errorf("tool: %q is reserved by the core runtime and cannot be overridden", t.Name())
-		}
-		filteredTools = append(filteredTools, t)
-	}
+// BuildCoreTools constructs the mandatory kernel tool set.
+func BuildCoreTools(cfg CoreToolsConfig) ([]Tool, error) {
 	readTool, err := filesystem.NewReadWithRuntime(cfg.Read, cfg.Runtime)
 	if err != nil {
 		return nil, err
@@ -72,18 +59,30 @@ func EnsureCoreTools(userTools []Tool, cfg CoreToolsConfig) ([]Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	extra := 5
-	out := make([]Tool, 0, len(filteredTools)+extra)
-	out = append(out, readTool)
-	out = append(out, writeTool)
-	out = append(out, patchTool)
-	out = append(out, bashTool)
 	taskTool, err := NewTaskTool()
 	if err != nil {
 		return nil, err
 	}
-	out = append(out, taskTool)
+	return []Tool{readTool, writeTool, patchTool, bashTool, taskTool}, nil
+}
+
+// EnsureCoreTools injects mandatory kernel tools and returns a new tool list.
+func EnsureCoreTools(userTools []Tool, builtins []Tool) ([]Tool, error) {
+	filteredTools := make([]Tool, 0, len(userTools))
+	for _, t := range userTools {
+		if t == nil {
+			continue
+		}
+		if isReservedCoreToolName(t.Name()) {
+			if isBuiltinCoreTool(t) {
+				continue
+			}
+			return nil, fmt.Errorf("tool: %q is reserved by the core runtime and cannot be overridden", t.Name())
+		}
+		filteredTools = append(filteredTools, t)
+	}
+	out := make([]Tool, 0, len(filteredTools)+len(builtins))
+	out = append(out, builtins...)
 	out = append(out, filteredTools...)
 	return out, nil
 }

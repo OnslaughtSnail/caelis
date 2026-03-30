@@ -38,19 +38,11 @@ func parseHeadlessOutputFormat(raw string) (headlessOutputFormat, error) {
 
 func resolveSingleShotInput(
 	promptFlag string,
-	legacyInputFlag string,
 	stdin io.Reader,
 	stdinTTY bool,
 	stdoutTTY bool,
 ) (string, bool, error) {
 	prompt := strings.TrimSpace(promptFlag)
-	legacy := strings.TrimSpace(legacyInputFlag)
-	if prompt != "" && legacy != "" && prompt != legacy {
-		return "", false, fmt.Errorf("flags -p and -input conflict, provide only one")
-	}
-	if prompt == "" {
-		prompt = legacy
-	}
 	if prompt != "" {
 		return prompt, true, nil
 	}

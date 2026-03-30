@@ -16,6 +16,7 @@ import (
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/envload"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -38,6 +39,9 @@ type appConfig struct {
 	DefaultModel              string                 `json:"default_model"`
 	PermissionMode            string                 `json:"permission_mode,omitempty"`
 	SandboxType               string                 `json:"sandbox_type,omitempty"`
+	SandboxReadableRoots      []string               `json:"sandbox_readable_roots,omitempty"`
+	SandboxWritableRoots      []string               `json:"sandbox_writable_roots,omitempty"`
+	SandboxReadOnlySubpaths   []string               `json:"sandbox_read_only_subpaths,omitempty"`
 	DefaultAgent              string                 `json:"defaultAgent,omitempty"`
 	DefaultPermissions        string                 `json:"defaultPermissions,omitempty"`
 	NonInteractivePermissions string                 `json:"nonInteractivePermissions,omitempty"`
@@ -189,6 +193,21 @@ func resolveAppConfigEnvPlaceholders(cfg *appConfig, configPath string) error {
 		*value = resolved
 		return nil
 	}
+	resolveStringSliceField := func(fieldPath string, values *[]string) error {
+		if values == nil || len(*values) == 0 {
+			return nil
+		}
+		resolved := make([]string, 0, len(*values))
+		for i, value := range *values {
+			one := value
+			if err := resolveField(fmt.Sprintf("%s[%d]", fieldPath, i), &one); err != nil {
+				return err
+			}
+			resolved = append(resolved, one)
+		}
+		*values = resolved
+		return nil
+	}
 
 	if err := resolveField("default_model", &cfg.DefaultModel); err != nil {
 		return err
@@ -197,6 +216,15 @@ func resolveAppConfigEnvPlaceholders(cfg *appConfig, configPath string) error {
 		return err
 	}
 	if err := resolveField("sandbox_type", &cfg.SandboxType); err != nil {
+		return err
+	}
+	if err := resolveStringSliceField("sandbox_readable_roots", &cfg.SandboxReadableRoots); err != nil {
+		return err
+	}
+	if err := resolveStringSliceField("sandbox_writable_roots", &cfg.SandboxWritableRoots); err != nil {
+		return err
+	}
+	if err := resolveStringSliceField("sandbox_read_only_subpaths", &cfg.SandboxReadOnlySubpaths); err != nil {
 		return err
 	}
 	if err := resolveField("defaultAgent", &cfg.DefaultAgent); err != nil {
@@ -528,6 +556,17 @@ func (s *appConfigStore) SandboxType() string {
 		return platformDefaultSandboxType()
 	}
 	return normalizeSandboxType(s.data.SandboxType)
+}
+
+func (s *appConfigStore) SandboxPolicy() toolexec.SandboxPolicy {
+	if s == nil {
+		return toolexec.SandboxPolicy{}
+	}
+	return toolexec.SandboxPolicy{
+		ReadableRoots:    normalizeStringSlice(s.data.SandboxReadableRoots),
+		WritableRoots:    normalizeStringSlice(s.data.SandboxWritableRoots),
+		ReadOnlySubpaths: normalizeStringSlice(s.data.SandboxReadOnlySubpaths),
+	}
 }
 
 func (s *appConfigStore) ProviderConfigs() []modelproviders.Config {
@@ -950,6 +989,9 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 	}
 	cfg.PermissionMode = normalizePermissionMode(cfg.PermissionMode)
 	cfg.SandboxType = normalizeSandboxType(cfg.SandboxType)
+	cfg.SandboxReadableRoots = normalizeStringSlice(cfg.SandboxReadableRoots)
+	cfg.SandboxWritableRoots = normalizeStringSlice(cfg.SandboxWritableRoots)
+	cfg.SandboxReadOnlySubpaths = normalizeStringSlice(cfg.SandboxReadOnlySubpaths)
 	if len(cfg.Agents) > 0 {
 		keys := make([]string, 0, len(cfg.Agents))
 		for key := range cfg.Agents {

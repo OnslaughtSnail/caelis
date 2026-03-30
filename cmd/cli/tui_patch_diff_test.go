@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -22,11 +23,24 @@ func (r previewTestRuntime) SandboxType() string                   { return "tes
 func (r previewTestRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
 func (r previewTestRuntime) FallbackToHost() bool                  { return false }
 func (r previewTestRuntime) FallbackReason() string                { return "" }
+func (r previewTestRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{}
+}
 func (r previewTestRuntime) FileSystem() toolexec.FileSystem {
 	return previewTestFS(r)
 }
-func (r previewTestRuntime) HostRunner() toolexec.CommandRunner    { return nil }
-func (r previewTestRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
+func (r previewTestRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{Mode: toolexec.PermissionModeDefault, ResolvedSandbox: "test"}
+}
+func (r previewTestRuntime) Execute(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, errors.New("execution unavailable")
+}
+func (r previewTestRuntime) Start(context.Context, toolexec.CommandRequest) (toolexec.Session, error) {
+	return nil, errors.New("execution unavailable")
+}
+func (r previewTestRuntime) OpenSession(toolexec.CommandSessionRef) (toolexec.Session, error) {
+	return nil, errors.New("execution unavailable")
+}
 func (r previewTestRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{}
 }

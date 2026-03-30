@@ -277,7 +277,7 @@ func (a *loopingAgent) Run(_ agent.InvocationContext) iter.Seq2[*session.Event, 
 
 func TestRuntime_LoopDetection_TerminatesStuckAgent(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestRuntime_LoopDetection_TerminatesStuckAgent(t *testing.T) {
 
 func TestRuntime_LoopDetection_EmitsVisibleWarningNotice(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func (a *varyingToolArgsAgent) Run(_ agent.InvocationContext) iter.Seq2[*session
 
 func TestRuntime_LoopDetection_NoFalsePositiveForVaryingArgs(t *testing.T) {
 	store := inmemory.New()
-	rt, err := New(Config{Store: store})
+	rt, err := New(Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,10 +2,13 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 )
 
 func TestReadTool_OffsetAndLimit(t *testing.T) {
@@ -104,5 +107,48 @@ func TestReadToolDeclaration_ExplainsLineThenTokenBudget(t *testing.T) {
 	}
 	if got := readTool.Description(); !strings.Contains(got, "first slices by lines") {
 		t.Fatalf("expected updated READ description, got %q", got)
+	}
+}
+
+func TestReadTool_DefaultWorkspaceRuntime_AllowsReadOutsideWorkspace(t *testing.T) {
+	rt, _ := newDefaultWorkspaceRuntime(t)
+	readTool, err := NewReadWithRuntime(DefaultReadConfig(), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := newOutsideScratchFilePath(t, "outside.txt")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := readTool.Run(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatalf("expected outside-workspace read to stay allowed, got %v", err)
+	}
+	text, _ := out["content"].(string)
+	if !strings.Contains(text, "1: line1") || !strings.Contains(text, "2: line2") {
+		t.Fatalf("unexpected content: %q", text)
+	}
+}
+
+func TestReadTool_RestrictedReadableRootsRejectOutsideWorkspace(t *testing.T) {
+	rt, _ := newWorkspaceRuntimeWithPolicy(t, toolexec.SandboxPolicy{
+		Type:          toolexec.SandboxPolicyWorkspaceWrite,
+		ReadableRoots: []string{"."},
+	})
+	readTool, err := NewReadWithRuntime(DefaultReadConfig(), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := newOutsideScratchFilePath(t, "outside.txt")
+	if err := os.WriteFile(path, []byte("line1\nline2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = readTool.Run(context.Background(), map[string]any{"path": path})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected permission error for outside-workspace read, got %v", err)
 	}
 }

@@ -30,22 +30,12 @@ func TestAssemble_PolicyProviderOnly(t *testing.T) {
 	}
 }
 
-func TestAssemble_NilRegistryFallsBackToBuiltinProviders(t *testing.T) {
-	got, err := Assemble(context.Background(), AssembleSpec{
+func TestAssemble_NilRegistryFails(t *testing.T) {
+	_, err := Assemble(context.Background(), AssembleSpec{
 		PolicyProviders: []string{ProviderDefaultPolicy},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("expected non-nil resolved spec")
-		return
-	}
-	if len(got.Tools) != 0 {
-		t.Fatalf("expected no assembled tools, got %d", len(got.Tools))
-	}
-	if len(got.Policies) != 2 {
-		t.Fatalf("expected 2 policy hooks, got %d", len(got.Policies))
+	if err == nil {
+		t.Fatal("expected assembly to require registry")
 	}
 }
 

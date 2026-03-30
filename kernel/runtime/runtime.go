@@ -22,17 +22,10 @@ type Config struct {
 	StateStore session.StateStore
 	TaskStore  task.Store
 	Compaction CompactionConfig
-
-	// Store is kept as a compatibility aggregate while callers migrate to
-	// narrower ports. LogStore/StateStore take precedence when set.
-	Store session.Store
 }
 
 // Runtime orchestrates session lifecycle and agent execution.
 type Runtime struct {
-	// store is kept as a compatibility aggregate for tests and transitional
-	// callers that still inspect the legacy field directly.
-	store              session.Store
 	logStore           session.LogStore
 	stateStore         session.StateStore
 	stateUpdater       session.StateUpdateStore
@@ -46,13 +39,7 @@ type Runtime struct {
 
 type SubagentRunnerFactory func(*Runtime, *session.Session, RunRequest) agent.SubagentRunner
 
-func New(cfg Config) (*Runtime, error) {
-	if cfg.LogStore == nil && cfg.Store != nil {
-		cfg.LogStore = cfg.Store
-	}
-	if cfg.StateStore == nil && cfg.Store != nil {
-		cfg.StateStore = cfg.Store
-	}
+func newRuntime(cfg Config) (*Runtime, error) {
 	if cfg.LogStore == nil {
 		return nil, fmt.Errorf("runtime: log store is nil")
 	}
@@ -66,7 +53,6 @@ func New(cfg Config) (*Runtime, error) {
 	}
 	updater, _ := cfg.StateStore.(session.StateUpdateStore)
 	return &Runtime{
-		store:              cfg.Store,
 		logStore:           cfg.LogStore,
 		stateStore:         cfg.StateStore,
 		stateUpdater:       updater,
@@ -76,6 +62,10 @@ func New(cfg Config) (*Runtime, error) {
 		compactionStrategy: strategy,
 		activeRuns:         map[string]struct{}{},
 	}, nil
+}
+
+func New(cfg Config) (*Runtime, error) {
+	return newRuntime(cfg)
 }
 
 // RunRequest defines one invocation input.
@@ -176,17 +166,21 @@ func (r *Runtime) buildInvocationContext(
 	)
 	ctx = task.WithManager(ctx, taskManager)
 	ctx = session.WithStoresContext(ctx, sess, r.logStore, r.stateStore)
-	allTools, err := tool.EnsureCoreTools(req.Tools, coreTools)
+	builtins, err := tool.BuildCoreTools(coreTools)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("runtime: build core tools: %w", err)
+	}
+	allTools, err := tool.EnsureCoreTools(req.Tools, builtins)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: merge tools: %w", err)
 	}
 	toolMap, err := tool.BuildMap(allTools)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("runtime: build tool map: %w", err)
 	}
 	state, err := r.snapshotReadonlyState(ctx, sess)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("runtime: snapshot readonly state: %w", err)
 	}
 	return &invocationContext{
 		Context:  ctx,
@@ -358,39 +352,46 @@ func (r *Runtime) appendAndYieldLifecycle(
 	prepareEvent(ctx, sess, ev)
 	state, ok := runStateFromLifecycleEvent(ev)
 	if ok {
-		snapshot := runStateSnapshot(state)
-		if r.stateUpdater != nil {
-			if err := r.stateUpdater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
-				if existing == nil {
-					existing = map[string]any{}
-				}
-				for k, v := range snapshot {
-					existing[k] = v
-				}
-				return existing, nil
-			}); err != nil {
-				return yield(nil, fmt.Errorf("lifecycle state merge: failed to update state: %w", err))
-			}
-		} else {
-			// Merge lifecycle data into existing state instead of replacing
-			// the entire map, so that unrelated state keys are preserved.
-			existing, snapErr := r.stateStore.SnapshotState(ctx, sess)
-			if snapErr != nil {
-				return yield(nil, fmt.Errorf("lifecycle state merge: failed to read existing state: %w", snapErr))
-			}
-			if existing == nil {
-				existing = map[string]any{}
-			}
-			for k, v := range snapshot {
-				existing[k] = v
-			}
-			if err := r.stateStore.ReplaceState(ctx, sess, existing); err != nil {
-				return yield(nil, err)
-			}
+		if err := r.mergeLifecycleStateSnapshot(ctx, sess, runStateSnapshot(state)); err != nil {
+			return yield(nil, err)
 		}
 	}
 	if !yield(ev, nil) {
 		return false
 	}
 	return true
+}
+
+func (r *Runtime) mergeLifecycleStateSnapshot(ctx context.Context, sess *session.Session, snapshot map[string]any) error {
+	if r == nil || sess == nil || len(snapshot) == 0 {
+		return nil
+	}
+	if r.stateUpdater != nil {
+		if err := r.stateUpdater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
+			if existing == nil {
+				existing = map[string]any{}
+			}
+			for k, v := range snapshot {
+				existing[k] = v
+			}
+			return existing, nil
+		}); err != nil {
+			return fmt.Errorf("lifecycle state merge: failed to update state: %w", err)
+		}
+		return nil
+	}
+	existing, err := r.stateStore.SnapshotState(ctx, sess)
+	if err != nil {
+		return fmt.Errorf("lifecycle state merge: failed to read existing state: %w", err)
+	}
+	if existing == nil {
+		existing = map[string]any{}
+	}
+	for k, v := range snapshot {
+		existing[k] = v
+	}
+	if err := r.stateStore.ReplaceState(ctx, sess, existing); err != nil {
+		return fmt.Errorf("lifecycle state merge: failed to replace state: %w", err)
+	}
+	return nil
 }

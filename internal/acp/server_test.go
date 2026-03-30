@@ -1994,7 +1994,7 @@ func newHarness(t *testing.T, cfg harnessConfig) *harness {
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatalf("new runtime core: %v", err)
 	}

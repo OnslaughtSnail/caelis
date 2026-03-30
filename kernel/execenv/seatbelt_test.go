@@ -194,6 +194,26 @@ func TestBuildSeatbeltProfileIncludesSystemRules(t *testing.T) {
 	}
 }
 
+func TestBuildSeatbeltProfile_ExplicitReadableRootsScopesReadAccess(t *testing.T) {
+	workDir := t.TempDir()
+	profile := buildSeatbeltProfile(SandboxPolicy{
+		Type:          SandboxPolicyWorkspaceWrite,
+		NetworkAccess: true,
+		ReadableRoots: []string{"."},
+		WritableRoots: []string{"."},
+	}, workDir)
+
+	if strings.Contains(profile, "(allow file-read*)\n") {
+		t.Fatalf("expected explicit readable roots to replace global file-read allow, got %q", profile)
+	}
+	if !strings.Contains(profile, `(allow file-read* (subpath `+sbplString(workDir)+`))`) {
+		t.Fatalf("expected workspace readable root in profile, got %q", profile)
+	}
+	if !strings.Contains(profile, `(allow file-read* (subpath "/usr"))`) {
+		t.Fatalf("expected system readable root in profile, got %q", profile)
+	}
+}
+
 func TestBuildSeatbeltProfileIncludesExtendedPermissions(t *testing.T) {
 	profile := buildSeatbeltProfile(SandboxPolicy{
 		Type:          SandboxPolicyWorkspaceWrite,
@@ -288,7 +308,7 @@ func TestSeatbeltPathVariantsIncludesSymlinkResolvedPath(t *testing.T) {
 		t.Skipf("symlink unsupported: %v", err)
 	}
 
-	variants := seatbeltPathVariants(link)
+	variants := sandboxPathVariants(link)
 	if len(variants) == 0 {
 		t.Fatal("expected non-empty path variants")
 	}

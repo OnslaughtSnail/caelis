@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -34,16 +35,33 @@ func (r mutationPreviewRuntime) FallbackReason() string {
 	return r.base.FallbackReason()
 }
 
+func (r mutationPreviewRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return r.base.Diagnostics()
+}
+
+func (r mutationPreviewRuntime) State() toolexec.RuntimeState {
+	return r.base.State()
+}
+
 func (r mutationPreviewRuntime) FileSystem() toolexec.FileSystem {
 	return r.fsys
 }
 
-func (r mutationPreviewRuntime) HostRunner() toolexec.CommandRunner {
-	return r.base.HostRunner()
+func (r mutationPreviewRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return r.base.Execute(ctx, req)
 }
 
-func (r mutationPreviewRuntime) SandboxRunner() toolexec.CommandRunner {
-	return r.base.SandboxRunner()
+func (r mutationPreviewRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	return r.base.Start(ctx, req)
+}
+
+func (r mutationPreviewRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	return r.base.OpenSession(ref)
+}
+
+func (r mutationPreviewRuntime) Decide(ctx context.Context, req toolexec.RouteRequest) (toolexec.CommandDecision, error) {
+	_ = ctx
+	return r.base.DecideRoute(req.Command, req.SandboxPermission), nil
 }
 
 func (r mutationPreviewRuntime) DecideRoute(command string, permission toolexec.SandboxPermission) toolexec.CommandDecision {

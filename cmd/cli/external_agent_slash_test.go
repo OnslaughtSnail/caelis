@@ -190,6 +190,55 @@ func TestHandleExternalPermissionRequest_FullAccessFallbackPromptsUser(t *testin
 	}
 }
 
+func TestHandleExternalPermissionRequest_UsesRunScopedSessionID(t *testing.T) {
+	prompter := &stubLineEditor{lines: []string{"y", "y"}}
+	sender := &testSender{}
+	console := &cliConsole{
+		sessionMode: sessionmode.FullMode,
+		approver:    newTerminalApprover(prompter, io.Discard, newUI(io.Discard, true, false)),
+		tuiSender:   sender,
+	}
+	console.approver.modeResolver = func() string { return console.sessionMode }
+
+	for _, childSessionID := range []string{"child-gemini-1", "child-gemini-2"} {
+		_, err := console.handleExternalPermissionRequest(context.Background(), acpclient.RequestPermissionRequest{
+			SessionID: childSessionID,
+			ToolCall: acpclient.ToolCallUpdate{
+				Title:    strPtr("BASH cat <<EOF"),
+				Kind:     strPtr("execute"),
+				RawInput: map[string]any{"command": "cat <<EOF\nhello\nEOF"},
+			},
+			Options: []acpclient.PermissionOption{
+				{OptionID: "approve", Name: "Approve"},
+				{OptionID: "reject", Name: "Reject"},
+			},
+		}, "unknown-agent", &activeExternalAgentRun{sessionID: childSessionID})
+		if err != nil {
+			t.Fatalf("permission request for %s: %v", childSessionID, err)
+		}
+	}
+
+	var waiting, running []string
+	for _, msg := range sender.Snapshot() {
+		status, ok := msg.(tuievents.ParticipantStatusMsg)
+		if !ok {
+			continue
+		}
+		switch status.State {
+		case "waiting_approval":
+			waiting = append(waiting, status.SessionID)
+		case "running":
+			running = append(running, status.SessionID)
+		}
+	}
+	if !slices.Equal(waiting, []string{"child-gemini-1", "child-gemini-2"}) {
+		t.Fatalf("expected waiting_approval to follow each run-scoped session id, got %v", waiting)
+	}
+	if !slices.Equal(running, []string{"child-gemini-1", "child-gemini-2"}) {
+		t.Fatalf("expected running reset to follow each run-scoped session id, got %v", running)
+	}
+}
+
 func selectedPermissionOptionID(t *testing.T, resp acpclient.RequestPermissionResponse) string {
 	t.Helper()
 	var selected struct {
@@ -200,3 +249,5 @@ func selectedPermissionOptionID(t *testing.T, resp acpclient.RequestPermissionRe
 	}
 	return selected.OptionID
 }
+
+func strPtr(value string) *string { return &value }

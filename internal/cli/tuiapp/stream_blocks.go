@@ -1041,12 +1041,57 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
 	block := NewDiffBlock(msg)
-	m.doc.Append(block)
+	if anchorID := m.latestDiffAnchorBlockID(msg.Tool); anchorID != "" {
+		block.Inline = true
+		if m.diffAnchorIndex == nil {
+			m.diffAnchorIndex = map[string]string{}
+		}
+		if existingID := strings.TrimSpace(m.diffAnchorIndex[anchorID]); existingID != "" {
+			if existing, _ := m.doc.Find(existingID).(*DiffBlock); existing != nil {
+				existing.Msg = msg
+				existing.Inline = true
+				m.hasCommittedLine = true
+				m.lastCommittedStyle = tuikit.LineStyleDefault
+				m.lastCommittedRaw = ""
+				m.syncViewportContent()
+				return m, nil
+			}
+		}
+		m.doc.InsertAfter(anchorID, block)
+		m.diffAnchorIndex[anchorID] = block.BlockID()
+	} else {
+		m.doc.Append(block)
+	}
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.syncViewportContent()
 	return m, nil
+}
+
+func (m *Model) latestDiffAnchorBlockID(toolName string) string {
+	if m == nil || m.doc == nil {
+		return ""
+	}
+	normalizedTool := strings.ToUpper(strings.TrimSpace(toolName))
+	if normalizedTool == "" {
+		return ""
+	}
+	for idx := m.doc.Len() - 1; idx >= 0; idx-- {
+		block := m.doc.Blocks()[idx]
+		transcript, ok := block.(*TranscriptBlock)
+		if !ok {
+			continue
+		}
+		anchorTool, ok := extractToolCallName(transcript.Raw)
+		if ok && strings.EqualFold(anchorTool, normalizedTool) {
+			return transcript.BlockID()
+		}
+		if strings.TrimSpace(transcript.Raw) != "" {
+			return ""
+		}
+	}
+	return ""
 }
 
 func (m *Model) ensureParticipantTurnBlock(sessionID string, actor string) *ParticipantTurnBlock {
@@ -1262,6 +1307,7 @@ func (m *Model) resetConversationView() {
 	m.activeParticipantTurnSessionID = ""
 	m.pendingToolAnchors = nil
 	m.callAnchorIndex = nil
+	m.diffAnchorIndex = nil
 	m.taskOriginCallID = nil
 	m.doc.Clear()
 	m.viewportStyledLines = m.viewportStyledLines[:0]

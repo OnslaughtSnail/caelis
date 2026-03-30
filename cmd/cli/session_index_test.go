@@ -59,9 +59,22 @@ func (r resumeExecRuntime) SandboxType() string                   { return "test
 func (r resumeExecRuntime) SandboxPolicy() toolexec.SandboxPolicy { return toolexec.SandboxPolicy{} }
 func (r resumeExecRuntime) FallbackToHost() bool                  { return false }
 func (r resumeExecRuntime) FallbackReason() string                { return "" }
-func (r resumeExecRuntime) FileSystem() toolexec.FileSystem       { return previewTestFS{cwd: r.cwd} }
-func (r resumeExecRuntime) HostRunner() toolexec.CommandRunner    { return r.host }
-func (r resumeExecRuntime) SandboxRunner() toolexec.CommandRunner { return nil }
+func (r resumeExecRuntime) Diagnostics() toolexec.SandboxDiagnostics {
+	return toolexec.SandboxDiagnostics{}
+}
+func (r resumeExecRuntime) FileSystem() toolexec.FileSystem { return previewTestFS{cwd: r.cwd} }
+func (r resumeExecRuntime) State() toolexec.RuntimeState {
+	return toolexec.RuntimeState{Mode: toolexec.PermissionModeDefault, ResolvedSandbox: "test"}
+}
+func (r resumeExecRuntime) Execute(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+func (r resumeExecRuntime) Start(ctx context.Context, req toolexec.CommandRequest) (toolexec.Session, error) {
+	return runtimeSessionFromRunner(ctx, "host", r.host, req)
+}
+func (r resumeExecRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	return runtimeSessionFromRef("host", r.host, ref)
+}
 func (r resumeExecRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexec.CommandDecision {
 	return toolexec.CommandDecision{}
 }
@@ -329,7 +342,7 @@ func TestHandleResume_WithSessionID_NonTUIStaysSilent(t *testing.T) {
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +402,7 @@ func TestHandleResume_PassesExecRuntimeForBashRecovery(t *testing.T) {
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
 	store := inmemory.New()
 	tasks := taskmem.New()
-	rt, err := runtime.New(runtime.Config{Store: store, TaskStore: tasks})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store, TaskStore: tasks})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +483,7 @@ func TestHandleResume_WithSessionPrefix_ResolvesUniqueMatch(t *testing.T) {
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +525,7 @@ func TestHandleResume_WithSessionID_TUIReplaysRecentEvents(t *testing.T) {
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +628,7 @@ func TestHandleResume_TUIReplaysInterleavedUserAttachmentsInStoredOrder(t *testi
 	})
 	workspace := workspaceContext{CWD: "/tmp/ws", Key: "ws-key"}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +693,7 @@ func TestHandleResume_WithPatchResponse_ReplaysCompactSummaryWithoutDiffBlock(t 
 		t.Fatal(err)
 	}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +788,7 @@ func TestHandleResume_WithPatchInsert_ReplaysTrueDiffStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,7 +858,7 @@ func TestHandleResume_WithPatchInsert_ReplaysTrueDiffStats(t *testing.T) {
 	t.Fatalf("expected compact patch summary +1 -0, got %#v", sender.msgs)
 }
 
-func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) {
+func TestHandleResume_WithWriteResult_ShowsLineCountSummary(t *testing.T) {
 	idx, err := newSessionIndex(filepath.Join(t.TempDir(), "session_index.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -860,11 +873,11 @@ func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) 
 		t.Fatal(err)
 	}
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess := &session.Session{AppName: "app", UserID: "u", ID: "resume-write-legacy"}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "resume-write-lines"}
 	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
 		t.Fatal(err)
 	}
@@ -873,7 +886,7 @@ func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) 
 		Time: time.Now(),
 		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{
 			{
-				ID:   "call_write_legacy",
+				ID:   "call_write_lines",
 				Name: "WRITE",
 				Args: fmt.Sprintf(`{"path":%q,"content":"new-one\nnew-two\n"}`, diffFixturePath),
 			},
@@ -885,7 +898,7 @@ func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) 
 		ID:   "ev-result",
 		Time: time.Now().Add(time.Second),
 		Message: model.MessageFromToolResponse(&model.ToolResponse{
-			ID:   "call_write_legacy",
+			ID:   "call_write_lines",
 			Name: "WRITE",
 			Result: map[string]any{
 				"path":       diffFixturePath,
@@ -896,7 +909,7 @@ func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := idx.UpsertSession(workspace, "app", "u", "resume-write-legacy", time.Now().Add(time.Second)); err != nil {
+	if err := idx.UpsertSession(workspace, "app", "u", "resume-write-lines", time.Now().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
@@ -915,16 +928,16 @@ func TestHandleResume_WithLegacyWriteResult_UsesLineCountFallback(t *testing.T) 
 		showReasoning: true,
 		tuiSender:     sender,
 	}
-	if _, err := handleResume(c, []string{"resume-write-legacy"}); err != nil {
+	if _, err := handleResume(c, []string{"resume-write-lines"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, raw := range sender.msgs {
 		msg, ok := raw.(tuievents.LogChunkMsg)
-		if ok && strings.Contains(msg.Chunk, "✓ WRITE +2 -0") {
+		if ok && strings.Contains(msg.Chunk, "✓ WRITE wrote a.txt (2 lines)") {
 			return
 		}
 	}
-	t.Fatalf("expected legacy WRITE summary +2 -0, got %#v", sender.msgs)
+	t.Fatalf("expected WRITE line-count summary, got %#v", sender.msgs)
 }
 
 func TestHandleResume_DefaultUsesMostRecentNonCurrent(t *testing.T) {

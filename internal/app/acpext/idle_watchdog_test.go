@@ -38,13 +38,13 @@ func TestIdleWatchdog_PauseResumeSkipsApprovalWaits(t *testing.T) {
 	defer watchdog.Stop()
 
 	watchdog.Beat()
-	watchdog.Pause()
+	watchdog.PauseWithReason(idleWatchdogPauseApproval)
 	time.Sleep(120 * time.Millisecond)
 	if fired.Load() != 0 {
 		t.Fatal("expected paused watchdog to ignore approval wait")
 	}
 
-	watchdog.Resume()
+	watchdog.ResumeWithReason(idleWatchdogPauseApproval)
 	time.Sleep(25 * time.Millisecond)
 	if fired.Load() != 0 {
 		t.Fatal("expected watchdog resume to refresh the idle window")
@@ -69,20 +69,20 @@ func TestIdleWatchdog_NestedPauseRequiresFinalResume(t *testing.T) {
 	defer watchdog.Stop()
 
 	watchdog.Beat()
-	watchdog.Pause()
-	watchdog.Pause()
+	watchdog.PauseWithReason(idleWatchdogPauseApproval)
+	watchdog.PauseWithReason(idleWatchdogPauseTerminalTool)
 	time.Sleep(100 * time.Millisecond)
 	if fired.Load() != 0 {
 		t.Fatal("expected nested pause to suppress idle timeout")
 	}
 
-	watchdog.Resume()
+	watchdog.ResumeWithReason(idleWatchdogPauseApproval)
 	time.Sleep(80 * time.Millisecond)
 	if fired.Load() != 0 {
 		t.Fatal("expected watchdog to remain paused until the final resume")
 	}
 
-	watchdog.Resume()
+	watchdog.ResumeWithReason(idleWatchdogPauseTerminalTool)
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if fired.Load() > 0 {

@@ -65,7 +65,7 @@ func newTestACPAdapterFactory(rt *runtime.Runtime, store session.Store, execRT t
 
 func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
 
 func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 
 func TestACPSpawnLeavesChildSessionInDefaultMode(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestPermissionRequestHandler_InvokesApprovalWatchdogHooks(t *testing.T) {
 
 func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 
 func TestSelfACPSubagentRunner_UsesCurrentTaskWriteLineageWhenReusingChildSession(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,7 +572,7 @@ func TestSelfACPSubagentRunner_UsesCurrentTaskWriteLineageWhenReusingChildSessio
 
 func TestSelfACPSubagentRunner_InspectFallsBackToPersistedState(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +823,7 @@ func TestPermissionRequestHandler_FullAccessUnknownOptionsFallbackToInteractiveA
 
 func TestSelfACPSubagentRunner_ReturnsSessionHandleWhenPromptTimeoutHitsAfterReady(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -886,7 +886,7 @@ func TestSelfACPSubagentRunner_ReturnsSessionHandleWhenPromptTimeoutHitsAfterRea
 
 func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -960,7 +960,7 @@ func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
 
 func TestSelfACPSubagentRunner_CallerTimeoutDoesNotCancelDetachedChild(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1110,7 +1110,7 @@ func TestACPTransportRunSubagent_FailsPromptWhenPeerDisconnectsAfterPartialOutpu
 	defer func() { startACPClient = origStart }()
 
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1180,7 +1180,7 @@ func TestACPTransportRunSubagent_FailsPromptWhenPeerDisconnectsAfterPartialOutpu
 
 func TestDelegatedSelfChildSessionCannotSpawnExternalACPChild(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1320,7 +1320,7 @@ func TestDelegatedSelfChildSessionCannotSpawnExternalACPChild(t *testing.T) {
 
 func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1455,7 +1455,7 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 
 func TestSelfACPSpawnRejectsNestedSelfSpawnWithoutBreakingChildSession(t *testing.T) {
 	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{Store: store})
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1766,6 +1766,50 @@ func TestTerminalBridgeManager_StreamsTerminalOutputIntoSessionUpdates(t *testin
 	}
 	if !strings.Contains(state.LatestOutput, "heartbeat 2/2") {
 		t.Fatalf("expected tracker latest output to include terminal progress, got %+v", state)
+	}
+}
+
+func TestTerminalBridgeManager_OnlyPausesWatchdogForActiveTerminalSession(t *testing.T) {
+	client := &fakeTerminalOutputClient{
+		outputs: []acpclient.TerminalOutputResponse{
+			{
+				Output: "[10s] heartbeat\n",
+				ExitStatus: &acpclient.TerminalExitStatus{
+					ExitCode: intPtr(0),
+				},
+			},
+		},
+	}
+	var starts, stops int
+	manager := &terminalBridgeManager{
+		onStart: func() { starts++ },
+		onStop:  func() { stops++ },
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	title := "BASH python long_job.py"
+	kind := "execute"
+	update := acpclient.ToolCallUpdate{
+		ToolCallID: "call-bash-1",
+		Title:      &title,
+		Kind:       &kind,
+		Status:     strPtr("in_progress"),
+		Content: []acpclient.ToolCallContent{{
+			Type:       "terminal",
+			TerminalID: "term-child-1",
+		}},
+	}
+	manager.observe(ctx, client, newRemoteSubagentTracker(), "child-1", "self", runtime.DelegationMetadata{}, update)
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if starts == 1 && stops == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if starts != 1 || stops != 1 {
+		t.Fatalf("expected one start and one stop callback for terminal-backed tool, got starts=%d stops=%d", starts, stops)
 	}
 }
 

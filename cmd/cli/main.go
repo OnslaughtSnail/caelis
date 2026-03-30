@@ -63,7 +63,6 @@ func runCLI(ctx context.Context, args []string) error {
 		userID           = fs.String("user", "local-user", "User id")
 		sessionID        = fs.String("session", "default", "Session id")
 		prompt           = fs.String("p", "", "Single-shot prompt text (headless mode)")
-		input            = fs.String("input", "", "Input text")
 		outputFormat     = fs.String("format", string(headlessFormatText), "Output format for headless mode: text|json")
 		storeDir         = fs.String("store-dir", defaultStoreDir, "Local event store directory")
 		sessionIndexFile = fs.String("session-index", defaultSessionIndexPath, "Session index sqlite file path")
@@ -94,7 +93,7 @@ func runCLI(ctx context.Context, args []string) error {
 	}
 	stdinTTY := isTTY(os.Stdin)
 	stdoutTTY := isTTY(os.Stdout)
-	singleInput, singleShotMode, err := resolveSingleShotInput(*prompt, *input, os.Stdin, stdinTTY, stdoutTTY)
+	singleInput, singleShotMode, err := resolveSingleShotInput(*prompt, os.Stdin, stdinTTY, stdoutTTY)
 	if err != nil {
 		return err
 	}
@@ -147,6 +146,7 @@ func runCLI(ctx context.Context, args []string) error {
 		toolexec.PermissionMode(strings.TrimSpace(*permissionMode)),
 		strings.TrimSpace(*sandboxType),
 		sandboxHelperPath,
+		configStore.SandboxPolicy(),
 	)
 	if err != nil {
 		return err
@@ -515,6 +515,7 @@ func runCLI(ctx context.Context, args []string) error {
 		ExecRuntime:           execRuntime,
 		ExecRuntimeView:       execRuntimeView,
 		SandboxType:           strings.TrimSpace(*sandboxType),
+		SandboxPolicy:         configStore.SandboxPolicy(),
 		AppliedSandboxType:    strings.TrimSpace(*sandboxType),
 		SandboxHelperPath:     sandboxHelperPath,
 		ModelAlias:            alias,
