@@ -37,8 +37,6 @@ jobs:
         run: make vet
 
       - name: Test
-        env:
-          GOMAXPROCS: 1
         run: make test
 
       - name: Build
