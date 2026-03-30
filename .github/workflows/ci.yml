@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # Limit package-level concurrency to avoid hitting process limits on
+      # GitHub-hosted runners during wide repo builds/tests.
+      GOFLAGS: -p=4
     defaults:
       run:
         working-directory: .

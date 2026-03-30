@@ -7,6 +7,8 @@ on:
 jobs:
   go-quality:
     runs-on: ubuntu-latest
+    env:
+      GOFLAGS: -p=4
     steps:
       - uses: actions/checkout@v4
 
