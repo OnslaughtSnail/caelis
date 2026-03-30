@@ -211,7 +211,7 @@ func TestHostRunner_Async(t *testing.T) {
 
 	// Start async command
 	sessionID, err := runner.StartAsync(context.Background(), CommandRequest{
-		Command: "echo async-test",
+		Command: "printf async-test; sleep 0.05",
 	})
 	if err != nil {
 		t.Fatalf("StartAsync failed: %v", err)

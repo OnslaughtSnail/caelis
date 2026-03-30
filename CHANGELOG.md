@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## v0.0.32 - 2026-03-30
+
+### Runtime Backends, Session Modes, And Resume Fixes
+- Refactored execution-runtime backend selection and sandbox policy handling across console, ACP, and runtime integration, with stronger regression coverage around Linux and macOS sandbox backends.
+- Fixed resumed task and bash-watch recovery for legacy persisted records so historical ACP terminal takeovers and backend metadata continue to restore correctly after upgrades.
+- Corrected console session-mode handling so `full_access` state is reflected consistently in the TUI and `/status`, including improved Shift+Tab mode switching behavior on Linux terminals.
+
+### ACP, TUI, And Test Stability
+- Tightened ACP resume and replay coverage by replacing environment-sensitive loopback client paths in resume tests with mocks, reducing Ubuntu-specific timing and sandbox probe flakiness.
+- Hardened `kernel/execenv` async host-runner coverage against ultra-short command races so release validation is less sensitive to scheduler timing.
+- Refined `acpx` approval routing in default mode so actual `acpx` execution still routes through approval correctly while lookup commands such as `which acpx` no longer trigger unnecessary escalation.
+
+### Documentation And Release Metadata
+- Rewrote the repository README to match the current CLI and ACP surface, including removal of outdated user-facing MCP setup and `mcp_tools` guidance.
+- Bumped release metadata to `v0.0.32` in `CHANGELOG.md`, `README.md`, and `VERSION` for the tagged release.
+
 ## v0.0.31 - 2026-03-29
 
 ### ACP Delegation, Permissions, And Resume Hardening
