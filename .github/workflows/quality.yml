@@ -4,11 +4,15 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go-quality:
     runs-on: ubuntu-latest
     env:
-      GOFLAGS: -p=4
+      GOMAXPROCS: 2
     steps:
       - uses: actions/checkout@v4
 
@@ -28,10 +32,16 @@ jobs:
           install-mode: goinstall
 
       - name: Vet
+        env:
+          GOFLAGS: -p=1
         run: make vet
 
       - name: Test
+        env:
+          GOMAXPROCS: 1
         run: make test
 
       - name: Build
+        env:
+          GOFLAGS: -p=1
         run: make build

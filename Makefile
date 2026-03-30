@@ -35,7 +35,11 @@ lint:
 quality: fmt-check lint test vet build
 
 test:
+ifeq ($(CI),true)
+	bash ./scripts/go_test_serial.sh
+else
 	go test ./...
+endif
 
 eval-light:
 	go run ./eval/cmd -suite light
