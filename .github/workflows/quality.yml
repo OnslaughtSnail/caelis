@@ -35,20 +35,10 @@ jobs:
           install-mode: goinstall
 
       - name: Vet
-        env:
-          GOFLAGS: -p=1
-          GOMAXPROCS: 2
         run: make vet
 
       - name: Build
-        env:
-          GOFLAGS: -p=1
-          GOMAXPROCS: 2
         run: make build
 
       - name: Test
-        env:
-          GOFLAGS: -p=1
-        run: |
-          set -o pipefail
-          go test -json -timeout=5m ./... | tee /tmp/go-test.json
+        run: make test
