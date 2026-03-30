@@ -1,8 +1,9 @@
 name: quality
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -11,8 +12,7 @@ concurrency:
 jobs:
   go-quality:
     runs-on: ubuntu-latest
-    env:
-      GOMAXPROCS: 2
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -34,12 +34,18 @@ jobs:
       - name: Vet
         env:
           GOFLAGS: -p=1
+          GOMAXPROCS: 2
         run: make vet
-
-      - name: Test
-        run: make test
 
       - name: Build
         env:
           GOFLAGS: -p=1
+          GOMAXPROCS: 2
         run: make build
+
+      - name: Test
+        env:
+          # Keep some concurrency for throughput, but avoid the default
+          # package fan-out that has been unstable on GitHub-hosted runners.
+          GOFLAGS: -p=2
+        run: make test
