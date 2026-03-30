@@ -170,6 +170,10 @@ func openConsoleBashSession(execRuntime toolexec.Runtime, backendName string, ro
 		case string(toolexec.ExecutionRouteHost):
 			backendName = "host"
 		default:
+			if usesLegacyConsoleACPTerminalBackend(route, sessionID) {
+				backendName = "acp_terminal"
+				break
+			}
 			state := execRuntime.State()
 			backendName = strings.TrimSpace(state.ResolvedSandbox)
 			if backendName == "" {
@@ -181,6 +185,15 @@ func openConsoleBashSession(execRuntime toolexec.Runtime, backendName string, ro
 		Backend:   backendName,
 		SessionID: strings.TrimSpace(sessionID),
 	})
+}
+
+func usesLegacyConsoleACPTerminalBackend(route string, sessionID string) bool {
+	switch strings.TrimSpace(route) {
+	case "", string(toolexec.ExecutionRouteSandbox):
+	default:
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sessionID)), "term-")
 }
 
 func bashWatchState(state toolexec.SessionState) string {

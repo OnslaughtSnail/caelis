@@ -16,17 +16,47 @@ func isACPXCommand(command string) bool {
 }
 
 func isACPXSegment(tokens []string) bool {
-	if len(tokens) == 0 {
-		return false
+	tokens = trimLeadingAssignments(tokens)
+	for len(tokens) > 0 {
+		base := strings.ToLower(filepath.Base(tokens[0]))
+		switch base {
+		case "acpx":
+			return true
+		case "npx":
+			return npxInvokesACPX(tokens[1:])
+		case "which", "whereis", "type":
+			return false
+		case "command":
+			next, lookup := unwrapCommandBuiltin(tokens[1:])
+			if lookup {
+				return false
+			}
+			tokens = next
+			continue
+		case "env":
+			tokens = unwrapEnv(tokens[1:])
+			continue
+		case "builtin", "nohup", "time":
+			tokens = tokens[1:]
+			continue
+		default:
+			return false
+		}
 	}
-	base := strings.ToLower(filepath.Base(tokens[0]))
-	if base == "acpx" {
+	return false
+}
+
+func npxOptionNeedsValue(token string) bool {
+	switch token {
+	case "-c", "--call", "-p", "--package", "--cache", "--userconfig", "--registry", "--prefix":
 		return true
-	}
-	if base != "npx" {
+	default:
 		return false
 	}
-	for i := 1; i < len(tokens); i++ {
+}
+
+func npxInvokesACPX(tokens []string) bool {
+	for i := 0; i < len(tokens); i++ {
 		token := tokens[i]
 		if token == "--" {
 			if i+1 >= len(tokens) {
@@ -45,13 +75,52 @@ func isACPXSegment(tokens []string) bool {
 	return false
 }
 
-func npxOptionNeedsValue(token string) bool {
-	switch token {
-	case "-c", "--call", "-p", "--package", "--cache", "--userconfig", "--registry", "--prefix":
-		return true
-	default:
-		return false
+func trimLeadingAssignments(tokens []string) []string {
+	for len(tokens) > 0 {
+		token := tokens[0]
+		if strings.Contains(token, "=") && !strings.HasPrefix(token, "=") {
+			tokens = tokens[1:]
+			continue
+		}
+		break
 	}
+	return tokens
+}
+
+func unwrapCommandBuiltin(tokens []string) ([]string, bool) {
+	for len(tokens) > 0 {
+		token := tokens[0]
+		if token == "--" {
+			return trimLeadingAssignments(tokens[1:]), false
+		}
+		if !strings.HasPrefix(token, "-") {
+			return trimLeadingAssignments(tokens), false
+		}
+		if token == "-v" || token == "-V" {
+			return nil, true
+		}
+		tokens = tokens[1:]
+	}
+	return nil, false
+}
+
+func unwrapEnv(tokens []string) []string {
+	for len(tokens) > 0 {
+		token := tokens[0]
+		if token == "--" {
+			return trimLeadingAssignments(tokens[1:])
+		}
+		if strings.HasPrefix(token, "-") {
+			tokens = tokens[1:]
+			continue
+		}
+		if strings.Contains(token, "=") && !strings.HasPrefix(token, "=") {
+			tokens = tokens[1:]
+			continue
+		}
+		return tokens
+	}
+	return nil
 }
 
 func bashCommandSegments(command string) []string {

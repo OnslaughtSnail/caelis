@@ -1209,7 +1209,9 @@ type assertErrString string
 func (e assertErrString) Error() string { return string(e) }
 
 type taskTestRuntime struct {
-	host toolexec.AsyncCommandRunner
+	host     toolexec.AsyncCommandRunner
+	backends map[string]toolexec.AsyncCommandRunner
+	state    toolexec.RuntimeState
 }
 
 func (r taskTestRuntime) PermissionMode() toolexec.PermissionMode {
@@ -1227,6 +1229,9 @@ func (r taskTestRuntime) DecideRoute(string, toolexec.SandboxPermission) toolexe
 	return toolexec.CommandDecision{}
 }
 func (r taskTestRuntime) State() toolexec.RuntimeState {
+	if len(r.state.Backends) > 0 || r.state.ResolvedSandbox != "" || r.state.RequestedSandbox != "" || r.state.SandboxStatus != "" || r.state.FallbackReason != "" {
+		return r.state
+	}
 	return toolexec.RuntimeState{Mode: toolexec.PermissionModeDefault}
 }
 func (r taskTestRuntime) Execute(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
@@ -1236,6 +1241,9 @@ func (r taskTestRuntime) Start(ctx context.Context, req toolexec.CommandRequest)
 	return newRuntimeTestSession(ctx, "host", r.host, req)
 }
 func (r taskTestRuntime) OpenSession(ref toolexec.CommandSessionRef) (toolexec.Session, error) {
+	if runner := r.backends[strings.TrimSpace(ref.Backend)]; runner != nil {
+		return openRuntimeTestSession(strings.TrimSpace(ref.Backend), runner, ref), nil
+	}
 	if r.host == nil {
 		return nil, errors.New("runner unavailable")
 	}

@@ -286,6 +286,83 @@ func TestRuntime_ReconcileSession_ReattachesRecoverableBashTask(t *testing.T) {
 	}
 }
 
+func TestRuntime_ReconcileSession_ReattachesLegacyACPTerminalBashTask(t *testing.T) {
+	sessions := sessionstore.New()
+	tasks := taskstore.New()
+	rt, err := New(Config{LogStore: sessions, StateStore: sessions, TaskStore: tasks})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
+	if _, err := sessions.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := tasks.Upsert(context.Background(), &task.Entry{
+		TaskID:         "t-bash-acp-recover",
+		Kind:           task.KindBash,
+		Session:        task.SessionRef{AppName: "app", UserID: "u", SessionID: "parent"},
+		Title:          "sleep 30",
+		State:          task.StateRunning,
+		Running:        true,
+		SupportsInput:  true,
+		SupportsCancel: true,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+		Spec: map[string]any{
+			taskSpecCommand:       "sleep 30",
+			taskSpecWorkdir:       "/workspace",
+			taskSpecRoute:         string(toolexec.ExecutionRouteSandbox),
+			taskSpecExecSessionID: "term-123",
+		},
+		Result: map[string]any{
+			"session_id": "term-123",
+			"route":      string(toolexec.ExecutionRouteSandbox),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	terminalRunner := &stubAsyncTaskRunner{
+		status: toolexec.SessionStatus{
+			ID:        "term-123",
+			Command:   "sleep 30",
+			Dir:       "/workspace",
+			State:     toolexec.SessionStateRunning,
+			StartTime: time.Now(),
+		},
+	}
+	execRuntime := taskTestRuntime{
+		backends: map[string]toolexec.AsyncCommandRunner{
+			"acp_terminal": terminalRunner,
+		},
+	}
+	entries, err := rt.ReconcileSession(context.Background(), ReconcileSessionRequest{
+		AppName:     "app",
+		UserID:      "u",
+		SessionID:   "parent",
+		ExecRuntime: execRuntime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 task entry, got %d", len(entries))
+	}
+	got, err := tasks.Get(context.Background(), "t-bash-acp-recover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != task.StateRunning || !got.Running {
+		t.Fatalf("expected recovered ACP bash task to remain running, got state=%q running=%v", got.State, got.Running)
+	}
+	if got.Result["session_id"] != "term-123" || got.Result["interrupted"] != nil {
+		t.Fatalf("unexpected recovered result payload: %#v", got.Result)
+	}
+	if got.Result["backend"] != "acp_terminal" {
+		t.Fatalf("expected recovered backend acp_terminal, got %#v", got.Result["backend"])
+	}
+}
+
 func TestRuntime_ReconcileSession_KeepsLiveSpawnTask(t *testing.T) {
 	sessions := sessionstore.New()
 	tasks := taskstore.New()

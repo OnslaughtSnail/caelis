@@ -133,10 +133,17 @@ func recoverBashBackendName(spec map[string]any, result map[string]any, execRunt
 		strings.TrimSpace(stringValue(spec, taskSpecRoute)),
 		strings.TrimSpace(stringValue(result, "route")),
 	)
+	sessionID := cmp.Or(
+		strings.TrimSpace(stringValue(result, "session_id")),
+		strings.TrimSpace(stringValue(spec, taskSpecExecSessionID)),
+	)
 	switch route {
 	case string(toolexec.ExecutionRouteHost):
 		return "host"
 	case "", string(toolexec.ExecutionRouteSandbox):
+		if usesLegacyACPTerminalBackend(route, sessionID) {
+			return "acp_terminal"
+		}
 		if execRuntime != nil {
 			if resolved := strings.TrimSpace(execRuntime.State().ResolvedSandbox); resolved != "" {
 				return resolved
@@ -146,6 +153,15 @@ func recoverBashBackendName(spec map[string]any, result map[string]any, execRunt
 	default:
 		return ""
 	}
+}
+
+func usesLegacyACPTerminalBackend(route string, sessionID string) bool {
+	switch strings.TrimSpace(route) {
+	case "", string(toolexec.ExecutionRouteSandbox):
+	default:
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(sessionID)), "term-")
 }
 
 func entryToRecord(entry *task.Entry) *task.Record {

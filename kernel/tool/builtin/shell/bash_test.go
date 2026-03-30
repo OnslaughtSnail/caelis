@@ -1293,3 +1293,56 @@ func TestBash_ACPXCommandRunsOnHostWhenEscalated(t *testing.T) {
 		t.Fatalf("expected host command unchanged, got %q", host.calls[0].Command)
 	}
 }
+
+func TestBash_ACPXLookupCommandDoesNotRequireEscalation(t *testing.T) {
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "/usr/local/bin/acpx\n"}}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		FileSystem:     stubFileSystem{cwd: "/repo", home: "/home/tester"},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), map[string]any{"command": "which acpx"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBashOutput(t, out, "/usr/local/bin/acpx\n")
+	if len(sandbox.calls) != 1 {
+		t.Fatalf("expected sandbox runner called once, got %d", len(sandbox.calls))
+	}
+}
+
+func TestBash_ACPXWrappedByEnvStillRequiresHostEscalation(t *testing.T) {
+	sandbox := &recordingRunner{result: toolexec.CommandResult{Stdout: "ok"}}
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeDefault,
+		FileSystem:     stubFileSystem{cwd: "/repo", home: "/home/tester"},
+		SandboxRunner:  sandbox,
+		SandboxType:    testSandboxType(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, err := NewBash(BashConfig{Runtime: rt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tool.Run(context.Background(), map[string]any{"command": "env DEBUG=1 acpx codex exec 'inspect repo'"})
+	if err == nil {
+		t.Fatal("expected approval-required error")
+	}
+	var approvalErr *toolexec.ApprovalRequiredError
+	if !errors.As(err, &approvalErr) {
+		t.Fatalf("expected ApprovalRequiredError, got %T: %v", err, err)
+	}
+	if len(sandbox.calls) != 0 {
+		t.Fatalf("expected sandbox runner not called, got %d calls", len(sandbox.calls))
+	}
+}
