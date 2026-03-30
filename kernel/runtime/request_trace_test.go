@@ -679,7 +679,10 @@ func newTraceFileStore(t *testing.T) *filestore.Store {
 
 func newTraceExecRuntime(t *testing.T) toolexec.Runtime {
 	t.Helper()
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

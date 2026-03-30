@@ -10,6 +10,12 @@ import (
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
 )
 
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
 func TestEnsureCoreTools_AddRead(t *testing.T) {
 	echoTool, err := NewFunction("echo", "echo", func(ctx context.Context, args struct{}) (struct{}, error) {
 		_ = ctx
@@ -21,6 +27,7 @@ func TestEnsureCoreTools_AddRead(t *testing.T) {
 	}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +69,7 @@ func TestEnsureCoreTools_AddRead(t *testing.T) {
 func TestEnsureCoreTools_AddKernelCoreTools(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +115,7 @@ func TestEnsureCoreTools_RejectsReservedNames(t *testing.T) {
 	}
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -130,6 +139,7 @@ func TestEnsureCoreTools_RejectsReservedNames(t *testing.T) {
 func TestEnsureCoreTools_DedupesBuiltinBashTool(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

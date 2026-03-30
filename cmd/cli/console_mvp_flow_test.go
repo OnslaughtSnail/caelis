@@ -51,13 +51,7 @@ func TestConsoleGatewaySpawnAttachBackContinueFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
 		t.Fatal(err)

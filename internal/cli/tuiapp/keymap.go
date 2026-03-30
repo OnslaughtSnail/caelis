@@ -58,7 +58,7 @@ func defaultKeyMap(isWSL bool) appKeyMap {
 		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		Queue:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
 		Interrupt:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt")),
-		Mode:          key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "mode")),
+		Mode:          key.NewBinding(key.WithKeys("shift+tab", "backtab"), key.WithHelp("shift+tab", "mode")),
 		HistoryPrev:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history")),
 		HistoryNext:   key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "draft")),
 		ChoosePrev:    key.NewBinding(key.WithKeys("up"), key.WithHelp("↑/↓", "select")),

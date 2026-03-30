@@ -31,9 +31,17 @@ type resumedSubagentTarget struct {
 	ChildCWD     string
 }
 
+type resumedACPClient interface {
+	Initialize(context.Context) (acpclient.InitializeResponse, error)
+	LoadSession(context.Context, string, string, map[string]any) (acpclient.LoadSessionResponse, error)
+}
+
 var (
 	resumedSubagentSelfLoadTimeout = 5 * time.Second
 	resumedSubagentACPLoadTimeout  = 30 * time.Second
+	startResumedACPClient          = func(c *cliConsole, ctx context.Context, target resumedSubagentTarget, onUpdate func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		return c.startResumedSubagentACPClient(ctx, target, onUpdate)
+	}
 )
 
 func (c *cliConsole) restoreResumedSubagentPanels(ctx context.Context, rootSessionID string, events []*session.Event) {
@@ -227,7 +235,7 @@ func (c *cliConsole) restoreResumedSubagentPanelFromACP(ctx context.Context, roo
 		loading: true,
 		calls:   map[string]toolCallSnapshot{},
 	}
-	client, cleanup, err := c.startResumedSubagentACPClient(observationCtx, target, func(env acpclient.UpdateEnvelope) {
+	client, cleanup, err := startResumedACPClient(c, observationCtx, target, func(env acpclient.UpdateEnvelope) {
 		c.forwardResumedACPUpdate(observationCtx, rootSessionID, target, state, env)
 	})
 	if err != nil {

@@ -20,6 +20,12 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
 func TestServiceNewLoadAndRestoreState(t *testing.T) {
 	svc, cleanup := newTestService(t, testServiceConfig{
 		llm: &scriptedLLM{
@@ -228,7 +234,10 @@ func TestServiceStartPromptFreezesSystemPromptPerLoadedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +447,10 @@ func TestServiceDelegatedChildPromptRemovesSpawnGuidance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,6 +570,7 @@ func newTestService(t *testing.T, cfg testServiceConfig) (*Service, func()) {
 	}
 	execRT, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

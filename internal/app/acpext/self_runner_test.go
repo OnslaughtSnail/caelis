@@ -63,19 +63,32 @@ func newTestACPAdapterFactory(rt *runtime.Runtime, store session.Store, execRT t
 	}
 }
 
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
+func newFullControlExecRuntime(t *testing.T) toolexec.Runtime {
+	t.Helper()
+	rt, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(rt) })
+	return rt
+}
+
 func TestSelfACPSpawnCreatesDelegationReference(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -165,13 +178,7 @@ func TestSelfACPSpawnUsesProvidedAdapterFactory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	sentinel := errors.New("adapter factory invoked")
 	var factoryCalled bool
@@ -217,13 +224,7 @@ func TestACPSpawnLeavesChildSessionInDefaultMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -429,13 +430,7 @@ func TestSelfACPSpawnBridgesLiveChildSessionUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -827,13 +822,7 @@ func TestSelfACPSubagentRunner_ReturnsSessionHandleWhenPromptTimeoutHitsAfterRea
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -890,13 +879,7 @@ func TestSelfACPSubagentRunner_CancelsRemotePromptOnLocalTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -964,13 +947,7 @@ func TestSelfACPSubagentRunner_CallerTimeoutDoesNotCancelDetachedChild(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	child := &session.Session{AppName: "app", UserID: "u", ID: "child-existing"}
@@ -1114,13 +1091,7 @@ func TestACPTransportRunSubagent_FailsPromptWhenPeerDisconnectsAfterPartialOutpu
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -1184,13 +1155,7 @@ func TestDelegatedSelfChildSessionCannotSpawnExternalACPChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	ag, err := llmagent.New(llmagent.Config{Name: "test-agent"})
 	if err != nil {
@@ -1324,13 +1289,7 @@ func TestSelfACPSpawn_ListAndGlobUseChildWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "one.txt"), []byte("one"), 0o644); err != nil {
@@ -1459,13 +1418,7 @@ func TestSelfACPSpawnRejectsNestedSelfSpawnWithoutBreakingChildSession(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newFullControlExecRuntime(t)
 
 	workspace := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workspace, "one.txt"), []byte("one"), 0o644); err != nil {

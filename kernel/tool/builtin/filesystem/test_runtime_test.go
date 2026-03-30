@@ -22,6 +22,7 @@ func newTestRuntime(t *testing.T) toolexec.Runtime {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		SandboxType:    sandboxType,
+		SandboxRunner:  noopSandboxRunner{},
 	})
 	if err != nil {
 		t.Fatalf("create runtime: %v", err)

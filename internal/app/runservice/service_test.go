@@ -10,6 +10,12 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
 func TestServiceAssembleTools_AddsOptionalPlanAndSpawn(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
@@ -18,6 +24,7 @@ func TestServiceAssembleTools_AddsOptionalPlanAndSpawn(t *testing.T) {
 	}
 	execRT, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

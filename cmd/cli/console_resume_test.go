@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -91,13 +93,7 @@ func TestHandleResume_ReplaysSpawnedSubagentPanelsFromChildSessions(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	execRT, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	ag, err := llmagent.New(llmagent.Config{Name: "resume-test-agent"})
 	if err != nil {
 		t.Fatal(err)
@@ -206,6 +202,20 @@ func TestHandleResume_ReplaysSpawnedSubagentPanelsFromChildSessions(t *testing.T
 }
 
 func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {
+	prevStarter := startResumedACPClient
+	t.Cleanup(func() {
+		startResumedACPClient = prevStarter
+	})
+	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, onUpdate func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		return &blockingResumeClient{
+			loadDelay: 200 * time.Millisecond,
+			updates: []acpclient.UpdateEnvelope{
+				resumedACPTextUpdate("child-1", "child reply"),
+			},
+			onUpdate: onUpdate,
+		}, func() {}, nil
+	}
+
 	store := inmemory.New()
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -252,16 +262,6 @@ func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {
 		gateway:        gw,
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
-		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
-			return blockingResumeAdapter{
-				loadDelay: 200 * time.Millisecond,
-				events: []*session.Event{{
-					ID:        "ev-child-1",
-					SessionID: "child-1",
-					Message:   model.NewTextMessage(model.RoleAssistant, "child reply"),
-				}},
-			}, nil
-		},
 	}
 
 	start := time.Now()
@@ -390,6 +390,14 @@ func TestHandleResume_SkipsACPReplayWhenChildRunStateIsAlreadyCompleted(t *testi
 		t.Fatal(err)
 	}
 	var adapterCalls atomic.Int32
+	prevStarter := startResumedACPClient
+	t.Cleanup(func() {
+		startResumedACPClient = prevStarter
+	})
+	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		adapterCalls.Add(1)
+		return &blockingResumeClient{}, func() {}, nil
+	}
 	sender := &testSender{}
 	console := &cliConsole{
 		baseCtx:        context.Background(),
@@ -401,10 +409,6 @@ func TestHandleResume_SkipsACPReplayWhenChildRunStateIsAlreadyCompleted(t *testi
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
 		rt:             rt,
-		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
-			adapterCalls.Add(1)
-			return blockingResumeAdapter{}, nil
-		},
 	}
 
 	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
@@ -514,6 +518,14 @@ func TestHandleResume_SkipsACPReplayForCompletedSpawn(t *testing.T) {
 		t.Fatal(err)
 	}
 	var adapterCalls atomic.Int32
+	prevStarter := startResumedACPClient
+	t.Cleanup(func() {
+		startResumedACPClient = prevStarter
+	})
+	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		adapterCalls.Add(1)
+		return &blockingResumeClient{}, func() {}, nil
+	}
 	sender := &testSender{}
 	console := &cliConsole{
 		baseCtx:        context.Background(),
@@ -524,10 +536,6 @@ func TestHandleResume_SkipsACPReplayForCompletedSpawn(t *testing.T) {
 		gateway:        gw,
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
-		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
-			adapterCalls.Add(1)
-			return blockingResumeAdapter{}, nil
-		},
 	}
 
 	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
@@ -595,6 +603,14 @@ func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	var adapterCalls atomic.Int32
+	prevStarter := startResumedACPClient
+	t.Cleanup(func() {
+		startResumedACPClient = prevStarter
+	})
+	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		adapterCalls.Add(1)
+		return &blockingResumeClient{}, func() {}, nil
+	}
 	sender := &testSender{}
 	console := &cliConsole{
 		baseCtx:        context.Background(),
@@ -605,10 +621,6 @@ func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
 		gateway:        gw,
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
-		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
-			adapterCalls.Add(1)
-			return blockingResumeAdapter{}, nil
-		},
 	}
 
 	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
@@ -647,6 +659,14 @@ func TestResumedSubagentLoadTimeoutForAgent(t *testing.T) {
 }
 
 func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *testing.T) {
+	prevStarter := startResumedACPClient
+	t.Cleanup(func() {
+		startResumedACPClient = prevStarter
+	})
+	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		return &blockingResumeClient{loadDelay: 200 * time.Millisecond}, func() {}, nil
+	}
+
 	prev := resumedSubagentSelfLoadTimeout
 	resumedSubagentSelfLoadTimeout = 20 * time.Millisecond
 	t.Cleanup(func() {
@@ -662,9 +682,6 @@ func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *test
 		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
-		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
-			return blockingResumeAdapter{loadDelay: 200 * time.Millisecond}, nil
-		},
 	}
 
 	done := make(chan struct{})
@@ -695,6 +712,14 @@ func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *test
 }
 
 func TestRestoreResumedSubagentPanelFromACP_LoadFailureEmitsFailed(t *testing.T) {
+	prevStarter := startResumedACPClient
+	t.Cleanup(func() {
+		startResumedACPClient = prevStarter
+	})
+	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
+		return &blockingResumeClient{loadErr: errors.New("load failed")}, func() {}, nil
+	}
+
 	sender := &testSender{}
 	console := &cliConsole{
 		baseCtx:        context.Background(),
@@ -704,9 +729,6 @@ func TestRestoreResumedSubagentPanelFromACP_LoadFailureEmitsFailed(t *testing.T)
 		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
-		newACPAdapter: func(_ *internalacp.Conn) (internalacp.Adapter, error) {
-			return blockingResumeAdapter{loadErr: errors.New("load failed")}, nil
-		},
 	}
 
 	console.restoreResumedSubagentPanelFromACP(context.Background(), "parent", resumedSubagentTarget{
@@ -731,57 +753,58 @@ type resumeIndexStub struct {
 	resolveID string
 }
 
-type blockingResumeAdapter struct {
+type blockingResumeClient struct {
+	initDelay time.Duration
 	loadDelay time.Duration
 	loadErr   error
-	events    []*session.Event
+	updates   []acpclient.UpdateEnvelope
+	onUpdate  func(acpclient.UpdateEnvelope)
 }
 
-func (a blockingResumeAdapter) Capabilities() internalacp.AdapterCapabilities {
-	return internalacp.AdapterCapabilities{}
-}
-
-func (a blockingResumeAdapter) NewSession(context.Context, internalacp.NewSessionRequest, internalacp.ClientCapabilities) (internalacp.AdapterSessionState, error) {
-	return internalacp.AdapterSessionState{}, errors.New("not implemented")
-}
-
-func (a blockingResumeAdapter) ListSessions(context.Context, internalacp.SessionListRequest) (internalacp.SessionListResponse, error) {
-	return internalacp.SessionListResponse{}, errors.New("not implemented")
-}
-
-func (a blockingResumeAdapter) LoadSession(ctx context.Context, req internalacp.LoadSessionRequest, _ internalacp.ClientCapabilities) (internalacp.LoadedSessionState, error) {
+func (c *blockingResumeClient) Initialize(ctx context.Context) (acpclient.InitializeResponse, error) {
 	select {
 	case <-ctx.Done():
-		return internalacp.LoadedSessionState{}, ctx.Err()
-	case <-time.After(a.loadDelay):
+		return acpclient.InitializeResponse{}, ctx.Err()
+	case <-time.After(c.initDelay):
 	}
-	if a.loadErr != nil {
-		return internalacp.LoadedSessionState{}, a.loadErr
+	return acpclient.InitializeResponse{}, nil
+}
+
+func (c *blockingResumeClient) LoadSession(ctx context.Context, sessionID string, _ string, _ map[string]any) (acpclient.LoadSessionResponse, error) {
+	select {
+	case <-ctx.Done():
+		return acpclient.LoadSessionResponse{}, ctx.Err()
+	case <-time.After(c.loadDelay):
 	}
-	return internalacp.LoadedSessionState{
-		Session: internalacp.AdapterSessionState{
-			SessionID: strings.TrimSpace(req.SessionID),
-			CWD:       strings.TrimSpace(req.CWD),
+	if c.loadErr != nil {
+		return acpclient.LoadSessionResponse{}, c.loadErr
+	}
+	for _, update := range c.updates {
+		if c.onUpdate != nil {
+			update.SessionID = strings.TrimSpace(sessionID)
+			c.onUpdate(update)
+		}
+	}
+	return acpclient.LoadSessionResponse{}, nil
+}
+
+func resumedACPTextUpdate(sessionID string, text string) acpclient.UpdateEnvelope {
+	return acpclient.UpdateEnvelope{
+		SessionID: strings.TrimSpace(sessionID),
+		Update: acpclient.ContentChunk{
+			SessionUpdate: acpclient.UpdateAgentMessage,
+			Content:       mustMarshalResumeTextChunk(text),
 		},
-		Events: a.events,
-	}, nil
+	}
 }
 
-func (a blockingResumeAdapter) SetMode(context.Context, internalacp.SetSessionModeRequest) (internalacp.AdapterSessionState, error) {
-	return internalacp.AdapterSessionState{}, errors.New("not implemented")
+func mustMarshalResumeTextChunk(text string) json.RawMessage {
+	data, err := json.Marshal(acpclient.TextContent{Type: "text", Text: text})
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
-
-func (a blockingResumeAdapter) SetConfigOption(context.Context, internalacp.SetSessionConfigOptionRequest) (internalacp.AdapterSessionState, error) {
-	return internalacp.AdapterSessionState{}, errors.New("not implemented")
-}
-
-func (a blockingResumeAdapter) StartPrompt(context.Context, internalacp.StartPromptRequest) (internalacp.StartPromptResult, error) {
-	return internalacp.StartPromptResult{}, errors.New("not implemented")
-}
-
-func (a blockingResumeAdapter) CancelPrompt(string) {}
-
-func (a blockingResumeAdapter) SessionFS(string) toolexec.FileSystem { return nil }
 
 func (s resumeIndexStub) ResolveWorkspaceSessionID(_ context.Context, _ string, prefix string) (string, bool, error) {
 	if strings.TrimSpace(prefix) == strings.TrimSpace(s.resolveID) {

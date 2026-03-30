@@ -1,4 +1,4 @@
-package runtime
+package main
 
 import (
 	"context"
@@ -13,17 +13,19 @@ func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.Co
 	return toolexec.CommandResult{}, nil
 }
 
-func newCoreRuntime(t *testing.T) toolexec.Runtime {
+func newCLITestExecRuntime(t *testing.T, mode toolexec.PermissionMode) toolexec.Runtime {
 	t.Helper()
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeFullControl,
+	cfg := toolexec.Config{
+		PermissionMode: mode,
 		SandboxRunner:  noopExecRunner{},
-	})
-	if err != nil {
-		t.Fatalf("create runtime: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = toolexec.Close(rt)
-	})
+	if mode == toolexec.PermissionModeDefault {
+		cfg.SandboxType = cliTestSandboxType()
+	}
+	rt, err := toolexec.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(rt) })
 	return rt
 }

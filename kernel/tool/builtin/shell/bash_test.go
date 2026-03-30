@@ -276,6 +276,7 @@ func TestBash_PassesTimeoutToTaskManager(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     &recordingRunner{},
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -403,6 +404,7 @@ func TestBash_YieldReturnsSharedTaskHandle(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +444,7 @@ func TestBash_CompletedCommandReturnsStdoutEvenWhenTTYArgIsIgnored(t *testing.T)
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -529,6 +532,7 @@ func TestBash_FullControlRunsOnHostWithoutApproval(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -784,6 +788,7 @@ func TestBash_InteractiveCommandWithoutYieldBecomesTask(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -832,6 +837,7 @@ func TestBash_DefaultYieldInFullControlStartsTask(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -912,6 +918,7 @@ func TestBash_NilYieldUsesDefaultWait(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -953,6 +960,7 @@ func TestBash_ExplicitNegativeYieldFallsBackToDefaultWait(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -993,6 +1001,7 @@ func TestBash_ExplicitZeroYieldUsesDefaultWait(t *testing.T) {
 	rt, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     host,
+		SandboxRunner:  &recordingRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -205,10 +205,7 @@ func TestHandlePermission_SwitchMode(t *testing.T) {
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	bashTool, err := toolshell.NewBash(toolshell.BashConfig{Runtime: rt})
 	if err != nil {
 		t.Fatal(err)
@@ -247,10 +244,7 @@ func TestHandlePermission_FullControlEnablesFullAccessSessionMode(t *testing.T) 
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		execRuntime: rt,
@@ -258,7 +252,7 @@ func TestHandlePermission_FullControlEnablesFullAccessSessionMode(t *testing.T) 
 		sessionMode: sessionmode.DefaultMode,
 		resolved:    &appassembly.ResolvedSpec{},
 	}
-	_, err = handlePermission(console, []string{"full_control"})
+	_, err := handlePermission(console, []string{"full_control"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,10 +276,7 @@ func TestHandlePermission_DefaultPreservesPlanMode(t *testing.T) {
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		execRuntime: rt,
@@ -293,7 +284,7 @@ func TestHandlePermission_DefaultPreservesPlanMode(t *testing.T) {
 		sessionMode: sessionmode.PlanMode,
 		resolved:    &appassembly.ResolvedSpec{},
 	}
-	_, err = handlePermission(console, []string{"default"})
+	_, err := handlePermission(console, []string{"default"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,10 +303,7 @@ func TestSyncSessionModeFromStore_ClampsPersistedFullAccessToCurrentPermission(t
 		sessionStore: store,
 		sessionMode:  sessionmode.DefaultMode,
 	}
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	defer func() { _ = toolexec.Close(rt) }()
 	console.execRuntime = rt
 	sess := &session.Session{AppName: console.appName, UserID: console.userID, ID: console.sessionID}
@@ -353,10 +341,7 @@ func TestSyncSessionModeFromStore_DoesNotPersistRuntimeDefaults(t *testing.T) {
 		sessionStore: store,
 		configStore:  cfg,
 	}
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	defer func() { _ = toolexec.Close(rt) }()
 	console.execRuntime = rt
 	sess := &session.Session{AppName: console.appName, UserID: console.userID, ID: console.sessionID}
@@ -371,6 +356,34 @@ func TestSyncSessionModeFromStore_DoesNotPersistRuntimeDefaults(t *testing.T) {
 
 	if cfg.PermissionMode() != "default" {
 		t.Fatalf("expected global permission default to stay unchanged, got %q", cfg.PermissionMode())
+	}
+}
+
+func TestSyncSessionModeFromStore_DerivesFullAccessFromRuntimePermissionWithoutSnapshot(t *testing.T) {
+	store := inmemory.New()
+	console := &cliConsole{
+		baseCtx:      context.Background(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "s-full-control",
+		sessionStore: store,
+		sessionMode:  sessionmode.DefaultMode,
+	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
+	defer func() { _ = toolexec.Close(rt) }()
+	console.execRuntime = rt
+	sess := &session.Session{AppName: console.appName, UserID: console.userID, ID: console.sessionID}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+
+	console.syncSessionModeFromStore()
+
+	if console.execRuntime.PermissionMode() != toolexec.PermissionModeFullControl {
+		t.Fatalf("expected runtime permission to remain full_control, got %q", console.execRuntime.PermissionMode())
+	}
+	if console.sessionMode != sessionmode.FullMode {
+		t.Fatalf("expected session mode %q, got %q", sessionmode.FullMode, console.sessionMode)
 	}
 }
 
@@ -394,10 +407,7 @@ func TestSetSessionMode_FullAccessDoesNotPersistGlobalRuntimeDefaults(t *testing
 		t.Fatal(err)
 	}
 	store := inmemory.New()
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:      context.Background(),
 		appName:      "app",
@@ -442,10 +452,7 @@ func TestSetSessionMode_DoesNotSendTUIStatusInline(t *testing.T) {
 	}
 
 	store := inmemory.New()
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:      context.Background(),
 		appName:      "app",
@@ -548,10 +555,7 @@ func TestHandlePermission_PersistsGlobalRuntimeDefaults(t *testing.T) {
 	if err := cfg.save(); err != nil {
 		t.Fatal(err)
 	}
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeDefault, SandboxType: cliTestSandboxType()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeDefault)
 	console := &cliConsole{
 		baseCtx:     context.Background(),
 		configStore: cfg,
@@ -571,24 +575,18 @@ func TestHandlePermission_PersistsGlobalRuntimeDefaults(t *testing.T) {
 }
 
 func TestHandlePermission_InvalidMode(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handlePermission(console, []string{"invalid"})
+	_, err := handlePermission(console, []string{"invalid"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestHandleSandbox_UnknownType(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{"unknown-type"})
+	_, err := handleSandbox(console, []string{"unknown-type"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -619,12 +617,9 @@ func TestHandleSandbox_InFullControlOnlyUpdatesConfig(t *testing.T) {
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{cliTestSandboxType()})
+	_, err := handleSandbox(console, []string{cliTestSandboxType()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,12 +655,9 @@ func TestHandleSandbox_RejectsUnavailableSelection(t *testing.T) {
 		}, nil
 	}
 
-	rt, err := toolexec.New(toolexec.Config{PermissionMode: toolexec.PermissionModeFullControl})
-	if err != nil {
-		t.Fatal(err)
-	}
+	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
 	console := &cliConsole{execRuntime: rt, sandboxType: cliTestSandboxType()}
-	_, err = handleSandbox(console, []string{cliTestSandboxType()})
+	_, err := handleSandbox(console, []string{cliTestSandboxType()})
 	if err == nil {
 		t.Fatal("expected error")
 	}

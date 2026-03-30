@@ -17,6 +17,12 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 )
 
+type noopExecRunner struct{}
+
+func (noopExecRunner) Run(context.Context, toolexec.CommandRequest) (toolexec.CommandResult, error) {
+	return toolexec.CommandResult{}, nil
+}
+
 func TestServiceListDelegations(t *testing.T) {
 	store := inmemory.New()
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
@@ -360,6 +366,7 @@ func TestServiceRunTurnUsesSwappableExecutionRuntime(t *testing.T) {
 	newRuntime, err := toolexec.New(toolexec.Config{
 		PermissionMode: toolexec.PermissionModeFullControl,
 		HostRunner:     newRunner,
+		SandboxRunner:  noopExecRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
