@@ -355,12 +355,7 @@ func TestSelectSandboxCandidates_LinuxReadableRootsKeepDefaultOrder(t *testing.T
 	runtimeGOOS = "linux"
 	defer func() { runtimeGOOS = oldGoos }()
 
-	got := selectSandboxCandidates(Config{
-		SandboxPolicy: SandboxPolicy{
-			Type:          SandboxPolicyWorkspaceWrite,
-			ReadableRoots: []string{"."},
-		},
-	}, "")
+	got := selectSandboxCandidates("")
 	want := []string{bwrapSandboxType, landlockSandboxType}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected readable-roots candidates: got=%v want=%v", got, want)

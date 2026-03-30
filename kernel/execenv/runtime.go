@@ -570,7 +570,7 @@ func SelectSandbox(cfg Config) (CommandRunner, SandboxDiagnostics, error) {
 
 	diagnostics := SandboxDiagnostics{
 		RequestedType: requestedSandboxType,
-		Candidates:    selectSandboxCandidates(cfg, requestedSandboxType),
+		Candidates:    selectSandboxCandidates(requestedSandboxType),
 	}
 	if len(diagnostics.Candidates) == 0 {
 		return nil, diagnostics, NewCodedError(ErrorCodeSandboxUnsupported, "execenv: no sandbox backend candidates")
@@ -654,7 +654,7 @@ func sandboxTypeCandidates(requested string) []string {
 	return sandboxTypeCandidatesForPlatform(requested, runtimeGOOS)
 }
 
-func selectSandboxCandidates(cfg Config, requested string) []string {
+func selectSandboxCandidates(requested string) []string {
 	candidates := sandboxTypeCandidatesForPlatform(requested, runtimeGOOS)
 	if strings.TrimSpace(strings.ToLower(runtimeGOOS)) != "linux" {
 		return candidates
