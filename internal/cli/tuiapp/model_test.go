@@ -3188,6 +3188,28 @@ func TestViewShowsStatusBar(t *testing.T) {
 	}
 }
 
+func TestStatusHeaderTruncatesLongWorkspaceAndModelToSingleLine(t *testing.T) {
+	m := NewModel(Config{
+		Workspace: "~/WorkDir/xueyongzhi/caelis [⎇ codex/tui-beautification-v0.0.34-super-long-branch-name]",
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.statusModel = "minimax/minimax-m2.7-highspeed"
+
+	header := ansi.Strip(m.renderStatusHeader())
+	if strings.Contains(header, "\n") {
+		t.Fatalf("expected single-line status header, got %q", header)
+	}
+	if got := displayColumns(header); got > m.fixedRowWidth() {
+		t.Fatalf("expected status header to fit fixed row width %d, got %d cols: %q", m.fixedRowWidth(), got, header)
+	}
+	if !strings.Contains(header, "[⎇ ") {
+		t.Fatalf("expected branch marker preserved, got %q", header)
+	}
+	if !strings.Contains(header, "...") {
+		t.Fatalf("expected status header truncation, got %q", header)
+	}
+}
+
 func TestCtrlVPasteShowsAttachmentHint(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,

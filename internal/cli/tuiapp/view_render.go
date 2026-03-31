@@ -575,15 +575,15 @@ func (m *Model) renderHintRowStyledText() string {
 }
 
 func (m *Model) headerRowText() string {
-	left := strings.TrimSpace(m.cfg.Workspace)
-	right := strings.TrimSpace(m.statusModel)
-	return tuikit.ComposeFooter(m.fixedRowContentWidth(), left, right)
+	left, right := fitHeaderRowParts(m.fixedRowContentWidth(), m.cfg.Workspace, m.statusModel)
+	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
 func (m *Model) renderHeaderRowStyledText() string {
 	tok := m.theme.Tokens()
-	left := tok.TextPrimary.Render(strings.TrimSpace(m.cfg.Workspace))
-	right := tok.TextPrimary.Render(strings.TrimSpace(m.statusModel))
+	leftPlain, rightPlain := fitHeaderRowParts(m.fixedRowContentWidth(), m.cfg.Workspace, m.statusModel)
+	left := tok.TextPrimary.Render(leftPlain)
+	right := tok.TextPrimary.Render(rightPlain)
 	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
@@ -593,8 +593,9 @@ func (m *Model) renderStatusFooter() string {
 		return m.renderFixedRow(fixedSelectionFooter, m.footerRowText(), m.renderFooterRowStyledText(), style)
 	}
 	contentWidth := m.fixedRowContentWidth()
-	left := m.renderFooterLeft()
-	right := m.theme.TextStyle().Render(strings.TrimSpace(m.statusContext))
+	leftPlain, rightPlain := fitGenericFooterParts(contentWidth, m.footerLeftText(), m.footerContextText())
+	left := styleFooterLeft(m, leftPlain)
+	right := m.theme.TextStyle().Render(rightPlain)
 	return style.Render(composeStyledFooter(contentWidth, left, right))
 }
 
@@ -649,9 +650,8 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 }
 
 func (m *Model) footerRowText() string {
-	left := m.footerLeftText()
-	right := m.footerContextText()
-	return tuikit.ComposeFooter(m.fixedRowContentWidth(), strings.TrimSpace(left), strings.TrimSpace(right))
+	left, right := fitGenericFooterParts(m.fixedRowContentWidth(), m.footerLeftText(), m.footerContextText())
+	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
 func (m *Model) footerLeftText() string {
@@ -667,35 +667,15 @@ func (m *Model) footerLeftText() string {
 	}
 }
 
-func (m *Model) renderFooterLeft() string {
-	mode := strings.TrimSpace(m.modeLabel())
-	if mode == "" {
-		return m.renderFooterHelp()
-	}
-	modeStyle := m.theme.TextStyle().Bold(true)
-	if mode == "full_access" {
-		modeStyle = m.theme.WarnStyle().Bold(true)
-	}
-	modeText := modeStyle.Render(mode)
-	helpText := m.renderFooterHelp()
-	if helpText == "" {
-		return modeText
-	}
-	return modeText + "  " + helpText
-}
-
 func (m *Model) renderFooterRowStyledText() string {
-	left := m.renderFooterLeft()
-	right := m.theme.TextStyle().Render(m.footerContextText())
+	leftPlain, rightPlain := fitGenericFooterParts(m.fixedRowContentWidth(), m.footerLeftText(), m.footerContextText())
+	left := styleFooterLeft(m, leftPlain)
+	right := m.theme.TextStyle().Render(rightPlain)
 	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
 func (m *Model) footerHelpText() string {
 	return formatFooterBindingKeys(m.currentFooterHelp().ShortHelp())
-}
-
-func (m *Model) renderFooterHelp() string {
-	return renderFooterBindingKeys(m.currentFooterHelp().ShortHelp(), m.theme.HelpHintTextStyle())
 }
 
 func (m *Model) footerContextText() string {
@@ -736,6 +716,184 @@ func composeStyledFooter(width int, left string, right string) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
+func fitHeaderRowParts(width int, workspace string, model string) (string, string) {
+	return fitFooterParts(width, workspace, model, truncateWorkspaceStatusDisplay, truncateMiddleDisplayWidthPlain, 20, 24)
+}
+
+func fitGenericFooterParts(width int, left string, right string) (string, string) {
+	return fitFooterParts(width, left, right, truncateTailDisplay, truncateTailDisplay, 16, 10)
+}
+
+func fitFooterParts(width int, left string, right string, leftTrunc func(string, int) string, rightTrunc func(string, int) string, minLeft int, minRight int) (string, string) {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if width <= 0 {
+		return "", ""
+	}
+	if left == "" {
+		return "", rightTrunc(right, width)
+	}
+	if right == "" {
+		return leftTrunc(left, width), ""
+	}
+
+	leftMin := minInt(maxInt(4, minLeft), maxInt(4, width-1))
+	rightMin := minInt(maxInt(4, minRight), maxInt(4, width-1))
+	maxRight := maxInt(rightMin, width-leftMin-1)
+	if displayColumns(right) > maxRight {
+		right = rightTrunc(right, maxRight)
+	}
+
+	leftBudget := maxInt(0, width-displayColumns(right)-1)
+	left = leftTrunc(left, leftBudget)
+
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		overflow := total - width
+		if displayColumns(left) > leftMin {
+			left = leftTrunc(left, maxInt(leftMin, displayColumns(left)-overflow))
+		}
+	}
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		overflow := total - width
+		if displayColumns(right) > rightMin {
+			right = rightTrunc(right, maxInt(rightMin, displayColumns(right)-overflow))
+		}
+	}
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		left = leftTrunc(left, maxInt(0, width-displayColumns(right)-1))
+	}
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		right = rightTrunc(right, maxInt(0, width-displayColumns(left)-1))
+	}
+	return left, right
+}
+
+func truncateWorkspaceStatusDisplay(input string, width int) string {
+	input = strings.TrimSpace(input)
+	if input == "" || width <= 0 || displayColumns(input) <= width {
+		return input
+	}
+	path, branch, dirty, ok := parseWorkspaceStatusDisplay(input)
+	if !ok {
+		return truncateMiddleDisplayWidthPlain(input, width)
+	}
+	if branch == "" {
+		return truncateMiddleDisplayWidthPlain(path, width)
+	}
+	suffix := " [⎇ " + branch
+	if dirty {
+		suffix += "*"
+	}
+	suffix += "]"
+	if displayColumns(suffix) >= width {
+		return truncateTailDisplay(suffix, width)
+	}
+	contentBudget := maxInt(1, width-displayColumns(" [⎇ ")-displayColumns("]"))
+	if dirty {
+		contentBudget--
+	}
+	pathBudget := maxInt(8, minInt(contentBudget*2/3, contentBudget-8))
+	branchBudget := maxInt(8, contentBudget-pathBudget)
+	if pathWidth := displayColumns(path); pathWidth < pathBudget {
+		branchBudget = minInt(contentBudget-pathWidth, contentBudget-1)
+		pathBudget = contentBudget - branchBudget
+	}
+	if branchWidth := displayColumns(branch); branchWidth < branchBudget {
+		pathBudget = minInt(contentBudget-branchWidth, contentBudget-1)
+		branchBudget = contentBudget - pathBudget
+	}
+	if branchBudget < 8 {
+		branchBudget = minInt(contentBudget, 8)
+		pathBudget = maxInt(1, contentBudget-branchBudget)
+	}
+	if pathBudget < 8 {
+		pathBudget = minInt(contentBudget, 8)
+		branchBudget = maxInt(1, contentBudget-pathBudget)
+	}
+	path = truncateMiddleDisplayWidthPlain(path, pathBudget)
+	branch = truncateTailDisplay(branch, branchBudget)
+	out := path + " [⎇ " + branch
+	if dirty {
+		out += "*"
+	}
+	out += "]"
+	if displayColumns(out) > width {
+		return truncateTailDisplay(out, width)
+	}
+	return out
+}
+
+func parseWorkspaceStatusDisplay(input string) (path string, branch string, dirty bool, ok bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", false, false
+	}
+	open := strings.LastIndex(input, " [⎇ ")
+	if open <= 0 || !strings.HasSuffix(input, "]") {
+		return "", "", false, false
+	}
+	path = strings.TrimSpace(input[:open])
+	branch = strings.TrimSpace(strings.TrimSuffix(input[open+len(" [⎇ "):], "]"))
+	if strings.HasSuffix(branch, "*") {
+		dirty = true
+		branch = strings.TrimSpace(strings.TrimSuffix(branch, "*"))
+	}
+	if path == "" || branch == "" {
+		return "", "", false, false
+	}
+	return path, branch, dirty, true
+}
+
+func truncateMiddleDisplayWidthPlain(input string, limit int) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
+	if text == "" || limit <= 0 || displayColumns(text) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return sliceByDisplayColumns(text, 0, limit)
+	}
+	head := maxInt(1, (limit-3)*2/3)
+	tail := maxInt(1, (limit-3)-head)
+	total := displayColumns(text)
+	prefix := sliceByDisplayColumns(text, 0, head)
+	suffix := sliceByDisplayColumns(text, total-tail, total)
+	return prefix + "..." + suffix
+}
+
+func styleFooterLeft(m *Model, plain string) string {
+	plain = strings.TrimSpace(plain)
+	if plain == "" || m == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(m.modeLabel())
+	help := strings.TrimSpace(m.footerHelpText())
+	switch {
+	case mode == "":
+		return m.theme.HelpHintTextStyle().Render(plain)
+	case help == "":
+		modeStyle := m.theme.TextStyle().Bold(true)
+		if mode == "full_access" {
+			modeStyle = m.theme.WarnStyle().Bold(true)
+		}
+		return modeStyle.Render(plain)
+	default:
+		parts := strings.SplitN(plain, "  ", 2)
+		modeText := parts[0]
+		helpText := ""
+		if len(parts) > 1 {
+			helpText = parts[1]
+		}
+		modeStyle := m.theme.TextStyle().Bold(true)
+		if modeText == "full_access" {
+			modeStyle = m.theme.WarnStyle().Bold(true)
+		}
+		if helpText == "" {
+			return modeStyle.Render(modeText)
+		}
+		return modeStyle.Render(modeText) + "  " + m.theme.HelpHintTextStyle().Render(helpText)
+	}
+}
+
 func formatFooterBindingKeys(bindings []key.Binding) string {
 	parts := make([]string, 0, len(bindings))
 	for _, binding := range bindings {
@@ -747,21 +905,6 @@ func formatFooterBindingKeys(bindings []key.Binding) string {
 			continue
 		}
 		parts = append(parts, keyLabel)
-	}
-	return strings.Join(parts, "  ")
-}
-
-func renderFooterBindingKeys(bindings []key.Binding, style lipgloss.Style) string {
-	parts := make([]string, 0, len(bindings))
-	for _, binding := range bindings {
-		if !binding.Enabled() {
-			continue
-		}
-		keyLabel := strings.TrimSpace(binding.Help().Key)
-		if keyLabel == "" {
-			continue
-		}
-		parts = append(parts, style.Render(keyLabel))
 	}
 	return strings.Join(parts, "  ")
 }

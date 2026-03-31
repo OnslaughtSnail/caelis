@@ -84,7 +84,12 @@ func buildWelcomePanelViewModel(w WelcomeViewModel, width int, theme tuikit.Them
 	renderField := func(label string, value string, style func(...string) string) string {
 		labelText := tok.ComposerLabel.Render(label + ":")
 		padding := maxInt(0, 11-displayColumns(label+":"))
-		return labelText + strings.Repeat(" ", padding) + style(truncateTailDisplay(value, valueWidth))
+		if label == "workspace" {
+			value = truncateWorkspaceStatusDisplay(value, valueWidth)
+		} else {
+			value = truncateTailDisplay(value, valueWidth)
+		}
+		return labelText + strings.Repeat(" ", padding) + style(value)
 	}
 	body := []string{
 		titleLine,
