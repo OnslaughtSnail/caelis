@@ -20,12 +20,16 @@ var builtinCatalog = map[string]Descriptor{
 	"openclaw": {
 		ID:          "openclaw",
 		Name:        "openclaw",
-		Description: "OpenClaw ACP bridge.",
+		Description: "OpenClaw ACP bridge routed to the default main agent.",
 		Stability:   StabilityExperimental,
 		Transport:   TransportACP,
 		Command:     "openclaw",
-		Args:        []string{"acp"},
-		Builtin:     true,
+		Args:        []string{"acp", "--session", "agent:main:main"},
+		Env: map[string]string{
+			"OPENCLAW_HIDE_BANNER":    "1",
+			"OPENCLAW_SUPPRESS_NOTES": "1",
+		},
+		Builtin: true,
 	},
 	"codex": {
 		ID:          "codex",

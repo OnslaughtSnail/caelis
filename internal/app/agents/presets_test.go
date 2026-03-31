@@ -15,6 +15,25 @@ func TestLookupBuiltin(t *testing.T) {
 	}
 }
 
+func TestLookupBuiltin_OpenClawUsesCleanACPBridgeDefaults(t *testing.T) {
+	preset, ok := LookupBuiltin("openclaw")
+	if !ok {
+		t.Fatal("expected openclaw builtin")
+	}
+	if preset.Command != "openclaw" {
+		t.Fatalf("expected openclaw command, got %+v", preset)
+	}
+	if got := preset.Args; len(got) != 3 || got[0] != "acp" || got[1] != "--session" || got[2] != "agent:main:main" {
+		t.Fatalf("expected main-agent ACP bridge args, got %+v", got)
+	}
+	if preset.Env["OPENCLAW_HIDE_BANNER"] != "1" {
+		t.Fatalf("expected banner suppression env, got %+v", preset.Env)
+	}
+	if preset.Env["OPENCLAW_SUPPRESS_NOTES"] != "1" {
+		t.Fatalf("expected note suppression env, got %+v", preset.Env)
+	}
+}
+
 func TestResolveDescriptor_CommandBackedACP(t *testing.T) {
 	desc, err := ResolveDescriptor(Descriptor{
 		ID:        "copilot",
