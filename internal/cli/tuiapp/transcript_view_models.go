@@ -76,13 +76,15 @@ func buildWelcomeViewModel(version, workspace, modelName string) WelcomeViewMode
 
 func buildWelcomePanelViewModel(w WelcomeViewModel, width int, theme tuikit.Theme) PanelViewModel {
 	tok := theme.Tokens()
+	contentWidth := maxInt(1, width-4)
+	valueWidth := maxInt(8, contentWidth-11)
 	titleLine := theme.PromptStyle().Render(">_") +
 		" " + tok.ChromeTitle.Render("CAELIS") +
 		" " + tok.ChromeMeta.Render("("+w.VersionLabel+")")
 	renderField := func(label string, value string, style func(...string) string) string {
 		labelText := tok.ComposerLabel.Render(label + ":")
 		padding := maxInt(0, 11-displayColumns(label+":"))
-		return labelText + strings.Repeat(" ", padding) + style(value)
+		return labelText + strings.Repeat(" ", padding) + style(truncateTailDisplay(value, valueWidth))
 	}
 	body := []string{
 		titleLine,
@@ -96,6 +98,17 @@ func buildWelcomePanelViewModel(w WelcomeViewModel, width int, theme tuikit.Them
 		Width:   width,
 		Body:    body,
 	}
+}
+
+func truncateTailDisplay(text string, width int) string {
+	text = strings.TrimSpace(text)
+	if text == "" || width <= 0 || displayColumns(text) <= width {
+		return text
+	}
+	if width <= 3 {
+		return sliceByDisplayColumns(text, 0, width)
+	}
+	return sliceByDisplayColumns(text, 0, width-3) + "..."
 }
 
 func buildToolEventViewModel(ev SubagentEvent) ToolEventViewModel {

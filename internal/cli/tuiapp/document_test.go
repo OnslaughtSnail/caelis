@@ -99,6 +99,25 @@ func TestDocumentRenderAll(t *testing.T) {
 	}
 }
 
+func TestWelcomePanelTruncatesLongWorkspaceValue(t *testing.T) {
+	vm := buildWelcomePanelViewModel(buildWelcomeViewModel(
+		"v0.0.34",
+		"~/WorkDir/xueyongzhi/caelis [⎇ codex/tui-beautification-v0.0.34-super-long-branch-name]",
+		"minimax/minimax-m2.7-highspeed",
+	), 40, tuikit.DefaultTheme())
+
+	if len(vm.Body) < 4 {
+		t.Fatalf("expected welcome body rows, got %+v", vm.Body)
+	}
+	workspaceLine := ansi.Strip(vm.Body[3])
+	if !strings.Contains(workspaceLine, "...") {
+		t.Fatalf("expected welcome workspace line to truncate, got %q", workspaceLine)
+	}
+	if got := displayColumns(workspaceLine); got > 36 {
+		t.Fatalf("expected welcome workspace line to fit panel body width, got %d cols: %q", got, workspaceLine)
+	}
+}
+
 func TestBashPanelScrollbarHiddenUntilRecentScroll(t *testing.T) {
 	panel := NewBashPanelBlock("BASH", "call-1")
 	panel.Lines = []toolOutputLine{
@@ -183,6 +202,36 @@ func TestBashPanelScrollbarShowsOnHover(t *testing.T) {
 	_, _ = m.Update(mouseMotion(x, y))
 	if view := renderModel(m); !strings.Contains(view, "▎") {
 		t.Fatalf("expected bash panel scrollbar visible on hover, got:\n%s", view)
+	}
+}
+
+func TestMousePointToContentPointRejectsOuterCenteredGutter(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	block := NewAssistantBlock()
+	block.Raw = "hello centered transcript"
+	m.doc.Append(block)
+	m.syncViewportContent()
+
+	contentLine := -1
+	for i, line := range m.viewportPlainLines {
+		if strings.Contains(line, "hello centered transcript") {
+			contentLine = i
+			break
+		}
+	}
+	if contentLine < 0 {
+		t.Fatal("expected assistant content in viewport")
+	}
+	y := contentLine - m.viewport.YOffset()
+	if _, ok := m.mousePointToContentPoint(m.mainColumnX()-1, y, false); ok {
+		t.Fatal("expected left outer gutter click to miss transcript")
+	}
+	if _, ok := m.mousePointToContentPoint(m.mainColumnX()+m.mainColumnWidth(), y, false); ok {
+		t.Fatal("expected right outer gutter click to miss transcript")
+	}
+	if _, ok := m.mousePointToContentPoint(m.mainColumnX()+tuikit.GutterNarrative, y, false); !ok {
+		t.Fatal("expected in-column click to map to transcript")
 	}
 }
 

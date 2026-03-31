@@ -45,6 +45,8 @@ const (
 	externalAgentTurnLoad externalAgentTurnMode = "load"
 )
 
+const externalACPStartupTimeout = 45 * time.Second
+
 type externalAgentTurn struct {
 	mode        externalAgentTurnMode
 	desc        appagents.Descriptor
@@ -355,32 +357,37 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	}
 	defer cleanup()
 
-	initCtx, initCancel := context.WithCancel(ctx)
+	initCtx, initCancel := externalACPStartupContext(ctx, turn.desc.ID)
 	defer initCancel()
 	if _, err := client.Initialize(initCtx); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return externalAgentRunError(err, client)
+		return externalACPStageError(turn.desc.ID, "initialize", err, client)
 	}
 
 	switch turn.mode {
 	case externalAgentTurnNew:
-		sessionResp, err := client.NewSession(ctx, c.resolveExternalAgentWorkDir(turn.desc), nil)
+		stageCtx, cancel := externalACPStartupContext(ctx, turn.desc.ID)
+		sessionResp, err := client.NewSession(stageCtx, c.resolveExternalAgentWorkDir(turn.desc), nil)
+		cancel()
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return externalAgentRunError(err, client)
+			return externalACPStageError(turn.desc.ID, "session/new", err, client)
 		}
 		turn.participant.ChildSessionID = strings.TrimSpace(sessionResp.SessionID)
 	case externalAgentTurnLoad:
-		if _, err := client.LoadSession(ctx, strings.TrimSpace(turn.participant.ChildSessionID), c.resolveExternalAgentWorkDir(turn.desc), nil); err != nil {
+		stageCtx, cancel := externalACPStartupContext(ctx, turn.desc.ID)
+		if _, err := client.LoadSession(stageCtx, strings.TrimSpace(turn.participant.ChildSessionID), c.resolveExternalAgentWorkDir(turn.desc), nil); err != nil {
+			cancel()
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return externalAgentRunError(err, client)
+			return externalACPStageError(turn.desc.ID, "session/load", err, client)
 		}
+		cancel()
 	default:
 		return fmt.Errorf("unsupported external turn mode %q", turn.mode)
 	}
@@ -431,12 +438,13 @@ func (c *cliConsole) startExternalSlashACPClient(ctx context.Context, runState *
 	updateCtx := context.WithoutCancel(ctx)
 	execRuntime := c.executionRuntimeForSession()
 	client, err := acpclient.Start(ctx, acpclient.Config{
-		Command:   strings.TrimSpace(desc.Command),
-		Args:      append([]string(nil), desc.Args...),
-		Env:       copyStringMap(desc.Env),
-		WorkDir:   c.resolveExternalAgentWorkDir(desc),
-		Runtime:   execRuntime,
-		Workspace: c.workspace.CWD,
+		Command:    strings.TrimSpace(desc.Command),
+		Args:       append([]string(nil), desc.Args...),
+		Env:        copyStringMap(desc.Env),
+		WorkDir:    c.resolveExternalAgentWorkDir(desc),
+		Runtime:    execRuntime,
+		Workspace:  c.workspace.CWD,
+		ClientInfo: acpclient.DefaultClientInfo(c.version),
 		OnUpdate: func(env acpclient.UpdateEnvelope) {
 			if turn == nil || !turn.ready.Load() {
 				return
@@ -452,6 +460,23 @@ func (c *cliConsole) startExternalSlashACPClient(ctx context.Context, runState *
 	}
 	runState.setClient(client)
 	return client, func() { _ = client.Close() }, nil
+}
+
+func externalACPStartupContext(ctx context.Context, agentID string) (context.Context, context.CancelFunc) {
+	if !strings.EqualFold(strings.TrimSpace(agentID), "openclaw") {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, externalACPStartupTimeout)
+}
+
+func externalACPStageError(agentID string, stage string, err error, client *acpclient.Client) error {
+	if err == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(agentID), "openclaw") && errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("%s timed out after %s while starting %s ACP session", stage, externalACPStartupTimeout.Round(time.Second), strings.TrimSpace(agentID))
+	}
+	return externalAgentRunError(err, client)
 }
 
 func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req acpclient.RequestPermissionRequest, agentID string, runState *activeExternalAgentRun) (acpclient.RequestPermissionResponse, error) {

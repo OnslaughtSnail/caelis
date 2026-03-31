@@ -572,6 +572,26 @@ func TestWorkspaceStatusLineTracksBranchSwitchAndDirtyFiles(t *testing.T) {
 	}
 }
 
+func TestFormatWorkspaceStatusLineTruncatesLongPathAndBranch(t *testing.T) {
+	got := formatWorkspaceStatusLine(
+		"~/WorkDir/xueyongzhi/projects/caelis/very/long/workspace/path",
+		"codex/tui-beautification-v0.0.34-super-long-branch-name",
+		true,
+	)
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected truncated workspace status, got %q", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("did not expect wrapped workspace status, got %q", got)
+	}
+	if displayWidth(got) > workspaceStatusTotalBudget {
+		t.Fatalf("expected workspace status within width budget, got %d cols: %q", displayWidth(got), got)
+	}
+	if !strings.Contains(got, "[⎇ ") {
+		t.Fatalf("expected branch marker preserved, got %q", got)
+	}
+}
+
 func initGitRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()

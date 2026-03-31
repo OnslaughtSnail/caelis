@@ -368,6 +368,13 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 	if len(m.viewportPlainLines) == 0 || m.viewport.Height() <= 0 {
 		return textSelectionPoint{}, false
 	}
+	if !clamp {
+		columnStart := m.mainColumnX()
+		columnEnd := columnStart + m.mainColumnWidth()
+		if x < columnStart || x >= columnEnd {
+			return textSelectionPoint{}, false
+		}
+	}
 	vy := y
 	if clamp {
 		if vy < 0 {
