@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v0.0.34 - 2026-03-31
+
+### TUI Transcript And Subagent Fixes
+- Kept committed user turns verbatim in the transcript so pasted Markdown, fenced code blocks, and copied history preserve the exact original prompt text.
+- Fixed compact footer token-count rounding so decimal status strings round numerically instead of spuriously rounding up from later fractional digits.
+- Updated TASK write activity summaries in the TUI to render as `SEND` with the follow-up prompt preview instead of collapsing into misleading `Checked N tasks` task-status text.
+- Fixed resumed subagent panel behavior after local interruption so fresh streamed output revives the panel cleanly and stale `interrupted before completion` / `failed` artifacts are removed.
+
+### Release Metadata
+- Bumped release metadata to `v0.0.34` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
+
 ## v0.0.33 - 2026-03-31
 
 ### npm Distribution Restructure

@@ -3,16 +3,21 @@ package tuiapp
 import (
 	"fmt"
 	"math"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/charmbracelet/x/ansi"
 )
+
+var statusContextCompactPattern = regexp.MustCompile(`(\d+)\.(\d+)([km])`)
 
 // ---------------------------------------------------------------------------
 // View sub-components
@@ -90,7 +95,7 @@ func (m *Model) renderPlanDrawer() string {
 	if len(visible) == 0 {
 		return ""
 	}
-	contentWidth := maxInt(1, m.width-(inputHorizontalInset*2))
+	contentWidth := maxInt(1, m.mainColumnWidth()-(inputHorizontalInset*2))
 	lines := []string{m.theme.SeparatorStyle().Render(strings.Repeat("─", contentWidth))}
 	for _, item := range visible {
 		lines = append(lines, renderPlanLine(m, item))
@@ -112,7 +117,7 @@ func (m *Model) btwVisibleBudget() int {
 }
 
 func (m *Model) btwContentWidth() int {
-	return maxInt(1, m.width-(inputHorizontalInset*2))
+	return maxInt(1, m.mainColumnWidth()-(inputHorizontalInset*2))
 }
 
 const pendingSubmissionIcon = "↪"
@@ -388,7 +393,7 @@ func (m *Model) renderPendingQueueDrawer() string {
 	if m.pendingQueue == nil || m.width <= 0 {
 		return ""
 	}
-	contentWidth := maxInt(1, m.width-(inputHorizontalInset*2))
+	contentWidth := maxInt(1, m.mainColumnWidth()-(inputHorizontalInset*2))
 	lines := []string{m.theme.SeparatorStyle().Render(strings.Repeat("─", contentWidth))}
 	text := strings.TrimSpace(m.pendingQueue.displayLine)
 	if text == "" {
@@ -544,22 +549,21 @@ func renderMultilineInput(prompt string, input string) string {
 }
 
 func (m *Model) renderStatusHeader() string {
-	style := m.theme.StatusStyle().Width(maxInt(20, m.width))
-	return m.renderFixedRow(fixedSelectionHeader, m.headerRowText(), m.headerRowText(), style)
+	style := m.theme.StatusStyle().Width(m.fixedRowWidth())
+	return m.renderFixedRow(fixedSelectionHeader, m.headerRowText(), m.renderHeaderRowStyledText(), style)
 }
 
 func (m *Model) renderHintRow() string {
-	style := m.theme.HintRowStyle().Width(maxInt(20, m.width))
+	style := m.theme.HintRowStyle().Width(m.fixedRowWidth())
 	return m.renderFixedRow(fixedSelectionHint, m.hintRowText(), m.renderHintRowStyledText(), style)
 }
 
 func (m *Model) hintRowText() string {
-	w := maxInt(20, m.width)
-	return composeStyledFooter(w-(tuikit.StatusInset*2), m.buildHintText(), "")
+	return composeStyledFooter(m.fixedRowContentWidth(), m.buildHintText(), "")
 }
 
 func (m *Model) renderHintRowStyledText() string {
-	w := maxInt(20, m.width) - (tuikit.StatusInset * 2)
+	w := m.fixedRowContentWidth()
 	if w <= 0 {
 		return ""
 	}
@@ -571,20 +575,27 @@ func (m *Model) renderHintRowStyledText() string {
 }
 
 func (m *Model) headerRowText() string {
-	w := maxInt(20, m.width)
-	left := strings.TrimSpace(m.cfg.Workspace)
-	right := strings.TrimSpace(m.statusModel)
-	return tuikit.ComposeFooter(w-(tuikit.StatusInset*2), left, right)
+	left, right := fitHeaderRowParts(m.fixedRowContentWidth(), m.cfg.Workspace, m.statusModel)
+	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
+}
+
+func (m *Model) renderHeaderRowStyledText() string {
+	tok := m.theme.Tokens()
+	leftPlain, rightPlain := fitHeaderRowParts(m.fixedRowContentWidth(), m.cfg.Workspace, m.statusModel)
+	left := tok.TextPrimary.Render(leftPlain)
+	right := tok.TextPrimary.Render(rightPlain)
+	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
 func (m *Model) renderStatusFooter() string {
-	style := m.theme.StatusStyle().Width(maxInt(20, m.width))
+	style := m.theme.StatusStyle().Width(m.fixedRowWidth())
 	if m.fixedSelectionArea == fixedSelectionFooter {
 		return m.renderFixedRow(fixedSelectionFooter, m.footerRowText(), m.renderFooterRowStyledText(), style)
 	}
-	contentWidth := maxInt(1, maxInt(20, m.width)-(tuikit.StatusInset*2))
-	left := m.renderFooterLeft()
-	right := m.theme.TextStyle().Render(strings.TrimSpace(m.statusContext))
+	contentWidth := m.fixedRowContentWidth()
+	leftPlain, rightPlain := fitGenericFooterParts(contentWidth, m.footerLeftText(), m.footerContextText())
+	left := styleFooterLeft(m, leftPlain)
+	right := m.theme.TextStyle().Render(rightPlain)
 	return style.Render(composeStyledFooter(contentWidth, left, right))
 }
 
@@ -623,6 +634,9 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 	if m.viewportScrollbarWidth() == 0 || vpView == "" {
 		return vpView
 	}
+	if !m.shouldShowViewportScrollbar(time.Now()) {
+		return vpView
+	}
 	total := m.viewport.TotalLineCount()
 	visible := maxInt(1, m.viewport.Height())
 	if total <= visible {
@@ -632,30 +646,12 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 	if len(lines) == 0 {
 		return vpView
 	}
-	thumbHeight := maxInt(1, visible*visible/maxInt(visible, total))
-	maxStart := maxInt(0, visible-thumbHeight)
-	thumbStart := 0
-	if total > visible && maxStart > 0 {
-		thumbStart = (m.viewport.YOffset() * maxStart) / maxInt(1, total-visible)
-	}
-	for i := range lines {
-		glyph := m.theme.ScrollbarTrackStyle().Render("│")
-		if i >= thumbStart && i < thumbStart+thumbHeight {
-			glyph = m.theme.ScrollbarThumbStyle().Render("█")
-		}
-		if pad := m.viewport.Width() - lipgloss.Width(lines[i]); pad > 0 {
-			lines[i] += strings.Repeat(" ", pad)
-		}
-		lines[i] += glyph
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(addScrollbar(lines, m.viewport.Width(), visible, m.viewport.YOffset(), total, m.theme, true), "\n")
 }
 
 func (m *Model) footerRowText() string {
-	w := maxInt(20, m.width)
-	left := m.footerLeftText()
-	right := strings.TrimSpace(m.statusContext)
-	return tuikit.ComposeFooter(w-(tuikit.StatusInset*2), left, right)
+	left, right := fitGenericFooterParts(m.fixedRowContentWidth(), m.footerLeftText(), m.footerContextText())
+	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
 func (m *Model) footerLeftText() string {
@@ -671,32 +667,19 @@ func (m *Model) footerLeftText() string {
 	}
 }
 
-func (m *Model) renderFooterLeft() string {
-	mode := strings.TrimSpace(m.modeLabel())
-	if mode == "" {
-		return m.renderHelp(m.currentFooterHelp())
-	}
-	modeStyle := m.theme.TextStyle().Bold(true)
-	if mode == "full_access" {
-		modeStyle = m.theme.WarnStyle().Bold(true)
-	}
-	modeText := modeStyle.Render(mode)
-	helpText := m.renderHelp(m.currentFooterHelp())
-	if helpText == "" {
-		return modeText
-	}
-	return modeText + "  " + helpText
-}
-
 func (m *Model) renderFooterRowStyledText() string {
-	w := maxInt(20, m.width)
-	left := m.renderFooterLeft()
-	right := m.theme.TextStyle().Render(strings.TrimSpace(m.statusContext))
-	return composeStyledFooter(w-(tuikit.StatusInset*2), left, right)
+	leftPlain, rightPlain := fitGenericFooterParts(m.fixedRowContentWidth(), m.footerLeftText(), m.footerContextText())
+	left := styleFooterLeft(m, leftPlain)
+	right := m.theme.TextStyle().Render(rightPlain)
+	return composeStyledFooter(m.fixedRowContentWidth(), left, right)
 }
 
 func (m *Model) footerHelpText() string {
-	return ansi.Strip(m.renderHelp(m.currentFooterHelp()))
+	return formatFooterBindingKeys(m.currentFooterHelp().ShortHelp())
+}
+
+func (m *Model) footerContextText() string {
+	return formatStatusContextDisplay(strings.TrimSpace(m.statusContext))
 }
 
 func (m *Model) modeLabel() string {
@@ -731,6 +714,217 @@ func composeStyledFooter(width int, left string, right string) string {
 	}
 	gap := max(width-leftWidth-rightWidth, 1)
 	return left + strings.Repeat(" ", gap) + right
+}
+
+func fitHeaderRowParts(width int, workspace string, model string) (string, string) {
+	return fitFooterParts(width, workspace, model, truncateWorkspaceStatusDisplay, truncateMiddleDisplayWidthPlain, 20, 24)
+}
+
+func fitGenericFooterParts(width int, left string, right string) (string, string) {
+	return fitFooterParts(width, left, right, truncateTailDisplay, truncateTailDisplay, 16, 10)
+}
+
+func fitFooterParts(width int, left string, right string, leftTrunc func(string, int) string, rightTrunc func(string, int) string, minLeft int, minRight int) (string, string) {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if width <= 0 {
+		return "", ""
+	}
+	if left == "" {
+		return "", rightTrunc(right, width)
+	}
+	if right == "" {
+		return leftTrunc(left, width), ""
+	}
+
+	leftMin := minInt(maxInt(4, minLeft), maxInt(4, width-1))
+	rightMin := minInt(maxInt(4, minRight), maxInt(4, width-1))
+	maxRight := maxInt(rightMin, width-leftMin-1)
+	if displayColumns(right) > maxRight {
+		right = rightTrunc(right, maxRight)
+	}
+
+	leftBudget := maxInt(0, width-displayColumns(right)-1)
+	left = leftTrunc(left, leftBudget)
+
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		overflow := total - width
+		if displayColumns(left) > leftMin {
+			left = leftTrunc(left, maxInt(leftMin, displayColumns(left)-overflow))
+		}
+	}
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		overflow := total - width
+		if displayColumns(right) > rightMin {
+			right = rightTrunc(right, maxInt(rightMin, displayColumns(right)-overflow))
+		}
+	}
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		left = leftTrunc(left, maxInt(0, width-displayColumns(right)-1))
+	}
+	if total := displayColumns(left) + displayColumns(right) + 1; total > width {
+		right = rightTrunc(right, maxInt(0, width-displayColumns(left)-1))
+	}
+	return left, right
+}
+
+func truncateWorkspaceStatusDisplay(input string, width int) string {
+	input = strings.TrimSpace(input)
+	if input == "" || width <= 0 || displayColumns(input) <= width {
+		return input
+	}
+	path, branch, dirty, ok := parseWorkspaceStatusDisplay(input)
+	if !ok {
+		return truncateMiddleDisplayWidthPlain(input, width)
+	}
+	if branch == "" {
+		return truncateMiddleDisplayWidthPlain(path, width)
+	}
+	suffix := " [⎇ " + branch
+	if dirty {
+		suffix += "*"
+	}
+	suffix += "]"
+	if displayColumns(suffix) >= width {
+		return truncateTailDisplay(suffix, width)
+	}
+	contentBudget := maxInt(1, width-displayColumns(" [⎇ ")-displayColumns("]"))
+	if dirty {
+		contentBudget--
+	}
+	pathBudget := maxInt(8, minInt(contentBudget*2/3, contentBudget-8))
+	branchBudget := maxInt(8, contentBudget-pathBudget)
+	if pathWidth := displayColumns(path); pathWidth < pathBudget {
+		branchBudget = minInt(contentBudget-pathWidth, contentBudget-1)
+		pathBudget = contentBudget - branchBudget
+	}
+	if branchWidth := displayColumns(branch); branchWidth < branchBudget {
+		pathBudget = minInt(contentBudget-branchWidth, contentBudget-1)
+		branchBudget = contentBudget - pathBudget
+	}
+	if branchBudget < 8 {
+		branchBudget = minInt(contentBudget, 8)
+		pathBudget = maxInt(1, contentBudget-branchBudget)
+	}
+	if pathBudget < 8 {
+		pathBudget = minInt(contentBudget, 8)
+		branchBudget = maxInt(1, contentBudget-pathBudget)
+	}
+	path = truncateMiddleDisplayWidthPlain(path, pathBudget)
+	branch = truncateTailDisplay(branch, branchBudget)
+	out := path + " [⎇ " + branch
+	if dirty {
+		out += "*"
+	}
+	out += "]"
+	if displayColumns(out) > width {
+		return truncateTailDisplay(out, width)
+	}
+	return out
+}
+
+func parseWorkspaceStatusDisplay(input string) (path string, branch string, dirty bool, ok bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", false, false
+	}
+	open := strings.LastIndex(input, " [⎇ ")
+	if open <= 0 || !strings.HasSuffix(input, "]") {
+		return "", "", false, false
+	}
+	path = strings.TrimSpace(input[:open])
+	branch = strings.TrimSpace(strings.TrimSuffix(input[open+len(" [⎇ "):], "]"))
+	if strings.HasSuffix(branch, "*") {
+		dirty = true
+		branch = strings.TrimSpace(strings.TrimSuffix(branch, "*"))
+	}
+	if path == "" || branch == "" {
+		return "", "", false, false
+	}
+	return path, branch, dirty, true
+}
+
+func truncateMiddleDisplayWidthPlain(input string, limit int) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
+	if text == "" || limit <= 0 || displayColumns(text) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return sliceByDisplayColumns(text, 0, limit)
+	}
+	head := maxInt(1, (limit-3)*2/3)
+	tail := maxInt(1, (limit-3)-head)
+	total := displayColumns(text)
+	prefix := sliceByDisplayColumns(text, 0, head)
+	suffix := sliceByDisplayColumns(text, total-tail, total)
+	return prefix + "..." + suffix
+}
+
+func styleFooterLeft(m *Model, plain string) string {
+	plain = strings.TrimSpace(plain)
+	if plain == "" || m == nil {
+		return ""
+	}
+	mode := strings.TrimSpace(m.modeLabel())
+	help := strings.TrimSpace(m.footerHelpText())
+	switch {
+	case mode == "":
+		return m.theme.HelpHintTextStyle().Render(plain)
+	case help == "":
+		modeStyle := m.theme.TextStyle().Bold(true)
+		if mode == "full_access" {
+			modeStyle = m.theme.WarnStyle().Bold(true)
+		}
+		return modeStyle.Render(plain)
+	default:
+		parts := strings.SplitN(plain, "  ", 2)
+		modeText := parts[0]
+		helpText := ""
+		if len(parts) > 1 {
+			helpText = parts[1]
+		}
+		modeStyle := m.theme.TextStyle().Bold(true)
+		if modeText == "full_access" {
+			modeStyle = m.theme.WarnStyle().Bold(true)
+		}
+		if helpText == "" {
+			return modeStyle.Render(modeText)
+		}
+		return modeStyle.Render(modeText) + "  " + m.theme.HelpHintTextStyle().Render(helpText)
+	}
+}
+
+func formatFooterBindingKeys(bindings []key.Binding) string {
+	parts := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		if !binding.Enabled() {
+			continue
+		}
+		keyLabel := strings.TrimSpace(binding.Help().Key)
+		if keyLabel == "" {
+			continue
+		}
+		parts = append(parts, keyLabel)
+	}
+	return strings.Join(parts, "  ")
+}
+
+func formatStatusContextDisplay(text string) string {
+	if text == "" {
+		return ""
+	}
+	return statusContextCompactPattern.ReplaceAllStringFunc(text, func(match string) string {
+		parts := statusContextCompactPattern.FindStringSubmatch(match)
+		if len(parts) != 4 {
+			return match
+		}
+		value, err := strconv.ParseFloat(parts[1]+"."+parts[2], 64)
+		if err != nil {
+			return match
+		}
+		suffix := parts[3]
+		return fmt.Sprintf("%d%s", int(math.Round(value)), suffix)
+	})
 }
 
 func (m *Model) renderPromptModal() string {
@@ -855,8 +1049,7 @@ func (m *Model) renderPromptModalBox(lines []string) string {
 		filtered = []string{""}
 	}
 	body := strings.Join(filtered, "\n")
-	inset := tuikit.GutterNarrative
-	width := minInt(maxInt(44, m.width-(inset*2)), 96)
+	width := minInt(maxInt(44, m.fixedRowWidth()-4), 96)
 	if width <= 0 {
 		width = 72
 	}
@@ -865,7 +1058,7 @@ func (m *Model) renderPromptModalBox(lines []string) string {
 		BorderForeground(m.theme.Focus).
 		Padding(0, 1).
 		Width(width)
-	return insetRenderedBlock(box.Render(body), inset)
+	return box.Render(body)
 }
 
 func (m *Model) promptDetailLineBudget() int {
@@ -880,8 +1073,7 @@ func (m *Model) promptDetailLineBudget() int {
 }
 
 func (m *Model) promptModalInnerWidth() int {
-	inset := tuikit.GutterNarrative
-	width := minInt(maxInt(44, m.width-(inset*2)), 96)
+	width := minInt(maxInt(44, m.fixedRowWidth()-4), 96)
 	if width <= 0 {
 		width = 72
 	}

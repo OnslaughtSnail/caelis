@@ -130,8 +130,8 @@ func (m *Model) composeInputRender() composerRender {
 }
 
 func (m *Model) composerContentWidth() int {
-	if m.width > 0 {
-		return maxInt(20, m.width-16-(inputHorizontalInset*2))
+	if width := m.readableContentWidth() - (inputHorizontalInset * 2); width > 0 {
+		return maxInt(20, width)
 	}
 	if width := m.textarea.Width(); width > 0 {
 		return width

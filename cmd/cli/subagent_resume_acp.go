@@ -341,13 +341,14 @@ func (c *cliConsole) startResumedSubagentACPClient(ctx context.Context, target r
 		return client, cleanup, nil
 	case appagents.TransportACP:
 		client, err := acpclient.Start(ctx, acpclient.Config{
-			Command:   strings.TrimSpace(desc.Command),
-			Args:      append([]string(nil), desc.Args...),
-			Env:       copyStringMap(desc.Env),
-			WorkDir:   c.resolveResumedSubagentWorkDir(desc),
-			Runtime:   runtime,
-			Workspace: c.workspace.CWD,
-			OnUpdate:  onUpdate,
+			Command:    strings.TrimSpace(desc.Command),
+			Args:       append([]string(nil), desc.Args...),
+			Env:        copyStringMap(desc.Env),
+			WorkDir:    c.resolveResumedSubagentWorkDir(desc),
+			Runtime:    runtime,
+			Workspace:  c.workspace.CWD,
+			ClientInfo: acpclient.DefaultClientInfo(c.version),
+			OnUpdate:   onUpdate,
 		})
 		if err != nil {
 			return nil, nil, err

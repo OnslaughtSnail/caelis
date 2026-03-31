@@ -493,7 +493,7 @@ func TestReadTUIStatus_ZeroUsageStillShowsContextWindow(t *testing.T) {
 	if modelText != "deepseek/deepseek-chat" {
 		t.Fatalf("unexpected model text %q", modelText)
 	}
-	if contextText != "0/128.0k(0%)" {
+	if contextText != "0/128k(0%)" {
 		t.Fatalf("expected zero context usage display, got %q", contextText)
 	}
 }
@@ -523,7 +523,7 @@ func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) 
 	if modelText != "gemini/gemini-2.5-pro [high]" {
 		t.Fatalf("unexpected model text %q", modelText)
 	}
-	if contextText != "5.2k/1.0m(0%)" {
+	if contextText != "5k/1m(0%)" {
 		t.Fatalf("expected context ratio display for gemini, got %q", contextText)
 	}
 }
@@ -569,6 +569,26 @@ func TestWorkspaceStatusLineTracksBranchSwitchAndDirtyFiles(t *testing.T) {
 	runGit(t, repo, "checkout", "-b", "feature/status-refresh")
 	if got := workspaceStatusLine(repo); !strings.Contains(got, "[⎇ feature/status-refresh*]") {
 		t.Fatalf("expected switched branch in workspace status, got %q", got)
+	}
+}
+
+func TestFormatWorkspaceStatusLineTruncatesLongPathAndBranch(t *testing.T) {
+	got := formatWorkspaceStatusLine(
+		"~/WorkDir/xueyongzhi/projects/caelis/very/long/workspace/path",
+		"codex/tui-beautification-v0.0.34-super-long-branch-name",
+		true,
+	)
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected truncated workspace status, got %q", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("did not expect wrapped workspace status, got %q", got)
+	}
+	if displayWidth(got) > workspaceStatusTotalBudget {
+		t.Fatalf("expected workspace status within width budget, got %d cols: %q", displayWidth(got), got)
+	}
+	if !strings.Contains(got, "[⎇ ") {
+		t.Fatalf("expected branch marker preserved, got %q", got)
 	}
 }
 

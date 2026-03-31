@@ -16,6 +16,7 @@ import (
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
+	"github.com/OnslaughtSnail/caelis/internal/version"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -103,6 +104,7 @@ type terminalBridgeManager struct {
 const (
 	defaultRemoteACPIdleTimeout = 3 * time.Minute
 	defaultRemoteACPInitTimeout = 6 * time.Minute
+	openClawACPStartupTimeout   = 45 * time.Second
 )
 
 var startACPClient = acpclient.Start
@@ -487,7 +489,7 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 			WorkDir:             r.resolveAgentWorkDir(desc),
 			Runtime:             r.resolveClientRuntime(),
 			Workspace:           r.resolveWorkspaceRoot(),
-			ClientInfo:          nil,
+			ClientInfo:          acpclient.DefaultClientInfo(version.String()),
 			OnUpdate:            onUpdate,
 			OnPermissionRequest: r.permissionRequestHandler(ctx, strings.TrimSpace(desc.ID), func() string { return strings.TrimSpace(sessionIDForPermissions) }, metaBase, target.childCWD, pauseWatchdog, resumeWatchdog),
 		})
@@ -507,23 +509,30 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 	defer cleanup()
 	defer terminalBridge.stopAll()
 
-	if _, err := client.Initialize(ctx); err != nil {
-		return "", metaBase, false, err
+	initCtx, initCancel := remoteACPStartupContext(ctx, desc.ID)
+	if _, err := client.Initialize(initCtx); err != nil {
+		initCancel()
+		return "", metaBase, false, remoteACPStageError(desc.ID, "initialize", err, client)
 	}
+	initCancel()
 	created := false
 	requestedSessionID := strings.TrimSpace(target.requestedSessionID)
 	if requestedSessionID != "" {
-		_, loadErr := client.LoadSession(ctx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()), sessionMeta)
+		loadCtx, loadCancel := remoteACPStartupContext(ctx, desc.ID)
+		_, loadErr := client.LoadSession(loadCtx, requestedSessionID, firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD()), sessionMeta)
+		loadCancel()
 		if loadErr == nil {
 			actualSessionID = requestedSessionID
 		} else {
-			return "", metaBase, false, fmt.Errorf("acpext: load child session %q: %w", requestedSessionID, loadErr)
+			return "", metaBase, false, remoteACPStageError(desc.ID, "session/load", fmt.Errorf("acpext: load child session %q: %w", requestedSessionID, loadErr), client)
 		}
 	} else {
 		sessionCWD := firstNonEmpty(target.childCWD, r.resolveWorkspaceCWD())
-		newResp, err := client.NewSession(ctx, sessionCWD, sessionMeta)
+		newCtx, newCancel := remoteACPStartupContext(ctx, desc.ID)
+		newResp, err := client.NewSession(newCtx, sessionCWD, sessionMeta)
+		newCancel()
 		if err != nil {
-			return "", metaBase, false, err
+			return "", metaBase, false, remoteACPStageError(desc.ID, "session/new", err, client)
 		}
 		actualSessionID = strings.TrimSpace(newResp.SessionID)
 		created = true
@@ -582,6 +591,30 @@ func (r *selfACPSubagentRunner) runACPSubagent(ctx context.Context, desc appagen
 		}
 	}
 	return actualSessionID, meta, created, err
+}
+
+func remoteACPStartupContext(ctx context.Context, agentID string) (context.Context, context.CancelFunc) {
+	if !strings.EqualFold(strings.TrimSpace(agentID), "openclaw") {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, openClawACPStartupTimeout)
+}
+
+func remoteACPStageError(agentID string, stage string, err error, client *acpclient.Client) error {
+	if err == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(agentID), "openclaw") && errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("%s timed out after %s while starting %s ACP session", stage, openClawACPStartupTimeout.Round(time.Second), strings.TrimSpace(agentID))
+	}
+	if client == nil {
+		return err
+	}
+	stderr := strings.TrimSpace(client.StderrTail(4096))
+	if stderr == "" {
+		return err
+	}
+	return fmt.Errorf("%s\n%s", err.Error(), stderr)
 }
 
 func (r *selfACPSubagentRunner) startLoopbackClient(ctx context.Context, requestedSessionID string, meta runtime.DelegationMetadata, childCWD string, sessionMeta map[string]any, sessionIDProvider func() string, onUpdate func(acpclient.UpdateEnvelope), onClient func(*acpclient.Client), onApprovalStart func(), onApprovalDone func()) (*acpclient.Client, func(), error) {

@@ -20,6 +20,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
@@ -199,6 +200,310 @@ func TestHandleResume_ReplaysSpawnedSubagentPanelsFromChildSessions(t *testing.T
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("expected resumed replay to restore child subagent stream")
+}
+
+func TestRenderSessionEvents_ReplayedChildAssistantStaysOutOfMainTranscript(t *testing.T) {
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	events := []*session.Event{{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "codex",
+				"state":            "completed",
+			},
+		}),
+	}}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    child.ID,
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+		"_ui_agent":           "codex",
+	}
+	events = append(events, &session.Event{
+		ID:        "ev-child-answer",
+		SessionID: child.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "child reply"),
+		Meta:      childMeta,
+	})
+	events = append(events, &session.Event{
+		ID:        "ev-child-reasoning",
+		SessionID: child.ID,
+		Message:   model.NewReasoningMessage(model.RoleAssistant, "child reasoning", model.ReasoningVisibilityVisible),
+		Meta:      childMeta,
+	})
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+		showReasoning:  true,
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		foundChildAssistantSubagent bool
+		foundChildReasoningSubagent bool
+		foundChildInMainTranscript  bool
+	)
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.RawDeltaMsg:
+			if msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.Text, "child reply") {
+				foundChildAssistantSubagent = true
+			}
+			if msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "reasoning" && strings.Contains(msg.Text, "child reasoning") {
+				foundChildReasoningSubagent = true
+			}
+			if msg.Target == tuievents.RawDeltaTargetAssistant && (strings.Contains(msg.Text, "child reply") || strings.Contains(msg.Text, "child reasoning")) {
+				foundChildInMainTranscript = true
+			}
+		case tuievents.LogChunkMsg:
+			if strings.Contains(msg.Chunk, "child reply") || strings.Contains(msg.Chunk, "child reasoning") {
+				foundChildInMainTranscript = true
+			}
+		}
+	}
+	if !foundChildAssistantSubagent {
+		t.Fatalf("expected child assistant replay to populate subagent stream, got %#v", sender.Snapshot())
+	}
+	if !foundChildReasoningSubagent {
+		t.Fatalf("expected child reasoning replay to populate subagent stream, got %#v", sender.Snapshot())
+	}
+	if foundChildInMainTranscript {
+		t.Fatalf("did not expect child replay content in main transcript, got %#v", sender.Snapshot())
+	}
+}
+
+func TestRenderSessionEvents_ReplayedChildToolCallStaysOutOfMainTranscript(t *testing.T) {
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	events := []*session.Event{{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "codex",
+				"state":            "completed",
+			},
+		}),
+	}}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    child.ID,
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+		"_ui_agent":           "codex",
+	}
+	events = append(events, &session.Event{
+		ID:        "ev-child-call",
+		SessionID: child.ID,
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "child-read-1",
+			Name: "READ",
+			Args: `{"path":"demo.py"}`,
+		}}, ""),
+		Meta: childMeta,
+	})
+	events = append(events, &session.Event{
+		ID:        "ev-child-result",
+		SessionID: child.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:     "child-read-1",
+			Name:   "READ",
+			Result: map[string]any{"result": "ok"},
+		}),
+		Meta: childMeta,
+	})
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		foundSubagentTool bool
+		foundMainToolLine bool
+	)
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.SubagentToolCallMsg:
+			if msg.SpawnID == "child-1" && msg.CallID == "child-read-1" && strings.EqualFold(msg.ToolName, "READ") {
+				foundSubagentTool = true
+			}
+		case tuievents.LogChunkMsg:
+			if strings.Contains(msg.Chunk, "READ demo.py") || strings.Contains(msg.Chunk, "✓ READ") {
+				foundMainToolLine = true
+			}
+		}
+	}
+	if !foundSubagentTool {
+		t.Fatalf("expected child tool replay to populate subagent panel, got %#v", sender.Snapshot())
+	}
+	if foundMainToolLine {
+		t.Fatalf("did not expect child tool replay in main transcript, got %#v", sender.Snapshot())
+	}
+}
+
+func TestRenderSessionEvents_ReplayedChildUserEventIsSuppressedFromMainTranscript(t *testing.T) {
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
+	events := []*session.Event{{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "codex",
+				"state":            "running",
+			},
+		}),
+	}}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    child.ID,
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+		"_ui_agent":           "codex",
+	}
+	events = append(events, &session.Event{
+		ID:        "ev-child-user",
+		SessionID: child.ID,
+		Message:   model.NewTextMessage(model.RoleUser, "child internal input"),
+		Meta:      childMeta,
+	})
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.UserMessageMsg:
+			if strings.Contains(msg.Text, "child internal input") {
+				t.Fatalf("did not expect child user replay in main transcript, got %#v", sender.Snapshot())
+			}
+		case tuievents.LogChunkMsg:
+			if strings.Contains(msg.Chunk, "child internal input") {
+				t.Fatalf("did not expect child user replay as log chunk, got %#v", sender.Snapshot())
+			}
+		}
+	}
+}
+
+func TestRenderSessionEvents_ReplayedBashTaskStreamUsesOriginalCallID(t *testing.T) {
+	events := []*session.Event{
+		{
+			ID:        "ev-bash-call",
+			SessionID: "resume-parent",
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "call-bash-1",
+				Name: "BASH",
+				Args: `{"command":"echo hello"}`,
+			}}, ""),
+		},
+		{
+			ID:        "ev-bash-result",
+			SessionID: "resume-parent",
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call-bash-1",
+				Name: "BASH",
+				Result: taskstream.AppendResultEvent(map[string]any{
+					"task_id": "task-bash-1",
+					"state":   "completed",
+				}, taskstream.Event{
+					Label:  "BASH",
+					TaskID: "task-bash-1",
+					CallID: "task-bash-1",
+					Stream: "stdout",
+					Chunk:  "hello from replay\n",
+					State:  "completed",
+				}),
+			}),
+		},
+	}
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:   context.Background(),
+		appName:   "app",
+		userID:    "u",
+		sessionID: "resume-parent",
+		workspace: workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender: sender,
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		foundReplayStdout bool
+		foundWrongCallID  bool
+	)
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.TaskStreamMsg)
+		if !ok {
+			continue
+		}
+		if msg.Stream == "stdout" && strings.Contains(msg.Chunk, "hello from replay") {
+			if msg.CallID == "call-bash-1" {
+				foundReplayStdout = true
+			}
+			if msg.CallID == "task-bash-1" {
+				foundWrongCallID = true
+			}
+		}
+	}
+	if !foundReplayStdout {
+		t.Fatalf("expected replayed bash stdout to be routed to original call id, got %#v", sender.Snapshot())
+	}
+	if foundWrongCallID {
+		t.Fatalf("did not expect replayed bash stdout to stay bound to self-referential task id, got %#v", sender.Snapshot())
+	}
 }
 
 func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {

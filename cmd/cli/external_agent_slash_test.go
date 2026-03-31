@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
@@ -59,6 +60,29 @@ func TestRunExternalAgentSlash_RequiresIdleMainSession(t *testing.T) {
 	}, "today weather")
 	if err == nil || err.Error() != "/gemini is only available while the main session is idle" {
 		t.Fatalf("expected main-session busy error, got %v", err)
+	}
+}
+
+func TestExternalACPStartupContextUsesTimeoutForOpenClaw(t *testing.T) {
+	ctx, cancel := externalACPStartupContext(context.Background(), "openclaw")
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected openclaw startup context to have a deadline")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > externalACPStartupTimeout+time.Second {
+		t.Fatalf("unexpected openclaw startup timeout %v", remaining)
+	}
+}
+
+func TestExternalACPStartupContextLeavesOtherAgentsUnbounded(t *testing.T) {
+	ctx, cancel := externalACPStartupContext(context.Background(), "codex")
+	defer cancel()
+
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("did not expect non-openclaw startup context deadline")
 	}
 }
 
@@ -134,6 +158,14 @@ func TestFormatExternalToolStart_UsesACPQuerySummary(t *testing.T) {
 	})
 	if got != `for "Shanghai weather"` {
 		t.Fatalf("expected ACP query summary, got %q", got)
+	}
+}
+
+func TestMergeExternalNarrativeChunk_DeduplicatesCumulativeReplay(t *testing.T) {
+	prefix := "我是 Gemini CLI，专注于软件工程任务的交互式 AI"
+	full := prefix + " 代理。我以高级软件工程师的身份协助你进行代码分析。"
+	if got := mergeExternalNarrativeChunk(prefix, full); got != full {
+		t.Fatalf("expected cumulative replay to replace previous snapshot, got %q", got)
 	}
 }
 

@@ -128,6 +128,18 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 	return client, nil
 }
 
+func DefaultClientInfo(version string) *Implementation {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "dev"
+	}
+	return &Implementation{
+		Name:    "caelis",
+		Title:   "Caelis",
+		Version: version,
+	}
+}
+
 func (c *Client) Initialize(ctx context.Context) (InitializeResponse, error) {
 	var resp InitializeResponse
 	err := c.conn.Call(ctx, MethodInitialize, InitializeRequest{

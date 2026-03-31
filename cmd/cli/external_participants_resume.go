@@ -37,12 +37,13 @@ func (c *cliConsole) resumeExternalParticipantStream(ctx context.Context, partic
 	runState := &activeExternalAgentRun{}
 	runState.setSessionID(participant.ChildSessionID)
 	client, err := acpclient.Start(observationCtx, acpclient.Config{
-		Command:   strings.TrimSpace(desc.Command),
-		Args:      append([]string(nil), desc.Args...),
-		Env:       copyStringMap(desc.Env),
-		WorkDir:   c.resolveExternalAgentWorkDir(desc),
-		Runtime:   c.executionRuntimeForSession(),
-		Workspace: c.workspace.CWD,
+		Command:    strings.TrimSpace(desc.Command),
+		Args:       append([]string(nil), desc.Args...),
+		Env:        copyStringMap(desc.Env),
+		WorkDir:    c.resolveExternalAgentWorkDir(desc),
+		Runtime:    c.executionRuntimeForSession(),
+		Workspace:  c.workspace.CWD,
+		ClientInfo: acpclient.DefaultClientInfo(c.version),
 		OnUpdate: func(env acpclient.UpdateEnvelope) {
 			if !ready.Load() {
 				return

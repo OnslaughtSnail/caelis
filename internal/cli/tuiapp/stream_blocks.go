@@ -77,56 +77,108 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) tryMergeMutationSummaryLine(line string) bool {
-	merged, ok := mergedMutationToolLine(m.lastCommittedRaw, line)
+	toolName, summary, ok := parseMutationSummaryLine(line)
 	if !ok || m.doc.Len() == 0 {
 		return false
 	}
-	last := m.doc.Last()
-	if last == nil {
-		return false
+	if merged, ok := mergedMutationToolLine(m.lastCommittedRaw, line); ok {
+		last := m.doc.Last()
+		if tb, ok := last.(*TranscriptBlock); ok {
+			style := tuikit.DetectLineStyleWithContext(merged, m.lastCommittedStyle)
+			tb.Raw = merged
+			tb.Style = style
+			m.lastCommittedStyle = style
+			m.lastCommittedRaw = merged
+			m.hasCommittedLine = true
+			return true
+		}
 	}
-	tb, ok := last.(*TranscriptBlock)
-	if !ok {
-		return false
+	if anchor := m.findMutationSummaryAnchor(toolName); anchor != nil {
+		if !hasMutationSummarySuffix(anchor.Raw) {
+			anchor.Raw = strings.TrimSpace(anchor.Raw) + " " + summary
+			anchor.Style = tuikit.DetectLineStyleWithContext(anchor.Raw, anchor.Style)
+		}
+		m.hasCommittedLine = true
+		return true
 	}
-	style := tuikit.DetectLineStyleWithContext(merged, m.lastCommittedStyle)
-	tb.Raw = merged
-	tb.Style = style
-	m.lastCommittedStyle = style
-	m.lastCommittedRaw = merged
-	m.hasCommittedLine = true
+	// By design standalone WRITE/PATCH result summaries are not rendered in TUI.
 	return true
 }
 
 func mergedMutationToolLine(previous string, current string) (string, bool) {
-	prevTrimmed := strings.TrimSpace(previous)
-	currTrimmed := strings.TrimSpace(current)
-	if prevTrimmed == "" || currTrimmed == "" {
+	toolName, summary, ok := parseMutationSummaryLine(current)
+	if !ok {
 		return "", false
 	}
-	if !strings.HasPrefix(prevTrimmed, "▸ ") || !strings.HasPrefix(currTrimmed, "✓ ") {
+	prevTrimmed := strings.TrimSpace(previous)
+	if prevTrimmed == "" || !strings.HasPrefix(prevTrimmed, "▸ ") {
 		return "", false
 	}
 	prevRest := strings.TrimSpace(strings.TrimPrefix(prevTrimmed, "▸ "))
-	currRest := strings.TrimSpace(strings.TrimPrefix(currTrimmed, "✓ "))
-	prevParts := strings.SplitN(prevRest, " ", 2)
-	currParts := strings.SplitN(currRest, " ", 2)
-	if len(prevParts) != 2 || len(currParts) != 2 {
+	prevParts := strings.Fields(prevRest)
+	if len(prevParts) < 2 {
 		return "", false
 	}
-	toolName := strings.ToUpper(strings.TrimSpace(prevParts[0]))
-	if toolName != "PATCH" && toolName != "WRITE" {
+	if !strings.EqualFold(toolName, strings.TrimSpace(prevParts[0])) {
 		return "", false
 	}
-	if !strings.EqualFold(toolName, strings.TrimSpace(currParts[0])) {
-		return "", false
-	}
-	summary := strings.TrimSpace(currParts[1])
-	fields := strings.Fields(summary)
-	if len(fields) != 2 || !strings.HasPrefix(fields[0], "+") || !strings.HasPrefix(fields[1], "-") {
+	if hasMutationSummarySuffix(prevTrimmed) {
 		return "", false
 	}
 	return prevTrimmed + " " + summary, true
+}
+
+func parseMutationSummaryLine(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "✓ ") {
+		return "", "", false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "✓ "))
+	parts := strings.Fields(rest)
+	if len(parts) != 3 {
+		return "", "", false
+	}
+	toolName := strings.ToUpper(strings.TrimSpace(parts[0]))
+	if toolName != "PATCH" && toolName != "WRITE" {
+		return "", "", false
+	}
+	if !strings.HasPrefix(parts[1], "+") || !strings.HasPrefix(parts[2], "-") {
+		return "", "", false
+	}
+	return toolName, parts[1] + " " + parts[2], true
+}
+
+func hasMutationSummarySuffix(line string) bool {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 2 {
+		return false
+	}
+	last := fields[len(fields)-1]
+	prev := fields[len(fields)-2]
+	return strings.HasPrefix(prev, "+") && strings.HasPrefix(last, "-")
+}
+
+func (m *Model) findMutationSummaryAnchor(toolName string) *TranscriptBlock {
+	if m == nil || m.doc == nil {
+		return nil
+	}
+	blocks := m.doc.Blocks()
+	for i := len(blocks) - 1; i >= 0; i-- {
+		tb, ok := blocks[i].(*TranscriptBlock)
+		if !ok {
+			continue
+		}
+		raw := strings.TrimSpace(tb.Raw)
+		if !strings.HasPrefix(raw, "▸ ") {
+			continue
+		}
+		callName, ok := extractToolCallName(raw)
+		if !ok || !strings.EqualFold(callName, toolName) {
+			continue
+		}
+		return tb
+	}
+	return nil
 }
 
 func (m *Model) finalizeAssistantBlock() {
@@ -259,6 +311,7 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	if m.activeAssistantID == "" {
 		block := NewAssistantBlock(actor)
 		block.Raw = text
+		block.Streaming = !final
 		m.doc.Append(block)
 		m.activeAssistantID = block.BlockID()
 		m.activeAssistantActor = actor
@@ -283,6 +336,9 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	ab := block.(*AssistantBlock)
 	ab.Actor = actor
 	ab.Raw = mergeStreamChunk(ab.Raw, text, final)
+	if final {
+		ab.Streaming = false
+	}
 	if final {
 		m.activeAssistantID = ""
 		m.activeAssistantActor = ""
@@ -1148,6 +1204,10 @@ func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string,
 	m.finalizeActivityBlock()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
+	text = tuikit.SanitizeLogText(text)
+	if text == "" && !final {
+		return m, nil
+	}
 	block := m.ensureParticipantTurnBlock(sessionID, actor)
 	if block == nil {
 		return m, nil
@@ -1273,24 +1333,6 @@ func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea
 	}
 	m.syncViewportContent()
 	return m, cmd
-}
-
-// renderAssistantBlockLines renders assistant content for use in block Render.
-// Kept as a Model method for access to theme and viewport width.
-func (m *Model) renderAssistantBlockLines(raw string) []string {
-	nls, plainRows := buildNarrativeRows(raw)
-	if len(plainRows) == 0 {
-		return []string{tuikit.ColorizeLogLine("* ", tuikit.LineStyleAssistant, m.theme)}
-	}
-	lines := make([]string, len(plainRows))
-	for i := range plainRows {
-		rolePrefix := ""
-		if i == 0 {
-			rolePrefix = "* "
-		}
-		lines[i] = styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, tuikit.LineStyleAssistant, m.theme)
-	}
-	return lines
 }
 
 func (m *Model) resetConversationView() {

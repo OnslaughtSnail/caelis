@@ -202,6 +202,14 @@ func (m *Model) scheduleInlineBashCollapse(panel *BashPanelBlock) {
 	if m == nil || !isInlineBashPanel(panel) || panel == nil {
 		return
 	}
+	if m.noAnimation {
+		panel.Expanded = false
+		panel.CollapseAt = time.Time{}
+		panel.CollapseFrom = time.Time{}
+		panel.VisibleLines = 0
+		m.syncInlineBashAnchorState(panel)
+		return
+	}
 	scheduleInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.CollapseFor, &panel.VisibleLines, panel.StartedAt, toolOutputPreviewLines, time.Now())
 	m.syncInlineBashAnchorState(panel)
 }

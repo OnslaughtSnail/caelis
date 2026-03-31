@@ -4,7 +4,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 )
@@ -354,30 +353,33 @@ func replaceRuneSpan(input []rune, start int, end int, replacement string) ([]ru
 	return out, start + len(repl)
 }
 
-// overlayBottom places an overlay box near the bottom of the base text.
-func overlayBottom(base string, overlay string, width int, _ int) string {
+// overlayBottom places an overlay box near the bottom of the base text,
+// centered within the readable main column.
+func overlayBottom(base string, overlay string, screenWidth int, columnX int, columnWidth int, _ int) string {
 	baseLines := strings.Split(base, "\n")
 	overlayLines := strings.Split(overlay, "\n")
 	if len(baseLines) == 0 {
 		return overlay
 	}
+	startX := overlayColumnStart(overlayLines, columnX, columnWidth)
 	startRow := maxInt(0, len(baseLines)-len(overlayLines)-2)
 	for i, line := range overlayLines {
 		row := startRow + i
 		if row < 0 || row >= len(baseLines) {
 			continue
 		}
-		baseLines[row] = padCenter(line, width)
+		baseLines[row] = overlayLineAt(baseLines[row], line, startX, screenWidth)
 	}
 	return strings.Join(baseLines, "\n")
 }
 
-func overlayAboveBottomArea(base string, overlay string, width int, bottomHeight int, gap int) string {
+func overlayAboveBottomArea(base string, overlay string, screenWidth int, columnX int, columnWidth int, bottomHeight int, gap int) string {
 	baseLines := strings.Split(base, "\n")
 	overlayLines := strings.Split(overlay, "\n")
 	if len(baseLines) == 0 || len(overlayLines) == 0 {
 		return base
 	}
+	startX := overlayColumnStart(overlayLines, columnX, columnWidth)
 	startRow := len(baseLines) - bottomHeight - len(overlayLines) - gap
 	if startRow < 0 {
 		startRow = 0
@@ -387,25 +389,40 @@ func overlayAboveBottomArea(base string, overlay string, width int, bottomHeight
 		if row < 0 || row >= len(baseLines) {
 			continue
 		}
-		if pad := width - lipgloss.Width(line); pad > 0 {
-			line += strings.Repeat(" ", pad)
-		}
-		baseLines[row] = line
+		baseLines[row] = overlayLineAt(baseLines[row], line, startX, screenWidth)
 	}
 	return strings.Join(baseLines, "\n")
 }
 
-func padCenter(text string, width int) string {
-	if width <= 0 {
-		return text
+func overlayColumnStart(lines []string, columnX int, columnWidth int) int {
+	startX := maxInt(0, columnX)
+	if columnWidth <= 0 || len(lines) == 0 {
+		return startX
 	}
-	textWidth := utf8.RuneCountInString(text)
-	if textWidth >= width {
-		return text
+	overlayWidth := 0
+	for _, line := range lines {
+		if width := lipgloss.Width(line); width > overlayWidth {
+			overlayWidth = width
+		}
 	}
-	left := (width - textWidth) / 2
-	right := width - textWidth - left
-	return strings.Repeat(" ", left) + text + strings.Repeat(" ", right)
+	if overlayWidth >= columnWidth {
+		return startX
+	}
+	return startX + (columnWidth-overlayWidth)/2
+}
+
+func overlayLineAt(_ string, overlayLine string, startX int, screenWidth int) string {
+	if startX < 0 {
+		startX = 0
+	}
+	prefix := strings.Repeat(" ", startX)
+	overlayWidth := lipgloss.Width(overlayLine)
+	remaining := screenWidth - startX - overlayWidth
+	suffix := ""
+	if remaining > 0 {
+		suffix = strings.Repeat(" ", remaining)
+	}
+	return prefix + overlayLine + suffix
 }
 
 func percentileDuration(values []time.Duration, percentile float64) time.Duration {
@@ -522,6 +539,55 @@ func renderSelectionOnLines(lines []string, start textSelectionPoint, end textSe
 		suffix := sliceByDisplayColumns(line, to, width)
 		if middle == "" {
 			out = append(out, line)
+			continue
+		}
+		out = append(out, prefix+highlight.Render(middle)+suffix)
+	}
+	return out
+}
+
+// renderSelectionOnStyledLines renders selection highlight while preserving
+// styled (ANSI-colored) output for non-selected lines. Selected lines show
+// plain text with reverse highlight so the selection boundary is visually
+// unambiguous.
+func renderSelectionOnStyledLines(styledLines, plainLines []string, start textSelectionPoint, end textSelectionPoint) []string {
+	if len(styledLines) == 0 {
+		return nil
+	}
+	highlight := lipgloss.NewStyle().Reverse(true)
+	out := make([]string, 0, len(styledLines))
+	for i := 0; i < len(styledLines); i++ {
+		if i < start.line || i > end.line {
+			// Non-selected: keep styled (colored) output.
+			out = append(out, styledLines[i])
+			continue
+		}
+		// Selected line: use plain text with reverse highlight on the
+		// selected portion.
+		line := plainLines[i]
+		width := displayColumns(line)
+		from := 0
+		to := width
+		if i == start.line {
+			from = start.col
+		}
+		if i == end.line {
+			to = end.col
+		}
+		if from < 0 {
+			from = 0
+		}
+		if to > width {
+			to = width
+		}
+		if to < from {
+			to = from
+		}
+		prefix := sliceByDisplayColumns(line, 0, from)
+		middle := sliceByDisplayColumns(line, from, to)
+		suffix := sliceByDisplayColumns(line, to, width)
+		if middle == "" {
+			out = append(out, styledLines[i])
 			continue
 		}
 		out = append(out, prefix+highlight.Render(middle)+suffix)

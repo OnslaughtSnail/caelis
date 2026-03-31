@@ -41,6 +41,8 @@ func Next(mode string) string {
 
 func DisplayLabel(mode string) string {
 	switch Normalize(mode) {
+	case DefaultMode:
+		return DefaultMode
 	case PlanMode:
 		return "plan"
 	case FullMode:

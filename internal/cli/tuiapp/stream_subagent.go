@@ -372,13 +372,22 @@ func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
 	streamKind := strings.TrimSpace(msg.Stream)
-	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
-		state.Status = "running"
+	chunk := tuikit.SanitizeLogText(msg.Chunk)
+	if chunk == "" {
+		return m, nil
+	}
+	if state != nil {
+		switch {
+		case strings.EqualFold(state.Status, "waiting_approval"):
+			state.Status = "running"
+		case isTerminalSubagentState(state.Status):
+			state.ReviveFromTerminal()
+		}
 	}
 	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false); panel != nil {
 		m.reviveSubagentPanel(panel, false)
 	}
-	m.applySubagentStreamImmediate(sessionKey, streamKind, msg.Chunk)
+	m.applySubagentStreamImmediate(sessionKey, streamKind, chunk)
 	m.syncSubagentSessionPanels(sessionKey)
 	return m, nil
 }
@@ -387,9 +396,19 @@ func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string
 	sessionKey, state := m.ensureSubagentSessionState(spawnID, "", "")
 	_ = m.ensureSubagentPanelBlock(spawnID, "", "", "", "", false)
 	streamKind := strings.TrimSpace(stream)
+	chunk = tuikit.SanitizeLogText(chunk)
 	m.flushSubagentStreamSmoothingExcept(sessionKey, streamKind)
-	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
-		state.Status = "running"
+	if state != nil {
+		switch {
+		case strings.EqualFold(state.Status, "waiting_approval"):
+			state.Status = "running"
+		case isTerminalSubagentState(state.Status):
+			state.ReviveFromTerminal()
+		}
+	}
+	if chunk == "" && !final {
+		m.syncSubagentSessionPanels(sessionKey)
+		return m, nil
 	}
 	if !m.enqueueStreamDelta("subagent", sessionKey, streamKind, "", chunk, final) {
 		m.syncSubagentSessionPanels(sessionKey)
@@ -425,8 +444,13 @@ func (m *Model) applySubagentStreamImmediate(sessionKey string, stream string, c
 func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.Model, tea.Cmd) {
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
-	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
-		state.Status = "running"
+	if state != nil {
+		switch {
+		case strings.EqualFold(state.Status, "waiting_approval"):
+			state.Status = "running"
+		case isTerminalSubagentState(state.Status):
+			state.ReviveFromTerminal()
+		}
 	}
 	if msg.CallID != "" && state != nil {
 		state.UpdateToolCall(msg.CallID, msg.ToolName, msg.Args, msg.Stream, msg.Chunk, msg.Final)
@@ -442,8 +466,13 @@ func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.M
 func (m *Model) handleSubagentPlan(msg tuievents.SubagentPlanMsg) (tea.Model, tea.Cmd) {
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
-	if state != nil && strings.EqualFold(state.Status, "waiting_approval") {
-		state.Status = "running"
+	if state != nil {
+		switch {
+		case strings.EqualFold(state.Status, "waiting_approval"):
+			state.Status = "running"
+		case isTerminalSubagentState(state.Status):
+			state.ReviveFromTerminal()
+		}
 	}
 	entries := make([]planEntryState, len(msg.Entries))
 	for i, e := range msg.Entries {
@@ -486,6 +515,14 @@ func (m *Model) scheduleInlineSubagentCollapse(panel *SubagentPanelBlock) {
 	}
 	if panel.PinnedOpenByUser {
 		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+		return
+	}
+	if m.noAnimation {
+		panel.Expanded = false
+		panel.CollapseAt = time.Time{}
+		panel.CollapseFrom = time.Time{}
+		panel.VisibleLines = 0
+		m.syncInlineSubagentAnchorState(panel)
 		return
 	}
 	scheduleInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.CollapseFor, &panel.VisibleLines, panel.StartedAt, subagentOutputPreviewLines, time.Now())

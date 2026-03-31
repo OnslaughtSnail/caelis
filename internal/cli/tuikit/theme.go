@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 )
 
 type Theme struct {
-	Name   string
-	IsDark bool
+	Name    string
+	IsDark  bool
+	NoColor bool
+	Profile colorprofile.Profile
 
 	AppBg          color.Color
 	PanelBorder    color.Color
@@ -85,6 +88,27 @@ type Theme struct {
 	CodeSurface         color.Color
 	TableHeaderBg       color.Color
 	TableBorder         color.Color
+
+	// Resolved semantic tokens — lazily populated via Tokens().
+	tokens *Tokens
+}
+
+// Tokens returns the resolved semantic design tokens for this theme.
+// The result is cached after the first call.
+func (t *Theme) Tokens() Tokens {
+	if t.tokens != nil {
+		return *t.tokens
+	}
+	tok := resolveTokens(*t)
+	t.tokens = &tok
+	return tok
+}
+
+// InvalidateTokens clears the cached tokens, forcing a re-resolve on the
+// next Tokens() call. Call this after mutating theme colors (e.g. accent
+// override, theme switch).
+func (t *Theme) InvalidateTokens() {
+	t.tokens = nil
 }
 
 func DefaultTheme() Theme {
@@ -92,13 +116,32 @@ func DefaultTheme() Theme {
 }
 
 func ResolveThemeFromEnv() Theme {
-	return resolveTheme(themeResolveOptions{})
+	return resolveTheme(themeResolveOptions{noColor: noColorRequested()})
 }
 
 func ResolveThemeForBackground(isDark bool) Theme {
 	return resolveTheme(themeResolveOptions{
 		backgroundKnown: true,
 		backgroundDark:  isDark,
+		noColor:         noColorRequested(),
+	})
+}
+
+func ResolveThemeFromOptions(noColor bool, profile colorprofile.Profile) Theme {
+	return resolveTheme(themeResolveOptions{
+		noColor:           noColor,
+		colorProfileKnown: profile != colorprofile.Unknown,
+		colorProfile:      profile,
+	})
+}
+
+func ResolveThemeWithState(isDark bool, noColor bool, profile colorprofile.Profile) Theme {
+	return resolveTheme(themeResolveOptions{
+		backgroundKnown:   true,
+		backgroundDark:    isDark,
+		noColor:           noColor,
+		colorProfileKnown: profile != colorprofile.Unknown,
+		colorProfile:      profile,
 	})
 }
 
@@ -108,21 +151,51 @@ func ThemeUsesAutoBackground() bool {
 }
 
 type themeResolveOptions struct {
-	backgroundKnown bool
-	backgroundDark  bool
+	backgroundKnown   bool
+	backgroundDark    bool
+	colorProfileKnown bool
+	colorProfile      colorprofile.Profile
+	noColor           bool
 }
 
 func resolveTheme(opts themeResolveOptions) Theme {
-	useTrueColor := supportsTrueColor()
+	profile := resolvedColorProfile(opts)
+	useTrueColor := profile == colorprofile.TrueColor
 	name := strings.ToLower(strings.TrimSpace(os.Getenv("CAELIS_THEME")))
 	theme := namedTheme(name, useTrueColor, resolvedDarkBackground(opts))
+	theme.Profile = profile
+	theme.NoColor = opts.noColor
 	if accent := strings.TrimSpace(os.Getenv("CAELIS_ACCENT")); accent != "" {
 		theme.Accent = lipgloss.Color(accent)
 		theme.Focus = lipgloss.Color(accent)
 		theme.ComposerBorderFocus = lipgloss.Color(accent)
 		theme.LinkFg = lipgloss.Color(accent)
 	}
+	if opts.noColor {
+		theme = stripThemeColors(theme)
+	}
 	return theme
+}
+
+func noColorRequested() bool {
+	value, ok := os.LookupEnv("NO_COLOR")
+	return ok && strings.TrimSpace(value) != ""
+}
+
+func resolvedColorProfile(opts themeResolveOptions) colorprofile.Profile {
+	if opts.noColor {
+		return colorprofile.NoTTY
+	}
+	if opts.colorProfileKnown && opts.colorProfile != colorprofile.Unknown {
+		return opts.colorProfile
+	}
+	if supportsTrueColor() {
+		return colorprofile.TrueColor
+	}
+	if supportsANSI256() {
+		return colorprofile.ANSI256
+	}
+	return colorprofile.ANSI
 }
 
 func resolvedDarkBackground(opts themeResolveOptions) bool {
@@ -139,6 +212,84 @@ func supportsTrueColor() bool {
 	}
 	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
 	return strings.Contains(term, "truecolor") || strings.Contains(term, "24bit") || strings.Contains(term, "direct")
+}
+
+func supportsANSI256() bool {
+	term := strings.ToLower(strings.TrimSpace(os.Getenv("TERM")))
+	return strings.Contains(term, "256color")
+}
+
+func stripThemeColors(theme Theme) Theme {
+	theme.NoColor = true
+	theme.Profile = colorprofile.NoTTY
+	theme.AppBg = nil
+	theme.PanelBorder = nil
+	theme.PanelTitle = nil
+	theme.TextPrimary = nil
+	theme.TextSecondary = nil
+	theme.SecondaryText = nil
+	theme.MutedText = nil
+	theme.Info = nil
+	theme.Success = nil
+	theme.Warning = nil
+	theme.Error = nil
+	theme.Accent = nil
+	theme.Focus = nil
+	theme.ModalBg = nil
+	theme.StatusBg = nil
+	theme.StatusText = nil
+	theme.CommandBg = nil
+	theme.CommandActive = nil
+	theme.CommandText = nil
+	theme.CommandSubText = nil
+	theme.AssistantFg = nil
+	theme.ReasoningFg = nil
+	theme.UserFg = nil
+	theme.UserBg = nil
+	theme.UserPrefixFg = nil
+	theme.UserMentionFg = nil
+	theme.ToolFg = nil
+	theme.DiffAddFg = nil
+	theme.DiffRemoveFg = nil
+	theme.DiffHeaderFg = nil
+	theme.DiffHunkFg = nil
+	theme.DiffAddBg = nil
+	theme.DiffAddStrongBg = nil
+	theme.DiffRemoveBg = nil
+	theme.DiffRemoveStrongBg = nil
+	theme.DiffLineNoFg = nil
+	theme.DiffGutterFg = nil
+	theme.DiffPanelBorder = nil
+	theme.SectionFg = nil
+	theme.KeyLabelFg = nil
+	theme.NoteFg = nil
+	theme.PromptFg = nil
+	theme.CursorFg = nil
+	theme.ScrollHintFg = nil
+	theme.InputBarBg = nil
+	theme.InputBarFg = nil
+	theme.ToolOutputBg = nil
+	theme.HelpHintFg = nil
+	theme.SpinnerFg = nil
+	theme.SeparatorFg = nil
+	theme.RoleBorderFg = nil
+	theme.NewMsgBg = nil
+	theme.ComposerBorder = nil
+	theme.ComposerBorderFocus = nil
+	theme.ScrollbarTrack = nil
+	theme.ScrollbarThumb = nil
+	theme.LinkFg = nil
+	theme.CodeFg = nil
+	theme.CodeBg = nil
+	theme.CodeBlockFg = nil
+	theme.CodeBlockBg = nil
+	theme.TranscriptRail = nil
+	theme.TranscriptShell = nil
+	theme.TranscriptPillBg = nil
+	theme.CodeSurface = nil
+	theme.TableHeaderBg = nil
+	theme.TableBorder = nil
+	return theme
 }
 
 func namedTheme(name string, trueColor bool, darkBackground bool) Theme {
@@ -188,8 +339,8 @@ func defaultThemeVariant(trueColor bool) Theme {
 		Success:        themeColor(trueColor, "#56d364", "77"),
 		Warning:        themeColor(trueColor, "#f5c451", "221"),
 		Error:          themeColor(trueColor, "#ff7b72", "210"),
-		Accent:         themeColor(trueColor, "#e5e7eb", "254"),
-		Focus:          themeColor(trueColor, "#f3f4f6", "255"),
+		Accent:         themeColor(trueColor, "#8ab4f8", "117"),
+		Focus:          themeColor(trueColor, "#9ec6ff", "153"),
 		ModalBg:        themeColor(trueColor, "#15181d", "234"),
 		StatusBg:       themeColor(trueColor, "#111315", "233"),
 		StatusText:     themeColor(trueColor, "#d4d4d8", "252"),
@@ -242,7 +393,7 @@ func defaultThemeVariant(trueColor bool) Theme {
 		CodeBlockBg:         themeColor(trueColor, "#171a20", "234"),
 		TranscriptRail:      themeColor(trueColor, "#5b6472", "242"),
 		TranscriptShell:     themeColor(trueColor, "#2a303a", "236"),
-		TranscriptPillBg:    themeColor(trueColor, "#1a1f27", "234"),
+		TranscriptPillBg:    themeColor(trueColor, "#202632", "236"),
 		CodeSurface:         themeColor(trueColor, "#171c23", "234"),
 		TableHeaderBg:       themeColor(trueColor, "#171c23", "234"),
 		TableBorder:         themeColor(trueColor, "#5b6472", "242"),
@@ -623,9 +774,8 @@ func (t Theme) TranscriptLabelStyle() lipgloss.Style {
 
 func (t Theme) TranscriptPillStyle(tone string) lipgloss.Style {
 	style := lipgloss.NewStyle().
-		Background(t.TranscriptPillBg).
 		Foreground(t.SecondaryText).
-		Padding(0, 1)
+		Bold(true)
 	switch strings.ToLower(strings.TrimSpace(tone)) {
 	case "success":
 		return style.Foreground(t.Success)
@@ -731,7 +881,7 @@ func ComposeFooter(width int, left string, right string) string {
 func (t Theme) InputBarStyle() lipgloss.Style {
 	return lipgloss.NewStyle().
 		Foreground(t.InputBarFg).
-		Padding(0, 1)
+		Padding(0, 0)
 }
 
 func (t Theme) ComposerStyle(focused bool) lipgloss.Style {
@@ -774,7 +924,7 @@ func (t Theme) ScrollbarTrackStyle() lipgloss.Style {
 }
 
 func (t Theme) ScrollbarThumbStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(t.ScrollbarThumb).Bold(true)
+	return lipgloss.NewStyle().Foreground(t.ScrollbarThumb)
 }
 
 func (t Theme) LinkStyle() lipgloss.Style {

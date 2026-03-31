@@ -28,6 +28,18 @@ func keyPress(code rune, mods ...tea.KeyMod) tea.KeyPressMsg {
 	return tea.KeyPressMsg(key)
 }
 
+func keyRelease(code rune, mods ...tea.KeyMod) tea.KeyReleaseMsg {
+	var mod tea.KeyMod
+	for _, one := range mods {
+		mod |= one
+	}
+	key := tea.Key{Code: code, Mod: mod}
+	if code == tea.KeySpace {
+		key.Text = " "
+	}
+	return tea.KeyReleaseMsg(key)
+}
+
 func keyText(text string) tea.KeyPressMsg {
 	key := tea.Key{Text: text, Code: tea.KeyExtended}
 	runes := []rune(text)
@@ -55,6 +67,10 @@ func mouseRelease(x int, y int, button tea.MouseButton) tea.MouseReleaseMsg {
 
 func mouseWheel(x int, y int, button tea.MouseButton) tea.MouseWheelMsg {
 	return tea.MouseWheelMsg(tea.Mouse{X: x, Y: y, Button: button})
+}
+
+func mouseMotion(x int, y int) tea.MouseMotionMsg {
+	return tea.MouseMotionMsg(tea.Mouse{X: x, Y: y})
 }
 
 func driveBashPanelCollapse(m *Model, panel *BashPanelBlock) {
@@ -263,6 +279,9 @@ func TestRenderHelpShowsMinimalFooterHints(t *testing.T) {
 			t.Fatalf("expected minimal footer help to include %q, got %q", want, help)
 		}
 	}
+	if strings.Contains(help, "ctrl+o") {
+		t.Fatalf("did not expect footer help to include alias key, got %q", help)
+	}
 	for _, unwanted := range []string{"enter", "history"} {
 		if strings.Contains(help, unwanted) {
 			t.Fatalf("did not expect verbose footer help to include %q, got %q", unwanted, help)
@@ -436,7 +455,7 @@ func TestPaletteAnimation_OpenAndClose(t *testing.T) {
 	}
 }
 
-func TestViewRendersScrollbarWhenViewportOverflows(t *testing.T) {
+func TestViewHidesScrollbarWhenViewportOverflowsByDefault(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	for i := 0; i < 40; i++ {
@@ -445,8 +464,54 @@ func TestViewRendersScrollbarWhenViewportOverflows(t *testing.T) {
 	m.syncViewportContent()
 
 	view := renderModel(m)
-	if !strings.Contains(view, "█") {
-		t.Fatalf("expected viewport scrollbar in view, got:\n%s", view)
+	if strings.Contains(view, "▎") || strings.Contains(view, "▏") {
+		t.Fatalf("did not expect viewport scrollbar in idle view, got:\n%s", view)
+	}
+}
+
+func TestViewShowsViewportScrollbarOnlyWithinVisibleWindow(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	for i := 0; i < 40; i++ {
+		m.doc.Append(NewTranscriptBlock(fmt.Sprintf("line %02d", i), tuikit.LineStyleDefault))
+	}
+	m.syncViewportContent()
+
+	m.viewportScrollbarVisibleUntil = time.Now().Add(time.Second)
+	if view := renderModel(m); !strings.Contains(view, "▎") {
+		t.Fatalf("expected visible viewport scrollbar while scrolling, got:\n%s", view)
+	}
+
+	m.viewportScrollbarVisibleUntil = time.Now().Add(-time.Second)
+	if view := renderModel(m); strings.Contains(view, "▎") || strings.Contains(view, "▏") {
+		t.Fatalf("did not expect expired viewport scrollbar, got:\n%s", view)
+	}
+}
+
+func TestViewportScrollbarShowsOnHoverAndDrags(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	for i := 0; i < 60; i++ {
+		m.doc.Append(NewTranscriptBlock(fmt.Sprintf("line %02d", i), tuikit.LineStyleDefault))
+	}
+	m.syncViewportContent()
+	m.viewport.GotoTop()
+	m.userScrolledUp = true
+
+	x := m.mainColumnX() + tuikit.GutterNarrative + m.viewport.Width()
+	y := maxInt(1, m.viewport.Height()/2)
+
+	_, _ = m.Update(mouseMotion(x, y))
+	if view := renderModel(m); !strings.Contains(view, "▎") {
+		t.Fatalf("expected viewport scrollbar visible on hover, got:\n%s", view)
+	}
+
+	before := m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(x, y, tea.MouseLeft))
+	_, _ = m.Update(mouseMotion(x, m.viewport.Height()-1))
+	_, _ = m.Update(mouseRelease(x, m.viewport.Height()-1, tea.MouseLeft))
+	if got := m.viewport.YOffset(); got <= before {
+		t.Fatalf("expected viewport scrollbar drag to advance offset, before=%d after=%d", before, got)
 	}
 }
 
@@ -617,6 +682,29 @@ func TestResumeOverlayTabFillsSessionID(t *testing.T) {
 	}
 	if len(m.resumeCandidates) != 0 {
 		t.Fatalf("expected resume candidates cleared after tab completion, got %d", len(m.resumeCandidates))
+	}
+}
+
+func TestResumeOverlayIgnoresKeyReleaseNavigation(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
+			return []ResumeCandidate{
+				{SessionID: "s-1", Prompt: "first", Age: "1m"},
+				{SessionID: "s-2", Prompt: "second", Age: "2m"},
+				{SessionID: "s-3", Prompt: "third", Age: "3m"},
+			}, nil
+		},
+	})
+	resizeModel(m)
+
+	typeRunes(m, "/resume")
+	_, _ = m.Update(keyPress(tea.KeyEnter))
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	_, _ = m.Update(keyRelease(tea.KeyDown))
+
+	if m.resumeIndex != 1 {
+		t.Fatalf("expected resume index 1 after key press+release, got %d", m.resumeIndex)
 	}
 }
 
@@ -1319,6 +1407,33 @@ func TestBacktabTogglesModeAndRefreshesStatus(t *testing.T) {
 	}
 }
 
+func TestCtrlOTogglesModeAndRefreshesStatus(t *testing.T) {
+	toggled := false
+	m := NewModel(Config{
+		ToggleMode: func() (string, error) {
+			toggled = true
+			return "plan mode enabled", nil
+		},
+		RefreshStatus: func() (string, string) {
+			return "model {plan}", "42/128k"
+		},
+	})
+	updated, cmd := m.Update(keyText("ctrl+o"))
+	next := updated.(*Model)
+	if !toggled {
+		t.Fatal("expected toggle callback")
+	}
+	if next.hint != "plan mode enabled" {
+		t.Fatalf("expected mode hint, got %q", next.hint)
+	}
+	if next.statusModel != "model {plan}" || next.statusContext != "42/128k" {
+		t.Fatalf("unexpected refreshed status %q %q", next.statusModel, next.statusContext)
+	}
+	if cmd == nil {
+		t.Fatal("expected hint clear command")
+	}
+}
+
 func TestObserveRenderStats(t *testing.T) {
 	m := NewModel(Config{})
 	m.observeRender(5*time.Millisecond, 100, "incremental")
@@ -1452,8 +1567,8 @@ func TestSlashTabCompletionUnique(t *testing.T) {
 	typeRunes(m, "/hel")
 	_, _ = m.Update(keyPress(tea.KeyTab))
 	got := string(m.input)
-	if got != "/help" {
-		t.Fatalf("expected '/help', got %q", got)
+	if got != "/help " {
+		t.Fatalf("expected '/help ', got %q", got)
 	}
 }
 
@@ -1559,8 +1674,53 @@ func TestSlashOverlayDownTabFillsSelectedCommand(t *testing.T) {
 	}
 	_, _ = m.Update(keyPress(tea.KeyDown))
 	_, _ = m.Update(keyPress(tea.KeyTab))
-	if got := string(m.input); !strings.HasPrefix(got, "/") || strings.HasSuffix(got, " ") {
-		t.Fatalf("expected slash command filled without trailing space, got %q", got)
+	if got := string(m.input); !strings.HasPrefix(got, "/") || !strings.HasSuffix(got, " ") {
+		t.Fatalf("expected slash command filled with trailing space, got %q", got)
+	}
+}
+
+func TestSlashCompletionAutoOpensResumePickerAfterFill(t *testing.T) {
+	m := NewModel(Config{
+		Commands:    []string{"resume", "status"},
+		ExecuteLine: noopExecute,
+		ResumeComplete: func(_ string, _ int) ([]ResumeCandidate, error) {
+			return []ResumeCandidate{{SessionID: "s-1", Prompt: "restored", Age: "1m"}}, nil
+		},
+	})
+	resizeModel(m)
+
+	typeRunes(m, "/res")
+	_, _ = m.Update(keyPress(tea.KeyTab))
+
+	if got := string(m.input); got != "/resume " {
+		t.Fatalf("expected '/resume ' after completion, got %q", got)
+	}
+	if len(m.resumeCandidates) == 0 {
+		t.Fatal("expected resume picker to auto-open after slash completion")
+	}
+	if len(m.slashCandidates) != 0 {
+		t.Fatalf("did not expect slash command overlay to remain visible, got %v", m.slashCandidates)
+	}
+}
+
+func TestSlashCompletionFreeformCommandDoesNotReopenSlashOverlay(t *testing.T) {
+	m := NewModel(Config{
+		Commands:    []string{"btw", "copilot", "status"},
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	typeRunes(m, "/cop")
+	_, _ = m.Update(keyPress(tea.KeyTab))
+
+	if got := string(m.input); got != "/copilot " {
+		t.Fatalf("expected '/copilot ' after completion, got %q", got)
+	}
+	if len(m.slashCandidates) != 0 {
+		t.Fatalf("did not expect slash overlay to remain for freeform command, got %v", m.slashCandidates)
+	}
+	if m.slashArgActive || len(m.slashArgCandidates) > 0 || len(m.resumeCandidates) > 0 {
+		t.Fatalf("did not expect follow-up picker for freeform command, slashArgActive=%v slashArgs=%d resume=%d", m.slashArgActive, len(m.slashArgCandidates), len(m.resumeCandidates))
 	}
 }
 
@@ -1641,6 +1801,62 @@ func TestInputMouseDragCopiesSelection(t *testing.T) {
 	start, end, ok := normalizedSelectionRange(m.inputSelectionStart, m.inputSelectionEnd, len(m.inputPlainLines()))
 	if !ok || (start.line == end.line && start.col == end.col) {
 		t.Fatal("expected input selection to remain after mouse release")
+	}
+}
+
+func TestShiftEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
+	submitted := false
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg {
+			submitted = true
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+
+	typeRunes(m, "hello")
+	_, cmd := m.Update(keyPress(tea.KeyEnter, tea.ModShift))
+	if cmd != nil {
+		t.Fatalf("expected no submit cmd on shift+enter, got %T", cmd)
+	}
+	if submitted {
+		t.Fatal("did not expect shift+enter to submit")
+	}
+	if got := m.textarea.Value(); got != "hello\n" {
+		t.Fatalf("expected newline inserted on shift+enter, got %q", got)
+	}
+}
+
+func TestCtrlJInsertsNewlineWithoutSubmitting(t *testing.T) {
+	submitted := false
+	m := NewModel(Config{
+		ExecuteLine: func(Submission) tuievents.TaskResultMsg {
+			submitted = true
+			return tuievents.TaskResultMsg{}
+		},
+	})
+	resizeModel(m)
+
+	typeRunes(m, "hello")
+	_, cmd := m.Update(keyText("ctrl+j"))
+	if cmd != nil {
+		t.Fatalf("expected no submit cmd on ctrl+j, got %T", cmd)
+	}
+	if submitted {
+		t.Fatal("did not expect ctrl+j to submit")
+	}
+	if got := m.textarea.Value(); got != "hello\n" {
+		t.Fatalf("expected newline inserted on ctrl+j, got %q", got)
+	}
+}
+
+func TestViewRequestsKeyboardEnhancements(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+
+	view := m.View()
+	if !view.KeyboardEnhancements.ReportEventTypes {
+		t.Fatal("expected view to request keyboard enhancement event types")
 	}
 }
 
@@ -1931,11 +2147,46 @@ func TestAssistantStreamUpdatesMarkdownBlockInPlace(t *testing.T) {
 	}
 
 	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
-	if !strings.Contains(joined, "- one") || !strings.Contains(joined, "- two") {
-		t.Fatalf("expected plain list formatting in history, got %q", joined)
+	if !strings.Contains(joined, "one") || !strings.Contains(joined, "two") {
+		t.Fatalf("expected finalized markdown list content in history, got %q", joined)
 	}
 	if strings.Contains(joined, "## Heading") {
 		t.Fatalf("expected heading markers to be hidden, got %q", joined)
+	}
+}
+
+func TestAssistantFinalizedAnswerUsesGlamourForCodeFences(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	raw := "## 技术栈\n\n```python\nprint(\"hello\")\n```"
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: raw[:12], Final: false})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: raw, Final: true})
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if strings.Contains(joined, "```") {
+		t.Fatalf("expected finalized answer to render fenced code via glamour, got %q", joined)
+	}
+	if !strings.Contains(joined, "print(\"hello\")") {
+		t.Fatalf("expected rendered code content preserved, got %q", joined)
+	}
+
+	var found bool
+	for _, block := range m.doc.Blocks() {
+		ab, ok := block.(*AssistantBlock)
+		if !ok {
+			continue
+		}
+		if strings.Contains(ab.Raw, "print(\"hello\")") {
+			found = true
+			if ab.Streaming {
+				t.Fatal("expected finalized assistant block to exit streaming mode")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected assistant block containing finalized code example")
 	}
 }
 
@@ -2553,8 +2804,8 @@ func TestDiffBlockResizeRerendersAdaptiveLayout(t *testing.T) {
 	if before == after {
 		t.Fatalf("expected resize to rerender diff block, got identical output: %q", after)
 	}
-	if !strings.Contains(after, " │ ") {
-		t.Fatalf("expected split diff separator after wide resize, got %q", after)
+	if strings.Contains(after, " │ ") {
+		t.Fatalf("expected wide diff to stay within centered main column instead of split full-width layout, got %q", after)
 	}
 }
 
@@ -2937,6 +3188,28 @@ func TestViewShowsStatusBar(t *testing.T) {
 	}
 }
 
+func TestStatusHeaderTruncatesLongWorkspaceAndModelToSingleLine(t *testing.T) {
+	m := NewModel(Config{
+		Workspace: "~/WorkDir/xueyongzhi/caelis [⎇ codex/tui-beautification-v0.0.34-super-long-branch-name]",
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.statusModel = "minimax/minimax-m2.7-highspeed"
+
+	header := ansi.Strip(m.renderStatusHeader())
+	if strings.Contains(header, "\n") {
+		t.Fatalf("expected single-line status header, got %q", header)
+	}
+	if got := displayColumns(header); got > m.fixedRowWidth() {
+		t.Fatalf("expected status header to fit fixed row width %d, got %d cols: %q", m.fixedRowWidth(), got, header)
+	}
+	if !strings.Contains(header, "[⎇ ") {
+		t.Fatalf("expected branch marker preserved, got %q", header)
+	}
+	if !strings.Contains(header, "...") {
+		t.Fatalf("expected status header truncation, got %q", header)
+	}
+}
+
 func TestCtrlVPasteShowsAttachmentHint(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
@@ -3275,6 +3548,12 @@ func TestFooterLeftShowsModeOnly(t *testing.T) {
 	if !strings.Contains(got, "plan") || !strings.Contains(got, "shift+tab") {
 		t.Fatalf("unexpected mode footer text %q", got)
 	}
+	if strings.Contains(got, "mode") {
+		t.Fatalf("did not expect footer mode text to include desc, got %q", got)
+	}
+	if strings.Contains(got, "ctrl+o") {
+		t.Fatalf("did not expect footer mode text to include alias, got %q", got)
+	}
 }
 
 func TestHintRowUsesHintInsteadOfFooter(t *testing.T) {
@@ -3287,6 +3566,24 @@ func TestHintRowUsesHintInsteadOfFooter(t *testing.T) {
 	}
 	if got := m.footerLeftText(); !strings.Contains(got, "plan") || !strings.Contains(got, "shift+tab") {
 		t.Fatalf("expected footer mode text preserved, got %q", got)
+	}
+}
+
+func TestFooterContextRoundsCompactTokenCountsToIntegers(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.statusContext = "15.4k/204.8k(7%)"
+	if got := m.footerContextText(); got != "15k/205k(7%)" {
+		t.Fatalf("expected rounded compact footer context, got %q", got)
+	}
+}
+
+func TestFooterContextDoesNotRoundUpFromLaterFractionDigits(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.statusContext = "15.49k/128.49k(12%)"
+	if got := m.footerContextText(); got != "15k/128k(12%)" {
+		t.Fatalf("expected numeric rounding for compact footer context, got %q", got)
 	}
 }
 
@@ -3761,6 +4058,38 @@ func TestUserMessageMsgDoesNotDuplicateCommittedAttachmentLine(t *testing.T) {
 	}
 }
 
+func TestUserTurnClearsFinalAnswerDedup(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	const answer = "same final answer"
+
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: answer, Final: true})
+	_, _ = m.submitLine("再发一遍")
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Text: answer, Final: true})
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if count := strings.Count(joined, answer); count != 2 {
+		t.Fatalf("expected repeated finalized answer after new user turn, got count=%d view=%q", count, joined)
+	}
+}
+
+func TestUserTurnPreservesLiteralMarkdown(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	m.commitUserDisplayLine("# Heading\n\n```go\nfmt.Println(1)\n```")
+	m.syncViewportContent()
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if !strings.Contains(joined, "> # Heading") {
+		t.Fatalf("expected literal heading marker in user history, got %q", joined)
+	}
+	if !strings.Contains(joined, "```go") || !strings.Contains(joined, "```") {
+		t.Fatalf("expected literal fenced code markers in user history, got %q", joined)
+	}
+}
+
 func TestSubmitWhileRunningReconcilesViewportForPendingQueue(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -4093,6 +4422,44 @@ func TestWriteResultMergesIntoPriorCallLine(t *testing.T) {
 	}
 }
 
+func TestWriteResultMergesIntoAnchorLineEvenAfterDiffBlock(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WRITE build.sh\n"})
+	_, _ = m.Update(tuievents.DiffBlockMsg{
+		Tool: "WRITE",
+		Path: "build.sh",
+		Old:  "",
+		New:  "echo hi\n",
+	})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WRITE +1 -0\n"})
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if !strings.Contains(joined, "▸ WRITE build.sh +1 -0") {
+		t.Fatalf("expected write result merged into anchor line after diff block, got %q", joined)
+	}
+	if strings.Contains(joined, "✓ WRITE +1 -0") {
+		t.Fatalf("did not expect standalone write result line after diff block, got %q", joined)
+	}
+}
+
+func TestMutationResultLineSuppressedWhenAnchorAlreadySummarized(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WRITE run_demo.sh +23 -0\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WRITE +43 -0\n"})
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if strings.Contains(joined, "✓ WRITE +43 -0") {
+		t.Fatalf("did not expect standalone aggregate write result line, got %q", joined)
+	}
+	if !strings.Contains(joined, "▸ WRITE run_demo.sh +23 -0") {
+		t.Fatalf("expected original summarized write anchor to stay visible, got %q", joined)
+	}
+}
+
 func TestAssistantStreamAddsPrefixMarker(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -4266,8 +4633,35 @@ func TestViewShowsModeFooterWhenConfigured(t *testing.T) {
 	})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	view := stripModelView(m)
-	if !strings.Contains(view, "full_access") || !strings.Contains(view, "shift+tab mode") {
+	if !strings.Contains(view, "full_access") || !strings.Contains(view, "shift+tab") {
 		t.Fatalf("expected mode footer in view, got:\n%s", view)
+	}
+	if strings.Contains(view, "shift+tab mode") {
+		t.Fatalf("did not expect footer mode desc in view, got:\n%s", view)
+	}
+	if strings.Contains(view, "ctrl+o mode") {
+		t.Fatalf("did not expect alias key in main view footer, got:\n%s", view)
+	}
+}
+
+func TestViewShowsDefaultModeAndContextFooterWhenConfigured(t *testing.T) {
+	m := NewModel(Config{
+		Workspace: "/tmp/work",
+		ModeLabel: func() string { return "default" },
+		RefreshStatus: func() (string, string) {
+			return "model-x", "42/128k"
+		},
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	view := stripModelView(m)
+	if !strings.Contains(view, "default") || !strings.Contains(view, "shift+tab") {
+		t.Fatalf("expected default mode footer in view, got:\n%s", view)
+	}
+	if strings.Contains(view, "shift+tab mode") {
+		t.Fatalf("did not expect footer mode desc in view, got:\n%s", view)
+	}
+	if !strings.Contains(view, "42/128k") {
+		t.Fatalf("expected context footer in view, got:\n%s", view)
 	}
 }
 
@@ -4417,8 +4811,8 @@ func TestBTWOverlayMessageDoesNotCommitConversationHistory(t *testing.T) {
 	if !strings.Contains(view, "config file name?") || !strings.Contains(view, "caelis.toml") {
 		t.Fatalf("expected question and answer in btw drawer, got:\n%s", view)
 	}
-	if !strings.Contains(view, "esc") || !strings.Contains(view, "close") {
-		t.Fatalf("expected close help in footer area, got:\n%s", view)
+	if !strings.Contains(view, "esc") {
+		t.Fatalf("expected close shortcut in footer area, got:\n%s", view)
 	}
 
 	_, _ = m.Update(keyPress(tea.KeyEnter))
@@ -4629,6 +5023,104 @@ func TestBackgroundColorMsgDoesNotOverrideExplicitTheme(t *testing.T) {
 	}
 }
 
+func TestPaletteToggle_NoAnimationSkipsTransition(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute, NoAnimation: true})
+	resizeModel(m)
+	_, _ = m.Update(keyPress('p', tea.ModCtrl))
+	if !m.showPalette || m.paletteAnimating {
+		t.Fatalf("expected palette open without animation, show=%v anim=%v", m.showPalette, m.paletteAnimating)
+	}
+	if m.paletteAnimLines != m.paletteAnimationTarget() {
+		t.Fatalf("expected palette lines to jump to target, got=%d want=%d", m.paletteAnimLines, m.paletteAnimationTarget())
+	}
+}
+
+func TestWideViewportCentersMainColumn(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	if got := m.mainColumnX(); got <= 0 {
+		t.Fatalf("expected centered main column in wide terminal, got offset %d", got)
+	}
+	header := ansi.Strip(m.renderStatusHeader())
+	placed := m.placeInMainColumn(header)
+	if !strings.HasPrefix(placed, strings.Repeat(" ", m.mainColumnX())) {
+		t.Fatalf("expected centered header padding, got %q", placed)
+	}
+}
+
+func TestComposerSeparatorsUseMainColumnWidth(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+
+	view := stripModelView(m)
+	if strings.Contains(view, strings.Repeat("─", m.width)) {
+		t.Fatalf("did not expect full terminal width separator in view")
+	}
+	centeredSep := strings.Repeat(" ", m.mainColumnX()) + strings.Repeat("─", m.fixedRowWidth())
+	if !strings.Contains(view, centeredSep) {
+		t.Fatalf("expected centered composer separator, got:\n%s", view)
+	}
+}
+
+func TestSlashCompletionOverlayCentersInMainColumn(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		Commands:    []string{"agent", "connect", "exit"},
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	m.setInputText("/")
+	m.syncTextareaFromInput()
+	m.refreshSlashCommands()
+
+	view := stripModelView(m)
+	var titleLine string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "Commands") {
+			titleLine = line
+			break
+		}
+	}
+	if titleLine == "" {
+		t.Fatalf("expected commands overlay in view, got:\n%s", view)
+	}
+	if idx := strings.Index(titleLine, "Commands"); idx < m.mainColumnX() {
+		t.Fatalf("expected commands overlay centered within main column, idx=%d offset=%d line=%q", idx, m.mainColumnX(), titleLine)
+	}
+}
+
+func TestPaletteOverlayCentersInMainColumn(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+		Commands:    []string{"agent", "connect", "exit"},
+		NoAnimation: true,
+	})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
+	m.togglePalette()
+
+	view := stripModelView(m)
+	var overlayLine string
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "/agent") {
+			overlayLine = line
+			break
+		}
+	}
+	if overlayLine == "" {
+		t.Fatalf("expected palette overlay in view, got:\n%s", view)
+	}
+	if idx := strings.Index(overlayLine, "/agent"); idx < m.mainColumnX() {
+		t.Fatalf("expected palette overlay centered within main column, idx=%d offset=%d line=%q", idx, m.mainColumnX(), overlayLine)
+	}
+}
+
+func TestExplicitNoColorModelUsesColorlessTheme(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute, NoColor: true})
+	resizeModel(m)
+	if !m.theme.NoColor {
+		t.Fatal("expected explicit no-color config to produce no-color theme")
+	}
+}
+
 func TestLogBlockGapBetweenNarrativeAndTool(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -4640,7 +5132,7 @@ func TestLogBlockGapBetweenNarrativeAndTool(t *testing.T) {
 	if strings.Contains(joined, "\n·\n") {
 		t.Fatalf("did not expect synthetic dot spacer between assistant and tool, got %q", joined)
 	}
-	if !strings.Contains(joined, "* hello world\n") || !strings.Contains(joined, "▸ Exploring 1 files") || !strings.Contains(joined, "Read file.txt") {
+	if !strings.Contains(joined, "hello world") || !strings.Contains(joined, "▸ Exploring 1 files") || !strings.Contains(joined, "Read file.txt") {
 		t.Fatalf("expected assistant and exploration block preserved, got %q", joined)
 	}
 }
@@ -4855,6 +5347,22 @@ func TestTaskMonitorStatusCollapsesWithoutStandbyLabel(t *testing.T) {
 	}
 	if strings.Contains(view, "Standby") {
 		t.Fatalf("did not expect standby summary, got:\n%s", view)
+	}
+}
+
+func TestTaskMonitorWriteCollapsesToSendPreview(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ TASK WRITE continue the spawned worker with more detail\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "SEND continue the spawned worker with more detail") {
+		t.Fatalf("expected TASK write summary to preserve send preview, got:\n%s", view)
+	}
+	if strings.Contains(view, "Checked 1 tasks") {
+		t.Fatalf("did not expect TASK write summary to be rendered as task status, got:\n%s", view)
 	}
 }
 

@@ -76,6 +76,7 @@ type cliConsole struct {
 	version               string
 	uiMode                interactiveUIMode
 	noColor               bool
+	noAnimation           bool
 	verbose               bool
 	inputRefs             *inputReferenceResolver
 	tuiDiag               *tuiDiagnostics
@@ -198,6 +199,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		version:               strings.TrimSpace(cfg.Version),
 		uiMode:                mode,
 		noColor:               cfg.NoColor,
+		noAnimation:           cfg.NoAnimation,
 		verbose:               cfg.Verbose,
 		inputRefs:             cfg.InputRefs,
 		tuiDiag:               cfg.TUIDiagnostics,
@@ -276,6 +278,7 @@ type cliConsoleConfig struct {
 	HistoryFile           string
 	Version               string
 	NoColor               bool
+	NoAnimation           bool
 	Verbose               bool
 	UIMode                string
 	AgentRegistry         *appagents.Registry
@@ -1299,6 +1302,9 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, call
 		if callID == "" {
 			callID = resp.ID
 		}
+		if shouldRebindReplayBashCallID(resp, ev, callID) {
+			callID = resp.ID
+		}
 		msg := tuievents.TaskStreamMsg{
 			Label:  label,
 			TaskID: ev.TaskID,
@@ -1315,6 +1321,20 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, call
 		c.tuiSender.Send(msg)
 	}
 	return true
+}
+
+func shouldRebindReplayBashCallID(resp *model.ToolResponse, ev taskstream.Event, callID string) bool {
+	if resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), toolshell.BashToolName) {
+		return false
+	}
+	if strings.TrimSpace(resp.ID) == "" {
+		return false
+	}
+	taskID := strings.TrimSpace(ev.TaskID)
+	if taskID == "" {
+		return false
+	}
+	return strings.TrimSpace(callID) == taskID
 }
 
 func syntheticTaskStreamMsgFromToolResult(resp *model.ToolResponse, callArgs map[string]any) (tuievents.TaskStreamMsg, bool) {
@@ -1514,6 +1534,10 @@ func handleHelp(c *cliConsole, args []string) (bool, error) {
 	helpSection("Model", []string{"model", "connect", "agent"})
 	helpSection("Security", []string{"sandbox"})
 	helpSection("Other", []string{"btw", "help", "version", "exit", "quit"})
+	c.ui.Section("Keys")
+	c.ui.Plain("  %-24s %s\n", "shift+tab", "Cycle mode")
+	c.ui.Plain("  %-24s %s\n", "ctrl+o", "Mode alias for terminals that don't report shift+tab/backtab")
+	c.ui.Plain("  %-24s %s\n", "shift+enter / ctrl+j", "Insert newline without sending")
 	if items := c.dynamicSlashAgents(); len(items) > 0 {
 		c.ui.Section("Agents")
 		for _, item := range items {
@@ -2265,6 +2289,9 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 		if ev == nil || eventIsPartial(ev) {
 			continue
 		}
+		if c.forwardReplaySubagentHistoryEvent(replayCtx, rootSessionID, ev) {
+			continue
+		}
 		msg := ev.Message
 		if msg.Role == model.RoleUser {
 			userText := visibleUserText(msg)
@@ -2300,6 +2327,35 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 	c.restoreResumedExternalParticipants(replayCtx)
 	c.tuiSender.Send(tuievents.TaskResultMsg{})
 	return nil
+}
+
+func (c *cliConsole) forwardReplaySubagentHistoryEvent(ctx context.Context, rootSessionID string, ev *session.Event) bool {
+	if c == nil || c.tuiSender == nil || c.spawnPreviewer == nil || ev == nil {
+		return false
+	}
+	update := sessionstream.Update{
+		SessionID: strings.TrimSpace(ev.SessionID),
+		Event:     ev,
+	}
+	msgs := c.projectSubagentUpdate(update)
+	if len(msgs) == 0 {
+		return isDelegatedSubagentHistoryEvent(ev)
+	}
+	for _, msg := range msgs {
+		c.sendSubagentProjectionMsg(ctx, rootSessionID, msg)
+	}
+	return true
+}
+
+func isDelegatedSubagentHistoryEvent(ev *session.Event) bool {
+	if ev == nil {
+		return false
+	}
+	meta, ok := runtime.DelegationMetadataFromEvent(ev)
+	if !ok || strings.TrimSpace(meta.ParentToolCall) == "" {
+		return false
+	}
+	return strings.EqualFold(meta.ParentToolName, tool.SpawnToolName) || strings.EqualFold(meta.ParentToolName, tool.TaskToolName)
 }
 
 func (c *cliConsole) resetResumeReplayContext() context.Context {

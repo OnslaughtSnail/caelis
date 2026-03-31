@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
@@ -32,6 +34,12 @@ import (
 )
 
 const connectModelCacheTTL = 30 * time.Second
+
+const (
+	workspaceStatusPathBudget   = 40
+	workspaceStatusBranchBudget = 24
+	workspaceStatusTotalBudget  = 56
+)
 
 var discoverModelsFn = modelproviders.DiscoverModels
 
@@ -375,9 +383,18 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 				d.RedrawMode,
 			)
 		},
+		NoColor:     c.noColor,
+		NoAnimation: c.noAnimation,
 	})
 
-	program := tea.NewProgram(model, tea.WithFPS(30))
+	opts := []tea.ProgramOption{tea.WithFPS(30)}
+	if c.noAnimation {
+		opts[0] = tea.WithFPS(15)
+	}
+	if c.noColor {
+		opts = append(opts, tea.WithColorProfile(colorprofile.NoTTY))
+	}
+	program := tea.NewProgram(model, opts...)
 	sender.set(func(msg any) { program.Send(msg) })
 
 	sigCh := make(chan os.Signal, 1)
@@ -426,21 +443,35 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 	switch {
 	case cw > 0:
 		pct := int(float64(pt) / float64(cw) * 100)
-		used := formatTokenCount(pt)
+		used := formatCompactTokenCountInt(pt)
 		if used == "" {
 			used = "0"
 		}
-		total := formatTokenCount(cw)
+		total := formatCompactTokenCountInt(cw)
 		if total == "" {
 			total = "0"
 		}
 		contextStr = fmt.Sprintf("%s/%s(%d%%)", used, total, pct)
 	case pt > 0:
-		contextStr = formatTokenCount(pt)
+		contextStr = formatCompactTokenCountInt(pt)
 	default:
 		contextStr = "0"
 	}
 	return modelLabel, contextStr
+}
+
+func formatCompactTokenCountInt(v int) string {
+	if v <= 0 {
+		return ""
+	}
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%dm", int(math.Round(float64(v)/1_000_000)))
+	case v >= 1_000:
+		return fmt.Sprintf("%dk", int(math.Round(float64(v)/1_000)))
+	default:
+		return fmt.Sprintf("%d", v)
+	}
 }
 
 func workspaceStatusLine(cwd string) string {
@@ -449,14 +480,9 @@ func workspaceStatusLine(cwd string) string {
 		return ""
 	}
 	label := shortenHomeDir(cwd)
-	if branch, dirty := gitBranchStatus(cwd); branch != "" {
-		label += " [⎇ " + branch
-		if dirty {
-			label += "*"
-		}
-		label += "]"
-	}
-	return label
+	label = truncateMiddleDisplayWidth(label, workspaceStatusPathBudget)
+	branch, dirty := gitBranchStatus(cwd)
+	return formatWorkspaceStatusLine(label, branch, dirty)
 }
 
 func (c *cliConsole) readWorkspaceStatusLine() string {
@@ -489,6 +515,56 @@ func gitBranchStatus(cwd string) (string, bool) {
 	statusOut, err := exec.Command("git", "-C", cwd, "status", "--porcelain", "--ignore-submodules=dirty").Output()
 	dirty := err == nil && strings.TrimSpace(string(statusOut)) != ""
 	return branch, dirty
+}
+
+func formatWorkspaceStatusLine(label string, branch string, dirty bool) string {
+	label = strings.TrimSpace(label)
+	branch = truncateDisplayWidth(strings.TrimSpace(branch), workspaceStatusBranchBudget)
+	if branch == "" {
+		return label
+	}
+	status := " [⎇ " + branch
+	if dirty {
+		status += "*"
+	}
+	status += "]"
+	if displayWidth(label)+displayWidth(status) > workspaceStatusTotalBudget {
+		maxLabel := max(8, workspaceStatusTotalBudget-displayWidth(status))
+		label = truncateMiddleDisplayWidth(label, maxLabel)
+	}
+	if displayWidth(label)+displayWidth(status) > workspaceStatusTotalBudget {
+		maxBranch := max(8, workspaceStatusTotalBudget-displayWidth(label)-displayWidth(" [⎇ *]"))
+		branch = truncateDisplayWidth(branch, maxBranch)
+		status = " [⎇ " + branch
+		if dirty {
+			status += "*"
+		}
+		status += "]"
+	}
+	if label == "" {
+		return strings.TrimSpace(status)
+	}
+	return label + status
+}
+
+func truncateMiddleDisplayWidth(input string, limit int) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
+	if limit <= 0 || displayWidth(text) <= limit {
+		return text
+	}
+	if limit <= 3 {
+		return truncateDisplayWidth(text, limit)
+	}
+	rs := []rune(text)
+	if len(rs) <= limit {
+		return text
+	}
+	head := max(1, (limit-3)*2/3)
+	tail := max(1, (limit-3)-head)
+	if head+tail >= len(rs) {
+		return truncateDisplayWidth(text, limit)
+	}
+	return string(rs[:head]) + "..." + string(rs[len(rs)-tail:])
 }
 
 func (c *cliConsole) statusReasoningLevelLabel() string {

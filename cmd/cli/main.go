@@ -76,6 +76,7 @@ func runCLI(ctx context.Context, args []string) error {
 		showVersion      = fs.Bool("version", false, "Show version and exit")
 		verbose          = fs.Bool("verbose", false, "Enable verbose output with debug details")
 		noColor          = fs.Bool("no-color", false, "Disable colored output")
+		noAnimation      = fs.Bool("no-animation", defaultNoAnimation(), "Disable TUI animations")
 	)
 	if err := rejectRemovedExecutionFlags(args); err != nil {
 		return err
@@ -534,6 +535,7 @@ func runCLI(ctx context.Context, args []string) error {
 		HistoryFile:           historyPath,
 		Version:               version.String(),
 		NoColor:               *noColor,
+		NoAnimation:           *noAnimation,
 		Verbose:               *verbose,
 		UIMode:                string(resolvedUIMode),
 		AgentRegistry:         agentReg,

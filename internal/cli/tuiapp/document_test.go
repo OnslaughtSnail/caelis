@@ -99,6 +99,142 @@ func TestDocumentRenderAll(t *testing.T) {
 	}
 }
 
+func TestWelcomePanelTruncatesLongWorkspaceValue(t *testing.T) {
+	vm := buildWelcomePanelViewModel(buildWelcomeViewModel(
+		"v0.0.34",
+		"~/WorkDir/xueyongzhi/caelis [⎇ codex/tui-beautification-v0.0.34-super-long-branch-name]",
+		"minimax/minimax-m2.7-highspeed",
+	), 40, tuikit.DefaultTheme())
+
+	if len(vm.Body) < 4 {
+		t.Fatalf("expected welcome body rows, got %+v", vm.Body)
+	}
+	workspaceLine := ansi.Strip(vm.Body[3])
+	if !strings.Contains(workspaceLine, "...") {
+		t.Fatalf("expected welcome workspace line to truncate, got %q", workspaceLine)
+	}
+	if got := displayColumns(workspaceLine); got > 36 {
+		t.Fatalf("expected welcome workspace line to fit panel body width, got %d cols: %q", got, workspaceLine)
+	}
+}
+
+func TestBashPanelScrollbarHiddenUntilRecentScroll(t *testing.T) {
+	panel := NewBashPanelBlock("BASH", "call-1")
+	panel.Lines = []toolOutputLine{
+		{text: "line 01", stream: "stdout"},
+		{text: "line 02", stream: "stdout"},
+		{text: "line 03", stream: "stdout"},
+		{text: "line 04", stream: "stdout"},
+		{text: "line 05", stream: "stdout"},
+		{text: "line 06", stream: "stdout"},
+	}
+	ctx := BlockRenderContext{Width: 40, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+
+	idleRows := panel.Render(ctx)
+	idle := make([]string, 0, len(idleRows))
+	for _, row := range idleRows {
+		idle = append(idle, row.Styled)
+	}
+	if joined := strings.Join(idle, "\n"); strings.Contains(joined, "▎") || strings.Contains(joined, "▏") {
+		t.Fatalf("did not expect idle bash panel scrollbar, got:\n%s", joined)
+	}
+
+	panel.ScrollbarVisibleUntil = time.Now().Add(time.Second)
+	activeRows := panel.Render(ctx)
+	active := make([]string, 0, len(activeRows))
+	for _, row := range activeRows {
+		active = append(active, row.Styled)
+	}
+	if joined := strings.Join(active, "\n"); !strings.Contains(joined, "▎") {
+		t.Fatalf("expected visible bash panel scrollbar after scroll, got:\n%s", joined)
+	}
+}
+
+func TestSubagentPanelScrollbarHiddenUntilRecentScroll(t *testing.T) {
+	panel := NewSubagentPanelBlock("spawn-1", "child-1", "helper", "call-1")
+	for i := 0; i < 20; i++ {
+		panel.AppendStreamChunk(SEAssistant, fmt.Sprintf("line %02d with enough text to wrap inside the subagent panel", i))
+	}
+	ctx := BlockRenderContext{Width: 50, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+
+	idleRows := panel.Render(ctx)
+	idle := make([]string, 0, len(idleRows))
+	for _, row := range idleRows {
+		idle = append(idle, row.Styled)
+	}
+	if joined := strings.Join(idle, "\n"); strings.Contains(joined, "▎") || strings.Contains(joined, "▏") {
+		t.Fatalf("did not expect idle subagent panel scrollbar, got:\n%s", joined)
+	}
+
+	panel.ScrollbarVisibleUntil = time.Now().Add(time.Second)
+	activeRows := panel.Render(ctx)
+	active := make([]string, 0, len(activeRows))
+	for _, row := range activeRows {
+		active = append(active, row.Styled)
+	}
+	if joined := strings.Join(active, "\n"); !strings.Contains(joined, "▎") {
+		t.Fatalf("expected visible subagent panel scrollbar after scroll, got:\n%s", joined)
+	}
+}
+
+func TestBashPanelScrollbarShowsOnHover(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 18})
+	panel := NewBashPanelBlock("BASH", "call-1")
+	for i := 0; i < 20; i++ {
+		panel.Lines = append(panel.Lines, toolOutputLine{text: fmt.Sprintf("line %02d", i), stream: "stdout"})
+	}
+	m.doc.Append(panel)
+	m.syncViewportContent()
+
+	contentLine := -1
+	for i, blockID := range m.viewportBlockIDs {
+		if blockID == panel.BlockID() && strings.Contains(m.viewportPlainLines[i], "line") {
+			contentLine = i
+			break
+		}
+	}
+	if contentLine < 0 {
+		t.Fatal("expected panel block in viewport")
+	}
+	x := m.mainColumnX() + tuikit.GutterNarrative + maxInt(0, displayColumns(m.viewportPlainLines[contentLine])-2)
+	y := contentLine - m.viewport.YOffset()
+	_, _ = m.Update(mouseMotion(x, y))
+	if view := renderModel(m); !strings.Contains(view, "▎") {
+		t.Fatalf("expected bash panel scrollbar visible on hover, got:\n%s", view)
+	}
+}
+
+func TestMousePointToContentPointRejectsOuterCenteredGutter(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	block := NewAssistantBlock()
+	block.Raw = "hello centered transcript"
+	m.doc.Append(block)
+	m.syncViewportContent()
+
+	contentLine := -1
+	for i, line := range m.viewportPlainLines {
+		if strings.Contains(line, "hello centered transcript") {
+			contentLine = i
+			break
+		}
+	}
+	if contentLine < 0 {
+		t.Fatal("expected assistant content in viewport")
+	}
+	y := contentLine - m.viewport.YOffset()
+	if _, ok := m.mousePointToContentPoint(m.mainColumnX()-1, y, false); ok {
+		t.Fatal("expected left outer gutter click to miss transcript")
+	}
+	if _, ok := m.mousePointToContentPoint(m.mainColumnX()+m.mainColumnWidth(), y, false); ok {
+		t.Fatal("expected right outer gutter click to miss transcript")
+	}
+	if _, ok := m.mousePointToContentPoint(m.mainColumnX()+tuikit.GutterNarrative, y, false); !ok {
+		t.Fatal("expected in-column click to map to transcript")
+	}
+}
+
 func TestAssistantViewportWrapPreservesCJKHeading(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -1349,6 +1485,30 @@ func TestSubagentPanelBlockRenderWithContent(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelPrefersRenderWidthOverTerminalWidth(t *testing.T) {
+	sp := NewSubagentPanelBlock("s1", "attach-id", "helper", "c1")
+	sp.AppendStreamChunk(SEAssistant, "line 01 with enough extra text to force wrapping inside the subagent panel viewport")
+	sp.AppendStreamChunk(SEAssistant, "line 02 with enough extra text to force wrapping inside the subagent panel viewport")
+	sp.Status = "completed"
+
+	narrow := sp.Render(BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()})
+	wideTerm := sp.Render(BlockRenderContext{Width: 80, TermWidth: 140, Theme: tuikit.DefaultTheme()})
+
+	var narrowText strings.Builder
+	for _, row := range narrow {
+		narrowText.WriteString(ansi.Strip(row.Styled))
+		narrowText.WriteByte('\n')
+	}
+	var wideText strings.Builder
+	for _, row := range wideTerm {
+		wideText.WriteString(ansi.Strip(row.Styled))
+		wideText.WriteByte('\n')
+	}
+	if narrowText.String() != wideText.String() {
+		t.Fatalf("expected subagent panel render width to stay anchored to ctx.Width, got narrow:\n%s\nwide-term:\n%s", narrowText.String(), wideText.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // P1: InsertAfter anchor tests
 // ---------------------------------------------------------------------------
@@ -1918,8 +2078,28 @@ func TestSubagentPanelAssistantMarkdownDoesNotInjectRolePrefix(t *testing.T) {
 	if strings.Contains(combined, "* - 文件操作") || strings.Contains(combined, "* 文件操作") {
 		t.Fatalf("did not expect injected assistant marker before markdown list:\n%s", combined)
 	}
-	if !strings.Contains(combined, "- 文件操作") {
+	// glamour converts "- " list markers to "• " bullets
+	if !strings.Contains(combined, "文件操作") {
 		t.Fatalf("expected markdown list item to remain visible:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelStreamingClosedFenceHidesDelimiters(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.AppendStreamChunk(SEAssistant, "```python\ndef hello():\n    return 1\n```")
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if strings.Contains(combined, "```python") || strings.Contains(combined, "\n```") {
+		t.Fatalf("expected active subagent code fence delimiters to be hidden, got:\n%s", combined)
+	}
+	if !strings.Contains(combined, "def hello():") {
+		t.Fatalf("expected code block body to remain visible, got:\n%s", combined)
 	}
 }
 
