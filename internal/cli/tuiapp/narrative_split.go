@@ -362,36 +362,8 @@ func buildNarrativeRows(raw string) ([]NarrativeLine, []string) {
 }
 
 // ---------------------------------------------------------------------------
-// Styling: derive styled text from plain rows + narrative classification.
+// Styling helpers retained for viewport stream-line rendering.
 // ---------------------------------------------------------------------------
-
-// styleNarrativeLine applies minimal theme styling to a plain-text narrative
-// line based on its structural kind. rolePrefix is a renderer-added prefix
-// such as "* " or "· actor: ", and must not be inferred from the content line
-// itself because markdown list items can also begin with "* ".
-func styleNarrativeLine(raw, rolePrefix string, kind NarrativeBlockKind, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
-	styledPrefix := ""
-	if rolePrefix != "" {
-		styledPrefix = tuikit.ColorizeLogLine(rolePrefix, roleStyle, theme)
-	}
-	bodyRaw := strings.TrimRight(raw, " \t")
-	switch kind {
-	case NarrativeHeading:
-		return styledPrefix + styleHeadingLine(bodyRaw, theme)
-	case NarrativeCodeFence, NarrativeCodeFenceDelim:
-		return styledPrefix + styleCodeFenceLine(bodyRaw, theme)
-	case NarrativeListItem:
-		return styledPrefix + styleListItemLine(bodyRaw, roleStyle, theme)
-	case NarrativeBlockquote:
-		return styledPrefix + styleBlockquoteLine(bodyRaw, roleStyle, theme)
-	case NarrativeTableRow:
-		return styledPrefix + styleTableRowLine(bodyRaw, theme)
-	case NarrativeTableRule:
-		return styledPrefix + styleTableRuleLine(bodyRaw, theme)
-	default:
-		return styledPrefix + renderInlineMarkdown(bodyRaw, narrativeBodyStyle(roleStyle, theme), theme)
-	}
-}
 
 func narrativeBodyStyle(roleStyle tuikit.LineStyle, theme tuikit.Theme) lipgloss.Style {
 	if roleStyle == tuikit.LineStyleReasoning {
@@ -400,98 +372,10 @@ func narrativeBodyStyle(roleStyle tuikit.LineStyle, theme tuikit.Theme) lipgloss
 	return theme.TextStyle()
 }
 
-func styleHeadingLine(raw string, theme tuikit.Theme) string {
-	body := stripHeadingMarker(raw)
-	return renderInlineMarkdown(body, theme.TextStyle().Bold(true), theme)
-}
-
-func styleListItemLine(raw string, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
-	indent, marker, body, ok := splitListMarker(raw)
-	if !ok {
-		return renderInlineMarkdown(raw, narrativeBodyStyle(roleStyle, theme), theme)
-	}
-	markerStyle := lipgloss.NewStyle().Foreground(theme.Accent).Bold(true)
-	return indent + markerStyle.Render(marker) + renderInlineMarkdown(body, narrativeBodyStyle(roleStyle, theme), theme)
-}
-
-func styleBlockquoteLine(raw string, roleStyle tuikit.LineStyle, theme tuikit.Theme) string {
-	indent, marker, body, ok := splitBlockquoteMarker(raw)
-	if !ok {
-		return renderInlineMarkdown(raw, narrativeBodyStyle(roleStyle, theme), theme)
-	}
-	return indent + theme.NoteStyle().Render(marker) + renderInlineMarkdown(body, narrativeBodyStyle(roleStyle, theme), theme)
-}
-
-func styleCodeFenceLine(raw string, theme tuikit.Theme) string {
-	return theme.CodeSurfaceStyle().Render(raw)
-}
-
-func styleTableRowLine(raw string, theme tuikit.Theme) string {
-	cells := tableCells(raw)
-	if len(cells) == 0 {
-		return theme.SecondaryTextStyle().Render(strings.TrimSpace(raw))
-	}
-	parts := make([]string, 0, len(cells)*2-1)
-	for i, cell := range cells {
-		cellText := renderInlineMarkdown(cell, theme.SecondaryTextStyle(), theme)
-		parts = append(parts, cellText)
-		if i < len(cells)-1 {
-			parts = append(parts, theme.TableBorderStyle().Render(" │ "))
-		}
-	}
-	return strings.Join(parts, "")
-}
-
-func styleTableRuleLine(raw string, theme tuikit.Theme) string {
-	return theme.TableBorderStyle().Render(formatTableRuleRow(raw))
-}
-
 // simplifyInlineMarkers strips balanced inline markdown markers from a line
 // while leaving unmatched delimiters visible in partial streaming output.
 func simplifyInlineMarkers(line string) string {
 	return stripInlineMarkdown(line)
-}
-
-func splitListMarker(raw string) (indent, marker, body string, ok bool) {
-	indentWidth := len(raw) - len(strings.TrimLeft(raw, " \t"))
-	indent = raw[:indentWidth]
-	rest := raw[indentWidth:]
-	switch {
-	case strings.HasPrefix(rest, "- "):
-		return indent, "- ", rest[2:], true
-	case rest == "-":
-		return indent, "-", "", true
-	case strings.HasPrefix(rest, "* "):
-		return indent, "* ", rest[2:], true
-	case rest == "*":
-		return indent, "*", "", true
-	}
-	i := 0
-	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
-		i++
-	}
-	if i > 0 && i < len(rest) && rest[i] == '.' {
-		if i+1 < len(rest) && rest[i+1] == ' ' {
-			return indent, rest[:i+2], rest[i+2:], true
-		}
-		if i+1 == len(rest) {
-			return indent, rest, "", true
-		}
-	}
-	return "", "", "", false
-}
-
-func splitBlockquoteMarker(raw string) (indent, marker, body string, ok bool) {
-	indentWidth := len(raw) - len(strings.TrimLeft(raw, " \t"))
-	indent = raw[:indentWidth]
-	rest := raw[indentWidth:]
-	if strings.HasPrefix(rest, "> ") {
-		return indent, "> ", rest[2:], true
-	}
-	if rest == ">" {
-		return indent, ">", "", true
-	}
-	return "", "", "", false
 }
 
 func isPotentialTableRow(trimmed string) bool {

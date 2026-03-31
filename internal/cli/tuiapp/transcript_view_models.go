@@ -24,15 +24,6 @@ type ToolEventViewModel struct {
 	Err    bool
 }
 
-type NarrativeViewModel struct {
-	Raw                string
-	Kind               NarrativeBlockKind
-	RolePrefix         string
-	ContinuationPrefix string
-	LineStyle          tuikit.LineStyle
-	Width              int
-}
-
 type WelcomeViewModel struct {
 	VersionLabel string
 	Workspace    string
@@ -84,20 +75,21 @@ func buildWelcomeViewModel(version, workspace, modelName string) WelcomeViewMode
 }
 
 func buildWelcomePanelViewModel(w WelcomeViewModel, width int, theme tuikit.Theme) PanelViewModel {
+	tok := theme.Tokens()
 	titleLine := theme.PromptStyle().Render(">_") +
-		" " + theme.TitleStyle().Render("CAELIS") +
-		" " + theme.TranscriptMetaStyle().Render("("+w.VersionLabel+")")
-	renderField := func(label string, value string, render func(...string) string) string {
-		labelText := theme.TranscriptLabelStyle().Render(label + ":")
+		" " + tok.ChromeTitle.Render("CAELIS") +
+		" " + tok.ChromeMeta.Render("("+w.VersionLabel+")")
+	renderField := func(label string, value string, style func(...string) string) string {
+		labelText := tok.ComposerLabel.Render(label + ":")
 		padding := maxInt(0, 11-displayColumns(label+":"))
-		return labelText + strings.Repeat(" ", padding) + render(value)
+		return labelText + strings.Repeat(" ", padding) + style(value)
 	}
 	body := []string{
 		titleLine,
 		"",
-		renderField("model", w.ModelAlias, theme.TextStyle().Render),
-		renderField("workspace", w.Workspace, theme.SecondaryTextStyle().Render),
-		renderField("tip", "type / for command list", theme.TranscriptMetaStyle().Render),
+		renderField("model", w.ModelAlias, tok.TextPrimary.Render),
+		renderField("workspace", w.Workspace, tok.TextSecondary.Render),
+		renderField("tip", "type / for command list", tok.TextMuted.Render),
 	}
 	return PanelViewModel{
 		Variant: tuikit.PanelShellVariantCard,
@@ -202,33 +194,4 @@ func renderToolEventViewModelPlain(vm ToolEventViewModel) (string, tuikit.LineSt
 		line += " completed"
 	}
 	return line, tuikit.LineStyleTool
-}
-
-func renderNarrativeViewModelRows(blockID string, vm NarrativeViewModel, theme tuikit.Theme) []RenderedRow {
-	segments := renderNarrativeViewModelSegments(vm, theme)
-	rows := make([]RenderedRow, 0, len(segments))
-	for _, segment := range segments {
-		rows = append(rows, StyledPlainRow(blockID, segment.Plain, segment.Styled))
-	}
-	return rows
-}
-
-func renderNarrativeViewModelSegments(vm NarrativeViewModel, theme tuikit.Theme) []renderedSegment {
-	wrapWidth := maxInt(1, vm.Width-maxInt(displayColumns(vm.RolePrefix), displayColumns(vm.ContinuationPrefix)))
-	segments := graphemeHardWrap(vm.Raw, wrapWidth)
-	if len(segments) == 0 {
-		segments = []string{""}
-	}
-	out := make([]renderedSegment, 0, len(segments))
-	for i, segment := range segments {
-		prefix := vm.RolePrefix
-		if i > 0 {
-			prefix = vm.ContinuationPrefix
-		}
-		out = append(out, renderedSegment{
-			Plain:  prefix + segment,
-			Styled: styleNarrativeLine(segment, prefix, vm.Kind, vm.LineStyle, theme),
-		})
-	}
-	return out
 }

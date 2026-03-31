@@ -451,6 +451,7 @@ func summarizeTaskMonitorAction(verb string, count int) string {
 
 func taskMonitorInlineText(entries []activityEntry, finalized bool) string {
 	parts := taskWaitSummaryParts(entries, finalized)
+	parts = append(parts, taskWriteSummaryParts(entries)...)
 	if cancelCount := countTaskActions(entries, "cancel"); cancelCount > 0 {
 		verb := "Cancelling"
 		if finalized {
@@ -475,6 +476,22 @@ func taskMonitorInlineText(entries []activityEntry, finalized bool) string {
 	return strings.Join(parts, ", ")
 }
 
+func taskWriteSummaryParts(entries []activityEntry) []string {
+	parts := make([]string, 0, 2)
+	for _, entry := range entries {
+		if !strings.EqualFold(entry.tool, "TASK") || !strings.EqualFold(entry.action, "write") {
+			continue
+		}
+		detail := strings.TrimSpace(entry.raw)
+		if detail == "" {
+			parts = append(parts, "SEND")
+			continue
+		}
+		parts = append(parts, "SEND "+detail)
+	}
+	return parts
+}
+
 func parseTaskMonitorSummaryLine(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if !strings.HasPrefix(trimmed, "▸ ") {
@@ -494,7 +511,7 @@ func parseTaskMonitorSummaryLine(line string) (string, bool) {
 			return "", false
 		}
 		switch fields[0] {
-		case "Waited", "Waiting", "Checked", "Checking", "Cancelled", "Cancelling", "Listed", "Listing":
+		case "Waited", "Waiting", "Checked", "Checking", "Cancelled", "Cancelling", "Listed", "Listing", "SEND":
 		default:
 			return "", false
 		}
@@ -683,6 +700,23 @@ func parseTaskListEntry(remainder string, result bool) activityEntry {
 	}
 }
 
+func parseTaskWriteEntry(remainder string, result bool) activityEntry {
+	trimmed := strings.TrimSpace(remainder)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.HasPrefix(lower, "write "):
+		trimmed = strings.TrimSpace(trimmed[len("write"):])
+	case lower == "write":
+		trimmed = ""
+	}
+	return activityEntry{
+		tool:   "TASK",
+		action: "write",
+		raw:    trimmed,
+		result: result,
+	}
+}
+
 type activityDisplayEntry struct {
 	verb   string
 	detail string
@@ -761,6 +795,10 @@ func parseRawTaskActivityEntry(remainder string, result bool) (activityBlockKind
 	switch {
 	case parseFriendlyWaitMS(remainder) > 0:
 		return activityBlockTaskMonitor, parseTaskWaitEntry("TASK", remainder, result), true
+	case strings.HasPrefix(trimmed, "write "):
+		return activityBlockTaskMonitor, parseTaskWriteEntry(remainder, result), true
+	case trimmed == "write":
+		return activityBlockTaskMonitor, parseTaskWriteEntry(remainder, result), true
 	case strings.Contains(trimmed, "cancel"):
 		return activityBlockTaskMonitor, parseTaskCancelEntry(remainder, result), true
 	case strings.Contains(trimmed, "list"):
@@ -801,6 +839,8 @@ func activityEntryDisplay(entry activityEntry) (verb string, detail string) {
 			return "Cancelled", "task"
 		}
 		return "Cancelling", "task"
+	case entry.tool == "TASK" && entry.action == "write":
+		return "SEND", strings.TrimSpace(entry.raw)
 	case entry.tool == "TASK" && entry.action == "list":
 		if entry.result {
 			if strings.TrimSpace(entry.raw) != "" {

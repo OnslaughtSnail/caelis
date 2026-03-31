@@ -25,7 +25,7 @@ func (m *Model) bottomSectionHeight() int {
 	lines := 0
 
 	// Spacer + optional plan + optional pending queue + hint row + hint/header
-	// gap + workspace/model row + composer top separator.
+	// gap + workspace/model row + composer section label.
 	lines += m.preComposerFixedHeight()
 
 	// Composer top padding between workspace/model row and input.
@@ -87,56 +87,49 @@ func (m *Model) syncViewportContent() {
 		rawRows = append(rawRows, block.Render(ctx)...)
 	}
 
-	// Build wrapped viewport lines: styled, plain, and blockIDs in parallel.
+	// Build wrapped viewport lines: styled and blockIDs.
+	// Plain is derived from styled at the end (rendered-text-first).
 	styledLines := make([]string, 0, len(rawRows)+8)
-	plainLines := make([]string, 0, len(rawRows)+8)
 	blockIDs := make([]string, 0, len(rawRows)+8)
 
 	for _, row := range rawRows {
 		bid := row.BlockID
-		plainLine := m.adaptPlainLineForViewport(row.Plain, wrapWidth)
 		styledLine := m.adaptHistoryLineForViewport(row.Styled, wrapWidth)
 
 		var wrappedStyled string
-		var wrappedPlain string
-		switch m.renderedRowWrapMode(bid) {
-		case BlockAssistant, BlockReasoning:
-			// Narrative: wrap plain first, derive styled from same segments.
-			wrappedPlain, wrappedStyled = m.wrapNarrativeRow(row, plainLine, wrapWidth)
-		case BlockParticipantTurn:
-			// Participant turns already render wrapped rows in block.Render.
-			// Re-wrapping styled ANSI text here can duplicate visual content.
-			wrappedStyled = styledLine
-			wrappedPlain = plainLine
-		default:
-			wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
-			wrappedPlain = hardWrapDisplayLine(plainLine, wrapWidth)
+
+		if row.PreWrapped {
+			// Glamour usually wraps finalized narrative correctly, but very long
+			// single tokens (for example URLs) can still exceed the viewport.
+			// Keep glamour's layout when it fits, otherwise apply an ANSI-aware
+			// hard wrap as a safety net so the viewport never overflows.
+			if graphemeWidth(ansi.Strip(styledLine)) > wrapWidth {
+				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
+			} else {
+				wrappedStyled = styledLine
+			}
+		} else {
+			switch m.renderedRowWrapMode(bid) {
+			case BlockAssistant, BlockReasoning:
+				// Narrative: word-wrap and re-style.
+				wrappedStyled = m.wrapNarrativeRowStyled(row, wrapWidth)
+			case BlockParticipantTurn:
+				// Participant turns already render wrapped rows in block.Render.
+				wrappedStyled = styledLine
+			default:
+				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
+			}
 		}
 
 		if wrappedStyled == "" {
 			styledLines = append(styledLines, "")
-			plainLines = append(plainLines, "")
 			blockIDs = append(blockIDs, bid)
 			continue
 		}
 
 		sParts := strings.Split(wrappedStyled, "\n")
-		pParts := strings.Split(wrappedPlain, "\n")
-
-		// Equalize line counts. For narrative blocks plain is
-		// authoritative; for others styled may contain box-drawing that
-		// produces more lines, so we pad whichever is shorter.
-		for len(pParts) < len(sParts) {
-			pParts = append(pParts, "")
-		}
-		for len(sParts) < len(pParts) {
-			sParts = append(sParts, "")
-		}
-
-		n := len(sParts)
 		styledLines = append(styledLines, sParts...)
-		plainLines = append(plainLines, pParts...)
-		for range n {
+		for range sParts {
 			blockIDs = append(blockIDs, bid)
 		}
 	}
@@ -148,43 +141,32 @@ func (m *Model) syncViewportContent() {
 		for _, sl := range streamLines {
 			style := tuikit.DetectLineStyleWithContext(sl, prevStyle)
 
-			var wrappedStyled, wrappedPlain string
+			var wrappedStyled string
 			switch style {
 			case tuikit.LineStyleAssistant, tuikit.LineStyleReasoning:
-				// Plain-first wrapping: wrap plain, then colorize each segment.
-				segments := graphemeHardWrap(sl, wrapWidth)
+				// Word-wrap plain, then apply inline styling.
+				segments := graphemeWordWrap(sl, wrapWidth)
 				if len(segments) == 0 {
-					wrappedPlain = ""
 					wrappedStyled = ""
 				} else {
+					baseStyle := narrativeBodyStyle(style, m.theme)
 					styledSegs := make([]string, len(segments))
 					for j, seg := range segments {
-						styledSegs[j] = tuikit.ColorizeLogLine(seg, style, m.theme)
+						styledSegs[j] = renderInlineMarkdown(seg, baseStyle, m.theme)
 					}
-					wrappedPlain = strings.Join(segments, "\n")
 					wrappedStyled = strings.Join(styledSegs, "\n")
 				}
 			default:
 				colored := tuikit.ColorizeLogLine(sl, style, m.theme)
 				wrappedStyled = hardWrapDisplayLine(colored, wrapWidth)
-				wrappedPlain = hardWrapDisplayLine(sl, wrapWidth)
 			}
 
 			if wrappedStyled == "" {
 				styledLines = append(styledLines, "")
-				plainLines = append(plainLines, "")
 				blockIDs = append(blockIDs, "")
 			} else {
 				sParts := strings.Split(wrappedStyled, "\n")
-				pParts := strings.Split(wrappedPlain, "\n")
-				for len(pParts) < len(sParts) {
-					pParts = append(pParts, "")
-				}
-				for len(sParts) < len(pParts) {
-					sParts = append(sParts, "")
-				}
 				styledLines = append(styledLines, sParts...)
-				plainLines = append(plainLines, pParts...)
 				for range sParts {
 					blockIDs = append(blockIDs, "")
 				}
@@ -194,8 +176,12 @@ func (m *Model) syncViewportContent() {
 	}
 
 	m.viewportStyledLines = append(m.viewportStyledLines[:0], styledLines...)
-	m.viewportPlainLines = append(m.viewportPlainLines[:0], plainLines...)
 	m.viewportBlockIDs = append(m.viewportBlockIDs[:0], blockIDs...)
+
+	// Rendered-text-first: derive plain from styled via ANSI strip.
+	// This ensures copy text always matches what the user sees on screen.
+	m.viewportPlainLines = deriveViewportPlainLines(m.viewportPlainLines[:0], styledLines)
+
 	m.renderViewportContent()
 }
 
@@ -228,37 +214,34 @@ func (m *Model) renderedRowWrapMode(blockID string) BlockKind {
 	return block.Kind()
 }
 
-func (m *Model) wrapNarrativeRow(row RenderedRow, plain string, width int) (string, string) {
+func (m *Model) wrapNarrativeRowStyled(row RenderedRow, width int) string {
 	if width <= 0 {
-		return plain, row.Styled
+		return row.Styled
 	}
-	segments := graphemeHardWrap(plain, width)
+	plain := ansi.Strip(row.Styled)
+	// If the line already fits, preserve the original styled text (which may
+	// include inline markdown formatting from block.Render).
+	if graphemeWidth(plain) <= width {
+		return row.Styled
+	}
+	// Word-wrap plain text, then re-apply inline styling per segment.
+	segments := graphemeWordWrap(plain, width)
 	if len(segments) == 0 {
-		return "", ""
+		return ""
 	}
+	roleStyle := tuikit.LineStyleAssistant
+	if m.renderedRowWrapMode(row.BlockID) == BlockReasoning {
+		roleStyle = tuikit.LineStyleReasoning
+	}
+	baseStyle := narrativeBodyStyle(roleStyle, m.theme)
 	styled := make([]string, 0, len(segments))
 	for _, segment := range segments {
-		switch m.renderedRowWrapMode(row.BlockID) {
-		case BlockAssistant:
-			styled = append(styled, tuikit.ColorizeLogLine(segment, tuikit.LineStyleAssistant, m.theme))
-		case BlockReasoning:
-			styled = append(styled, tuikit.ColorizeLogLine(segment, tuikit.LineStyleReasoning, m.theme))
-		default:
-			styled = append(styled, segment)
-		}
+		styled = append(styled, renderInlineMarkdown(segment, baseStyle, m.theme))
 	}
-	return strings.Join(segments, "\n"), strings.Join(styled, "\n")
+	return strings.Join(styled, "\n")
 }
 
 func (m *Model) adaptHistoryLineForViewport(line string, wrapWidth int) string {
-	return m.adaptLineForViewport(line, wrapWidth, true)
-}
-
-func (m *Model) adaptPlainLineForViewport(line string, wrapWidth int) string {
-	return m.adaptLineForViewport(line, wrapWidth, false)
-}
-
-func (m *Model) adaptLineForViewport(line string, wrapWidth int, colorize bool) string {
 	plain := strings.TrimSpace(ansi.Strip(line))
 	prefix := ""
 	switch {
@@ -276,11 +259,21 @@ func (m *Model) adaptLineForViewport(line string, wrapWidth int, colorize bool) 
 	available := max(wrapWidth-displayColumns(gutter)-displayColumns(prefix), 16)
 	targetWidth := minInt(available, maxInt(24, wrapWidth*2/3))
 	adapted := prefix + truncateMiddleDisplay(taskText, targetWidth)
-	if colorize {
-		colored := tuikit.ColorizeLogLine(adapted, style, m.theme)
-		return gutter + colored
+	colored := tuikit.ColorizeLogLine(adapted, style, m.theme)
+	return gutter + colored
+}
+
+// deriveViewportPlainLines strips ANSI from styled lines to produce plain text.
+// This is the rendered-text-first approach: what the user sees on screen
+// (minus colors) is what they get when copying.
+func deriveViewportPlainLines(buf []string, styledLines []string) []string {
+	if cap(buf) < len(styledLines) {
+		buf = make([]string, 0, len(styledLines))
 	}
-	return gutter + adapted
+	for _, sl := range styledLines {
+		buf = append(buf, strings.TrimRight(ansi.Strip(sl), " "))
+	}
+	return buf
 }
 
 func truncateMiddleDisplay(text string, width int) string {
@@ -392,7 +385,7 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 		line = len(m.viewportPlainLines) - 1
 	}
 
-	col := max(x-tuikit.GutterNarrative, 0)
+	col := max(x-m.mainColumnX()-tuikit.GutterNarrative, 0)
 	width := displayColumns(m.viewportPlainLines[line])
 	if col > width {
 		col = width
@@ -428,7 +421,7 @@ func (m *Model) mousePointToInputPoint(x int, y int, clamp bool, lines []string)
 	if ry >= len(lines) {
 		ry = len(lines) - 1
 	}
-	col := max(x-inputHorizontalInset, 0)
+	col := max(x-m.mainColumnX()-inputHorizontalInset, 0)
 	width := displayColumns(lines[ry])
 	if col > width {
 		col = width
@@ -449,7 +442,9 @@ func (m *Model) renderSelectionLines() []string {
 	if !ok {
 		return append([]string(nil), m.viewportStyledLines...)
 	}
-	return renderSelectionOnLines(m.viewportPlainLines, start, end)
+	// Rendered-text-first selection: non-selected lines keep styled output,
+	// selected lines show plain text with reverse highlight.
+	return renderSelectionOnStyledLines(m.viewportStyledLines, m.viewportPlainLines, start, end)
 }
 
 type fixedTextRegion struct {
@@ -517,8 +512,8 @@ func (m *Model) fixedRegionAt(y int) (fixedTextRegion, bool) {
 }
 
 func (m *Model) fixedRowPoint(region fixedTextRegion, x int, clamp bool) (textSelectionPoint, bool) {
-	contentWidth := maxInt(1, maxInt(20, m.width)-(tuikit.StatusInset*2))
-	col := x - tuikit.StatusInset // account for status-row horizontal padding
+	contentWidth := m.fixedRowContentWidth()
+	col := x - m.mainColumnX() - tuikit.StatusInset // account for status-row horizontal padding
 	if clamp {
 		if col < 0 {
 			col = 0

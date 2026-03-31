@@ -5,11 +5,13 @@ import (
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
 type appKeyMap struct {
 	Send          key.Binding
+	InsertNewline key.Binding
 	Queue         key.Binding
 	Interrupt     key.Binding
 	Mode          key.Binding
@@ -56,9 +58,10 @@ func defaultKeyMap(isWSL bool) appKeyMap {
 	}
 	return appKeyMap{
 		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		InsertNewline: key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("shift+enter", "newline")),
 		Queue:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "queue")),
 		Interrupt:     key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "interrupt")),
-		Mode:          key.NewBinding(key.WithKeys("shift+tab", "backtab"), key.WithHelp("shift+tab", "mode")),
+		Mode:          key.NewBinding(key.WithKeys("shift+tab", "backtab", "ctrl+o"), key.WithHelp("shift+tab", "mode")),
 		HistoryPrev:   key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "history")),
 		HistoryNext:   key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "draft")),
 		ChoosePrev:    key.NewBinding(key.WithKeys("up"), key.WithHelp("↑/↓", "select")),
@@ -74,6 +77,30 @@ func defaultKeyMap(isWSL bool) appKeyMap {
 		PageUp:        key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll")),
 		PageDown:      key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll")),
 		Quit:          key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+	}
+}
+
+func matchesInsertNewlineKey(msg tea.KeyMsg, binding key.Binding) bool {
+	if key.Matches(msg, binding) {
+		return true
+	}
+	switch msg.String() {
+	case "shift+enter", "ctrl+j":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesModeKey(msg tea.KeyMsg, binding key.Binding) bool {
+	if key.Matches(msg, binding) {
+		return true
+	}
+	switch msg.String() {
+	case "shift+tab", "backtab", "ctrl+o":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -156,16 +183,6 @@ func (m *Model) currentFooterHelp() helpBindings {
 			enabledBindings(m.keys.Mode),
 		},
 	}
-}
-
-func (m *Model) renderHelp(bindings helpBindings) string {
-	if m == nil {
-		return ""
-	}
-	if len(bindings.short) == 0 && len(bindings.full) == 0 {
-		return ""
-	}
-	return m.help.View(bindings)
 }
 
 func (m *Model) overlayHintText(label string) string {

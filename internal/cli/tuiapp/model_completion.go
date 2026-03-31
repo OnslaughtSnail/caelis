@@ -16,21 +16,35 @@ import (
 
 func (m *Model) togglePalette() {
 	m.showPalette = !m.showPalette
-	m.paletteAnimating = true
+	m.paletteAnimating = !m.noAnimation
 	if m.showPalette {
 		m.palette.ResetSelected()
 		if m.paletteAnimLines < 0 {
 			m.paletteAnimLines = 0
 		}
 	}
+	if m.noAnimation {
+		m.paletteAnimLines = m.paletteAnimationTarget()
+	}
+}
+
+func (m *Model) paletteAnimationCmd() tea.Cmd {
+	if m == nil || m.noAnimation {
+		return nil
+	}
+	return animatePaletteCmd()
 }
 
 func (m *Model) handlePaletteKey(msg tea.KeyMsg) tea.Cmd {
 	switch {
 	case key.Matches(msg, m.keys.Back):
 		m.showPalette = false
-		m.paletteAnimating = true
-		return animatePaletteCmd()
+		m.paletteAnimating = !m.noAnimation
+		if m.noAnimation {
+			m.paletteAnimLines = 0
+			return nil
+		}
+		return m.paletteAnimationCmd()
 	case key.Matches(msg, m.keys.Accept):
 		item, ok := m.palette.SelectedItem().(commandItem)
 		if ok {
@@ -41,8 +55,12 @@ func (m *Model) handlePaletteKey(msg tea.KeyMsg) tea.Cmd {
 			m.refreshSlashCommands()
 		}
 		m.showPalette = false
-		m.paletteAnimating = true
-		return animatePaletteCmd()
+		m.paletteAnimating = !m.noAnimation
+		if m.noAnimation {
+			m.paletteAnimLines = 0
+			return nil
+		}
+		return m.paletteAnimationCmd()
 	}
 	var cmd tea.Cmd
 	m.palette, cmd = m.palette.Update(msg)
@@ -869,8 +887,14 @@ func (m *Model) applySlashCommandCompletion() {
 			return
 		}
 	}
-	m.setInputText(strings.TrimSpace(m.slashCandidates[m.slashIndex]))
+	selected := strings.TrimSpace(m.slashCandidates[m.slashIndex])
+	if selected == "" {
+		return
+	}
+	line := selected + " "
+	m.setInputText(line)
 	m.clearSlashCompletion()
+	m.tryOpenSlashArgPicker(line)
 }
 
 func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
@@ -900,19 +924,9 @@ func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		if m.running || len(m.slashCandidates) == 0 {
 			return true, nil
 		}
-		selected := strings.TrimSpace(m.slashCandidates[m.slashIndex])
-		if selected == "" {
-			return true, nil
-		}
-		if selected == "/agent" || selected == "/model" || selected == "/sandbox" || selected == "/resume" {
-			m.setInputText(selected)
-			m.syncTextareaFromInput()
-			m.clearSlashCompletion()
-			m.tryOpenSlashArgPicker(selected)
-			return true, nil
-		}
-		_, cmd := m.submitLine(selected)
-		return true, cmd
+		m.applySlashCommandCompletion()
+		m.syncTextareaFromInput()
+		return true, nil
 	default:
 		return false, nil
 	}

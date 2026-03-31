@@ -14,9 +14,10 @@ import (
 
 // RenderedRow is one terminal line of output from a block's Render method.
 type RenderedRow struct {
-	Styled  string // ANSI-colored display text
-	Plain   string // plain text for selection/copy
-	BlockID string // originating block ID
+	Styled     string // ANSI-colored display text
+	Plain      string // plain text for selection/copy
+	BlockID    string // originating block ID
+	PreWrapped bool   // if true, already wrapped to viewport width — skip re-wrapping
 }
 
 // StyledRow creates a RenderedRow from a styled line, deriving Plain automatically.

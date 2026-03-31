@@ -12,6 +12,7 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/cliputil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -23,7 +24,7 @@ func requestBackgroundColorCmd() tea.Cmd {
 }
 
 func NewModel(cfg Config) *Model {
-	theme := tuikit.ResolveThemeFromEnv()
+	theme := tuikit.ResolveThemeFromOptions(cfg.NoColor, cfg.ColorProfile)
 	themeAuto := tuikit.ThemeUsesAutoBackground()
 
 	delegate := list.NewDefaultDelegate()
@@ -86,13 +87,16 @@ func NewModel(cfg Config) *Model {
 	vp.KeyMap.PageUp = key.NewBinding(key.WithKeys("pgup"))
 
 	m := &Model{
-		cfg:       cfg,
-		theme:     theme,
-		themeAuto: themeAuto,
-		keys:      defaultKeyMap(cliputil.IsWSL()),
-		spinner:   sp,
-		viewport:  vp,
-		doc:       NewDocument(),
+		cfg:          cfg,
+		theme:        theme,
+		themeAuto:    themeAuto,
+		noColor:      cfg.NoColor,
+		noAnimation:  cfg.NoAnimation,
+		colorProfile: theme.Profile,
+		keys:         defaultKeyMap(cliputil.IsWSL()),
+		spinner:      sp,
+		viewport:     vp,
+		doc:          NewDocument(),
 		Composer: Composer{
 			textarea:     ta,
 			historyIndex: -1,
@@ -182,8 +186,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = typed.Width
 		m.height = typed.Height
 		m.syncTextareaChrome()
-		m.help.SetWidth(maxInt(20, m.width/2))
-		m.palette.SetSize(maxInt(30, m.width-12), maxInt(8, minInt(16, m.height-10)))
+		m.help.SetWidth(maxInt(20, m.fixedRowWidth()/2))
+		paletteWidth := minInt(maxInt(30, m.fixedRowWidth()-4), maxInt(30, m.width-12))
+		m.palette.SetSize(paletteWidth, maxInt(8, minInt(16, m.height-10)))
 
 		vpHeight, _ := m.computeLayout()
 		m.viewport.SetWidth(m.viewportContentWidth())
@@ -207,10 +212,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.themeAuto {
 			return m, nil
 		}
-		nextTheme := tuikit.ResolveThemeForBackground(typed.IsDark())
+		nextTheme := tuikit.ResolveThemeWithState(typed.IsDark(), m.noColor, m.colorProfile)
 		if nextTheme.Name == m.theme.Name && nextTheme.IsDark == m.theme.IsDark {
 			return m, nil
 		}
+		m.applyTheme(nextTheme)
+		return m, nil
+
+	case tea.ColorProfileMsg:
+		if m.noColor {
+			return m, nil
+		}
+		if typed.Profile == colorprofile.Unknown || typed.Profile == m.colorProfile {
+			return m, nil
+		}
+		m.colorProfile = typed.Profile
+		nextTheme := tuikit.ResolveThemeWithState(m.theme.IsDark, m.noColor, m.colorProfile)
 		m.applyTheme(nextTheme)
 		return m, nil
 
@@ -346,6 +363,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.paletteAnimating {
 			return m, nil
 		}
+		if m.noAnimation {
+			m.paletteAnimLines = m.paletteAnimationTarget()
+			m.paletteAnimating = false
+			return m, nil
+		}
 		target := m.paletteAnimationTarget()
 		switch {
 		case m.paletteAnimLines < target:
@@ -363,7 +385,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.paletteAnimating = false
 			return m, nil
 		}
-		return m, animatePaletteCmd()
+		return m, m.paletteAnimationCmd()
 
 	case tuievents.SetRunningMsg:
 		wasRunning := m.running
@@ -504,6 +526,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			m.drainPendingStreamSmoothing(typed.at),
 			m.advancePanelAnimations(typed.at),
+			m.advanceScrollbarVisibility(typed.at),
 		)
 
 	case tuievents.TickStatusMsg:
@@ -555,6 +578,7 @@ func (m *Model) applyTheme(theme tuikit.Theme) {
 		return
 	}
 	m.theme = theme
+	clearGlamourCache()
 	configureHelpStyles(&m.help, theme)
 	m.applyPaletteTheme(theme)
 	m.applyTextareaStyles(theme)
@@ -627,7 +651,42 @@ func (m *Model) viewportScrollbarWidth() int {
 }
 
 func (m *Model) viewportContentWidth() int {
-	return maxInt(1, m.width-tuikit.GutterNarrative-m.viewportScrollbarWidth())
+	return m.readableContentWidth()
+}
+
+func (m *Model) readableContentWidth() int {
+	maxWidth := maxInt(1, tuikit.ReadableContentMaxWidth)
+	available := maxInt(1, m.width-tuikit.GutterNarrative-m.viewportScrollbarWidth())
+	return minInt(maxWidth, available)
+}
+
+func (m *Model) mainColumnWidth() int {
+	return maxInt(1, m.readableContentWidth()+tuikit.GutterNarrative+m.viewportScrollbarWidth())
+}
+
+func (m *Model) mainColumnX() int {
+	if m.width <= 0 {
+		return 0
+	}
+	if pad := (m.width - m.mainColumnWidth()) / 2; pad > 0 {
+		return pad
+	}
+	return 0
+}
+
+func (m *Model) placeInMainColumn(block string) string {
+	if block == "" {
+		return ""
+	}
+	return indentBlock(block, m.mainColumnX())
+}
+
+func (m *Model) fixedRowWidth() int {
+	return maxInt(20, m.mainColumnWidth())
+}
+
+func (m *Model) fixedRowContentWidth() int {
+	return maxInt(1, m.fixedRowWidth()-(tuikit.StatusInset*2))
 }
 
 func (m *Model) paletteAnimationTarget() int {

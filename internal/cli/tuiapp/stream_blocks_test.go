@@ -263,6 +263,29 @@ func TestParticipantTurnBlock_DoesNotDuplicateStyledReasoningRowsInViewport(t *t
 	}
 }
 
+func TestParticipantTurnBlock_StreamingClosedFenceHidesDelimiters(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "amy(copilot)"})
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "amy(copilot)",
+		Stream:  "answer",
+		Text:    "```python\ndef hello():\n    return 1\n```",
+		Final:   false,
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "```python") || strings.Contains(view, "\n```") {
+		t.Fatalf("expected active participant code fence delimiters to be hidden, got:\n%s", view)
+	}
+	if !strings.Contains(view, "def hello():") {
+		t.Fatalf("expected code block body to remain visible, got:\n%s", view)
+	}
+}
+
 func TestRenderMentionList_UsesAgentsTitleForAtPrefix(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

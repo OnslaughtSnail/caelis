@@ -493,7 +493,7 @@ func TestReadTUIStatus_ZeroUsageStillShowsContextWindow(t *testing.T) {
 	if modelText != "deepseek/deepseek-chat" {
 		t.Fatalf("unexpected model text %q", modelText)
 	}
-	if contextText != "0/128.0k(0%)" {
+	if contextText != "0/128k(0%)" {
 		t.Fatalf("expected zero context usage display, got %q", contextText)
 	}
 }
@@ -523,7 +523,7 @@ func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) 
 	if modelText != "gemini/gemini-2.5-pro [high]" {
 		t.Fatalf("unexpected model text %q", modelText)
 	}
-	if contextText != "5.2k/1.0m(0%)" {
+	if contextText != "5k/1m(0%)" {
 		t.Fatalf("expected context ratio display for gemini, got %q", contextText)
 	}
 }

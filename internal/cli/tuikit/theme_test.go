@@ -19,6 +19,7 @@ func TestComposeFooter(t *testing.T) {
 }
 
 func TestResolveThemeFromEnv_UsesNamedThemeAndAccentOverride(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	t.Setenv("CAELIS_THEME", "nord")
 	t.Setenv("CAELIS_ACCENT", "#ff9900")
 	t.Setenv("COLORTERM", "truecolor")
@@ -36,6 +37,7 @@ func TestResolveThemeFromEnv_UsesNamedThemeAndAccentOverride(t *testing.T) {
 }
 
 func TestResolveThemeFromEnv_FallsBackTo256Palette(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	t.Setenv("CAELIS_THEME", "dracula")
 	t.Setenv("COLORTERM", "")
 	t.Setenv("TERM", "xterm-256color")
@@ -50,6 +52,7 @@ func TestResolveThemeFromEnv_FallsBackTo256Palette(t *testing.T) {
 }
 
 func TestResolveThemeForBackground_SelectsLightTheme(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	t.Setenv("CAELIS_THEME", "")
 	t.Setenv("COLORTERM", "truecolor")
 
@@ -66,6 +69,7 @@ func TestResolveThemeForBackground_SelectsLightTheme(t *testing.T) {
 }
 
 func TestThemeUsesAutoBackground(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
 	t.Setenv("CAELIS_THEME", "")
 	if !ThemeUsesAutoBackground() {
 		t.Fatal("expected empty theme to use auto background detection")
@@ -79,6 +83,16 @@ func TestThemeUsesAutoBackground(t *testing.T) {
 	t.Setenv("CAELIS_THEME", "light")
 	if ThemeUsesAutoBackground() {
 		t.Fatal("expected explicit light theme to disable auto background detection")
+	}
+}
+
+func TestResolveThemeFromOptions_NoColor(t *testing.T) {
+	theme := ResolveThemeFromOptions(true, 0)
+	if !theme.NoColor {
+		t.Fatal("expected explicit no-color option to be preserved on theme")
+	}
+	if theme.TextPrimary != nil || theme.Accent != nil || theme.StatusBg != nil {
+		t.Fatalf("expected no-color theme to strip palette, got primary=%v accent=%v status=%v", theme.TextPrimary, theme.Accent, theme.StatusBg)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
@@ -35,6 +36,7 @@ const streamSmoothingNormalMaxPerFrameDefault = 5
 const streamSmoothingCatchupMaxPerFrameDefault = 12
 const inlinePanelMinVisibleDuration = 600 * time.Millisecond
 const inlinePanelCollapseDuration = 180 * time.Millisecond
+const scrollbarVisibleDuration = 900 * time.Millisecond
 
 type hintEntry struct {
 	id             uint64
@@ -106,6 +108,9 @@ type Config struct {
 	StreamThreshold      int
 	StreamNormalMaxTick  int
 	StreamCatchupMaxTick int
+	NoColor              bool
+	NoAnimation          bool
+	ColorProfile         colorprofile.Profile
 }
 
 type ResumeCandidate struct {
@@ -259,11 +264,14 @@ type toolAnchor struct {
 }
 
 type Model struct {
-	cfg       Config
-	theme     tuikit.Theme
-	themeAuto bool
-	keys      appKeyMap
-	help      help.Model
+	cfg          Config
+	theme        tuikit.Theme
+	themeAuto    bool
+	noColor      bool
+	noAnimation  bool
+	colorProfile colorprofile.Profile
+	keys         appKeyMap
+	help         help.Model
 
 	width   int
 	height  int
@@ -320,12 +328,14 @@ type Model struct {
 	transientRemove  bool
 
 	// Viewport caches — populated by syncViewportContent from Document.
-	viewportStyledLines []string
-	viewportPlainLines  []string
-	viewportBlockIDs    []string
-	viewport            viewport.Model
-	userScrolledUp      bool
-	ready               bool
+	viewportStyledLines           []string
+	viewportPlainLines            []string
+	viewportBlockIDs              []string
+	viewport                      viewport.Model
+	userScrolledUp                bool
+	ready                         bool
+	viewportScrollbarVisibleUntil time.Time
+	scrollbarDrag                 scrollbarDragState
 
 	selecting      bool
 	selectionStart textSelectionPoint
@@ -371,6 +381,7 @@ type Model struct {
 	streamSmoothing              map[string]*streamSmoothingState
 	streamSmoothingTickScheduled bool
 	panelAnimationTickScheduled  bool
+	scrollbarTickScheduled       bool
 	streamPlayback               streamPlaybackMetrics
 	lastViewportContent          string
 	viewportSyncDepth            int

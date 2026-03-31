@@ -35,6 +35,10 @@ const (
 	// content (assistant text, reasoning blocks).  Applied via indentBlock.
 	GutterNarrative = 2
 
+	// ReadableContentMaxWidth is the maximum readable transcript width before
+	// the UI recenters content within wider terminals.
+	ReadableContentMaxWidth = 100
+
 	// GutterUser is the total left margin for user prompt lines.
 	// Keep user turns aligned with the main narrative column so the
 	// brighter prefix/body styling can do the differentiation work.

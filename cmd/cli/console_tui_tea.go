@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
@@ -375,9 +377,18 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 				d.RedrawMode,
 			)
 		},
+		NoColor:     c.noColor,
+		NoAnimation: c.noAnimation,
 	})
 
-	program := tea.NewProgram(model, tea.WithFPS(30))
+	opts := []tea.ProgramOption{tea.WithFPS(30)}
+	if c.noAnimation {
+		opts[0] = tea.WithFPS(15)
+	}
+	if c.noColor {
+		opts = append(opts, tea.WithColorProfile(colorprofile.NoTTY))
+	}
+	program := tea.NewProgram(model, opts...)
 	sender.set(func(msg any) { program.Send(msg) })
 
 	sigCh := make(chan os.Signal, 1)
@@ -426,21 +437,35 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 	switch {
 	case cw > 0:
 		pct := int(float64(pt) / float64(cw) * 100)
-		used := formatTokenCount(pt)
+		used := formatCompactTokenCountInt(pt)
 		if used == "" {
 			used = "0"
 		}
-		total := formatTokenCount(cw)
+		total := formatCompactTokenCountInt(cw)
 		if total == "" {
 			total = "0"
 		}
 		contextStr = fmt.Sprintf("%s/%s(%d%%)", used, total, pct)
 	case pt > 0:
-		contextStr = formatTokenCount(pt)
+		contextStr = formatCompactTokenCountInt(pt)
 	default:
 		contextStr = "0"
 	}
 	return modelLabel, contextStr
+}
+
+func formatCompactTokenCountInt(v int) string {
+	if v <= 0 {
+		return ""
+	}
+	switch {
+	case v >= 1_000_000:
+		return fmt.Sprintf("%dm", int(math.Round(float64(v)/1_000_000)))
+	case v >= 1_000:
+		return fmt.Sprintf("%dk", int(math.Round(float64(v)/1_000)))
+	default:
+		return fmt.Sprintf("%d", v)
+	}
 }
 
 func workspaceStatusLine(cwd string) string {

@@ -44,6 +44,18 @@ func TestNextCyclesThroughModes(t *testing.T) {
 	}
 }
 
+func TestDisplayLabel(t *testing.T) {
+	if got := DisplayLabel(DefaultMode); got != DefaultMode {
+		t.Fatalf("expected default label, got %q", got)
+	}
+	if got := DisplayLabel(PlanMode); got != PlanMode {
+		t.Fatalf("expected plan label, got %q", got)
+	}
+	if got := DisplayLabel(FullMode); got != FullMode {
+		t.Fatalf("expected full_access label, got %q", got)
+	}
+}
+
 func TestIsDangerousCommand(t *testing.T) {
 	for _, command := range []string{
 		"rm -rf /",

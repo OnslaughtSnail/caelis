@@ -37,14 +37,22 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.viewport.SetYOffset(offset)
 				m.userScrolledUp = keepScrolledUp
 			}
+			if changed {
+				return m, m.ensureScrollbarTick()
+			}
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.userScrolledUp = !m.viewport.AtBottom()
-		return m, cmd
+		return m, tea.Batch(cmd, m.touchViewportScrollbar())
 	case tea.MouseClickMsg:
 		mouse := typed.Mouse()
+		if mouse.Button == tea.MouseLeft {
+			if handled, cmd := m.beginScrollbarDrag(mouse); handled {
+				return m, cmd
+			}
+		}
 		if handled, cmd := m.handleInputAreaMouse(mouse, mousePhasePress); handled {
 			return m, cmd
 		}
@@ -54,6 +62,12 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleViewportMousePress(mouse)
 	case tea.MouseMotionMsg:
 		mouse := typed.Mouse()
+		if m.scrollbarDrag.active {
+			return m, m.updateScrollbarDrag(mouse)
+		}
+		if cmd := m.hoverScrollbarAtMouse(mouse); cmd != nil {
+			return m, cmd
+		}
 		if handled, cmd := m.handleInputAreaMouse(mouse, mousePhaseMotion); handled {
 			return m, cmd
 		}
@@ -63,6 +77,11 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, m.handleViewportMouseMotion(mouse)
 	case tea.MouseReleaseMsg:
 		mouse := typed.Mouse()
+		if m.scrollbarDrag.active {
+			cmd := m.updateScrollbarDrag(mouse)
+			m.endScrollbarDrag()
+			return m, cmd
+		}
 		if handled, cmd := m.handleInputAreaMouse(mouse, mousePhaseRelease); handled {
 			return m, cmd
 		}
@@ -107,12 +126,20 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 		if !block.CanScroll(delta, ctx) {
 			return false, false
 		}
-		return true, block.Scroll(delta, ctx)
+		changed = block.Scroll(delta, ctx)
+		if changed {
+			touchScrollbarDeadline(block.scrollbarVisibleUntilPtr(), time.Now())
+		}
+		return true, changed
 	case *SubagentPanelBlock:
 		if !block.CanScroll(delta, ctx) {
 			return false, false
 		}
-		return true, block.Scroll(delta, ctx)
+		changed = block.Scroll(delta, ctx)
+		if changed {
+			touchScrollbarDeadline(block.scrollbarVisibleUntilPtr(), time.Now())
+		}
+		return true, changed
 	default:
 		return false, false
 	}
@@ -385,6 +412,9 @@ func (m *Model) reportClipboardError(action string, err error) tea.Cmd {
 // ---------------------------------------------------------------------------
 
 func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(tea.KeyReleaseMsg); ok {
+		return m, nil
+	}
 	// External prompt input takes priority.
 	if m.activePrompt != nil {
 		return m, m.handlePromptKey(msg)
@@ -443,7 +473,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ctrlCArmed = false
 		m.lastCtrlCAt = time.Time{}
 	}
-	if key.Matches(msg, m.keys.Mode) && !m.running && m.cfg.ToggleMode != nil {
+	if matchesModeKey(msg, m.keys.Mode) && !m.running && m.cfg.ToggleMode != nil {
 		hint, err := m.cfg.ToggleMode()
 		if err != nil {
 			return m, m.showHint(err.Error(), hintOptions{
@@ -474,11 +504,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.PageUp):
 		m.viewport.PageUp()
 		m.userScrolledUp = !m.viewport.AtBottom()
-		return m, nil
+		return m, m.touchViewportScrollbar()
 	case key.Matches(msg, m.keys.PageDown):
 		m.viewport.PageDown()
 		m.userScrolledUp = !m.viewport.AtBottom()
-		return m, nil
+		return m, m.touchViewportScrollbar()
 
 	case key.Matches(msg, m.keys.Quit):
 		if m.running {
@@ -533,7 +563,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.togglePalette()
-		return m, animatePaletteCmd()
+		return m, m.paletteAnimationCmd()
 
 	case key.Matches(msg, m.keys.Back):
 		if m.running {
@@ -591,6 +621,23 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.adjustTextareaHeight()
 			}
 		}
+		return m, nil
+
+	case matchesInsertNewlineKey(msg, m.keys.InsertNewline):
+		m.insertComposerText("\n")
+		m.refreshMention()
+		m.refreshSkill()
+		if m.isWizardActive() {
+			if m.resumeActive {
+				m.updateResumeCandidates()
+			}
+			if m.slashArgActive {
+				m.updateSlashArgCandidates()
+			}
+		} else {
+			m.syncSlashInputOverlays()
+		}
+		m.refreshSlashCommands()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Complete):
@@ -765,6 +812,17 @@ func (m *Model) handlePaste(msg tea.PasteMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *Model) insertComposerText(text string) {
+	if m == nil || text == "" {
+		return
+	}
+	before := m.textarea.Value()
+	m.textarea.InsertString(text)
+	m.inputAttachments = adjustAttachmentOffsetsForTextEdit(m.inputAttachments, before, m.textarea.Value())
+	m.syncAttachmentSummary()
+	m.syncInputFromTextarea()
+}
+
 func (m *Model) submitLine(line string) (tea.Model, tea.Cmd) {
 	return m.submitLineWithDisplayAndAttachments(line, m.displayLineWithAttachments(line), inputAttachmentsToSubmission(m.inputAttachments))
 }
@@ -901,12 +959,23 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 	if displayLine == "" {
 		return
 	}
-	userLine := "> " + displayLine
+	// A new user turn invalidates finalized-answer dedup. Otherwise asking the
+	// model to repeat the same answer text can be mistaken for a duplicate final
+	// replay and get suppressed.
+	m.lastFinalAnswer = ""
 	if m.lastCommittedStyle == tuikit.LineStyleUser &&
 		normalizeUserDisplayLine(strings.TrimPrefix(strings.TrimSpace(m.lastCommittedRaw), ">")) == normalizeUserDisplayLine(displayLine) {
 		return
 	}
-	m.commitLine(userLine)
+	userLine := "> " + displayLine
+	if m.hasCommittedLine {
+		m.insertSpacing(tuikit.LineStyleUser, userLine)
+	}
+	block := NewTranscriptBlock(userLine, tuikit.LineStyleUser)
+	m.doc.Append(block)
+	m.lastCommittedStyle = tuikit.LineStyleUser
+	m.lastCommittedRaw = userLine
+	m.hasCommittedLine = true
 }
 
 func normalizeUserDisplayLine(text string) string {

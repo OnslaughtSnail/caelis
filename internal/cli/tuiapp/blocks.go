@@ -9,6 +9,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuidiff"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
+	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,25 @@ func NewSpacerBlock() *TranscriptBlock {
 }
 
 // ---------------------------------------------------------------------------
+// UserNarrativeBlock — finalized user message rendered through glamour.
+// ---------------------------------------------------------------------------
+
+type UserNarrativeBlock struct {
+	id  string
+	Raw string // user's display text (without the "> " prefix)
+}
+
+func NewUserNarrativeBlock(text string) *UserNarrativeBlock {
+	return &UserNarrativeBlock{id: nextBlockID(), Raw: strings.TrimSpace(text)}
+}
+
+func (b *UserNarrativeBlock) BlockID() string { return b.id }
+func (b *UserNarrativeBlock) Kind() BlockKind { return BlockTranscript }
+func (b *UserNarrativeBlock) Render(ctx BlockRenderContext) []RenderedRow {
+	return renderNarrativeRows(b.id, b.Raw, "> ", tuikit.LineStyleUser, ctx.Width, ctx.Theme, false)
+}
+
+// ---------------------------------------------------------------------------
 // AssistantBlock — streaming or finalized assistant answer.
 // ---------------------------------------------------------------------------
 
@@ -69,32 +89,22 @@ func NewAssistantBlock(actor ...string) *AssistantBlock {
 func (b *AssistantBlock) BlockID() string { return b.id }
 func (b *AssistantBlock) Kind() BlockKind { return BlockAssistant }
 func (b *AssistantBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderAssistantRows(b.id, b.Actor, b.Raw, ctx)
+	return renderNarrativeRows(
+		b.id,
+		b.Raw,
+		"* "+assistantActorPrefix(b.Actor),
+		tuikit.LineStyleAssistant,
+		ctx.Width,
+		ctx.Theme,
+		b.Streaming,
+	)
 }
 
-func renderAssistantRows(blockID, actor, raw string, ctx BlockRenderContext) []RenderedRow {
-	nls, plainRows := buildNarrativeRows(raw)
-	actorPrefix := ""
+func assistantActorPrefix(actor string) string {
 	if actor = strings.TrimSpace(actor); actor != "" {
-		actorPrefix = actor + ": "
+		return actor + ": "
 	}
-	if len(plainRows) == 0 {
-		plain := "* " + actorPrefix
-		styled := tuikit.ColorizeLogLine(plain, tuikit.LineStyleAssistant, ctx.Theme)
-		return []RenderedRow{StyledPlainRow(blockID, plain, styled)}
-	}
-	rows := make([]RenderedRow, 0, len(plainRows))
-	for i, pr := range plainRows {
-		rolePrefix := ""
-		plain := pr
-		if i == 0 {
-			rolePrefix = "* " + actorPrefix
-			plain = rolePrefix + pr
-		}
-		styled := styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, tuikit.LineStyleAssistant, ctx.Theme)
-		rows = append(rows, StyledPlainRow(blockID, plain, styled))
-	}
-	return rows
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -119,31 +129,61 @@ func NewReasoningBlock(actor ...string) *ReasoningBlock {
 func (b *ReasoningBlock) BlockID() string { return b.id }
 func (b *ReasoningBlock) Kind() BlockKind { return BlockReasoning }
 func (b *ReasoningBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderReasoningRows(b.id, b.Actor, b.Raw, ctx)
+	prefix := "· "
+	if actor := strings.TrimSpace(b.Actor); actor != "" {
+		prefix += actor + ": "
+	}
+	return renderNarrativeRows(b.id, b.Raw, prefix, tuikit.LineStyleReasoning, ctx.Width, ctx.Theme, b.Streaming)
 }
 
-func renderReasoningRows(blockID, actor, raw string, ctx BlockRenderContext) []RenderedRow {
-	nls, plainRows := buildNarrativeRows(raw)
-	actorPrefix := ""
-	if actor = strings.TrimSpace(actor); actor != "" {
-		actorPrefix = actor + ": "
+// renderNarrativeFallbackRows preserves multi-line structure when glamour
+// cannot produce usable output. This is intentionally minimal and should only
+// be exercised for empty or degenerate markdown.
+func renderNarrativeFallbackRows(blockID, raw, rolePrefix, continuationPrefix string, lineStyle tuikit.LineStyle, theme tuikit.Theme) []RenderedRow {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	if strings.TrimSpace(normalized) == "" {
+		styled := tuikit.ColorizeLogLine(rolePrefix, lineStyle, theme)
+		return []RenderedRow{StyledPlainRow(blockID, rolePrefix, styled)}
 	}
-	if len(plainRows) == 0 {
-		plain := "· " + actorPrefix
-		styled := tuikit.ColorizeLogLine(plain, tuikit.LineStyleReasoning, ctx.Theme)
-		return []RenderedRow{StyledPlainRow(blockID, plain, styled)}
-	}
-	rows := make([]RenderedRow, 0, len(plainRows))
-	for i, pr := range plainRows {
-		rolePrefix := "  "
+	normalized = strings.TrimRight(normalized, "\n")
+	lines := strings.Split(normalized, "\n")
+	rows := make([]RenderedRow, 0, len(lines))
+	for i, line := range lines {
+		prefix := continuationPrefix
 		if i == 0 {
-			rolePrefix = "· " + actorPrefix
+			prefix = rolePrefix
 		}
-		plain := rolePrefix + pr
-		styled := styleNarrativeLine(nls[i].Text, rolePrefix, nls[i].Kind, tuikit.LineStyleReasoning, ctx.Theme)
+		plain := prefix + line
+		styled := tuikit.ColorizeLogLine(plain, lineStyle, theme)
 		rows = append(rows, StyledPlainRow(blockID, plain, styled))
 	}
 	return rows
+}
+
+func renderNarrativeRows(blockID, raw, rolePrefix string, lineStyle tuikit.LineStyle, width int, theme tuikit.Theme, streaming bool) []RenderedRow {
+	if rows := renderNarrativeGlamourRows(blockID, raw, rolePrefix, lineStyle, width, theme, streaming); len(rows) > 0 {
+		return rows
+	}
+	_, continuationPrefix := narrativeLinePrefixes(lineStyle)
+	return renderNarrativeFallbackRows(blockID, raw, rolePrefix, continuationPrefix, lineStyle, theme)
+}
+
+func renderNarrativeGlamourRows(blockID, raw, rolePrefix string, lineStyle tuikit.LineStyle, width int, theme tuikit.Theme, streaming bool) []RenderedRow {
+	if streaming {
+		return glamourStreamingNarrativeRows(blockID, raw, rolePrefix, lineStyle, width, theme)
+	}
+	return glamourNarrativeRows(blockID, raw, rolePrefix, lineStyle, width, theme)
+}
+
+func narrativeRowsStyled(rows []RenderedRow) []string {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.Styled)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -297,12 +337,13 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		return rows
 	}
 	contentWidth := maxInt(8, ctx.Width)
-	for _, ev := range visibleNarrativeEvents(b.Events, b.Status) {
+	events := visibleNarrativeEvents(b.Events, b.Status)
+	for i, ev := range events {
 		switch ev.Kind {
 		case SEReasoning:
-			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleReasoning, contentWidth, ctx)...)
+			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleReasoning, contentWidth, ctx, participantNarrativeEventActive(events, i, b.Status))...)
 		case SEAssistant:
-			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleAssistant, contentWidth, ctx)...)
+			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleAssistant, contentWidth, ctx, participantNarrativeEventActive(events, i, b.Status))...)
 		case SEToolCall:
 			if shouldRenderToolEvent(ev) {
 				rows = append(rows, renderParticipantTurnToolRows(b.id, ev, contentWidth, ctx)...)
@@ -345,28 +386,13 @@ func renderParticipantTurnHeader(b *ParticipantTurnBlock, ctx BlockRenderContext
 	}
 }
 
-func renderParticipantTurnNarrativeRows(blockID string, raw string, lineStyle tuikit.LineStyle, width int, ctx BlockRenderContext) []RenderedRow {
-	nls, plainRows := buildNarrativeRows(raw)
-	if len(plainRows) == 0 {
-		return nil
-	}
-	rolePrefix, continuationPrefix := narrativeLinePrefixes(lineStyle)
-	out := make([]RenderedRow, 0, len(plainRows)*2)
-	for i, plain := range plainRows {
-		linePrefix := continuationPrefix
-		if i == 0 {
-			linePrefix = rolePrefix
-		}
-		out = append(out, renderNarrativeViewModelRows(blockID, NarrativeViewModel{
-			Raw:                plain,
-			Kind:               nls[i].Kind,
-			RolePrefix:         linePrefix,
-			ContinuationPrefix: continuationPrefix,
-			LineStyle:          lineStyle,
-			Width:              width,
-		}, ctx.Theme)...)
-	}
-	return out
+func participantNarrativeEventActive(events []SubagentEvent, idx int, status string) bool {
+	return narrativeEventActive(events, idx, participantTurnIsTerminal(status))
+}
+
+func renderParticipantTurnNarrativeRows(blockID string, raw string, lineStyle tuikit.LineStyle, width int, ctx BlockRenderContext, active bool) []RenderedRow {
+	rolePrefix, _ := narrativeLinePrefixes(lineStyle)
+	return renderNarrativeRows(blockID, raw, rolePrefix, lineStyle, width, ctx.Theme, active)
 }
 
 func renderParticipantTurnToolRows(blockID string, ev SubagentEvent, width int, ctx BlockRenderContext) []RenderedRow {
@@ -507,17 +533,18 @@ type BashPanelBlock struct {
 	CallID   string
 	State    string // running, completed, failed, etc.
 
-	StartedAt    time.Time
-	UpdatedAt    time.Time
-	EndedAt      time.Time
-	Expanded     bool
-	CollapseAt   time.Time
-	CollapseFrom time.Time
-	CollapseFor  time.Duration
-	VisibleLines int
-	Active       bool
-	ScrollOffset int
-	FollowTail   bool
+	StartedAt             time.Time
+	UpdatedAt             time.Time
+	EndedAt               time.Time
+	Expanded              bool
+	CollapseAt            time.Time
+	CollapseFrom          time.Time
+	CollapseFor           time.Duration
+	VisibleLines          int
+	Active                bool
+	ScrollOffset          int
+	FollowTail            bool
+	ScrollbarVisibleUntil time.Time
 
 	Lines         []toolOutputLine
 	StdoutPartial string
@@ -625,7 +652,7 @@ func (b *BashPanelBlock) renderPanelLines(ctx BlockRenderContext, content []tool
 	start, end, _ := panelScrollWindow(len(lines), b.previewLines(), b.ScrollOffset, b.FollowTail)
 	lines = lines[start:end]
 	if overflow {
-		lines = addPanelScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme)
+		lines = addScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme, b.shouldShowScrollbar(time.Now()))
 	}
 	if isInlineBashPanel(b) {
 		return renderPanelViewModel(ctx.Theme, PanelViewModel{
@@ -1052,24 +1079,49 @@ func (s *SubagentSessionState) AddApprovalEvent(tool, command string) {
 	s.eventsGen++
 }
 
+func (s *SubagentSessionState) ReviveFromTerminal() {
+	if s == nil || !isTerminalSubagentState(s.Status) {
+		return
+	}
+	s.Status = "running"
+	filtered := s.Events[:0]
+	changed := false
+	for _, ev := range s.Events {
+		if ev.Kind == SEToolCall &&
+			ev.Done &&
+			ev.Err &&
+			strings.Contains(strings.ToLower(strings.TrimSpace(ev.Output)), "interrupted before completion") &&
+			(strings.EqualFold(strings.TrimSpace(ev.Name), tool.SpawnToolName) || strings.EqualFold(strings.TrimSpace(ev.Name), tool.TaskToolName)) {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, ev)
+	}
+	s.Events = filtered
+	if changed {
+		s.eventsGen++
+	}
+}
+
 type SubagentPanelBlock struct {
-	id           string
-	session      *SubagentSessionState
-	localEvtGen  uint64 // tracks which session eventsGen was last copied
-	SpawnID      string
-	AttachID     string
-	Agent        string
-	CallID       string
-	Status       string // "running", "completed", "failed", "interrupted", "timed_out", "waiting_approval"
-	StartedAt    time.Time
-	Expanded     bool
-	CollapseAt   time.Time
-	CollapseFrom time.Time
-	CollapseFor  time.Duration
-	VisibleLines int
-	ScrollOffset int
-	FollowTail   bool
-	Terminal     bool
+	id                    string
+	session               *SubagentSessionState
+	localEvtGen           uint64 // tracks which session eventsGen was last copied
+	SpawnID               string
+	AttachID              string
+	Agent                 string
+	CallID                string
+	Status                string // "running", "completed", "failed", "interrupted", "timed_out", "waiting_approval"
+	StartedAt             time.Time
+	Expanded              bool
+	CollapseAt            time.Time
+	CollapseFrom          time.Time
+	CollapseFor           time.Duration
+	VisibleLines          int
+	ScrollOffset          int
+	FollowTail            bool
+	Terminal              bool
+	ScrollbarVisibleUntil time.Time
 
 	// PinnedOpenByUser is set when a terminal inline panel is manually
 	// reopened from its anchor. That suppresses future auto-collapse until
@@ -1264,9 +1316,6 @@ func renderSubagentPanelLines(panel *SubagentPanelBlock, ctx BlockRenderContext)
 	}
 	baseWidth := ctx.Width
 	if baseWidth <= 0 {
-		baseWidth = ctx.TermWidth
-	}
-	if baseWidth <= 0 {
 		baseWidth = 80
 	}
 	boxWidth := maxInt(20, baseWidth-4)
@@ -1275,7 +1324,7 @@ func renderSubagentPanelLines(panel *SubagentPanelBlock, ctx BlockRenderContext)
 	start, end, _ := panelScrollWindow(len(lines), panel.previewLines(), panel.ScrollOffset, panel.FollowTail)
 	lines = lines[start:end]
 	if overflow {
-		lines = addPanelScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme)
+		lines = addScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme, panel.shouldShowScrollbar(time.Now()))
 	}
 	vm := PanelViewModel{
 		Variant: tuikit.PanelShellVariantDrawer,
@@ -1310,7 +1359,8 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 	var lines []string
 	hasContent := false
 
-	for _, ev := range visibleNarrativeEvents(panel.Events, panel.Status) {
+	events := visibleNarrativeEvents(panel.Events, panel.Status)
+	for i, ev := range events {
 		switch ev.Kind {
 		case SEPlan:
 			for _, pe := range ev.PlanEntries {
@@ -1331,13 +1381,13 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 
 		case SEReasoning:
 			if text := strings.TrimSpace(ev.Text); text != "" {
-				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleReasoning, contentWidth, ctx)...)
+				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleReasoning, contentWidth, ctx, subagentNarrativeEventActive(events, i, panel.Status))...)
 				hasContent = true
 			}
 
 		case SEAssistant:
 			if text := strings.TrimSpace(ev.Text); text != "" {
-				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleAssistant, contentWidth, ctx)...)
+				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleAssistant, contentWidth, ctx, subagentNarrativeEventActive(events, i, panel.Status))...)
 				hasContent = true
 			}
 
@@ -1374,30 +1424,29 @@ func renderSubagentToolEvent(ev SubagentEvent, ctx BlockRenderContext, contentWi
 	return renderToolEventViewModelStyledLines(buildToolEventViewModel(ev), contentWidth, ctx.Theme)
 }
 
-func renderSubagentNarrativeLines(raw string, lineStyle tuikit.LineStyle, contentWidth int, ctx BlockRenderContext) []string {
-	nls, plainRows := buildNarrativeRows(raw)
-	if len(plainRows) == 0 {
-		return nil
+func subagentNarrativeEventActive(events []SubagentEvent, idx int, status string) bool {
+	return narrativeEventActive(events, idx, isTerminalSubagentState(status))
+}
+
+func narrativeEventActive(events []SubagentEvent, idx int, terminal bool) bool {
+	if terminal || idx < 0 || idx >= len(events) {
+		return false
 	}
-	rolePrefix, continuationPrefix := narrativeLinePrefixes(lineStyle)
-	out := make([]string, 0, len(plainRows)*2)
-	for i, plain := range plainRows {
-		linePrefix := continuationPrefix
-		if i == 0 {
-			linePrefix = rolePrefix
-		}
-		for _, segment := range renderNarrativeViewModelSegments(NarrativeViewModel{
-			Raw:                plain,
-			Kind:               nls[i].Kind,
-			RolePrefix:         linePrefix,
-			ContinuationPrefix: continuationPrefix,
-			LineStyle:          lineStyle,
-			Width:              contentWidth,
-		}, ctx.Theme) {
-			out = append(out, segment.Styled)
+	ev := events[idx]
+	if ev.Kind != SEAssistant && ev.Kind != SEReasoning {
+		return false
+	}
+	for j := idx + 1; j < len(events); j++ {
+		if events[j].Kind == SEAssistant || events[j].Kind == SEReasoning {
+			return false
 		}
 	}
-	return out
+	return true
+}
+
+func renderSubagentNarrativeLines(raw string, lineStyle tuikit.LineStyle, contentWidth int, ctx BlockRenderContext, active bool) []string {
+	rolePrefix, _ := narrativeLinePrefixes(lineStyle)
+	return narrativeRowsStyled(renderNarrativeRows("", raw, rolePrefix, lineStyle, contentWidth, ctx.Theme, active))
 }
 
 func panelScrollWindow(total, visible, offset int, followTail bool) (start int, end int, maxOffset int) {
@@ -1439,8 +1488,8 @@ func canScrollPanelState(offset int, followTail bool, total, visible, delta int)
 	return next != current
 }
 
-func addPanelScrollbar(lines []string, contentWidth, visible, offset, total int, theme tuikit.Theme) []string {
-	if len(lines) == 0 || total <= visible {
+func addScrollbar(lines []string, contentWidth, visible, offset, total int, theme tuikit.Theme, visibleNow bool) []string {
+	if len(lines) == 0 || total <= visible || !visibleNow {
 		return lines
 	}
 	thumbHeight := maxInt(1, visible*visible/maxInt(visible, total))
@@ -1451,9 +1500,9 @@ func addPanelScrollbar(lines []string, contentWidth, visible, offset, total int,
 	}
 	withScrollbar := make([]string, len(lines))
 	for i, line := range lines {
-		glyph := theme.ScrollbarTrackStyle().Render("│")
+		glyph := theme.ScrollbarTrackStyle().Render("▏")
 		if i >= thumbStart && i < thumbStart+thumbHeight {
-			glyph = theme.ScrollbarThumbStyle().Render("█")
+			glyph = theme.ScrollbarThumbStyle().Render("▎")
 		}
 		if pad := contentWidth - lipgloss.Width(line); pad > 0 {
 			line += strings.Repeat(" ", pad)
@@ -1504,6 +1553,20 @@ func (b *BashPanelBlock) CanScroll(delta int, ctx BlockRenderContext) bool {
 	return canScrollPanelState(b.ScrollOffset, b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
 }
 
+func (b *BashPanelBlock) scrollState() (*int, *bool) {
+	if b == nil {
+		return nil, nil
+	}
+	return &b.ScrollOffset, &b.FollowTail
+}
+
+func (b *BashPanelBlock) scrollbarVisibleUntilPtr() *time.Time {
+	if b == nil {
+		return nil
+	}
+	return &b.ScrollbarVisibleUntil
+}
+
 func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 	if b == nil || !b.Expanded {
 		return 0
@@ -1511,9 +1574,6 @@ func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 	_ = b.sessionState()
 	b.syncSessionMirror()
 	baseWidth := ctx.Width
-	if baseWidth <= 0 {
-		baseWidth = ctx.TermWidth
-	}
 	if baseWidth <= 0 {
 		baseWidth = 80
 	}
@@ -1531,6 +1591,20 @@ func (b *SubagentPanelBlock) CanScroll(delta int, ctx BlockRenderContext) bool {
 		return false
 	}
 	return canScrollPanelState(b.ScrollOffset, b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
+}
+
+func (b *SubagentPanelBlock) scrollState() (*int, *bool) {
+	if b == nil {
+		return nil, nil
+	}
+	return &b.ScrollOffset, &b.FollowTail
+}
+
+func (b *SubagentPanelBlock) scrollbarVisibleUntilPtr() *time.Time {
+	if b == nil {
+		return nil
+	}
+	return &b.ScrollbarVisibleUntil
 }
 
 // ---------------------------------------------------------------------------

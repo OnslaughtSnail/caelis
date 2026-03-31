@@ -258,6 +258,43 @@ func TestSubagentPanelClearsWaitingApprovalWhenWorkResumes(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelClearsInterruptedArtifactsWhenWorkResumes(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "spawn-1", AttachTarget: "child-1", Agent: "codex", CallID: "call-1"})
+	_, _ = m.Update(tuievents.SubagentToolCallMsg{
+		SpawnID:  "spawn-1",
+		ToolName: "SPAWN",
+		CallID:   "call-1",
+		Stream:   "stderr",
+		Chunk:    "tool call interrupted before completion",
+		Final:    true,
+	})
+	_, _ = m.Update(tuievents.SubagentStatusMsg{SpawnID: "spawn-1", State: "failed"})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "spawn-1", Stream: "assistant", Chunk: "actual child output"})
+
+	panel, _ := m.doc.Find(m.subagentBlockIDs["spawn-1"]).(*SubagentPanelBlock)
+	if panel == nil {
+		t.Fatal("expected panel")
+	}
+	if panel.Status != "running" {
+		t.Fatalf("expected terminal status to be cleared when work resumes, got %q", panel.Status)
+	}
+	for _, ev := range panel.Events {
+		if ev.Kind == SEToolCall && strings.Contains(ev.Output, "interrupted before completion") {
+			t.Fatalf("expected stale interrupted tool artifact to be removed, got %+v", panel.Events)
+		}
+	}
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if !strings.Contains(joined, "actual child output") {
+		t.Fatalf("expected resumed child output in panel, got %q", joined)
+	}
+	if strings.Contains(joined, "tool call interrupted before completion") || strings.Contains(joined, "✗ failed") {
+		t.Fatalf("did not expect stale interrupted state in panel, got %q", joined)
+	}
+}
+
 func TestSubagentPanelAddsLatestReferenceForSameSession(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },
