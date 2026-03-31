@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## v0.0.34 - 2026-03-31
+## v0.0.35 - 2026-04-01
 
 ### TUI Transcript And Subagent Fixes
 - Kept committed user turns verbatim in the transcript so pasted Markdown, fenced code blocks, and copied history preserve the exact original prompt text.
@@ -11,7 +11,7 @@
 - Fixed resumed subagent panel behavior after local interruption so fresh streamed output revives the panel cleanly and stale `interrupted before completion` / `failed` artifacts are removed.
 
 ### Release Metadata
-- Bumped release metadata to `v0.0.34` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
+- Bumped release metadata to `v0.0.35` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
 
 ## v0.0.33 - 2026-03-31
 
