@@ -15,6 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -580,15 +581,16 @@ func (c *cliConsole) forwardExternalAgentUpdate(ctx context.Context, turn *exter
 	switch update := env.Update.(type) {
 	case acpclient.ContentChunk:
 		stream, chunk := externalContentChunk(update)
+		chunk = tuikit.SanitizeLogText(chunk)
 		if stream == "" || chunk == "" {
 			return
 		}
 		turn.mu.Lock()
 		switch stream {
 		case "assistant":
-			turn.assistant += chunk
+			turn.assistant = mergeExternalNarrativeChunk(turn.assistant, chunk)
 		case "reasoning":
-			turn.reasoning += chunk
+			turn.reasoning = mergeExternalNarrativeChunk(turn.reasoning, chunk)
 		}
 		turn.mu.Unlock()
 		c.tuiSender.Send(tuievents.RawDeltaMsg{
@@ -875,6 +877,42 @@ func externalACPPrimaryValue(raw any) string {
 		}
 	}
 	return ""
+}
+
+func mergeExternalNarrativeChunk(existing string, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if incoming == existing {
+		return existing
+	}
+
+	const stableReplayThreshold = 12
+	if len([]rune(existing)) >= stableReplayThreshold && strings.HasPrefix(incoming, existing) {
+		return incoming
+	}
+	if len([]rune(incoming)) >= stableReplayThreshold && strings.HasPrefix(existing, incoming) {
+		return existing
+	}
+	if suffix := overlappingExternalNarrativeSuffix(existing, incoming, 6); suffix != incoming {
+		return existing + suffix
+	}
+	return existing + incoming
+}
+
+func overlappingExternalNarrativeSuffix(existing string, incoming string, minOverlap int) string {
+	existingRunes := []rune(existing)
+	incomingRunes := []rune(incoming)
+	limit := minInt(len(existingRunes), len(incomingRunes))
+	for overlap := limit; overlap >= minOverlap; overlap-- {
+		if string(existingRunes[len(existingRunes)-overlap:]) == string(incomingRunes[:overlap]) {
+			return string(incomingRunes[overlap:])
+		}
+	}
+	return incoming
 }
 
 func externalACPTitleSummary(name string, kind string, title string) string {

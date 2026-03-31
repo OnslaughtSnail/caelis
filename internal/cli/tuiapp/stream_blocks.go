@@ -1204,6 +1204,10 @@ func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string,
 	m.finalizeActivityBlock()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
+	text = tuikit.SanitizeLogText(text)
+	if text == "" && !final {
+		return m, nil
+	}
 	block := m.ensureParticipantTurnBlock(sessionID, actor)
 	if block == nil {
 		return m, nil

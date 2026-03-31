@@ -161,6 +161,22 @@ func TestSubagentPanelShowsApprovalState(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelSanitizesStreamingControlCharacters(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "spawn-1", AttachTarget: "child-1", Agent: "gemini", CallID: "call-1"})
+	_, _ = m.Update(tuievents.SubagentStreamMsg{SpawnID: "spawn-1", Stream: "assistant", Chunk: "hello\x1b[31m\rworld"})
+
+	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
+	if strings.Contains(joined, "\x1b") || strings.Contains(joined, "[31m") {
+		t.Fatalf("did not expect ANSI escape content in subagent stream, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "hello") || !strings.Contains(joined, "world") {
+		t.Fatalf("expected sanitized subagent text to remain visible, got:\n%s", joined)
+	}
+}
+
 func TestSubagentStartClaimsWriteTranscriptAnchor(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: func(Submission) tuievents.TaskResultMsg { return tuievents.TaskResultMsg{} },

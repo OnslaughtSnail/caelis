@@ -372,6 +372,10 @@ func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
 	streamKind := strings.TrimSpace(msg.Stream)
+	chunk := tuikit.SanitizeLogText(msg.Chunk)
+	if chunk == "" {
+		return m, nil
+	}
 	if state != nil {
 		switch {
 		case strings.EqualFold(state.Status, "waiting_approval"):
@@ -383,7 +387,7 @@ func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model
 	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false); panel != nil {
 		m.reviveSubagentPanel(panel, false)
 	}
-	m.applySubagentStreamImmediate(sessionKey, streamKind, msg.Chunk)
+	m.applySubagentStreamImmediate(sessionKey, streamKind, chunk)
 	m.syncSubagentSessionPanels(sessionKey)
 	return m, nil
 }
@@ -392,6 +396,7 @@ func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string
 	sessionKey, state := m.ensureSubagentSessionState(spawnID, "", "")
 	_ = m.ensureSubagentPanelBlock(spawnID, "", "", "", "", false)
 	streamKind := strings.TrimSpace(stream)
+	chunk = tuikit.SanitizeLogText(chunk)
 	m.flushSubagentStreamSmoothingExcept(sessionKey, streamKind)
 	if state != nil {
 		switch {
@@ -400,6 +405,10 @@ func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string
 		case isTerminalSubagentState(state.Status):
 			state.ReviveFromTerminal()
 		}
+	}
+	if chunk == "" && !final {
+		m.syncSubagentSessionPanels(sessionKey)
+		return m, nil
 	}
 	if !m.enqueueStreamDelta("subagent", sessionKey, streamKind, "", chunk, final) {
 		m.syncSubagentSessionPanels(sessionKey)

@@ -219,12 +219,10 @@ func (b *ParticipantTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk s
 	if b == nil {
 		return
 	}
-	if len(b.Events) > 0 {
-		last := &b.Events[len(b.Events)-1]
-		if last.Kind == kind {
-			last.Text = collapseRepeatedNarrativeText(mergeSubagentStreamChunk(last.Text, chunk))
-			return
-		}
+	if idx := latestParticipantNarrativeEventIndex(b.Events, kind); idx >= 0 {
+		b.Events[idx].Text = collapseRepeatedNarrativeText(mergeSubagentStreamChunk(b.Events[idx].Text, chunk))
+		b.Events = b.Events[:idx+1]
+		return
 	}
 	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
 }
@@ -237,12 +235,9 @@ func (b *ParticipantTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, c
 	if chunk == "" {
 		return
 	}
-	for i := len(b.Events) - 1; i >= 0; i-- {
-		ev := &b.Events[i]
-		if ev.Kind != kind {
-			continue
-		}
-		ev.Text = collapseRepeatedNarrativeText(chunk)
+	if idx := latestParticipantNarrativeEventIndex(b.Events, kind); idx >= 0 {
+		b.Events[idx].Text = collapseRepeatedNarrativeText(chunk)
+		b.Events = b.Events[:idx+1]
 		return
 	}
 	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
@@ -440,6 +435,32 @@ func collapseAdjacentDuplicateLines(text string) string {
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+func latestParticipantNarrativeEventIndex(events []SubagentEvent, kind SubagentEventKind) int {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.Kind == kind {
+			return i
+		}
+		if participantNarrativeMergeBarrier(kind, ev) {
+			return -1
+		}
+	}
+	return -1
+}
+
+func participantNarrativeMergeBarrier(kind SubagentEventKind, ev SubagentEvent) bool {
+	switch ev.Kind {
+	case SEApproval:
+		return false
+	case SEReasoning:
+		return kind != SEAssistant
+	case SEToolCall:
+		return true
+	default:
+		return true
+	}
 }
 
 func participantTurnIsTerminal(state string) bool {

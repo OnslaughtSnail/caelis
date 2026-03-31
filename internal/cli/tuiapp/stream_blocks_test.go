@@ -286,6 +286,69 @@ func TestParticipantTurnBlock_StreamingClosedFenceHidesDelimiters(t *testing.T) 
 	}
 }
 
+func TestParticipantTurnBlock_CoalescesAssistantChunksAcrossHiddenReasoning(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	prefix := "我是 Gemini CLI，专注于软件工程任务的交互式 AI"
+	full := prefix + " 代理。我以高级软件工程师的身份协助你进行代码分析。"
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "leo(gemini)"})
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "leo(gemini)",
+		Stream:  "answer",
+		Text:    prefix,
+	})
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "leo(gemini)",
+		Stream:  "reasoning",
+		Text:    "thinking",
+	})
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "leo(gemini)",
+		Stream:  "answer",
+		Text:    full,
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "thinking") {
+		t.Fatalf("did not expect hidden reasoning preview to remain visible, got:\n%s", view)
+	}
+	if count := strings.Count(view, prefix); count != 1 {
+		t.Fatalf("expected assistant prefix to render once after coalescing, got %d occurrences:\n%s", count, view)
+	}
+	if !strings.Contains(view, "代理。我以高级软件工程师的身份协助你进行代码分析。") {
+		t.Fatalf("expected coalesced assistant content, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_SanitizesStreamingControlCharacters(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "leo(gemini)"})
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "leo(gemini)",
+		Stream:  "answer",
+		Text:    "hello\x1b[31m\rworld",
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "\x1b") || strings.Contains(view, "[31m") {
+		t.Fatalf("did not expect ANSI escape content in participant stream, got:\n%s", view)
+	}
+	if !strings.Contains(view, "hello") || !strings.Contains(view, "world") {
+		t.Fatalf("expected sanitized participant text to remain visible, got:\n%s", view)
+	}
+}
+
 func TestRenderMentionList_UsesAgentsTitleForAtPrefix(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
