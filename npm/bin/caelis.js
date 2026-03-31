@@ -4,12 +4,41 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const exeName = process.platform === 'win32' ? 'caelis.exe' : 'caelis';
-const binPath = path.join(__dirname, '..', 'runtime', exeName);
+const packageMap = {
+  'darwin:arm64': '@onslaughtsnail/caelis-darwin-arm64',
+  'darwin:x64': '@onslaughtsnail/caelis-darwin-x64',
+  'linux:arm64': '@onslaughtsnail/caelis-linux-arm64',
+  'linux:x64': '@onslaughtsnail/caelis-linux-x64',
+};
+
+function resolvePackageName() {
+  const key = `${process.platform}:${process.arch}`;
+  const packageName = packageMap[key];
+  if (!packageName) {
+    console.error(`[caelis] unsupported platform/arch: ${process.platform}/${process.arch}`);
+    process.exit(1);
+  }
+  return packageName;
+}
+
+function resolveBinaryPath(packageName) {
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`);
+    return path.join(path.dirname(packageJsonPath), 'runtime', 'caelis');
+  } catch (err) {
+    console.error(`[caelis] platform package not installed: ${packageName}`);
+    console.error('[caelis] reinstall without --omit=optional, then try again.');
+    console.error('[caelis] resolve error:', err.message);
+    process.exit(1);
+  }
+}
+
+const packageName = resolvePackageName();
+const binPath = resolveBinaryPath(packageName);
 
 if (!fs.existsSync(binPath)) {
   console.error('[caelis] binary not found at', binPath);
-  console.error('[caelis] try: npm rebuild @onslaughtsnail/caelis');
+  console.error(`[caelis] reinstall ${packageName}, then try again.`);
   process.exit(1);
 }
 

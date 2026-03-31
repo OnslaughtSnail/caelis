@@ -18,8 +18,6 @@ npx @onslaughtsnail/caelis --help
 
 ## How it works
 
-This package downloads the platform-specific `caelis` binary from GitHub Releases during `postinstall`.
+This package installs a platform-specific `caelis` binary from npm optional dependencies.
 
-If your environment blocks postinstall network access, download the binary from:
-
-- https://github.com/OnslaughtSnail/caelis/releases
+This keeps installation traffic on the npm registry path instead of fetching binaries from GitHub Releases during `postinstall`.

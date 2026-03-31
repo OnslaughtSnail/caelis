@@ -150,7 +150,7 @@ User-facing MCP tool loading is no longer supported in the CLI runtime. Older AC
 
 ## Release
 
-- Current release: `v0.0.32`
+- Current release: `v0.0.33`
 - Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
@@ -160,11 +160,13 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.32`.
+CI release is triggered by pushing a version tag such as `v0.0.33`.
 
 ## npm Package
 
 The npm package lives under `npm/` and publishes as `@onslaughtsnail/caelis`.
+
+Platform-specific binaries publish as internal npm packages and are pulled in through `optionalDependencies`, so installs stay on the npm registry path instead of downloading GitHub Release assets during `postinstall`.
 
 ```bash
 npm i -g @onslaughtsnail/caelis

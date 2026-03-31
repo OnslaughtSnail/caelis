@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v0.0.33 - 2026-03-31
+
+### npm Distribution Restructure
+- Replaced the npm postinstall GitHub Release download flow with platform-specific optional dependency packages for macOS and Linux on both `x64` and `arm64`.
+- Updated the npm launcher to resolve the matching installed platform package at runtime and report clearer errors when optional dependencies are omitted.
+- Added release helper scripts to synchronize package versions, stage GoReleaser archives into platform packages, and publish packages idempotently.
+
+### Release Automation And Docs
+- Reworked the GitHub release workflow so GoReleaser builds and npm publishing happen in one trusted-publishing job, with platform packages published before the main package.
+- Removed the npm package lockfile and the old binary download script now that npm publication no longer depends on install-time network fetches.
+- Bumped release metadata to `v0.0.33` in `CHANGELOG.md`, `README.md`, and `VERSION` for the tagged release.
+
 ## v0.0.32 - 2026-03-30
 
 ### Runtime Backends, Session Modes, And Resume Fixes

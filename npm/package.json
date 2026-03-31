@@ -1,6 +1,6 @@
 {
   "name": "@onslaughtsnail/caelis",
-  "version": "0.0.0",
+  "version": "0.0.33",
   "description": "caelis CLI distributed via npm",
   "license": "Apache-2.0",
   "repository": {
@@ -17,7 +17,6 @@
   "files": [
     "bin",
     "scripts",
-    "runtime",
     "README.md",
     "LICENSE"
   ],
@@ -30,14 +29,19 @@
     "arm64"
   ],
   "scripts": {
-    "postinstall": "node ./scripts/postinstall.mjs",
-    "prepare": "node ./scripts/prepare.mjs"
+    "prepare": "node ./scripts/prepare.mjs",
+    "set-version": "node ./scripts/set-version.mjs",
+    "stage-release": "node ./scripts/stage-release.mjs",
+    "publish-release": "node ./scripts/publish-release.mjs"
   },
-  "dependencies": {
-    "extract-zip": "^2.0.1",
-    "tar": "^7.4.3"
+  "optionalDependencies": {
+    "@onslaughtsnail/caelis-darwin-arm64": "0.0.33",
+    "@onslaughtsnail/caelis-darwin-x64": "0.0.33",
+    "@onslaughtsnail/caelis-linux-arm64": "0.0.33",
+    "@onslaughtsnail/caelis-linux-x64": "0.0.33"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   }
 }
