@@ -27,9 +27,7 @@ func (m *Model) View() tea.View {
 	var sections []string
 
 	// 1. Viewport (scrollable history + streaming + spinner) with left gutter.
-	vpView := m.viewport.View()
-	vpView = strings.TrimRight(vpView, "\n")
-	vpView = m.renderViewportScrollbar(vpView)
+	vpView := m.renderViewportView()
 	if tuikit.GutterNarrative > 0 {
 		vpView = indentBlock(vpView, tuikit.GutterNarrative)
 	}

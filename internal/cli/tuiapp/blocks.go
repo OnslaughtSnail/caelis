@@ -52,8 +52,9 @@ func NewSpacerBlock() *TranscriptBlock {
 // ---------------------------------------------------------------------------
 
 type UserNarrativeBlock struct {
-	id  string
-	Raw string // user's display text (without the "> " prefix)
+	id          string
+	Raw         string // user's display text (without the "> " prefix)
+	renderCache narrativeBlockRenderCache
 }
 
 func NewUserNarrativeBlock(text string) *UserNarrativeBlock {
@@ -63,7 +64,43 @@ func NewUserNarrativeBlock(text string) *UserNarrativeBlock {
 func (b *UserNarrativeBlock) BlockID() string { return b.id }
 func (b *UserNarrativeBlock) Kind() BlockKind { return BlockTranscript }
 func (b *UserNarrativeBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderNarrativeRows(b.id, b.Raw, "> ", tuikit.LineStyleUser, ctx.Width, ctx.Theme, false)
+	return b.renderCache.renderNarrativeRows(b.id, b.Raw, "> ", tuikit.LineStyleUser, ctx, false)
+}
+
+type narrativeBlockRenderCache struct {
+	width      int
+	themeKey   string
+	raw        string
+	rolePrefix string
+	streaming  bool
+	rows       []RenderedRow
+}
+
+func (c *narrativeBlockRenderCache) renderNarrativeRows(blockID, raw, rolePrefix string, lineStyle tuikit.LineStyle, ctx BlockRenderContext, streaming bool) []RenderedRow {
+	if cached := c.cachedRows(raw, rolePrefix, ctx.Width, ctx.Theme, streaming); cached != nil {
+		return cached
+	}
+	rows := renderNarrativeRows(blockID, raw, rolePrefix, lineStyle, ctx.Width, ctx.Theme, streaming)
+	c.width = ctx.Width
+	c.themeKey = themeRenderCacheKey(ctx.Theme)
+	c.raw = raw
+	c.rolePrefix = rolePrefix
+	c.streaming = streaming
+	c.rows = rows
+	return rows
+}
+
+func (c *narrativeBlockRenderCache) cachedRows(raw, rolePrefix string, width int, theme tuikit.Theme, streaming bool) []RenderedRow {
+	if c == nil || len(c.rows) == 0 {
+		return nil
+	}
+	if c.width != width || c.themeKey != themeRenderCacheKey(theme) {
+		return nil
+	}
+	if c.raw != raw || c.rolePrefix != rolePrefix || c.streaming != streaming {
+		return nil
+	}
+	return c.rows
 }
 
 // ---------------------------------------------------------------------------
@@ -71,11 +108,12 @@ func (b *UserNarrativeBlock) Render(ctx BlockRenderContext) []RenderedRow {
 // ---------------------------------------------------------------------------
 
 type AssistantBlock struct {
-	id        string
-	Actor     string
-	Raw       string
-	Streaming bool
-	LastFinal string // dedup for duplicate final events
+	id          string
+	Actor       string
+	Raw         string
+	Streaming   bool
+	LastFinal   string // dedup for duplicate final events
+	renderCache narrativeBlockRenderCache
 }
 
 func NewAssistantBlock(actor ...string) *AssistantBlock {
@@ -89,13 +127,12 @@ func NewAssistantBlock(actor ...string) *AssistantBlock {
 func (b *AssistantBlock) BlockID() string { return b.id }
 func (b *AssistantBlock) Kind() BlockKind { return BlockAssistant }
 func (b *AssistantBlock) Render(ctx BlockRenderContext) []RenderedRow {
-	return renderNarrativeRows(
+	return b.renderCache.renderNarrativeRows(
 		b.id,
 		b.Raw,
 		"* "+assistantActorPrefix(b.Actor),
 		tuikit.LineStyleAssistant,
-		ctx.Width,
-		ctx.Theme,
+		ctx,
 		b.Streaming,
 	)
 }
@@ -112,10 +149,11 @@ func assistantActorPrefix(actor string) string {
 // ---------------------------------------------------------------------------
 
 type ReasoningBlock struct {
-	id        string
-	Actor     string
-	Raw       string
-	Streaming bool
+	id          string
+	Actor       string
+	Raw         string
+	Streaming   bool
+	renderCache narrativeBlockRenderCache
 }
 
 func NewReasoningBlock(actor ...string) *ReasoningBlock {
@@ -133,7 +171,7 @@ func (b *ReasoningBlock) Render(ctx BlockRenderContext) []RenderedRow {
 	if actor := strings.TrimSpace(b.Actor); actor != "" {
 		prefix += actor + ": "
 	}
-	return renderNarrativeRows(b.id, b.Raw, prefix, tuikit.LineStyleReasoning, ctx.Width, ctx.Theme, b.Streaming)
+	return b.renderCache.renderNarrativeRows(b.id, b.Raw, prefix, tuikit.LineStyleReasoning, ctx, b.Streaming)
 }
 
 // renderNarrativeFallbackRows preserves multi-line structure when glamour

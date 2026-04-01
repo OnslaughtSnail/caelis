@@ -3,6 +3,7 @@ package tuiapp
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
@@ -142,6 +143,42 @@ func TestSubagentPanelOmitsAttachHint(t *testing.T) {
 	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
 	if strings.Contains(joined, "/attach child-1") {
 		t.Fatalf("did not expect attach hint in subagent panel, got %q", joined)
+	}
+}
+
+func TestSubagentStream_ScrolledUpSchedulesOffscreenSync(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	resizeModel(m)
+
+	for i := 0; i < 80; i++ {
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: strings.Repeat("x", 4) + "\n"})
+	}
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "spawn-1", AttachTarget: "child-1", Agent: "self", CallID: "call-1"})
+	m.viewport.PageUp()
+	m.userScrolledUp = !m.viewport.AtBottom()
+	if !m.userScrolledUp {
+		t.Fatal("expected model to be scrolled away from bottom")
+	}
+
+	before := m.lastViewportContent
+	_, cmd := m.Update(tuievents.SubagentStreamMsg{SpawnID: "spawn-1", Stream: "assistant", Chunk: "child output"})
+	if cmd == nil {
+		t.Fatal("expected offscreen viewport tick for subagent stream")
+	}
+	if m.lastViewportContent != before {
+		t.Fatal("expected viewport content not to rebuild immediately while scrolled up")
+	}
+
+	_, _ = m.Update(tickAt(frameTickOffscreen, time.Now().Add(m.offscreenViewportSyncInterval())))
+	if m.lastViewportContent != before {
+		t.Fatal("expected offscreen frame tick to defer subagent rebuild while still scrolled up")
+	}
+
+	m.viewport.GotoBottom()
+	m.userScrolledUp = false
+	_, _ = m.Update(tickAt(frameTickOffscreen, time.Now().Add(2*m.offscreenViewportSyncInterval())))
+	if m.lastViewportContent == before {
+		t.Fatal("expected viewport content to catch up after returning to bottom")
 	}
 }
 

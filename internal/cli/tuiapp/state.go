@@ -37,6 +37,8 @@ const streamSmoothingCatchupMaxPerFrameDefault = 12
 const inlinePanelMinVisibleDuration = 600 * time.Millisecond
 const inlinePanelCollapseDuration = 180 * time.Millisecond
 const scrollbarVisibleDuration = 900 * time.Millisecond
+const offscreenViewportSyncIntervalMin = 80 * time.Millisecond
+const offscreenViewportSyncIntervalMax = 160 * time.Millisecond
 
 type hintEntry struct {
 	id             uint64
@@ -311,10 +313,11 @@ type Model struct {
 	taskOriginCallID map[string]string
 
 	streamLine         string
+	pendingLogChunk    string
+	pendingTaskStreams []tuievents.TaskStreamMsg
 	lastCommittedStyle tuikit.LineStyle
 	lastCommittedRaw   string
 	hasCommittedLine   bool
-	lastFinalAnswer    string
 	planEntries        []planEntryState
 	welcomeCardPending bool
 	runStartedAt       time.Time
@@ -378,12 +381,20 @@ type Model struct {
 	lastCtrlCAt time.Time
 	ctrlCArmSeq uint64
 
-	streamSmoothing              map[string]*streamSmoothingState
-	streamSmoothingTickScheduled bool
-	panelAnimationTickScheduled  bool
-	scrollbarTickScheduled       bool
-	streamPlayback               streamPlaybackMetrics
-	lastViewportContent          string
-	viewportSyncDepth            int
-	viewportDirty                bool
+	streamSmoothing                map[string]*streamSmoothingState
+	streamSmoothingTickScheduled   bool
+	spinnerTickScheduled           bool
+	deferredBatchTickScheduled     bool
+	offscreenViewportDirty         bool
+	offscreenViewportTickScheduled bool
+	offscreenViewportSyncAt        time.Time
+	panelAnimationTickScheduled    bool
+	scrollbarTickScheduled         bool
+	streamPlayback                 streamPlaybackMetrics
+	viewportRenderEntries          []viewportRenderEntry
+	lastViewportContent            string
+	lastViewportViewKey            string
+	lastViewportViewRendered       string
+	viewportSyncDepth              int
+	viewportDirty                  bool
 }

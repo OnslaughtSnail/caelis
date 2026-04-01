@@ -11,6 +11,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
@@ -300,6 +301,7 @@ func visiblePlanEntries(entries []planEntryState, limit int) ([]planEntryState, 
 
 func (m *Model) startRunningAnimation() {
 	m.runningTick = 0
+	m.spinnerTickScheduled = false
 	if len(runningCarouselLines) > 0 {
 		seed := int(time.Now().UnixNano() % int64(len(runningCarouselLines)))
 		if seed < 0 {
@@ -314,6 +316,7 @@ func (m *Model) startRunningAnimation() {
 func (m *Model) stopRunningAnimation() {
 	m.runningTick = 0
 	m.runningTip = 0
+	m.spinnerTickScheduled = false
 }
 
 func (m *Model) advanceRunningAnimation() {
@@ -323,6 +326,28 @@ func (m *Model) advanceRunningAnimation() {
 			m.runningTip = (m.runningTip + 1) % len(runningCarouselLines)
 		}
 	}
+}
+
+func (m *Model) shouldThrottleRunningAnimation() bool {
+	if m == nil || !m.running {
+		return false
+	}
+	return m.shouldDeferStreamViewportSync()
+}
+
+func (m *Model) scheduleSpinnerTick() tea.Cmd {
+	if m == nil || !m.running || m.spinnerTickScheduled {
+		return nil
+	}
+	m.spinnerTickScheduled = true
+	return m.spinner.Tick
+}
+
+func (m *Model) resumeRunningAnimationIfNeeded() tea.Cmd {
+	if m == nil || !m.running || m.shouldThrottleRunningAnimation() {
+		return nil
+	}
+	return m.scheduleSpinnerTick()
 }
 
 func (m *Model) buildRunningHintText() string {
@@ -647,6 +672,38 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 		return vpView
 	}
 	return strings.Join(addScrollbar(lines, m.viewport.Width(), visible, m.viewport.YOffset(), total, m.theme, true), "\n")
+}
+
+func (m *Model) viewportViewCacheKey(showScrollbar bool) string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		m.lastViewportContent,
+		strconv.Itoa(m.viewport.Width()),
+		strconv.Itoa(m.viewport.Height()),
+		strconv.Itoa(m.viewport.YOffset()),
+		strconv.Itoa(m.viewport.TotalLineCount()),
+		strconv.FormatBool(showScrollbar),
+	}, "|")
+}
+
+func (m *Model) renderViewportView() string {
+	if m == nil {
+		return ""
+	}
+	showScrollbar := m.viewportScrollbarWidth() > 0 && m.shouldShowViewportScrollbar(time.Now())
+	key := m.viewportViewCacheKey(showScrollbar)
+	if key != "" && key == m.lastViewportViewKey {
+		return m.lastViewportViewRendered
+	}
+	vpView := strings.TrimRight(m.viewport.View(), "\n")
+	if showScrollbar {
+		vpView = m.renderViewportScrollbar(vpView)
+	}
+	m.lastViewportViewKey = key
+	m.lastViewportViewRendered = vpView
+	return vpView
 }
 
 func (m *Model) footerRowText() string {

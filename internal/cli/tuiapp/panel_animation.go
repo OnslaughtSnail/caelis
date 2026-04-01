@@ -14,7 +14,7 @@ func (m *Model) ensurePanelAnimationTick() tea.Cmd {
 		return nil
 	}
 	m.panelAnimationTickScheduled = true
-	return frameTickCmd(m.streamTickInterval())
+	return frameTickCmd(frameTickPanelAnimation, m.streamTickInterval())
 }
 
 func (m *Model) hasPendingPanelAnimations() bool {
@@ -75,7 +75,7 @@ func (m *Model) advancePanelAnimations(now time.Time) tea.Cmd {
 		return nil
 	}
 	m.panelAnimationTickScheduled = true
-	return frameTickCmd(m.streamTickInterval())
+	return frameTickCmd(frameTickPanelAnimation, m.streamTickInterval())
 }
 
 func scheduleInlineCollapse(collapseAt *time.Time, collapseFrom *time.Time, collapseFor *time.Duration, visibleLines *int, startedAt time.Time, defaultLines int, now time.Time) {

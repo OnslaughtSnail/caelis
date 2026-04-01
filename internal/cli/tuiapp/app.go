@@ -15,7 +15,6 @@ import (
 	"github.com/charmbracelet/colorprofile"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/cliputil"
-	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
 
@@ -181,6 +180,11 @@ func (m *Model) appendWelcomeCard() {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if handledModel, handledCmd, handled := m.dispatchRenderEvent(msg); handled {
+		return handledModel, handledCmd
+	}
+	m.flushPendingDeferredBatches()
+
 	switch typed := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = typed.Width
@@ -242,111 +246,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.focused = false
 		return m, nil
 
-	case tuievents.LogChunkMsg:
-		m.flushAllPendingStreamSmoothing()
-		m.dismissMessageHints()
-		return m.handleLogChunk(typed.Chunk)
-
-	case tuievents.AssistantStreamMsg:
-		m.dismissMessageHints()
-		if m.cfg.FrameBatchMainStream {
-			return m.enqueueMainDelta(typed.Kind, typed.Actor, typed.Text, typed.Final)
-		}
-		return m.handleStreamBlock(typed.Kind, typed.Actor, typed.Text, typed.Final)
-
-	case tuievents.RawDeltaMsg:
-		m.dismissMessageHints()
-		return m.handleRawDelta(typed)
-
-	case tuievents.ReasoningStreamMsg:
-		m.dismissMessageHints()
-		if m.cfg.FrameBatchMainStream {
-			return m.enqueueMainDelta("reasoning", typed.Actor, typed.Text, typed.Final)
-		}
-		return m.handleStreamBlock("reasoning", typed.Actor, typed.Text, typed.Final)
-
-	case tuievents.DiffBlockMsg:
-		m.flushAllPendingStreamSmoothing()
-		m.dismissMessageHints()
-		return m.handleDiffBlock(typed)
-
-	case tuievents.TaskStreamMsg:
-		m.dismissMessageHints()
-		return m.handleToolStreamMsg(typed)
-
-	case tuievents.ParticipantTurnStartMsg:
-		m.flushAllPendingStreamSmoothing()
-		m.dismissMessageHints()
-		return m.handleParticipantTurnStart(typed)
-
-	case tuievents.ParticipantToolMsg:
-		m.dismissMessageHints()
-		return m.handleParticipantToolMsg(typed)
-
-	case tuievents.ParticipantStatusMsg:
-		m.dismissMessageHints()
-		return m.handleParticipantStatusMsg(typed)
-
-	case tuievents.SubagentStartMsg:
-		m.flushAllPendingStreamSmoothing()
-		m.dismissMessageHints()
-		return m.handleSubagentStart(typed)
-
-	case tuievents.SubagentStatusMsg:
-		m.flushAllPendingStreamSmoothing()
-		return m.handleSubagentStatus(typed)
-
-	case tuievents.SubagentStreamMsg:
-		m.dismissMessageHints()
-		return m.handleSubagentStream(typed)
-
-	case tuievents.SubagentToolCallMsg:
-		m.flushAllPendingStreamSmoothing()
-		m.dismissMessageHints()
-		return m.handleSubagentToolCall(typed)
-
-	case tuievents.SubagentPlanMsg:
-		m.flushAllPendingStreamSmoothing()
-		return m.handleSubagentPlan(typed)
-
-	case tuievents.SubagentDoneMsg:
-		m.flushAllPendingStreamSmoothing()
-		return m.handleSubagentDone(typed)
-
-	case tuievents.PlanUpdateMsg:
-		m.planEntries = m.planEntries[:0]
-		hasIncomplete := false
-		for _, item := range typed.Entries {
-			content := strings.TrimSpace(item.Content)
-			status := strings.TrimSpace(item.Status)
-			if content == "" || status == "" {
-				continue
-			}
-			if status != "completed" {
-				hasIncomplete = true
-			}
-			m.planEntries = append(m.planEntries, planEntryState{
-				Content: content,
-				Status:  status,
-			})
-		}
-		if !hasIncomplete {
-			m.planEntries = m.planEntries[:0]
-		}
-		m.ensureViewportLayout()
-		return m, nil
-
-	case tuievents.SetHintMsg:
-		after := typed.ClearAfter
-		if after <= 0 {
-			after = systemHintDuration
-		}
-		return m, m.showHint(typed.Hint, hintOptions{
-			priority:       typed.Priority,
-			clearOnMessage: typed.ClearOnMessage,
-			clearAfter:     after,
-		})
-
 	case clearHintMsg:
 		m.removeHintByID(typed.id)
 		return m, nil
@@ -387,171 +286,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.paletteAnimationCmd()
 
-	case tuievents.SetRunningMsg:
-		wasRunning := m.running
-		m.running = typed.Running
-		if typed.Running && !wasRunning {
-			m.startRunningAnimation()
-		}
-		if !typed.Running {
-			m.stopRunningAnimation()
-			m.runStartedAt = time.Time{}
-		}
-		return m, nil
-
-	case tuievents.SetStatusMsg:
-		if workspace := strings.TrimSpace(typed.Workspace); workspace != "" {
-			m.cfg.Workspace = workspace
-		}
-		if strings.TrimSpace(typed.Model) != "" {
-			m.statusModel = typed.Model
-		}
-		m.statusContext = strings.TrimSpace(typed.Context)
-		return m, nil
-
-	case tuievents.SetCommandsMsg:
-		m.setCommands(typed.Commands)
-		return m, nil
-
-	case tuievents.AttachmentCountMsg:
-		if typed.Count <= 0 {
-			m.clearInputAttachments()
-			m.dismissVisibleHint()
-		} else {
-			m.syncAttachmentSummary()
-		}
-		m.syncTextareaChrome()
-		m.ensureViewportLayout()
-		return m, nil
-
-	case tuievents.ClearHistoryMsg:
-		m.resetConversationView()
-		return m, nil
-
-	case tuievents.UserMessageMsg:
-		m.dismissMessageHints()
-		m.dequeuePendingUserMessage(typed.Text)
-		m.commitUserDisplayLine(typed.Text)
-		m.ensureViewportLayout()
-		m.syncViewportContent()
-		return m, nil
-
-	case tuievents.TaskResultMsg:
-		if typed.ContinueRunning {
-			if typed.Err != nil {
-				m.pendingQueue = nil
-				errLine := "error: " + typed.Err.Error()
-				m.commitLine(errLine)
-				m.ensureViewportLayout()
-				m.syncViewportContent()
-			}
-			return m, nil
-		}
-		m.dismissMessageHints()
-		if typed.Interrupted {
-			m.discardActiveAssistantStream()
-		} else {
-			m.flushStream()
-			m.finalizeAssistantBlock()
-			m.finalizeReasoningBlock()
-		}
-		if typed.SuppressTurnDivider {
-			m.finalizeActiveParticipantTurn(typed.Interrupted, typed.Err)
-		}
-		m.finalizeActivityBlock()
-		if !m.runStartedAt.IsZero() {
-			m.lastRunDuration = time.Since(m.runStartedAt)
-			m.hasLastRunDuration = true
-			m.runStartedAt = time.Time{}
-		}
-		m.running = false
-		m.stopRunningAnimation()
-		m.pendingQueue = nil
-		m.planEntries = m.planEntries[:0]
-		m.clearInputAttachments()
-		m.syncTextareaChrome()
-		m.clearInputOverlays()
-		if typed.Err != nil && !typed.Interrupted {
-			errText := strings.TrimSpace(typed.Err.Error())
-			isPromptCancel := errText == "cli: input interrupted" ||
-				errText == "cli: input eof" ||
-				errText == tuievents.PromptErrInterrupt ||
-				errText == tuievents.PromptErrEOF
-			if !isPromptCancel {
-				errLine := "error: " + typed.Err.Error()
-				m.commitLine(errLine)
-			}
-		}
-		if m.showTurnDivider && !typed.SuppressTurnDivider && m.doc.Len() > 0 {
-			// Check if last block has non-empty content.
-			last := m.doc.Last()
-			hasContent := false
-			if last != nil {
-				if tb, ok := last.(*TranscriptBlock); ok {
-					hasContent = strings.TrimSpace(tb.Raw) != ""
-				} else {
-					hasContent = true
-				}
-			}
-			if hasContent {
-				m.doc.Append(NewDividerBlock(m.userTurnDividerLine()))
-			}
-		}
-		m.showTurnDivider = false
-		m.ensureViewportLayout()
-		m.syncViewportContent()
-		if typed.ExitNow {
-			m.quit = true
-			return m, tea.Quit
-		}
-		return m, nil
-
-	case tuievents.BTWOverlayMsg:
-		return m.handleBTWDelta(typed.Text, typed.Final)
-
-	case tuievents.BTWErrorMsg:
-		if m.btwOverlay == nil && m.btwDismissed {
-			return m, nil
-		}
-		m.dropPendingStreamSmoothing(streamSmoothingKey("btw", "", "answer", ""))
-		m.applyBTWOverlayImmediate(typed.Text, true)
-		return m, nil
-
-	case tuievents.PromptRequestMsg:
-		m.enqueuePrompt(typed)
-		m.ensureViewportLayout()
-		return m, nil
-
-	case frameTickMsg:
-		return m, tea.Batch(
-			m.drainPendingStreamSmoothing(typed.at),
-			m.advancePanelAnimations(typed.at),
-			m.advanceScrollbarVisibility(typed.at),
-		)
-
-	case tuievents.TickStatusMsg:
-		if m.cfg.RefreshWorkspace != nil {
-			if workspace := strings.TrimSpace(m.cfg.RefreshWorkspace()); workspace != "" {
-				m.cfg.Workspace = workspace
-			}
-		}
-		if m.cfg.RefreshStatus != nil {
-			modelText, contextText := m.cfg.RefreshStatus()
-			if strings.TrimSpace(modelText) != "" {
-				m.statusModel = modelText
-			}
-			m.statusContext = strings.TrimSpace(contextText)
-		}
-		return m, tickStatusCmd()
-
 	case spinner.TickMsg:
+		m.spinnerTickScheduled = false
 		if m.running {
+			if m.shouldThrottleRunningAnimation() {
+				return m, nil
+			}
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
+			if cmd != nil {
+				m.spinnerTickScheduled = true
+			}
 			if m.activePrompt == nil {
 				m.advanceRunningAnimation()
 				if m.activeActivityID != "" {
-					m.syncActivityBlock()
+					cmd = tea.Batch(cmd, m.syncActivityBlock())
 				}
 			}
 			return m, cmd
@@ -622,7 +371,7 @@ func (m *Model) rethemeHistory() {
 	// and Render() re-colorizes with the current theme. So we only need
 	// to rebuild activity block cached rows (which depend on theme colors).
 	if m.activeActivityID != "" {
-		m.syncActivityBlock()
+		_ = m.syncActivityBlock()
 	}
 	m.refreshHistoryTailState()
 }

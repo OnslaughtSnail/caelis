@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/glamour"
 	gansi "github.com/charmbracelet/glamour/ansi"
@@ -50,8 +51,11 @@ func glamourNarrativeRows(blockID, raw, rolePrefix string, roleStyle tuikit.Line
 	// Compute available width after accounting for the role prefix.
 	prefixWidth := maxInt(graphemeWidth(rolePrefix), 0)
 	glamourWidth := maxInt(1, width-prefixWidth)
+	return glamourNarrativeRowsWithWrapWidth(blockID, raw, rolePrefix, roleStyle, glamourWidth, theme)
+}
 
-	rendered := glamourRenderNarrative(raw, glamourWidth, theme, roleStyle)
+func glamourNarrativeRowsWithWrapWidth(blockID, raw, rolePrefix string, roleStyle tuikit.LineStyle, wrapWidth int, theme tuikit.Theme) []RenderedRow {
+	rendered := glamourRenderNarrative(raw, wrapWidth, theme, roleStyle)
 	if rendered == "" {
 		return nil
 	}
@@ -105,6 +109,20 @@ var glamourCache struct {
 	role     tuikit.LineStyle
 }
 
+type streamingNarrativeCacheEntry struct {
+	width        int
+	dark         bool
+	role         tuikit.LineStyle
+	stableRaw    string
+	rolePrefix   string
+	renderedRows []RenderedRow
+}
+
+var glamourStreamingCache struct {
+	sync.Mutex
+	entries map[string]streamingNarrativeCacheEntry
+}
+
 // clearGlamourCache invalidates the cached glamour renderer so that the next
 // call to getGlamourRenderer creates a fresh one. Call this when the theme or
 // color profile changes (e.g. from applyTheme).
@@ -112,6 +130,9 @@ func clearGlamourCache() {
 	glamourCache.Lock()
 	glamourCache.renderer = nil
 	glamourCache.Unlock()
+	glamourStreamingCache.Lock()
+	glamourStreamingCache.entries = nil
+	glamourStreamingCache.Unlock()
 }
 
 func getGlamourRenderer(width int, theme tuikit.Theme, roleStyle tuikit.LineStyle) *glamour.TermRenderer {
@@ -301,6 +322,38 @@ func colorToAnsiPtr(c color.Color) *string {
 
 func boolPtr(v bool) *bool { return &v }
 
+func themeRenderCacheKey(theme tuikit.Theme) string {
+	parts := []string{
+		theme.Name,
+		fmt.Sprintf("%t", theme.IsDark),
+		fmt.Sprintf("%t", theme.NoColor),
+		fmt.Sprint(theme.Profile),
+		themeColorCacheKey(theme.TextPrimary),
+		themeColorCacheKey(theme.SecondaryText),
+		themeColorCacheKey(theme.MutedText),
+		themeColorCacheKey(theme.AssistantFg),
+		themeColorCacheKey(theme.ReasoningFg),
+		themeColorCacheKey(theme.UserFg),
+		themeColorCacheKey(theme.UserPrefixFg),
+		themeColorCacheKey(theme.Accent),
+		themeColorCacheKey(theme.LinkFg),
+		themeColorCacheKey(theme.CodeFg),
+		themeColorCacheKey(theme.CodeBg),
+		themeColorCacheKey(theme.CodeBlockFg),
+		themeColorCacheKey(theme.CodeBlockBg),
+		themeColorCacheKey(theme.Warning),
+		themeColorCacheKey(theme.Error),
+	}
+	return strings.Join(parts, "|")
+}
+
+func themeColorCacheKey(c color.Color) string {
+	if ansiColor := colorToAnsiPtr(c); ansiColor != nil {
+		return *ansiColor
+	}
+	return ""
+}
+
 func normalizeGlamourMarkdown(raw string) string {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	raw = normalizeTerminalMarkdown(raw)
@@ -403,8 +456,202 @@ func glamourStreamingNarrativeRows(blockID, raw, rolePrefix string, roleStyle tu
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	normalized := closeUnclosedCodeFences(raw)
-	return glamourNarrativeRows(blockID, normalized, rolePrefix, roleStyle, width, theme)
+	raw = strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	stableRaw, tailRaw := splitStableStreamingMarkdown(raw)
+	prefixWidth := maxInt(graphemeWidth(rolePrefix), 0)
+	glamourWidth := maxInt(1, width-prefixWidth)
+	if strings.TrimSpace(stableRaw) == "" {
+		if utf8.RuneCountInString(strings.TrimSpace(raw)) >= streamingLightTailMinRunes {
+			if rows := renderStreamingNarrativeTailRows(blockID, raw, rolePrefix, roleStyle, glamourWidth, theme); len(rows) > 0 {
+				return rows
+			}
+		}
+		normalized := closeUnclosedCodeFences(raw)
+		return glamourNarrativeRows(blockID, normalized, rolePrefix, roleStyle, width, theme)
+	}
+	prefixRows := cachedStreamingNarrativePrefixRows(blockID, stableRaw, rolePrefix, roleStyle, width, theme)
+	if len(prefixRows) == 0 {
+		normalized := closeUnclosedCodeFences(raw)
+		return glamourNarrativeRows(blockID, normalized, rolePrefix, roleStyle, width, theme)
+	}
+	tailRows := renderStreamingNarrativeTailRows(blockID, tailRaw, "", roleStyle, glamourWidth, theme)
+	if len(tailRows) == 0 {
+		return prefixRows
+	}
+	separatorRows := 0
+	if hasStreamingParagraphBoundary(stableRaw) {
+		separatorRows = 1
+	}
+	rows := make([]RenderedRow, 0, len(prefixRows)+separatorRows+len(tailRows))
+	rows = append(rows, prefixRows...)
+	if separatorRows > 0 {
+		separator := strings.Repeat(" ", glamourWidth)
+		rows = append(rows, RenderedRow{Styled: separator, Plain: separator, BlockID: blockID, PreWrapped: true})
+	}
+	rows = append(rows, tailRows...)
+	return rows
+}
+
+const streamingStableTailMinRunes = 96
+const streamingLightTailMinRunes = 160
+
+func renderStreamingNarrativeTailRows(blockID, raw, rolePrefix string, roleStyle tuikit.LineStyle, width int, theme tuikit.Theme) []RenderedRow {
+	raw = strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	_, plainRows := buildNarrativeRows(raw)
+	if len(plainRows) == 0 {
+		if strings.TrimSpace(raw) == "" {
+			return nil
+		}
+		plainRows = []string{strings.TrimRight(raw, "\n")}
+	}
+	if width <= 0 {
+		width = 1
+	}
+	baseStyle := narrativeBodyStyle(roleStyle, theme)
+	styledRolePrefix := ""
+	if rolePrefix != "" {
+		styledRolePrefix = tuikit.ColorizeLogLine(rolePrefix, roleStyle, theme)
+	}
+	rows := make([]RenderedRow, 0, len(plainRows)+4)
+	for idx, plainRow := range plainRows {
+		fullPlain := plainRow
+		prefixPlain := ""
+		prefixStyled := ""
+		if idx == 0 && rolePrefix != "" {
+			prefixPlain = rolePrefix
+			prefixStyled = styledRolePrefix
+			fullPlain = rolePrefix + plainRow
+		}
+		segments := graphemeWordWrap(fullPlain, width)
+		if len(segments) == 0 {
+			segments = []string{fullPlain}
+		}
+		for segIdx, segment := range normalizeWrappedPlainSegments(segments) {
+			styled := renderInlineMarkdown(segment, baseStyle, theme)
+			if prefixPlain != "" && segIdx == 0 && strings.HasPrefix(segment, prefixPlain) {
+				body := strings.TrimPrefix(segment, prefixPlain)
+				styled = prefixStyled + renderInlineMarkdown(body, baseStyle, theme)
+			}
+			rows = append(rows, RenderedRow{
+				Styled:     styled,
+				Plain:      segment,
+				BlockID:    blockID,
+				PreWrapped: true,
+			})
+		}
+	}
+	return rows
+}
+
+func cachedStreamingNarrativePrefixRows(blockID, stableRaw, rolePrefix string, roleStyle tuikit.LineStyle, width int, theme tuikit.Theme) []RenderedRow {
+	if blockID == "" || strings.TrimSpace(stableRaw) == "" {
+		return nil
+	}
+	glamourStreamingCache.Lock()
+	defer glamourStreamingCache.Unlock()
+	if glamourStreamingCache.entries == nil {
+		glamourStreamingCache.entries = map[string]streamingNarrativeCacheEntry{}
+	}
+	if entry, ok := glamourStreamingCache.entries[blockID]; ok {
+		if entry.width == width && entry.dark == theme.IsDark && entry.role == roleStyle && entry.stableRaw == stableRaw && entry.rolePrefix == rolePrefix {
+			return cloneRenderedRows(entry.renderedRows)
+		}
+	}
+	rows := glamourNarrativeRows(blockID, stableRaw, rolePrefix, roleStyle, width, theme)
+	if len(rows) == 0 {
+		return nil
+	}
+	glamourStreamingCache.entries[blockID] = streamingNarrativeCacheEntry{
+		width:        width,
+		dark:         theme.IsDark,
+		role:         roleStyle,
+		stableRaw:    stableRaw,
+		rolePrefix:   rolePrefix,
+		renderedRows: cloneRenderedRows(rows),
+	}
+	return rows
+}
+
+func cloneRenderedRows(rows []RenderedRow) []RenderedRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]RenderedRow, len(rows))
+	copy(out, rows)
+	return out
+}
+
+func hasStreamingParagraphBoundary(raw string) bool {
+	raw = strings.TrimRight(raw, " \t\r")
+	newlines := 0
+	for i := len(raw) - 1; i >= 0; i-- {
+		if raw[i] != '\n' {
+			break
+		}
+		newlines++
+	}
+	return newlines >= 2
+}
+
+func splitStableStreamingMarkdown(raw string) (stableRaw string, tailRaw string) {
+	raw = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n"))
+	if raw == "" {
+		return "", ""
+	}
+	if utf8.RuneCountInString(raw) < streamingStableTailMinRunes*2 {
+		return "", raw
+	}
+	lines := strings.SplitAfter(raw, "\n")
+	if len(lines) < 3 {
+		return "", raw
+	}
+	lastBoundary := 0
+	offset := 0
+	inFence := false
+	fenceChar := byte(0)
+	fenceLen := 0
+	for idx, seg := range lines {
+		line := strings.TrimSuffix(seg, "\n")
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) >= 3 {
+			ch := trimmed[0]
+			if ch == '`' || ch == '~' {
+				count := 0
+				for count < len(trimmed) && trimmed[count] == ch {
+					count++
+				}
+				if count >= 3 {
+					if !inFence {
+						inFence = true
+						fenceChar = ch
+						fenceLen = count
+					} else if ch == fenceChar && count >= fenceLen && strings.TrimSpace(trimmed[count:]) == "" {
+						inFence = false
+					}
+				}
+			}
+		}
+		offset += len(seg)
+		if inFence || idx >= len(lines)-1 {
+			continue
+		}
+		if strings.TrimSpace(line) != "" {
+			continue
+		}
+		tailCandidate := strings.TrimSpace(raw[offset:])
+		if utf8.RuneCountInString(tailCandidate) >= streamingStableTailMinRunes {
+			lastBoundary = offset
+		}
+	}
+	if lastBoundary <= 0 || lastBoundary >= len(raw) {
+		return "", raw
+	}
+	stableRaw = raw[:lastBoundary]
+	tailRaw = raw[lastBoundary:]
+	if strings.TrimSpace(stableRaw) == "" || strings.TrimSpace(tailRaw) == "" {
+		return "", raw
+	}
+	return stableRaw, tailRaw
 }
 
 // closeUnclosedCodeFences appends a closing fence marker when the input

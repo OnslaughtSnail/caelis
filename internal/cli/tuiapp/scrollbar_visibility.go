@@ -78,7 +78,7 @@ func (m *Model) ensureScrollbarTick() tea.Cmd {
 		return nil
 	}
 	m.scrollbarTickScheduled = true
-	return frameTickCmd(delay)
+	return frameTickCmd(frameTickScrollbarVisible, delay)
 }
 
 func (m *Model) advanceScrollbarVisibility(_ time.Time) tea.Cmd {
@@ -149,22 +149,32 @@ func (m *Model) beginScrollbarDrag(mouse tea.Mouse) (bool, tea.Cmd) {
 	}
 	m.scrollbarDrag = scrollbarDragState{active: true, target: target}
 	cmd := m.touchScrollbarTarget(target)
+	wasScrolledUp := m.userScrolledUp
 	changed := m.applyScrollbarDrag(mouse)
+	var resumeCmd tea.Cmd
 	if changed {
 		m.syncViewportContent()
+		if wasScrolledUp && !m.userScrolledUp {
+			resumeCmd = m.resumeRunningAnimationIfNeeded()
+		}
 	}
-	return true, tea.Batch(cmd, m.ensureScrollbarTick())
+	return true, tea.Batch(cmd, m.ensureScrollbarTick(), resumeCmd)
 }
 
 func (m *Model) updateScrollbarDrag(mouse tea.Mouse) tea.Cmd {
 	if !m.scrollbarDrag.active {
 		return nil
 	}
+	wasScrolledUp := m.userScrolledUp
 	changed := m.applyScrollbarDrag(mouse)
+	var resumeCmd tea.Cmd
 	if changed {
 		m.syncViewportContent()
+		if wasScrolledUp && !m.userScrolledUp {
+			resumeCmd = m.resumeRunningAnimationIfNeeded()
+		}
 	}
-	return tea.Batch(m.touchScrollbarTarget(m.scrollbarDrag.target), m.ensureScrollbarTick())
+	return tea.Batch(m.touchScrollbarTarget(m.scrollbarDrag.target), m.ensureScrollbarTick(), resumeCmd)
 }
 
 func (m *Model) endScrollbarDrag() {

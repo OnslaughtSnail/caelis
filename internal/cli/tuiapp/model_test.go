@@ -73,6 +73,10 @@ func mouseMotion(x int, y int) tea.MouseMotionMsg {
 	return tea.MouseMotionMsg(tea.Mouse{X: x, Y: y})
 }
 
+func tickAt(kind frameTickKind, at time.Time) frameTickMsg {
+	return frameTickMsg{at: at, kind: kind}
+}
+
 func driveBashPanelCollapse(m *Model, panel *BashPanelBlock) {
 	if m == nil || panel == nil || panel.CollapseAt.IsZero() {
 		return
@@ -81,8 +85,8 @@ func driveBashPanelCollapse(m *Model, panel *BashPanelBlock) {
 	if collapseFor <= 0 {
 		collapseFor = inlinePanelCollapseDuration
 	}
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt})
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt.Add(collapseFor)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt))
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt.Add(collapseFor)))
 }
 
 func driveSubagentPanelCollapse(m *Model, panel *SubagentPanelBlock) {
@@ -93,8 +97,8 @@ func driveSubagentPanelCollapse(m *Model, panel *SubagentPanelBlock) {
 	if collapseFor <= 0 {
 		collapseFor = inlinePanelCollapseDuration
 	}
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt})
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt.Add(collapseFor)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt))
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt.Add(collapseFor)))
 }
 
 func TestMentionQueryAtCursor(t *testing.T) {
@@ -2880,6 +2884,51 @@ func TestRunningHintAnimationAdvancesOnSpinnerTicks(t *testing.T) {
 	}
 }
 
+func TestRunningHintAnimationPausesWhenScrolledUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = true
+	before := m.buildHintText()
+
+	_, _ = m.Update(spinner.TickMsg{})
+
+	after := m.buildHintText()
+	if before != after {
+		t.Fatalf("expected running hint animation to pause while scrolled up, before=%q after=%q", before, after)
+	}
+	if m.spinnerTickScheduled {
+		t.Fatal("expected spinner tick chain to stop while scrolled up")
+	}
+}
+
+func TestRunningHintAnimationResumesAfterScrollCatchUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = true
+
+	_, _ = m.Update(spinner.TickMsg{})
+	before := m.buildHintText()
+
+	m.userScrolledUp = false
+	cmd := m.resumeRunningAnimationIfNeeded()
+	if cmd == nil {
+		t.Fatal("expected spinner tick to resume after returning to bottom")
+	}
+	if !m.spinnerTickScheduled {
+		t.Fatal("expected spinner tick to be marked scheduled after resuming")
+	}
+
+	_, _ = m.Update(spinner.TickMsg{})
+	after := m.buildHintText()
+	if before == after {
+		t.Fatalf("expected running hint animation to resume after catch-up, got unchanged text: %q", after)
+	}
+}
+
 func TestViewShowsInputWhenRunningForQueueing(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -3010,8 +3059,8 @@ func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 	if !bp.Expanded {
 		t.Fatal("expected final BASH panel to remain expanded before animation finishes")
 	}
-	_, _ = m.Update(frameTickMsg{at: bp.CollapseAt})
-	_, _ = m.Update(frameTickMsg{at: bp.CollapseAt.Add(bp.CollapseFor / 2)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, bp.CollapseAt))
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, bp.CollapseAt.Add(bp.CollapseFor/2)))
 	if !bp.Expanded || bp.VisibleLines >= toolOutputPreviewLines {
 		t.Fatalf("expected bash panel to be mid-collapse during animation, got expanded=%v visible=%d", bp.Expanded, bp.VisibleLines)
 	}
@@ -4987,6 +5036,24 @@ func TestActiveExplorationBlockReRendersOnSpinnerTick(t *testing.T) {
 	after := m.renderedStyledLines()[0]
 	if before == after {
 		t.Fatalf("expected active exploration header to animate on spinner ticks")
+	}
+}
+
+func TestActiveExplorationBlockDoesNotReRenderOnSpinnerTickWhenScrolledUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = true
+
+	before := m.renderedStyledLines()[0]
+	_, _ = m.Update(spinner.TickMsg{})
+	after := m.renderedStyledLines()[0]
+	if before != after {
+		t.Fatalf("expected active exploration header animation to pause while scrolled up")
 	}
 }
 

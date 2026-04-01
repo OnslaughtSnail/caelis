@@ -322,6 +322,110 @@ func TestStreamingReasoning_VisualContinuity(t *testing.T) {
 	}
 }
 
+func TestSplitStableStreamingMarkdown_PicksParagraphBoundary(t *testing.T) {
+	raw := strings.Join([]string{
+		"# Summary",
+		"",
+		"First stable paragraph.",
+		"",
+		"Second stable paragraph.",
+		"",
+		strings.Repeat("tail ", 40),
+	}, "\n")
+	stable, tail := splitStableStreamingMarkdown(raw)
+	if stable == "" {
+		t.Fatal("expected a stable prefix boundary")
+	}
+	if !strings.Contains(stable, "First stable paragraph") || !strings.Contains(stable, "Second stable paragraph") {
+		t.Fatalf("unexpected stable prefix: %q", stable)
+	}
+	if !strings.Contains(tail, "tail tail") {
+		t.Fatalf("expected tail content to remain in tail segment, got %q", tail)
+	}
+}
+
+func TestStreamingNarrativeRows_FrozenPrefixMatchesCachedGlamourPrefix(t *testing.T) {
+	theme := tuikit.DefaultTheme()
+	raw := strings.Join([]string{
+		"# Summary",
+		"",
+		"Stable paragraph one with **markdown**.",
+		"",
+		"Stable paragraph two with `inline code`.",
+		"",
+		strings.Repeat("tail content ", 20),
+	}, "\n")
+	stable, tail := splitStableStreamingMarkdown(raw)
+	if stable == "" || tail == "" {
+		t.Fatal("expected both stable prefix and live tail")
+	}
+	prefixRows := cachedStreamingNarrativePrefixRows("blk", stable, "* ", tuikit.LineStyleAssistant, 60, theme)
+	streamRows := glamourStreamingNarrativeRows("blk", raw, "* ", tuikit.LineStyleAssistant, 60, theme)
+	if len(prefixRows) == 0 || len(streamRows) <= len(prefixRows) {
+		t.Fatal("expected hybrid streaming rows with cached prefix and live tail")
+	}
+	for i := range prefixRows {
+		if prefixRows[i].Plain != streamRows[i].Plain {
+			t.Fatalf("prefix row %d mismatch:\ncache=%q\nstream=%q", i, prefixRows[i].Plain, streamRows[i].Plain)
+		}
+	}
+	joined := strings.Join(narrativeRowsPlain(streamRows), "\n")
+	if !strings.Contains(joined, "tail content") {
+		t.Fatalf("expected live tail content in hybrid renderer, got:\n%s", joined)
+	}
+}
+
+func TestRenderStreamingNarrativeTailRows_PreservesPrefixAndInlinePlainText(t *testing.T) {
+	theme := tuikit.DefaultTheme()
+	rows := renderStreamingNarrativeTailRows("blk", "**bold** tail with `code`", "* ", tuikit.LineStyleAssistant, 24, theme)
+	if len(rows) == 0 {
+		t.Fatal("expected lightweight tail rows")
+	}
+	if !rows[0].PreWrapped {
+		t.Fatal("expected lightweight tail rows to be prewrapped")
+	}
+	plain := strings.Join(narrativeRowsPlain(rows), "\n")
+	if !strings.Contains(plain, "* bold tail with code") {
+		t.Fatalf("expected inline markdown stripped in plain output, got %q", plain)
+	}
+	if ansi.Strip(rows[0].Styled) != rows[0].Plain {
+		t.Fatalf("expected styled/plain parity, got styled=%q plain=%q", ansi.Strip(rows[0].Styled), rows[0].Plain)
+	}
+}
+
+func TestAssistantBlock_RenderCacheReusesRowsUntilContentChanges(t *testing.T) {
+	ctx := BlockRenderContext{Width: 60, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	block := NewAssistantBlock()
+	block.Raw = strings.Repeat("paragraph ", 20)
+	block.Streaming = false
+
+	first := block.Render(ctx)
+	second := block.Render(ctx)
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatal("expected rendered rows")
+	}
+	if &first[0] != &second[0] {
+		t.Fatal("expected second render to reuse cached row slice")
+	}
+
+	block.Raw += "updated"
+	third := block.Render(ctx)
+	if len(third) == 0 {
+		t.Fatal("expected rows after cache invalidation")
+	}
+	if &third[0] == &second[0] {
+		t.Fatal("expected cache invalidation after content change")
+	}
+}
+
+func narrativeRowsPlain(rows []RenderedRow) []string {
+	plain := make([]string, 0, len(rows))
+	for _, row := range rows {
+		plain = append(plain, row.Plain)
+	}
+	return plain
+}
+
 // ---------------------------------------------------------------------------
 // Unclosed markdown during streaming
 // ---------------------------------------------------------------------------

@@ -989,7 +989,7 @@ func TestSubagentPanelAutoCollapseCanBeReopenedFromAnchor(t *testing.T) {
 	if !panel.CollapseAt.IsZero() {
 		t.Fatal("expected reopened terminal subagent panel to cancel auto-collapse")
 	}
-	_, _ = m.Update(frameTickMsg{at: time.Now().Add(inlinePanelCollapseDuration)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, time.Now().Add(inlinePanelCollapseDuration)))
 	if !panel.Expanded {
 		t.Fatal("expected reopened terminal subagent panel to remain expanded without new work")
 	}

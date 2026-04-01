@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/charmbracelet/x/ansi"
@@ -14,13 +15,13 @@ import (
 
 const defaultActivityWaitMS = 5000
 
-func (m *Model) consumeActivityLine(line string) bool {
+func (m *Model) consumeActivityLine(line string) (bool, tea.Cmd) {
 	kind, entry, ok := parseActivityLine(line)
 	if !ok {
 		if m.activeActivityID != "" {
-			m.finalizeActivityBlock()
+			return false, m.finalizeActivityBlock()
 		}
-		return false
+		return false, nil
 	}
 	if m.activeReasoningID != "" {
 		m.doc.Remove(m.activeReasoningID)
@@ -28,17 +29,13 @@ func (m *Model) consumeActivityLine(line string) bool {
 		m.refreshHistoryTailState()
 	}
 	if m.activeActivityID == "" {
-		m.appendActivityEntry(kind, entry)
-		return true
+		return true, m.appendActivityEntry(kind, entry)
 	}
 	ab := m.findActivityBlock()
 	if ab != nil && ab.BlockKindField != kind {
-		m.finalizeActivityBlock()
-		m.appendActivityEntry(kind, entry)
-		return true
+		return true, tea.Batch(m.finalizeActivityBlock(), m.appendActivityEntry(kind, entry))
 	}
-	m.appendActivityEntry(kind, entry)
-	return true
+	return true, m.appendActivityEntry(kind, entry)
 }
 
 func (m *Model) findActivityBlock() *ActivityBlock {
@@ -58,7 +55,7 @@ func (m *Model) findActivityBlock() *ActivityBlock {
 	return ab
 }
 
-func (m *Model) appendActivityEntry(kind activityBlockKind, entry activityEntry) {
+func (m *Model) appendActivityEntry(kind activityBlockKind, entry activityEntry) tea.Cmd {
 	ab := m.findActivityBlock()
 	if ab == nil {
 		ab = NewActivityBlock(kind)
@@ -70,13 +67,13 @@ func (m *Model) appendActivityEntry(kind activityBlockKind, entry activityEntry)
 		ab.Active = true
 		ab.Finalized = false
 	}
-	m.syncActivityBlock()
+	return m.syncActivityBlock()
 }
 
-func (m *Model) syncActivityBlock() {
+func (m *Model) syncActivityBlock() tea.Cmd {
 	ab := m.findActivityBlock()
 	if ab == nil {
-		return
+		return nil
 	}
 	foldedState := ab.toFoldedState()
 	lines := m.renderActivityBlockLines(foldedState)
@@ -88,14 +85,14 @@ func (m *Model) syncActivityBlock() {
 	m.hasCommittedLine = m.doc.Len() > 0
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
-	m.syncViewportContent()
+	return m.requestStreamViewportSync()
 }
 
-func (m *Model) finalizeActivityBlock() {
+func (m *Model) finalizeActivityBlock() tea.Cmd {
 	ab := m.findActivityBlock()
 	if ab == nil {
 		m.activeActivityID = ""
-		return
+		return nil
 	}
 	ab.Active = false
 	ab.Finalized = true
@@ -106,8 +103,7 @@ func (m *Model) finalizeActivityBlock() {
 		m.doc.Remove(ab.BlockID())
 		m.activeActivityID = ""
 		m.refreshHistoryTailState()
-		m.syncViewportContent()
-		return
+		return m.requestStreamViewportSync()
 	}
 	// Render finalized summary line.
 	summaryLine := m.renderActivitySummaryLine(foldedState)
@@ -127,8 +123,7 @@ func (m *Model) finalizeActivityBlock() {
 					m.doc.Remove(ab.BlockID())
 					m.activeActivityID = ""
 					m.refreshHistoryTailState()
-					m.syncViewportContent()
-					return
+					return m.requestStreamViewportSync()
 				}
 			}
 		}
@@ -141,7 +136,7 @@ func (m *Model) finalizeActivityBlock() {
 	}
 	m.activeActivityID = ""
 	m.refreshHistoryTailState()
-	m.syncViewportContent()
+	return m.requestStreamViewportSync()
 }
 
 // findPreviousTranscriptBlock returns the TranscriptBlock right before the given block ID.
