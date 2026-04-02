@@ -12,6 +12,7 @@ func (m *Model) View() tea.View {
 	start := time.Now()
 
 	if !m.ready {
+		m.frameTopTrim = 0
 		view := tea.NewView("loading...")
 		view.AltScreen = true
 		view.MouseMode = tea.MouseModeCellMotion
@@ -82,22 +83,27 @@ func (m *Model) View() tea.View {
 	}
 
 	view := strings.Join(sections, "\n")
+	topTrim := 0
+	view, topTrim = normalizeFullscreenFrameWithTopTrim(view, m.width, m.height)
 
 	if m.activePrompt != nil && m.width > 0 && m.height > 0 {
 		if promptView := m.renderPromptModal(); promptView != "" {
-			view = overlayAboveBottomArea(view, promptView, m.width, m.mainColumnX(), m.fixedRowWidth(), bottomHeight, 0)
+			view = overlayAboveBottomAreaLeft(view, promptView, m.width, m.mainColumnX()+inputHorizontalInset, bottomHeight, 0)
 		}
 	} else if overlayView := m.renderInputOverlay(); overlayView != "" && m.width > 0 && m.height > 0 {
-		view = overlayAboveBottomArea(view, overlayView, m.width, m.mainColumnX(), m.fixedRowWidth(), bottomHeight, 0)
+		view = overlayAboveBottomAreaLeft(view, overlayView, m.width, m.mainColumnX()+inputHorizontalInset, bottomHeight, 0)
 	}
 
 	// Overlay: command palette.
 	if m.shouldRenderPalette() && m.width > 0 && m.height > 0 {
-		lineCount := strings.Count(view, "\n") + 1
 		if paletteView := m.renderPaletteOverlay(); paletteView != "" {
-			view = overlayBottom(view, paletteView, m.width, m.mainColumnX(), m.fixedRowWidth(), lineCount)
+			view = overlayAboveBottomAreaLeft(view, paletteView, m.width, m.mainColumnX()+inputHorizontalInset, bottomHeight, 0)
 		}
 	}
+	secondTrim := 0
+	view, secondTrim = normalizeFullscreenFrameWithTopTrim(view, m.width, m.height)
+	topTrim += secondTrim
+	m.frameTopTrim = topTrim
 
 	duration := time.Since(start)
 	m.observeRender(duration, len(view), "fullscreen")
@@ -110,6 +116,13 @@ func (m *Model) View() tea.View {
 	if cursor := m.regularInputCursor(); cursor != nil {
 		cursor.X += m.mainColumnX()
 		cursor.Y += m.viewport.Height() + m.preComposerFixedHeight() + tuikit.ComposerPadTop
+		cursor.Y -= topTrim
+		if cursor.Y < 0 {
+			cursor.Y = 0
+		}
+		if m.height > 0 && cursor.Y >= m.height {
+			cursor.Y = m.height - 1
+		}
 		frame.Cursor = cursor
 	}
 	return frame

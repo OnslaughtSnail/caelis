@@ -104,7 +104,6 @@ Current interactive slash commands:
 - `/help`
 - `/agent list | add <builtin> | rm <name>`
 - `/btw <question>`
-- `/version`
 - `/exit`
 - `/quit`
 - `/new`
@@ -150,7 +149,7 @@ User-facing MCP tool loading is no longer supported in the CLI runtime. Older AC
 
 ## Release
 
-- Current release: `v0.0.35`
+- Current release: `v0.0.36`
 - Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
@@ -160,7 +159,7 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.35`.
+CI release is triggered by pushing a version tag such as `v0.0.36`.
 
 ## npm Package
 

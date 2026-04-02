@@ -103,12 +103,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bool) {
-	vy := mouse.Y
-	if vy < 0 || vy >= m.viewport.Height() {
-		return false, false
-	}
-	contentLine := m.viewport.YOffset() + vy
-	if contentLine < 0 || contentLine >= len(m.viewportBlockIDs) {
+	contentLine, ok := m.contentLineAtViewportY(mouse.Y)
+	if !ok {
 		return false, false
 	}
 	blockID := strings.TrimSpace(m.viewportBlockIDs[contentLine])
@@ -223,12 +219,8 @@ func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
 // tryTogglePanelAtClick checks if the click hit a BashPanelBlock header line
 // and toggles its Expanded state. Returns true if a toggle was performed.
 func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
-	vy := mouse.Y
-	if vy < 0 || vy >= m.viewport.Height() {
-		return false
-	}
-	contentLine := m.viewport.YOffset() + vy
-	if contentLine < 0 || contentLine >= len(m.viewportBlockIDs) {
+	contentLine, ok := m.contentLineAtViewportY(mouse.Y)
+	if !ok {
 		return false
 	}
 	bid := m.viewportBlockIDs[contentLine]
@@ -255,6 +247,20 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	}
 	bp, ok := blk.(*BashPanelBlock)
 	if !ok {
+		if ab, ok := blk.(*ActivityBlock); ok {
+			if ab.BlockKindField != activityBlockExploration || !ab.Finalized {
+				return false
+			}
+			if ab.Expanded {
+				if contentLine > 0 && m.viewportBlockIDs[contentLine-1] == bid {
+					return false
+				}
+			}
+			ab.Expanded = !ab.Expanded
+			_ = m.syncActivityBlockByID(ab.BlockID())
+			m.refreshHistoryTailState()
+			return true
+		}
 		if turn, ok := blk.(*ParticipantTurnBlock); ok {
 			if contentLine > 0 && m.viewportBlockIDs[contentLine-1] == bid {
 				return false
@@ -1029,13 +1035,11 @@ func (m *Model) shouldUseTextareaVerticalNavigation(direction int) bool {
 	}
 }
 
-func (m *Model) userTurnDividerLine() string {
-	label := ""
+func (m *Model) userTurnDividerLabel() string {
 	if m.hasLastRunDuration {
-		label = formatTurnDuration(m.lastRunDuration)
+		return formatTurnDuration(m.lastRunDuration)
 	}
-	contentWidth := maxInt(12, m.viewport.Width())
-	return m.theme.HelpHintTextStyle().Render(centeredDivider(contentWidth, label))
+	return ""
 }
 
 func formatTurnDuration(d time.Duration) string {

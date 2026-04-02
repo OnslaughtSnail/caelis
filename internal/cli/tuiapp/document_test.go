@@ -782,6 +782,65 @@ func TestPanelClickToggle(t *testing.T) {
 	}
 }
 
+func TestExplorationSummaryClickToggle(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	blocks := m.doc.FindByKind(BlockActivity)
+	if len(blocks) != 1 {
+		t.Fatalf("expected one finalized exploration block, got %d", len(blocks))
+	}
+	ab, ok := blocks[0].(*ActivityBlock)
+	if !ok {
+		t.Fatalf("expected activity block, got %T", blocks[0])
+	}
+	if ab.Expanded {
+		t.Fatal("expected finalized exploration summary to start collapsed")
+	}
+
+	headerLine := -1
+	for i, id := range m.viewportBlockIDs {
+		if id == ab.BlockID() {
+			headerLine = i
+			break
+		}
+	}
+	if headerLine < 0 {
+		t.Fatal("could not find exploration summary in viewport")
+	}
+
+	vy := headerLine - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+
+	if !ab.Expanded {
+		t.Fatal("expected exploration summary to expand after click")
+	}
+	view := stripModelView(m)
+	if !strings.Contains(view, "▾ Explored 1 files, 1 searches") {
+		t.Fatalf("expected expanded exploration header, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Read state.go") || !strings.Contains(view, "Searched for enter") {
+		t.Fatalf("expected expanded exploration details, got:\n%s", view)
+	}
+
+	m.syncViewportContent()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+
+	if ab.Expanded {
+		t.Fatal("expected exploration summary to collapse after second click")
+	}
+	view = stripModelView(m)
+	if strings.Contains(view, "Read state.go") || strings.Contains(view, "Searched for enter") {
+		t.Fatalf("expected collapsed exploration summary to hide details, got:\n%s", view)
+	}
+}
+
 func TestBashPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

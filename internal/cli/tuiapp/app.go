@@ -368,10 +368,12 @@ func (m *Model) rethemeHistory() {
 		return
 	}
 	// In the document model, TranscriptBlocks store raw text + style,
-	// and Render() re-colorizes with the current theme. So we only need
-	// to rebuild activity block cached rows (which depend on theme colors).
-	if m.activeActivityID != "" {
-		_ = m.syncActivityBlock()
+	// and Render() re-colorizes with the current theme. Activity blocks cache
+	// pre-rendered rows, so they must be refreshed when the theme changes.
+	for _, block := range m.doc.FindByKind(BlockActivity) {
+		if ab, ok := block.(*ActivityBlock); ok {
+			_ = m.syncActivityBlockBlock(ab)
+		}
 	}
 	m.refreshHistoryTailState()
 }
@@ -404,9 +406,16 @@ func (m *Model) viewportContentWidth() int {
 }
 
 func (m *Model) readableContentWidth() int {
-	maxWidth := maxInt(1, tuikit.ReadableContentMaxWidth)
 	available := maxInt(1, m.width-tuikit.GutterNarrative-m.viewportScrollbarWidth())
-	return minInt(maxWidth, available)
+	if available <= tuikit.ReadableContentWideMaxWidth {
+		return available
+	}
+	sidePadding := minInt(
+		tuikit.ReadableContentMaxSidePadding,
+		maxInt(0, (available-tuikit.ReadableContentWideMaxWidth)/2),
+	)
+	width := available - (sidePadding * 2)
+	return minInt(maxInt(1, tuikit.ReadableContentWideMaxWidth), width)
 }
 
 func (m *Model) mainColumnWidth() int {

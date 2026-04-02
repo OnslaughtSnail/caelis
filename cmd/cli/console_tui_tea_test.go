@@ -9,9 +9,39 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
+
+func TestBubbleTeaHardQuitFilterInterceptsQuitMsg(t *testing.T) {
+	called := false
+	filter := bubbleTeaHardQuitFilter(func() {
+		called = true
+	})
+
+	if got := filter(nil, tea.QuitMsg{}); got != nil {
+		t.Fatalf("expected QuitMsg to be swallowed, got %#v", got)
+	}
+	if !called {
+		t.Fatal("expected hard quit callback to be invoked")
+	}
+
+	msg := tea.WindowSizeMsg{Width: 80, Height: 24}
+	if got := filter(nil, msg); got != msg {
+		t.Fatalf("expected non-quit message passthrough, got %#v", got)
+	}
+}
+
+func TestNormalizeBubbleTeaRunErrTreatsRequestedKillAsSuccess(t *testing.T) {
+	if err := normalizeBubbleTeaRunErr(tea.ErrProgramKilled, true); err != nil {
+		t.Fatalf("expected requested hard quit to be treated as success, got %v", err)
+	}
+	if err := normalizeBubbleTeaRunErr(tea.ErrProgramKilled, false); err == nil {
+		t.Fatal("expected unexpected kill to remain an error")
+	}
+}
 
 func TestCompleteModelCandidates_GroupsByProvider(t *testing.T) {
 	factory := modelproviders.NewFactory()

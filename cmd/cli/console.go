@@ -224,7 +224,6 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 	console.commands = map[string]slashCommand{
 		"help":    {Usage: "/help", Description: "Show available commands", Handle: handleHelp},
 		"btw":     {Usage: "/btw <question>", Description: "Ask an ephemeral side question without modifying history", Handle: handleBTW},
-		"version": {Usage: "/version", Description: "Show version", Handle: handleVersion},
 		"exit":    {Usage: "/exit", Description: "Exit the CLI", Handle: handleExit},
 		"quit":    {Usage: "/quit", Description: "Alias of /exit", Handle: handleExit},
 		"new":     {Usage: "/new", Description: "Start a new conversation session", Handle: handleNew},
@@ -1590,7 +1589,7 @@ func handleHelp(c *cliConsole, args []string) (bool, error) {
 	helpSection("Session", []string{"new", "fork", "attach", "back", "resume", "compact", "status"})
 	helpSection("Model", []string{"model", "connect", "agent"})
 	helpSection("Security", []string{"sandbox"})
-	helpSection("Other", []string{"btw", "help", "version", "exit", "quit"})
+	helpSection("Other", []string{"btw", "help", "exit", "quit"})
 	c.ui.Section("Keys")
 	c.ui.Plain("  %-24s %s\n", "shift+tab", "Cycle mode")
 	c.ui.Plain("  %-24s %s\n", "ctrl+o", "Mode alias for terminals that don't report shift+tab/backtab")
@@ -1605,16 +1604,6 @@ func handleHelp(c *cliConsole, args []string) (bool, error) {
 			c.ui.Plain("  %-24s %s\n", "/"+item.ID+" <prompt>", desc)
 		}
 	}
-	return false, nil
-}
-
-func handleVersion(c *cliConsole, args []string) (bool, error) {
-	_ = args
-	if strings.TrimSpace(c.version) == "" {
-		c.printf("version=unknown\n")
-		return false, nil
-	}
-	c.printf("version=%s\n", c.version)
 	return false, nil
 }
 

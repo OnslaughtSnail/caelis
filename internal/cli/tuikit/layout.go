@@ -35,9 +35,18 @@ const (
 	// content (assistant text, reasoning blocks).  Applied via indentBlock.
 	GutterNarrative = 2
 
-	// ReadableContentMaxWidth is the maximum readable transcript width before
-	// the UI recenters content within wider terminals.
+	// ReadableContentMaxWidth is the baseline readable transcript width. Past
+	// this width the UI can continue expanding on moderately wide terminals
+	// before applying the wide-terminal soft cap below.
 	ReadableContentMaxWidth = 100
+
+	// ReadableContentWideMaxWidth is the soft cap used on very wide terminals
+	// so the transcript can breathe without collapsing back to a narrow card.
+	ReadableContentWideMaxWidth = 132
+
+	// ReadableContentMaxSidePadding is the maximum whitespace reserved on each
+	// side of the main column in wide terminals.
+	ReadableContentMaxSidePadding = 8
 
 	// GutterUser is the total left margin for user prompt lines.
 	// Keep user turns aligned with the main narrative column so the

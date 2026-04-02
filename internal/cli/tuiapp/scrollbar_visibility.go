@@ -203,7 +203,7 @@ func (m *Model) dragViewportScrollbarTo(y int) bool {
 	if maxOffset == 0 {
 		return false
 	}
-	vy := y
+	vy := m.screenYToFrameY(y)
 	if vy < 0 {
 		vy = 0
 	}
@@ -230,7 +230,7 @@ func (m *Model) dragPanelScrollbarTo(target scrollbarHitTarget, y int) bool {
 		TermWidth: m.width,
 		Theme:     m.theme,
 	}
-	localY := y
+	localY := m.screenYToFrameY(y)
 	if localY < 0 {
 		localY = 0
 	}
@@ -292,6 +292,7 @@ func (m *Model) viewportScrollbarTargetAtMouse(x, y int) (scrollbarHitTarget, bo
 	}
 	total := m.viewport.TotalLineCount()
 	visible := maxInt(1, m.viewport.Height())
+	y = m.screenYToFrameY(y)
 	if total <= visible || y < 0 || y >= visible {
 		return scrollbarHitTarget{}, false
 	}
@@ -343,6 +344,7 @@ func scrollbarVisibleUntil(until *time.Time, now time.Time) bool {
 }
 
 func (m *Model) contentLineAtViewportY(y int) (int, bool) {
+	y = m.screenYToFrameY(y)
 	if y < 0 || y >= m.viewport.Height() {
 		return 0, false
 	}

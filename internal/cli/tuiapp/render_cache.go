@@ -265,6 +265,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addString(b.Msg.Preview)
 		builder.addBool(b.Msg.Truncated)
 	case *DividerBlock:
+		builder.addString(b.Label)
 		builder.addString(b.Text)
 	case *BashPanelBlock:
 		builder.addString(b.Key)
@@ -307,6 +308,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addString(string(b.BlockKindField))
 		builder.addBool(b.Active)
 		builder.addBool(b.Finalized)
+		builder.addBool(b.Expanded)
 		builder.addString(b.Summary)
 		writeActivityEntries(builder, b.Entries)
 		writeRenderedRows(builder, b.cachedRows)

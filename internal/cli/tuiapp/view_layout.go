@@ -273,8 +273,8 @@ func (m *Model) renderViewportContent() {
 
 func (m *Model) offscreenViewportSyncInterval() time.Duration {
 	interval := m.streamTickInterval() * 5
-	if interval < offscreenViewportSyncIntervalMin {
-		interval = offscreenViewportSyncIntervalMin
+	if interval < offscreenViewportSyncIntervalFloor {
+		interval = offscreenViewportSyncIntervalFloor
 	}
 	if interval > offscreenViewportSyncIntervalMax {
 		interval = offscreenViewportSyncIntervalMax
@@ -380,6 +380,7 @@ func (m *Model) hasSelectionRange() bool {
 }
 
 func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectionPoint, bool) {
+	y = m.screenYToFrameY(y)
 	if len(m.viewportPlainLines) == 0 || m.viewport.Height() <= 0 {
 		return textSelectionPoint{}, false
 	}
@@ -425,6 +426,7 @@ func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 }
 
 func (m *Model) mousePointToInputPoint(x int, y int, clamp bool, lines []string) (textSelectionPoint, bool) {
+	y = m.screenYToFrameY(y)
 	startY, height, ok := m.inputAreaBounds()
 	if !ok || len(lines) == 0 {
 		return textSelectionPoint{}, false
@@ -525,12 +527,20 @@ func (m *Model) pendingQueueSectionHeight() int {
 }
 
 func (m *Model) fixedRegionAt(y int) (fixedTextRegion, bool) {
+	y = m.screenYToFrameY(y)
 	for _, region := range m.fixedTextRegions() {
 		if region.y == y {
 			return region, true
 		}
 	}
 	return fixedTextRegion{}, false
+}
+
+func (m *Model) screenYToFrameY(y int) int {
+	if y < 0 {
+		return y
+	}
+	return y + maxInt(0, m.frameTopTrim)
 }
 
 func (m *Model) fixedRowPoint(region fixedTextRegion, x int, clamp bool) (textSelectionPoint, bool) {

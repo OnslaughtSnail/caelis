@@ -144,13 +144,13 @@ func (m *Model) handleMentionKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.clearMention()
 		return true, nil
 	case key.Matches(msg, m.keys.ChoosePrev):
-		if m.mentionIndex > 0 {
-			m.mentionIndex--
+		if len(m.mentionCandidates) > 0 {
+			m.mentionIndex = wrapSelectionIndex(m.mentionIndex, len(m.mentionCandidates), -1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.ChooseNext):
-		if m.mentionIndex < len(m.mentionCandidates)-1 {
-			m.mentionIndex++
+		if len(m.mentionCandidates) > 0 {
+			m.mentionIndex = wrapSelectionIndex(m.mentionIndex, len(m.mentionCandidates), 1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.Accept), key.Matches(msg, m.keys.Complete):
@@ -222,13 +222,13 @@ func (m *Model) handleSkillKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.clearSkill()
 		return true, nil
 	case key.Matches(msg, m.keys.ChoosePrev):
-		if m.skillIndex > 0 {
-			m.skillIndex--
+		if len(m.skillCandidates) > 0 {
+			m.skillIndex = wrapSelectionIndex(m.skillIndex, len(m.skillCandidates), -1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.ChooseNext):
-		if m.skillIndex < len(m.skillCandidates)-1 {
-			m.skillIndex++
+		if len(m.skillCandidates) > 0 {
+			m.skillIndex = wrapSelectionIndex(m.skillIndex, len(m.skillCandidates), 1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.Accept), key.Matches(msg, m.keys.Complete):
@@ -360,13 +360,13 @@ func (m *Model) handleResumeKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.clearResume()
 		return true, nil
 	case key.Matches(msg, m.keys.ChoosePrev):
-		if m.resumeIndex > 0 {
-			m.resumeIndex--
+		if len(m.resumeCandidates) > 0 {
+			m.resumeIndex = wrapSelectionIndex(m.resumeIndex, len(m.resumeCandidates), -1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.ChooseNext):
-		if m.resumeIndex < len(m.resumeCandidates)-1 {
-			m.resumeIndex++
+		if len(m.resumeCandidates) > 0 {
+			m.resumeIndex = wrapSelectionIndex(m.resumeIndex, len(m.resumeCandidates), 1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.Complete):
@@ -456,6 +456,7 @@ func (m *Model) openSlashArgPicker(command string) {
 	m.clearSlashCompletion()
 	m.slashArgActive = true
 	m.slashArgCommand = cmd
+	m.slashArgIndex = 0
 	m.wizard = nil
 	m.setInputText("/" + cmd + " ")
 	m.syncTextareaFromInput()
@@ -477,6 +478,7 @@ func (m *Model) activateSlashArgPickerFromInput(command string) {
 	m.clearSlashCompletion()
 	m.slashArgActive = true
 	m.slashArgCommand = cmd
+	m.slashArgIndex = 0
 	m.wizard = nil
 	m.updateSlashArgCandidates()
 }
@@ -735,13 +737,13 @@ func (m *Model) handleSlashArgKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.clearSlashArg()
 		return true, nil
 	case key.Matches(msg, m.keys.ChoosePrev):
-		if m.slashArgIndex > 0 {
-			m.slashArgIndex--
+		if len(m.slashArgCandidates) > 0 {
+			m.slashArgIndex = wrapSelectionIndex(m.slashArgIndex, len(m.slashArgCandidates), -1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.ChooseNext):
-		if m.slashArgIndex < len(m.slashArgCandidates)-1 {
-			m.slashArgIndex++
+		if len(m.slashArgCandidates) > 0 {
+			m.slashArgIndex = wrapSelectionIndex(m.slashArgIndex, len(m.slashArgCandidates), 1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.Complete):
@@ -907,13 +909,13 @@ func (m *Model) handleSlashCommandKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.clearSlashCompletion()
 		return true, nil
 	case key.Matches(msg, m.keys.ChoosePrev):
-		if m.slashIndex > 0 {
-			m.slashIndex--
+		if len(m.slashCandidates) > 0 {
+			m.slashIndex = wrapSelectionIndex(m.slashIndex, len(m.slashCandidates), -1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.ChooseNext):
-		if m.slashIndex < len(m.slashCandidates)-1 {
-			m.slashIndex++
+		if len(m.slashCandidates) > 0 {
+			m.slashIndex = wrapSelectionIndex(m.slashIndex, len(m.slashCandidates), 1)
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.Complete):

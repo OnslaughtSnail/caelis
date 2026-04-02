@@ -37,7 +37,7 @@ const streamSmoothingCatchupMaxPerFrameDefault = 12
 const inlinePanelMinVisibleDuration = 600 * time.Millisecond
 const inlinePanelCollapseDuration = 180 * time.Millisecond
 const scrollbarVisibleDuration = 900 * time.Millisecond
-const offscreenViewportSyncIntervalMin = 80 * time.Millisecond
+const offscreenViewportSyncIntervalFloor = 80 * time.Millisecond
 const offscreenViewportSyncIntervalMax = 160 * time.Millisecond
 
 type hintEntry struct {
@@ -232,6 +232,7 @@ type foldedActivityBlockState struct {
 	kind      activityBlockKind
 	active    bool
 	finalized bool
+	expanded  bool
 	entries   []activityEntry
 	summary   string
 }
@@ -334,6 +335,7 @@ type Model struct {
 	viewportStyledLines           []string
 	viewportPlainLines            []string
 	viewportBlockIDs              []string
+	frameTopTrim                  int
 	viewport                      viewport.Model
 	userScrolledUp                bool
 	ready                         bool

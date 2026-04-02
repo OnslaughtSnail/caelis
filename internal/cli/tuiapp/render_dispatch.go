@@ -329,6 +329,9 @@ func (m *Model) handleAttachmentCountMsg(msg tuievents.AttachmentCountMsg) tea.M
 
 func (m *Model) handleUserMessageMsg(msg tuievents.UserMessageMsg) tea.Model {
 	m.dequeuePendingUserMessage(msg.Text)
+	if m.activeActivityID != "" {
+		_ = m.finalizeActivityBlock()
+	}
 	m.commitUserDisplayLine(msg.Text)
 	m.ensureViewportLayout()
 	m.syncViewportContent()
@@ -416,7 +419,7 @@ func (m *Model) handleTaskResultMsg(msg tuievents.TaskResultMsg) (tea.Model, tea
 			}
 		}
 		if hasContent {
-			m.doc.Append(NewDividerBlock(m.userTurnDividerLine()))
+			m.doc.Append(NewDividerBlock(m.userTurnDividerLabel()))
 		}
 	}
 	m.showTurnDivider = false

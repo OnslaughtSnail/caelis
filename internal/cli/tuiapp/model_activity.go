@@ -71,7 +71,25 @@ func (m *Model) appendActivityEntry(kind activityBlockKind, entry activityEntry)
 }
 
 func (m *Model) syncActivityBlock() tea.Cmd {
-	ab := m.findActivityBlock()
+	return m.syncActivityBlockByID(m.activeActivityID)
+}
+
+func (m *Model) syncActivityBlockByID(blockID string) tea.Cmd {
+	if strings.TrimSpace(blockID) == "" {
+		return nil
+	}
+	b := m.doc.Find(blockID)
+	if b == nil {
+		return nil
+	}
+	ab, ok := b.(*ActivityBlock)
+	if !ok {
+		return nil
+	}
+	return m.syncActivityBlockBlock(ab)
+}
+
+func (m *Model) syncActivityBlockBlock(ab *ActivityBlock) tea.Cmd {
 	if ab == nil {
 		return nil
 	}
@@ -96,6 +114,9 @@ func (m *Model) finalizeActivityBlock() tea.Cmd {
 	}
 	ab.Active = false
 	ab.Finalized = true
+	if ab.BlockKindField == activityBlockExploration {
+		ab.Expanded = false
+	}
 	foldedState := ab.toFoldedState()
 	ab.Summary = m.activityBlockSummary(foldedState)
 	foldedState.summary = ab.Summary
@@ -128,7 +149,13 @@ func (m *Model) finalizeActivityBlock() tea.Cmd {
 			}
 		}
 	}
-	// Convert activity block to a summary transcript block.
+	if ab.BlockKindField == activityBlockExploration {
+		m.activeActivityID = ""
+		_ = m.syncActivityBlockBlock(ab)
+		m.refreshHistoryTailState()
+		return m.requestStreamViewportSync()
+	}
+	// Convert task-monitor activity blocks to a summary transcript block.
 	summaryBlock := NewTranscriptBlock(rawSummary, tuikit.DetectLineStyle(rawSummary))
 	if !m.doc.Replace(ab.BlockID(), summaryBlock) {
 		m.doc.Remove(ab.BlockID())
@@ -159,7 +186,10 @@ func (m *Model) renderActivityBlockLines(block *foldedActivityBlockState) []stri
 	if block.kind == activityBlockTaskMonitor {
 		return []string{m.renderTaskMonitorInlineLine(block, false)}
 	}
-	lines := []string{m.renderActivityTitleLine(block)}
+	if block.finalized && !block.expanded {
+		return []string{m.renderActivitySummaryLine(block)}
+	}
+	lines := []string{m.renderActivityHeaderLine(block)}
 	displayEntries := buildActivityDisplayEntries(block.entries)
 	if len(displayEntries) > activityBlockPreviewLines {
 		displayEntries = displayEntries[len(displayEntries)-activityBlockPreviewLines:]
@@ -168,6 +198,16 @@ func (m *Model) renderActivityBlockLines(block *foldedActivityBlockState) []stri
 		lines = append(lines, m.renderActivityEntryLine(block, entry.verb, entry.detail))
 	}
 	return lines
+}
+
+func (m *Model) renderActivityHeaderLine(block *foldedActivityBlockState) string {
+	if block == nil {
+		return ""
+	}
+	if block.finalized {
+		return m.renderActivitySummaryLine(block)
+	}
+	return m.renderActivityTitleLine(block)
 }
 
 func (m *Model) renderActivityTitleLine(block *foldedActivityBlockState) string {
@@ -242,7 +282,7 @@ func (m *Model) renderActivitySummaryLine(block *foldedActivityBlockState) strin
 			text = "Explored"
 		}
 	}
-	prefix := m.theme.ToolStyle().Bold(true).Render("▸")
+	prefix := m.renderActivitySummaryPrefix(block)
 	return prefix + " " + m.renderActivitySummaryText(text)
 }
 
@@ -321,6 +361,14 @@ func (m *Model) renderTaskMonitorSummaryText(text string) string {
 
 func (m *Model) renderActivityTitlePrefix(_ *foldedActivityBlockState) string {
 	return m.theme.ToolStyle().Bold(true).Render("▸")
+}
+
+func (m *Model) renderActivitySummaryPrefix(block *foldedActivityBlockState) string {
+	icon := "▸"
+	if block != nil && block.expanded {
+		icon = "▾"
+	}
+	return m.theme.ToolStyle().Bold(true).Render(icon)
 }
 
 func (m *Model) renderActivityTitleText(text string, block *foldedActivityBlockState) string {

@@ -736,7 +736,11 @@ func (m *Model) footerHelpText() string {
 }
 
 func (m *Model) footerContextText() string {
-	return formatStatusContextDisplay(strings.TrimSpace(m.statusContext))
+	text := formatStatusContextDisplay(strings.TrimSpace(m.statusContext))
+	if text == "0" {
+		return ""
+	}
+	return text
 }
 
 func (m *Model) modeLabel() string {

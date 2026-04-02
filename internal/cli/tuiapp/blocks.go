@@ -10,6 +10,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ---------------------------------------------------------------------------
@@ -567,18 +568,30 @@ func (b *DiffBlock) Render(ctx BlockRenderContext) []RenderedRow {
 // ---------------------------------------------------------------------------
 
 type DividerBlock struct {
-	id   string
-	Text string // pre-rendered divider text
+	id    string
+	Label string
+	Text  string // legacy pre-rendered divider text
 }
 
-func NewDividerBlock(text string) *DividerBlock {
-	return &DividerBlock{id: nextBlockID(), Text: text}
+func NewDividerBlock(label string) *DividerBlock {
+	return &DividerBlock{id: nextBlockID(), Label: strings.TrimSpace(label)}
 }
 
 func (b *DividerBlock) BlockID() string { return b.id }
 func (b *DividerBlock) Kind() BlockKind { return BlockDivider }
-func (b *DividerBlock) Render(_ BlockRenderContext) []RenderedRow {
-	return []RenderedRow{StyledRow(b.id, b.Text)}
+func (b *DividerBlock) Render(ctx BlockRenderContext) []RenderedRow {
+	label := strings.TrimSpace(b.Label)
+	if label == "" && strings.TrimSpace(b.Text) != "" {
+		label = strings.TrimSpace(ansi.Strip(b.Text))
+	}
+	plain := centeredDivider(maxInt(12, ctx.Width), label)
+	styled := ctx.Theme.HelpHintTextStyle().Render(plain)
+	return []RenderedRow{{
+		Styled:     styled,
+		Plain:      plain,
+		BlockID:    b.id,
+		PreWrapped: true,
+	}}
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,6 +1688,7 @@ type ActivityBlock struct {
 	BlockKindField activityBlockKind
 	Active         bool
 	Finalized      bool
+	Expanded       bool
 	Entries        []activityEntry
 	Summary        string
 	// cachedRows is updated by Model.syncActivityBlockRender().
@@ -1688,6 +1702,7 @@ func NewActivityBlock(kind activityBlockKind) *ActivityBlock {
 		id:             nextBlockID(),
 		BlockKindField: kind,
 		Active:         true,
+		Expanded:       true,
 	}
 }
 
@@ -1704,6 +1719,7 @@ func (b *ActivityBlock) toFoldedState() *foldedActivityBlockState {
 		kind:      b.BlockKindField,
 		active:    b.Active,
 		finalized: b.Finalized,
+		expanded:  b.Expanded,
 		entries:   b.Entries,
 		summary:   b.Summary,
 	}
