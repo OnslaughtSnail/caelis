@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## v0.0.36 - 2026-04-02
+## v0.0.37 - 2026-04-02
 
 ### TUI Layout, Overlay, And Interaction Refinements
 - Improved Bubble Tea fullscreen frame normalization so resize and inline panel-collapse paths keep the screen fully padded without leaving short frames behind.
@@ -18,8 +18,11 @@
 - Removed the legacy `/version` slash command from the interactive console help surface.
 - Hardened Bubble Tea hard-quit handling so requested program kills are treated as clean exits instead of surfacing spurious `ErrProgramKilled` failures.
 
+### Deferred Batch Scheduling Fix
+- Fixed deferred log-chunk and task-stream flush handling so viewport sync commands are propagated correctly while scrolled away from the bottom, preventing offscreen transcript refresh from stalling after batched updates.
+
 ### Release Metadata
-- Bumped release metadata to `v0.0.36` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
+- Bumped release metadata to `v0.0.37` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
 
 ## v0.0.35 - 2026-04-01
 

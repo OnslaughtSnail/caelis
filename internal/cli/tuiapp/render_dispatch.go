@@ -83,13 +83,13 @@ func renderEventPolicyForFrameTick(msg frameTickMsg) renderEventPolicy {
 	return renderEventPolicy{lane: renderLaneTick}
 }
 
-func (m *Model) applyRenderEventPolicy(policy renderEventPolicy) {
+func (m *Model) applyRenderEventPolicy(policy renderEventPolicy) tea.Cmd {
 	if m == nil {
-		return
+		return nil
 	}
+	var cmds []tea.Cmd
 	if policy.flushDeferredOnly {
-		m.flushPendingDeferredBatches()
-		return
+		return m.flushPendingDeferredBatches()
 	}
 	if policy.flushSmoothing {
 		m.flushAllPendingStreamSmoothing()
@@ -98,11 +98,12 @@ func (m *Model) applyRenderEventPolicy(policy renderEventPolicy) {
 		m.dismissMessageHints()
 	}
 	if policy.flushLogChunks {
-		m.flushPendingLogChunks()
+		cmds = append(cmds, m.flushPendingLogChunks())
 	}
 	if policy.flushTaskStreams {
-		m.flushPendingTaskStreamMsgs()
+		cmds = append(cmds, m.flushPendingTaskStreamMsgs())
 	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) deferredBatchingEnabled() bool {
@@ -114,113 +115,113 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	if !ok {
 		return m, nil, false
 	}
-	m.applyRenderEventPolicy(policy)
+	policyCmd := m.applyRenderEventPolicy(policy)
 
 	switch typed := msg.(type) {
 	case tuievents.LogChunkMsg:
 		if !m.deferredBatchingEnabled() {
 			model, cmd := m.handleLogChunk(typed.Chunk)
-			return model, cmd, true
+			return model, tea.Batch(policyCmd, cmd), true
 		}
 		if !m.queueLogChunk(typed.Chunk) {
-			return m, nil, true
+			return m, policyCmd, true
 		}
-		return m, m.ensureDeferredBatchTick(), true
+		return m, tea.Batch(policyCmd, m.ensureDeferredBatchTick()), true
 
 	case tuievents.AssistantStreamMsg:
 		if m.cfg.FrameBatchMainStream {
 			model, cmd := m.enqueueMainDelta(typed.Kind, typed.Actor, typed.Text, typed.Final)
-			return model, cmd, true
+			return model, tea.Batch(policyCmd, cmd), true
 		}
 		model, cmd := m.handleStreamBlock(typed.Kind, typed.Actor, typed.Text, typed.Final)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.RawDeltaMsg:
 		model, cmd := m.handleRawDelta(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.ReasoningStreamMsg:
 		if m.cfg.FrameBatchMainStream {
 			model, cmd := m.enqueueMainDelta("reasoning", typed.Actor, typed.Text, typed.Final)
-			return model, cmd, true
+			return model, tea.Batch(policyCmd, cmd), true
 		}
 		model, cmd := m.handleStreamBlock("reasoning", typed.Actor, typed.Text, typed.Final)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.DiffBlockMsg:
 		model, cmd := m.handleDiffBlock(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.TaskStreamMsg:
 		if m.deferredBatchingEnabled() && shouldBatchTaskStreamMsg(typed) {
 			m.queueTaskStreamMsg(typed)
-			return m, m.ensureDeferredBatchTick(), true
+			return m, tea.Batch(policyCmd, m.ensureDeferredBatchTick()), true
 		}
 		model, cmd := m.handleToolStreamMsg(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.ParticipantTurnStartMsg:
 		model, cmd := m.handleParticipantTurnStart(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.ParticipantToolMsg:
 		model, cmd := m.handleParticipantToolMsg(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.ParticipantStatusMsg:
 		model, cmd := m.handleParticipantStatusMsg(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.SubagentStartMsg:
 		model, cmd := m.handleSubagentStart(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentStatusMsg:
 		model, cmd := m.handleSubagentStatus(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentStreamMsg:
 		model, cmd := m.handleSubagentStream(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentToolCallMsg:
 		model, cmd := m.handleSubagentToolCall(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentPlanMsg:
 		model, cmd := m.handleSubagentPlan(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentDoneMsg:
 		model, cmd := m.handleSubagentDone(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.PlanUpdateMsg:
-		return m.handlePlanUpdateMsg(typed), nil, true
+		return m.handlePlanUpdateMsg(typed), policyCmd, true
 	case tuievents.SetHintMsg:
 		model, cmd := m.handleSetHintMsg(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SetRunningMsg:
-		return m.handleSetRunningMsg(typed), nil, true
+		return m.handleSetRunningMsg(typed), policyCmd, true
 	case tuievents.SetStatusMsg:
-		return m.handleSetStatusMsg(typed), nil, true
+		return m.handleSetStatusMsg(typed), policyCmd, true
 	case tuievents.SetCommandsMsg:
-		return m.handleSetCommandsMsg(typed), nil, true
+		return m.handleSetCommandsMsg(typed), policyCmd, true
 	case tuievents.AttachmentCountMsg:
-		return m.handleAttachmentCountMsg(typed), nil, true
+		return m.handleAttachmentCountMsg(typed), policyCmd, true
 
 	case tuievents.ClearHistoryMsg:
 		m.resetConversationView()
-		return m, nil, true
+		return m, policyCmd, true
 	case tuievents.UserMessageMsg:
-		return m.handleUserMessageMsg(typed), nil, true
+		return m.handleUserMessageMsg(typed), policyCmd, true
 	case tuievents.TaskResultMsg:
 		model, cmd := m.handleTaskResultMsg(typed)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.BTWOverlayMsg:
 		model, cmd := m.handleBTWDelta(typed.Text, typed.Final)
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.BTWErrorMsg:
-		return m.handleBTWErrorMsg(typed), nil, true
+		return m.handleBTWErrorMsg(typed), policyCmd, true
 
 	case tuievents.PromptRequestMsg:
 		m.enqueuePrompt(typed)
 		m.ensureViewportLayout()
-		return m, nil, true
+		return m, policyCmd, true
 
 	case frameTickMsg:
 		legacyBroadcast := typed.kind == ""
@@ -244,10 +245,10 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		if legacyBroadcast || typed.kind == frameTickScrollbarVisible {
 			cmds = append(cmds, m.advanceScrollbarVisibility(typed.at))
 		}
-		return m, tea.Batch(cmds...), true
+		return m, tea.Batch(append(cmds, policyCmd)...), true
 	case tuievents.TickStatusMsg:
 		model, cmd := m.handleStatusTickMsg()
-		return model, cmd, true
+		return model, tea.Batch(policyCmd, cmd), true
 	default:
 		return m, nil, false
 	}

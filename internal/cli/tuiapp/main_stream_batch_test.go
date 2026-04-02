@@ -114,6 +114,77 @@ func TestTaskStreamMsg_FrameBatchesPureOutputChunks(t *testing.T) {
 	}
 }
 
+func TestDeferredLogFlushWhileScrolledUpReturnsOffscreenTick(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine:        noopExecute,
+		StreamTickInterval: 20 * time.Millisecond,
+	})
+	resizeModel(m)
+
+	for i := 0; i < 80; i++ {
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* history-%02d\n", i)})
+	}
+	_, _ = m.Update(keyPress(tea.KeyPgUp))
+	if !m.userScrolledUp {
+		t.Fatal("expected model to be scrolled away from the bottom")
+	}
+
+	_, cmd := m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH echo hi\n"})
+	if cmd == nil {
+		t.Fatal("expected deferred batch tick for queued log chunk")
+	}
+
+	_, cmd = m.Update(tickAt(frameTickDeferredBatch, time.Now().Add(20*time.Millisecond)))
+	if cmd == nil {
+		t.Fatal("expected deferred log flush to return an offscreen viewport tick")
+	}
+	if !m.offscreenViewportTickScheduled {
+		t.Fatal("expected offscreen viewport tick to remain scheduled after deferred log flush")
+	}
+}
+
+func TestDeferredTaskFlushWhileScrolledUpReturnsOffscreenTick(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine:        noopExecute,
+		StreamTickInterval: 20 * time.Millisecond,
+	})
+	resizeModel(m)
+
+	for i := 0; i < 80; i++ {
+		_, _ = m.Update(tuievents.LogChunkMsg{Chunk: fmt.Sprintf("* history-%02d\n", i)})
+	}
+	_, _ = m.Update(keyPress(tea.KeyPgUp))
+	if !m.userScrolledUp {
+		t.Fatal("expected model to be scrolled away from the bottom")
+	}
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH echo hi\n"})
+	_, _ = m.Update(tickAt(frameTickDeferredBatch, time.Now().Add(20*time.Millisecond)))
+	if !m.offscreenViewportTickScheduled {
+		t.Fatal("expected offscreen viewport tick after batched bash anchor flush")
+	}
+
+	m.offscreenViewportTickScheduled = false
+	msg := tuievents.TaskStreamMsg{
+		Label:  "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "hello world\n",
+	}
+	_, cmd := m.Update(msg)
+	if cmd == nil {
+		t.Fatal("expected deferred batch tick for queued task stream chunk")
+	}
+
+	_, cmd = m.Update(tickAt(frameTickDeferredBatch, time.Now().Add(40*time.Millisecond)))
+	if cmd == nil {
+		t.Fatal("expected deferred task flush to return an offscreen viewport tick")
+	}
+	if !m.offscreenViewportTickScheduled {
+		t.Fatal("expected offscreen viewport tick to remain scheduled after deferred task flush")
+	}
+}
+
 func TestAssistantStreamMsg_ScrolledUpSchedulesOffscreenSync(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	resizeModel(m)

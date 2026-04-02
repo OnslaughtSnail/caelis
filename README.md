@@ -149,7 +149,7 @@ User-facing MCP tool loading is no longer supported in the CLI runtime. Older AC
 
 ## Release
 
-- Current release: `v0.0.36`
+- Current release: `v0.0.37`
 - Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
@@ -159,7 +159,7 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.36`.
+CI release is triggered by pushing a version tag such as `v0.0.37`.
 
 ## npm Package
 

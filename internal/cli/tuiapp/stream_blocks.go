@@ -33,13 +33,14 @@ func (m *Model) queueLogChunk(chunk string) bool {
 	return true
 }
 
-func (m *Model) flushPendingLogChunks() {
+func (m *Model) flushPendingLogChunks() tea.Cmd {
 	if m == nil || m.pendingLogChunk == "" {
-		return
+		return nil
 	}
 	chunk := m.pendingLogChunk
 	m.pendingLogChunk = ""
-	_, _ = m.handleLogChunk(chunk)
+	_, cmd := m.handleLogChunk(chunk)
+	return cmd
 }
 
 func shouldBatchTaskStreamMsg(msg tuievents.TaskStreamMsg) bool {
@@ -59,28 +60,33 @@ func (m *Model) queueTaskStreamMsg(msg tuievents.TaskStreamMsg) {
 	m.pendingTaskStreams = append(m.pendingTaskStreams, msg)
 }
 
-func (m *Model) flushPendingTaskStreamMsgs() {
+func (m *Model) flushPendingTaskStreamMsgs() tea.Cmd {
 	if m == nil || len(m.pendingTaskStreams) == 0 {
-		return
+		return nil
 	}
 	pending := append([]tuievents.TaskStreamMsg(nil), m.pendingTaskStreams...)
 	m.pendingTaskStreams = nil
 	m.beginDeferredViewportSync()
 	defer m.endDeferredViewportSync()
+	var cmds []tea.Cmd
 	for _, msg := range pending {
-		_, _ = m.handleToolStreamMsg(msg)
+		_, cmd := m.handleToolStreamMsg(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
+	return tea.Batch(cmds...)
 }
 
-func (m *Model) flushPendingDeferredBatches() {
+func (m *Model) flushPendingDeferredBatches() tea.Cmd {
 	if m == nil {
-		return
+		return nil
 	}
-	m.flushPendingLogChunks()
-	m.flushPendingTaskStreamMsgs()
+	cmd := tea.Batch(m.flushPendingLogChunks(), m.flushPendingTaskStreamMsgs())
 	if m.pendingLogChunk == "" && len(m.pendingTaskStreams) == 0 {
 		m.deferredBatchTickScheduled = false
 	}
+	return cmd
 }
 
 func (m *Model) ensureDeferredBatchTick() tea.Cmd {
