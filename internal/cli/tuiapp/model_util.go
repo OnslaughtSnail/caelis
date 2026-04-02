@@ -353,34 +353,16 @@ func replaceRuneSpan(input []rune, start int, end int, replacement string) ([]ru
 	return out, start + len(repl)
 }
 
-// overlayBottom places an overlay box near the bottom of the base text,
-// centered within the readable main column.
-func overlayBottom(base string, overlay string, screenWidth int, columnX int, columnWidth int, _ int) string {
-	baseLines := strings.Split(base, "\n")
-	overlayLines := strings.Split(overlay, "\n")
-	if len(baseLines) == 0 {
-		return overlay
-	}
-	startX := overlayColumnStart(overlayLines, columnX, columnWidth)
-	startRow := maxInt(0, len(baseLines)-len(overlayLines)-2)
-	for i, line := range overlayLines {
-		row := startRow + i
-		if row < 0 || row >= len(baseLines) {
-			continue
-		}
-		baseLines[row] = overlayLineAt(baseLines[row], line, startX, screenWidth)
-	}
-	return strings.Join(baseLines, "\n")
-}
-
-func overlayAboveBottomArea(base string, overlay string, screenWidth int, columnX int, columnWidth int, bottomHeight int, gap int) string {
+func overlayAboveBottomAreaLeft(base string, overlay string, screenWidth int, startX int, bottomHeight int, gap int) string {
 	baseLines := strings.Split(base, "\n")
 	overlayLines := strings.Split(overlay, "\n")
 	if len(baseLines) == 0 || len(overlayLines) == 0 {
 		return base
 	}
-	startX := overlayColumnStart(overlayLines, columnX, columnWidth)
-	startRow := len(baseLines) - bottomHeight - len(overlayLines) - gap
+	if startX < 0 {
+		startX = 0
+	}
+	startRow := len(baseLines) - maxInt(0, bottomHeight) - len(overlayLines) - gap
 	if startRow < 0 {
 		startRow = 0
 	}
@@ -392,23 +374,6 @@ func overlayAboveBottomArea(base string, overlay string, screenWidth int, column
 		baseLines[row] = overlayLineAt(baseLines[row], line, startX, screenWidth)
 	}
 	return strings.Join(baseLines, "\n")
-}
-
-func overlayColumnStart(lines []string, columnX int, columnWidth int) int {
-	startX := maxInt(0, columnX)
-	if columnWidth <= 0 || len(lines) == 0 {
-		return startX
-	}
-	overlayWidth := 0
-	for _, line := range lines {
-		if width := lipgloss.Width(line); width > overlayWidth {
-			overlayWidth = width
-		}
-	}
-	if overlayWidth >= columnWidth {
-		return startX
-	}
-	return startX + (columnWidth-overlayWidth)/2
 }
 
 func overlayLineAt(_ string, overlayLine string, startX int, screenWidth int) string {
@@ -423,6 +388,45 @@ func overlayLineAt(_ string, overlayLine string, startX int, screenWidth int) st
 		suffix = strings.Repeat(" ", remaining)
 	}
 	return prefix + overlayLine + suffix
+}
+
+func normalizeFullscreenFrame(view string, width int, height int) string {
+	normalized, _ := normalizeFullscreenFrameWithTopTrim(view, width, height)
+	return normalized
+}
+
+func normalizeFullscreenFrameWithTopTrim(view string, width int, height int) (string, int) {
+	if width <= 0 && height <= 0 {
+		return view, 0
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	topTrim := 0
+	if height > 0 && len(lines) > height {
+		// Keep the bottom portion so fixed input/footer rows survive if a
+		// transient resize frame overproduces viewport rows.
+		topTrim = len(lines) - height
+		lines = lines[len(lines)-height:]
+	}
+	if width > 0 {
+		for i, line := range lines {
+			if pad := width - displayColumns(line); pad > 0 {
+				lines[i] = line + strings.Repeat(" ", pad)
+			}
+		}
+	}
+	if height > 0 && len(lines) < height {
+		blank := ""
+		if width > 0 {
+			blank = strings.Repeat(" ", width)
+		}
+		for len(lines) < height {
+			lines = append(lines, blank)
+		}
+	}
+	return strings.Join(lines, "\n"), topTrim
 }
 
 func percentileDuration(values []time.Duration, percentile float64) time.Duration {

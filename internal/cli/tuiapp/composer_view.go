@@ -62,9 +62,10 @@ func (m *Model) composeInputRender() composerRender {
 
 	value := m.textarea.Value()
 	cursorIndex := m.textareaCursorIndex()
-	width := m.composerContentWidth()
+	totalWidth := m.composerContentWidth()
+	contentWidth := maxInt(1, totalWidth-promptWidth)
 	displayValue, displayCursor := composeInputDisplay(value, cursorIndex, m.inputAttachments)
-	layout := layoutComposerDisplay(displayValue, displayCursor, width)
+	layout := layoutComposerDisplay(displayValue, displayCursor, contentWidth)
 	rows := layout.rows
 	cursorRow := layout.cursorRow
 	cursorCol := layout.cursorCol
@@ -100,11 +101,13 @@ func (m *Model) composeInputRender() composerRender {
 		var contentStyled string
 		switch {
 		case placeholder != "" && idx == 0:
-			contentPlain = placeholder
-			contentStyled = m.theme.HelpHintTextStyle().Render(placeholder)
+			contentPlain = truncateTailDisplay(placeholder, contentWidth)
+			contentStyled = m.theme.HelpHintTextStyle().Render(contentPlain)
 		case ghost != "" && idx == cursorRow:
-			contentPlain += ghost
-			contentStyled = m.theme.TextStyle().Render(rows[idx]) + m.theme.HelpHintTextStyle().Render(ghost)
+			remaining := maxInt(0, contentWidth-displayColumns(contentPlain))
+			ghostPart := truncateTailDisplay(ghost, remaining)
+			contentPlain += ghostPart
+			contentStyled = m.theme.TextStyle().Render(rows[idx]) + m.theme.HelpHintTextStyle().Render(ghostPart)
 		default:
 			contentStyled = m.theme.TextStyle().Render(rows[idx])
 		}

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/url"
 	"os"
@@ -17,11 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/colorprofile"
-	"github.com/charmbracelet/x/ansi"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
@@ -67,6 +66,23 @@ type teaOutputWriter struct {
 	sender *teaProgramSender
 	diag   *tuiDiagnostics
 	mu     sync.Mutex
+}
+
+func bubbleTeaHardQuitFilter(requestHardQuit func()) func(tea.Model, tea.Msg) tea.Msg {
+	return func(_ tea.Model, msg tea.Msg) tea.Msg {
+		if _, ok := msg.(tea.QuitMsg); ok {
+			requestHardQuit()
+			return nil
+		}
+		return msg
+	}
+}
+
+func normalizeBubbleTeaRunErr(err error, hardQuitRequested bool) error {
+	if hardQuitRequested && errors.Is(err, tea.ErrProgramKilled) {
+		return nil
+	}
+	return err
 }
 
 func (w *teaOutputWriter) Write(p []byte) (int, error) {
@@ -230,9 +246,6 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 		c.ui = previousUI
 		c.prompter = previousPrompter
 		c.approver = previousApprover
-		if previousOut != nil {
-			_, _ = io.WriteString(previousOut, ansi.ResetModeAltScreenSaveCursor+ansi.ShowCursor)
-		}
 		if closeErr := toolexec.Close(c.execRuntime); closeErr != nil {
 			c.printf("warn: close execution runtime failed: %v\n", closeErr)
 		}
@@ -394,8 +407,32 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 	if c.noColor {
 		opts = append(opts, tea.WithColorProfile(colorprofile.NoTTY))
 	}
-	program := tea.NewProgram(model, opts...)
+	var (
+		program           *tea.Program
+		hardQuitRequested atomic.Bool
+	)
+	hardQuitCh := make(chan struct{}, 1)
+	hardQuitDone := make(chan struct{})
+	defer close(hardQuitDone)
+	opts = append(opts, tea.WithFilter(bubbleTeaHardQuitFilter(func() {
+		hardQuitRequested.Store(true)
+		select {
+		case hardQuitCh <- struct{}{}:
+		default:
+		}
+	})))
+	program = tea.NewProgram(model, opts...)
 	sender.set(func(msg any) { program.Send(msg) })
+	go func() {
+		select {
+		case <-hardQuitDone:
+			return
+		case <-hardQuitCh:
+			if program != nil {
+				program.Kill()
+			}
+		}
+	}()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -416,6 +453,9 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 	}()
 
 	if _, err := program.Run(); err != nil {
+		if err = normalizeBubbleTeaRunErr(err, hardQuitRequested.Load()); err == nil {
+			return nil
+		}
 		return err
 	}
 	return nil

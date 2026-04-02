@@ -67,6 +67,9 @@ func TestNewCLIConsole_CommandSetRemovesLegacyUIAndModels(t *testing.T) {
 	if _, ok := console.commands["quit"]; !ok {
 		t.Fatal("expected /quit command alias to exist")
 	}
+	if _, ok := console.commands["version"]; ok {
+		t.Fatal("expected /version command to be removed")
+	}
 	if _, ok := console.commands["sandbox"]; !ok {
 		t.Fatal("expected /sandbox command to exist")
 	}

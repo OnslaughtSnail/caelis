@@ -25,6 +25,84 @@ func (m *Model) handleRawDelta(msg tuievents.RawDeltaMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *Model) queueLogChunk(chunk string) bool {
+	if m == nil || chunk == "" {
+		return false
+	}
+	m.pendingLogChunk += chunk
+	return true
+}
+
+func (m *Model) flushPendingLogChunks() tea.Cmd {
+	if m == nil || m.pendingLogChunk == "" {
+		return nil
+	}
+	chunk := m.pendingLogChunk
+	m.pendingLogChunk = ""
+	_, cmd := m.handleLogChunk(chunk)
+	return cmd
+}
+
+func shouldBatchTaskStreamMsg(msg tuievents.TaskStreamMsg) bool {
+	if strings.TrimSpace(msg.Chunk) == "" {
+		return false
+	}
+	if msg.Reset || msg.Final {
+		return false
+	}
+	return strings.TrimSpace(msg.State) == ""
+}
+
+func (m *Model) queueTaskStreamMsg(msg tuievents.TaskStreamMsg) {
+	if m == nil {
+		return
+	}
+	m.pendingTaskStreams = append(m.pendingTaskStreams, msg)
+}
+
+func (m *Model) flushPendingTaskStreamMsgs() tea.Cmd {
+	if m == nil || len(m.pendingTaskStreams) == 0 {
+		return nil
+	}
+	pending := append([]tuievents.TaskStreamMsg(nil), m.pendingTaskStreams...)
+	m.pendingTaskStreams = nil
+	m.beginDeferredViewportSync()
+	defer m.endDeferredViewportSync()
+	var cmds []tea.Cmd
+	for _, msg := range pending {
+		_, cmd := m.handleToolStreamMsg(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) flushPendingDeferredBatches() tea.Cmd {
+	if m == nil {
+		return nil
+	}
+	cmd := tea.Batch(m.flushPendingLogChunks(), m.flushPendingTaskStreamMsgs())
+	if m.pendingLogChunk == "" && len(m.pendingTaskStreams) == 0 {
+		m.deferredBatchTickScheduled = false
+	}
+	return cmd
+}
+
+func (m *Model) ensureDeferredBatchTick() tea.Cmd {
+	if m == nil {
+		return nil
+	}
+	if m.deferredBatchTickScheduled {
+		return nil
+	}
+	if m.pendingLogChunk == "" && len(m.pendingTaskStreams) == 0 {
+		return nil
+	}
+	m.deferredBatchTickScheduled = true
+	return frameTickCmd(frameTickDeferredBatch, m.streamTickInterval())
+}
+
 // ---------------------------------------------------------------------------
 // Log chunk handling — inline commit architecture
 // ---------------------------------------------------------------------------
@@ -38,6 +116,7 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 	normalized := strings.ReplaceAll(strings.ReplaceAll(chunk, "\r\n", "\n"), "\r", "\n")
 
 	m.streamLine += normalized
+	var cmds []tea.Cmd
 
 	for {
 		idx := strings.IndexByte(m.streamLine, '\n')
@@ -53,27 +132,27 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(line) != "" {
 				m.finalizeAssistantBlock()
 				m.finalizeReasoningBlock()
-				m.lastFinalAnswer = ""
 			}
 			continue
 		}
-		if m.consumeActivityLine(line) {
+		if handled, cmd := m.consumeActivityLine(line); handled {
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 			if strings.TrimSpace(line) != "" {
 				m.finalizeAssistantBlock()
-				m.lastFinalAnswer = ""
 			}
 			continue
 		}
 		if strings.TrimSpace(line) != "" {
 			m.finalizeAssistantBlock()
 			m.finalizeReasoningBlock()
-			m.lastFinalAnswer = ""
 		}
 		m.commitLine(line)
 	}
 
-	m.syncViewportContent()
-	return m, nil
+	cmds = append(cmds, m.requestStreamViewportSync())
+	return m, tea.Batch(cmds...)
 }
 
 func (m *Model) tryMergeMutationSummaryLine(line string) bool {
@@ -188,7 +267,6 @@ func (m *Model) finalizeAssistantBlock() {
 
 func (m *Model) discardActiveAssistantStream() {
 	m.streamLine = ""
-	m.lastFinalAnswer = ""
 	// Remove active assistant block from doc.
 	if m.activeAssistantID != "" {
 		m.doc.Remove(m.activeAssistantID)
@@ -272,6 +350,9 @@ func (m *Model) enqueueMainDelta(kind string, actor string, text string, final b
 	if !m.enqueueStreamDelta("main", "", streamKind, actor, text, false) {
 		return m, nil
 	}
+	if m.shouldDeferStreamViewportSync() {
+		return m, m.requestStreamViewportSync()
+	}
 	return m, m.ensurePendingStreamSmoothingTick()
 }
 
@@ -285,7 +366,7 @@ func (m *Model) handleStreamBlock(kind string, actor string, text string, final 
 
 func (m *Model) applyStreamBlockImmediate(streamKind string, actor string, text string, final bool) (tea.Model, tea.Cmd) {
 	if m.activeActivityID != "" && streamKind == "answer" && strings.TrimSpace(text) != "" {
-		m.finalizeActivityBlock()
+		_ = m.finalizeActivityBlock()
 	}
 	if text == "" && (streamKind != "reasoning" || !final) {
 		return m, nil
@@ -301,17 +382,17 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	if m.activeAssistantID != "" && strings.TrimSpace(m.activeAssistantActor) != actor {
 		m.finalizeAssistantBlock()
 	}
-	if final && m.activeAssistantID == "" {
-		normalized := strings.TrimSpace(text)
-		if normalized != "" && normalized == m.lastFinalAnswer {
-			return m, nil
-		}
+	if final && m.activeAssistantID == "" && m.shouldSuppressDuplicateFinalAnswer(actor, text) {
+		return m, nil
 	}
 
 	if m.activeAssistantID == "" {
 		block := NewAssistantBlock(actor)
 		block.Raw = text
 		block.Streaming = !final
+		if final {
+			block.LastFinal = strings.TrimSpace(text)
+		}
 		m.doc.Append(block)
 		m.activeAssistantID = block.BlockID()
 		m.activeAssistantActor = actor
@@ -321,10 +402,8 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 		if final {
 			m.activeAssistantID = ""
 			m.activeAssistantActor = ""
-			m.lastFinalAnswer = strings.TrimSpace(text)
 		}
-		m.syncViewportContent()
-		return m, nil
+		return m, m.requestStreamViewportSync()
 	}
 
 	block := m.doc.Find(m.activeAssistantID)
@@ -338,16 +417,47 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	ab.Raw = mergeStreamChunk(ab.Raw, text, final)
 	if final {
 		ab.Streaming = false
+		ab.LastFinal = strings.TrimSpace(ab.Raw)
 	}
 	if final {
 		m.activeAssistantID = ""
 		m.activeAssistantActor = ""
-		m.lastFinalAnswer = strings.TrimSpace(ab.Raw)
 	}
 	m.lastCommittedStyle = tuikit.LineStyleAssistant
 	m.lastCommittedRaw = "* "
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
+}
+
+func (m *Model) shouldSuppressDuplicateFinalAnswer(actor string, text string) bool {
+	if m == nil {
+		return false
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
+	blocks := m.doc.Blocks()
+	for i := len(blocks) - 1; i >= 0; i-- {
+		switch block := blocks[i].(type) {
+		case *TranscriptBlock:
+			if strings.TrimSpace(block.Raw) == "" {
+				continue
+			}
+			return false
+		case *AssistantBlock:
+			if block.Streaming {
+				return false
+			}
+			lastFinal := strings.TrimSpace(block.LastFinal)
+			if lastFinal == "" {
+				lastFinal = strings.TrimSpace(block.Raw)
+			}
+			return strings.TrimSpace(block.Actor) == actor && lastFinal == text
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (m *Model) handleReasoningStream(actor string, text string, final bool) (tea.Model, tea.Cmd) {
@@ -357,7 +467,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 		m.activeReasoningID = ""
 		m.activeReasoningActor = ""
 		m.refreshHistoryTailState()
-		m.syncViewportContent()
+		return m, m.requestStreamViewportSync()
 	}
 	if final {
 		if m.activeReasoningID != "" {
@@ -365,7 +475,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 			m.activeReasoningID = ""
 			m.activeReasoningActor = ""
 			m.refreshHistoryTailState()
-			m.syncViewportContent()
+			return m, m.requestStreamViewportSync()
 		}
 		return m, nil
 	}
@@ -379,8 +489,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 		m.hasCommittedLine = true
 		m.lastCommittedStyle = tuikit.LineStyleReasoning
 		m.lastCommittedRaw = "│ "
-		m.syncViewportContent()
-		return m, nil
+		return m, m.requestStreamViewportSync()
 	}
 
 	block := m.doc.Find(m.activeReasoningID)
@@ -394,8 +503,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 	rb.Raw = mergeStreamChunk(rb.Raw, text, final)
 	m.lastCommittedStyle = tuikit.LineStyleReasoning
 	m.lastCommittedRaw = "│ "
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 const minReplayLen = 16
@@ -498,8 +606,34 @@ func (m *Model) ensurePendingStreamSmoothingTick() tea.Cmd {
 	if len(m.streamSmoothing) == 0 || m.streamSmoothingTickScheduled {
 		return nil
 	}
+	if !m.hasImmediateStreamSmoothingWork() {
+		return nil
+	}
 	m.streamSmoothingTickScheduled = true
-	return frameTickCmd(m.streamTickInterval())
+	return frameTickCmd(frameTickStreamSmoothing, m.streamTickInterval())
+}
+
+func (m *Model) hasImmediateStreamSmoothingWork() bool {
+	if m == nil {
+		return false
+	}
+	for _, state := range m.streamSmoothing {
+		if state == nil || len(state.pending) == 0 {
+			continue
+		}
+		if m.shouldDeferMainStreamSmoothing(state) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (m *Model) shouldDeferMainStreamSmoothing(state *streamSmoothingState) bool {
+	if m == nil || state == nil {
+		return false
+	}
+	return state.targetKind == "main" && m.shouldDeferStreamViewportSync()
 }
 
 func (m *Model) drainPendingStreamSmoothing(now time.Time) tea.Cmd {
@@ -526,10 +660,14 @@ func (m *Model) drainPendingStreamSmoothing(now time.Time) tea.Cmd {
 	sort.Strings(keys)
 	m.beginDeferredViewportSync()
 	defer m.endDeferredViewportSync()
+	var cmds []tea.Cmd
 	for _, key := range keys {
 		state := m.streamSmoothing[key]
 		if state == nil || len(state.pending) == 0 {
 			delete(m.streamSmoothing, key)
+			continue
+		}
+		if m.shouldDeferMainStreamSmoothing(state) {
 			continue
 		}
 		backlog := len(state.pending)
@@ -547,19 +685,56 @@ func (m *Model) drainPendingStreamSmoothing(now time.Time) tea.Cmd {
 					m.streamPlayback.FirstByteLatency = state.firstPaint.Sub(state.firstSeen)
 				}
 			}
-			m.applyPendingSmoothChunk(state, chunk)
+			if cmd := m.applyPendingSmoothChunk(state, chunk); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 		if len(state.pending) == 0 {
 			delete(m.streamSmoothing, key)
 		}
 	}
 	m.streamPlayback.Frames++
+	if !m.hasImmediateStreamSmoothingWork() {
+		m.streamSmoothingTickScheduled = false
+		if len(m.streamSmoothing) == 0 {
+			m.streamPlayback.BacklogRunes = 0
+		}
+		return tea.Batch(cmds...)
+	}
 	if len(m.streamSmoothing) == 0 {
 		m.streamPlayback.BacklogRunes = 0
-		return nil
+		return tea.Batch(cmds...)
 	}
 	m.streamSmoothingTickScheduled = true
-	return frameTickCmd(m.streamTickInterval())
+	cmds = append(cmds, frameTickCmd(frameTickStreamSmoothing, m.streamTickInterval()))
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) flushDeferredMainStreamSmoothing() {
+	if m == nil || len(m.streamSmoothing) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(m.streamSmoothing))
+	for key, state := range m.streamSmoothing {
+		if state == nil || len(state.pending) == 0 || state.targetKind != "main" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	m.beginDeferredViewportSync()
+	defer m.endDeferredViewportSync()
+	for _, key := range keys {
+		state := m.streamSmoothing[key]
+		if state == nil || len(state.pending) == 0 || state.targetKind != "main" {
+			continue
+		}
+		_ = m.applyPendingSmoothChunk(state, joinGraphemeClusters(state.pending))
+		delete(m.streamSmoothing, key)
+	}
+	if !m.hasImmediateStreamSmoothingWork() {
+		m.streamSmoothingTickScheduled = false
+	}
 }
 
 func (m *Model) revealPendingSmoothedText(state *streamSmoothingState, now time.Time) (string, int) {
@@ -666,19 +841,21 @@ func (m *Model) currentMainStreamRaw(state *streamSmoothingState) string {
 	}
 }
 
-func (m *Model) applyPendingSmoothChunk(state *streamSmoothingState, chunk string) {
+func (m *Model) applyPendingSmoothChunk(state *streamSmoothingState, chunk string) tea.Cmd {
 	if m == nil || state == nil || chunk == "" {
-		return
+		return nil
 	}
 	switch state.targetKind {
 	case "subagent":
-		m.applySubagentStreamImmediate(state.sessionKey, state.streamKind, chunk)
+		return m.applySubagentStreamImmediate(state.sessionKey, state.streamKind, chunk)
 	case "btw":
 		m.applyBTWOverlayImmediate(chunk, false)
+		return nil
 	case "spawn_preview":
-		m.applySpawnPreviewImmediate(state.sessionKey, state.streamKind, chunk)
+		return m.applySpawnPreviewImmediate(state.sessionKey, state.streamKind, chunk)
 	default:
-		_, _ = m.applyStreamBlockImmediate(state.streamKind, state.actor, chunk, false)
+		_, cmd := m.applyStreamBlockImmediate(state.streamKind, state.actor, chunk, false)
+		return cmd
 	}
 }
 
@@ -1093,7 +1270,7 @@ func (m *Model) finalizeReasoningBlock() {
 
 func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd) {
 	m.flushStream()
-	m.finalizeActivityBlock()
+	_ = m.finalizeActivityBlock()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
 	block := NewDiffBlock(msg)
@@ -1179,7 +1356,7 @@ func (m *Model) handleParticipantTurnStart(msg tuievents.ParticipantTurnStartMsg
 	if m == nil {
 		return m, nil
 	}
-	m.finalizeActivityBlock()
+	_ = m.finalizeActivityBlock()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
 	sessionID := strings.TrimSpace(msg.SessionID)
@@ -1196,12 +1373,11 @@ func (m *Model) handleParticipantTurnStart(msg tuievents.ParticipantTurnStartMsg
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleAssistant
 	m.lastCommittedRaw = strings.TrimSpace(msg.Actor) + ":"
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string, final bool) (tea.Model, tea.Cmd) {
-	m.finalizeActivityBlock()
+	_ = m.finalizeActivityBlock()
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
 	text = tuikit.SanitizeLogText(text)
@@ -1232,8 +1408,7 @@ func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string,
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleAssistant
 	m.lastCommittedRaw = strings.TrimSpace(block.Actor) + ":"
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleParticipantToolMsg(msg tuievents.ParticipantToolMsg) (tea.Model, tea.Cmd) {
@@ -1242,8 +1417,7 @@ func (m *Model) handleParticipantToolMsg(msg tuievents.ParticipantToolMsg) (tea.
 		return m, nil
 	}
 	block.UpdateTool(msg.CallID, msg.ToolName, msg.Args, msg.Output, msg.Final, msg.Err)
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleParticipantStatusMsg(msg tuievents.ParticipantStatusMsg) (tea.Model, tea.Cmd) {
@@ -1255,8 +1429,7 @@ func (m *Model) handleParticipantStatusMsg(msg tuievents.ParticipantStatusMsg) (
 	if participantTurnIsTerminal(msg.State) {
 		m.activeParticipantTurnSessionID = strings.TrimSpace(msg.SessionID)
 	}
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) finalizeActiveParticipantTurn(interrupted bool, err error) {
@@ -1286,7 +1459,7 @@ func (m *Model) finalizeActiveParticipantTurn(interrupted bool, err error) {
 }
 
 func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea.Cmd) {
-	m.finalizeActivityBlock()
+	_ = m.finalizeActivityBlock()
 	var cmd tea.Cmd
 	toolName := strings.TrimSpace(msg.Label)
 	if toolName == "" {
@@ -1328,11 +1501,9 @@ func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea
 				cmd = tea.Batch(cmd, animCmd)
 			}
 		}
-		m.syncViewportContent()
-		return m, cmd
+		return m, tea.Batch(cmd, m.requestStreamViewportSync())
 	}
-	m.syncViewportContent()
-	return m, cmd
+	return m, tea.Batch(cmd, m.requestStreamViewportSync())
 }
 
 func (m *Model) resetConversationView() {
@@ -1357,7 +1528,6 @@ func (m *Model) resetConversationView() {
 	m.hasCommittedLine = false
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
-	m.lastFinalAnswer = ""
 	m.transientIsRetry = false
 	m.pendingQueue = nil
 	m.hintEntries = nil
@@ -1422,7 +1592,6 @@ func (m *Model) commitLine(line string) {
 			m.lastCommittedStyle = style
 			m.lastCommittedRaw = line
 			m.transientRemove = false
-			m.syncViewportContent()
 			return
 		}
 	}
@@ -1433,7 +1602,6 @@ func (m *Model) commitLine(line string) {
 			m.lastCommittedStyle = style
 			m.lastCommittedRaw = line
 			m.transientRemove = isEphemeralWarn
-			m.syncViewportContent()
 			return
 		}
 	}

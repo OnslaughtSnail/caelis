@@ -73,6 +73,10 @@ func mouseMotion(x int, y int) tea.MouseMotionMsg {
 	return tea.MouseMotionMsg(tea.Mouse{X: x, Y: y})
 }
 
+func tickAt(kind frameTickKind, at time.Time) frameTickMsg {
+	return frameTickMsg{at: at, kind: kind}
+}
+
 func driveBashPanelCollapse(m *Model, panel *BashPanelBlock) {
 	if m == nil || panel == nil || panel.CollapseAt.IsZero() {
 		return
@@ -81,8 +85,8 @@ func driveBashPanelCollapse(m *Model, panel *BashPanelBlock) {
 	if collapseFor <= 0 {
 		collapseFor = inlinePanelCollapseDuration
 	}
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt})
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt.Add(collapseFor)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt))
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt.Add(collapseFor)))
 }
 
 func driveSubagentPanelCollapse(m *Model, panel *SubagentPanelBlock) {
@@ -93,8 +97,8 @@ func driveSubagentPanelCollapse(m *Model, panel *SubagentPanelBlock) {
 	if collapseFor <= 0 {
 		collapseFor = inlinePanelCollapseDuration
 	}
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt})
-	_, _ = m.Update(frameTickMsg{at: panel.CollapseAt.Add(collapseFor)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt))
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, panel.CollapseAt.Add(collapseFor)))
 }
 
 func TestMentionQueryAtCursor(t *testing.T) {
@@ -1679,6 +1683,28 @@ func TestSlashOverlayDownTabFillsSelectedCommand(t *testing.T) {
 	}
 }
 
+func TestSlashOverlayNavigationWraps(t *testing.T) {
+	m := NewModel(Config{
+		Commands:    []string{"status", "session", "set"},
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+	typeRunes(m, "/s")
+	if len(m.slashCandidates) < 2 {
+		t.Fatalf("expected at least 2 slash candidates, got %d", len(m.slashCandidates))
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyUp))
+	if got := m.slashIndex; got != len(m.slashCandidates)-1 {
+		t.Fatalf("expected slash selection to wrap from first to last, got %d", got)
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	if got := m.slashIndex; got != 0 {
+		t.Fatalf("expected slash selection to wrap from last to first, got %d", got)
+	}
+}
+
 func TestSlashCompletionAutoOpensResumePickerAfterFill(t *testing.T) {
 	m := NewModel(Config{
 		Commands:    []string{"resume", "status"},
@@ -2503,8 +2529,8 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if modalLine == "" {
 		t.Fatalf("expected modal border line in view, got %q", view)
 	}
-	if !strings.HasPrefix(modalLine, strings.Repeat(" ", tuikit.GutterNarrative)+"╭") {
-		t.Fatalf("expected modal to align with narrative gutter, got %q", modalLine)
+	if !strings.HasPrefix(modalLine, strings.Repeat(" ", m.mainColumnX()+inputHorizontalInset)+"╭") {
+		t.Fatalf("expected modal to align near input bar, got %q", modalLine)
 	}
 
 	_, _ = m.Update(keyPress(tea.KeyDown))
@@ -2548,6 +2574,73 @@ func TestApprovalPromptBacktabMovesSelectionUp(t *testing.T) {
 
 	if m.activePrompt.choiceIndex != 0 {
 		t.Fatalf("expected backtab to move selection up, got %d", m.activePrompt.choiceIndex)
+	}
+}
+
+func TestPromptChoiceNavigationWrapsFromFirstToLast(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Select model",
+		Choices: []tuievents.PromptChoice{
+			{Label: "alpha", Value: "a"},
+			{Label: "beta", Value: "b"},
+			{Label: "gamma", Value: "g"},
+		},
+		Response: respCh,
+	})
+	if m.activePrompt == nil {
+		t.Fatal("expected active prompt")
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyUp))
+	if got := m.activePrompt.choiceIndex; got != 2 {
+		t.Fatalf("expected up navigation to wrap from first to last, got %d", got)
+	}
+
+	_, _ = m.Update(keyPress(tea.KeyDown))
+	if got := m.activePrompt.choiceIndex; got != 0 {
+		t.Fatalf("expected down navigation to wrap from last to first, got %d", got)
+	}
+}
+
+func TestPromptModalAnchorsNearInputBar(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt:        "Select model",
+		DefaultChoice: "a",
+		Choices: []tuievents.PromptChoice{
+			{Label: "alpha", Value: "a"},
+			{Label: "beta", Value: "b"},
+			{Label: "gamma", Value: "g"},
+		},
+		Response: respCh,
+	})
+
+	viewLines := strings.Split(stripModelView(m), "\n")
+	top := -1
+	for i, line := range viewLines {
+		if strings.Contains(line, "╭") {
+			top = i
+			if idx := strings.Index(line, "╭"); idx != m.mainColumnX()+inputHorizontalInset {
+				t.Fatalf("expected prompt modal left-aligned near input bar, idx=%d want=%d line=%q", idx, m.mainColumnX()+inputHorizontalInset, line)
+			}
+			break
+		}
+	}
+	if top < 0 {
+		t.Fatal("expected prompt modal border in view")
+	}
+	modal := ansi.Strip(m.renderPromptModal())
+	modalHeight := strings.Count(modal, "\n") + 1
+	wantTop := maxInt(0, len(viewLines)-m.bottomSectionHeight()-modalHeight)
+	if top != wantTop {
+		t.Fatalf("expected prompt modal anchored above bottom area, got row=%d want=%d", top, wantTop)
 	}
 }
 
@@ -2804,8 +2897,10 @@ func TestDiffBlockResizeRerendersAdaptiveLayout(t *testing.T) {
 	if before == after {
 		t.Fatalf("expected resize to rerender diff block, got identical output: %q", after)
 	}
-	if strings.Contains(after, " │ ") {
-		t.Fatalf("expected wide diff to stay within centered main column instead of split full-width layout, got %q", after)
+	for _, line := range strings.Split(after, "\n") {
+		if got, want := displayColumns(line), m.mainColumnWidth(); got > want {
+			t.Fatalf("expected diff line to stay within main column width %d after resize, got %d: %q", want, got, line)
+		}
 	}
 }
 
@@ -2877,6 +2972,51 @@ func TestRunningHintAnimationAdvancesOnSpinnerTicks(t *testing.T) {
 	after := m.buildHintText()
 	if before == after {
 		t.Fatalf("expected running hint to animate/rotate, got unchanged text: %q", after)
+	}
+}
+
+func TestRunningHintAnimationPausesWhenScrolledUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = true
+	before := m.buildHintText()
+
+	_, _ = m.Update(spinner.TickMsg{})
+
+	after := m.buildHintText()
+	if before != after {
+		t.Fatalf("expected running hint animation to pause while scrolled up, before=%q after=%q", before, after)
+	}
+	if m.spinnerTickScheduled {
+		t.Fatal("expected spinner tick chain to stop while scrolled up")
+	}
+}
+
+func TestRunningHintAnimationResumesAfterScrollCatchUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = true
+
+	_, _ = m.Update(spinner.TickMsg{})
+	before := m.buildHintText()
+
+	m.userScrolledUp = false
+	cmd := m.resumeRunningAnimationIfNeeded()
+	if cmd == nil {
+		t.Fatal("expected spinner tick to resume after returning to bottom")
+	}
+	if !m.spinnerTickScheduled {
+		t.Fatal("expected spinner tick to be marked scheduled after resuming")
+	}
+
+	_, _ = m.Update(spinner.TickMsg{})
+	after := m.buildHintText()
+	if before == after {
+		t.Fatalf("expected running hint animation to resume after catch-up, got unchanged text: %q", after)
 	}
 }
 
@@ -3010,8 +3150,8 @@ func TestBashFinalKeepsPanelVisibleUntilNewContentArrives(t *testing.T) {
 	if !bp.Expanded {
 		t.Fatal("expected final BASH panel to remain expanded before animation finishes")
 	}
-	_, _ = m.Update(frameTickMsg{at: bp.CollapseAt})
-	_, _ = m.Update(frameTickMsg{at: bp.CollapseAt.Add(bp.CollapseFor / 2)})
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, bp.CollapseAt))
+	_, _ = m.Update(tickAt(frameTickPanelAnimation, bp.CollapseAt.Add(bp.CollapseFor/2)))
 	if !bp.Expanded || bp.VisibleLines >= toolOutputPreviewLines {
 		t.Fatalf("expected bash panel to be mid-collapse during animation, got expanded=%v visible=%d", bp.Expanded, bp.VisibleLines)
 	}
@@ -3091,6 +3231,60 @@ func TestBashPanelPersistsAfterNewContent(t *testing.T) {
 		}
 	}
 
+}
+
+func TestBashLateChunkAfterFinalKeepsAutoCollapse(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH long-task\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "line-1\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		State:  "completed",
+		Final:  true,
+	})
+
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to exist after final")
+	}
+	bp := m.doc.Find(blockID).(*BashPanelBlock)
+	if bp.CollapseAt.IsZero() {
+		t.Fatal("expected final BASH panel to schedule auto-collapse")
+	}
+	collapseAt := bp.CollapseAt
+
+	// Detached streamers can deliver a final stdout chunk after the terminal
+	// state. That late chunk should not cancel the already scheduled collapse.
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "late-tail\n",
+	})
+	if bp.CollapseAt.IsZero() {
+		t.Fatal("expected late chunk to keep scheduled collapse")
+	}
+	if !bp.CollapseAt.Equal(collapseAt) {
+		t.Fatalf("expected late chunk to preserve collapse timing, got %v want %v", bp.CollapseAt, collapseAt)
+	}
+
+	driveBashPanelCollapse(m, bp)
+	view := stripModelView(m)
+	if !strings.Contains(view, "BASH long-task") {
+		t.Fatalf("expected collapsed bash call line to remain visible, got:\n%s", view)
+	}
+	if strings.Contains(view, "line-1") || strings.Contains(view, "late-tail") {
+		t.Fatalf("expected late chunk to be hidden once panel collapses, got:\n%s", view)
+	}
 }
 
 func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
@@ -3584,6 +3778,49 @@ func TestFooterContextDoesNotRoundUpFromLaterFractionDigits(t *testing.T) {
 	m.statusContext = "15.49k/128.49k(12%)"
 	if got := m.footerContextText(); got != "15k/128k(12%)" {
 		t.Fatalf("expected numeric rounding for compact footer context, got %q", got)
+	}
+}
+
+func TestTurnDividerShrinksWithViewportWithoutWrapping(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	m.hasLastRunDuration = true
+	m.lastRunDuration = 65 * time.Second
+
+	divider := NewDividerBlock(m.userTurnDividerLabel())
+	m.doc.Append(divider)
+	m.syncViewportContent()
+
+	countDividerRows := func() int {
+		count := 0
+		for _, id := range m.viewportBlockIDs {
+			if id == divider.BlockID() {
+				count++
+			}
+		}
+		return count
+	}
+
+	if got := countDividerRows(); got != 1 {
+		t.Fatalf("expected divider to render on one row at wide width, got %d", got)
+	}
+
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+	if got := countDividerRows(); got != 1 {
+		t.Fatalf("expected divider to stay on one row after narrowing viewport, got %d", got)
+	}
+	view := stripModelView(m)
+	if strings.Count(view, "1m05s") != 1 {
+		t.Fatalf("expected divider label to remain on a single row after resize, got:\n%s", view)
+	}
+}
+
+func TestFooterContextHidesZeroPlaceholder(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.statusContext = "0"
+	if got := m.footerContextText(); got != "" {
+		t.Fatalf("expected zero placeholder footer context hidden, got %q", got)
 	}
 }
 
@@ -4554,6 +4791,118 @@ func TestResizeDoesNotClearScreen(t *testing.T) {
 	}
 }
 
+func TestViewPadsFullscreenFrameAfterInlineBashCollapse(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH long-task\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "permission default sandbox=seatbelt route=sandbox sandbox_policy sandbox_policy=workspace_write network=on readable_roots=- writable_roots=-\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		State:  "completed",
+		Final:  true,
+	})
+
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to exist after final")
+	}
+	bp := m.doc.Find(blockID).(*BashPanelBlock)
+	driveBashPanelCollapse(m, bp)
+
+	lines := strings.Split(renderModel(m), "\n")
+	if got, want := len(lines), m.height; got != want {
+		t.Fatalf("expected fullscreen frame height %d after collapse, got %d", want, got)
+	}
+	for i, line := range lines {
+		if got, want := displayColumns(line), m.width; got != want {
+			t.Fatalf("expected line %d to fill fullscreen width %d after collapse, got %d (%q)", i, want, got, ansi.Strip(line))
+		}
+	}
+}
+
+func TestViewLinesStayWithinWidthAfterResizeWithEmptyComposer(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "* hello world\n"})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+
+	lines := strings.Split(renderModel(m), "\n")
+	if got, want := len(lines), m.height; got != want {
+		t.Fatalf("expected fullscreen frame height %d after resize, got %d", want, got)
+	}
+	for i, line := range lines {
+		if got, want := displayColumns(ansi.Strip(line)), m.width; got > want {
+			t.Fatalf("expected line %d to stay within fullscreen width %d after resize, got %d (%q)", i, want, got, ansi.Strip(line))
+		}
+	}
+}
+
+func TestNormalizeFullscreenFrameTrimsExcessRowsFromTop(t *testing.T) {
+	view := strings.Join([]string{
+		"row-1",
+		"row-2",
+		"row-3",
+		"row-4",
+		"row-5",
+	}, "\n")
+
+	got := normalizeFullscreenFrame(view, 0, 3)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected trimmed frame height 3, got %d", len(lines))
+	}
+	want := []string{"row-3", "row-4", "row-5"}
+	for i, line := range lines {
+		if line != want[i] {
+			t.Fatalf("expected line %d = %q, got %q", i, want[i], line)
+		}
+	}
+}
+
+func TestMouseHitTestingAccountsForFrameTopTrim(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	for i := 1; i <= 6; i++ {
+		m.commitLine(fmt.Sprintf("line-%d", i))
+	}
+	m.syncViewportContent()
+	m.frameTopTrim = 2
+
+	point, ok := m.mousePointToContentPoint(m.mainColumnX()+tuikit.GutterNarrative, 0, false)
+	if !ok {
+		t.Fatal("expected viewport hit-test to succeed after top trim")
+	}
+	if got, want := point.line, m.viewport.YOffset()+2; got != want {
+		t.Fatalf("expected screen row 0 to map to content line %d after trim, got %d", want, got)
+	}
+}
+
+func TestFixedAreaMouseAccountsForFrameTopTrim(t *testing.T) {
+	m := newTestModel()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	m.statusModel = "model"
+	m.statusContext = "1k/2k(50%)"
+	layout := m.fixedRowLayout()
+	m.frameTopTrim = 2
+
+	screenY := layout.footerY - m.frameTopTrim
+	handled, _ := m.handleFixedAreaMouse(mouseClick(m.mainColumnX()+tuikit.StatusInset, screenY, tea.MouseLeft).Mouse(), mousePhasePress)
+	if !handled {
+		t.Fatal("expected footer selection hit-test to succeed after top trim")
+	}
+	if got, want := m.fixedSelectionArea, fixedSelectionFooter; got != want {
+		t.Fatalf("expected footer selection area %v, got %v", want, got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Arrow key behavior tests
 // ---------------------------------------------------------------------------
@@ -4990,6 +5339,24 @@ func TestActiveExplorationBlockReRendersOnSpinnerTick(t *testing.T) {
 	}
 }
 
+func TestActiveExplorationBlockDoesNotReRenderOnSpinnerTickWhenScrolledUp(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	m.running = true
+	m.startRunningAnimation()
+	m.userScrolledUp = true
+
+	before := m.renderedStyledLines()[0]
+	_, _ = m.Update(spinner.TickMsg{})
+	after := m.renderedStyledLines()[0]
+	if before != after {
+		t.Fatalf("expected active exploration header animation to pause while scrolled up")
+	}
+}
+
 func TestBackgroundColorMsgSwitchesAutoThemeToLight(t *testing.T) {
 	t.Setenv("CAELIS_THEME", "")
 
@@ -5048,6 +5415,30 @@ func TestWideViewportCentersMainColumn(t *testing.T) {
 	}
 }
 
+func TestReadableContentWidthExpandsAcrossMediumTerminals(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+
+	if got, wantMin := m.readableContentWidth(), 110; got < wantMin {
+		t.Fatalf("expected medium terminal content width >= %d, got %d", wantMin, got)
+	}
+	if got, wantMax := m.readableContentWidth(), tuikit.ReadableContentWideMaxWidth; got > wantMax {
+		t.Fatalf("expected medium terminal content width <= %d, got %d", wantMax, got)
+	}
+}
+
+func TestReadableContentWidthKeepsBreathingRoomOnVeryWideTerminal(t *testing.T) {
+	m := NewModel(Config{ExecuteLine: noopExecute})
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 180, Height: 24})
+
+	if got, want := m.readableContentWidth(), tuikit.ReadableContentWideMaxWidth; got != want {
+		t.Fatalf("expected very wide terminal content width capped at %d, got %d", want, got)
+	}
+	if got, wantMin := m.mainColumnX(), 1; got < wantMin {
+		t.Fatalf("expected very wide terminal to preserve side breathing room, got offset %d", got)
+	}
+}
+
 func TestComposerSeparatorsUseMainColumnWidth(t *testing.T) {
 	m := NewModel(Config{ExecuteLine: noopExecute})
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 140, Height: 24})
@@ -5062,7 +5453,7 @@ func TestComposerSeparatorsUseMainColumnWidth(t *testing.T) {
 	}
 }
 
-func TestSlashCompletionOverlayCentersInMainColumn(t *testing.T) {
+func TestSlashCompletionOverlayAnchorsNearInputBar(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
 		Commands:    []string{"agent", "connect", "exit"},
@@ -5083,12 +5474,12 @@ func TestSlashCompletionOverlayCentersInMainColumn(t *testing.T) {
 	if titleLine == "" {
 		t.Fatalf("expected commands overlay in view, got:\n%s", view)
 	}
-	if idx := strings.Index(titleLine, "Commands"); idx < m.mainColumnX() {
-		t.Fatalf("expected commands overlay centered within main column, idx=%d offset=%d line=%q", idx, m.mainColumnX(), titleLine)
+	if idx, want := strings.Index(titleLine, "│"), m.mainColumnX()+inputHorizontalInset; idx != want {
+		t.Fatalf("expected commands overlay left-aligned with input bar, border=%d want=%d line=%q", idx, want, titleLine)
 	}
 }
 
-func TestPaletteOverlayCentersInMainColumn(t *testing.T) {
+func TestPaletteOverlayAnchorsNearInputBar(t *testing.T) {
 	m := NewModel(Config{
 		ExecuteLine: noopExecute,
 		Commands:    []string{"agent", "connect", "exit"},
@@ -5108,8 +5499,8 @@ func TestPaletteOverlayCentersInMainColumn(t *testing.T) {
 	if overlayLine == "" {
 		t.Fatalf("expected palette overlay in view, got:\n%s", view)
 	}
-	if idx := strings.Index(overlayLine, "/agent"); idx < m.mainColumnX() {
-		t.Fatalf("expected palette overlay centered within main column, idx=%d offset=%d line=%q", idx, m.mainColumnX(), overlayLine)
+	if idx, want := strings.Index(overlayLine, "│"), m.mainColumnX()+inputHorizontalInset; idx != want {
+		t.Fatalf("expected palette overlay left-aligned with input bar, border=%d want=%d line=%q", idx, want, overlayLine)
 	}
 }
 
@@ -5241,6 +5632,26 @@ func TestExplorationBlockCollapsesBeforeAssistantAnswer(t *testing.T) {
 	}
 	if strings.Contains(view, "Exploring") || strings.Contains(view, "Read state.go") {
 		t.Fatalf("expected expanded exploration block removed, got:\n%s", view)
+	}
+}
+
+func TestExplorationBlockCollapsesBeforeUserMessage(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	_, _ = m.Update(tuievents.UserMessageMsg{Text: "next question"})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "▸ Explored 1 files, 1 searches") {
+		t.Fatalf("expected collapsed exploration summary before user message, got:\n%s", view)
+	}
+	if !strings.Contains(view, "> next question") {
+		t.Fatalf("expected user message after collapsed summary, got:\n%s", view)
+	}
+	if strings.Contains(view, "Exploring") || strings.Contains(view, "Read state.go") {
+		t.Fatalf("expected expanded exploration block removed after user message, got:\n%s", view)
 	}
 }
 

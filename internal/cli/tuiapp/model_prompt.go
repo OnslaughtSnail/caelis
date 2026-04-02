@@ -286,14 +286,14 @@ func (m *Model) handlePromptChoiceKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "up", "k", "shift+tab", "backtab":
-		if m.activePrompt.choiceIndex > 0 {
-			m.activePrompt.choiceIndex--
+		if len(visible) > 0 {
+			m.activePrompt.choiceIndex = wrapSelectionIndex(m.activePrompt.choiceIndex, len(visible), -1)
 			m.syncPromptChoiceWindow()
 		}
 		return nil
 	case "down", "j", "tab":
-		if m.activePrompt.choiceIndex < len(visible)-1 {
-			m.activePrompt.choiceIndex++
+		if len(visible) > 0 {
+			m.activePrompt.choiceIndex = wrapSelectionIndex(m.activePrompt.choiceIndex, len(visible), 1)
 			m.syncPromptChoiceWindow()
 		}
 		return nil
@@ -487,4 +487,15 @@ func clampPromptChoiceWindow(state *promptState, visibleCount int) {
 	if state.choiceIndex >= state.scrollOffset+maxVisiblePromptChoices {
 		state.scrollOffset = state.choiceIndex - maxVisiblePromptChoices + 1
 	}
+}
+
+func wrapSelectionIndex(current int, count int, delta int) int {
+	if count <= 0 {
+		return 0
+	}
+	next := (current + delta) % count
+	if next < 0 {
+		next += count
+	}
+	return next
 }

@@ -335,8 +335,7 @@ func (m *Model) handleSubagentStart(msg tuievents.SubagentStartMsg) (tea.Model, 
 	}
 	m.syncSubagentSessionPanels(sessionKey)
 	m.syncInlineSubagentAnchorState(panel)
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleSubagentStatus(msg tuievents.SubagentStatusMsg) (tea.Model, tea.Cmd) {
@@ -364,8 +363,7 @@ func (m *Model) handleSubagentStatus(msg tuievents.SubagentStatusMsg) (tea.Model
 	}
 	m.syncSubagentSessionPanels(sessionKey)
 	m.syncInlineSubagentAnchorState(panel)
-	m.syncViewportContent()
-	return m, cmd
+	return m, tea.Batch(cmd, m.requestStreamViewportSync())
 }
 
 func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model, tea.Cmd) {
@@ -387,9 +385,9 @@ func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model
 	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false); panel != nil {
 		m.reviveSubagentPanel(panel, false)
 	}
-	m.applySubagentStreamImmediate(sessionKey, streamKind, chunk)
+	cmd := m.applySubagentStreamImmediate(sessionKey, streamKind, chunk)
 	m.syncSubagentSessionPanels(sessionKey)
-	return m, nil
+	return m, cmd
 }
 
 func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string, final bool) (tea.Model, tea.Cmd) {
@@ -418,16 +416,16 @@ func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string
 	return m, m.ensurePendingStreamSmoothingTick()
 }
 
-func (m *Model) applySubagentStreamImmediate(sessionKey string, stream string, chunk string) {
+func (m *Model) applySubagentStreamImmediate(sessionKey string, stream string, chunk string) tea.Cmd {
 	if m == nil || strings.TrimSpace(sessionKey) == "" || chunk == "" {
-		return
+		return nil
 	}
 	state := m.subagentSessions[sessionKey]
 	if state == nil {
 		_, state = m.ensureSubagentSessionState(sessionKey, "", "")
 	}
 	if state == nil {
-		return
+		return nil
 	}
 	switch stream {
 	case "assistant":
@@ -435,10 +433,10 @@ func (m *Model) applySubagentStreamImmediate(sessionKey string, stream string, c
 	case "reasoning":
 		state.AppendStreamChunk(SEReasoning, chunk)
 	default:
-		return
+		return nil
 	}
 	m.syncSubagentSessionPanels(sessionKey)
-	m.syncViewportContent()
+	return m.requestStreamViewportSync()
 }
 
 func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.Model, tea.Cmd) {
@@ -459,8 +457,7 @@ func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.M
 		m.reviveSubagentPanel(panel, false)
 	}
 	m.syncSubagentSessionPanels(sessionKey)
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleSubagentPlan(msg tuievents.SubagentPlanMsg) (tea.Model, tea.Cmd) {
@@ -485,8 +482,7 @@ func (m *Model) handleSubagentPlan(msg tuievents.SubagentPlanMsg) (tea.Model, te
 		m.reviveSubagentPanel(panel, false)
 	}
 	m.syncSubagentSessionPanels(sessionKey)
-	m.syncViewportContent()
-	return m, nil
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleSubagentDone(msg tuievents.SubagentDoneMsg) (tea.Model, tea.Cmd) {
@@ -505,8 +501,7 @@ func (m *Model) handleSubagentDone(msg tuievents.SubagentDoneMsg) (tea.Model, te
 	}
 	m.syncSubagentSessionPanels(sessionKey)
 	m.syncInlineSubagentAnchorState(panel)
-	m.syncViewportContent()
-	return m, cmd
+	return m, tea.Batch(cmd, m.requestStreamViewportSync())
 }
 
 func (m *Model) scheduleInlineSubagentCollapse(panel *SubagentPanelBlock) {

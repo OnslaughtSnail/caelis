@@ -19,7 +19,7 @@ func driveSmoothingFrames(m *Model, frames int) {
 	}
 	now := time.Now().Add(m.streamWarmDelay() + m.streamTickInterval())
 	for i := 0; i < frames; i++ {
-		_, _ = m.Update(frameTickMsg{at: now})
+		_, _ = m.Update(tickAt(frameTickStreamSmoothing, now))
 		now = now.Add(m.streamTickInterval())
 	}
 }

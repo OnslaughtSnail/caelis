@@ -1,9 +1,12 @@
 package tuiapp
 
 import (
+	"hash/fnv"
+	"strconv"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/charmbracelet/x/ansi"
@@ -62,6 +65,8 @@ func (m *Model) renderedStyledLines() []string {
 			lines = append(lines, row.Styled)
 		}
 	}
+	streamStyled, _, _ := m.renderStreamViewportLines(ctx)
+	lines = append(lines, streamStyled...)
 	return lines
 }
 
@@ -74,113 +79,17 @@ func (m *Model) syncViewportContent() {
 		m.viewportDirty = true
 		return
 	}
+	m.offscreenViewportDirty = false
+	m.offscreenViewportTickScheduled = false
+	m.offscreenViewportSyncAt = time.Time{}
 	wrapWidth := maxInt(1, m.viewport.Width())
 	ctx := BlockRenderContext{
 		Width:     wrapWidth,
 		TermWidth: m.width,
 		Theme:     m.theme,
 	}
-
-	// Render all blocks → collect RenderedRows (unwrapped).
-	var rawRows []RenderedRow
-	for _, block := range m.doc.Blocks() {
-		rawRows = append(rawRows, block.Render(ctx)...)
-	}
-
-	// Build wrapped viewport lines: styled and blockIDs.
-	// Plain is derived from styled at the end (rendered-text-first).
-	styledLines := make([]string, 0, len(rawRows)+8)
-	blockIDs := make([]string, 0, len(rawRows)+8)
-
-	for _, row := range rawRows {
-		bid := row.BlockID
-		styledLine := m.adaptHistoryLineForViewport(row.Styled, wrapWidth)
-
-		var wrappedStyled string
-
-		if row.PreWrapped {
-			// Glamour usually wraps finalized narrative correctly, but very long
-			// single tokens (for example URLs) can still exceed the viewport.
-			// Keep glamour's layout when it fits, otherwise apply an ANSI-aware
-			// hard wrap as a safety net so the viewport never overflows.
-			if graphemeWidth(ansi.Strip(styledLine)) > wrapWidth {
-				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
-			} else {
-				wrappedStyled = styledLine
-			}
-		} else {
-			switch m.renderedRowWrapMode(bid) {
-			case BlockAssistant, BlockReasoning:
-				// Narrative: word-wrap and re-style.
-				wrappedStyled = m.wrapNarrativeRowStyled(row, wrapWidth)
-			case BlockParticipantTurn:
-				// Participant turns already render wrapped rows in block.Render.
-				wrappedStyled = styledLine
-			default:
-				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
-			}
-		}
-
-		if wrappedStyled == "" {
-			styledLines = append(styledLines, "")
-			blockIDs = append(blockIDs, bid)
-			continue
-		}
-
-		sParts := strings.Split(wrappedStyled, "\n")
-		styledLines = append(styledLines, sParts...)
-		for range sParts {
-			blockIDs = append(blockIDs, bid)
-		}
-	}
-
-	// Current streaming partial line (if any).
-	if m.streamLine != "" {
-		streamLines := strings.Split(m.streamLine, "\n")
-		prevStyle := m.lastCommittedStyle
-		for _, sl := range streamLines {
-			style := tuikit.DetectLineStyleWithContext(sl, prevStyle)
-
-			var wrappedStyled string
-			switch style {
-			case tuikit.LineStyleAssistant, tuikit.LineStyleReasoning:
-				// Word-wrap plain, then apply inline styling.
-				segments := graphemeWordWrap(sl, wrapWidth)
-				if len(segments) == 0 {
-					wrappedStyled = ""
-				} else {
-					baseStyle := narrativeBodyStyle(style, m.theme)
-					styledSegs := make([]string, len(segments))
-					for j, seg := range segments {
-						styledSegs[j] = renderInlineMarkdown(seg, baseStyle, m.theme)
-					}
-					wrappedStyled = strings.Join(styledSegs, "\n")
-				}
-			default:
-				colored := tuikit.ColorizeLogLine(sl, style, m.theme)
-				wrappedStyled = hardWrapDisplayLine(colored, wrapWidth)
-			}
-
-			if wrappedStyled == "" {
-				styledLines = append(styledLines, "")
-				blockIDs = append(blockIDs, "")
-			} else {
-				sParts := strings.Split(wrappedStyled, "\n")
-				styledLines = append(styledLines, sParts...)
-				for range sParts {
-					blockIDs = append(blockIDs, "")
-				}
-			}
-			prevStyle = style
-		}
-	}
-
-	m.viewportStyledLines = append(m.viewportStyledLines[:0], styledLines...)
-	m.viewportBlockIDs = append(m.viewportBlockIDs[:0], blockIDs...)
-
-	// Rendered-text-first: derive plain from styled via ANSI strip.
-	// This ensures copy text always matches what the user sees on screen.
-	m.viewportPlainLines = deriveViewportPlainLines(m.viewportPlainLines[:0], styledLines)
+	m.rebuildViewportRenderCache(ctx)
+	m.rebuildViewportLineCaches(ctx)
 
 	m.renderViewportContent()
 }
@@ -241,6 +150,35 @@ func (m *Model) wrapNarrativeRowStyled(row RenderedRow, width int) string {
 	return strings.Join(styled, "\n")
 }
 
+func (m *Model) wrapNarrativeRowPlain(row RenderedRow, width int) []string {
+	plain := strings.TrimRight(row.Plain, " ")
+	if plain == "" {
+		plain = strings.TrimRight(ansi.Strip(row.Styled), " ")
+	}
+	if width <= 0 {
+		return []string{plain}
+	}
+	if graphemeWidth(plain) <= width {
+		return []string{plain}
+	}
+	segments := graphemeWordWrap(plain, width)
+	if len(segments) == 0 {
+		return []string{""}
+	}
+	return normalizeWrappedPlainSegments(segments)
+}
+
+func normalizeWrappedPlainSegments(segments []string) []string {
+	if len(segments) == 0 {
+		return nil
+	}
+	out := make([]string, len(segments))
+	for i, seg := range segments {
+		out[i] = strings.TrimRight(seg, " ")
+	}
+	return out
+}
+
 func (m *Model) adaptHistoryLineForViewport(line string, wrapWidth int) string {
 	plain := strings.TrimSpace(ansi.Strip(line))
 	prefix := ""
@@ -276,6 +214,17 @@ func deriveViewportPlainLines(buf []string, styledLines []string) []string {
 	return buf
 }
 
+func viewportLinesFingerprint(lines []string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strconv.Itoa(len(lines))))
+	_, _ = h.Write([]byte{0})
+	for _, line := range lines {
+		_, _ = h.Write([]byte(line))
+		_, _ = h.Write([]byte{0})
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
+}
+
 func truncateMiddleDisplay(text string, width int) string {
 	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 	if text == "" || width <= 0 || displayColumns(text) <= width {
@@ -306,10 +255,10 @@ func (m *Model) renderViewportContent() {
 	if m.hasSelectionRange() {
 		lines = m.renderSelectionLines()
 	}
-	content := strings.Join(lines, "\n")
-	if content != m.lastViewportContent {
-		m.viewport.SetContent(content)
-		m.lastViewportContent = content
+	fingerprint := viewportLinesFingerprint(lines)
+	if fingerprint != m.lastViewportContent {
+		m.viewport.SetContentLines(append([]string(nil), lines...))
+		m.lastViewportContent = fingerprint
 	}
 
 	// Auto-scroll: decide based on current state AFTER SetContent so
@@ -320,6 +269,72 @@ func (m *Model) renderViewportContent() {
 		m.viewport.GotoBottom()
 	}
 	m.streamPlayback.LastFrameRenderCost = time.Since(start)
+}
+
+func (m *Model) offscreenViewportSyncInterval() time.Duration {
+	interval := m.streamTickInterval() * 5
+	if interval < offscreenViewportSyncIntervalFloor {
+		interval = offscreenViewportSyncIntervalFloor
+	}
+	if interval > offscreenViewportSyncIntervalMax {
+		interval = offscreenViewportSyncIntervalMax
+	}
+	return interval
+}
+
+func (m *Model) shouldDeferStreamViewportSync() bool {
+	if m == nil || !m.userScrolledUp {
+		return false
+	}
+	if m.selecting || m.inputSelecting || m.fixedSelecting {
+		return false
+	}
+	return !m.hasSelectionRange()
+}
+
+func (m *Model) ensureOffscreenViewportTick() tea.Cmd {
+	if m == nil || !m.offscreenViewportDirty || m.offscreenViewportTickScheduled {
+		return nil
+	}
+	delay := time.Until(m.offscreenViewportSyncAt)
+	if delay <= 0 {
+		delay = time.Millisecond
+	}
+	m.offscreenViewportTickScheduled = true
+	return frameTickCmd(frameTickOffscreen, delay)
+}
+
+func (m *Model) requestStreamViewportSync() tea.Cmd {
+	if m == nil {
+		return nil
+	}
+	if !m.shouldDeferStreamViewportSync() {
+		m.syncViewportContent()
+		return nil
+	}
+	m.offscreenViewportDirty = true
+	if m.offscreenViewportSyncAt.IsZero() {
+		m.offscreenViewportSyncAt = time.Now().Add(m.offscreenViewportSyncInterval())
+	}
+	return m.ensureOffscreenViewportTick()
+}
+
+func (m *Model) flushPendingOffscreenViewportSync(now time.Time) tea.Cmd {
+	if m == nil || !m.offscreenViewportDirty {
+		m.offscreenViewportSyncAt = time.Time{}
+		return nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if m.shouldDeferStreamViewportSync() {
+		m.flushDeferredMainStreamSmoothing()
+		m.offscreenViewportSyncAt = now.Add(m.offscreenViewportSyncInterval())
+		return m.ensureOffscreenViewportTick()
+	}
+	m.flushDeferredMainStreamSmoothing()
+	m.syncViewportContent()
+	return nil
 }
 
 // ensureViewportLayout reconciles the viewport height with the current
@@ -365,6 +380,7 @@ func (m *Model) hasSelectionRange() bool {
 }
 
 func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectionPoint, bool) {
+	y = m.screenYToFrameY(y)
 	if len(m.viewportPlainLines) == 0 || m.viewport.Height() <= 0 {
 		return textSelectionPoint{}, false
 	}
@@ -410,6 +426,7 @@ func (m *Model) inputAreaBounds() (startY int, height int, ok bool) {
 }
 
 func (m *Model) mousePointToInputPoint(x int, y int, clamp bool, lines []string) (textSelectionPoint, bool) {
+	y = m.screenYToFrameY(y)
 	startY, height, ok := m.inputAreaBounds()
 	if !ok || len(lines) == 0 {
 		return textSelectionPoint{}, false
@@ -510,12 +527,20 @@ func (m *Model) pendingQueueSectionHeight() int {
 }
 
 func (m *Model) fixedRegionAt(y int) (fixedTextRegion, bool) {
+	y = m.screenYToFrameY(y)
 	for _, region := range m.fixedTextRegions() {
 		if region.y == y {
 			return region, true
 		}
 	}
 	return fixedTextRegion{}, false
+}
+
+func (m *Model) screenYToFrameY(y int) int {
+	if y < 0 {
+		return y
+	}
+	return y + maxInt(0, m.frameTopTrim)
 }
 
 func (m *Model) fixedRowPoint(region fixedTextRegion, x int, clamp bool) (textSelectionPoint, bool) {

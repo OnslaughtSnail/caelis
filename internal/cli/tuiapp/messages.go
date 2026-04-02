@@ -18,8 +18,19 @@ type ctrlCExpireMsg struct {
 }
 
 type paletteAnimationMsg struct{}
+type frameTickKind string
+
+const (
+	frameTickDeferredBatch    frameTickKind = "deferred_batch"
+	frameTickOffscreen        frameTickKind = "offscreen"
+	frameTickStreamSmoothing  frameTickKind = "stream_smoothing"
+	frameTickPanelAnimation   frameTickKind = "panel_animation"
+	frameTickScrollbarVisible frameTickKind = "scrollbar_visibility"
+)
+
 type frameTickMsg struct {
-	at time.Time
+	at   time.Time
+	kind frameTickKind
 }
 
 func animatePaletteCmd() tea.Cmd {
@@ -28,12 +39,12 @@ func animatePaletteCmd() tea.Cmd {
 	})
 }
 
-func frameTickCmd(interval time.Duration) tea.Cmd {
+func frameTickCmd(kind frameTickKind, interval time.Duration) tea.Cmd {
 	if interval <= 0 {
 		interval = streamSmoothingTickIntervalDefault
 	}
 	return tea.Tick(interval, func(at time.Time) tea.Msg {
-		return frameTickMsg{at: at}
+		return frameTickMsg{at: at, kind: kind}
 	})
 }
 

@@ -573,6 +573,31 @@ func TestForwardEventToTUI_BashSuccessWithoutOutputDoesNotEmitExitCodeLine(t *te
 	}
 }
 
+func TestForwardEventToTUI_BashFinalFallbackCarriesTerminalState(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{tuiSender: sender}
+
+	handled := c.forwardEventToTUI(&session.Event{
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call_bash_done",
+			Name: "BASH",
+			Result: map[string]any{
+				"exit_code": 0,
+			},
+		}),
+	}, map[string]toolCallSnapshot{})
+	if !handled {
+		t.Fatal("expected bash response to be handled")
+	}
+	last, ok := sender.msgs[len(sender.msgs)-1].(tuievents.TaskStreamMsg)
+	if !ok {
+		t.Fatalf("expected final task stream message, got %T", sender.msgs[len(sender.msgs)-1])
+	}
+	if !last.Final || last.State != "completed" {
+		t.Fatalf("expected completed final bash panel event, got %+v", last)
+	}
+}
+
 func TestForwardEventToTUI_BashErrorWithoutOutputEmitsToolResultSummary(t *testing.T) {
 	sender := &testSender{}
 	c := &cliConsole{tuiSender: sender}

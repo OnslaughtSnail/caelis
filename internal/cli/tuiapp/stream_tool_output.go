@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
@@ -301,7 +302,12 @@ func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string
 	if panel == nil {
 		return
 	}
-	cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	// Late stdout/stderr chunks can arrive after the terminal state has already
+	// scheduled auto-collapse. Keep the collapse in place unless the tool has
+	// explicitly re-entered a live state.
+	if !isTerminalToolOutputState(panel.State) {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	}
 	normalized := tuikit.SanitizeLogText(chunk)
 	normalized = strings.ReplaceAll(strings.ReplaceAll(normalized, "\r\n", "\n"), "\r", "\n")
 	stream = strings.ToLower(strings.TrimSpace(stream))
@@ -343,13 +349,13 @@ func (m *Model) appendSpawnPreviewChunk(panel *BashPanelBlock, partial, chunk, s
 	return partial
 }
 
-func (m *Model) applySpawnPreviewImmediate(panelID string, stream string, chunk string) {
+func (m *Model) applySpawnPreviewImmediate(panelID string, stream string, chunk string) tea.Cmd {
 	if m == nil || strings.TrimSpace(panelID) == "" || chunk == "" {
-		return
+		return nil
 	}
 	panel, _ := m.doc.Find(panelID).(*BashPanelBlock)
 	if panel == nil {
-		return
+		return nil
 	}
 	switch strings.ToLower(strings.TrimSpace(stream)) {
 	case "reasoning":
@@ -363,7 +369,7 @@ func (m *Model) applySpawnPreviewImmediate(panelID string, stream string, chunk 
 	}
 	panel.LastStream = strings.ToLower(strings.TrimSpace(stream))
 	panel.UpdatedAt = time.Now()
-	m.syncViewportContent()
+	return m.requestStreamViewportSync()
 }
 
 func (m *Model) consumeSubagentPreviewChunkBlock(panel *BashPanelBlock, partial, chunk, stream string) string {

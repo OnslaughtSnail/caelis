@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## v0.0.37 - 2026-04-02
+
+### TUI Layout, Overlay, And Interaction Refinements
+- Improved Bubble Tea fullscreen frame normalization so resize and inline panel-collapse paths keep the screen fully padded without leaving short frames behind.
+- Re-anchored prompt, completion, and palette overlays beside the input bar instead of centering them in the transcript column, making approval and command pickers feel more consistent with the composer.
+- Expanded readable transcript width on medium and wide terminals while preserving side breathing room on very large screens.
+
+### Exploration Summaries, Composer, And Navigation
+- Kept finalized exploration activity as collapsible summaries in the transcript, including click-to-expand details and correct history-tail state restoration after toggling.
+- Fixed turn-divider rendering and composer placeholder/ghost text truncation so narrow terminals no longer wrap or overflow those UI elements unexpectedly.
+- Added wraparound keyboard navigation for slash completion, slash-argument pickers, mention/skill/resume pickers, and prompt choice lists.
+
+### Command Surface And Exit Handling
+- Removed the legacy `/version` slash command from the interactive console help surface.
+- Hardened Bubble Tea hard-quit handling so requested program kills are treated as clean exits instead of surfacing spurious `ErrProgramKilled` failures.
+
+### Deferred Batch Scheduling Fix
+- Fixed deferred log-chunk and task-stream flush handling so viewport sync commands are propagated correctly while scrolled away from the bottom, preventing offscreen transcript refresh from stalling after batched updates.
+
+### Release Metadata
+- Bumped release metadata to `v0.0.37` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
+
 ## v0.0.35 - 2026-04-01
 
 ### TUI Transcript And Subagent Fixes

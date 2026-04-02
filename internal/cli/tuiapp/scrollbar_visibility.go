@@ -78,7 +78,7 @@ func (m *Model) ensureScrollbarTick() tea.Cmd {
 		return nil
 	}
 	m.scrollbarTickScheduled = true
-	return frameTickCmd(delay)
+	return frameTickCmd(frameTickScrollbarVisible, delay)
 }
 
 func (m *Model) advanceScrollbarVisibility(_ time.Time) tea.Cmd {
@@ -149,22 +149,32 @@ func (m *Model) beginScrollbarDrag(mouse tea.Mouse) (bool, tea.Cmd) {
 	}
 	m.scrollbarDrag = scrollbarDragState{active: true, target: target}
 	cmd := m.touchScrollbarTarget(target)
+	wasScrolledUp := m.userScrolledUp
 	changed := m.applyScrollbarDrag(mouse)
+	var resumeCmd tea.Cmd
 	if changed {
 		m.syncViewportContent()
+		if wasScrolledUp && !m.userScrolledUp {
+			resumeCmd = m.resumeRunningAnimationIfNeeded()
+		}
 	}
-	return true, tea.Batch(cmd, m.ensureScrollbarTick())
+	return true, tea.Batch(cmd, m.ensureScrollbarTick(), resumeCmd)
 }
 
 func (m *Model) updateScrollbarDrag(mouse tea.Mouse) tea.Cmd {
 	if !m.scrollbarDrag.active {
 		return nil
 	}
+	wasScrolledUp := m.userScrolledUp
 	changed := m.applyScrollbarDrag(mouse)
+	var resumeCmd tea.Cmd
 	if changed {
 		m.syncViewportContent()
+		if wasScrolledUp && !m.userScrolledUp {
+			resumeCmd = m.resumeRunningAnimationIfNeeded()
+		}
 	}
-	return tea.Batch(m.touchScrollbarTarget(m.scrollbarDrag.target), m.ensureScrollbarTick())
+	return tea.Batch(m.touchScrollbarTarget(m.scrollbarDrag.target), m.ensureScrollbarTick(), resumeCmd)
 }
 
 func (m *Model) endScrollbarDrag() {
@@ -193,7 +203,7 @@ func (m *Model) dragViewportScrollbarTo(y int) bool {
 	if maxOffset == 0 {
 		return false
 	}
-	vy := y
+	vy := m.screenYToFrameY(y)
 	if vy < 0 {
 		vy = 0
 	}
@@ -220,7 +230,7 @@ func (m *Model) dragPanelScrollbarTo(target scrollbarHitTarget, y int) bool {
 		TermWidth: m.width,
 		Theme:     m.theme,
 	}
-	localY := y
+	localY := m.screenYToFrameY(y)
 	if localY < 0 {
 		localY = 0
 	}
@@ -282,6 +292,7 @@ func (m *Model) viewportScrollbarTargetAtMouse(x, y int) (scrollbarHitTarget, bo
 	}
 	total := m.viewport.TotalLineCount()
 	visible := maxInt(1, m.viewport.Height())
+	y = m.screenYToFrameY(y)
 	if total <= visible || y < 0 || y >= visible {
 		return scrollbarHitTarget{}, false
 	}
@@ -333,6 +344,7 @@ func scrollbarVisibleUntil(until *time.Time, now time.Time) bool {
 }
 
 func (m *Model) contentLineAtViewportY(y int) (int, bool) {
+	y = m.screenYToFrameY(y)
 	if y < 0 || y >= m.viewport.Height() {
 		return 0, false
 	}
