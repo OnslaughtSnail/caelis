@@ -3142,6 +3142,60 @@ func TestBashPanelPersistsAfterNewContent(t *testing.T) {
 
 }
 
+func TestBashLateChunkAfterFinalKeepsAutoCollapse(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ BASH long-task\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "BASH", CallID: "call-1", Reset: true})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "line-1\n",
+	})
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		State:  "completed",
+		Final:  true,
+	})
+
+	blockID := m.toolOutputBlockIDs["call-1"]
+	if blockID == "" {
+		t.Fatal("expected bash panel to exist after final")
+	}
+	bp := m.doc.Find(blockID).(*BashPanelBlock)
+	if bp.CollapseAt.IsZero() {
+		t.Fatal("expected final BASH panel to schedule auto-collapse")
+	}
+	collapseAt := bp.CollapseAt
+
+	// Detached streamers can deliver a final stdout chunk after the terminal
+	// state. That late chunk should not cancel the already scheduled collapse.
+	_, _ = m.Update(tuievents.ToolStreamMsg{
+		Tool:   "BASH",
+		CallID: "call-1",
+		Stream: "stdout",
+		Chunk:  "late-tail\n",
+	})
+	if bp.CollapseAt.IsZero() {
+		t.Fatal("expected late chunk to keep scheduled collapse")
+	}
+	if !bp.CollapseAt.Equal(collapseAt) {
+		t.Fatalf("expected late chunk to preserve collapse timing, got %v want %v", bp.CollapseAt, collapseAt)
+	}
+
+	driveBashPanelCollapse(m, bp)
+	view := stripModelView(m)
+	if !strings.Contains(view, "BASH long-task") {
+		t.Fatalf("expected collapsed bash call line to remain visible, got:\n%s", view)
+	}
+	if strings.Contains(view, "line-1") || strings.Contains(view, "late-tail") {
+		t.Fatalf("expected late chunk to be hidden once panel collapses, got:\n%s", view)
+	}
+}
+
 func TestViewAnchorsToolOutputBelowMatchingCallLines(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

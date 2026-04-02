@@ -14,6 +14,7 @@ import (
 	"time"
 
 	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
+	coreacpmeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
@@ -194,6 +195,7 @@ func (s *Service) NewSession(ctx context.Context, req internalacp.NewSessionRequ
 		configValues: s.initialConfigValues(),
 		meta:         internalacp.CloneMeta(req.Meta),
 	}
+	s.applyMetaModelAlias(sess)
 	s.normalizeSessionConfig(sess)
 	resources, err := s.newSessionResources(ctx, sessionID, sess.cwd, caps, sess.mode)
 	if err != nil {
@@ -557,6 +559,7 @@ func (s *Service) loadSessionState(ctx context.Context, sessionID string, resolv
 		meta:         internalacp.CloneMeta(meta),
 		planEntries:  append([]internalacp.PlanEntry(nil), planEntries...),
 	}
+	s.applyMetaModelAlias(sess)
 	s.normalizeSessionConfig(sess)
 	resources, err := s.newSessionResources(ctx, sessionID, sess.cwd, caps, sess.mode)
 	if err != nil {
@@ -721,6 +724,24 @@ func (s *Service) normalizeSessionConfig(sess *managedSession) {
 		sess.modeID = strings.TrimSpace(next.ModeID)
 	}
 	sess.configValues = cloneStringMap(next.ConfigValues)
+}
+
+func (s *Service) applyMetaModelAlias(sess *managedSession) {
+	if sess == nil {
+		return
+	}
+	alias := coreacpmeta.ModelAlias(sess.metaSnapshot())
+	if alias == "" {
+		return
+	}
+	sess.stateMu.Lock()
+	defer sess.stateMu.Unlock()
+	if sess.configValues == nil {
+		sess.configValues = map[string]string{}
+	}
+	if strings.TrimSpace(sess.configValues["model"]) == "" {
+		sess.configValues["model"] = alias
+	}
 }
 
 func (s *Service) persistSessionState(ctx context.Context, sessRef *session.Session, sess *managedSession) error {

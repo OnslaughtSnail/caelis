@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
 
+	coreacpmeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 )
 
 func TestHandleModel_FixedReasoningRejectsOverrides(t *testing.T) {
@@ -258,5 +262,34 @@ func TestHandleModel_DelPromptsForMultipleRemovals(t *testing.T) {
 	text := out.String()
 	if !strings.Contains(text, "model removed: xiaomi/mimo-v2-flash") || !strings.Contains(text, "model removed: openai/o3") {
 		t.Fatalf("expected both removal notes, got %q", text)
+	}
+}
+
+func TestPersistSessionModelAlias_StoresACPMetadata(t *testing.T) {
+	store := inmemory.New()
+	console := &cliConsole{
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "s-1",
+		modelAlias:   "minimax/minimax-m2.7-highspeed",
+		sessionStore: store,
+	}
+
+	if err := console.persistSessionModelAlias(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	values, err := store.SnapshotState(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      "s-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acpState, _ := values["acp"].(map[string]any)
+	meta, _ := acpState["meta"].(map[string]any)
+	if got := coreacpmeta.ModelAlias(meta); got != "minimax/minimax-m2.7-highspeed" {
+		t.Fatalf("expected persisted model alias, got %q", got)
 	}
 }

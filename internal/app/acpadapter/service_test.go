@@ -386,6 +386,106 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 	assertMeta(true, "load-1", "prompt-1")
 }
 
+func TestServiceNewSession_SeedsModelFromSessionMeta(t *testing.T) {
+	ctx := context.Background()
+	store := inmemory.New()
+	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRT, err := toolexec.New(toolexec.Config{
+		PermissionMode: toolexec.PermissionModeFullControl,
+		SandboxRunner:  noopExecRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = toolexec.Close(execRT) })
+
+	var gotModel string
+	svc, err := New(Config{
+		Runtime:       rt,
+		Store:         store,
+		AppName:       "app",
+		UserID:        "u",
+		WorkspaceRoot: "/workspace",
+		SessionModes: []internalacp.SessionMode{
+			{ID: "default", Name: "Default"},
+		},
+		DefaultModeID: "default",
+		SessionConfig: []internalacp.SessionConfigOptionTemplate{
+			{
+				ID:           "mode",
+				Name:         "Mode",
+				Category:     "mode",
+				DefaultValue: "default",
+				Options: []internalacp.SessionConfigSelectOption{
+					{Value: "default", Name: "Default"},
+				},
+			},
+			{
+				ID:           "model",
+				Name:         "Model",
+				Category:     "model",
+				DefaultValue: "",
+				Options: []internalacp.SessionConfigSelectOption{
+					{Value: "minimax/minimax-m2.7-highspeed", Name: "Minimax"},
+				},
+			},
+		},
+		NewModel: func(cfg internalacp.AgentSessionConfig) (model.LLM, error) {
+			gotModel = strings.TrimSpace(cfg.ConfigValues["model"])
+			return &scriptedLLM{calls: [][]*model.Response{{{Message: model.NewTextMessage(model.RoleAssistant, "ok")}}}}, nil
+		},
+		BuildSystemPrompt: func(string) (string, error) { return "test", nil },
+		NewSessionResources: func(context.Context, string, string, internalacp.ClientCapabilities, func() string) (*internalacp.SessionResources, error) {
+			return &internalacp.SessionResources{Runtime: execRT}, nil
+		},
+		NewAgent: func(stream bool, _ string, systemPrompt string, _ internalacp.AgentSessionConfig) (agent.Agent, error) {
+			return llmagent.New(llmagent.Config{
+				Name:              "test-agent",
+				SystemPrompt:      systemPrompt,
+				StreamModel:       stream,
+				EmitPartialEvents: stream,
+			})
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+		CWD: "/workspace/project",
+		Meta: map[string]any{
+			"caelis": map[string]any{
+				"modelAlias": "minimax/minimax-m2.7-highspeed",
+			},
+		},
+	}, internalacp.ClientCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := currentOptionValue(created.ConfigOptions, "model"); got != "minimax/minimax-m2.7-highspeed" {
+		t.Fatalf("expected session model seeded from metadata, got %q", got)
+	}
+
+	result, err := svc.StartPrompt(ctx, internalacp.StartPromptRequest{
+		SessionID: created.SessionID,
+		InputText: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = result.Handle.Close() }()
+	_, errs := drainPromptEvents(result.Handle.Events())
+	if len(errs) > 0 {
+		t.Fatalf("unexpected prompt errors: %v", errs)
+	}
+	if gotModel != "minimax/minimax-m2.7-highspeed" {
+		t.Fatalf("expected NewModel to see metadata-derived model alias, got %q", gotModel)
+	}
+}
+
 func TestServiceSessionServiceDisablesSpawnForDelegatedChildSessions(t *testing.T) {
 	svc, cleanup := newTestService(t, testServiceConfig{})
 	defer cleanup()

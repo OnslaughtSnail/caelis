@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	coreacpmeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/internal/app/acpext"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
@@ -597,6 +598,9 @@ func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared 
 	ctx = cliContext(ctx)
 	ctx = toolexec.WithApprover(ctx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
+	if err := c.persistSessionModelAlias(ctx); err != nil {
+		return err
+	}
 	if c.tuiSender != nil {
 		ctx = taskstream.WithStreamer(ctx, taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
 			if c.tuiSender == nil {
@@ -672,6 +676,54 @@ func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared 
 			c.refreshContextUsageEstimate(floor)
 		},
 	})
+}
+
+func (c *cliConsole) persistSessionModelAlias(ctx context.Context) error {
+	if c == nil || c.sessionStore == nil {
+		return nil
+	}
+	alias := strings.TrimSpace(c.modelAlias)
+	if alias == "" || strings.TrimSpace(c.appName) == "" || strings.TrimSpace(c.userID) == "" || strings.TrimSpace(c.sessionID) == "" {
+		return nil
+	}
+	sess := &session.Session{
+		AppName: c.appName,
+		UserID:  c.userID,
+		ID:      c.sessionID,
+	}
+	if _, err := c.sessionStore.GetOrCreate(ctx, sess); err != nil {
+		return err
+	}
+	if updater, ok := c.sessionStore.(session.StateUpdateStore); ok {
+		return updater.UpdateState(ctx, sess, func(values map[string]any) (map[string]any, error) {
+			if values == nil {
+				values = map[string]any{}
+			}
+			acpState, _ := values["acp"].(map[string]any)
+			if acpState == nil {
+				acpState = map[string]any{}
+			}
+			meta, _ := acpState["meta"].(map[string]any)
+			acpState["meta"] = coreacpmeta.WithModelAlias(meta, alias)
+			values["acp"] = acpState
+			return values, nil
+		})
+	}
+	values, err := c.sessionStore.SnapshotState(ctx, sess)
+	if err != nil {
+		return err
+	}
+	if values == nil {
+		values = map[string]any{}
+	}
+	acpState, _ := values["acp"].(map[string]any)
+	if acpState == nil {
+		acpState = map[string]any{}
+	}
+	meta, _ := acpState["meta"].(map[string]any)
+	acpState["meta"] = coreacpmeta.WithModelAlias(meta, alias)
+	values["acp"] = acpState
+	return c.sessionStore.ReplaceState(ctx, sess, values)
 }
 
 func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) error {
@@ -1174,9 +1226,14 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 			if !emittedTaskStream {
 				c.emitReplayBashOutput(resp)
 			}
+			state := "completed"
+			if hasToolError(resp.Result) {
+				state = "failed"
+			}
 			c.tuiSender.Send(tuievents.TaskStreamMsg{
 				Label:  resp.Name,
 				CallID: resp.ID,
+				State:  state,
 				Final:  true,
 			})
 			hasError := hasToolError(resp.Result)

@@ -302,7 +302,12 @@ func (m *Model) appendBashPanelChunk(panel *BashPanelBlock, stream, chunk string
 	if panel == nil {
 		return
 	}
-	cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	// Late stdout/stderr chunks can arrive after the terminal state has already
+	// scheduled auto-collapse. Keep the collapse in place unless the tool has
+	// explicitly re-entered a live state.
+	if !isTerminalToolOutputState(panel.State) {
+		cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
+	}
 	normalized := tuikit.SanitizeLogText(chunk)
 	normalized = strings.ReplaceAll(strings.ReplaceAll(normalized, "\r\n", "\n"), "\r", "\n")
 	stream = strings.ToLower(strings.TrimSpace(stream))

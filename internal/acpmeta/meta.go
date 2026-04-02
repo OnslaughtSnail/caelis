@@ -5,6 +5,7 @@ import "strings"
 const (
 	metaKeyRoot           = "caelis"
 	metaKeyDelegatedChild = "delegatedChild"
+	metaKeyModelAlias     = "modelAlias"
 )
 
 func CloneMeta(meta map[string]any) map[string]any {
@@ -47,6 +48,36 @@ func WithDelegatedChild(meta map[string]any, delegated bool) map[string]any {
 		root = map[string]any{}
 	}
 	root[metaKeyDelegatedChild] = delegated
+	out[metaKeyRoot] = root
+	return out
+}
+
+func ModelAlias(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	root, ok := meta[strings.TrimSpace(metaKeyRoot)].(map[string]any)
+	if !ok || len(root) == 0 {
+		return ""
+	}
+	value, _ := root[metaKeyModelAlias].(string)
+	return strings.TrimSpace(value)
+}
+
+func WithModelAlias(meta map[string]any, alias string) map[string]any {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return CloneMeta(meta)
+	}
+	out := CloneMeta(meta)
+	if out == nil {
+		out = map[string]any{}
+	}
+	root, _ := out[metaKeyRoot].(map[string]any)
+	if root == nil {
+		root = map[string]any{}
+	}
+	root[metaKeyModelAlias] = alias
 	out[metaKeyRoot] = root
 	return out
 }
