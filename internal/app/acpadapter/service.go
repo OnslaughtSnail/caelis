@@ -176,7 +176,7 @@ func (s *Service) Capabilities() internalacp.AdapterCapabilities {
 	}
 }
 
-func (s *Service) NewSession(ctx context.Context, req internalacp.NewSessionRequest, caps internalacp.ClientCapabilities) (internalacp.AdapterSessionState, error) {
+func (s *Service) NewSession(ctx context.Context, req internalacp.AdapterNewSessionRequest, caps internalacp.ClientCapabilities) (internalacp.AdapterSessionState, error) {
 	if ctx == nil {
 		return internalacp.AdapterSessionState{}, fmt.Errorf("acpadapter: context is required")
 	}
@@ -231,7 +231,7 @@ func (s *Service) ListSessions(ctx context.Context, req internalacp.SessionListR
 	return s.listSessions(ctx, req)
 }
 
-func (s *Service) LoadSession(ctx context.Context, req internalacp.LoadSessionRequest, caps internalacp.ClientCapabilities) (internalacp.LoadedSessionState, error) {
+func (s *Service) LoadSession(ctx context.Context, req internalacp.AdapterLoadSessionRequest, caps internalacp.ClientCapabilities) (internalacp.LoadedSessionState, error) {
 	if ctx == nil {
 		return internalacp.LoadedSessionState{}, fmt.Errorf("acpadapter: context is required")
 	}
@@ -258,7 +258,7 @@ func (s *Service) LoadSession(ctx context.Context, req internalacp.LoadSessionRe
 	}, nil
 }
 
-func (s *Service) SetMode(ctx context.Context, req internalacp.SetSessionModeRequest) (internalacp.AdapterSessionState, error) {
+func (s *Service) SetMode(ctx context.Context, req internalacp.AdapterSetModeRequest) (internalacp.AdapterSessionState, error) {
 	sess, err := s.session(req.SessionID)
 	if err != nil {
 		return internalacp.AdapterSessionState{}, err
@@ -291,7 +291,7 @@ func (s *Service) SetMode(ctx context.Context, req internalacp.SetSessionModeReq
 	return s.snapshot(sess), nil
 }
 
-func (s *Service) SetConfigOption(ctx context.Context, req internalacp.SetSessionConfigOptionRequest) (internalacp.AdapterSessionState, error) {
+func (s *Service) SetConfigOption(ctx context.Context, req internalacp.AdapterSetConfigOptionRequest) (internalacp.AdapterSessionState, error) {
 	sess, err := s.session(req.SessionID)
 	if err != nil {
 		return internalacp.AdapterSessionState{}, err

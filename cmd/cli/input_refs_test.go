@@ -38,11 +38,17 @@ description: atlas skill
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, "请阅读文件: ") || !strings.Contains(result.Text, "SKILL.md") {
-		t.Fatalf("expected SKILL rewritten to read-file prompt, got %q", result.Text)
+	if got, want := result.DisplayText, "请按 $atlas 执行"; got != want {
+		t.Fatalf("expected visible skill trigger preserved in user input, got %q want %q", got, want)
 	}
-	if strings.Contains(result.Text, "Referenced files:") {
-		t.Fatalf("did not expect referenced files section, got %q", result.Text)
+	if !strings.Contains(result.Text, inputReferenceOpenTag) || !strings.Contains(result.Text, "Load atlas Skills.") {
+		t.Fatalf("expected hidden skill hint injected into model text, got %q", result.Text)
+	}
+	if got := stripHiddenInputReferenceHints(result.Text); got != result.DisplayText {
+		t.Fatalf("expected hidden hint stripping to recover visible text, got %q want %q", got, result.DisplayText)
+	}
+	if len(result.ResolvedPaths) != 0 {
+		t.Fatalf("did not expect skill trigger to register referenced files, got %v", result.ResolvedPaths)
 	}
 }
 

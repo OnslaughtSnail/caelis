@@ -1025,27 +1025,7 @@ func (m *Model) renderPromptModal() string {
 	for i := range maxItems {
 		choice := window[i]
 		actualIndex := start + i
-		marker := ""
-		if p.multiSelect {
-			if _, ok := p.selected[choice.value]; ok {
-				marker = "[x] "
-			} else {
-				marker = "[ ] "
-			}
-		}
-		if actualIndex == p.choiceIndex {
-			line := m.theme.PromptStyle().Render("▸ ") + m.theme.CommandActiveStyle().Render(marker+choice.label)
-			if choice.detail != "" {
-				line += "  " + m.theme.HelpHintTextStyle().Render(choice.detail)
-			}
-			lines = append(lines, line)
-			continue
-		}
-		line := "  " + m.theme.TextStyle().Render(marker+choice.label)
-		if choice.detail != "" {
-			line += "  " + m.theme.HelpHintTextStyle().Render(choice.detail)
-		}
-		lines = append(lines, line)
+		lines = append(lines, m.renderPromptChoiceLine(choice, actualIndex == p.choiceIndex))
 	}
 	if len(visible) > end {
 		lines = append(lines, m.theme.HelpHintTextStyle().Render(
@@ -1067,7 +1047,7 @@ func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []stri
 	detailBudget := m.promptDetailLineBudget()
 	for _, detail := range details {
 		label := strings.TrimSpace(detail.Label)
-		value := strings.TrimSpace(detail.Value)
+		value := sanitizePromptModalText(detail.Value)
 		if label == "" || value == "" {
 			continue
 		}
@@ -1098,6 +1078,62 @@ func (m *Model) renderPromptDetailLines(details []tuievents.PromptDetail) []stri
 		}
 	}
 	return lines
+}
+
+func (m *Model) renderPromptChoiceLine(choice promptChoice, selected bool) string {
+	gutter := "  "
+	if selected {
+		gutter = "▎ "
+	}
+	marker := ""
+	if m.activePrompt != nil && m.activePrompt.multiSelect {
+		if _, ok := m.activePrompt.selected[choice.value]; ok {
+			marker = "[x] "
+		} else {
+			marker = "[ ] "
+		}
+	}
+	label := sanitizePromptModalText(choice.label)
+	detail := sanitizePromptModalText(choice.detail)
+	contentWidth := maxInt(1, m.promptModalInnerWidth()-displayColumns(gutter))
+	mainText := marker + label
+	if detail != "" {
+		mainText += "  " + detail
+	}
+	mainText = truncateTailDisplay(mainText, contentWidth)
+	selectedLabelStyle := lipgloss.NewStyle().
+		Foreground(m.theme.CommandText).
+		Background(m.theme.CommandActive).
+		Bold(true)
+	selectedDetailStyle := lipgloss.NewStyle().
+		Foreground(m.theme.CommandSubText).
+		Background(m.theme.CommandActive)
+	if detail == "" {
+		if selected {
+			return m.theme.PromptStyle().Render(gutter) + selectedLabelStyle.Render(mainText)
+		}
+		return m.theme.HelpHintTextStyle().Render(gutter) + m.theme.TextStyle().Render(mainText)
+	}
+	labelWidth := maxInt(8, minInt(displayColumns(marker+label), maxInt(8, contentWidth/2)))
+	if displayColumns(mainText) <= labelWidth {
+		labelWidth = displayColumns(mainText)
+	}
+	if labelWidth >= contentWidth {
+		labelWidth = maxInt(1, contentWidth-1)
+	}
+	labelText := truncateTailDisplay(marker+label, labelWidth)
+	detailBudget := maxInt(1, contentWidth-displayColumns(labelText)-2)
+	detailText := truncateTailDisplay(detail, detailBudget)
+	if selected {
+		return m.theme.PromptStyle().Render(gutter) +
+			selectedLabelStyle.Render(labelText) +
+			"  " +
+			selectedDetailStyle.Render(detailText)
+	}
+	return m.theme.HelpHintTextStyle().Render(gutter) +
+		m.theme.TextStyle().Render(labelText) +
+		"  " +
+		m.theme.HelpHintTextStyle().Render(detailText)
 }
 
 func (m *Model) renderPromptModalBox(lines []string) string {
@@ -1172,6 +1208,14 @@ func clampPromptModalLines(lines []string, budget int, theme tuikit.Theme) []str
 	truncated := append([]string(nil), lines[:budget-1]...)
 	truncated = append(truncated, theme.HelpHintTextStyle().Render(fmt.Sprintf("… %d more lines", len(lines)-budget+1)))
 	return truncated
+}
+
+func sanitizePromptModalText(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "<nil>" {
+		return ""
+	}
+	return value
 }
 
 func (m *Model) renderCompletionOverlay(title string, lines []string) string {

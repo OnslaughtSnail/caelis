@@ -2,15 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
-	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
@@ -88,7 +84,7 @@ func lastHint(msgs []any) string {
 	return ""
 }
 
-func TestHandleResume_ReplaysSpawnedSubagentPanelsFromChildSessions(t *testing.T) {
+func TestHandleResume_BootstrapsRunningSubagentWithoutRemoteReplay(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
 	if err != nil {
@@ -189,20 +185,248 @@ func TestHandleResume_ReplaysSpawnedSubagentPanelsFromChildSessions(t *testing.T
 	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
 		t.Fatal(err)
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, raw := range sender.Snapshot() {
-			if msg, ok := raw.(tuievents.RawDeltaMsg); ok && msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.Text, "child reply") {
-				return
+	foundStart := false
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.SubagentStartMsg:
+			if msg.SpawnID == "child-1" {
+				foundStart = true
+			}
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope == tuievents.ACPProjectionSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.DeltaText+msg.FullText, "child reply") {
+				t.Fatalf("did not expect /resume to recover child stream without local projection log, got %#v", sender.Snapshot())
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("expected resumed replay to restore child subagent stream")
+	if !foundStart {
+		t.Fatalf("expected /resume to bootstrap running subagent panel, got %#v", sender.Snapshot())
+	}
 }
 
-func TestRenderSessionEvents_ReplayedChildAssistantStaysOutOfMainTranscript(t *testing.T) {
+func TestHandleResume_RestoresExternalParticipantTurnFromProjectionLog(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	route := routeMirrorUserEvent("/copilot 介绍一下你自己", externalParticipant{
+		Alias:          "cole",
+		AgentID:        "copilot",
+		ChildSessionID: "child-1",
+		DisplayLabel:   "cole(copilot)",
+	}, "slash_create")
+	if route.Meta == nil {
+		route.Meta = map[string]any{}
+	}
+	route.Meta[metaRouteCallID] = "call-1"
+	if err := store.AppendEvent(context.Background(), parent, route); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: parent.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore:   store,
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	if err := console.acpProjectionStore().AppendEvent(context.Background(), acpProjectionPersistedEvent{
+		Scope:     string(tuievents.ACPProjectionParticipant),
+		ScopeID:   "child-1",
+		CallID:    "call-1",
+		Kind:      "turn_start",
+		SessionID: "child-1",
+		Actor:     "cole(copilot)",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := console.acpProjectionStore().AppendEvent(context.Background(), acpProjectionPersistedEvent{
+		Scope:     string(tuievents.ACPProjectionParticipant),
+		ScopeID:   "child-1",
+		CallID:    "call-1",
+		Kind:      "projection",
+		SessionID: "child-1",
+		Actor:     "cole(copilot)",
+		Stream:    "assistant",
+		DeltaText: "hello from copilot",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := console.acpProjectionStore().AppendEvent(context.Background(), acpProjectionPersistedEvent{
+		Scope:      string(tuievents.ACPProjectionParticipant),
+		ScopeID:    "child-1",
+		CallID:     "call-1",
+		Kind:       "projection",
+		SessionID:  "child-1",
+		Actor:      "cole(copilot)",
+		ToolCallID: "tool-1",
+		ToolName:   "READ",
+		ToolArgs:   map[string]any{"path": "README.md"},
+		ToolResult: map[string]any{"summary": "README.md"},
+		ToolStatus: "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := console.acpProjectionStore().AppendEvent(context.Background(), acpProjectionPersistedEvent{
+		Scope:     string(tuievents.ACPProjectionParticipant),
+		ScopeID:   "child-1",
+		CallID:    "call-1",
+		Kind:      "projection",
+		SessionID: "child-1",
+		Actor:     "cole(copilot)",
+		Stream:    "reasoning",
+		DeltaText: "checking tools",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := console.acpProjectionStore().AppendEvent(context.Background(), acpProjectionPersistedEvent{
+		Scope:     string(tuievents.ACPProjectionParticipant),
+		ScopeID:   "child-1",
+		CallID:    "call-1",
+		Kind:      "status",
+		SessionID: "child-1",
+		Status:    "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := handleResume(console, []string{parent.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		foundStart     bool
+		foundAssistant bool
+		foundReasoning bool
+		foundTool      bool
+		foundCompleted bool
+	)
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.ParticipantTurnStartMsg:
+			if msg.SessionID == "child-1" && msg.Actor == "cole(copilot)" {
+				foundStart = true
+			}
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope != tuievents.ACPProjectionParticipant || msg.ScopeID != "child-1" {
+				continue
+			}
+			if msg.Stream == "assistant" && strings.Contains(msg.DeltaText+msg.FullText, "hello from copilot") {
+				foundAssistant = true
+			}
+			if msg.Stream == "reasoning" && strings.Contains(msg.DeltaText+msg.FullText, "checking tools") {
+				foundReasoning = true
+			}
+			if msg.ToolCallID == "tool-1" && msg.ToolStatus == "completed" && strings.EqualFold(msg.ToolName, "READ") {
+				foundTool = true
+			}
+		case tuievents.ParticipantStatusMsg:
+			if msg.SessionID == "child-1" && msg.State == "completed" {
+				foundCompleted = true
+			}
+		}
+	}
+	if !foundStart || !foundAssistant || !foundReasoning || !foundTool || !foundCompleted {
+		t.Fatalf("expected cached external participant replay, got %#v", sender.Snapshot())
+	}
+}
+
+func TestHandleResume_RestoresExternalParticipantProjectionOrder(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent-ordered"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	route := routeMirrorUserEvent("@cole 演示一下你的工具调用能力", externalParticipant{
+		Alias:          "cole",
+		AgentID:        "copilot",
+		ChildSessionID: "child-1",
+		DisplayLabel:   "cole(copilot)",
+	}, "participant_route")
+	if route.Meta == nil {
+		route.Meta = map[string]any{}
+	}
+	route.Meta[metaRouteCallID] = "call-ordered"
+	if err := store.AppendEvent(context.Background(), parent, route); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index:   resumeIndexStub{resolveID: parent.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore:   store,
+		gateway:        gw,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionParticipant), ScopeID: "child-1", CallID: "call-ordered", Kind: "turn_start", SessionID: "child-1", Actor: "cole(copilot)"},
+		{Scope: string(tuievents.ACPProjectionParticipant), ScopeID: "child-1", CallID: "call-ordered", Kind: "projection", SessionID: "child-1", Actor: "cole(copilot)", Stream: "assistant", DeltaText: "先看文件。"},
+		{Scope: string(tuievents.ACPProjectionParticipant), ScopeID: "child-1", CallID: "call-ordered", Kind: "projection", SessionID: "child-1", Actor: "cole(copilot)", ToolCallID: "tool-1", ToolName: "READ", ToolArgs: map[string]any{"_display": "/tmp/demo"}, ToolStatus: "completed", ToolResult: map[string]any{"summary": "found target file"}},
+		{Scope: string(tuievents.ACPProjectionParticipant), ScopeID: "child-1", CallID: "call-ordered", Kind: "projection", SessionID: "child-1", Actor: "cole(copilot)", Stream: "assistant", DeltaText: "读取完成，下面总结。"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := handleResume(console, []string{parent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
+		if !ok || msg.ScopeID != "child-1" {
+			continue
+		}
+		switch {
+		case msg.Stream == "assistant" && msg.DeltaText != "":
+			got = append(got, "assistant:"+msg.DeltaText)
+		case msg.ToolCallID != "":
+			got = append(got, "tool:"+msg.ToolName)
+		}
+	}
+	want := []string{"assistant:先看文件。", "tool:READ", "assistant:读取完成，下面总结。"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected ordered projection replay %v, got %v", want, got)
+	}
+}
+
+func TestRenderSessionEvents_ChildAssistantHistoryIsSuppressedWithoutProjectionLog(t *testing.T) {
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
 	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
 	events := []*session.Event{{
@@ -255,41 +479,270 @@ func TestRenderSessionEvents_ReplayedChildAssistantStaysOutOfMainTranscript(t *t
 		t.Fatal(err)
 	}
 
-	var (
-		foundChildAssistantSubagent bool
-		foundChildReasoningSubagent bool
-		foundChildInMainTranscript  bool
-	)
+	var foundChildInResume bool
 	for _, raw := range sender.Snapshot() {
 		switch msg := raw.(type) {
-		case tuievents.RawDeltaMsg:
-			if msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.Text, "child reply") {
-				foundChildAssistantSubagent = true
-			}
-			if msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "reasoning" && strings.Contains(msg.Text, "child reasoning") {
-				foundChildReasoningSubagent = true
-			}
-			if msg.Target == tuievents.RawDeltaTargetAssistant && (strings.Contains(msg.Text, "child reply") || strings.Contains(msg.Text, "child reasoning")) {
-				foundChildInMainTranscript = true
+		case tuievents.ACPProjectionMsg:
+			if strings.Contains(msg.DeltaText, "child reply") || strings.Contains(msg.DeltaText, "child reasoning") || strings.Contains(msg.FullText, "child reply") || strings.Contains(msg.FullText, "child reasoning") {
+				foundChildInResume = true
 			}
 		case tuievents.LogChunkMsg:
 			if strings.Contains(msg.Chunk, "child reply") || strings.Contains(msg.Chunk, "child reasoning") {
-				foundChildInMainTranscript = true
+				foundChildInResume = true
+			}
+		case tuievents.RawDeltaMsg:
+			if strings.Contains(msg.Text, "child reply") || strings.Contains(msg.Text, "child reasoning") {
+				foundChildInResume = true
 			}
 		}
 	}
-	if !foundChildAssistantSubagent {
-		t.Fatalf("expected child assistant replay to populate subagent stream, got %#v", sender.Snapshot())
-	}
-	if !foundChildReasoningSubagent {
-		t.Fatalf("expected child reasoning replay to populate subagent stream, got %#v", sender.Snapshot())
-	}
-	if foundChildInMainTranscript {
-		t.Fatalf("did not expect child replay content in main transcript, got %#v", sender.Snapshot())
+	if foundChildInResume {
+		t.Fatalf("did not expect child assistant history to replay without a local projection log, got %#v", sender.Snapshot())
 	}
 }
 
-func TestRenderSessionEvents_ReplayedChildToolCallStaysOutOfMainTranscript(t *testing.T) {
+func TestRenderSessionEvents_UsesOrderedProjectionLogForRunningSubagent(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent-subagent"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	events := []*session.Event{{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "codex",
+				"state":            "running",
+			},
+		}),
+	}}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    "child-1",
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+		"_ui_agent":           "codex",
+	}
+	events = append(events, &session.Event{
+		ID:        "ev-child-answer",
+		SessionID: "child-1",
+		Message:   model.NewTextMessage(model.RoleAssistant, "canonical child reply"),
+		Meta:      childMeta,
+	})
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore:   store,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "turn_start", SessionID: "child-1", Agent: "codex", AttachTarget: "child-1", AnchorTool: "SPAWN", ClaimAnchor: true},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", Stream: "assistant", DeltaText: "ordered first"},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", ToolCallID: "tool-1", ToolName: "READ", ToolStatus: "completed", ToolResult: map[string]any{"summary": "ordered tool"}},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", Stream: "assistant", DeltaText: "ordered second"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	got := []string{}
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
+		if !ok || msg.Scope != tuievents.ACPProjectionSubagent || msg.ScopeID != "child-1" {
+			continue
+		}
+		switch {
+		case msg.Stream == "assistant" && msg.DeltaText != "":
+			got = append(got, "assistant:"+msg.DeltaText)
+		case msg.ToolCallID != "":
+			got = append(got, "tool:"+msg.ToolName)
+		}
+		if strings.Contains(msg.DeltaText+msg.FullText, "canonical child reply") {
+			t.Fatalf("did not expect canonical child replay when ordered projection log exists, got %#v", sender.Snapshot())
+		}
+	}
+	want := []string{"assistant:ordered first", "tool:READ", "assistant:ordered second"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected ordered subagent projection replay %v, got %v", want, got)
+	}
+}
+
+func TestRenderSessionEvents_UsesOrderedProjectionLogForCompletedSubagent(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent-completed-projection"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	events := []*session.Event{{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "codex",
+				"state":            "completed",
+			},
+		}),
+	}}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    "child-1",
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+		"_ui_agent":           "codex",
+	}
+	events = append(events, &session.Event{
+		ID:        "ev-child-answer",
+		SessionID: "child-1",
+		Message:   model.NewTextMessage(model.RoleAssistant, "canonical completed child reply"),
+		Meta:      childMeta,
+	})
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore:   store,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "turn_start", SessionID: "child-1", Agent: "codex", AttachTarget: "child-1", AnchorTool: "SPAWN", ClaimAnchor: true},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", Stream: "assistant", DeltaText: "ordered completed first"},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", ToolCallID: "tool-1", ToolName: "READ", ToolStatus: "completed", ToolResult: map[string]any{"summary": "ordered completed tool"}},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", Stream: "assistant", DeltaText: "ordered completed second"},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "status", SessionID: "child-1", Status: "completed"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	got := []string{}
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
+		if !ok || msg.Scope != tuievents.ACPProjectionSubagent || msg.ScopeID != "child-1" {
+			continue
+		}
+		switch {
+		case msg.Stream == "assistant" && msg.DeltaText != "":
+			got = append(got, "assistant:"+msg.DeltaText)
+		case msg.ToolCallID != "":
+			got = append(got, "tool:"+msg.ToolName)
+		}
+		if strings.Contains(msg.DeltaText+msg.FullText, "canonical completed child reply") {
+			t.Fatalf("did not expect canonical completed child replay when ordered projection log exists, got %#v", sender.Snapshot())
+		}
+	}
+	want := []string{"assistant:ordered completed first", "tool:READ", "assistant:ordered completed second"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected ordered completed subagent projection replay %v, got %v", want, got)
+	}
+}
+
+func TestRenderSessionEvents_PartialSubagentProjectionLogDoesNotReplayChildHistory(t *testing.T) {
+	store := inmemory.New()
+	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent-partial-log"}
+	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
+		t.Fatal(err)
+	}
+	events := []*session.Event{{
+		ID:        "ev-parent-spawn",
+		SessionID: parent.ID,
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "call-spawn-1",
+			Name: "SPAWN",
+			Result: map[string]any{
+				"child_session_id": "child-1",
+				"delegation_id":    "dlg-1",
+				"agent":            "codex",
+				"state":            "running",
+			},
+		}),
+	}}
+	childMeta := map[string]any{
+		"parent_session_id":   parent.ID,
+		"child_session_id":    "child-1",
+		"delegation_id":       "dlg-1",
+		"parent_tool_call_id": "call-spawn-1",
+		"parent_tool_name":    "SPAWN",
+		"_ui_agent":           "codex",
+	}
+	events = append(events, &session.Event{
+		ID:        "ev-child-answer",
+		SessionID: "child-1",
+		Message:   model.NewTextMessage(model.RoleAssistant, "canonical child reply"),
+		Meta:      childMeta,
+	})
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      parent.ID,
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore:   store,
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "turn_start", SessionID: "child-1", Agent: "codex", AttachTarget: "child-1", AnchorTool: "SPAWN", ClaimAnchor: true},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "status", SessionID: "child-1", Status: "running"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
+		if ok && msg.Scope == tuievents.ACPProjectionSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.DeltaText+msg.FullText, "canonical child reply") {
+			t.Fatalf("did not expect canonical child history replay when a local subagent projection log exists, got %#v", sender.Snapshot())
+		}
+	}
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.SubagentStartMsg)
+		if ok && msg.SpawnID == "child-1" {
+			return
+		}
+	}
+	t.Fatalf("expected subagent bootstrap/replay state even when projection log has no output, got %#v", sender.Snapshot())
+}
+
+func TestRenderSessionEvents_ChildToolHistoryIsSuppressedWithoutProjectionLog(t *testing.T) {
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
 	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
 	events := []*session.Event{{
@@ -349,27 +802,21 @@ func TestRenderSessionEvents_ReplayedChildToolCallStaysOutOfMainTranscript(t *te
 		t.Fatal(err)
 	}
 
-	var (
-		foundSubagentTool bool
-		foundMainToolLine bool
-	)
+	var foundChildToolReplay bool
 	for _, raw := range sender.Snapshot() {
 		switch msg := raw.(type) {
-		case tuievents.SubagentToolCallMsg:
-			if msg.SpawnID == "child-1" && msg.CallID == "child-read-1" && strings.EqualFold(msg.ToolName, "READ") {
-				foundSubagentTool = true
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope == tuievents.ACPProjectionSubagent && msg.ScopeID == "child-1" && msg.ToolCallID == "child-read-1" && strings.EqualFold(msg.ToolName, "READ") {
+				foundChildToolReplay = true
 			}
 		case tuievents.LogChunkMsg:
 			if strings.Contains(msg.Chunk, "READ demo.py") || strings.Contains(msg.Chunk, "✓ READ") {
-				foundMainToolLine = true
+				foundChildToolReplay = true
 			}
 		}
 	}
-	if !foundSubagentTool {
-		t.Fatalf("expected child tool replay to populate subagent panel, got %#v", sender.Snapshot())
-	}
-	if foundMainToolLine {
-		t.Fatalf("did not expect child tool replay in main transcript, got %#v", sender.Snapshot())
+	if foundChildToolReplay {
+		t.Fatalf("did not expect child tool history to replay without a local projection log, got %#v", sender.Snapshot())
 	}
 }
 
@@ -506,21 +953,7 @@ func TestRenderSessionEvents_ReplayedBashTaskStreamUsesOriginalCallID(t *testing
 	}
 }
 
-func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {
-	prevStarter := startResumedACPClient
-	t.Cleanup(func() {
-		startResumedACPClient = prevStarter
-	})
-	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, onUpdate func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
-		return &blockingResumeClient{
-			loadDelay: 200 * time.Millisecond,
-			updates: []acpclient.UpdateEnvelope{
-				resumedACPTextUpdate("child-1", "child reply"),
-			},
-			onUpdate: onUpdate,
-		}, func() {}, nil
-	}
-
+func TestHandleResume_ReplaysRunningSubagentOnlyFromLocalProjectionLog(t *testing.T) {
 	store := inmemory.New()
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -564,29 +997,35 @@ func TestHandleResume_DoesNotBlockOnAsyncSubagentLoadReplay(t *testing.T) {
 		userID:         "u",
 		sessionID:      "current",
 		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore:   store,
 		gateway:        gw,
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
 	}
+	console.sessionID = "resume-parent"
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "turn_start", SessionID: "child-1", Agent: "self", AttachTarget: "child-1", AnchorTool: "SPAWN", ClaimAnchor: true},
+		{Scope: string(tuievents.ACPProjectionSubagent), ScopeID: "child-1", CallID: "call-spawn-1", Kind: "projection", SessionID: "child-1", Stream: "assistant", DeltaText: "child reply"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	console.sessionID = "current"
 
-	start := time.Now()
 	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
 		t.Fatal(err)
 	}
-	if elapsed := time.Since(start); elapsed >= 150*time.Millisecond {
-		t.Fatalf("expected handleResume to return before ACP load replay finishes, took %s", elapsed)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, raw := range sender.Snapshot() {
-			if msg, ok := raw.(tuievents.RawDeltaMsg); ok && msg.Target == tuievents.RawDeltaTargetSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.Text, "child reply") {
-				return
-			}
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
+		if !ok {
+			continue
 		}
-		time.Sleep(10 * time.Millisecond)
+		if msg.Scope == tuievents.ACPProjectionSubagent && msg.ScopeID == "child-1" && msg.Stream == "assistant" && strings.Contains(msg.DeltaText+msg.FullText, "child reply") {
+			return
+		}
 	}
-	t.Fatal("expected async ACP load replay to populate subagent panel")
+	t.Fatal("expected static projection replay to populate running subagent panel")
 }
 
 func TestCollectResumedSubagentTargets_PrefersTaskWriteContinuation(t *testing.T) {
@@ -621,7 +1060,7 @@ func TestCollectResumedSubagentTargets_PrefersTaskWriteContinuation(t *testing.T
 		},
 	}
 
-	targets := collectResumedSubagentTargets(events)
+	targets := collectResumedSubagentTargets(events, false)
 	if len(targets) != 1 {
 		t.Fatalf("expected one resumed target, got %#v", targets)
 	}
@@ -634,225 +1073,7 @@ func TestCollectResumedSubagentTargets_PrefersTaskWriteContinuation(t *testing.T
 	}
 }
 
-func TestHandleResume_SkipsACPReplayWhenChildRunStateIsAlreadyCompleted(t *testing.T) {
-	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
-	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
-	for _, sess := range []*session.Session{parent, child} {
-		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.AppendEvent(context.Background(), parent, &session.Event{
-		ID:        "ev-parent-spawn",
-		SessionID: parent.ID,
-		Message: model.MessageFromToolResponse(&model.ToolResponse{
-			ID:   "call-spawn-1",
-			Name: "SPAWN",
-			Result: map[string]any{
-				"child_session_id": "child-1",
-				"delegation_id":    "dlg-1",
-				"agent":            "gemini",
-				"state":            "running",
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if updater, ok := any(store).(session.StateUpdateStore); ok {
-		if err := updater.UpdateState(context.Background(), child, func(values map[string]any) (map[string]any, error) {
-			if values == nil {
-				values = map[string]any{}
-			}
-			values["runtime.lifecycle"] = map[string]any{
-				"status": string(runtime.RunLifecycleStatusCompleted),
-				"phase":  "run",
-			}
-			return values, nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		t.Fatal("expected state update store")
-	}
-	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
-		Store:   store,
-		AppName: "app",
-		UserID:  "u",
-		Index: resumeIndexStub{
-			resolveID: "resume-parent",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	gw, err := appgateway.New(svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var adapterCalls atomic.Int32
-	prevStarter := startResumedACPClient
-	t.Cleanup(func() {
-		startResumedACPClient = prevStarter
-	})
-	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
-		adapterCalls.Add(1)
-		return &blockingResumeClient{}, func() {}, nil
-	}
-	sender := &testSender{}
-	console := &cliConsole{
-		baseCtx:        context.Background(),
-		appName:        "app",
-		userID:         "u",
-		sessionID:      "current",
-		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
-		gateway:        gw,
-		tuiSender:      sender,
-		spawnPreviewer: newSpawnPreviewProjector(),
-		rt:             rt,
-	}
-
-	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	if got := adapterCalls.Load(); got != 0 {
-		t.Fatalf("expected completed child run state to skip ACP replay, got %d adapter calls", got)
-	}
-}
-
-func TestShouldReplayResumedSubagentTarget_UsesChildSessionStateForContinuation(t *testing.T) {
-	store := inmemory.New()
-	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
-	if err != nil {
-		t.Fatal(err)
-	}
-	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
-	if _, err := store.GetOrCreate(context.Background(), child); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AppendEvent(context.Background(), child, runtime.LifecycleEvent(child, runtime.RunLifecycleStatusCompleted, "run", nil)); err != nil {
-		t.Fatal(err)
-	}
-
-	console := &cliConsole{
-		appName: "app",
-		userID:  "u",
-		rt:      rt,
-	}
-	if console.shouldReplayResumedSubagentTarget(context.Background(), resumedSubagentTarget{
-		SpawnID:   "call-task-write-1",
-		SessionID: "child-1",
-	}) {
-		t.Fatal("expected completed child continuation to skip ACP replay")
-	}
-}
-
-func TestHandleResume_SkipsACPReplayForCompletedSpawn(t *testing.T) {
-	store := inmemory.New()
-	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
-	child := &session.Session{AppName: "app", UserID: "u", ID: "child-1"}
-	for _, sess := range []*session.Session{parent, child} {
-		if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.AppendEvent(context.Background(), parent, &session.Event{
-		ID:        "ev-parent-spawn",
-		SessionID: parent.ID,
-		Message: model.MessageFromToolResponse(&model.ToolResponse{
-			ID:   "call-spawn-1",
-			Name: "SPAWN",
-			Result: map[string]any{
-				"child_session_id": "child-1",
-				"delegation_id":    "dlg-1",
-				"agent":            "self",
-				"state":            "completed",
-			},
-		}),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AppendEvent(context.Background(), child, &session.Event{
-		ID:        "ev-child-1",
-		SessionID: child.ID,
-		Message:   model.NewTextMessage(model.RoleAssistant, "child reply"),
-		Meta: map[string]any{
-			"parent_session_id":   parent.ID,
-			"child_session_id":    child.ID,
-			"delegation_id":       "dlg-1",
-			"parent_tool_call_id": "call-spawn-1",
-			"parent_tool_name":    "SPAWN",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AppendEvent(context.Background(), child, &session.Event{
-		ID:        "ev-child-done",
-		SessionID: child.ID,
-		Message:   model.Message{Role: model.RoleSystem},
-		Meta: map[string]any{
-			"kind":                "lifecycle",
-			"lifecycle":           map[string]any{"status": "completed"},
-			"parent_session_id":   parent.ID,
-			"child_session_id":    child.ID,
-			"delegation_id":       "dlg-1",
-			"parent_tool_call_id": "call-spawn-1",
-			"parent_tool_name":    "SPAWN",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
-		Store:   store,
-		AppName: "app",
-		UserID:  "u",
-		Index: resumeIndexStub{
-			resolveID: "resume-parent",
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	gw, err := appgateway.New(svc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var adapterCalls atomic.Int32
-	prevStarter := startResumedACPClient
-	t.Cleanup(func() {
-		startResumedACPClient = prevStarter
-	})
-	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
-		adapterCalls.Add(1)
-		return &blockingResumeClient{}, func() {}, nil
-	}
-	sender := &testSender{}
-	console := &cliConsole{
-		baseCtx:        context.Background(),
-		appName:        "app",
-		userID:         "u",
-		sessionID:      "current",
-		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
-		gateway:        gw,
-		tuiSender:      sender,
-		spawnPreviewer: newSpawnPreviewProjector(),
-	}
-
-	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	if got := adapterCalls.Load(); got != 0 {
-		t.Fatalf("expected completed spawn to skip ACP replay, got %d adapter calls", got)
-	}
-}
-
-func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
+func TestHandleResume_ReplaysCompletedTaskWaitWithoutACPAttach(t *testing.T) {
 	store := inmemory.New()
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "resume-parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -907,15 +1128,6 @@ func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var adapterCalls atomic.Int32
-	prevStarter := startResumedACPClient
-	t.Cleanup(func() {
-		startResumedACPClient = prevStarter
-	})
-	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
-		adapterCalls.Add(1)
-		return &blockingResumeClient{}, func() {}, nil
-	}
 	sender := &testSender{}
 	console := &cliConsole{
 		baseCtx:        context.Background(),
@@ -930,10 +1142,6 @@ func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
 
 	if _, err := handleResume(console, []string{"resume-parent"}); err != nil {
 		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	if got := adapterCalls.Load(); got != 0 {
-		t.Fatalf("expected completed TASK wait result to skip ACP replay, got %d adapter calls", got)
 	}
 	foundDone := false
 	for _, raw := range sender.Snapshot() {
@@ -951,164 +1159,8 @@ func TestHandleResume_SkipsACPReplayWhenTaskWaitAlreadyCompleted(t *testing.T) {
 	}
 }
 
-func TestResumedSubagentLoadTimeoutForAgent(t *testing.T) {
-	if got := resumedSubagentLoadTimeoutForAgent("self"); got != resumedSubagentSelfLoadTimeout {
-		t.Fatalf("expected self timeout %v, got %v", resumedSubagentSelfLoadTimeout, got)
-	}
-	if got := resumedSubagentLoadTimeoutForAgent("codex"); got != resumedSubagentACPLoadTimeout {
-		t.Fatalf("expected ACP timeout %v, got %v", resumedSubagentACPLoadTimeout, got)
-	}
-	if resumedSubagentACPLoadTimeout <= 5*time.Second {
-		t.Fatalf("expected ACP resume timeout to exceed cold-start window, got %v", resumedSubagentACPLoadTimeout)
-	}
-}
-
-func TestRestoreResumedSubagentPanelFromACP_LoadTimeoutDoesNotEmitFailed(t *testing.T) {
-	prevStarter := startResumedACPClient
-	t.Cleanup(func() {
-		startResumedACPClient = prevStarter
-	})
-	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
-		return &blockingResumeClient{loadDelay: 200 * time.Millisecond}, func() {}, nil
-	}
-
-	prev := resumedSubagentSelfLoadTimeout
-	resumedSubagentSelfLoadTimeout = 20 * time.Millisecond
-	t.Cleanup(func() {
-		resumedSubagentSelfLoadTimeout = prev
-	})
-
-	sender := &testSender{}
-	console := &cliConsole{
-		baseCtx:        context.Background(),
-		appName:        "app",
-		userID:         "u",
-		sessionID:      "parent",
-		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
-		tuiSender:      sender,
-		spawnPreviewer: newSpawnPreviewProjector(),
-	}
-
-	done := make(chan struct{})
-	go func() {
-		console.restoreResumedSubagentPanelFromACP(context.Background(), "parent", resumedSubagentTarget{
-			SpawnID:   "child-1",
-			SessionID: "child-1",
-			Agent:     "self",
-		})
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("expected replay attach to stop after local load timeout")
-	}
-
-	for _, raw := range sender.Snapshot() {
-		msg, ok := raw.(tuievents.SubagentDoneMsg)
-		if !ok {
-			continue
-		}
-		if msg.SpawnID == "child-1" && msg.State == "failed" {
-			t.Fatalf("expected resume load timeout to avoid terminal failed update, got %#v", msg)
-		}
-	}
-}
-
-func TestRestoreResumedSubagentPanelFromACP_LoadFailureEmitsFailed(t *testing.T) {
-	prevStarter := startResumedACPClient
-	t.Cleanup(func() {
-		startResumedACPClient = prevStarter
-	})
-	startResumedACPClient = func(_ *cliConsole, _ context.Context, _ resumedSubagentTarget, _ func(acpclient.UpdateEnvelope)) (resumedACPClient, func(), error) {
-		return &blockingResumeClient{loadErr: errors.New("load failed")}, func() {}, nil
-	}
-
-	sender := &testSender{}
-	console := &cliConsole{
-		baseCtx:        context.Background(),
-		appName:        "app",
-		userID:         "u",
-		sessionID:      "parent",
-		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
-		tuiSender:      sender,
-		spawnPreviewer: newSpawnPreviewProjector(),
-	}
-
-	console.restoreResumedSubagentPanelFromACP(context.Background(), "parent", resumedSubagentTarget{
-		SpawnID:   "child-1",
-		SessionID: "child-1",
-		Agent:     "self",
-	})
-
-	for _, raw := range sender.Snapshot() {
-		msg, ok := raw.(tuievents.SubagentDoneMsg)
-		if !ok {
-			continue
-		}
-		if msg.SpawnID == "child-1" && msg.State == "failed" {
-			return
-		}
-	}
-	t.Fatalf("expected failed terminal update after non-timeout load failure, got %#v", sender.Snapshot())
-}
-
 type resumeIndexStub struct {
 	resolveID string
-}
-
-type blockingResumeClient struct {
-	initDelay time.Duration
-	loadDelay time.Duration
-	loadErr   error
-	updates   []acpclient.UpdateEnvelope
-	onUpdate  func(acpclient.UpdateEnvelope)
-}
-
-func (c *blockingResumeClient) Initialize(ctx context.Context) (acpclient.InitializeResponse, error) {
-	select {
-	case <-ctx.Done():
-		return acpclient.InitializeResponse{}, ctx.Err()
-	case <-time.After(c.initDelay):
-	}
-	return acpclient.InitializeResponse{}, nil
-}
-
-func (c *blockingResumeClient) LoadSession(ctx context.Context, sessionID string, _ string, _ map[string]any) (acpclient.LoadSessionResponse, error) {
-	select {
-	case <-ctx.Done():
-		return acpclient.LoadSessionResponse{}, ctx.Err()
-	case <-time.After(c.loadDelay):
-	}
-	if c.loadErr != nil {
-		return acpclient.LoadSessionResponse{}, c.loadErr
-	}
-	for _, update := range c.updates {
-		if c.onUpdate != nil {
-			update.SessionID = strings.TrimSpace(sessionID)
-			c.onUpdate(update)
-		}
-	}
-	return acpclient.LoadSessionResponse{}, nil
-}
-
-func resumedACPTextUpdate(sessionID string, text string) acpclient.UpdateEnvelope {
-	return acpclient.UpdateEnvelope{
-		SessionID: strings.TrimSpace(sessionID),
-		Update: acpclient.ContentChunk{
-			SessionUpdate: acpclient.UpdateAgentMessage,
-			Content:       mustMarshalResumeTextChunk(text),
-		},
-	}
-}
-
-func mustMarshalResumeTextChunk(text string) json.RawMessage {
-	data, err := json.Marshal(acpclient.TextContent{Type: "text", Text: text})
-	if err != nil {
-		panic(err)
-	}
-	return data
 }
 
 func (s resumeIndexStub) ResolveWorkspaceSessionID(_ context.Context, _ string, prefix string) (string, bool, error) {

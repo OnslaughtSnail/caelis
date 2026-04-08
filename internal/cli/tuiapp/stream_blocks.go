@@ -1367,6 +1367,9 @@ func (m *Model) handleParticipantTurnStart(msg tuievents.ParticipantTurnStartMsg
 		m.participantTurnIDs = map[string]string{}
 	}
 	block := NewParticipantTurnBlock(sessionID, msg.Actor)
+	if !msg.OccurredAt.IsZero() {
+		block.StartedAt = msg.OccurredAt
+	}
 	m.doc.Append(block)
 	m.participantTurnIDs[sessionID] = block.BlockID()
 	m.activeParticipantTurnSessionID = sessionID
@@ -1388,21 +1391,26 @@ func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string,
 	if block == nil {
 		return m, nil
 	}
+	if !block.EndedAt.IsZero() {
+		block.EndedAt = time.Time{}
+	}
 	switch normalizeStreamKind(kind) {
 	case "reasoning":
 		if final {
 			block.ReplaceFinalStreamChunk(SEReasoning, text)
-		} else if strings.TrimSpace(text) != "" {
+		} else if text != "" {
 			block.AppendStreamChunk(SEReasoning, text)
 		}
 	default:
 		if final {
 			block.ReplaceFinalStreamChunk(SEAssistant, text)
-		} else if strings.TrimSpace(text) != "" {
+		} else if text != "" {
 			block.AppendStreamChunk(SEAssistant, text)
 		}
 	}
 	if final && strings.EqualFold(strings.TrimSpace(block.Status), "waiting_approval") {
+		block.Status = "running"
+	} else if state := strings.ToLower(strings.TrimSpace(block.Status)); state == "initializing" || state == "prompting" {
 		block.Status = "running"
 	}
 	m.hasCommittedLine = true
@@ -1416,6 +1424,9 @@ func (m *Model) handleParticipantToolMsg(msg tuievents.ParticipantToolMsg) (tea.
 	if block == nil {
 		return m, nil
 	}
+	if state := strings.ToLower(strings.TrimSpace(block.Status)); state == "initializing" || state == "prompting" {
+		block.Status = "running"
+	}
 	block.UpdateTool(msg.CallID, msg.ToolName, msg.Args, msg.Output, msg.Final, msg.Err)
 	return m, m.requestStreamViewportSync()
 }
@@ -1425,7 +1436,7 @@ func (m *Model) handleParticipantStatusMsg(msg tuievents.ParticipantStatusMsg) (
 	if block == nil {
 		return m, nil
 	}
-	block.SetStatus(msg.State, msg.ApprovalTool, msg.ApprovalCommand)
+	block.SetStatus(msg.State, msg.ApprovalTool, msg.ApprovalCommand, msg.OccurredAt)
 	if participantTurnIsTerminal(msg.State) {
 		m.activeParticipantTurnSessionID = strings.TrimSpace(msg.SessionID)
 	}
@@ -1453,7 +1464,7 @@ func (m *Model) finalizeActiveParticipantTurn(interrupted bool, err error) {
 		case err != nil:
 			state = "failed"
 		}
-		block.SetStatus(state, "", "")
+		block.SetStatus(state, "", "", time.Time{})
 	}
 	m.activeParticipantTurnSessionID = ""
 }

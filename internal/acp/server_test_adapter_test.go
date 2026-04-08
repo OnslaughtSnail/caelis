@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -99,6 +100,16 @@ func newHarnessAdapter(t *testing.T, cfg harnessConfig, adapterCfg harnessAdapte
 	}
 }
 
+func TestRequestFailedMapsNotExistToSessionNotFoundCode(t *testing.T) {
+	got := requestFailed(os.ErrNotExist)
+	if got == nil {
+		t.Fatal("expected rpc error")
+	}
+	if got.Code != -32002 {
+		t.Fatalf("expected -32002 for os.ErrNotExist, got %d", got.Code)
+	}
+}
+
 func (a *harnessAdapter) Capabilities() AdapterCapabilities {
 	return AdapterCapabilities{
 		PromptImage: a.cfg.promptImageEnabled == nil || a.cfg.promptImageEnabled(),
@@ -106,7 +117,7 @@ func (a *harnessAdapter) Capabilities() AdapterCapabilities {
 	}
 }
 
-func (a *harnessAdapter) NewSession(ctx context.Context, req NewSessionRequest, caps ClientCapabilities) (AdapterSessionState, error) {
+func (a *harnessAdapter) NewSession(ctx context.Context, req AdapterNewSessionRequest, caps ClientCapabilities) (AdapterSessionState, error) {
 	cwd, err := a.validateCWD(req.CWD)
 	if err != nil {
 		return AdapterSessionState{}, err
@@ -142,7 +153,7 @@ func (a *harnessAdapter) ListSessions(ctx context.Context, req SessionListReques
 	return a.cfg.listSessions(ctx, req)
 }
 
-func (a *harnessAdapter) LoadSession(ctx context.Context, req LoadSessionRequest, caps ClientCapabilities) (LoadedSessionState, error) {
+func (a *harnessAdapter) LoadSession(ctx context.Context, req AdapterLoadSessionRequest, caps ClientCapabilities) (LoadedSessionState, error) {
 	cwd, err := a.validateCWD(req.CWD)
 	if err != nil {
 		return LoadedSessionState{}, err
@@ -201,7 +212,7 @@ func (a *harnessAdapter) LoadSession(ctx context.Context, req LoadSessionRequest
 	return LoadedSessionState{Session: a.snapshot(sess), Events: loaded.Events}, nil
 }
 
-func (a *harnessAdapter) SetMode(ctx context.Context, req SetSessionModeRequest) (AdapterSessionState, error) {
+func (a *harnessAdapter) SetMode(ctx context.Context, req AdapterSetModeRequest) (AdapterSessionState, error) {
 	sess, err := a.session(req.SessionID)
 	if err != nil {
 		return AdapterSessionState{}, err
@@ -231,7 +242,7 @@ func (a *harnessAdapter) SetMode(ctx context.Context, req SetSessionModeRequest)
 	return a.snapshot(sess), nil
 }
 
-func (a *harnessAdapter) SetConfigOption(ctx context.Context, req SetSessionConfigOptionRequest) (AdapterSessionState, error) {
+func (a *harnessAdapter) SetConfigOption(ctx context.Context, req AdapterSetConfigOptionRequest) (AdapterSessionState, error) {
 	sess, err := a.session(req.SessionID)
 	if err != nil {
 		return AdapterSessionState{}, err

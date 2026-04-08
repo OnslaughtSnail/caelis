@@ -2577,6 +2577,71 @@ func TestApprovalPromptBacktabMovesSelectionUp(t *testing.T) {
 	}
 }
 
+func TestPromptModalOmitsNilDetailsAndChoiceDetails(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Would you like to make the following edits?",
+		Details: []tuievents.PromptDetail{
+			{Label: "CREATE FILE", Value: "<nil>", Emphasis: true},
+			{Label: "PATH", Value: "demo.txt", Emphasis: true},
+		},
+		Choices: []tuievents.PromptChoice{
+			{Label: "approve", Value: "approve", Detail: "<nil>"},
+			{Label: "reject", Value: "reject", Detail: "skip it"},
+		},
+		Response: respCh,
+	})
+
+	modal := ansi.Strip(m.renderPromptModal())
+	if strings.Contains(modal, "<nil>") {
+		t.Fatalf("expected prompt modal to omit nil placeholders, got:\n%s", modal)
+	}
+	if !strings.Contains(modal, "PATH: demo.txt") {
+		t.Fatalf("expected non-empty detail to remain visible, got:\n%s", modal)
+	}
+}
+
+func TestPromptModalSelectionKeepsChoiceColumnAligned(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	respCh := make(chan tuievents.PromptResponse, 1)
+	_, _ = m.Update(tuievents.PromptRequestMsg{
+		Prompt: "Pick one",
+		Choices: []tuievents.PromptChoice{
+			{Label: "approve", Value: "approve", Detail: "this time"},
+			{Label: "reject", Value: "reject", Detail: "skip it"},
+		},
+		Response: respCh,
+	})
+
+	modal := ansi.Strip(m.renderPromptModal())
+	lines := strings.Split(modal, "\n")
+	var selectedLine, otherLine string
+	for _, line := range lines {
+		if strings.Contains(line, "approve") {
+			selectedLine = line
+		}
+		if strings.Contains(line, "reject") {
+			otherLine = line
+		}
+	}
+	if selectedLine == "" || otherLine == "" {
+		t.Fatalf("expected both choice rows in modal, got:\n%s", modal)
+	}
+	selectedIdx := strings.Index(selectedLine, "approve")
+	otherIdx := strings.Index(otherLine, "reject")
+	if selectedIdx < 0 || otherIdx < 0 {
+		t.Fatalf("expected both labels in modal, got:\n%s", modal)
+	}
+	if got, want := displayColumns(selectedLine[:selectedIdx]), displayColumns(otherLine[:otherIdx]); got != want {
+		t.Fatalf("expected selected and unselected rows to stay aligned, got selected=%d unselected=%d\n%s", got, want, modal)
+	}
+}
+
 func TestPromptChoiceNavigationWrapsFromFirstToLast(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)

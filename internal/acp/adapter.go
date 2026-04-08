@@ -15,6 +15,11 @@ type AdapterCapabilities struct {
 	SessionList bool
 }
 
+type AdapterNewSessionRequest = NewSessionRequest
+type AdapterLoadSessionRequest = LoadSessionRequest
+type AdapterSetModeRequest = SetSessionModeRequest
+type AdapterSetConfigOptionRequest = SetSessionConfigOptionRequest
+
 type AdapterSessionState struct {
 	SessionID         string
 	CWD               string
@@ -50,11 +55,11 @@ type PromptHandle interface {
 
 type Adapter interface {
 	Capabilities() AdapterCapabilities
-	NewSession(context.Context, NewSessionRequest, ClientCapabilities) (AdapterSessionState, error)
+	NewSession(context.Context, AdapterNewSessionRequest, ClientCapabilities) (AdapterSessionState, error)
 	ListSessions(context.Context, SessionListRequest) (SessionListResponse, error)
-	LoadSession(context.Context, LoadSessionRequest, ClientCapabilities) (LoadedSessionState, error)
-	SetMode(context.Context, SetSessionModeRequest) (AdapterSessionState, error)
-	SetConfigOption(context.Context, SetSessionConfigOptionRequest) (AdapterSessionState, error)
+	LoadSession(context.Context, AdapterLoadSessionRequest, ClientCapabilities) (LoadedSessionState, error)
+	SetMode(context.Context, AdapterSetModeRequest) (AdapterSessionState, error)
+	SetConfigOption(context.Context, AdapterSetConfigOptionRequest) (AdapterSessionState, error)
 	StartPrompt(context.Context, StartPromptRequest) (StartPromptResult, error)
 	CancelPrompt(string)
 	SessionFS(string) toolexec.FileSystem

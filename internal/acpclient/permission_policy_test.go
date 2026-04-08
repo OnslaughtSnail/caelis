@@ -12,8 +12,8 @@ func TestResolveApproveAllOnce_PrefersAllowOnceOverAllowAlways(t *testing.T) {
 	}
 
 	got := ResolveApproveAllOnce("full_access", "copilot", req)
-	if got.Decision != PermissionDecisionAutoAllowOnce {
-		t.Fatalf("expected auto allow once, got %q", got.Decision)
+	if got.Decision != PermissionDecisionAutoSelect {
+		t.Fatalf("expected auto select, got %q", got.Decision)
 	}
 	if got.OptionID != "allow_once" {
 		t.Fatalf("expected allow_once, got %q", got.OptionID)
@@ -29,15 +29,15 @@ func TestResolveApproveAllOnce_UsesKnownAgentAliasWhenKindMissing(t *testing.T) 
 	}
 
 	got := ResolveApproveAllOnce("full_access", "gemini", req)
-	if got.Decision != PermissionDecisionAutoAllowOnce {
-		t.Fatalf("expected auto allow once, got %q", got.Decision)
+	if got.Decision != PermissionDecisionAutoSelect {
+		t.Fatalf("expected auto select, got %q", got.Decision)
 	}
 	if got.OptionID != "approve" {
 		t.Fatalf("expected approve alias, got %q", got.OptionID)
 	}
 }
 
-func TestResolveApproveAllOnce_DoesNotTreatAllowAlwaysAliasAsAllowOnce(t *testing.T) {
+func TestResolveApproveAllOnce_FallsBackToAllowAlways(t *testing.T) {
 	req := RequestPermissionRequest{
 		Options: []PermissionOption{
 			{OptionID: "allow", Name: "Allow", Kind: "allow_always"},
@@ -46,15 +46,15 @@ func TestResolveApproveAllOnce_DoesNotTreatAllowAlwaysAliasAsAllowOnce(t *testin
 	}
 
 	got := ResolveApproveAllOnce("full_access", "copilot", req)
-	if got.Decision != PermissionDecisionAskUser {
-		t.Fatalf("expected ask_user fallback, got %q", got.Decision)
+	if got.Decision != PermissionDecisionAutoSelect {
+		t.Fatalf("expected auto select fallback, got %q", got.Decision)
 	}
-	if got.OptionID != "" {
-		t.Fatalf("expected empty option id on fallback, got %q", got.OptionID)
+	if got.OptionID != "allow" {
+		t.Fatalf("expected allow_always option, got %q", got.OptionID)
 	}
 }
 
-func TestResolveApproveAllOnce_UnknownAgentFallsBackToUserApproval(t *testing.T) {
+func TestResolveApproveAllOnce_UnknownAgentUsesFirstOptionFallback(t *testing.T) {
 	req := RequestPermissionRequest{
 		Options: []PermissionOption{
 			{OptionID: "approve", Name: "Approve"},
@@ -63,11 +63,11 @@ func TestResolveApproveAllOnce_UnknownAgentFallsBackToUserApproval(t *testing.T)
 	}
 
 	got := ResolveApproveAllOnce("full_access", "unknown-agent", req)
-	if got.Decision != PermissionDecisionAskUser {
-		t.Fatalf("expected ask_user fallback, got %q", got.Decision)
+	if got.Decision != PermissionDecisionAutoSelect {
+		t.Fatalf("expected auto select fallback, got %q", got.Decision)
 	}
-	if got.OptionID != "" {
-		t.Fatalf("expected empty option id on fallback, got %q", got.OptionID)
+	if got.OptionID != "approve" {
+		t.Fatalf("expected first option fallback, got %q", got.OptionID)
 	}
 }
 

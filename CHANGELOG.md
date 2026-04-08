@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## v0.0.38 - 2026-04-08
+
+### ACP Projection, Resume, And Transcript Unification
+- Reworked ACP transport internals around shared `acpconn`, split client/server core helpers, and durable ACP projection logs so resumed external participants and subagents restore from a single persisted rendering path.
+- Unified TUI transcript rendering for ACP-backed participant and subagent activity, including plan updates, tool lifecycle projection, final stream snapshots, and replay-safe panel revival after resume.
+- Removed legacy child-session mirror persistence for external ACP participants in favor of projection-log-backed replay, reducing duplicated session history and keeping resumed UI state aligned with live ACP streams.
+
+### Full-Access ACP Approval Alignment
+- Aligned `full_access` ACP permission handling with `openclaw/acpx --approve-all` so known single-use allow options are preferred, persistent allow options are used as fallback, and server-provided options can still auto-select without blocking execution.
+- Centralized ACP permission auto-selection helpers across external-agent and self-runner paths to keep full-access approval behavior consistent and reduce future policy drift.
+
+### Tooling, Quality, And Release Metadata
+- Cleaned up dead compatibility code and test scaffolding left behind by the ACP/TUI refactor, then fixed lint, vet, and formatting issues surfaced by the new projection-based paths.
+- Bumped release metadata to `v0.0.38` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
+
 ## v0.0.37 - 2026-04-02
 
 ### TUI Layout, Overlay, And Interaction Refinements

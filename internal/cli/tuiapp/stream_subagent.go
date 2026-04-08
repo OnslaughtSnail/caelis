@@ -9,6 +9,52 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 )
 
+func legacySubagentProjectionMsg(msg tea.Msg) (tuievents.ACPProjectionMsg, bool) {
+	switch typed := msg.(type) {
+	case tuievents.SubagentStreamMsg:
+		return tuievents.ACPProjectionMsg{
+			Scope:     tuievents.ACPProjectionSubagent,
+			ScopeID:   typed.SpawnID,
+			Stream:    typed.Stream,
+			DeltaText: tuikit.SanitizeLogText(typed.Chunk),
+		}, true
+	case tuievents.SubagentToolCallMsg:
+		projection := tuievents.ACPProjectionMsg{
+			Scope:      tuievents.ACPProjectionSubagent,
+			ScopeID:    typed.SpawnID,
+			ToolCallID: typed.CallID,
+			ToolName:   typed.ToolName,
+		}
+		if args := strings.TrimSpace(typed.Args); args != "" {
+			projection.ToolArgs = map[string]any{"_display": args}
+		}
+		if typed.Final {
+			projection.ToolStatus = "completed"
+			if strings.EqualFold(strings.TrimSpace(typed.Stream), "stderr") {
+				projection.ToolStatus = "failed"
+			}
+			if chunk := strings.TrimSpace(typed.Chunk); chunk != "" {
+				projection.ToolResult = map[string]any{"summary": typed.Chunk}
+			}
+		} else if strings.TrimSpace(typed.Chunk) != "" {
+			projection.ToolResult = map[string]any{
+				"summary": typed.Chunk,
+				"stream":  typed.Stream,
+			}
+		}
+		return projection, true
+	case tuievents.SubagentPlanMsg:
+		return tuievents.ACPProjectionMsg{
+			Scope:         tuievents.ACPProjectionSubagent,
+			ScopeID:       typed.SpawnID,
+			PlanEntries:   append([]tuievents.PlanEntry(nil), typed.Entries...),
+			HasPlanUpdate: true,
+		}, true
+	default:
+		return tuievents.ACPProjectionMsg{}, false
+	}
+}
+
 func (m *Model) ensureSubagentSessionState(spawnID, attachID, agent string) (string, *SubagentSessionState) {
 	if m.subagentSessions == nil {
 		m.subagentSessions = map[string]*SubagentSessionState{}
@@ -324,6 +370,9 @@ func (m *Model) handleSubagentStart(msg tuievents.SubagentStartMsg) (tea.Model, 
 	}
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, msg.AttachTarget, msg.Agent)
 	panel := m.ensureSubagentPanelBlock(msg.SpawnID, msg.AttachTarget, msg.Agent, msg.CallID, msg.AnchorTool, msg.ClaimAnchor)
+	if state != nil && !msg.OccurredAt.IsZero() && (state.StartedAt.IsZero() || msg.OccurredAt.Before(state.StartedAt)) {
+		state.StartedAt = msg.OccurredAt
+	}
 	if state != nil && state.Status == "" {
 		state.Status = "running"
 	}
@@ -342,6 +391,9 @@ func (m *Model) handleSubagentStatus(msg tuievents.SubagentStatusMsg) (tea.Model
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
 	var cmd tea.Cmd
+	if state != nil && !msg.OccurredAt.IsZero() && (state.StartedAt.IsZero() || msg.OccurredAt.Before(state.StartedAt)) {
+		state.StartedAt = msg.OccurredAt
+	}
 	stateName := strings.TrimSpace(msg.State)
 	if stateName != "" && state != nil {
 		state.Status = stateName
@@ -367,27 +419,8 @@ func (m *Model) handleSubagentStatus(msg tuievents.SubagentStatusMsg) (tea.Model
 }
 
 func (m *Model) handleSubagentStream(msg tuievents.SubagentStreamMsg) (tea.Model, tea.Cmd) {
-	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
-	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
-	streamKind := strings.TrimSpace(msg.Stream)
-	chunk := tuikit.SanitizeLogText(msg.Chunk)
-	if chunk == "" {
-		return m, nil
-	}
-	if state != nil {
-		switch {
-		case strings.EqualFold(state.Status, "waiting_approval"):
-			state.Status = "running"
-		case isTerminalSubagentState(state.Status):
-			state.ReviveFromTerminal()
-		}
-	}
-	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false); panel != nil {
-		m.reviveSubagentPanel(panel, false)
-	}
-	cmd := m.applySubagentStreamImmediate(sessionKey, streamKind, chunk)
-	m.syncSubagentSessionPanels(sessionKey)
-	return m, cmd
+	projection, _ := legacySubagentProjectionMsg(msg)
+	return m.handleSubagentACPProjection(projection)
 }
 
 func (m *Model) enqueueSubagentDelta(spawnID string, stream string, chunk string, final bool) (tea.Model, tea.Cmd) {
@@ -439,56 +472,13 @@ func (m *Model) applySubagentStreamImmediate(sessionKey string, stream string, c
 	return m.requestStreamViewportSync()
 }
 
-func (m *Model) handleSubagentToolCall(msg tuievents.SubagentToolCallMsg) (tea.Model, tea.Cmd) {
-	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
-	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
-	if state != nil {
-		switch {
-		case strings.EqualFold(state.Status, "waiting_approval"):
-			state.Status = "running"
-		case isTerminalSubagentState(state.Status):
-			state.ReviveFromTerminal()
-		}
-	}
-	if msg.CallID != "" && state != nil {
-		state.UpdateToolCall(msg.CallID, msg.ToolName, msg.Args, msg.Stream, msg.Chunk, msg.Final)
-	}
-	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false); panel != nil {
-		m.reviveSubagentPanel(panel, false)
-	}
-	m.syncSubagentSessionPanels(sessionKey)
-	return m, m.requestStreamViewportSync()
-}
-
-func (m *Model) handleSubagentPlan(msg tuievents.SubagentPlanMsg) (tea.Model, tea.Cmd) {
-	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
-	_ = m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
-	if state != nil {
-		switch {
-		case strings.EqualFold(state.Status, "waiting_approval"):
-			state.Status = "running"
-		case isTerminalSubagentState(state.Status):
-			state.ReviveFromTerminal()
-		}
-	}
-	entries := make([]planEntryState, len(msg.Entries))
-	for i, e := range msg.Entries {
-		entries[i] = planEntryState{Content: e.Content, Status: e.Status}
-	}
-	if state != nil {
-		state.UpdatePlan(entries)
-	}
-	if panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false); panel != nil {
-		m.reviveSubagentPanel(panel, false)
-	}
-	m.syncSubagentSessionPanels(sessionKey)
-	return m, m.requestStreamViewportSync()
-}
-
 func (m *Model) handleSubagentDone(msg tuievents.SubagentDoneMsg) (tea.Model, tea.Cmd) {
 	sessionKey, state := m.ensureSubagentSessionState(msg.SpawnID, "", "")
 	panel := m.ensureSubagentPanelBlock(msg.SpawnID, "", "", "", "", false)
 	var cmd tea.Cmd
+	if state != nil && !msg.OccurredAt.IsZero() && (state.StartedAt.IsZero() || msg.OccurredAt.Before(state.StartedAt)) {
+		state.StartedAt = msg.OccurredAt
+	}
 	if state != nil {
 		state.Status = msg.State
 	}

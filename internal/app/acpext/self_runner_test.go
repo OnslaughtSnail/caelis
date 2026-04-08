@@ -777,7 +777,7 @@ func TestPermissionRequestHandler_FullAccessAutoAllowsKnownSingleUseOption(t *te
 	}
 }
 
-func TestPermissionRequestHandler_FullAccessUnknownOptionsFallbackToInteractiveApproval(t *testing.T) {
+func TestPermissionRequestHandler_FullAccessUnknownOptionsAutoSelectsFirstOption(t *testing.T) {
 	store := inmemory.New()
 	parent := &session.Session{AppName: "app", UserID: "u", ID: "parent"}
 	if _, err := store.GetOrCreate(context.Background(), parent); err != nil {
@@ -806,13 +806,10 @@ func TestPermissionRequestHandler_FullAccessUnknownOptionsFallbackToInteractiveA
 		t.Fatalf("permission request: %v", err)
 	}
 	if got := acpclient.PermissionSelectedOptionID(resp); got != "approve" {
-		t.Fatalf("expected fallback approver to select approve, got %q", got)
+		t.Fatalf("expected auto-selected first option, got %q", got)
 	}
-	if approver.calls != 1 {
-		t.Fatalf("expected one approver call, got %d", approver.calls)
-	}
-	if !approver.lastInteractive {
-		t.Fatal("expected fallback approval to require interactive approval")
+	if approver.calls != 0 {
+		t.Fatalf("expected no approver call, got %d", approver.calls)
 	}
 }
 

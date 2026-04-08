@@ -119,6 +119,10 @@ type cliConsole struct {
 	newACPAdapter       acpext.AdapterFactory
 }
 
+type replayContextKey string
+
+const replayContextMarker replayContextKey = "resume_replay"
+
 const interruptExitWindow = 2 * time.Second
 const transientHintDuration = 1600 * time.Millisecond
 
@@ -490,6 +494,7 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 		return preparedPromptSubmission{}, fmt.Errorf("no model configured, use /connect to add provider and select model")
 	}
 	resolvedInput := input
+	visibleInput := input
 	var resolvedPaths []string
 	if c.inputRefs != nil {
 		result, err := c.inputRefs.RewriteInput(input)
@@ -497,13 +502,15 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 			c.ui.Warn("input reference resolution skipped: %v\n", err)
 		} else {
 			resolvedInput = result.Text
+			if displayText := strings.TrimSpace(result.DisplayText); displayText != "" {
+				visibleInput = displayText
+			}
 			resolvedPaths = result.ResolvedPaths
 			for _, note := range result.Notes {
 				c.ui.Note("%s\n", note)
 			}
 		}
 	}
-	visibleInput := resolvedInput
 	resolvedInput = c.injectedPrompt(resolvedInput)
 	controlInput := strings.TrimSpace(c.injectedPrompt(""))
 	// Load image content parts from resolved file references.
@@ -630,8 +637,8 @@ func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared 
 				Chunk:  chunk.Text,
 			})
 		}))
-		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
-			c.forwardSessionEventToTUI(c.sessionID, update)
+		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(streamCtx context.Context, update sessionstream.Update) {
+			c.forwardSessionEventToTUI(streamCtx, c.sessionID, update)
 		}))
 	}
 	pendingTUIToolCalls := map[string]toolCallSnapshot{}
@@ -792,8 +799,8 @@ func (c *cliConsole) startBTWAsyncContext(ctx context.Context, prepared prepared
 				Chunk:  chunk.Text,
 			})
 		}))
-		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(_ context.Context, update sessionstream.Update) {
-			c.forwardSessionEventToTUI(c.sessionID, update)
+		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(streamCtx context.Context, update sessionstream.Update) {
+			c.forwardSessionEventToTUI(streamCtx, c.sessionID, update)
 		}))
 	}
 	gw, err := c.sessionGateway()
@@ -2319,6 +2326,10 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 	// In TUI mode, replay directly through structured events so assistant
 	// Markdown is rendered by the same block renderer as live streaming,
 	// avoiding mixed prefix-coloring and formatting artifacts.
+	// /resume is intentionally a static local replay: it rebuilds the UI from
+	// durable session events plus locally persisted ACP projection logs only.
+	// Reconnecting to remote ACP sessions belongs to explicit follow-up flows
+	// such as TASK write or @participant, not to resume itself.
 	c.tuiSender.Send(tuievents.ClearHistoryMsg{})
 	c.tuiSender.Send(tuievents.PlanUpdateMsg{})
 	c.spawnPreviewer = newSpawnPreviewProjector()
@@ -2331,11 +2342,15 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 		Context:   contextText,
 	})
 	pendingToolCalls := map[string]toolCallSnapshot{}
+	var acpProjectionEvents map[string][]acpProjectionPersistedEvent
+	if projectionIndex := c.loadACPProjectionIndex(replayCtx); projectionIndex != nil {
+		acpProjectionEvents = projectionIndex.ByCallID
+	}
 	for _, ev := range events {
 		if ev == nil || eventIsPartial(ev) {
 			continue
 		}
-		if c.forwardReplaySubagentHistoryEvent(replayCtx, rootSessionID, ev) {
+		if isDelegatedSubagentHistoryEvent(ev) {
 			continue
 		}
 		msg := ev.Message
@@ -2344,10 +2359,13 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 			if userText != "" {
 				c.tuiSender.Send(tuievents.UserMessageMsg{Text: userText})
 				if isParticipantMirrorEvent(ev) && strings.TrimSpace(asString(ev.Meta[metaRouteKind])) != "" {
-					c.tuiSender.Send(tuievents.ParticipantTurnStartMsg{
-						SessionID: eventParticipantSessionID(ev),
-						Actor:     eventParticipantDisplay(ev),
-					})
+					callID := strings.TrimSpace(asString(ev.Meta[metaRouteCallID]))
+					if projections, ok := acpProjectionEvents[callID]; !ok || !c.acpProjectionStore().ReplayParticipantEvents(projections) {
+						c.tuiSender.Send(tuievents.ParticipantTurnStartMsg{
+							SessionID: eventParticipantSessionID(ev),
+							Actor:     eventParticipantDisplay(ev),
+						})
+					}
 				}
 			}
 			continue
@@ -2370,27 +2388,8 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 		}
 	}
 	c.restoreResumedSubagentPanels(replayCtx, rootSessionID, events)
-	c.restoreResumedExternalParticipants(replayCtx)
 	c.tuiSender.Send(tuievents.TaskResultMsg{})
 	return nil
-}
-
-func (c *cliConsole) forwardReplaySubagentHistoryEvent(ctx context.Context, rootSessionID string, ev *session.Event) bool {
-	if c == nil || c.tuiSender == nil || c.spawnPreviewer == nil || ev == nil {
-		return false
-	}
-	update := sessionstream.Update{
-		SessionID: strings.TrimSpace(ev.SessionID),
-		Event:     ev,
-	}
-	msgs := c.projectSubagentUpdate(update)
-	if len(msgs) == 0 {
-		return isDelegatedSubagentHistoryEvent(ev)
-	}
-	for _, msg := range msgs {
-		c.sendSubagentProjectionMsg(ctx, rootSessionID, msg)
-	}
-	return true
 }
 
 func isDelegatedSubagentHistoryEvent(ev *session.Event) bool {
@@ -2406,7 +2405,7 @@ func isDelegatedSubagentHistoryEvent(ev *session.Event) bool {
 
 func (c *cliConsole) resetResumeReplayContext() context.Context {
 	if c == nil {
-		return context.Background()
+		return context.WithValue(context.Background(), replayContextMarker, true)
 	}
 	c.resumeReplayMu.Lock()
 	defer c.resumeReplayMu.Unlock()
@@ -2418,7 +2417,7 @@ func (c *cliConsole) resetResumeReplayContext() context.Context {
 	if base == nil {
 		base = context.Background()
 	}
-	ctx, cancel := context.WithCancel(base)
+	ctx, cancel := context.WithCancel(context.WithValue(base, replayContextMarker, true))
 	c.resumeReplayCancel = cancel
 	return ctx
 }
@@ -2882,7 +2881,7 @@ func toolAuthorizationPromptRequest(req kernelpolicy.ToolAuthorizationRequest, s
 }
 
 func approvalReasonText(reason string) string {
-	reason = strings.TrimSpace(reason)
+	reason = sanitizeApprovalDisplayText(reason)
 	if reason == "" {
 		return ""
 	}
@@ -2896,32 +2895,32 @@ func approvalReasonText(reason string) string {
 }
 
 func commandApprovalSummary(req toolexec.ApprovalRequest) (label string, value string) {
-	label = strings.ToUpper(strings.TrimSpace(req.ToolName))
+	label = strings.ToUpper(sanitizeApprovalDisplayText(req.ToolName))
 	if label == "" {
 		label = "COMMAND"
 	}
-	value = strings.TrimSpace(req.Command)
+	value = sanitizeApprovalDisplayText(req.Command)
 	if value != "" {
 		return label, approvalPreview(value)
 	}
-	if action := strings.TrimSpace(req.Action); action != "" {
+	if action := sanitizeApprovalDisplayText(req.Action); action != "" {
 		return label, approvalPreview(strings.ReplaceAll(action, "_", " "))
 	}
 	return "", ""
 }
 
 func toolAuthorizationSummary(req kernelpolicy.ToolAuthorizationRequest) (label string, value string) {
-	label = strings.ToUpper(strings.TrimSpace(req.ToolName))
+	label = strings.ToUpper(sanitizeApprovalDisplayText(req.ToolName))
 	if label == "" {
 		label = "TOOL"
 	}
 	switch {
-	case strings.TrimSpace(req.Path) != "":
-		value = approvalPreview(strings.TrimSpace(req.Path))
-	case strings.TrimSpace(req.Target) != "":
-		value = approvalPreview(strings.TrimSpace(req.Target))
-	case strings.TrimSpace(req.Preview) != "":
-		value = approvalPreview(strings.TrimSpace(req.Preview))
+	case sanitizeApprovalDisplayText(req.Path) != "":
+		value = approvalPreview(sanitizeApprovalDisplayText(req.Path))
+	case sanitizeApprovalDisplayText(req.Target) != "":
+		value = approvalPreview(sanitizeApprovalDisplayText(req.Target))
+	case sanitizeApprovalDisplayText(req.Preview) != "":
+		value = approvalPreview(sanitizeApprovalDisplayText(req.Preview))
 	default:
 		value = approvalReasonText(req.Reason)
 	}
@@ -2945,6 +2944,14 @@ func approvalPreview(input string) string {
 func approvalInlinePreview(input string, limit int) string {
 	text := strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
 	return truncateDisplayWidth(text, limit)
+}
+
+func sanitizeApprovalDisplayText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" || text == "<nil>" {
+		return ""
+	}
+	return text
 }
 
 func approvalPreviewWithLimits(input string, maxLines int, maxLineCols int, maxTotalCols int) string {
@@ -3028,7 +3035,7 @@ func toolApprovalOutcomeTarget(req kernelpolicy.ToolAuthorizationRequest) string
 }
 
 func compactApprovalScope(scope string) string {
-	scope = strings.TrimSpace(scope)
+	scope = sanitizeApprovalDisplayText(scope)
 	if scope == "" {
 		return "this"
 	}
@@ -3036,7 +3043,7 @@ func compactApprovalScope(scope string) string {
 }
 
 func shortApprovalTarget(text string) string {
-	text = strings.TrimSpace(text)
+	text = sanitizeApprovalDisplayText(text)
 	if text == "" {
 		return "\"\""
 	}

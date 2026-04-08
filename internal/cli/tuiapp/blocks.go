@@ -214,17 +214,6 @@ func renderNarrativeGlamourRows(blockID, raw, rolePrefix string, lineStyle tuiki
 	return glamourNarrativeRows(blockID, raw, rolePrefix, lineStyle, width, theme)
 }
 
-func narrativeRowsStyled(rows []RenderedRow) []string {
-	if len(rows) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, row.Styled)
-	}
-	return out
-}
-
 // ---------------------------------------------------------------------------
 // ParticipantTurnBlock — inline external-agent turn inside the main transcript.
 // ---------------------------------------------------------------------------
@@ -259,7 +248,7 @@ func (b *ParticipantTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk s
 		return
 	}
 	if idx := latestParticipantNarrativeEventIndex(b.Events, kind); idx >= 0 {
-		b.Events[idx].Text = collapseRepeatedNarrativeText(mergeSubagentStreamChunk(b.Events[idx].Text, chunk))
+		b.Events[idx].Text = collapseRepeatedNarrativeText(appendDeltaStreamChunk(b.Events[idx].Text, chunk))
 		b.Events = b.Events[:idx+1]
 		return
 	}
@@ -323,6 +312,20 @@ func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, fin
 		if ev.Kind != SEToolCall || strings.TrimSpace(ev.CallID) != callID {
 			continue
 		}
+		if !ev.Done {
+			if strings.TrimSpace(finalEvent.Name) == "" {
+				finalEvent.Name = strings.TrimSpace(ev.Name)
+			}
+			if strings.TrimSpace(finalEvent.Args) == "" {
+				finalEvent.Args = strings.TrimSpace(ev.Args)
+			}
+			ev.Name = finalEvent.Name
+			ev.Args = finalEvent.Args
+			ev.Output = finalEvent.Output
+			ev.Done = true
+			ev.Err = finalEvent.Err
+			return
+		}
 		if strings.TrimSpace(finalEvent.Name) == "" {
 			finalEvent.Name = strings.TrimSpace(ev.Name)
 		}
@@ -334,7 +337,21 @@ func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, fin
 	b.Events = append(b.Events, finalEvent)
 }
 
-func (b *ParticipantTurnBlock) SetStatus(state string, approvalTool string, approvalCommand string) {
+func (b *ParticipantTurnBlock) UpdatePlan(entries []planEntryState) {
+	if b == nil {
+		return
+	}
+	if n := len(b.Events); n > 0 && b.Events[n-1].Kind == SEPlan {
+		b.Events[n-1].PlanEntries = entries
+		return
+	}
+	b.Events = append(b.Events, SubagentEvent{
+		Kind:        SEPlan,
+		PlanEntries: entries,
+	})
+}
+
+func (b *ParticipantTurnBlock) SetStatus(state string, approvalTool string, approvalCommand string, occurredAt time.Time) {
 	if b == nil {
 		return
 	}
@@ -342,7 +359,11 @@ func (b *ParticipantTurnBlock) SetStatus(state string, approvalTool string, appr
 	switch b.Status {
 	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
 		if b.EndedAt.IsZero() {
-			b.EndedAt = time.Now()
+			if !occurredAt.IsZero() {
+				b.EndedAt = occurredAt
+			} else {
+				b.EndedAt = time.Now()
+			}
 		}
 	default:
 		b.EndedAt = time.Time{}
@@ -370,28 +391,12 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 	if !b.Expanded {
 		return rows
 	}
-	contentWidth := maxInt(8, ctx.Width)
-	events := visibleNarrativeEvents(b.Events, b.Status)
-	for i, ev := range events {
-		switch ev.Kind {
-		case SEReasoning:
-			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleReasoning, contentWidth, ctx, participantNarrativeEventActive(events, i, b.Status))...)
-		case SEAssistant:
-			rows = append(rows, renderParticipantTurnNarrativeRows(b.id, ev.Text, tuikit.LineStyleAssistant, contentWidth, ctx, participantNarrativeEventActive(events, i, b.Status))...)
-		case SEToolCall:
-			if shouldRenderToolEvent(ev) {
-				rows = append(rows, renderParticipantTurnToolRows(b.id, ev, contentWidth, ctx)...)
-			}
-		case SEApproval:
-			continue
-		}
-	}
-	switch strings.ToLower(strings.TrimSpace(b.Status)) {
-	case "failed":
-		rows = append(rows, StyledRow(b.id, ctx.Theme.ErrorStyle().Render("✗ failed")))
-	case "interrupted":
-		rows = append(rows, StyledRow(b.id, ctx.Theme.WarnStyle().Render("⊘ interrupted")))
-	}
+	rows = append(rows, renderACPTranscriptRows(b.id, b.Events, b.Status, maxInt(8, ctx.Width), ctx, acpTranscriptRenderOptions{
+		UseStatusPlaceholder:   true,
+		PlaceholderAsMeta:      true,
+		HideWaitingApprovalRow: true,
+		HideCompletedRow:       true,
+	})...)
 	if b.Expanded && participantTurnIsTerminal(b.Status) {
 		rows = append(rows, StyledRow(b.id, renderParticipantTurnFooter(b, ctx)))
 	}
@@ -408,15 +413,37 @@ func renderParticipantTurnHeader(b *ParticipantTurnBlock, ctx BlockRenderContext
 	}
 	iconText := ctx.Theme.PromptStyle().Bold(true).Render(icon)
 	actor := renderParticipantActorLabel(ctx.Theme, b.Actor)
+	left := iconText + " " + actor
 	switch strings.ToLower(strings.TrimSpace(b.Status)) {
 	case "waiting_approval":
-		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + actor
+		left = ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + actor
 	case "failed":
-		return ctx.Theme.ErrorStyle().Bold(true).Render(icon) + " " + actor
+		left = ctx.Theme.ErrorStyle().Bold(true).Render(icon) + " " + actor
 	case "interrupted":
-		return ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + actor
+		left = ctx.Theme.WarnStyle().Bold(true).Render(icon) + " " + actor
+	}
+	metaParts := make([]string, 0, 1)
+	if label := participantTurnStatusLabel(b.Status); label != "" {
+		metaParts = append(metaParts, label)
+	}
+	if len(metaParts) == 0 {
+		return left
+	}
+	return left + " " + ctx.Theme.TranscriptMetaStyle().Render("· "+strings.Join(metaParts, " · "))
+}
+
+func participantTurnStatusLabel(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "", "running", "initializing", "prompting", "completed":
+		return ""
+	case "waiting_approval":
+		return "waiting approval"
+	case "failed":
+		return "failed"
+	case "interrupted":
+		return "interrupted"
 	default:
-		return iconText + " " + actor
+		return strings.TrimSpace(state)
 	}
 }
 
@@ -1035,15 +1062,39 @@ func (s *SubagentSessionState) AppendStreamChunk(kind SubagentEventKind, chunk s
 	if s == nil {
 		return
 	}
+	chunk = tuikit.SanitizeLogText(chunk)
+	if chunk == "" {
+		return
+	}
 	if len(s.Events) > 0 {
 		last := &s.Events[len(s.Events)-1]
 		if last.Kind == kind {
-			last.Text = mergeSubagentStreamChunk(last.Text, chunk)
+			last.Text = collapseRepeatedNarrativeText(mergeSubagentStreamChunk(last.Text, chunk))
 			s.eventsGen++
 			return
 		}
 	}
-	s.Events = append(s.Events, SubagentEvent{Kind: kind, Text: chunk})
+	s.Events = append(s.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	s.eventsGen++
+}
+
+func (s *SubagentSessionState) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+	if s == nil {
+		return
+	}
+	chunk = strings.TrimSpace(tuikit.SanitizeLogText(chunk))
+	if chunk == "" {
+		return
+	}
+	if len(s.Events) > 0 {
+		last := &s.Events[len(s.Events)-1]
+		if last.Kind == kind {
+			last.Text = collapseRepeatedNarrativeText(chunk)
+			s.eventsGen++
+			return
+		}
+	}
+	s.Events = append(s.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
 	s.eventsGen++
 }
 
@@ -1051,7 +1102,11 @@ func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, ch
 	if s == nil {
 		return
 	}
+	callID = strings.TrimSpace(callID)
+	toolName = strings.TrimSpace(toolName)
+	args = strings.TrimSpace(args)
 	stream = strings.ToLower(strings.TrimSpace(stream))
+	chunk = normalizeSubagentChunkBoundary("", chunk)
 	if !final {
 		for i := len(s.Events) - 1; i >= 0; i-- {
 			e := &s.Events[i]
@@ -1065,7 +1120,7 @@ func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, ch
 				e.Args = args
 			}
 			if chunk != "" {
-				e.Output += chunk
+				e.Output = mergeSubagentStreamChunk(e.Output, chunk)
 			}
 			s.eventsGen++
 			return
@@ -1301,7 +1356,14 @@ func (b *SubagentPanelBlock) AppendStreamChunk(kind SubagentEventKind, chunk str
 	b.syncSessionMirror()
 }
 
+func (b *SubagentPanelBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+	state := b.sessionState()
+	state.ReplaceFinalStreamChunk(kind, chunk)
+	b.syncSessionMirror()
+}
+
 func mergeSubagentStreamChunk(existing string, incoming string) string {
+	incoming = normalizeSubagentChunkBoundary(existing, incoming)
 	if incoming == "" {
 		return existing
 	}
@@ -1323,6 +1385,31 @@ func mergeSubagentStreamChunk(existing string, incoming string) string {
 		return existing + suffix
 	}
 	return existing + incoming
+}
+
+func appendDeltaStreamChunk(existing string, incoming string) string {
+	incoming = normalizeSubagentChunkBoundary(existing, incoming)
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	return existing + incoming
+}
+
+func normalizeSubagentChunkBoundary(existing string, incoming string) string {
+	if incoming == "" {
+		return ""
+	}
+	if existing == "" {
+		return strings.TrimLeft(incoming, "\uFEFF")
+	}
+	// Some upstream streaming paths occasionally surface a replacement-rune
+	// prefix at chunk boundaries when a multibyte rune was split mid-update.
+	// Keep the fix narrow: only trim leading U+FFFD/FEFF on continuation chunks.
+	incoming = strings.TrimLeft(incoming, "\uFFFD\uFEFF")
+	return incoming
 }
 
 func overlappingSubagentSuffix(existing string, incoming string, minOverlap int) string {
@@ -1428,76 +1515,9 @@ func subagentPanelRenderLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 }
 
 func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext, contentWidth int) []string {
-	var lines []string
-	hasContent := false
-
-	events := visibleNarrativeEvents(panel.Events, panel.Status)
-	for i, ev := range events {
-		switch ev.Kind {
-		case SEPlan:
-			for _, pe := range ev.PlanEntries {
-				icon := "○"
-				switch strings.ToLower(pe.Status) {
-				case "done", "completed":
-					icon = "✓"
-				case "in_progress", "running":
-					icon = "▸"
-				case "failed":
-					icon = "✗"
-				case "blocked":
-					icon = "⊘"
-				}
-				lines = append(lines, ctx.Theme.TextStyle().Width(contentWidth).Render(icon+" "+strings.TrimSpace(pe.Content)))
-			}
-			hasContent = true
-
-		case SEReasoning:
-			if text := strings.TrimSpace(ev.Text); text != "" {
-				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleReasoning, contentWidth, ctx, subagentNarrativeEventActive(events, i, panel.Status))...)
-				hasContent = true
-			}
-
-		case SEAssistant:
-			if text := strings.TrimSpace(ev.Text); text != "" {
-				lines = append(lines, renderSubagentNarrativeLines(text, tuikit.LineStyleAssistant, contentWidth, ctx, subagentNarrativeEventActive(events, i, panel.Status))...)
-				hasContent = true
-			}
-
-		case SEToolCall:
-			if shouldRenderToolEvent(ev) {
-				lines = append(lines, renderSubagentToolEvent(ev, ctx, contentWidth)...)
-				hasContent = true
-			}
-
-		case SEApproval:
-			continue
-		}
-	}
-
-	if !hasContent && panel.Status == "running" {
-		lines = append(lines, ctx.Theme.HelpHintTextStyle().Width(contentWidth).Render("waiting for subagent output"))
-	}
-	switch strings.ToLower(strings.TrimSpace(panel.Status)) {
-	case "waiting_approval":
-		lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render("waiting approval"))
-	case "completed":
-		lines = append(lines, ctx.Theme.HelpHintTextStyle().Width(contentWidth).Render("✓ completed"))
-	case "failed":
-		lines = append(lines, ctx.Theme.ErrorStyle().Width(contentWidth).Render("✗ failed"))
-	case "interrupted":
-		lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render("⊘ interrupted"))
-	case "timed_out":
-		lines = append(lines, ctx.Theme.WarnStyle().Width(contentWidth).Render("⌛ timed out"))
-	}
-	return lines
-}
-
-func renderSubagentToolEvent(ev SubagentEvent, ctx BlockRenderContext, contentWidth int) []string {
-	return renderToolEventViewModelStyledLines(buildToolEventViewModel(ev), contentWidth, ctx.Theme)
-}
-
-func subagentNarrativeEventActive(events []SubagentEvent, idx int, status string) bool {
-	return narrativeEventActive(events, idx, isTerminalSubagentState(status))
+	return renderACPTranscriptLines(panel.id, panel.Events, panel.Status, contentWidth, ctx, acpTranscriptRenderOptions{
+		EmptyPlaceholder: "waiting for subagent output",
+	})
 }
 
 func narrativeEventActive(events []SubagentEvent, idx int, terminal bool) bool {
@@ -1514,11 +1534,6 @@ func narrativeEventActive(events []SubagentEvent, idx int, terminal bool) bool {
 		}
 	}
 	return true
-}
-
-func renderSubagentNarrativeLines(raw string, lineStyle tuikit.LineStyle, contentWidth int, ctx BlockRenderContext, active bool) []string {
-	rolePrefix, _ := narrativeLinePrefixes(lineStyle)
-	return narrativeRowsStyled(renderNarrativeRows("", raw, rolePrefix, lineStyle, contentWidth, ctx.Theme, active))
 }
 
 func panelScrollWindow(total, visible, offset int, followTail bool) (start int, end int, maxOffset int) {

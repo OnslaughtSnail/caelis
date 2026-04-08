@@ -151,8 +151,8 @@ func TestConnServe_WritesResponseBeforePostWriteNotifications(t *testing.T) {
 	go func() {
 		done <- serverConn.Serve(ctx, func(_ context.Context, _ Message) (any, *RPCError) {
 			return postWriteResult{
-				payload: map[string]any{"ok": true},
-				afterWrite: func() {
+				Payload: map[string]any{"ok": true},
+				AfterWrite: func() {
 					_ = serverConn.Notify(MethodSessionUpdate, map[string]any{
 						"sessionId": "s-1",
 						"update": map[string]any{

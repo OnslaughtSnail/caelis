@@ -17,6 +17,11 @@ import (
 
 var skillTriggerPattern = regexp.MustCompile(`\$([A-Za-z0-9][A-Za-z0-9._-]*)`)
 
+const (
+	inputReferenceOpenTag  = "<caelis-input-reference"
+	inputReferenceCloseTag = "</caelis-input-reference>"
+)
+
 type inputReferenceResolver struct {
 	workspaceRoot string
 
@@ -69,22 +74,25 @@ func normalizeSlashPath(pathText string) string {
 // RewriteResult carries the output of RewriteInput.
 type RewriteResult struct {
 	Text          string   // rewritten input text with resolved mentions
+	DisplayText   string   // visible text for TUI/transcript display
 	Notes         []string // informational notes (e.g. unresolved mentions)
 	ResolvedPaths []string // workspace-relative paths of all resolved file references
 }
 
 func (r *inputReferenceResolver) RewriteInput(input string) (RewriteResult, error) {
 	if r == nil {
-		return RewriteResult{Text: input}, nil
+		return RewriteResult{Text: input, DisplayText: input}, nil
 	}
 	text := strings.TrimSpace(input)
 	if text == "" {
-		return RewriteResult{Text: input}, nil
+		return RewriteResult{Text: input, DisplayText: input}, nil
 	}
 
 	notes := make([]string, 0, 4)
 	referenced := make([]string, 0, 8)
 	referencedSet := map[string]struct{}{}
+	skillHints := make([]string, 0, 4)
+	skillHintSet := map[string]struct{}{}
 
 	addReference := func(pathText string) {
 		cleaned := strings.TrimSpace(pathText)
@@ -97,21 +105,30 @@ func (r *inputReferenceResolver) RewriteInput(input string) (RewriteResult, erro
 		referencedSet[cleaned] = struct{}{}
 		referenced = append(referenced, cleaned)
 	}
+	addSkillHint := func(skillName string) {
+		hint := formatSkillTriggerHint(skillName)
+		if hint == "" {
+			return
+		}
+		if _, exists := skillHintSet[hint]; exists {
+			return
+		}
+		skillHintSet[hint] = struct{}{}
+		skillHints = append(skillHints, hint)
+	}
 
 	text = skillTriggerPattern.ReplaceAllStringFunc(text, func(token string) string {
 		name := normalizeSkillName(strings.TrimPrefix(token, "$"))
 		meta, ok := r.skillByName[name]
-		if !ok {
-			return token
+		if ok {
+			addSkillHint(meta.Name)
 		}
-		pathText := r.displayPath(meta.Path)
-		addReference(pathText)
-		return "#" + pathText
+		return token
 	})
 
 	rewritten, resolved, unresolved, err := r.rewriteFileMentions(text)
 	if err != nil {
-		return RewriteResult{Text: input}, err
+		return RewriteResult{Text: input, DisplayText: input}, err
 	}
 	for _, one := range resolved {
 		addReference(one)
@@ -122,8 +139,10 @@ func (r *inputReferenceResolver) RewriteInput(input string) (RewriteResult, erro
 		}
 	}
 
+	displayText := strings.TrimSpace(rewritten)
 	return RewriteResult{
-		Text:          strings.TrimSpace(rewritten),
+		Text:          injectHiddenInputReferenceHints(displayText, skillHints),
+		DisplayText:   displayText,
 		Notes:         notes,
 		ResolvedPaths: referenced,
 	}, nil
@@ -185,6 +204,42 @@ func formatResolvedMentionPrompt(absPath string) string {
 		return ""
 	}
 	return "请阅读文件: " + cleaned
+}
+
+func formatSkillTriggerHint(skillName string) string {
+	skillName = strings.TrimSpace(skillName)
+	if skillName == "" {
+		return ""
+	}
+	return "Load " + skillName + " Skills."
+}
+
+func injectHiddenInputReferenceHints(visibleText string, hints []string) string {
+	visibleText = strings.TrimSpace(visibleText)
+	if len(hints) == 0 {
+		return visibleText
+	}
+	body := strings.TrimSpace(strings.Join(hints, "\n"))
+	if body == "" {
+		return visibleText
+	}
+	hidden := inputReferenceOpenTag + ` hidden="true">` + "\n" + body + "\n" + inputReferenceCloseTag
+	if visibleText == "" {
+		return hidden
+	}
+	return hidden + "\n\n" + visibleText
+}
+
+func stripHiddenInputReferenceHints(text string) string {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	for strings.HasPrefix(trimmed, inputReferenceOpenTag) {
+		end := strings.Index(trimmed, inputReferenceCloseTag)
+		if end < 0 {
+			return trimmed
+		}
+		trimmed = strings.TrimLeft(trimmed[end+len(inputReferenceCloseTag):], "\r\n")
+	}
+	return trimmed
 }
 
 func (r *inputReferenceResolver) ResolveMention(query string) (string, bool, error) {

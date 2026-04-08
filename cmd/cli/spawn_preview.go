@@ -15,7 +15,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
-func (c *cliConsole) forwardSessionEventToTUI(rootSessionID string, update sessionstream.Update) {
+func (c *cliConsole) forwardSessionEventToTUI(ctx context.Context, rootSessionID string, update sessionstream.Update) {
 	if c == nil || c.tuiSender == nil || update.Event == nil {
 		return
 	}
@@ -28,7 +28,7 @@ func (c *cliConsole) forwardSessionEventToTUI(rootSessionID string, update sessi
 		}
 	}
 	for _, msg := range c.projectSubagentUpdate(update) {
-		c.tuiSender.Send(msg)
+		c.sendSubagentProjectionMsg(ctx, rootSessionID, msg)
 	}
 }
 
@@ -156,25 +156,44 @@ func renderSubagentDomainUpdates(updates []subagentDomainUpdate) []any {
 				ApprovalCommand: update.ApprovalCommand,
 			})
 		case subagentDomainStream:
-			msgs = append(msgs, tuievents.SubagentStreamMsg{
-				SpawnID: target.SpawnID,
-				Stream:  update.Stream,
-				Chunk:   update.Chunk,
+			msgs = append(msgs, tuievents.ACPProjectionMsg{
+				Scope:     tuievents.ACPProjectionSubagent,
+				ScopeID:   target.SpawnID,
+				Stream:    update.Stream,
+				DeltaText: update.Chunk,
 			})
 		case subagentDomainToolCall:
-			msgs = append(msgs, tuievents.SubagentToolCallMsg{
-				SpawnID:  target.SpawnID,
-				ToolName: update.ToolName,
-				CallID:   update.ToolCallID,
-				Args:     update.Args,
-				Stream:   update.Stream,
-				Chunk:    update.Chunk,
-				Final:    update.Final,
-			})
+			msg := tuievents.ACPProjectionMsg{
+				Scope:      tuievents.ACPProjectionSubagent,
+				ScopeID:    target.SpawnID,
+				ToolCallID: update.ToolCallID,
+				ToolName:   update.ToolName,
+			}
+			if strings.TrimSpace(update.Args) != "" {
+				msg.ToolArgs = map[string]any{"_display": update.Args}
+			}
+			if !update.Final && strings.TrimSpace(update.Chunk) != "" {
+				msg.ToolResult = map[string]any{
+					"summary": update.Chunk,
+					"stream":  update.Stream,
+				}
+			}
+			if update.Final {
+				msg.ToolStatus = "completed"
+				if strings.EqualFold(strings.TrimSpace(update.Stream), "stderr") {
+					msg.ToolStatus = "failed"
+				}
+				if strings.TrimSpace(update.Chunk) != "" {
+					msg.ToolResult = map[string]any{"summary": update.Chunk}
+				}
+			}
+			msgs = append(msgs, msg)
 		case subagentDomainPlan:
-			msgs = append(msgs, tuievents.SubagentPlanMsg{
-				SpawnID: target.SpawnID,
-				Entries: append([]tuievents.PlanEntry(nil), update.Entries...),
+			msgs = append(msgs, tuievents.ACPProjectionMsg{
+				Scope:         tuievents.ACPProjectionSubagent,
+				ScopeID:       target.SpawnID,
+				PlanEntries:   append([]tuievents.PlanEntry(nil), update.Entries...),
+				HasPlanUpdate: true,
 			})
 		case subagentDomainTerminal:
 			msgs = append(msgs, tuievents.SubagentDoneMsg{
@@ -687,22 +706,6 @@ func projectSubagentSnapshotText(slot *string, text string, partial bool) string
 		return ""
 	}
 	return chunk + "\n"
-}
-
-func replaceSubagentReplayText(slot *string, text string) string {
-	if slot == nil {
-		return ""
-	}
-	*slot = text
-	return *slot
-}
-
-func appendSubagentReplayText(slot *string, text string) string {
-	if slot == nil {
-		return ""
-	}
-	*slot += text
-	return *slot
 }
 
 func rememberSubagentToolSnapshot(toolCalls map[string]toolCallSnapshot, callID, name string, args map[string]any) map[string]toolCallSnapshot {

@@ -75,8 +75,8 @@ func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, 
 				wrappedStyled = m.wrapNarrativeRowStyled(row, wrapWidth)
 				plainParts = m.wrapNarrativeRowPlain(row, wrapWidth)
 			case BlockParticipantTurn:
-				wrappedStyled = styledLine
-				plainParts = []string{plainLine}
+				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
+				plainParts = normalizeWrappedPlainSegments(graphemeHardWrap(plainLine, wrapWidth))
 			default:
 				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
 				plainParts = normalizeWrappedPlainSegments(graphemeHardWrap(plainLine, wrapWidth))

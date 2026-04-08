@@ -386,7 +386,8 @@ func userTextFromContentParts(parts []model.ContentPart) string {
 }
 
 func visibleUserText(msg model.Message) string {
-	return sessionmode.VisibleText(strings.TrimSpace(userMessageDisplayText(msg)))
+	text := sessionmode.VisibleText(strings.TrimSpace(userMessageDisplayText(msg)))
+	return strings.TrimSpace(stripHiddenInputReferenceHints(text))
 }
 
 func userMessageDisplayText(msg model.Message) string {

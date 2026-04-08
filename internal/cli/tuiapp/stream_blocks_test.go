@@ -3,6 +3,7 @@ package tuiapp
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/charmbracelet/x/ansi"
@@ -98,7 +99,6 @@ func TestParticipantTurnBlock_GroupsActorOutputUnderSingleHeader(t *testing.T) {
 		Text:    "Done.",
 		Final:   true,
 	})
-
 	view := strings.Join(m.viewportPlainLines, "\n")
 	if count := strings.Count(view, "luna [gemini]"); count != 1 {
 		t.Fatalf("expected a single actor header for the turn, got %d occurrences:\n%s", count, view)
@@ -175,6 +175,30 @@ func TestParticipantTurnBlock_RendersCompletionFooter(t *testing.T) {
 	}
 	if !strings.Contains(view, "─") {
 		t.Fatalf("expected completion divider footer, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_ReplayUsesOccurredAtForFooterDuration(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	startedAt := time.Date(2026, 4, 8, 9, 46, 0, 0, time.UTC)
+	endedAt := startedAt.Add(463 * time.Millisecond)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{
+		SessionID:  "child-1",
+		Actor:      "cole(copilot)",
+		OccurredAt: startedAt,
+	})
+	_, _ = m.Update(tuievents.ParticipantStatusMsg{
+		SessionID:  "child-1",
+		State:      "completed",
+		OccurredAt: endedAt,
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "463ms") {
+		t.Fatalf("expected replay footer to use persisted duration, got:\n%s", view)
 	}
 }
 
@@ -263,6 +287,355 @@ func TestParticipantTurnBlock_DoesNotDuplicateStyledReasoningRowsInViewport(t *t
 	}
 }
 
+func TestParticipantACPProjection_TracksInProgressToolUpdateWithoutSeparateToolCall(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "cole(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "cole(copilot)",
+		ToolCallID: "tool-1",
+		ToolName:   "READ",
+		ToolArgs:   map[string]any{"path": "/tmp/demo.txt"},
+		ToolStatus: "in_progress",
+	})
+
+	blockID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	block, ok := m.doc.Find(blockID).(*ParticipantTurnBlock)
+	if !ok || block == nil {
+		t.Fatalf("expected participant block for child-1")
+	}
+	if len(block.Events) == 0 || block.Events[0].Kind != SEToolCall {
+		t.Fatalf("expected in-progress tool event to be recorded, got %#v", block.Events)
+	}
+
+	m.syncViewportContent()
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "READ") || !strings.Contains(view, "/tmp/demo.txt") {
+		t.Fatalf("expected in-progress tool update to create participant tool row, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_FinalToolResultAttachesToOriginalCallOrder(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "evan(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-view",
+		ToolName:   "VIEWING",
+		ToolArgs:   map[string]any{"_display": "/tmp/a.txt"},
+		ToolStatus: "in_progress",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-list",
+		ToolName:   "LIST",
+		ToolArgs:   map[string]any{"_display": "ls -la"},
+		ToolStatus: "in_progress",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-view",
+		ToolName:   "VIEWING",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "first result"},
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-list",
+		ToolName:   "LIST",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "second result"},
+	})
+
+	blockID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	block, ok := m.doc.Find(blockID).(*ParticipantTurnBlock)
+	if !ok || block == nil {
+		t.Fatalf("expected participant block for child-1")
+	}
+	if got := len(block.Events); got != 2 {
+		t.Fatalf("expected final tool updates to reuse original events, got %d events: %#v", got, block.Events)
+	}
+	if !block.Events[0].Done || !block.Events[1].Done {
+		t.Fatalf("expected both tool events completed in place, got %#v", block.Events)
+	}
+
+	m.syncViewportContent()
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Index(view, "VIEWING") > strings.Index(view, "first result") {
+		t.Fatalf("expected viewing result detail after original call row, got:\n%s", view)
+	}
+	if strings.Index(view, "LIST") > strings.Index(view, "second result") {
+		t.Fatalf("expected list result detail after original call row, got:\n%s", view)
+	}
+	if strings.Index(view, "first result") > strings.Index(view, "LIST") {
+		t.Fatalf("expected first tool result to stay attached before second tool row, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_WrapsLongToolRowsInsideViewport(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.viewport.SetWidth(48)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "evan(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-list",
+		ToolName:   "LIST",
+		ToolArgs:   map[string]any{"_display": "ls -la && echo \"PWD: $(pwd)\""},
+		ToolStatus: "in_progress",
+	})
+
+	m.syncViewportContent()
+	for i, blockID := range m.viewportBlockIDs {
+		if blockID != strings.TrimSpace(m.participantTurnIDs["child-1"]) {
+			continue
+		}
+		if got, want := displayColumns(m.viewportPlainLines[i]), m.viewport.Width(); got > want {
+			t.Fatalf("expected participant rows to wrap to viewport width %d, got %d cols: %q", want, got, m.viewportPlainLines[i])
+		}
+	}
+}
+
+func TestParticipantTurnBlock_HeaderOmitsCompletedMetaAndBodyStatusRow(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "ruby(copilot)"})
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "ruby(copilot)",
+		Stream:  "answer",
+		Text:    "hello",
+		Final:   true,
+	})
+	_, _ = m.Update(tuievents.ParticipantStatusMsg{SessionID: "child-1", State: "completed"})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "· completed") {
+		t.Fatalf("did not expect completed meta in participant header, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ completed") {
+		t.Fatalf("did not expect completed body status row, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_PromptingPlaceholderDisappearsAfterFirstBodyEvent(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "ruby(copilot)"})
+	_, _ = m.Update(tuievents.ParticipantStatusMsg{SessionID: "child-1", State: "prompting"})
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "sending prompt") {
+		t.Fatalf("did not expect prompting placeholder in participant body, got:\n%s", view)
+	}
+
+	_, _ = m.Update(tuievents.RawDeltaMsg{
+		Target:  tuievents.RawDeltaTargetAssistant,
+		ScopeID: "child-1",
+		Actor:   "ruby(copilot)",
+		Stream:  "answer",
+		Text:    "body",
+	})
+	view = strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "sending prompt") || strings.Contains(view, "waiting for agent output") {
+		t.Fatalf("expected placeholder to disappear after first body event, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_KeepsPostToolAssistantChunksIncremental(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	prefix := "将并行执行四个操作以演示工具调用能力。现在并行执行这些操作。"
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "liam(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionParticipant,
+		ScopeID:   "child-1",
+		Actor:     "liam(copilot)",
+		Stream:    "assistant",
+		DeltaText: prefix,
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "liam(copilot)",
+		ToolCallID: "tool-1",
+		ToolName:   "SHOW",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "liam(copilot)",
+		ToolCallID: "tool-1",
+		ToolName:   "SHOW",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"summary": "done"},
+	})
+	for _, chunk := range []string{"已", "并", "行", "运行", " ", "4", " 项"} {
+		_, _ = m.Update(tuievents.ACPProjectionMsg{
+			Scope:     tuievents.ACPProjectionParticipant,
+			ScopeID:   "child-1",
+			Actor:     "liam(copilot)",
+			Stream:    "assistant",
+			DeltaText: chunk,
+		})
+	}
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Count(view, prefix) != 1 {
+		t.Fatalf("expected initial assistant prefix to appear once, got:\n%s", view)
+	}
+	if !strings.Contains(view, "已并行运行 4 项") {
+		t.Fatalf("expected post-tool assistant text to remain incremental, got:\n%s", view)
+	}
+	if strings.Count(view, prefix) != 1 {
+		t.Fatalf("did not expect post-tool chunks to re-expand the prior prefix, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_WhitespaceDeltaDoesNotTriggerFullTextReplay(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "liam(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionParticipant,
+		ScopeID:   "child-1",
+		Actor:     "liam(copilot)",
+		Stream:    "assistant",
+		DeltaText: "已并行运行",
+		FullText:  "前缀已并行运行",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionParticipant,
+		ScopeID:   "child-1",
+		Actor:     "liam(copilot)",
+		Stream:    "assistant",
+		DeltaText: " ",
+		FullText:  "前缀已并行运行 ",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionParticipant,
+		ScopeID:   "child-1",
+		Actor:     "liam(copilot)",
+		Stream:    "assistant",
+		DeltaText: "4 项",
+		FullText:  "前缀已并行运行 4 项",
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "前缀") {
+		t.Fatalf("did not expect whitespace delta to trigger full-text replay, got:\n%s", view)
+	}
+	if !strings.Contains(view, "已并行运行 4 项") {
+		t.Fatalf("expected whitespace delta to remain incremental, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_EmptyPlanUpdateClearsPriorPlan(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "liam(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:         tuievents.ACPProjectionParticipant,
+		ScopeID:       "child-1",
+		Actor:         "liam(copilot)",
+		HasPlanUpdate: true,
+		PlanEntries: []tuievents.PlanEntry{
+			{Content: "step 1", Status: "pending"},
+		},
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:         tuievents.ACPProjectionParticipant,
+		ScopeID:       "child-1",
+		Actor:         "liam(copilot)",
+		HasPlanUpdate: true,
+		PlanEntries:   []tuievents.PlanEntry{},
+	})
+
+	blockID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	block, ok := m.doc.Find(blockID).(*ParticipantTurnBlock)
+	if !ok || block == nil {
+		t.Fatalf("expected participant block for child-1")
+	}
+	if got := len(block.Events); got != 1 || block.Events[0].Kind != SEPlan || len(block.Events[0].PlanEntries) != 0 {
+		t.Fatalf("expected empty plan update to clear existing entries, got %#v", block.Events)
+	}
+}
+
+func TestSubagentACPProjection_EmptyPlanUpdateClearsPriorPlan(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:         tuievents.ACPProjectionSubagent,
+		ScopeID:       "spawn-1",
+		HasPlanUpdate: true,
+		PlanEntries: []tuievents.PlanEntry{
+			{Content: "step 1", Status: "pending"},
+		},
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:         tuievents.ACPProjectionSubagent,
+		ScopeID:       "spawn-1",
+		HasPlanUpdate: true,
+		PlanEntries:   []tuievents.PlanEntry{},
+	})
+
+	sessionKey, state := m.ensureSubagentSessionState("spawn-1", "", "")
+	if sessionKey == "" || state == nil {
+		t.Fatalf("expected subagent session state")
+	}
+	if got := len(state.Events); got != 1 || state.Events[0].Kind != SEPlan || len(state.Events[0].PlanEntries) != 0 {
+		t.Fatalf("expected empty subagent plan update to clear existing entries, got %#v", state.Events)
+	}
+}
+
+func TestSubagentACPProjection_InProgressToolPreviewStillRenders(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.SubagentStartMsg{SpawnID: "spawn-1", Agent: "self", CallID: "call-1"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionSubagent,
+		ScopeID:    "spawn-1",
+		ToolCallID: "tool-1",
+		ToolName:   "BASH",
+		ToolArgs:   map[string]any{"_display": "tail -f /tmp/demo.log"},
+		ToolResult: map[string]any{
+			"summary": "heartbeat 1/6",
+			"stream":  "stdout",
+		},
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "BASH tail -f /tmp/demo.log") {
+		t.Fatalf("expected subagent tool start in viewport, got:\n%s", view)
+	}
+	if !strings.Contains(view, "heartbeat 1/6") {
+		t.Fatalf("expected subagent tool preview in viewport, got:\n%s", view)
+	}
+}
+
 func TestParticipantTurnBlock_StreamingClosedFenceHidesDelimiters(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -346,6 +719,49 @@ func TestParticipantTurnBlock_SanitizesStreamingControlCharacters(t *testing.T) 
 	}
 	if !strings.Contains(view, "hello") || !strings.Contains(view, "world") {
 		t.Fatalf("expected sanitized participant text to remain visible, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_AddsNewReferenceForSameSession(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "cole(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionParticipant,
+		ScopeID:   "child-1",
+		Actor:     "cole(copilot)",
+		Stream:    "assistant",
+		DeltaText: "first turn",
+	})
+	firstID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	if firstID == "" {
+		t.Fatal("expected first participant turn block id")
+	}
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "cole(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionParticipant,
+		ScopeID:   "child-1",
+		Actor:     "cole(copilot)",
+		Stream:    "assistant",
+		DeltaText: "second turn",
+	})
+	secondID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	if secondID == "" || secondID == firstID {
+		t.Fatalf("expected latest participant reference block for same session, got %q want new block", secondID)
+	}
+
+	firstBlock, _ := m.doc.Find(firstID).(*ParticipantTurnBlock)
+	secondBlock, _ := m.doc.Find(secondID).(*ParticipantTurnBlock)
+	if firstBlock == nil || secondBlock == nil {
+		t.Fatal("expected both participant turn blocks to exist")
+	}
+	if got := len(firstBlock.Events); got != 1 || firstBlock.Events[0].Text != "first turn" {
+		t.Fatalf("expected first block content preserved, got %#v", firstBlock.Events)
+	}
+	if got := len(secondBlock.Events); got != 1 || secondBlock.Events[0].Text != "second turn" {
+		t.Fatalf("expected second block content preserved, got %#v", secondBlock.Events)
 	}
 }
 
