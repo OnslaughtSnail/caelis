@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 
@@ -331,7 +332,7 @@ func requestFailed(err error) *RPCError {
 	switch {
 	case errors.Is(err, errAuthenticationRequired):
 		return &RPCError{Code: -32000, Message: err.Error()}
-	case errors.Is(err, errSessionNotFound), errors.Is(err, ksession.ErrSessionNotFound):
+	case errors.Is(err, errSessionNotFound), errors.Is(err, ksession.ErrSessionNotFound), errors.Is(err, os.ErrNotExist):
 		return &RPCError{Code: -32002, Message: err.Error()}
 	default:
 		return &RPCError{Code: -32603, Message: err.Error()}

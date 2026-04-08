@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -96,6 +97,16 @@ func newHarnessAdapter(t *testing.T, cfg harnessConfig, adapterCfg harnessAdapte
 		modelImpl:     adapterCfg.modelImpl,
 		taskRegistry:  task.NewRegistry(task.RegistryConfig{}),
 		sessions:      map[string]*harnessAdapterSession{},
+	}
+}
+
+func TestRequestFailedMapsNotExistToSessionNotFoundCode(t *testing.T) {
+	got := requestFailed(os.ErrNotExist)
+	if got == nil {
+		t.Fatal("expected rpc error")
+	}
+	if got.Code != -32002 {
+		t.Fatalf("expected -32002 for os.ErrNotExist, got %d", got.Code)
 	}
 }
 
