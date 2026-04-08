@@ -48,13 +48,22 @@ func renderEventPolicyFor(msg tea.Msg) (renderEventPolicy, bool) {
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 	case tuievents.ParticipantStatusMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true}, true
+	case tuievents.ACPProjectionMsg:
+		switch typed.Scope {
+		case tuievents.ACPProjectionParticipant:
+			return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
+		case tuievents.ACPProjectionSubagent:
+			return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
+		default:
+			return renderEventPolicy{lane: renderLaneLifecycle, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true}, true
+		}
 	case tuievents.SubagentStartMsg:
 		return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
-	case tuievents.SubagentStatusMsg, tuievents.SubagentPlanMsg, tuievents.SubagentDoneMsg:
+	case tuievents.SubagentStatusMsg, tuievents.SubagentDoneMsg:
 		return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true}, true
-	case tuievents.SubagentStreamMsg:
+	case tuievents.SubagentStreamMsg, tuievents.SubagentToolCallMsg:
 		return renderEventPolicy{lane: renderLaneSubagent, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
-	case tuievents.SubagentToolCallMsg:
+	case tuievents.SubagentPlanMsg:
 		return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 	case tuievents.PlanUpdateMsg, tuievents.SetHintMsg, tuievents.SetRunningMsg,
 		tuievents.SetStatusMsg, tuievents.SetCommandsMsg, tuievents.AttachmentCountMsg:
@@ -118,6 +127,13 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	policyCmd := m.applyRenderEventPolicy(policy)
 
 	switch typed := msg.(type) {
+	case tuievents.SubagentStreamMsg, tuievents.SubagentToolCallMsg, tuievents.SubagentPlanMsg:
+		projection, ok := legacySubagentProjectionMsg(msg)
+		if !ok {
+			return m, policyCmd, true
+		}
+		model, cmd := m.handleACPProjection(projection)
+		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.LogChunkMsg:
 		if !m.deferredBatchingEnabled() {
 			model, cmd := m.handleLogChunk(typed.Chunk)
@@ -169,21 +185,15 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case tuievents.ParticipantStatusMsg:
 		model, cmd := m.handleParticipantStatusMsg(typed)
 		return model, tea.Batch(policyCmd, cmd), true
+	case tuievents.ACPProjectionMsg:
+		model, cmd := m.handleACPProjection(typed)
+		return model, tea.Batch(policyCmd, cmd), true
 
 	case tuievents.SubagentStartMsg:
 		model, cmd := m.handleSubagentStart(typed)
 		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentStatusMsg:
 		model, cmd := m.handleSubagentStatus(typed)
-		return model, tea.Batch(policyCmd, cmd), true
-	case tuievents.SubagentStreamMsg:
-		model, cmd := m.handleSubagentStream(typed)
-		return model, tea.Batch(policyCmd, cmd), true
-	case tuievents.SubagentToolCallMsg:
-		model, cmd := m.handleSubagentToolCall(typed)
-		return model, tea.Batch(policyCmd, cmd), true
-	case tuievents.SubagentPlanMsg:
-		model, cmd := m.handleSubagentPlan(typed)
 		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.SubagentDoneMsg:
 		model, cmd := m.handleSubagentDone(typed)

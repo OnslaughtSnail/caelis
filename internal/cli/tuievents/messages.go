@@ -121,8 +121,9 @@ type UserMessageMsg struct {
 }
 
 type ParticipantTurnStartMsg struct {
-	SessionID string
-	Actor     string
+	SessionID  string
+	Actor      string
+	OccurredAt time.Time
 }
 
 type ParticipantToolMsg struct {
@@ -140,6 +141,31 @@ type ParticipantStatusMsg struct {
 	State           string
 	ApprovalTool    string
 	ApprovalCommand string
+	OccurredAt      time.Time
+}
+
+type ACPProjectionScope string
+
+const (
+	ACPProjectionParticipant ACPProjectionScope = "participant"
+	ACPProjectionSubagent    ACPProjectionScope = "subagent"
+)
+
+type ACPProjectionMsg struct {
+	Scope         ACPProjectionScope
+	ScopeID       string
+	Actor         string
+	OccurredAt    time.Time
+	Stream        string
+	DeltaText     string
+	FullText      string
+	ToolCallID    string
+	ToolName      string
+	ToolArgs      map[string]any
+	ToolResult    map[string]any
+	ToolStatus    string
+	PlanEntries   []PlanEntry
+	HasPlanUpdate bool
 }
 
 // AssistantStreamMsg carries assistant answer chunks for TUI block rendering.
@@ -212,6 +238,7 @@ type SubagentStartMsg struct {
 	AnchorTool   string // transcript anchor label (e.g. "SPAWN", "WRITE")
 	ClaimAnchor  bool   // whether this start may claim a pending SPAWN anchor
 	Provisional  bool   // whether this is a pre-bootstrap placeholder keyed by callID
+	OccurredAt   time.Time
 }
 
 type SubagentStatusMsg struct {
@@ -221,6 +248,7 @@ type SubagentStatusMsg struct {
 	// Optional approval context (populated when State == "waiting_approval").
 	ApprovalTool    string // tool requesting approval (e.g. "BASH")
 	ApprovalCommand string // command or action awaiting approval
+	OccurredAt      time.Time
 }
 
 // SubagentStreamMsg carries assistant or reasoning chunks for a subagent panel.
@@ -249,6 +277,7 @@ type SubagentPlanMsg struct {
 
 // SubagentDoneMsg signals a subagent panel has completed.
 type SubagentDoneMsg struct {
-	SpawnID string
-	State   string // "completed", "failed", "interrupted"
+	SpawnID    string
+	State      string // "completed", "failed", "interrupted"
+	OccurredAt time.Time
 }

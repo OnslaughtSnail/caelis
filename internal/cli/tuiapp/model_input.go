@@ -248,7 +248,16 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	bp, ok := blk.(*BashPanelBlock)
 	if !ok {
 		if ab, ok := blk.(*ActivityBlock); ok {
-			if ab.BlockKindField != activityBlockExploration || !ab.Finalized {
+			if !ab.Finalized {
+				return false
+			}
+			switch ab.BlockKindField {
+			case activityBlockExploration:
+			case activityBlockTaskMonitor:
+				if !activityBlockHasTaskWriteEntries(ab.Entries) {
+					return false
+				}
+			default:
 				return false
 			}
 			if ab.Expanded {

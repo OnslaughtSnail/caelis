@@ -217,8 +217,10 @@ func newTestRPCClient() (*Client, <-chan Message, func(any, any) error, func()) 
 	reqReader, reqWriter := io.Pipe()
 	respReader, respWriter := io.Pipe()
 	serveCtx, cancel := context.WithCancel(context.Background())
+	conn := NewConn(respReader, reqWriter)
 	client := &Client{
-		conn: NewConn(respReader, reqWriter),
+		core: NewCoreClient(conn, CoreClientConfig{}),
+		conn: conn,
 		done: make(chan error, 1),
 	}
 	go func() {

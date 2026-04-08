@@ -21,6 +21,7 @@ const (
 	metaMirrorSourceSessionID  = "mirror_source_session_id"
 	metaMirrorSourceEventID    = "mirror_source_event_id"
 	metaRouteKind              = "route_kind"
+	metaRouteCallID            = "route_call_id"
 	metaParentSessionID        = "parent_session_id"
 	metaChildSessionID         = "child_session_id"
 	metaParticipantSessionKind = "participant_session_kind"
@@ -131,13 +132,6 @@ func (c *cliConsole) ensureSessionRecord(ctx context.Context, sessionID string) 
 		return nil, fmt.Errorf("session id is required")
 	}
 	return c.sessionStore.GetOrCreate(ctx, sess)
-}
-
-func (c *cliConsole) childSessionRecord(childSessionID string) *session.Session {
-	if c == nil {
-		return nil
-	}
-	return &session.Session{AppName: c.appName, UserID: c.userID, ID: strings.TrimSpace(childSessionID)}
 }
 
 func (c *cliConsole) loadSessionParticipants(ctx context.Context) ([]externalParticipant, error) {
@@ -369,31 +363,6 @@ func annotateParticipantEvent(ev *session.Event, p externalParticipant) *session
 	ev.Meta[metaParticipantDisplay] = participantDisplayLabel(p.Alias, p.AgentID)
 	ev.Meta[metaChildSessionID] = strings.TrimSpace(p.ChildSessionID)
 	return session.EnsureEventType(ev)
-}
-
-func annotateChildParticipantEvent(ev *session.Event, rootSessionID string, p externalParticipant) *session.Event {
-	ev = annotateParticipantEvent(ev, p)
-	if ev == nil {
-		return nil
-	}
-	ev.Meta[metaParentSessionID] = strings.TrimSpace(rootSessionID)
-	ev.Meta[metaChildSessionID] = strings.TrimSpace(p.ChildSessionID)
-	ev.Meta[metaParticipantSessionKind] = "external_agent"
-	return ev
-}
-
-func mirrorParticipantEvent(ev *session.Event, rootSessionID string, p externalParticipant, sourceEventID string) *session.Event {
-	ev = annotateParticipantEvent(ev, p)
-	if ev == nil {
-		return nil
-	}
-	if ev.Meta == nil {
-		ev.Meta = map[string]any{}
-	}
-	ev.Meta[metaMirrorSourceSessionID] = strings.TrimSpace(p.ChildSessionID)
-	ev.Meta[metaMirrorSourceEventID] = strings.TrimSpace(sourceEventID)
-	ev.Meta[metaParentSessionID] = strings.TrimSpace(rootSessionID)
-	return session.MarkMirror(ev)
 }
 
 func routeMirrorUserEvent(routeText string, p externalParticipant, routeKind string) *session.Event {

@@ -37,7 +37,7 @@ func TestServiceNewLoadAndRestoreState(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	created, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 	}, internalacp.ClientCapabilities{})
 	if err != nil {
@@ -47,7 +47,7 @@ func TestServiceNewLoadAndRestoreState(t *testing.T) {
 		t.Fatalf("expected cwd to persist, got %q", created.CWD)
 	}
 
-	updated, err := svc.SetMode(ctx, internalacp.SetSessionModeRequest{
+	updated, err := svc.SetMode(ctx, internalacp.AdapterSetModeRequest{
 		SessionID: created.SessionID,
 		ModeID:    "plan",
 	})
@@ -58,7 +58,7 @@ func TestServiceNewLoadAndRestoreState(t *testing.T) {
 		t.Fatalf("expected plan mode, got %+v", updated.Modes)
 	}
 
-	updated, err = svc.SetConfigOption(ctx, internalacp.SetSessionConfigOptionRequest{
+	updated, err = svc.SetConfigOption(ctx, internalacp.AdapterSetConfigOptionRequest{
 		SessionID: created.SessionID,
 		ConfigID:  "model",
 		Value:     "gpt-b",
@@ -70,7 +70,7 @@ func TestServiceNewLoadAndRestoreState(t *testing.T) {
 		t.Fatalf("expected model config to persist, got %q", got)
 	}
 
-	loaded, err := svc.LoadSession(ctx, internalacp.LoadSessionRequest{
+	loaded, err := svc.LoadSession(ctx, internalacp.AdapterLoadSessionRequest{
 		SessionID: created.SessionID,
 		CWD:       "/workspace/project",
 	}, internalacp.ClientCapabilities{})
@@ -93,14 +93,14 @@ func TestServiceLoadSessionRejectsPersistedCWDMismatch(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	created, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project-a",
 	}, internalacp.ClientCapabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = svc.LoadSession(ctx, internalacp.LoadSessionRequest{
+	_, err = svc.LoadSession(ctx, internalacp.AdapterLoadSessionRequest{
 		SessionID: created.SessionID,
 		CWD:       "/workspace/project-b",
 	}, internalacp.ClientCapabilities{})
@@ -143,7 +143,7 @@ func TestServiceStartPromptEmitsCanonicalEvents(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	created, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 	}, internalacp.ClientCapabilities{})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestServiceCancelPromptStopsActiveRun(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	created, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 	}, internalacp.ClientCapabilities{})
 	if err != nil {
@@ -278,7 +278,7 @@ func TestServiceStartPromptFreezesSystemPromptPerLoadedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	created, err := svc.NewSession(context.Background(), internalacp.NewSessionRequest{CWD: "/workspace/project"}, internalacp.ClientCapabilities{})
+	created, err := svc.NewSession(context.Background(), internalacp.AdapterNewSessionRequest{CWD: "/workspace/project"}, internalacp.ClientCapabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	created, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 		Meta: map[string]any{
 			"caelis": map[string]any{
@@ -352,7 +352,7 @@ func TestServiceSessionMetaRoundTripsThroughNewLoadAndPrompt(t *testing.T) {
 
 	assertMeta(true, "", "")
 
-	if _, err := svc.LoadSession(ctx, internalacp.LoadSessionRequest{
+	if _, err := svc.LoadSession(ctx, internalacp.AdapterLoadSessionRequest{
 		SessionID: created.SessionID,
 		CWD:       "/workspace/project",
 		Meta: map[string]any{
@@ -454,7 +454,7 @@ func TestServiceNewSession_SeedsModelFromSessionMeta(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	created, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	created, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 		Meta: map[string]any{
 			"caelis": map[string]any{
@@ -491,7 +491,7 @@ func TestServiceSessionServiceDisablesSpawnForDelegatedChildSessions(t *testing.
 	defer cleanup()
 
 	ctx := context.Background()
-	rootState, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	rootState, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 	}, internalacp.ClientCapabilities{})
 	if err != nil {
@@ -513,7 +513,7 @@ func TestServiceSessionServiceDisablesSpawnForDelegatedChildSessions(t *testing.
 		t.Fatalf("expected top-level ACP session to expose %q, got %+v", tool.SpawnToolName, toolNames(rootTools))
 	}
 
-	childState, err := svc.NewSession(ctx, internalacp.NewSessionRequest{
+	childState, err := svc.NewSession(ctx, internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 		Meta: map[string]any{
 			"caelis": map[string]any{
@@ -601,7 +601,7 @@ func TestServiceDelegatedChildPromptRemovesSpawnGuidance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	created, err := svc.NewSession(context.Background(), internalacp.NewSessionRequest{
+	created, err := svc.NewSession(context.Background(), internalacp.AdapterNewSessionRequest{
 		CWD: "/workspace/project",
 		Meta: map[string]any{
 			"caelis": map[string]any{

@@ -9,6 +9,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
@@ -61,8 +62,8 @@ func TestSpawnPreviewProjector_ProjectsAssistantStream(t *testing.T) {
 				t.Fatalf("expected child-event bootstrap not to claim anchors, got %+v", msg)
 			}
 			startFound = true
-		case tuievents.SubagentStreamMsg:
-			if msg.Stream != "assistant" || msg.Chunk == "" {
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope != tuievents.ACPProjectionSubagent || msg.Stream != "assistant" || msg.DeltaText == "" {
 				t.Fatalf("unexpected stream msg: %+v", msg)
 			}
 			streamFound = true
@@ -72,7 +73,7 @@ func TestSpawnPreviewProjector_ProjectsAssistantStream(t *testing.T) {
 		t.Fatal("expected SubagentStartMsg")
 	}
 	if !streamFound {
-		t.Fatal("expected SubagentStreamMsg for assistant")
+		t.Fatal("expected ACPProjectionMsg for assistant")
 	}
 }
 
@@ -101,8 +102,8 @@ func TestProjectSubagentDomainUpdate_UsesCommonSpawnProjectorPath(t *testing.T) 
 				t.Fatalf("expected synthetic child-event bootstrap not to claim anchors, got %+v", msg)
 			}
 			startFound = true
-		case tuievents.SubagentStreamMsg:
-			if msg.Stream != "assistant" || !strings.Contains(msg.Chunk, "hello") {
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope != tuievents.ACPProjectionSubagent || msg.Stream != "assistant" || !strings.Contains(msg.DeltaText, "hello") {
 				t.Fatalf("unexpected stream msg: %+v", msg)
 			}
 			streamFound = true
@@ -112,7 +113,7 @@ func TestProjectSubagentDomainUpdate_UsesCommonSpawnProjectorPath(t *testing.T) 
 		t.Fatal("expected SubagentStartMsg from common synthetic projector path")
 	}
 	if !streamFound {
-		t.Fatal("expected SubagentStreamMsg from common synthetic projector path")
+		t.Fatal("expected ACPProjectionMsg from common synthetic projector path")
 	}
 }
 
@@ -340,12 +341,12 @@ func TestSendSubagentProjectionMsg_IgnoresCancelledTurnContext(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected canceled turn context not to drop subagent projection, got %#v", msgs)
 	}
-	raw, ok := msgs[0].(tuievents.RawDeltaMsg)
+	raw, ok := msgs[0].(tuievents.ACPProjectionMsg)
 	if !ok {
-		t.Fatalf("expected RawDeltaMsg, got %T", msgs[0])
+		t.Fatalf("expected ACPProjectionMsg, got %T", msgs[0])
 	}
-	if raw.Target != tuievents.RawDeltaTargetSubagent || raw.ScopeID != "child-1" || raw.Text != "still arrives" {
-		t.Fatalf("unexpected raw subagent delta %+v", raw)
+	if raw.Scope != tuievents.ACPProjectionSubagent || raw.ScopeID != "child-1" || raw.Stream != "assistant" || raw.DeltaText != "still arrives" {
+		t.Fatalf("unexpected subagent projection %+v", raw)
 	}
 }
 
@@ -539,15 +540,15 @@ func TestSpawnPreviewProjector_ProjectsReasoningStream(t *testing.T) {
 	})
 	var reasoningFound bool
 	for _, m := range msgs {
-		if msg, ok := m.(tuievents.SubagentStreamMsg); ok && msg.Stream == "reasoning" {
-			if msg.Chunk == "" {
+		if msg, ok := m.(tuievents.ACPProjectionMsg); ok && msg.Scope == tuievents.ACPProjectionSubagent && msg.Stream == "reasoning" {
+			if msg.DeltaText == "" {
 				t.Fatal("expected non-empty reasoning chunk")
 			}
 			reasoningFound = true
 		}
 	}
 	if !reasoningFound {
-		t.Fatal("expected SubagentStreamMsg for reasoning")
+		t.Fatal("expected ACPProjectionMsg for reasoning")
 	}
 }
 
@@ -568,12 +569,12 @@ func TestSpawnPreviewProjector_ProjectsTaskWriteContinuationToNewPanel(t *testin
 		},
 	})
 	var start tuievents.SubagentStartMsg
-	var stream tuievents.SubagentStreamMsg
+	var stream tuievents.ACPProjectionMsg
 	for _, raw := range msgs {
 		switch msg := raw.(type) {
 		case tuievents.SubagentStartMsg:
 			start = msg
-		case tuievents.SubagentStreamMsg:
+		case tuievents.ACPProjectionMsg:
 			stream = msg
 		}
 	}
@@ -583,7 +584,7 @@ func TestSpawnPreviewProjector_ProjectsTaskWriteContinuationToNewPanel(t *testin
 	if start.AttachTarget != "child-1" || start.AnchorTool != runtime.SubagentContinuationAnchorTool {
 		t.Fatalf("unexpected continuation start metadata %+v", start)
 	}
-	if stream.SpawnID != "call-task-write-1" || stream.Stream != "assistant" || stream.Chunk == "" {
+	if stream.ScopeID != "call-task-write-1" || stream.Stream != "assistant" || stream.DeltaText == "" {
 		t.Fatalf("unexpected continuation stream %+v", stream)
 	}
 }
@@ -610,15 +611,15 @@ func TestSpawnPreviewProjector_ProjectsToolCallAndResult(t *testing.T) {
 	})
 	var toolCallFound bool
 	for _, m := range msgs {
-		if msg, ok := m.(tuievents.SubagentToolCallMsg); ok {
-			if msg.ToolName != "READ" || msg.CallID != "tc-1" {
+		if msg, ok := m.(tuievents.ACPProjectionMsg); ok && msg.Scope == tuievents.ACPProjectionSubagent {
+			if msg.ToolName != "READ" || msg.ToolCallID != "tc-1" || msg.ToolStatus != "" {
 				t.Fatalf("unexpected tool call msg: %+v", msg)
 			}
 			toolCallFound = true
 		}
 	}
 	if !toolCallFound {
-		t.Fatal("expected SubagentToolCallMsg for tool call")
+		t.Fatal("expected ACPProjectionMsg for tool call")
 	}
 
 	// Tool result
@@ -641,15 +642,15 @@ func TestSpawnPreviewProjector_ProjectsToolCallAndResult(t *testing.T) {
 	})
 	var resultFound bool
 	for _, m := range msgs {
-		if msg, ok := m.(tuievents.SubagentToolCallMsg); ok && msg.Final {
-			if msg.ToolName != "READ" || msg.CallID != "tc-1" || msg.Stream != "stdout" {
+		if msg, ok := m.(tuievents.ACPProjectionMsg); ok && msg.Scope == tuievents.ACPProjectionSubagent && msg.ToolStatus == "completed" {
+			if msg.ToolName != "READ" || msg.ToolCallID != "tc-1" {
 				t.Fatalf("unexpected tool result msg: %+v", msg)
 			}
 			resultFound = true
 		}
 	}
 	if !resultFound {
-		t.Fatal("expected SubagentToolCallMsg with Final=true for tool result")
+		t.Fatal("expected ACPProjectionMsg with completed tool result")
 	}
 }
 
@@ -724,20 +725,20 @@ func TestSpawnPreviewProjector_ProjectsRunningToolPreview(t *testing.T) {
 	})
 	var found bool
 	for _, m := range msgs {
-		msg, ok := m.(tuievents.SubagentToolCallMsg)
+		msg, ok := m.(tuievents.ACPProjectionMsg)
 		if !ok {
 			continue
 		}
-		if msg.CallID != "tc-bash-1" || msg.ToolName != "BASH" || msg.Final {
+		if msg.ToolCallID != "tc-bash-1" || msg.ToolName != "BASH" || msg.ToolStatus != "" {
 			t.Fatalf("unexpected running tool preview msg: %+v", msg)
 		}
-		if !strings.Contains(msg.Chunk, "heartbeat 1/6") {
+		if summary := asString(msg.ToolResult["summary"]); !strings.Contains(summary, "heartbeat 1/6") {
 			t.Fatalf("expected running tool preview chunk, got %+v", msg)
 		}
 		found = true
 	}
 	if !found {
-		t.Fatal("expected SubagentToolCallMsg for running tool preview")
+		t.Fatal("expected ACPProjectionMsg for running tool preview")
 	}
 }
 
@@ -770,7 +771,7 @@ func TestSpawnPreviewProjector_DropsUnchangedRunningToolPreview(t *testing.T) {
 
 	var firstCount int
 	for _, msg := range first {
-		if _, ok := msg.(tuievents.SubagentToolCallMsg); ok {
+		if _, ok := msg.(tuievents.ACPProjectionMsg); ok {
 			firstCount++
 		}
 	}
@@ -778,7 +779,7 @@ func TestSpawnPreviewProjector_DropsUnchangedRunningToolPreview(t *testing.T) {
 		t.Fatalf("expected initial running preview to emit tool call msg, got %#v", first)
 	}
 	for _, msg := range second {
-		if toolMsg, ok := msg.(tuievents.SubagentToolCallMsg); ok {
+		if toolMsg, ok := msg.(tuievents.ACPProjectionMsg); ok && toolMsg.ToolCallID != "" {
 			t.Fatalf("expected unchanged preview to emit no tool call msg, got %+v", toolMsg)
 		}
 	}
@@ -809,11 +810,11 @@ func TestSpawnPreviewProjector_SuppressesNestedTaskSubagentPreview(t *testing.T)
 		},
 	})
 	for _, raw := range msgs {
-		msg, ok := raw.(tuievents.SubagentToolCallMsg)
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
 		if !ok {
 			continue
 		}
-		if msg.CallID == "tc-task-1" && strings.TrimSpace(msg.Chunk) != "" {
+		if msg.ToolCallID == "tc-task-1" {
 			t.Fatalf("expected nested TASK preview to be suppressed, got %+v", msg)
 		}
 	}
@@ -866,7 +867,7 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
 	}
-	c.forwardSessionEventToTUI("parent-session", sessionstream.Update{
+	c.forwardSessionEventToTUI(context.Background(), "parent-session", sessionstream.Update{
 		SessionID: "child-session",
 		Event: &session.Event{
 			Message: model.NewTextMessage(model.RoleAssistant, "subagent answer"),
@@ -879,13 +880,13 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 			},
 		},
 	})
-	// Should get SubagentStartMsg + SubagentStreamMsg, but NOT TaskStreamMsg.
+	// Should get SubagentStartMsg + ACPProjectionMsg, but NOT TaskStreamMsg.
 	var hasStart, hasStream bool
 	for _, m := range sender.msgs {
 		switch m.(type) {
 		case tuievents.SubagentStartMsg:
 			hasStart = true
-		case tuievents.SubagentStreamMsg:
+		case tuievents.ACPProjectionMsg:
 			hasStream = true
 		case tuievents.TaskStreamMsg:
 			t.Fatal("SPAWN events should not produce TaskStreamMsg")
@@ -895,7 +896,59 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 		t.Fatal("expected SubagentStartMsg from spawn projector")
 	}
 	if !hasStream {
-		t.Fatal("expected SubagentStreamMsg from spawn projector")
+		t.Fatal("expected ACPProjectionMsg from spawn projector")
+	}
+}
+
+func TestForwardSessionEventToTUI_PersistsSpawnProjectionEvents(t *testing.T) {
+	store := inmemory.New()
+	if _, err := store.GetOrCreate(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      "parent-session",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "parent-session",
+		sessionStore:   store,
+		tuiSender:      &testSender{},
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+	c.forwardSessionEventToTUI(context.Background(), "parent-session", sessionstream.Update{
+		SessionID: "child-session",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "subagent answer"),
+			Meta: map[string]any{
+				"parent_session_id":   "parent-session",
+				"child_session_id":    "child-session",
+				"parent_tool_call_id": "call-spawn-1",
+				"parent_tool_name":    tool.SpawnToolName,
+				"delegation_id":       "dlg-1",
+			},
+		},
+	})
+	events, err := c.acpProjectionStore().LoadEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundStart, foundProjection bool
+	for _, ev := range events {
+		if ev.Scope != string(tuievents.ACPProjectionSubagent) || ev.ScopeID != "child-session" {
+			continue
+		}
+		if ev.Kind == "turn_start" {
+			foundStart = true
+		}
+		if ev.Kind == "projection" && ev.Stream == "assistant" && strings.Contains(ev.DeltaText, "subagent answer") {
+			foundProjection = true
+		}
+	}
+	if !foundStart || !foundProjection {
+		t.Fatalf("expected persisted subagent start/projection events, got %#v", events)
 	}
 }
 
@@ -906,7 +959,7 @@ func TestForwardSessionEventToTUI_IgnoresNestedGrandchildEvents(t *testing.T) {
 		tuiSender:      sender,
 		spawnPreviewer: newSpawnPreviewProjector(),
 	}
-	c.forwardSessionEventToTUI("root-session", sessionstream.Update{
+	c.forwardSessionEventToTUI(context.Background(), "root-session", sessionstream.Update{
 		SessionID: "grandchild-session",
 		Event: &session.Event{
 			Message: model.NewTextMessage(model.RoleAssistant, "nested codex output"),

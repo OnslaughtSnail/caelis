@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	imageutil "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
+	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 )
 
@@ -260,6 +261,17 @@ func decodeEmbeddedImageData(raw string, fallbackMime string) ([]byte, string, e
 		return nil, "", fmt.Errorf("invalid image data: %w", err)
 	}
 	return data, fallbackMime, nil
+}
+
+func sessReadFile(fsys toolexec.FileSystem, path string) (string, error) {
+	if fsys == nil {
+		return "", fmt.Errorf("session file system is not available")
+	}
+	data, err := fsys.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func filterImageContentParts(parts []model.ContentPart, keepImages bool) []model.ContentPart {

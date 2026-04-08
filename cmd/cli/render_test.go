@@ -214,3 +214,14 @@ func TestVisibleUserTextCombinesImagesAndText(t *testing.T) {
 		t.Fatalf("unexpected visible user text %q", got)
 	}
 }
+
+func TestVisibleUserTextStripsHiddenInputReferenceHints(t *testing.T) {
+	msg := model.Message{Role: model.RoleUser, Parts: []model.Part{
+		model.NewTextPart(injectHiddenInputReferenceHints("$cmpctl 归档数据字典", []string{
+			"Load cmpctl Skills.",
+		})),
+	}}
+	if got := visibleUserText(msg); got != "$cmpctl 归档数据字典" {
+		t.Fatalf("expected hidden input reference hints removed from visible text, got %q", got)
+	}
+}

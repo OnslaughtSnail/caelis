@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -13,12 +12,12 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
+	"github.com/OnslaughtSnail/caelis/internal/acpprojector"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -35,8 +34,9 @@ var errExternalAgentRunBusy = errors.New("an external agent run is active; wait 
 
 type activeExternalAgentRun struct {
 	mu        sync.RWMutex
-	client    *acpclient.Client
+	client    externalSlashACPClient
 	sessionID string
+	callID    string
 }
 
 type externalAgentTurnMode string
@@ -47,6 +47,25 @@ const (
 )
 
 const externalACPStartupTimeout = 45 * time.Second
+
+type externalSlashACPClient interface {
+	Initialize(context.Context) (acpclient.InitializeResponse, error)
+	NewSession(context.Context, string, map[string]any) (acpclient.NewSessionResponse, error)
+	LoadSession(context.Context, string, string, map[string]any) (acpclient.LoadSessionResponse, error)
+	Prompt(context.Context, string, string, map[string]any) (acpclient.PromptResponse, error)
+	Cancel(context.Context, string) error
+	StderrTail(int) string
+	Close() error
+}
+
+var startExternalSlashACPClientHook = func(c *cliConsole, ctx context.Context, runState *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (externalSlashACPClient, func(), error) {
+	return c.startExternalSlashACPClient(ctx, runState, desc, turn)
+}
+
+type externalAgentProjector interface {
+	Project(acpclient.UpdateEnvelope) []acpprojector.Projection
+	Snapshot() (assistant string, reasoning string)
+}
 
 type externalAgentTurn struct {
 	mode        externalAgentTurnMode
@@ -59,11 +78,11 @@ type externalAgentTurn struct {
 	runState    *activeExternalAgentRun
 	runCancel   context.CancelFunc
 
-	mu        sync.Mutex
-	assistant string
-	reasoning string
-	toolCalls map[string]toolCallSnapshot
+	projector externalAgentProjector
 	ready     atomic.Bool
+
+	sawAssistantStream atomic.Bool
+	sawReasoningStream atomic.Bool
 }
 
 func (t *externalAgentTurn) stop() {
@@ -78,7 +97,7 @@ func (t *externalAgentTurn) stop() {
 	}
 }
 
-func (r *activeExternalAgentRun) setClient(client *acpclient.Client) {
+func (r *activeExternalAgentRun) setClient(client externalSlashACPClient) {
 	if r == nil {
 		return
 	}
@@ -94,6 +113,15 @@ func (r *activeExternalAgentRun) setSessionID(sessionID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sessionID = strings.TrimSpace(sessionID)
+}
+
+func (r *activeExternalAgentRun) setCallID(callID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.callID = strings.TrimSpace(callID)
 }
 
 func (r *activeExternalAgentRun) cancel() {
@@ -240,7 +268,7 @@ func (c *cliConsole) runExternalAgentSlashContext(ctx context.Context, desc appa
 		routeKind:   "slash_create",
 		callID:      newExternalAgentCallID(),
 		runState:    &activeExternalAgentRun{},
-		toolCalls:   map[string]toolCallSnapshot{},
+		projector:   acpprojector.NewLiveProjector(),
 	})
 }
 
@@ -280,7 +308,7 @@ func (c *cliConsole) routeExternalParticipantContext(ctx context.Context, alias 
 		routeKind:   "participant_route",
 		callID:      newExternalAgentCallID(),
 		runState:    &activeExternalAgentRun{},
-		toolCalls:   map[string]toolCallSnapshot{},
+		projector:   acpprojector.NewLiveProjector(),
 	})
 }
 
@@ -302,6 +330,9 @@ func (c *cliConsole) startExternalAgentTurnAsyncContext(ctx context.Context, tur
 	}
 	runCtx, cancelCtx := context.WithCancel(cliContext(ctx))
 	turn.runCancel = cancelCtx
+	if turn.runState != nil {
+		turn.runState.setCallID(turn.callID)
+	}
 	c.setActiveExternalRun(turn.stop)
 
 	go func() {
@@ -309,6 +340,7 @@ func (c *cliConsole) startExternalAgentTurnAsyncContext(ctx context.Context, tur
 		err := c.runExternalAgentTurnOnce(runCtx, turn)
 		switch {
 		case err == nil:
+			_ = c.updateExternalParticipantProjectionStatus(runCtx, turn, "completed")
 			if c.tuiSender != nil && strings.TrimSpace(turn.participant.ChildSessionID) != "" {
 				c.tuiSender.Send(tuievents.ParticipantStatusMsg{
 					SessionID: turn.participant.ChildSessionID,
@@ -319,6 +351,7 @@ func (c *cliConsole) startExternalAgentTurnAsyncContext(ctx context.Context, tur
 				c.tuiSender.Send(tuievents.TaskResultMsg{SuppressTurnDivider: true})
 			}
 		case errors.Is(err, context.Canceled):
+			_ = c.updateExternalParticipantProjectionStatus(runCtx, turn, "interrupted")
 			if c.tuiSender != nil && strings.TrimSpace(turn.participant.ChildSessionID) != "" {
 				c.tuiSender.Send(tuievents.ParticipantStatusMsg{
 					SessionID: turn.participant.ChildSessionID,
@@ -329,6 +362,7 @@ func (c *cliConsole) startExternalAgentTurnAsyncContext(ctx context.Context, tur
 				c.tuiSender.Send(tuievents.TaskResultMsg{Interrupted: true, SuppressTurnDivider: true})
 			}
 		default:
+			_ = c.updateExternalParticipantProjectionStatus(runCtx, turn, "failed")
 			if c.tuiSender != nil && strings.TrimSpace(turn.participant.ChildSessionID) != "" {
 				c.tuiSender.Send(tuievents.ParticipantStatusMsg{
 					SessionID: turn.participant.ChildSessionID,
@@ -352,7 +386,7 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	if _, err := c.ensureSessionRecord(ctx, c.sessionID); err != nil {
 		return err
 	}
-	client, cleanup, err := c.startExternalSlashACPClient(ctx, turn.runState, turn.desc, turn)
+	client, cleanup, err := startExternalSlashACPClientHook(c, ctx, turn.runState, turn.desc, turn)
 	if err != nil {
 		return err
 	}
@@ -405,7 +439,7 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	if err := c.registerExternalParticipant(ctx, turn.participant); err != nil {
 		return err
 	}
-	if _, err := c.ensureSessionRecord(ctx, sessionID); err != nil {
+	if err := c.initializeExternalParticipantProjectionTurn(ctx, turn); err != nil {
 		return err
 	}
 	if err := c.persistExternalParticipantRoute(ctx, turn); err != nil {
@@ -416,7 +450,12 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 			SessionID: sessionID,
 			Actor:     turn.participant.DisplayLabel,
 		})
+		c.tuiSender.Send(tuievents.ParticipantStatusMsg{
+			SessionID: sessionID,
+			State:     "prompting",
+		})
 	}
+	_ = c.updateExternalParticipantProjectionStatus(ctx, turn, "prompting")
 	turn.ready.Store(true)
 
 	if _, err := client.Prompt(ctx, sessionID, turn.promptText, nil); err != nil {
@@ -434,7 +473,7 @@ func (c *cliConsole) runExternalAgentTurnOnce(ctx context.Context, turn *externa
 	return nil
 }
 
-func (c *cliConsole) startExternalSlashACPClient(ctx context.Context, runState *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (*acpclient.Client, func(), error) {
+func (c *cliConsole) startExternalSlashACPClient(ctx context.Context, runState *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (externalSlashACPClient, func(), error) {
 	ctx = cliContext(ctx)
 	updateCtx := context.WithoutCancel(ctx)
 	execRuntime := c.executionRuntimeForSession()
@@ -470,7 +509,7 @@ func externalACPStartupContext(ctx context.Context, agentID string) (context.Con
 	return context.WithTimeout(ctx, externalACPStartupTimeout)
 }
 
-func externalACPStageError(agentID string, stage string, err error, client *acpclient.Client) error {
+func externalACPStageError(agentID string, stage string, err error, client externalSlashACPClient) error {
 	if err == nil {
 		return nil
 	}
@@ -484,19 +523,24 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 	ctx = cliContext(ctx)
 	statusCtx := context.WithoutCancel(ctx)
 	sessionID := ""
+	callID := ""
 	if runState != nil {
 		runState.mu.RLock()
 		sessionID = runState.sessionID
+		callID = runState.callID
 		runState.mu.RUnlock()
 	}
 	decision := acpclient.ResolveApproveAllOnce(c.sessionMode, agentID, req)
-	if decision.Decision == acpclient.PermissionDecisionAutoAllowOnce {
-		return acpclient.PermissionSelectedOutcome(decision.OptionID), nil
+	if resp, ok := decision.AutoResponse(); ok {
+		return resp, nil
 	}
-	requireInteractive := decision.Decision == acpclient.PermissionDecisionAskUser
+	requireInteractive := decision.RequiresInteractiveApproval()
 	approvalTool, approvalCommand := externalApprovalContext(req)
 	if requireInteractive && sessionID != "" {
 		_ = c.updateParticipantStatus(statusCtx, sessionID, "waiting_approval")
+		if callID != "" {
+			_ = c.acpProjectionStore().AppendParticipantStatusByIDs(statusCtx, callID, sessionID, "waiting_approval")
+		}
 		if c.tuiSender != nil {
 			hint := strings.TrimSpace(approvalTool)
 			if hint == "" {
@@ -520,6 +564,9 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 		}
 		defer func() {
 			_ = c.updateParticipantStatus(statusCtx, sessionID, "running")
+			if callID != "" {
+				_ = c.acpProjectionStore().AppendParticipantStatusByIDs(statusCtx, callID, sessionID, "running")
+			}
 			if c.tuiSender != nil {
 				c.tuiSender.Send(tuievents.ParticipantStatusMsg{
 					SessionID: sessionID,
@@ -531,24 +578,50 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 	if requireInteractive {
 		ctx = toolexec.WithInteractiveApprovalRequired(ctx)
 	}
-	isToolAuthorization := externalRequestLooksLikeToolAuthorization(req)
-	if isToolAuthorization && c.approver != nil {
-		allowed, err := c.approver.AuthorizeTool(ctx, externalAuthorizationRequestFromACP(req))
-		if err != nil {
-			_ = c.updateParticipantStatus(statusCtx, sessionID, "failed")
-			return acpclient.RequestPermissionResponse{}, err
-		}
-		return externalPermissionOutcome(req, allowed), nil
-	}
 	if c.approver != nil {
-		allowed, err := c.approver.Approve(ctx, externalApprovalRequestFromACP(req))
+		selectedID, err := c.readExternalPermissionChoice(ctx, req)
 		if err != nil {
 			_ = c.updateParticipantStatus(statusCtx, sessionID, "failed")
 			return acpclient.RequestPermissionResponse{}, err
 		}
-		return externalPermissionOutcome(req, allowed), nil
+		return acpclient.PermissionSelectedOutcome(selectedID), nil
 	}
 	return externalPermissionOutcome(req, true), nil
+}
+
+func (c *cliConsole) readExternalPermissionChoice(ctx context.Context, req acpclient.RequestPermissionRequest) (string, error) {
+	if c == nil || c.approver == nil || c.approver.prompter == nil {
+		return "", &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
+	}
+	var selected string
+	err := c.approver.queue.Do(ctx, func(context.Context) error {
+		line, err := c.promptExternalPermissionChoice(req)
+		if err != nil {
+			if errors.Is(err, errInputInterrupt) || errors.Is(err, errInputEOF) {
+				return &toolexec.ApprovalAbortedError{Reason: "approval canceled by user"}
+			}
+			return err
+		}
+		optionID, ok := resolveExternalPermissionSelection(req.Options, line)
+		if !ok {
+			return &toolexec.ApprovalAbortedError{Reason: "approval denied by user"}
+		}
+		selected = optionID
+		return nil
+	})
+	return selected, err
+}
+
+func (c *cliConsole) promptExternalPermissionChoice(req acpclient.RequestPermissionRequest) (string, error) {
+	promptReq := externalPermissionPromptRequest(req)
+	if chooser, ok := c.approver.prompter.(structuredPromptReader); ok {
+		return chooser.RequestStructuredPrompt(promptReq)
+	}
+	if chooser, ok := c.approver.prompter.(choicePromptReader); ok {
+		return chooser.RequestChoicePrompt(promptReq.Title, promptReq.Choices, promptReq.DefaultChoice, false)
+	}
+	c.approver.renderExternalPermissionRequest(req)
+	return c.approver.prompter.ReadLine("Choose option: ")
 }
 
 func (c *cliConsole) persistExternalParticipantRoute(ctx context.Context, turn *externalAgentTurn) error {
@@ -556,17 +629,15 @@ func (c *cliConsole) persistExternalParticipantRoute(ctx context.Context, turn *
 		return fmt.Errorf("external agent turn is unavailable")
 	}
 	rootEvent := routeMirrorUserEvent(turn.routeText, turn.participant, turn.routeKind)
-	if err := c.appendSessionEvent(ctx, c.currentSessionRef(), rootEvent); err != nil {
-		return err
+	if rootEvent.Meta == nil {
+		rootEvent.Meta = map[string]any{}
 	}
-	childEvent := annotateChildParticipantEvent(&session.Event{
-		Message: model.NewTextMessage(model.RoleUser, strings.TrimSpace(turn.promptText)),
-	}, c.sessionID, turn.participant)
-	return c.appendSessionEvent(ctx, c.childSessionRecord(turn.participant.ChildSessionID), childEvent)
+	rootEvent.Meta[metaRouteCallID] = strings.TrimSpace(turn.callID)
+	return c.appendSessionEvent(ctx, c.currentSessionRef(), rootEvent)
 }
 
 func (c *cliConsole) forwardExternalAgentUpdate(ctx context.Context, turn *externalAgentTurn, env acpclient.UpdateEnvelope) {
-	if c == nil || c.tuiSender == nil || env.Update == nil || turn == nil {
+	if c == nil || env.Update == nil || turn == nil {
 		return
 	}
 	ctx = cliContext(ctx)
@@ -578,135 +649,88 @@ func (c *cliConsole) forwardExternalAgentUpdate(ctx context.Context, turn *exter
 		return
 	}
 	displayLabel := participantDisplayLabel(turn.participant.Alias, turn.participant.AgentID)
-	switch update := env.Update.(type) {
-	case acpclient.ContentChunk:
-		stream, chunk := externalContentChunk(update)
-		chunk = tuikit.SanitizeLogText(chunk)
-		if stream == "" || chunk == "" {
-			return
-		}
-		turn.mu.Lock()
-		switch stream {
-		case "assistant":
-			turn.assistant = mergeExternalNarrativeChunk(turn.assistant, chunk)
+	for _, item := range turn.projector.Project(env) {
+		switch strings.ToLower(strings.TrimSpace(item.Stream)) {
+		case "assistant", "answer":
+			if strings.TrimSpace(item.DeltaText) != "" || strings.TrimSpace(item.FullText) != "" {
+				turn.sawAssistantStream.Store(true)
+			}
 		case "reasoning":
-			turn.reasoning = mergeExternalNarrativeChunk(turn.reasoning, chunk)
+			if strings.TrimSpace(item.DeltaText) != "" || strings.TrimSpace(item.FullText) != "" {
+				turn.sawReasoningStream.Store(true)
+			}
 		}
-		turn.mu.Unlock()
-		c.tuiSender.Send(tuievents.RawDeltaMsg{
-			Target:  tuievents.RawDeltaTargetAssistant,
-			ScopeID: sessionID,
-			Stream:  stream,
-			Actor:   displayLabel,
-			Text:    chunk,
-		})
-	case acpclient.ToolCall:
-		name, args := resumedACPToolCallShape(update.Title, update.Kind, update.RawInput)
-		callID := strings.TrimSpace(update.ToolCallID)
-		turn.mu.Lock()
-		turn.toolCalls = rememberSubagentToolSnapshot(turn.toolCalls, callID, name, args)
-		turn.mu.Unlock()
-		childEvent := annotateChildParticipantEvent(&session.Event{
-			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
-				ID:   callID,
-				Name: name,
-				Args: marshalResumeACPToolInput(args),
-			}}, ""),
-		}, c.sessionID, turn.participant)
-		if c.appendSessionEvent(ctx, c.childSessionRecord(sessionID), childEvent) == nil {
-			mirror := mirrorParticipantEvent(&session.Event{
-				Message: childEvent.Message,
-			}, c.sessionID, turn.participant, childEvent.ID)
-			_ = c.appendSessionEvent(ctx, c.currentSessionRef(), mirror)
+		if strings.TrimSpace(item.SessionID) != "" {
+			sessionID = strings.TrimSpace(item.SessionID)
 		}
-		c.tuiSender.Send(tuievents.ParticipantToolMsg{
-			SessionID: sessionID,
-			CallID:    callID,
-			ToolName:  name,
-			Args:      formatExternalToolStart(name, args),
-		})
-	case acpclient.ToolCallUpdate:
-		status := strings.ToLower(strings.TrimSpace(derefString(update.Status)))
-		if status != "" && status != "completed" && status != "failed" {
-			return
+		if c.tuiSender != nil {
+			c.tuiSender.Send(tuievents.ACPProjectionMsg{
+				Scope:         tuievents.ACPProjectionParticipant,
+				ScopeID:       sessionID,
+				Actor:         displayLabel,
+				Stream:        item.Stream,
+				DeltaText:     tuikit.SanitizeLogText(item.DeltaText),
+				FullText:      tuikit.SanitizeLogText(item.FullText),
+				ToolCallID:    item.ToolCallID,
+				ToolName:      item.ToolName,
+				ToolArgs:      item.ToolArgs,
+				ToolResult:    item.ToolResult,
+				ToolStatus:    item.ToolStatus,
+				PlanEntries:   acpPlanEntriesToTUI(item.PlanEntries),
+				HasPlanUpdate: item.PlanEntries != nil,
+			})
 		}
-		callID := strings.TrimSpace(update.ToolCallID)
-		turn.mu.Lock()
-		toolCalls, snapshot, ok := consumeSubagentToolSnapshot(turn.toolCalls, callID)
-		turn.toolCalls = toolCalls
-		turn.mu.Unlock()
-		name := snapshot.Name
-		args := snapshot.Args
-		if strings.TrimSpace(name) == "" {
-			name, args = resumedACPToolCallShape(derefString(update.Title), derefString(update.Kind), update.RawInput)
-		}
-		result := resumedACPResultMap(update.RawOutput)
-		childEvent := annotateChildParticipantEvent(&session.Event{
-			Message: model.MessageFromToolResponse(&model.ToolResponse{
-				ID:     callID,
-				Name:   name,
-				Result: result,
-			}),
-		}, c.sessionID, turn.participant)
-		if c.appendSessionEvent(ctx, c.childSessionRecord(sessionID), childEvent) == nil {
-			mirror := mirrorParticipantEvent(&session.Event{
-				Message: childEvent.Message,
-			}, c.sessionID, turn.participant, childEvent.ID)
-			_ = c.appendSessionEvent(ctx, c.currentSessionRef(), mirror)
-		}
-		c.tuiSender.Send(tuievents.ParticipantToolMsg{
-			SessionID: sessionID,
-			CallID:    callID,
-			ToolName:  name,
-			Output:    formatExternalToolResult(name, args, result, status, ok),
-			Final:     true,
-			Err:       status == "failed",
-		})
-	case acpclient.PlanUpdate:
-		_ = update
+		_ = c.appendExternalParticipantProjection(ctx, turn, item)
 	}
 }
 
+func shouldPersistExternalProjectionEvent(item acpprojector.Projection) bool {
+	if item.Event == nil {
+		return false
+	}
+	if partial, _ := item.Event.Meta["partial"].(bool); partial {
+		return false
+	}
+	return true
+}
+
 func (c *cliConsole) finalizeExternalTurnStreams(ctx context.Context, turn *externalAgentTurn, interrupted bool) {
-	if c == nil || c.tuiSender == nil || turn == nil {
+	if c == nil || turn == nil {
 		return
 	}
 	ctx = cliContext(ctx)
 	displayLabel := participantDisplayLabel(turn.participant.Alias, turn.participant.AgentID)
-	turn.mu.Lock()
-	assistant := strings.TrimSpace(turn.assistant)
-	reasoning := strings.TrimSpace(turn.reasoning)
-	turn.mu.Unlock()
-	if reasoning != "" || interrupted {
-		c.tuiSender.Send(tuievents.RawDeltaMsg{
-			Target:  tuievents.RawDeltaTargetAssistant,
-			ScopeID: turn.participant.ChildSessionID,
-			Stream:  "reasoning",
-			Actor:   displayLabel,
-			Text:    reasoning,
-			Final:   true,
-		})
+	assistant, reasoning := turn.projector.Snapshot()
+	if reasoning != "" && (!turn.sawReasoningStream.Load() || interrupted) {
+		if c.tuiSender != nil {
+			c.tuiSender.Send(tuievents.RawDeltaMsg{
+				Target:  tuievents.RawDeltaTargetAssistant,
+				ScopeID: turn.participant.ChildSessionID,
+				Stream:  "reasoning",
+				Actor:   displayLabel,
+				Text:    reasoning,
+				Final:   true,
+			})
+		}
+		_ = c.acpProjectionStore().AppendParticipantStreamSnapshot(ctx, turn, "reasoning", reasoning)
 	}
 	if assistant == "" {
 		return
 	}
-	c.tuiSender.Send(tuievents.RawDeltaMsg{
-		Target:  tuievents.RawDeltaTargetAssistant,
-		ScopeID: turn.participant.ChildSessionID,
-		Stream:  "answer",
-		Actor:   displayLabel,
-		Text:    assistant,
-		Final:   true,
-	})
-	childEvent := annotateChildParticipantEvent(&session.Event{
-		Message: model.NewTextMessage(model.RoleAssistant, assistant),
-	}, c.sessionID, turn.participant)
-	if c.appendSessionEvent(ctx, c.childSessionRecord(turn.participant.ChildSessionID), childEvent) == nil {
-		mirror := mirrorParticipantEvent(&session.Event{
-			Message: childEvent.Message,
-		}, c.sessionID, turn.participant, childEvent.ID)
-		_ = c.appendSessionEvent(ctx, c.currentSessionRef(), mirror)
+	if turn.sawAssistantStream.Load() {
+		return
 	}
+	if c.tuiSender != nil {
+		c.tuiSender.Send(tuievents.RawDeltaMsg{
+			Target:  tuievents.RawDeltaTargetAssistant,
+			ScopeID: turn.participant.ChildSessionID,
+			Stream:  "answer",
+			Actor:   displayLabel,
+			Text:    assistant,
+			Final:   true,
+		})
+	}
+	_ = c.acpProjectionStore().AppendParticipantStreamSnapshot(ctx, turn, "assistant", assistant)
 }
 
 func (c *cliConsole) resolveExternalAgentWorkDir(desc appagents.Descriptor) string {
@@ -743,38 +767,11 @@ func (c *cliConsole) appendSessionEvent(ctx context.Context, sess *session.Sessi
 }
 
 func formatExternalToolStart(name string, args map[string]any) string {
-	return strings.TrimSpace(externalACPToolArgsWithName(name, args))
+	return acpprojector.FormatToolStart(name, args)
 }
 
 func formatExternalToolResult(name string, args map[string]any, result map[string]any, status string, _ bool) string {
-	name = strings.TrimSpace(strings.ToUpper(name))
-	_ = args
-	summary := strings.TrimSpace(externalACPToolOutput(result))
-	if summary == "" {
-		if strings.EqualFold(status, "failed") {
-			summary = "failed"
-		} else {
-			summary = "completed"
-		}
-	}
-	if strings.EqualFold(summary, name) {
-		if strings.EqualFold(status, "failed") {
-			return "failed"
-		}
-		return "completed"
-	}
-	return summary
-}
-
-func externalContentChunk(update acpclient.ContentChunk) (stream string, chunk string) {
-	switch strings.TrimSpace(update.SessionUpdate) {
-	case acpclient.UpdateAgentThought:
-		return "reasoning", decodeACPTextChunk(update.Content)
-	case acpclient.UpdateAgentMessage:
-		return "assistant", decodeACPTextChunk(update.Content)
-	default:
-		return "", ""
-	}
+	return acpprojector.FormatToolResult(name, args, result, status)
 }
 
 func externalACPToolDisplayName(title string, kind string) string {
@@ -789,94 +786,6 @@ func externalACPToolDisplayName(title string, kind string) string {
 		return strings.ToUpper(kind)
 	}
 	return "TOOL"
-}
-
-func externalACPToolArgsWithName(name string, raw any) string {
-	values, ok := raw.(map[string]any)
-	if !ok || len(values) == 0 {
-		if value := strings.TrimSpace(externalACPPrimaryValue(raw)); value != "" {
-			return truncateInline(value, 120)
-		}
-		return ""
-	}
-	kind := strings.ToLower(strings.TrimSpace(externalFirstNonEmpty(asString(values["_acp_kind"]), asString(values["kind"]))))
-	switch kind {
-	case "search":
-		if query := strings.TrimSpace(externalFirstNonEmpty(asString(values["query"]), asString(values["pattern"]), asString(values["text"]))); query != "" {
-			return `for "` + truncateInline(query, 96) + `"`
-		}
-	case "edit":
-		if path := strings.TrimSpace(externalFirstNonEmpty(asString(values["path"]), asString(values["target"]))); path != "" {
-			return truncateInline(path, 120)
-		}
-	case "read", "delete", "move":
-		if path := strings.TrimSpace(externalFirstNonEmpty(asString(values["path"]), asString(values["source"]), asString(values["target"]))); path != "" {
-			return truncateInline(path, 120)
-		}
-	case "execute":
-		if command := strings.TrimSpace(externalFirstNonEmpty(asString(values["command"]), asString(values["cmd"]))); command != "" {
-			return truncateInline(command, 120)
-		}
-	case "fetch":
-		if url := strings.TrimSpace(externalFirstNonEmpty(asString(values["url"]), asString(values["uri"]))); url != "" {
-			return truncateInline(url, 120)
-		}
-	}
-	if title := strings.TrimSpace(asString(values["_acp_title"])); title != "" {
-		if summary := externalACPTitleSummary(name, kind, title); summary != "" {
-			return truncateInline(summary, 120)
-		}
-	}
-	if value := strings.TrimSpace(externalACPPrimaryValue(values)); value != "" {
-		return truncateInline(value, 120)
-	}
-	return ""
-}
-
-func externalACPToolArgs(raw any) string {
-	return externalACPToolArgsWithName("", raw)
-}
-
-func externalACPToolOutput(raw any) string {
-	values, ok := raw.(map[string]any)
-	if !ok || len(values) == 0 {
-		if value := strings.TrimSpace(externalACPPrimaryValue(raw)); value != "" {
-			return truncateInline(value, 160)
-		}
-		return ""
-	}
-	for _, key := range []string{"error", "stderr", "message", "summary", "result", "stdout"} {
-		if value := strings.TrimSpace(asString(values[key])); value != "" && value != "{}" && value != "map[]" {
-			return truncateInline(value, 160)
-		}
-	}
-	if path := strings.TrimSpace(asString(values["path"])); path != "" {
-		if exitCode, ok := asInt(values["exit_code"]); ok {
-			return truncateInline(fmt.Sprintf("%s (exit %d)", path, exitCode), 160)
-		}
-		return truncateInline(path, 160)
-	}
-	if exitCode, ok := asInt(values["exit_code"]); ok {
-		return fmt.Sprintf("exit %d", exitCode)
-	}
-	if value := strings.TrimSpace(externalACPPrimaryValue(values)); value != "" {
-		return truncateInline(value, 160)
-	}
-	return ""
-}
-
-func externalACPPrimaryValue(raw any) string {
-	switch value := raw.(type) {
-	case string:
-		return value
-	case map[string]any:
-		for _, key := range []string{"command", "path", "target", "query", "pattern", "text", "prompt", "url", "error", "stderr", "stdout", "message", "summary", "result"} {
-			if text := strings.TrimSpace(fmt.Sprint(value[key])); text != "" && text != "<nil>" {
-				return text
-			}
-		}
-	}
-	return ""
 }
 
 func mergeExternalNarrativeChunk(existing string, incoming string) string {
@@ -913,30 +822,6 @@ func overlappingExternalNarrativeSuffix(existing string, incoming string, minOve
 		}
 	}
 	return incoming
-}
-
-func externalACPTitleSummary(name string, kind string, title string) string {
-	title = strings.TrimSpace(title)
-	if title == "" {
-		return ""
-	}
-	name = strings.TrimSpace(strings.ToUpper(name))
-	kind = strings.TrimSpace(strings.ToUpper(kind))
-	normalized := title
-	for _, prefix := range []string{name, kind} {
-		if prefix == "" {
-			continue
-		}
-		upperTitle := strings.ToUpper(normalized)
-		if strings.HasPrefix(upperTitle, prefix+" ") {
-			normalized = strings.TrimSpace(normalized[len(prefix):])
-			break
-		}
-		if strings.EqualFold(normalized, prefix) {
-			return ""
-		}
-	}
-	return strings.TrimSpace(normalized)
 }
 
 func externalApprovalRequestFromACP(req acpclient.RequestPermissionRequest) toolexec.ApprovalRequest {
@@ -979,13 +864,101 @@ func externalApprovalContext(req acpclient.RequestPermissionRequest) (tool strin
 	tool = externalACPToolDisplayName(title, kind)
 	command = truncateInline(strings.TrimSpace(externalRawStringField(req.ToolCall.RawInput, "command")), 120)
 	if command == "" {
-		command = externalACPToolArgs(req.ToolCall.RawInput)
+		command = acpprojector.FormatToolArgsValue("", req.ToolCall.RawInput)
 	}
 	return tool, command
 }
 
 func externalPermissionOutcome(req acpclient.RequestPermissionRequest, allowed bool) acpclient.RequestPermissionResponse {
 	return acpclient.PermissionSelectedOutcome(acpclient.SelectPermissionOptionID(req.Options, allowed))
+}
+
+func externalPermissionPromptRequest(req acpclient.RequestPermissionRequest) tuievents.PromptRequestMsg {
+	title := commandApprovalTitle()
+	details := make([]tuievents.PromptDetail, 0, 2)
+	if externalRequestLooksLikeToolAuthorization(req) {
+		title = toolAuthorizationTitle(externalAuthorizationRequestFromACP(req))
+		if label, value := toolAuthorizationSummary(externalAuthorizationRequestFromACP(req)); label != "" && value != "" {
+			details = append(details, tuievents.PromptDetail{Label: label, Value: value, Emphasis: true})
+		}
+	} else {
+		if label, value := commandApprovalSummary(externalApprovalRequestFromACP(req)); label != "" && value != "" {
+			details = append(details, tuievents.PromptDetail{Label: label, Value: value, Emphasis: true})
+		}
+	}
+	if reason := approvalReasonText(externalRawStringField(req.ToolCall.RawInput, "reason")); reason != "" {
+		details = append(details, tuievents.PromptDetail{Label: "Reason", Value: reason})
+	}
+	choices := externalPermissionPromptChoices(req.Options)
+	return tuievents.PromptRequestMsg{
+		Title:         title,
+		Prompt:        title,
+		Details:       details,
+		Choices:       choices,
+		DefaultChoice: defaultExternalPermissionOptionID(req.Options),
+	}
+}
+
+func externalPermissionPromptChoices(options []acpclient.PermissionOption) []tuievents.PromptChoice {
+	choices := make([]tuievents.PromptChoice, 0, len(options))
+	for _, option := range options {
+		optionID := strings.TrimSpace(option.OptionID)
+		if optionID == "" {
+			continue
+		}
+		label := strings.TrimSpace(option.Name)
+		if label == "" {
+			label = optionID
+		}
+		choices = append(choices, tuievents.PromptChoice{
+			Label: label,
+			Value: optionID,
+		})
+	}
+	return choices
+}
+
+func defaultExternalPermissionOptionID(options []acpclient.PermissionOption) string {
+	for _, candidate := range []string{
+		acpclient.SelectPermissionOptionID(options, true),
+		acpclient.SelectPermissionOptionID(options, false),
+	} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, option := range options {
+			if strings.EqualFold(strings.TrimSpace(option.OptionID), candidate) {
+				return strings.TrimSpace(option.OptionID)
+			}
+		}
+	}
+	for _, option := range options {
+		if optionID := strings.TrimSpace(option.OptionID); optionID != "" {
+			return optionID
+		}
+	}
+	return ""
+}
+
+func resolveExternalPermissionSelection(options []acpclient.PermissionOption, input string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		input = defaultExternalPermissionOptionID(options)
+	}
+	if input == "" {
+		return "", false
+	}
+	for _, option := range options {
+		optionID := strings.TrimSpace(option.OptionID)
+		if optionID == "" {
+			continue
+		}
+		if strings.EqualFold(input, optionID) || strings.EqualFold(input, strings.TrimSpace(option.Name)) {
+			return optionID, true
+		}
+	}
+	return "", false
 }
 
 func externalRawStringField(raw any, key string) string {
@@ -1003,7 +976,23 @@ func externalRawStringField(raw any, key string) string {
 	return text
 }
 
-func externalAgentRunError(err error, client *acpclient.Client) error {
+func (a *terminalApprover) renderExternalPermissionRequest(req acpclient.RequestPermissionRequest) {
+	if a == nil || a.ui == nil {
+		return
+	}
+	promptReq := externalPermissionPromptRequest(req)
+	a.ui.ApprovalTitle(promptReq.Title)
+	for _, detail := range promptReq.Details {
+		label := strings.TrimSpace(detail.Label)
+		value := strings.TrimSpace(detail.Value)
+		if label == "" || value == "" {
+			continue
+		}
+		a.ui.ApprovalMeta(label, value)
+	}
+}
+
+func externalAgentRunError(err error, client externalSlashACPClient) error {
 	if err == nil {
 		return nil
 	}
@@ -1015,20 +1004,6 @@ func externalAgentRunError(err error, client *acpclient.Client) error {
 		return err
 	}
 	return fmt.Errorf("%s\n%s", truncateInline(err.Error(), 160), tailLines(stderr, 6))
-}
-
-func decodeACPTextChunk(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var chunk acpclient.TextChunk
-	if err := json.Unmarshal(raw, &chunk); err != nil {
-		return ""
-	}
-	if !strings.EqualFold(strings.TrimSpace(chunk.Type), "text") {
-		return ""
-	}
-	return chunk.Text
 }
 
 func derefString(value *string) string {

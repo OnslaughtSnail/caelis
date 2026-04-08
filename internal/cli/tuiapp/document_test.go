@@ -841,6 +841,53 @@ func TestExplorationSummaryClickToggle(t *testing.T) {
 	}
 }
 
+func TestTaskWriteSummaryClickToggle(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ TASK WRITE continue the spawned worker with more detail\n"})
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	blocks := m.doc.FindByKind(BlockActivity)
+	if len(blocks) != 1 {
+		t.Fatalf("expected one finalized task-write activity block, got %d", len(blocks))
+	}
+	ab, ok := blocks[0].(*ActivityBlock)
+	if !ok {
+		t.Fatalf("expected activity block, got %T", blocks[0])
+	}
+	if ab.Expanded {
+		t.Fatal("expected finalized task-write block to start collapsed")
+	}
+
+	headerLine := -1
+	for i, id := range m.viewportBlockIDs {
+		if id == ab.BlockID() {
+			headerLine = i
+			break
+		}
+	}
+	if headerLine < 0 {
+		t.Fatal("could not find task-write summary in viewport")
+	}
+
+	vy := headerLine - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+
+	if !ab.Expanded {
+		t.Fatal("expected task-write summary to expand after click")
+	}
+	view := stripModelView(m)
+	if !strings.Contains(view, "SEND continue the spawned worker with more detail") {
+		t.Fatalf("expected SEND summary to stay visible, got:\n%s", view)
+	}
+
+	if count := strings.Count(view, "SEND continue the spawned worker with more detail"); count < 2 {
+		t.Fatalf("expected expanded task-write block to reveal SEND detail row, got:\n%s", view)
+	}
+}
+
 func TestBashPanelWheelScrollUsesInternalViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -1891,6 +1938,70 @@ func TestSubagentPanelRendersAllEvents(t *testing.T) {
 	}
 }
 
+func TestSubagentPanelDoesNotRenderACPSectionLabels(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child-1", "analyzer", "c1")
+	panel.Status = "running"
+	panel.UpdatePlan([]planEntryState{{Content: "Read file", Status: "done"}})
+	panel.AppendStreamChunk(SEAssistant, "I will inspect the file first.")
+	panel.UpdateToolCall("tc1", "READ", "/tmp/demo", "stdout", "found target file", true)
+
+	ctx := BlockRenderContext{TermWidth: 80, Width: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	for _, label := range []string{"plan", "response", "activity"} {
+		if strings.Contains(combined, label+" ") || strings.Contains(combined, label+"-") {
+			t.Fatalf("did not expect ACP section label %q in:\n%s", label, combined)
+		}
+	}
+}
+
+func TestSubagentPanelPreservesChronologicalTranscriptOrderWithoutSectionLabels(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child-1", "analyzer", "c1")
+	panel.Status = "completed"
+	panel.AppendStreamChunk(SEAssistant, "I will inspect the file first.")
+	panel.UpdateToolCall("tc1", "READ", "/tmp/demo", "stdout", "found target file", true)
+	panel.AppendStreamChunk(SEAssistant, "The read completed; here is the summary.")
+
+	ctx := BlockRenderContext{TermWidth: 80, Width: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	firstResponse := strings.Index(combined, "I will inspect the file first.")
+	toolCall := strings.Index(combined, "READ /tmp/demo")
+	toolResult := strings.Index(combined, "found target file")
+	finalResponse := strings.Index(combined, "The read completed; here is the summary.")
+	if firstResponse < 0 || toolCall < 0 || toolResult < 0 || finalResponse < 0 {
+		t.Fatalf("missing chronological transcript content:\n%s", combined)
+	}
+	if firstResponse >= toolCall || toolCall >= toolResult || toolResult >= finalResponse {
+		t.Fatalf("expected assistant -> tool -> assistant order, got:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelDoesNotRenderSectionDividerForSingleSection(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child-1", "analyzer", "c1")
+	panel.Status = "running"
+	panel.AppendStreamChunk(SEAssistant, "Only one response section should stay clean.")
+
+	ctx := BlockRenderContext{TermWidth: 80, Width: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if strings.Contains(combined, "response ─") || strings.Contains(combined, "response -") {
+		t.Fatalf("did not expect response divider for single-section transcript:\n%s", combined)
+	}
+}
+
 func TestSubagentPanelChronologicalOrder(t *testing.T) {
 	panel := NewSubagentPanelBlock("s1", "child-1", "self", "c1")
 	panel.Status = "running"
@@ -1966,7 +2077,7 @@ func TestSubagentPanelStreamChunkCoalescing(t *testing.T) {
 	}
 }
 
-func TestSubagentPanelStreamChunkCoalescingHandlesCumulativeReplay(t *testing.T) {
+func TestSubagentPanelStreamChunkCoalescingMergesCumulativeChunks(t *testing.T) {
 	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
 
 	panel.AppendStreamChunk(SEAssistant, "我建议默认删 2 个 log 文件给你。")
@@ -1977,11 +2088,11 @@ func TestSubagentPanelStreamChunkCoalescingHandlesCumulativeReplay(t *testing.T)
 	}
 	want := "我建议默认删 2 个 log 文件给你。\n如果想进一步身瘦，再额外删 node_modules。"
 	if panel.Events[0].Text != want {
-		t.Fatalf("expected cumulative replay to replace existing text,\n got: %q\nwant: %q", panel.Events[0].Text, want)
+		t.Fatalf("expected cumulative chunks to collapse to the latest full text,\n got: %q\nwant: %q", panel.Events[0].Text, want)
 	}
 }
 
-func TestSubagentPanelStreamChunkCoalescingDeduplicatesOverlap(t *testing.T) {
+func TestSubagentPanelStreamChunkCoalescingDeduplicatesOverlapInDeltaChunks(t *testing.T) {
 	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
 
 	panel.AppendStreamChunk(SEAssistant, "如果想进一步身瘦，再额外删")
@@ -1992,7 +2103,7 @@ func TestSubagentPanelStreamChunkCoalescingDeduplicatesOverlap(t *testing.T) {
 	}
 	want := "如果想进一步身瘦，再额外删 node_modules。"
 	if panel.Events[0].Text != want {
-		t.Fatalf("expected overlap merge result,\n got: %q\nwant: %q", panel.Events[0].Text, want)
+		t.Fatalf("expected overlapping delta chunks to merge without duplicating the shared suffix,\n got: %q\nwant: %q", panel.Events[0].Text, want)
 	}
 }
 
@@ -2179,6 +2290,126 @@ func TestSubagentPanelFiltersEmptyToolCompletionRows(t *testing.T) {
 	}
 	if strings.Contains(combined, "✓ VIEWING completed") {
 		t.Fatalf("did not expect empty completion line to remain visible:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelGroupsToolLifecycleWithoutRepeatingToolName(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdateToolCall("tc1", "READ", "/tmp/demo", "stdout", "", false)
+	panel.UpdateToolCall("tc1", "READ", "/tmp/demo", "stdout", "found target file", true)
+	if len(panel.Events) != 2 {
+		t.Fatalf("expected tool lifecycle to preserve chronological start/result events, got %#v", panel.Events)
+	}
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if !strings.Contains(combined, "▸ READ /tmp/demo") {
+		t.Fatalf("expected tool start row in:\n%s", combined)
+	}
+	if !strings.Contains(combined, "✓ found target file") {
+		t.Fatalf("expected compact tool result detail in:\n%s", combined)
+	}
+	if strings.Contains(combined, "✓ READ found target file") {
+		t.Fatalf("did not expect repeated tool name in final result row:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelShowsStreamingToolPreviewUnderCall(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdateToolCall("tc1", "BASH", "tail -f /tmp/demo.log", "stdout", "heartbeat 1/6", false)
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if !strings.Contains(combined, "▸ BASH tail -f /tmp/demo.log") {
+		t.Fatalf("expected tool start row in:\n%s", combined)
+	}
+	if !strings.Contains(combined, "· heartbeat 1/6") {
+		t.Fatalf("expected streaming preview detail under tool call in:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelMergesCumulativeStreamingToolPreview(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdateToolCall("tc1", "BASH", "python3 script.py", "stdout", "先看各 HTML 文件的前 200 行", false)
+	panel.UpdateToolCall("tc1", "BASH", "python3 script.py", "stdout", "先看各 HTML 文件的前 200 行，然后基于这些信息生成 SUMMARY.md。", false)
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if strings.Count(combined, "先看各 HTML 文件的前 200 行") != 1 {
+		t.Fatalf("expected cumulative tool preview to deduplicate prior prefix, got:\n%s", combined)
+	}
+	if !strings.Contains(combined, "然后基于这些信息生成 SUMMARY.md。") {
+		t.Fatalf("expected merged cumulative tool preview suffix, got:\n%s", combined)
+	}
+}
+
+func TestNormalizeSubagentChunkBoundary_StripsContinuationReplacementRunePrefix(t *testing.T) {
+	got := mergeSubagentStreamChunk("准备写入", "�� docs/SUMMARY.md")
+	if got != "准备写入 docs/SUMMARY.md" {
+		t.Fatalf("expected replacement-rune continuation prefix stripped, got %q", got)
+	}
+}
+
+func TestSubagentPanelTruncatesLongToolArgsInline(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdateToolCall("tc1", "BASH", "python3 -c \"print('alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau')\"", "stdout", "", false)
+
+	ctx := BlockRenderContext{Width: 52, TermWidth: 52, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if !strings.Contains(combined, "▸ BASH") {
+		t.Fatalf("expected tool start row in:\n%s", combined)
+	}
+	if !strings.Contains(combined, "...") {
+		t.Fatalf("expected truncated inline args in:\n%s", combined)
+	}
+}
+
+func TestSubagentPanelTruncatesLongToolDetailPreview(t *testing.T) {
+	panel := NewSubagentPanelBlock("s1", "child", "self", "c1")
+	panel.UpdateToolCall("tc1", "READ", "/tmp/demo", "stdout", strings.Join([]string{
+		"line 1 long preview content",
+		"line 2 long preview content",
+		"line 3 long preview content",
+		"line 4 long preview content",
+		"line 5 long preview content",
+		"line 6 long preview content",
+	}, "\n"), true)
+
+	ctx := BlockRenderContext{Width: 80, TermWidth: 80, Theme: tuikit.DefaultTheme()}
+	rows := panel.Render(ctx)
+	combined := ""
+	for _, r := range rows {
+		combined += ansi.Strip(r.Styled) + "\n"
+	}
+
+	if !strings.Contains(combined, "✓ line 1 long preview content") {
+		t.Fatalf("expected first detail line in:\n%s", combined)
+	}
+	if !strings.Contains(combined, "… 3 more lines") {
+		t.Fatalf("expected truncation hint in:\n%s", combined)
+	}
+	if strings.Contains(combined, "line 6 long preview content") {
+		t.Fatalf("did not expect full tool detail body to remain visible:\n%s", combined)
 	}
 }
 

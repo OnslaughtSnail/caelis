@@ -161,7 +161,7 @@ func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessions
 	}
 	var streamSess *serverSession
 	if eventIsPartial(update.Event) || update.Event.Message.Role == model.RoleAssistant {
-		streamSess = s.liveStreamSession(sessionID)
+		streamSess = s.state.liveStreamSession(sessionID)
 	}
 	if err := s.notifyEvent(sessionID, update.Event, streamSess); err != nil {
 		return err
@@ -169,38 +169,10 @@ func (s *Server) notifySessionStreamUpdate(rootSessionID string, update sessions
 	if info, ok := runtime.LifecycleFromEvent(update.Event); ok {
 		switch info.Status {
 		case runtime.RunLifecycleStatusCompleted, runtime.RunLifecycleStatusFailed, runtime.RunLifecycleStatusInterrupted:
-			s.dropLiveStreamSession(sessionID)
+			s.state.dropLiveStreamSession(sessionID)
 		}
 	}
 	return nil
-}
-
-func (s *Server) liveStreamSession(sessionID string) *serverSession {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.liveStream == nil {
-		s.liveStream = map[string]*serverSession{}
-	}
-	if sess, ok := s.liveStream[sessionID]; ok && sess != nil {
-		return sess
-	}
-	sess := &serverSession{id: sessionID}
-	s.liveStream[sessionID] = sess
-	return sess
-}
-
-func (s *Server) dropLiveStreamSession(sessionID string) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.liveStream, sessionID)
 }
 
 func (s *Server) emitBufferedPartial(sessionID string, sess *serverSession, channel string, text string) error {

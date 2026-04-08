@@ -1229,14 +1229,14 @@ func (r *selfACPSubagentRunner) permissionRequestHandler(ctx context.Context, ag
 		delegationID := strings.TrimSpace(meta.DelegationID)
 		mode := r.currentParentSessionMode(reqCtx)
 		decision := acpclient.ResolveApproveAllOnce(mode, agentName, req)
-		if decision.Decision == acpclient.PermissionDecisionAutoAllowOnce {
+		if resp, ok := decision.AutoResponse(); ok {
 			if r != nil && r.parent != nil && sessionID != nil {
 				r.emitLifecycleState(ctx, sessionID(), approvalLifecycleMeta(r.parent.ID, sessionID(), delegationID, meta), agentName, runtime.RunLifecycleStatusRunning, nil)
 			}
-			return acpclient.PermissionSelectedOutcome(decision.OptionID), nil
+			return resp, nil
 		}
 
-		if decision.Decision == acpclient.PermissionDecisionAskUser {
+		if decision.RequiresInteractiveApproval() {
 			reqCtx = toolexec.WithInteractiveApprovalRequired(reqCtx)
 		}
 

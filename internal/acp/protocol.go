@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/OnslaughtSnail/caelis/internal/acpconn"
 )
 
 const (
-	JSONRPCVersion                         = "2.0"
+	JSONRPCVersion                         = acpconn.JSONRPCVersion
 	CurrentProtocolVersion ProtocolVersion = 1
 
 	MethodInitialize           = "initialize"
@@ -75,20 +77,8 @@ const (
 	PermRejectAlways = "reject_always"
 )
 
-type Message struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      any             `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  any             `json:"result,omitempty"`
-	Error   *RPCError       `json:"error,omitempty"`
-}
-
-type RPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data,omitempty"`
-}
+type Message = acpconn.Message
+type RPCError = acpconn.RPCError
 
 type Implementation struct {
 	Name    string `json:"name,omitempty"`

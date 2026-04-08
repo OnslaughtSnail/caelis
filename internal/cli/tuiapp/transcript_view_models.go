@@ -135,15 +135,6 @@ func renderToolEventViewModelLines(blockID string, vm ToolEventViewModel, width 
 	return rows
 }
 
-func renderToolEventViewModelStyledLines(vm ToolEventViewModel, width int, theme tuikit.Theme) []string {
-	segments := renderToolEventViewModelSegments(vm, width, theme)
-	lines := make([]string, 0, len(segments))
-	for _, segment := range segments {
-		lines = append(lines, segment.Styled)
-	}
-	return lines
-}
-
 func renderToolEventViewModelSegments(vm ToolEventViewModel, width int, theme tuikit.Theme) []renderedSegment {
 	text, style := renderToolEventViewModelPlain(vm)
 	lines := wrapToolOutputText(text, maxInt(1, width))

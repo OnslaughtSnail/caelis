@@ -11,7 +11,7 @@ import (
 type PermissionDecision string
 
 const (
-	PermissionDecisionAutoAllowOnce       PermissionDecision = "auto_allow_once"
+	PermissionDecisionAutoSelect          PermissionDecision = "auto_select"
 	PermissionDecisionAskUser             PermissionDecision = "ask_user"
 	PermissionDecisionDeferExistingPolicy PermissionDecision = "defer_to_existing_policy"
 )
@@ -81,13 +81,24 @@ func ResolveApproveAllOnce(sessionMode string, agentID string, req RequestPermis
 	if !sessionmode.IsFullAccess(sessionmode.Normalize(sessionMode)) {
 		return PermissionResolution{Decision: PermissionDecisionDeferExistingPolicy}
 	}
-	if optionID, ok := selectPermissionOptionID(req.Options, true, true, agentID); ok {
+	if optionID, ok := selectApproveAllOptionID(req.Options, agentID); ok {
 		return PermissionResolution{
-			Decision: PermissionDecisionAutoAllowOnce,
+			Decision: PermissionDecisionAutoSelect,
 			OptionID: optionID,
 		}
 	}
 	return PermissionResolution{Decision: PermissionDecisionAskUser}
+}
+
+func (r PermissionResolution) AutoResponse() (RequestPermissionResponse, bool) {
+	if r.Decision != PermissionDecisionAutoSelect || strings.TrimSpace(r.OptionID) == "" {
+		return RequestPermissionResponse{}, false
+	}
+	return PermissionSelectedOutcome(r.OptionID), true
+}
+
+func (r PermissionResolution) RequiresInteractiveApproval() bool {
+	return r.Decision == PermissionDecisionAskUser
 }
 
 func PermissionSelectedOutcome(optionID string) RequestPermissionResponse {
@@ -118,6 +129,23 @@ func SelectPermissionOptionID(options []PermissionOption, allowed bool) string {
 		return "allow_once"
 	}
 	return "reject_once"
+}
+
+func selectApproveAllOptionID(options []PermissionOption, agentID string) (string, bool) {
+	if optionID, ok := selectPermissionOptionID(options, true, true, agentID); ok {
+		return optionID, true
+	}
+	if optionID, ok := findOptionByKinds(options, "allow_always"); ok {
+		return optionID, true
+	}
+	if len(options) == 0 {
+		return "", false
+	}
+	first := strings.TrimSpace(options[0].OptionID)
+	if first == "" {
+		return "", false
+	}
+	return first, true
 }
 
 func selectPermissionOptionID(options []PermissionOption, allowed bool, singleUseOnly bool, agentID string) (string, bool) {

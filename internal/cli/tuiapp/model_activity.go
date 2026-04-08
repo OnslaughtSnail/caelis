@@ -126,6 +126,13 @@ func (m *Model) finalizeActivityBlock() tea.Cmd {
 		m.refreshHistoryTailState()
 		return m.requestStreamViewportSync()
 	}
+	if ab.BlockKindField == activityBlockTaskMonitor && activityBlockHasTaskWriteEntries(ab.Entries) {
+		ab.Expanded = false
+		m.activeActivityID = ""
+		_ = m.syncActivityBlockBlock(ab)
+		m.refreshHistoryTailState()
+		return m.requestStreamViewportSync()
+	}
 	// Render finalized summary line.
 	summaryLine := m.renderActivitySummaryLine(foldedState)
 	rawSummary := ansi.Strip(summaryLine)
@@ -184,6 +191,17 @@ func (m *Model) renderActivityBlockLines(block *foldedActivityBlockState) []stri
 		return nil
 	}
 	if block.kind == activityBlockTaskMonitor {
+		if block.finalized && block.expanded {
+			lines := []string{m.renderTaskMonitorInlineLine(block, true)}
+			displayEntries := buildActivityDisplayEntries(block.entries)
+			if len(displayEntries) > activityBlockPreviewLines {
+				displayEntries = displayEntries[len(displayEntries)-activityBlockPreviewLines:]
+			}
+			for _, entry := range displayEntries {
+				lines = append(lines, m.renderActivityEntryLine(block, entry.verb, entry.detail))
+			}
+			return lines
+		}
 		return []string{m.renderTaskMonitorInlineLine(block, false)}
 	}
 	if block.finalized && !block.expanded {
@@ -533,6 +551,15 @@ func taskWriteSummaryParts(entries []activityEntry) []string {
 		parts = append(parts, "SEND "+detail)
 	}
 	return parts
+}
+
+func activityBlockHasTaskWriteEntries(entries []activityEntry) bool {
+	for _, entry := range entries {
+		if strings.EqualFold(entry.tool, "TASK") && strings.EqualFold(entry.action, "write") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTaskMonitorSummaryLine(line string) (string, bool) {

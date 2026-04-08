@@ -17,37 +17,37 @@ var (
 )
 
 func (s *Server) newSession(ctx context.Context, req NewSessionRequest) (NewSessionResponse, func(), error) {
-	state, err := s.cfg.Adapter.NewSession(ctx, req, s.clientCapabilities())
+	state, err := s.svcs.newSession(ctx, req, s.state.clientCapabilities())
 	if err != nil {
 		return NewSessionResponse{}, nil, err
 	}
 	sess := &serverSession{id: state.SessionID}
 	sess.applyState(state)
-	s.storeSession(sess)
+	s.state.storeSession(sess)
 	resp := NewSessionResponse{
 		SessionID:     sess.id,
 		ConfigOptions: sess.configOptionsSnapshot(),
 		Modes:         sess.modeState(),
 	}
-	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	updatedAt := currentTimestampRFC3339()
 	return resp, func() {
 		_ = s.syncSessionSnapshot(sess.id, sess, updatedAt)
 	}, nil
 }
 
 func (s *Server) listSessions(ctx context.Context, req SessionListRequest) (SessionListResponse, error) {
-	return s.cfg.Adapter.ListSessions(ctx, req)
+	return s.svcs.listSessions(ctx, req)
 }
 
 func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadSessionResponse, error) {
-	loaded, err := s.cfg.Adapter.LoadSession(ctx, req, s.clientCapabilities())
+	loaded, err := s.svcs.loadSession(ctx, req, s.state.clientCapabilities())
 	if err != nil {
 		return LoadSessionResponse{}, err
 	}
-	sess := s.loadedSession(loaded.Session.SessionID)
+	sess := s.state.loadedSession(loaded.Session.SessionID)
 	if sess == nil {
 		sess = &serverSession{id: loaded.Session.SessionID}
-		s.storeSession(sess)
+		s.state.storeSession(sess)
 	}
 	sess.applyState(loaded.Session)
 	updatedAt := ""
@@ -66,7 +66,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 		}
 	}
 	if updatedAt == "" {
-		updatedAt = time.Now().UTC().Format(time.RFC3339)
+		updatedAt = currentTimestampRFC3339()
 	}
 	if err := s.syncSessionSnapshot(req.SessionID, sess, updatedAt); err != nil {
 		return LoadSessionResponse{}, err
@@ -78,7 +78,7 @@ func (s *Server) loadSession(ctx context.Context, req LoadSessionRequest) (LoadS
 }
 
 func (s *Server) setSessionMode(ctx context.Context, req SetSessionModeRequest) (SetSessionModeResponse, error) {
-	state, err := s.cfg.Adapter.SetMode(ctx, req)
+	state, err := s.svcs.setMode(ctx, req)
 	if err != nil {
 		return SetSessionModeResponse{}, err
 	}
@@ -100,7 +100,7 @@ func (s *Server) setSessionMode(ctx context.Context, req SetSessionModeRequest) 
 }
 
 func (s *Server) setSessionConfigOption(ctx context.Context, req SetSessionConfigOptionRequest) (SetSessionConfigOptionResponse, error) {
-	state, err := s.cfg.Adapter.SetConfigOption(ctx, req)
+	state, err := s.svcs.setConfigOption(ctx, req)
 	if err != nil {
 		return SetSessionConfigOptionResponse{}, err
 	}
@@ -127,157 +127,30 @@ func (s *Server) authenticate(ctx context.Context, req AuthenticateRequest) erro
 	if methodID == "" {
 		return fmt.Errorf("authentication method is required")
 	}
-	if !s.hasAuthMethod(methodID) {
+	if !s.svcs.hasAuthMethod(methodID) {
 		return fmt.Errorf("unsupported authentication method %q", methodID)
 	}
-	if s.cfg.Authenticate != nil {
-		if err := s.cfg.Authenticate(ctx, req); err != nil {
-			return err
-		}
+	if err := s.svcs.validateAuthentication(ctx, req); err != nil {
+		return err
 	}
-	s.mu.Lock()
-	s.authOK = true
-	s.mu.Unlock()
+	s.state.markAuthenticated()
 	return nil
 }
 
 func (s *Server) requireAuthenticated() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.authOK {
-		return nil
-	}
-	return errAuthenticationRequired
-}
-
-func (s *Server) hasAuthMethod(methodID string) bool {
-	methodID = strings.TrimSpace(methodID)
-	for _, method := range s.cfg.AuthMethods {
-		if strings.TrimSpace(method.ID) == methodID {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Server) loadedSession(id string) *serverSession {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessions[strings.TrimSpace(id)]
+	return s.state.requireAuthenticated()
 }
 
 func (s *Server) session(id string) (*serverSession, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, ok := s.sessions[strings.TrimSpace(id)]
-	if !ok || sess == nil {
-		return nil, fmt.Errorf("%w: %q", errSessionNotFound, id)
-	}
-	return sess, nil
-}
-
-func (s *Server) storeSession(sess *serverSession) {
-	if sess == nil || strings.TrimSpace(sess.id) == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sessions[strings.TrimSpace(sess.id)] = sess
-}
-
-func (s *Server) syncSessionSnapshot(sessionID string, sess *serverSession, updatedAt string) error {
-	if err := s.notifyAvailableCommands(sessionID, sess); err != nil {
-		return err
-	}
-	if err := s.notifySessionInfo(sessionID, "", updatedAt); err != nil {
-		return err
-	}
-	if err := s.notifyPlan(sessionID, sess.planSnapshot()); err != nil {
-		return err
-	}
-	return nil
+	return s.state.session(id)
 }
 
 func (s *Server) sessionFS(sessionID string) toolexec.FileSystem {
-	return s.cfg.Adapter.SessionFS(sessionID)
+	return s.svcs.sessionFS(sessionID)
 }
 
 func (s *Server) cancelSession(id string) {
-	s.cfg.Adapter.CancelPrompt(id)
-}
-
-func (s *Server) clientCapabilities() ClientCapabilities {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.clientCaps
-}
-
-func (s *serverSession) applyState(state AdapterSessionState) {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	s.id = strings.TrimSpace(state.SessionID)
-	s.cwd = strings.TrimSpace(state.CWD)
-	if state.Modes != nil {
-		s.currentModeID = strings.TrimSpace(state.Modes.CurrentModeID)
-		s.availableModes = append([]SessionMode(nil), state.Modes.AvailableModes...)
-	}
-	s.configOptions = append([]SessionConfigOption(nil), state.ConfigOptions...)
-	s.availableCommands = append([]AvailableCommand(nil), state.AvailableCommands...)
-	s.planEntries = append([]PlanEntry(nil), state.PlanEntries...)
-}
-
-func (s *serverSession) currentMode() string {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	return strings.TrimSpace(s.currentModeID)
-}
-
-func (s *serverSession) permissionBridge(conn *Conn) *permissionBridge {
-	if s == nil {
-		return nil
-	}
-	s.approvalMu.Lock()
-	defer s.approvalMu.Unlock()
-	if s.approver == nil {
-		s.approver = newPermissionBridge(conn, s.id, s.currentMode)
-	}
-	return s.approver
-}
-
-func (s *serverSession) modeState() *SessionModeState {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	if len(s.availableModes) == 0 && strings.TrimSpace(s.currentModeID) == "" {
-		return nil
-	}
-	return &SessionModeState{
-		AvailableModes: append([]SessionMode(nil), s.availableModes...),
-		CurrentModeID:  strings.TrimSpace(s.currentModeID),
-	}
-}
-
-func (s *serverSession) configOptionsSnapshot() []SessionConfigOption {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	return append([]SessionConfigOption(nil), s.configOptions...)
-}
-
-func (s *serverSession) availableCommandsSnapshot() []AvailableCommand {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	return append([]AvailableCommand(nil), s.availableCommands...)
-}
-
-func (s *serverSession) planSnapshot() []PlanEntry {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	return append([]PlanEntry(nil), s.planEntries...)
-}
-
-func (s *serverSession) setPlan(entries []PlanEntry) {
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
-	s.planEntries = append([]PlanEntry(nil), entries...)
+	s.svcs.cancelPrompt(id)
 }
 
 func currentModelID(options []SessionConfigOption) string {
