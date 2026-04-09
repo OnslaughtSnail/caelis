@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
+	"github.com/OnslaughtSnail/caelis/kernel/runlease"
+	"github.com/OnslaughtSnail/caelis/kernel/runstatus"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
@@ -28,44 +29,42 @@ type Config struct {
 type Runtime struct {
 	logStore           session.LogStore
 	stateStore         session.StateStore
-	stateUpdater       session.StateUpdateStore
+	lifecycleStore     session.SessionStateStore[runstatus.State]
 	taskStore          task.Store
 	taskRegistry       *task.Registry
 	compaction         CompactionConfig
 	compactionStrategy CompactionStrategy
-	runMu              sync.Mutex
-	activeRuns         map[string]struct{}
+	runLeases          *runlease.Tracker
 }
 
 type SubagentRunnerFactory func(*Runtime, *session.Session, RunRequest) agent.SubagentRunner
 
-func newRuntime(cfg Config) (*Runtime, error) {
+func New(cfg Config) (*Runtime, error) {
 	if cfg.LogStore == nil {
 		return nil, fmt.Errorf("runtime: log store is nil")
 	}
 	if cfg.StateStore == nil {
 		return nil, fmt.Errorf("runtime: state store is nil")
 	}
+	lifecycleStore, err := runstatus.NewStore(cfg.StateStore)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: lifecycle state store: %w", err)
+	}
 	compactionCfg := normalizeCompactionConfig(cfg.Compaction)
 	strategy := compactionCfg.Strategy
 	if strategy == nil {
 		strategy = DefaultCompactionStrategy()
 	}
-	updater, _ := cfg.StateStore.(session.StateUpdateStore)
 	return &Runtime{
 		logStore:           cfg.LogStore,
 		stateStore:         cfg.StateStore,
-		stateUpdater:       updater,
+		lifecycleStore:     lifecycleStore,
 		taskStore:          cfg.TaskStore,
 		taskRegistry:       task.NewRegistry(task.RegistryConfig{}),
 		compaction:         compactionCfg,
 		compactionStrategy: strategy,
-		activeRuns:         map[string]struct{}{},
+		runLeases:          runlease.New(),
 	}, nil
-}
-
-func New(cfg Config) (*Runtime, error) {
-	return newRuntime(cfg)
 }
 
 // RunRequest defines one invocation input.
@@ -113,9 +112,6 @@ func validateRunIdentity(req RunRequest) error {
 func validateRunCapabilities(req RunRequest) error {
 	if req.Agent == nil {
 		return fmt.Errorf("runtime: agent is nil")
-	}
-	if req.Model == nil {
-		return fmt.Errorf("runtime: model is nil")
 	}
 	return nil
 }
@@ -221,7 +217,7 @@ func (r *Runtime) snapshotReadonlyState(ctx context.Context, sess *session.Sessi
 }
 
 func runLeaseKey(appName, userID, sessionID string) string {
-	return strings.TrimSpace(appName) + "\x00" + strings.TrimSpace(userID) + "\x00" + strings.TrimSpace(sessionID)
+	return runlease.Key(appName, userID, sessionID)
 }
 
 func (r *Runtime) resolveTaskRegistry(override *task.Registry) *task.Registry {
@@ -235,39 +231,24 @@ func (r *Runtime) resolveTaskRegistry(override *task.Registry) *task.Registry {
 }
 
 func (r *Runtime) acquireRunLease(key string) bool {
-	if r == nil || strings.TrimSpace(key) == "" {
+	if r == nil {
 		return false
 	}
-	r.runMu.Lock()
-	defer r.runMu.Unlock()
-	if r.activeRuns == nil {
-		r.activeRuns = map[string]struct{}{}
-	}
-	if _, exists := r.activeRuns[key]; exists {
-		return false
-	}
-	r.activeRuns[key] = struct{}{}
-	return true
+	return r.runLeases.Acquire(key)
 }
 
 func (r *Runtime) releaseRunLease(key string) {
-	if r == nil || strings.TrimSpace(key) == "" {
+	if r == nil {
 		return
 	}
-	r.runMu.Lock()
-	defer r.runMu.Unlock()
-	delete(r.activeRuns, key)
+	r.runLeases.Release(key)
 }
 
 func (r *Runtime) hasActiveRun(appName, userID, sessionID string) bool {
 	if r == nil {
 		return false
 	}
-	key := runLeaseKey(appName, userID, sessionID)
-	r.runMu.Lock()
-	defer r.runMu.Unlock()
-	_, ok := r.activeRuns[key]
-	return ok
+	return r.runLeases.Has(runLeaseKey(appName, userID, sessionID))
 }
 
 // CompactRequest defines one manual compaction call.
@@ -352,7 +333,7 @@ func (r *Runtime) appendAndYieldLifecycle(
 	prepareEvent(ctx, sess, ev)
 	state, ok := runStateFromLifecycleEvent(ev)
 	if ok {
-		if err := r.mergeLifecycleStateSnapshot(ctx, sess, runStateSnapshot(state)); err != nil {
+		if err := r.persistLifecycleState(ctx, sess, state); err != nil {
 			return yield(nil, err)
 		}
 	}
@@ -362,36 +343,15 @@ func (r *Runtime) appendAndYieldLifecycle(
 	return true
 }
 
-func (r *Runtime) mergeLifecycleStateSnapshot(ctx context.Context, sess *session.Session, snapshot map[string]any) error {
-	if r == nil || sess == nil || len(snapshot) == 0 {
+func (r *Runtime) persistLifecycleState(ctx context.Context, sess *session.Session, state RunState) error {
+	if r == nil || sess == nil || !state.HasLifecycle {
 		return nil
 	}
-	if r.stateUpdater != nil {
-		if err := r.stateUpdater.UpdateState(ctx, sess, func(existing map[string]any) (map[string]any, error) {
-			if existing == nil {
-				existing = map[string]any{}
-			}
-			for k, v := range snapshot {
-				existing[k] = v
-			}
-			return existing, nil
-		}); err != nil {
-			return fmt.Errorf("lifecycle state merge: failed to update state: %w", err)
-		}
+	if r.lifecycleStore == nil {
 		return nil
 	}
-	existing, err := r.stateStore.SnapshotState(ctx, sess)
-	if err != nil {
-		return fmt.Errorf("lifecycle state merge: failed to read existing state: %w", err)
-	}
-	if existing == nil {
-		existing = map[string]any{}
-	}
-	for k, v := range snapshot {
-		existing[k] = v
-	}
-	if err := r.stateStore.ReplaceState(ctx, sess, existing); err != nil {
-		return fmt.Errorf("lifecycle state merge: failed to replace state: %w", err)
+	if err := r.lifecycleStore.Save(ctx, sess, state); err != nil {
+		return fmt.Errorf("lifecycle state save: %w", err)
 	}
 	return nil
 }

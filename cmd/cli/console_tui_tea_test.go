@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 )
 
@@ -94,6 +95,35 @@ func TestShouldHandleAsSlashCommand_AllowsKnownAndTyposButNotPathQuestions(t *te
 	}
 	if c.shouldHandleAsSlashCommand("/v4/ebs/list") {
 		t.Fatal("expected path-like endpoint token to bypass slash command handling")
+	}
+}
+
+func TestExecuteTUISubmission_ParticipantUsageErrorDoesNotEnterRunningWhenIdle(t *testing.T) {
+	c := &cliConsole{}
+	got := c.executeTUISubmission(context.Background(), tuiapp.Submission{
+		Text: "@继续",
+		Mode: tuiapp.SubmissionModeDefault,
+	})
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "usage: @继续 <prompt>") {
+		t.Fatalf("expected usage error, got %+v", got)
+	}
+	if got.ContinueRunning {
+		t.Fatalf("expected idle usage error to avoid running state, got %+v", got)
+	}
+}
+
+func TestExecuteTUISubmission_ParticipantUsageErrorPreservesMainRunState(t *testing.T) {
+	c := &cliConsole{}
+	c.setActiveRunCancel(func() {})
+	got := c.executeTUISubmission(context.Background(), tuiapp.Submission{
+		Text: "@继续",
+		Mode: tuiapp.SubmissionModeDefault,
+	})
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "usage: @继续 <prompt>") {
+		t.Fatalf("expected usage error, got %+v", got)
+	}
+	if !got.ContinueRunning {
+		t.Fatalf("expected existing external run to remain active, got %+v", got)
 	}
 }
 
@@ -192,6 +222,33 @@ func TestCompleteAgentCommandCandidates_UsesSubcommands(t *testing.T) {
 	got := c.completeAgentCommandCandidates("r", 10)
 	if len(got) != 1 || got[0].Value != "rm" {
 		t.Fatalf("unexpected agent action candidates: %+v", got)
+	}
+}
+
+func TestCompleteAgentCommandCandidates_UseIncludesSelfAndConfiguredAgents(t *testing.T) {
+	store := &appConfigStore{data: appConfig{
+		MainAgent: "claude",
+		Agents: map[string]agentRecord{
+			"claude": {Command: "npx", Args: []string{"-y", "@zed-industries/claude-agent-acp"}},
+		},
+	}}
+	c := &cliConsole{configStore: store}
+	got, err := c.completeSlashArgCandidates("agent use", "", 20)
+	if err != nil {
+		t.Fatalf("completeSlashArgCandidates failed: %v", err)
+	}
+	values := make([]string, 0, len(got))
+	for _, one := range got {
+		values = append(values, one.Value)
+	}
+	if !containsString(values, "self") {
+		t.Fatalf("expected self to be offered as a main-agent switch target, got %v", values)
+	}
+	if !containsString(values, "claude") {
+		t.Fatalf("expected configured agent to be offered as a main-agent switch target, got %v", values)
+	}
+	if !containsString(values, "codex") {
+		t.Fatalf("expected builtin presets to be offered for one-step switching, got %v", values)
 	}
 }
 

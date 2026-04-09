@@ -3,20 +3,12 @@ package acpmeta
 import (
 	"context"
 
-	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	coremeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 )
 
 func SessionMetaFromState(state map[string]any) map[string]any {
-	if len(state) == 0 {
-		return nil
-	}
-	acpState, _ := state["acp"].(map[string]any)
-	if len(acpState) == 0 {
-		return nil
-	}
-	meta, _ := acpState["meta"].(map[string]any)
-	return coremeta.CloneMeta(meta)
+	return coremeta.SessionMetaFromState(state)
 }
 
 func SessionMetaFromContext(ctx context.Context) map[string]any {
@@ -28,5 +20,5 @@ func SessionMetaFromContext(ctx context.Context) map[string]any {
 	if err != nil {
 		return nil
 	}
-	return SessionMetaFromState(values)
+	return coremeta.SessionMetaFromState(values)
 }

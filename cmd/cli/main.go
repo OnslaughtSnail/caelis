@@ -12,7 +12,6 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/app/acpext"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
 	appbootstrap "github.com/OnslaughtSnail/caelis/internal/app/bootstrap"
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/internal/version"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -20,6 +19,7 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/sandboxhelper"
@@ -395,7 +395,37 @@ func runCLI(ctx context.Context, args []string) error {
 	}()
 
 	if singleShotMode {
-		if llm == nil {
+		mainAgentInput := buildAgentInput{
+			AppName:                     *appName,
+			PromptRole:                  promptRoleMainSession,
+			WorkspaceDir:                workspace.CWD,
+			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
+			BasePrompt:                  *systemPrompt,
+			SkillDirs:                   skillDirList,
+			MainAgent:                   configStore.MainAgent(),
+			DefaultAgent:                configStore.DefaultAgent(),
+			AgentDescriptors:            configStore.AgentDescriptors(),
+			StreamModel:                 true,
+			ThinkingBudget:              modelRuntime.ThinkingBudget,
+			ReasoningEffort:             modelRuntime.ReasoningEffort,
+			ModelProvider:               resolveProviderName(factory, alias),
+			ModelName:                   resolveModelName(factory, alias),
+			ModelConfig: func() modelproviders.Config {
+				if factory == nil {
+					return modelproviders.Config{}
+				}
+				cfg, _ := factory.ConfigForAlias(alias)
+				return cfg
+			}(),
+			WorkspaceRoot:    resolvedWorkspaceRoot,
+			ExecutionRuntime: execRuntimeView,
+			AppVersion:       version.String(),
+		}
+		needsLocalModel, err := mainSessionRequiresLocalModel(mainAgentInput)
+		if err != nil {
+			return err
+		}
+		if needsLocalModel && llm == nil {
 			return fmt.Errorf("no model configured, run /connect first or pass -model with a configured provider/model")
 		}
 		if strings.HasPrefix(strings.TrimSpace(singleInput), "/compact") {
@@ -432,28 +462,7 @@ func runCLI(ctx context.Context, args []string) error {
 			}
 			return nil
 		}
-		ag, err := buildAgent(buildAgentInput{
-			AppName:                     *appName,
-			PromptRole:                  promptRoleMainSession,
-			WorkspaceDir:                workspace.CWD,
-			EnableExperimentalLSPPrompt: hasLSPTools(resolved.Tools),
-			BasePrompt:                  *systemPrompt,
-			SkillDirs:                   skillDirList,
-			DefaultAgent:                configStore.DefaultAgent(),
-			AgentDescriptors:            configStore.AgentDescriptors(),
-			StreamModel:                 true,
-			ThinkingBudget:              modelRuntime.ThinkingBudget,
-			ReasoningEffort:             modelRuntime.ReasoningEffort,
-			ModelProvider:               resolveProviderName(factory, alias),
-			ModelName:                   resolveModelName(factory, alias),
-			ModelConfig: func() modelproviders.Config {
-				if factory == nil {
-					return modelproviders.Config{}
-				}
-				cfg, _ := factory.ConfigForAlias(alias)
-				return cfg
-			}(),
-		})
+		ag, err := buildMainSessionAgent(mainAgentInput)
 		if err != nil {
 			return err
 		}

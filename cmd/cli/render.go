@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 const defaultFriendlyWaitMS = 5000

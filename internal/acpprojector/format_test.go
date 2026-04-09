@@ -18,3 +18,12 @@ func TestFormatToolResult_ExtractsACPTextContent(t *testing.T) {
 		t.Fatalf("did not expect raw JSON blob, got %q", got)
 	}
 }
+
+func TestFormatToolStart_SuppressesNullPlaceholderArgs(t *testing.T) {
+	if got := FormatToolStart("SPAWN", map[string]any{"_display": "null"}); got != "" {
+		t.Fatalf("expected null display placeholder to be suppressed, got %q", got)
+	}
+	if got := FormatToolStart("SPAWN", map[string]any{"_display": "{}"}); got != "" {
+		t.Fatalf("expected empty json placeholder to be suppressed, got %q", got)
+	}
+}

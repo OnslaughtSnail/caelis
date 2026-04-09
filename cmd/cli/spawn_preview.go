@@ -425,28 +425,28 @@ func subagentDomainUpdatesFromSpawnToolError(rootSessionID string, resp *model.T
 	if target.Agent == "" {
 		target.Agent = "self"
 	}
-	return []subagentDomainUpdate{
+	updates := []subagentDomainUpdate{
 		{
 			Kind:        subagentDomainBootstrap,
 			Target:      target,
 			ClaimAnchor: true,
 			Provisional: provisional,
 		},
-		{
-			Kind:       subagentDomainToolCall,
-			Target:     target,
-			ToolName:   tool.SpawnToolName,
-			ToolCallID: strings.TrimSpace(resp.ID),
-			Chunk:      errText,
-			Stream:     "stderr",
-			Final:      true,
-		},
-		{
-			Kind:   subagentDomainTerminal,
-			Target: target,
-			Status: subagentTerminalStateFromError(errText),
-		},
 	}
+	if errText != "" {
+		updates = append(updates, subagentDomainUpdate{
+			Kind:   subagentDomainStream,
+			Target: target,
+			Stream: "assistant",
+			Chunk:  errText,
+		})
+	}
+	updates = append(updates, subagentDomainUpdate{
+		Kind:   subagentDomainTerminal,
+		Target: target,
+		Status: subagentTerminalStateFromError(errText),
+	})
+	return updates
 }
 
 func subagentTerminalStateFromError(errText string) string {

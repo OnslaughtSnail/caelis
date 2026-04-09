@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	coreacpmeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
+	coreacpmeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 )
 
 func TestHandleModel_FixedReasoningRejectsOverrides(t *testing.T) {

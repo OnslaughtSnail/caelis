@@ -10,7 +10,7 @@ import (
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appprompting "github.com/OnslaughtSnail/caelis/internal/app/prompting"
 	"github.com/OnslaughtSnail/caelis/internal/app/storage/localstore"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
+	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -19,6 +19,8 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	"github.com/OnslaughtSnail/caelis/pkg/acpagent"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type buildAgentInput struct {
@@ -29,6 +31,7 @@ type buildAgentInput struct {
 	BasePrompt                  string
 	FrozenPrompt                string
 	SkillDirs                   []string
+	MainAgent                   string
 	DefaultAgent                string
 	AgentDescriptors            []appagents.Descriptor
 	StreamModel                 bool
@@ -37,11 +40,15 @@ type buildAgentInput struct {
 	ModelProvider               string
 	ModelName                   string
 	ModelConfig                 modelproviders.Config
+	WorkspaceRoot               string
+	ExecutionRuntime            toolexec.Runtime
+	AppVersion                  string
 }
 
 const (
-	promptRoleMainSession = "main_session"
-	promptRoleACPServer   = "acp_server"
+	promptRoleMainSession    = "main_session"
+	promptRoleACPMainSession = "acp_main_session"
+	promptRoleACPServer      = "acp_server"
 )
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
@@ -49,7 +56,10 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	return buildResolvedLLMAgent(in, systemPrompt)
+}
 
+func buildResolvedLLMAgent(in buildAgentInput, systemPrompt string) (*llmagent.Agent, error) {
 	reasoning, err := parseReasoningEffortForConfig(in.ReasoningEffort, in.ThinkingBudget, in.ModelProvider, in.ModelName, in.ModelConfig)
 	if err != nil {
 		return nil, err
@@ -62,6 +72,65 @@ func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
 		Reasoning:         reasoning,
 		EmitPartialEvents: in.StreamModel,
 	})
+}
+
+func buildMainSessionAgent(in buildAgentInput) (agent.Agent, error) {
+	desc, usesACP, err := resolveMainSessionAgentDescriptor(in)
+	if err != nil {
+		return nil, err
+	}
+	systemPrompt, err := resolveMainSessionSystemPrompt(in, usesACP)
+	if err != nil {
+		return nil, err
+	}
+	if !usesACP {
+		return buildResolvedLLMAgent(in, systemPrompt)
+	}
+	return acpagent.New(acpagent.Config{
+		ID:                desc.ID,
+		Name:              desc.Name,
+		Command:           desc.Command,
+		Args:              append([]string(nil), desc.Args...),
+		Env:               copyStringMap(desc.Env),
+		WorkDir:           desc.WorkDir,
+		WorkspaceRoot:     firstNonEmptyString(in.WorkspaceRoot, in.WorkspaceDir),
+		SessionCWD:        in.WorkspaceDir,
+		Runtime:           in.ExecutionRuntime,
+		ClientInfoVersion: in.AppVersion,
+		SystemPrompt:      systemPrompt,
+	})
+}
+
+func resolveMainSessionSystemPrompt(in buildAgentInput, usesACP bool) (string, error) {
+	promptInput := in
+	if usesACP {
+		promptInput.PromptRole = promptRoleACPMainSession
+	}
+	return resolveSystemPrompt(promptInput)
+}
+
+func mainSessionRequiresLocalModel(in buildAgentInput) (bool, error) {
+	_, usesACP, err := resolveMainSessionAgentDescriptor(in)
+	if err != nil {
+		return false, err
+	}
+	return !usesACP, nil
+}
+
+func resolveMainSessionAgentDescriptor(in buildAgentInput) (appagents.Descriptor, bool, error) {
+	mainAgent := strings.TrimSpace(strings.ToLower(in.MainAgent))
+	if mainAgent == "" || mainAgent == "self" {
+		return appagents.Descriptor{}, false, nil
+	}
+	reg := appagents.NewRegistry(in.AgentDescriptors...)
+	desc, ok := reg.Lookup(mainAgent)
+	if !ok {
+		return appagents.Descriptor{}, false, fmt.Errorf("unknown mainAgent %q; add it under config.agents or reset mainAgent to self", mainAgent)
+	}
+	if desc.Transport != appagents.TransportACP {
+		return desc, false, nil
+	}
+	return desc, true, nil
 }
 
 func resolveSystemPrompt(in buildAgentInput) (string, error) {

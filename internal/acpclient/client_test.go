@@ -167,6 +167,48 @@ func TestClientPromptUsesTextContentBlocks(t *testing.T) {
 	}
 }
 
+func TestClientPromptPartsPreservesPromptBlocks(t *testing.T) {
+	client, requests, respond, cleanup := newTestRPCClient()
+	defer cleanup()
+
+	done := make(chan error, 1)
+	go func() {
+		msg := <-requests
+		if msg.Method != MethodSessionPrompt {
+			done <- fmt.Errorf("unexpected method %q", msg.Method)
+			return
+		}
+		params := decodeParamsMap(t, msg)
+		prompt, ok := params["prompt"].([]any)
+		if !ok || len(prompt) != 2 {
+			done <- fmt.Errorf("expected two prompt blocks, got %#v", params["prompt"])
+			return
+		}
+		first, ok := prompt[0].(map[string]any)
+		if !ok || first["type"] != "text" || first["text"] != "hello" {
+			done <- fmt.Errorf("unexpected first prompt block %#v", prompt[0])
+			return
+		}
+		second, ok := prompt[1].(map[string]any)
+		if !ok || second["type"] != "image" || second["mimeType"] != "image/png" || second["data"] != "abc123" {
+			done <- fmt.Errorf("unexpected second prompt block %#v", prompt[1])
+			return
+		}
+		done <- respond(msg.ID, map[string]any{"stopReason": "end_turn"})
+	}()
+
+	parts := []json.RawMessage{
+		mustMarshalRaw(TextContent{Type: "text", Text: "hello"}),
+		mustMarshalRaw(ImageContent{Type: "image", MimeType: "image/png", Data: "abc123"}),
+	}
+	if _, err := client.PromptParts(context.Background(), "child-1", parts, nil); err != nil {
+		t.Fatalf("PromptParts: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDecodeUpdate_IgnoresUnknownExtensionUpdate(t *testing.T) {
 	update, err := decodeUpdate(json.RawMessage(`{"sessionUpdate":"vendor_extension","value":1}`))
 	if !errors.Is(err, errUnknownSessionUpdate) {

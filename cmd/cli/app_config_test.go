@@ -488,6 +488,7 @@ func TestAppConfig_ResolvesAgentServerPlaceholdersAndBuildsRegistry(t *testing.T
 	}
 	raw := `{
   "version": 1,
+  "mainAgent": "codex",
   "defaultAgent": "codex",
   "agents": {
     "codex": {
@@ -518,6 +519,9 @@ func TestAppConfig_ResolvesAgentServerPlaceholdersAndBuildsRegistry(t *testing.T
 	store, err := loadOrInitAppConfig("demo-app")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := store.MainAgent(); got != "codex" {
+		t.Fatalf("expected mainAgent codex, got %q", got)
 	}
 	reg, err := store.AgentRegistry()
 	if err != nil {

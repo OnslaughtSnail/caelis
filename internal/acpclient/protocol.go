@@ -68,6 +68,7 @@ type SessionListRequest = internalacp.SessionListRequest
 type SessionSummary = internalacp.SessionSummary
 type SessionListResponse = internalacp.SessionListResponse
 type TextContent = internalacp.TextContent
+type ImageContent = internalacp.ImageContent
 type PromptRequest = internalacp.PromptRequest
 type PromptResponse = internalacp.PromptResponse
 type SessionMode = internalacp.SessionMode

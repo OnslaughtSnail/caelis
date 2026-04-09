@@ -1,6 +1,6 @@
 package acp
 
-import coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
+import coremeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 
 func CloneMeta(meta map[string]any) map[string]any {
 	return coremeta.CloneMeta(meta)

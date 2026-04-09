@@ -34,6 +34,14 @@ func builtInSystemIdentityPrompt(appName string) string {
 
 func builtInRolePrompt(role string) string {
 	switch strings.TrimSpace(role) {
+	case promptRoleACPMainSession:
+		return strings.Join([]string{
+			"## ACP Main Session Role",
+			"",
+			"You are the primary session, but execution is owned by an external ACP agent.",
+			"Carry the task end to end, but do not assume local Caelis tool names or shell semantics.",
+			"Follow the remote agent's actual capabilities and tool contract as exposed in-session.",
+		}, "\n")
 	case promptRoleACPServer:
 		return strings.Join([]string{
 			"## ACP Server Role",
@@ -53,7 +61,10 @@ func builtInRolePrompt(role string) string {
 	}
 }
 
-func builtInCapabilityGuidancePrompt() string {
+func builtInCapabilityGuidancePrompt(role string) string {
+	if !promptRoleUsesLocalTooling(role) {
+		return ""
+	}
 	return strings.Join([]string{
 		"## Capability Guidance",
 		"",
@@ -62,6 +73,10 @@ func builtInCapabilityGuidancePrompt() string {
 		"- Delegation: keep critical-path decisions in the current session and use child sessions for bounded side work or specialization.",
 		"- Modes: obey active session mode rules and avoid leaking planning-only behavior into execution turns.",
 	}, "\n")
+}
+
+func promptRoleUsesLocalTooling(role string) bool {
+	return strings.TrimSpace(role) != promptRoleACPMainSession
 }
 
 func builtInEnvironmentContextPrompt(workspaceDir string) string {

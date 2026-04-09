@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type Kind string

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 )
 
 type ChannelRef struct {

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/OnslaughtSnail/caelis/internal/cmdsafety"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/pkg/cmdsafety"
 )
 
 const defaultCommandExecutionToolName = "BASH"

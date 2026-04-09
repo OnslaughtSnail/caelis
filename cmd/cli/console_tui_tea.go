@@ -26,10 +26,10 @@ import (
 	appskills "github.com/OnslaughtSnail/caelis/internal/app/skills"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 const connectModelCacheTTL = 30 * time.Second
@@ -212,6 +212,61 @@ func (b *teaPromptBroker) Close() {
 	}
 }
 
+func (c *cliConsole) executeTUISubmission(ctx context.Context, submission tuiapp.Submission) tuievents.TaskResultMsg {
+	line := strings.TrimSpace(submission.Text)
+	if submission.Mode == tuiapp.SubmissionModeOverlay {
+		err := c.runBTWContext(ctx, line, submission.Attachments)
+		if err != nil {
+			if c.tuiSender != nil {
+				c.tuiSender.Send(tuievents.BTWErrorMsg{Text: err.Error()})
+				if c.currentRunKind() == runOccupancyNone {
+					c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
+				}
+			}
+			return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
+		}
+		return tuievents.TaskResultMsg{ContinueRunning: true}
+	}
+	if c.shouldHandleAsSlashCommand(line) {
+		exitNow, err := c.handleSlashContext(ctx, line)
+		if err == nil && c.currentRunKind() == runOccupancyExternalAgent {
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		}
+		return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}
+	}
+	if c.currentRunKind() == runOccupancyExternalAgent {
+		return tuievents.TaskResultMsg{Err: errExternalAgentRunBusy, ContinueRunning: true}
+	}
+	if alias, prompt, ok := parseParticipantRouteInput(line); ok {
+		if prompt == "" {
+			return tuievents.TaskResultMsg{
+				Err:             fmt.Errorf("usage: @%s <prompt>", alias),
+				ContinueRunning: c.currentRunKind() != runOccupancyNone,
+			}
+		}
+		err := c.routeExternalParticipantContext(ctx, alias, prompt)
+		if err == nil {
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		}
+		return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
+	}
+	if c.getActiveRunner() != nil {
+		err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
+		if shouldSuppressPromptErrorInTUI(err) {
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		}
+		return tuievents.TaskResultMsg{Err: err, ContinueRunning: true}
+	}
+	err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
+	if errors.Is(err, context.Canceled) {
+		return tuievents.TaskResultMsg{Interrupted: true}
+	}
+	if shouldSuppressPromptErrorInTUI(err) {
+		return tuievents.TaskResultMsg{}
+	}
+	return tuievents.TaskResultMsg{Err: err}
+}
+
 func (c *cliConsole) loopTUITea(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("cli: context is required")
@@ -261,55 +316,7 @@ func (c *cliConsole) loopTUITea(ctx context.Context) error {
 		Commands:             c.availableCommandNames(),
 		Wizards:              buildWizardDefs(),
 		ExecuteLine: func(submission tuiapp.Submission) tuievents.TaskResultMsg {
-			line := strings.TrimSpace(submission.Text)
-			if submission.Mode == tuiapp.SubmissionModeOverlay {
-				err := c.runBTWContext(ctx, line, submission.Attachments)
-				if err != nil {
-					if c.tuiSender != nil {
-						c.tuiSender.Send(tuievents.BTWErrorMsg{Text: err.Error()})
-						if c.currentRunKind() == runOccupancyNone {
-							c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
-						}
-					}
-					return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
-				}
-				return tuievents.TaskResultMsg{ContinueRunning: true}
-			}
-			if c.shouldHandleAsSlashCommand(line) {
-				exitNow, err := c.handleSlashContext(ctx, line)
-				if err == nil && c.currentRunKind() == runOccupancyExternalAgent {
-					return tuievents.TaskResultMsg{ContinueRunning: true}
-				}
-				return tuievents.TaskResultMsg{ExitNow: exitNow, Err: err}
-			}
-			if c.currentRunKind() == runOccupancyExternalAgent {
-				return tuievents.TaskResultMsg{Err: errExternalAgentRunBusy, ContinueRunning: true}
-			}
-			if alias, prompt, ok := parseParticipantRouteInput(line); ok {
-				if prompt == "" {
-					return tuievents.TaskResultMsg{Err: fmt.Errorf("usage: @%s <prompt>", alias), ContinueRunning: true}
-				}
-				err := c.routeExternalParticipantContext(ctx, alias, prompt)
-				if err == nil {
-					return tuievents.TaskResultMsg{ContinueRunning: true}
-				}
-				return tuievents.TaskResultMsg{Err: err, ContinueRunning: c.currentRunKind() != runOccupancyNone}
-			}
-			if c.getActiveRunner() != nil {
-				err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
-				if shouldSuppressPromptErrorInTUI(err) {
-					return tuievents.TaskResultMsg{ContinueRunning: true}
-				}
-				return tuievents.TaskResultMsg{Err: err, ContinueRunning: true}
-			}
-			err := c.runPromptWithAttachmentsContext(ctx, line, submission.Attachments)
-			if errors.Is(err, context.Canceled) {
-				return tuievents.TaskResultMsg{Interrupted: true}
-			}
-			if shouldSuppressPromptErrorInTUI(err) {
-				return tuievents.TaskResultMsg{}
-			}
-			return tuievents.TaskResultMsg{Err: err}
+			return c.executeTUISubmission(ctx, submission)
 		},
 		CancelRunning: func() bool {
 			return c.cancelActiveRun()
@@ -1026,7 +1033,7 @@ func (c *cliConsole) completeAgentCommandCandidates(query string, limit int) []t
 	action := strings.ToLower(strings.TrimSpace(fields[0]))
 	if !hasTrailingSpace && len(fields) == 1 {
 		switch action {
-		case "list", "add", "rm":
+		case "list", "add", "rm", "use":
 		default:
 			return completeAgentActionCandidates(action, limit)
 		}
@@ -1050,6 +1057,14 @@ func (c *cliConsole) completeAgentCommandCandidates(query string, limit int) []t
 			return c.completeConfiguredAgentCandidates(fields[1], limit)
 		}
 		return nil
+	case "use":
+		if len(fields) == 1 {
+			return c.completeSwitchableMainAgentCandidates("", limit)
+		}
+		if len(fields) == 2 && !hasTrailingSpace {
+			return c.completeSwitchableMainAgentCandidates(fields[1], limit)
+		}
+		return nil
 	default:
 		return completeAgentActionCandidates(action, limit)
 	}
@@ -1063,6 +1078,7 @@ func completeAgentActionCandidates(query string, limit int) []tuiapp.SlashArgCan
 		{Value: "list", Display: "list"},
 		{Value: "add", Display: "add"},
 		{Value: "rm", Display: "rm"},
+		{Value: "use", Display: "use"},
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
 	out := make([]tuiapp.SlashArgCandidate, 0, len(actions))
@@ -1133,6 +1149,72 @@ func (c *cliConsole) completeConfiguredAgentCandidates(query string, limit int) 
 		})
 		if len(out) >= limit {
 			break
+		}
+	}
+	return out
+}
+
+func (c *cliConsole) completeSwitchableMainAgentCandidates(query string, limit int) []tuiapp.SlashArgCandidate {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := strings.ToLower(strings.TrimSpace(query))
+	current := currentMainAgentName(c)
+	out := make([]tuiapp.SlashArgCandidate, 0, limit)
+	seen := map[string]struct{}{}
+	appendCandidate := func(value string, display string, detail string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		text := strings.ToLower(value + " " + display + " " + detail)
+		if q != "" && !strings.Contains(text, q) {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, tuiapp.SlashArgCandidate{
+			Value:   value,
+			Display: display,
+			Detail:  detail,
+		})
+	}
+
+	selfDetail := "built-in local main agent"
+	if current == "self" {
+		selfDetail = "current main agent"
+	}
+	appendCandidate("self", "self", selfDetail)
+	if len(out) >= limit {
+		return out
+	}
+
+	for _, rec := range c.completeConfiguredAgentCandidates("", limit) {
+		detail := strings.TrimSpace(rec.Detail)
+		if rec.Value == current {
+			if detail == "" {
+				detail = "current main agent"
+			} else {
+				detail = "current main agent; " + detail
+			}
+		}
+		appendCandidate(rec.Value, rec.Display, detail)
+		if len(out) >= limit {
+			return out[:limit]
+		}
+	}
+	for _, builtin := range completeAgentBuiltinCandidates("", limit) {
+		detail := strings.TrimSpace(builtin.Detail)
+		if detail == "" {
+			detail = "builtin ACP agent preset"
+		} else {
+			detail += "; builtin ACP agent preset"
+		}
+		appendCandidate(builtin.Value, builtin.Display, detail)
+		if len(out) >= limit {
+			return out[:limit]
 		}
 	}
 	return out

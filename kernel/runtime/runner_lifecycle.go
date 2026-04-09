@@ -64,14 +64,14 @@ func (h *runHandle) appendOutput(ev *session.Event, err error, persist bool) boo
 		prepareEvent(h.ctx, h.sess, ev)
 		if persist {
 			if appendErr := h.runtime.logStore.AppendEvent(h.ctx, h.sess, ev); appendErr != nil {
-				h.replay.append(nil, appendErr, false)
+				h.replay.Append(nil, appendErr, false)
 				return false
 			}
 		}
 		sessionstream.Emit(h.ctx, ev.SessionID, ev)
 	}
 	durable := ev != nil && isDurableReplayEvent(ev)
-	h.replay.append(ev, err, durable)
+	h.replay.Append(ev, err, durable)
 	select {
 	case h.eventNotifyCh <- struct{}{}:
 	default:

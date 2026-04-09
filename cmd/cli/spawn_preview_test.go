@@ -251,8 +251,50 @@ func TestSubagentDomainUpdatesFromSpawnToolError_Timeout(t *testing.T) {
 	if updates[0].Target.SpawnID != "call-spawn-1" {
 		t.Fatalf("expected provisional spawn id to use tool call id, got %#v", updates[0].Target)
 	}
+	if updates[1].Kind != subagentDomainStream || updates[1].Stream != "assistant" || !strings.Contains(updates[1].Chunk, "context deadline exceeded") {
+		t.Fatalf("expected assistant error stream update, got %#v", updates[1])
+	}
 	if updates[2].Kind != subagentDomainTerminal || updates[2].Status != "timed_out" {
 		t.Fatalf("expected timed_out terminal update, got %#v", updates[2])
+	}
+}
+
+func TestRenderSubagentDomainUpdates_SpawnErrorAvoidsNestedSpawnToolRow(t *testing.T) {
+	updates := subagentDomainUpdatesFromSpawnToolError("parent-1", &model.ToolResponse{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"agent": "codex",
+			"error": "acp rpc error -32603: Internal error",
+		},
+	})
+	msgs := renderSubagentDomainUpdates(updates)
+	var (
+		startFound    bool
+		streamFound   bool
+		nestedToolMsg bool
+		doneFound     bool
+	)
+	for _, raw := range msgs {
+		switch msg := raw.(type) {
+		case tuievents.SubagentStartMsg:
+			startFound = true
+		case tuievents.ACPProjectionMsg:
+			if msg.ToolCallID != "" || msg.ToolName != "" {
+				nestedToolMsg = true
+			}
+			if msg.Scope == tuievents.ACPProjectionSubagent && msg.Stream == "assistant" && strings.Contains(msg.DeltaText, "Internal error") {
+				streamFound = true
+			}
+		case tuievents.SubagentDoneMsg:
+			doneFound = msg.State == "failed"
+		}
+	}
+	if !startFound || !streamFound || !doneFound {
+		t.Fatalf("expected start, assistant error stream, and terminal messages, got %#v", msgs)
+	}
+	if nestedToolMsg {
+		t.Fatalf("did not expect spawn startup failure to render as nested tool call, got %#v", msgs)
 	}
 }
 

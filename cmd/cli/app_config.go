@@ -42,6 +42,7 @@ type appConfig struct {
 	SandboxReadableRoots      []string               `json:"sandbox_readable_roots,omitempty"`
 	SandboxWritableRoots      []string               `json:"sandbox_writable_roots,omitempty"`
 	SandboxReadOnlySubpaths   []string               `json:"sandbox_read_only_subpaths,omitempty"`
+	MainAgent                 string                 `json:"mainAgent,omitempty"`
 	DefaultAgent              string                 `json:"defaultAgent,omitempty"`
 	DefaultPermissions        string                 `json:"defaultPermissions,omitempty"`
 	NonInteractivePermissions string                 `json:"nonInteractivePermissions,omitempty"`
@@ -225,6 +226,9 @@ func resolveAppConfigEnvPlaceholders(cfg *appConfig, configPath string) error {
 		return err
 	}
 	if err := resolveStringSliceField("sandbox_read_only_subpaths", &cfg.SandboxReadOnlySubpaths); err != nil {
+		return err
+	}
+	if err := resolveField("mainAgent", &cfg.MainAgent); err != nil {
 		return err
 	}
 	if err := resolveField("defaultAgent", &cfg.DefaultAgent); err != nil {
@@ -418,6 +422,26 @@ func (s *appConfigStore) DefaultAgent() string {
 	return strings.TrimSpace(strings.ToLower(s.data.DefaultAgent))
 }
 
+func (s *appConfigStore) MainAgent() string {
+	if s == nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ToLower(s.data.MainAgent))
+}
+
+func (s *appConfigStore) SetMainAgent(name string) error {
+	if s == nil {
+		return nil
+	}
+	value := strings.TrimSpace(strings.ToLower(name))
+	if value == "" || value == "self" {
+		s.data.MainAgent = "self"
+		return s.save()
+	}
+	s.data.MainAgent = value
+	return s.save()
+}
+
 // AgentDescriptors converts configured agent records into application agent descriptors.
 func (s *appConfigStore) AgentDescriptors() []appagents.Descriptor {
 	descs, _ := s.resolvedAgentDescriptors()
@@ -514,6 +538,12 @@ func (s *appConfigStore) DeleteAgent(name string) error {
 		return nil
 	}
 	delete(s.data.Agents, name)
+	if strings.EqualFold(strings.TrimSpace(s.data.MainAgent), name) {
+		s.data.MainAgent = "self"
+	}
+	if strings.EqualFold(strings.TrimSpace(s.data.DefaultAgent), name) {
+		s.data.DefaultAgent = ""
+	}
 	if len(s.data.Agents) == 0 {
 		s.data.Agents = nil
 	}
@@ -983,6 +1013,7 @@ func mergeAppConfigDefaults(cfg *appConfig) {
 		cfg.Version = configVersion
 	}
 	cfg.DefaultModel = strings.TrimSpace(strings.ToLower(cfg.DefaultModel))
+	cfg.MainAgent = strings.TrimSpace(strings.ToLower(cfg.MainAgent))
 	cfg.DefaultAgent = strings.TrimSpace(strings.ToLower(cfg.DefaultAgent))
 	if cfg.DefaultModel == "fake" {
 		cfg.DefaultModel = ""

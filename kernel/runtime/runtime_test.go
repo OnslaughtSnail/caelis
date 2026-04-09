@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	internalacp "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -23,6 +22,7 @@ import (
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	internalacp "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 )
 
 type fixedAgent struct{}
@@ -178,6 +178,26 @@ func TestNew_UsesExplicitStores(t *testing.T) {
 	}
 	if rt.logStore != store || rt.stateStore != store {
 		t.Fatalf("expected explicit stores to be retained, got log=%T state=%T", rt.logStore, rt.stateStore)
+	}
+}
+
+func TestRuntimeRun_AllowsAgentWithoutModel(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{LogStore: store, StateStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-no-model",
+		Input:     "hello",
+		Agent:     fixedAgent{},
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatalf("unexpected run error: %v", runErr)
+		}
 	}
 }
 

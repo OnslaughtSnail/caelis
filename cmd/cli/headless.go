@@ -7,9 +7,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 )
 
 type headlessOutputFormat string

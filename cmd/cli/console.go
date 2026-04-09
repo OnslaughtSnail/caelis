@@ -14,12 +14,10 @@ import (
 	"time"
 	"unicode"
 
-	coreacpmeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/internal/app/acpext"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -28,16 +26,18 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
+	coreacpmeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 
 	"github.com/OnslaughtSnail/caelis/internal/approvalqueue"
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type cliConsole struct {
@@ -239,7 +239,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type (auto/bwrap/landlock experimental)",
 			Handle:      handleSandbox,
 		},
-		"agent":   {Usage: "/agent list | add <builtin> | rm <name>", Description: "Manage configured ACP agents", Handle: handleAgent},
+		"agent":   {Usage: "/agent list | use <self|name> | add <builtin> | rm <name>", Description: "Manage configured ACP agents and switch the main controller", Handle: handleAgent},
 		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
@@ -490,16 +490,46 @@ func (c *cliConsole) sessionGateway() (*appgateway.Gateway, error) {
 }
 
 func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.Attachment) (preparedPromptSubmission, error) {
-	if c.llm == nil {
+	agentInput := buildAgentInput{
+		AppName:                     c.appName,
+		PromptRole:                  promptRoleMainSession,
+		WorkspaceDir:                c.workspace.CWD,
+		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
+		BasePrompt:                  c.systemPrompt,
+		SkillDirs:                   c.skillDirs,
+		MainAgent:                   c.configStore.MainAgent(),
+		DefaultAgent:                c.configStore.DefaultAgent(),
+		AgentDescriptors:            c.configStore.AgentDescriptors(),
+		StreamModel:                 c.streamModel,
+		ThinkingBudget:              c.thinkingBudget,
+		ReasoningEffort:             c.reasoningEffort,
+		ModelProvider:               resolveProviderName(c.modelFactory, c.modelAlias),
+		ModelName:                   resolveModelName(c.modelFactory, c.modelAlias),
+		ModelConfig: func() modelproviders.Config {
+			if c.modelFactory == nil {
+				return modelproviders.Config{}
+			}
+			cfg, _ := c.modelFactory.ConfigForAlias(c.modelAlias)
+			return cfg
+		}(),
+		WorkspaceRoot:    c.workspace.CWD,
+		ExecutionRuntime: c.executionRuntimeForSession(),
+		AppVersion:       c.version,
+	}
+	needsLocalModel, err := mainSessionRequiresLocalModel(agentInput)
+	if err != nil {
+		return preparedPromptSubmission{}, err
+	}
+	if needsLocalModel && c.llm == nil {
 		return preparedPromptSubmission{}, fmt.Errorf("no model configured, use /connect to add provider and select model")
 	}
 	resolvedInput := input
 	visibleInput := input
 	var resolvedPaths []string
 	if c.inputRefs != nil {
-		result, err := c.inputRefs.RewriteInput(input)
-		if err != nil {
-			c.ui.Warn("input reference resolution skipped: %v\n", err)
+		result, rewriteErr := c.inputRefs.RewriteInput(input)
+		if rewriteErr != nil {
+			c.ui.Warn("input reference resolution skipped: %v\n", rewriteErr)
 		} else {
 			resolvedInput = result.Text
 			if displayText := strings.TrimSpace(result.DisplayText); displayText != "" {
@@ -567,29 +597,8 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	if err != nil {
 		return preparedPromptSubmission{}, err
 	}
-	ag, err := buildAgent(buildAgentInput{
-		AppName:                     c.appName,
-		PromptRole:                  promptRoleMainSession,
-		WorkspaceDir:                c.workspace.CWD,
-		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
-		BasePrompt:                  c.systemPrompt,
-		FrozenPrompt:                systemPrompt,
-		SkillDirs:                   c.skillDirs,
-		DefaultAgent:                c.configStore.DefaultAgent(),
-		AgentDescriptors:            c.configStore.AgentDescriptors(),
-		StreamModel:                 c.streamModel,
-		ThinkingBudget:              c.thinkingBudget,
-		ReasoningEffort:             c.reasoningEffort,
-		ModelProvider:               resolveProviderName(c.modelFactory, c.modelAlias),
-		ModelName:                   resolveModelName(c.modelFactory, c.modelAlias),
-		ModelConfig: func() modelproviders.Config {
-			if c.modelFactory == nil {
-				return modelproviders.Config{}
-			}
-			cfg, _ := c.modelFactory.ConfigForAlias(c.modelAlias)
-			return cfg
-		}(),
-	})
+	agentInput.FrozenPrompt = systemPrompt
+	ag, err := buildMainSessionAgent(agentInput)
 	if err != nil {
 		return preparedPromptSubmission{}, err
 	}
@@ -700,36 +709,9 @@ func (c *cliConsole) persistSessionModelAlias(ctx context.Context) error {
 	if _, err := c.sessionStore.GetOrCreate(ctx, sess); err != nil {
 		return err
 	}
-	if updater, ok := c.sessionStore.(session.StateUpdateStore); ok {
-		return updater.UpdateState(ctx, sess, func(values map[string]any) (map[string]any, error) {
-			if values == nil {
-				values = map[string]any{}
-			}
-			acpState, _ := values["acp"].(map[string]any)
-			if acpState == nil {
-				acpState = map[string]any{}
-			}
-			meta, _ := acpState["meta"].(map[string]any)
-			acpState["meta"] = coreacpmeta.WithModelAlias(meta, alias)
-			values["acp"] = acpState
-			return values, nil
-		})
-	}
-	values, err := c.sessionStore.SnapshotState(ctx, sess)
-	if err != nil {
-		return err
-	}
-	if values == nil {
-		values = map[string]any{}
-	}
-	acpState, _ := values["acp"].(map[string]any)
-	if acpState == nil {
-		acpState = map[string]any{}
-	}
-	meta, _ := acpState["meta"].(map[string]any)
-	acpState["meta"] = coreacpmeta.WithModelAlias(meta, alias)
-	values["acp"] = acpState
-	return c.sessionStore.ReplaceState(ctx, sess, values)
+	return coreacpmeta.UpdateSessionMeta(ctx, c.sessionStore, sess, func(meta map[string]any) map[string]any {
+		return coreacpmeta.WithModelAlias(meta, alias)
+	})
 }
 
 func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) error {

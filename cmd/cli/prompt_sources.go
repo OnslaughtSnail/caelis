@@ -58,7 +58,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Content: rolePrompt,
 		})
 	}
-	if capabilityPrompt := builtInCapabilityGuidancePrompt(); capabilityPrompt != "" {
+	if capabilityPrompt := builtInCapabilityGuidancePrompt(in.PromptRole); capabilityPrompt != "" {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindSystem,
 			Stage:   "capability_guidance",
@@ -74,13 +74,15 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Content: userInstructions,
 		})
 	}
-	if agentSupport := buildSystemAgentDelegationPrompt(in.DefaultAgent, in.AgentDescriptors); agentSupport != "" {
-		additional = append(additional, appprompting.PromptFragment{
-			Kind:    appprompting.PromptFragmentKindSystem,
-			Stage:   "capability_guidance",
-			Source:  "cli:acp-agent-support",
-			Content: agentSupport,
-		})
+	if promptRoleUsesLocalTooling(in.PromptRole) {
+		if agentSupport := buildSystemAgentDelegationPrompt(in.DefaultAgent, in.AgentDescriptors); agentSupport != "" {
+			additional = append(additional, appprompting.PromptFragment{
+				Kind:    appprompting.PromptFragmentKindSystem,
+				Stage:   "capability_guidance",
+				Source:  "cli:acp-agent-support",
+				Content: agentSupport,
+			})
+		}
 	}
 	if workspaceContext := builtInEnvironmentContextPrompt(workspaceDir); workspaceContext != "" {
 		additional = append(additional, appprompting.PromptFragment{
@@ -90,7 +92,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Content: workspaceContext,
 		})
 	}
-	if in.EnableExperimentalLSPPrompt {
+	if promptRoleUsesLocalTooling(in.PromptRole) && in.EnableExperimentalLSPPrompt {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindSystem,
 			Stage:   "capability_guidance",
@@ -103,12 +105,19 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 		Spec: appprompting.AssembleSpec{
 			IdentityPrompt:   builtInSystemIdentityPrompt(in.AppName),
 			IdentitySource:   "cli:built-in-identity",
-			SkillsMetaPrompt: appskills.BuildMetaPrompt(discovered.Metas),
+			SkillsMetaPrompt: skillsMetaPrompt(in.PromptRole, discovered.Metas),
 			SkillsMetaSource: "skills metadata",
 			Additional:       additional,
 		},
 		Warnings: warnings,
 	}, nil
+}
+
+func skillsMetaPrompt(role string, metas []appskills.Meta) string {
+	if !promptRoleUsesLocalTooling(role) {
+		return ""
+	}
+	return appskills.BuildMetaPrompt(metas)
 }
 
 func resolveWorkspaceDir(workspaceDir string) (string, error) {

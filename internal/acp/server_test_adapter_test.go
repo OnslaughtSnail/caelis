@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/internal/slashcmd"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
@@ -27,6 +26,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type harnessAdapterConfig struct {

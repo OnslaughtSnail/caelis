@@ -177,6 +177,13 @@ func TestSlashArgQueryAtCursor(t *testing.T) {
 	if cmd != "agent rm" || query != "claude" {
 		t.Fatalf("unexpected agent rm parse: cmd=%q query=%q", cmd, query)
 	}
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/agent use codex"), len([]rune("/agent use codex")))
+	if !ok {
+		t.Fatal("expected slash-arg query for /agent use main agent target")
+	}
+	if cmd != "agent use" || query != "codex" {
+		t.Fatalf("unexpected agent use parse: cmd=%q query=%q", cmd, query)
+	}
 	_, _, ok = slashArgQueryAtCursor([]rune("/agent list "), len([]rune("/agent list ")))
 	if ok {
 		t.Fatal("did not expect picker parse for /agent list")
@@ -931,6 +938,7 @@ func TestAgentSlashArgOpensOnTrailingSpaceAndAdvancesToBuiltinStep(t *testing.T)
 					{Value: "list", Display: "list"},
 					{Value: "add", Display: "add"},
 					{Value: "rm", Display: "rm"},
+					{Value: "use", Display: "use"},
 				}, nil
 			case "agent add":
 				return []SlashArgCandidate{
@@ -947,7 +955,7 @@ func TestAgentSlashArgOpensOnTrailingSpaceAndAdvancesToBuiltinStep(t *testing.T)
 	if !m.slashArgActive {
 		t.Fatal("expected slash-arg active for /agent")
 	}
-	if len(m.slashArgCandidates) != 3 {
+	if len(m.slashArgCandidates) != 4 {
 		t.Fatalf("expected agent action candidates, got %d", len(m.slashArgCandidates))
 	}
 	_, _ = m.Update(keyPress(tea.KeyDown))
@@ -986,6 +994,35 @@ func TestAgentAddExecutesOnSingleEnterWhenBuiltinAlreadyComplete(t *testing.T) {
 	}
 	if called != "/agent add codex" {
 		t.Fatalf("expected '/agent add codex', got %q", called)
+	}
+}
+
+func TestAgentUseExecutesOnSingleEnterWhenTargetAlreadyComplete(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(submission.Text)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
+			if command != "agent use" {
+				return nil, nil
+			}
+			return []SlashArgCandidate{{Value: "self", Display: "self"}}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/agent use self")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected command for exact /agent use target")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/agent use self" {
+		t.Fatalf("expected '/agent use self', got %q", called)
 	}
 }
 

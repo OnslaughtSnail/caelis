@@ -617,13 +617,13 @@ func (m *Model) applySlashArgCompletion() {
 	case "agent":
 		m.setInputText("/agent " + choice + " ")
 		switch choice {
-		case "add", "rm":
+		case "add", "rm", "use":
 			m.activateSlashArgPickerFromInput("agent " + choice)
 		default:
 			m.clearSlashArg()
 		}
 		return
-	case "agent add", "agent rm":
+	case "agent add", "agent rm", "agent use":
 		m.setInputText("/" + command + " " + choice)
 		m.clearSlashArg()
 		return
@@ -672,7 +672,7 @@ func (m *Model) shouldExecuteSlashArgSelection(command string, choice string) bo
 	switch command {
 	case "agent":
 		return false
-	case "agent add", "agent rm":
+	case "agent add", "agent rm", "agent use":
 		return true
 	case "model":
 		return false
@@ -701,7 +701,7 @@ func isExecutableSlashArgInput(line string) bool {
 		switch action {
 		case "list":
 			return len(fields) == 2
-		case "add", "rm":
+		case "add", "rm", "use":
 			return len(fields) >= 3
 		default:
 			return false

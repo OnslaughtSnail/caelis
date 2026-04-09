@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/OnslaughtSnail/caelis/internal/gitignorefilter"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	"github.com/OnslaughtSnail/caelis/pkg/gitignorefilter"
 )
 
 func runtimeOrDefault(runtime toolexec.Runtime) (toolexec.Runtime, error) {

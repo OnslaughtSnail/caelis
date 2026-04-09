@@ -10,9 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
+	"github.com/OnslaughtSnail/caelis/kernel/runreplay"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type Runner interface {
@@ -38,7 +39,7 @@ type runHandle struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
-	replay         *replayBuffer
+	replay         *runreplay.Buffer
 	eventNotifyCh  chan struct{}
 	submitNotifyCh chan struct{}
 	doneCh         chan struct{}
@@ -159,9 +160,9 @@ func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
 			pendingResync     bool
 		)
 		for {
-			snap := h.replay.snapshotFrom(nextSeq)
-			if nextSeq < snap.startSeq {
-				if nextSeq <= snap.lastDroppedDurableSeq {
+			snap := h.replay.SnapshotFrom(nextSeq)
+			if nextSeq < snap.StartSeq {
+				if nextSeq <= snap.LastDroppedDurableSeq {
 					if pendingResync {
 						if !yield(streamResyncEvent(), nil) {
 							return
@@ -195,37 +196,37 @@ func (h *runHandle) Events() iter.Seq2[*session.Event, error] {
 						}
 						cursor = nextCursor
 					}
-					nextSeq = snap.nextSeq
+					nextSeq = snap.NextSeq
 					pendingResync = true
 					continue
 				}
-				nextSeq = snap.startSeq
+				nextSeq = snap.StartSeq
 				pendingResync = true
 			}
-			if pendingResync && len(snap.items) > 0 {
+			if pendingResync && len(snap.Items) > 0 {
 				if !yield(streamResyncEvent(), nil) {
 					return
 				}
 				pendingResync = false
 			}
-			if len(snap.items) > 0 {
-				for _, item := range snap.items {
-					if item.durable && item.event != nil {
-						lastDurableCursor = item.event.ID
+			if len(snap.Items) > 0 {
+				for _, item := range snap.Items {
+					if item.Durable && item.Event != nil {
+						lastDurableCursor = item.Event.ID
 					}
-					if !yield(item.event, item.err) {
+					if !yield(item.Event, item.Err) {
 						return
 					}
-					nextSeq = item.seq + 1
-					if item.err != nil {
+					nextSeq = item.Seq + 1
+					if item.Err != nil {
 						return
 					}
 				}
 				continue
 			}
-			if snap.closed {
-				if snap.terminalErr != nil {
-					yield(nil, snap.terminalErr)
+			if snap.Closed {
+				if snap.TerminalErr != nil {
+					yield(nil, snap.TerminalErr)
 				}
 				return
 			}
@@ -306,7 +307,7 @@ func (r *Runtime) newRunner(ctx context.Context, req RunRequest) (*runHandle, er
 		sess:           sess,
 		ctx:            runCtx,
 		cancel:         cancel,
-		replay:         newReplayBuffer(replayBufferCapacity),
+		replay:         runreplay.NewBuffer(replayBufferCapacity),
 		eventNotifyCh:  make(chan struct{}, 1),
 		submitNotifyCh: make(chan struct{}, 1),
 		doneCh:         make(chan struct{}),
@@ -334,7 +335,7 @@ func (h *runHandle) runWorker(ctx context.Context, leaseKey string) {
 		}
 	}()
 	defer func() {
-		h.replay.close(nil)
+		h.replay.Close(nil)
 		select {
 		case h.eventNotifyCh <- struct{}{}:
 		default:
