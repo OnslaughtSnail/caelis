@@ -30,3 +30,27 @@ func TestResolveMainSessionSystemPrompt_UsesACPMainRoleForExternalController(t *
 		t.Fatalf("did not expect local delegation tool guidance in ACP main-session prompt: %q", prompt)
 	}
 }
+
+func TestResolveMainSessionSystemPrompt_IgnoresFrozenLocalPromptForACPController(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workspace := t.TempDir()
+
+	prompt, err := resolveMainSessionSystemPrompt(buildAgentInput{
+		AppName:      "demo-app",
+		PromptRole:   promptRoleMainSession,
+		WorkspaceDir: workspace,
+		BasePrompt:   "keep answers concise",
+		FrozenPrompt: "## Main Session Role\nTool families: use READ/SEARCH/GLOB/LIST to inspect",
+		DefaultAgent: "codex",
+	}, true)
+	if err != nil {
+		t.Fatalf("resolveMainSessionSystemPrompt failed: %v", err)
+	}
+	if !strings.Contains(prompt, "## ACP Main Session Role") {
+		t.Fatalf("expected ACP main-session role guidance, got %q", prompt)
+	}
+	if strings.Contains(prompt, "Tool families: use READ/SEARCH/GLOB/LIST to inspect") {
+		t.Fatalf("expected ACP main-session prompt rebuild, got %q", prompt)
+	}
+}

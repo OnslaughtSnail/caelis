@@ -105,6 +105,7 @@ func resolveMainSessionSystemPrompt(in buildAgentInput, usesACP bool) (string, e
 	promptInput := in
 	if usesACP {
 		promptInput.PromptRole = promptRoleACPMainSession
+		promptInput.FrozenPrompt = ""
 	}
 	return resolveSystemPrompt(promptInput)
 }

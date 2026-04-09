@@ -50,6 +50,7 @@ type cliConsole struct {
 	contextWindow int
 	workspace     workspaceContext
 	workspaceLine string
+	workspaceRoot string
 
 	resolved              *appassembly.ResolvedSpec
 	sessionStore          session.Store
@@ -179,6 +180,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		contextWindow:         cfg.ContextWindow,
 		workspace:             cfg.Workspace,
 		workspaceLine:         strings.TrimSpace(cfg.WorkspaceLine),
+		workspaceRoot:         strings.TrimSpace(cfg.WorkspaceRoot),
 		resolved:              cfg.Resolved,
 		sessionStore:          cfg.SessionStore,
 		execRuntime:           cfg.ExecRuntime,
@@ -258,6 +260,7 @@ type cliConsoleConfig struct {
 	ContextWindow         int
 	Workspace             workspaceContext
 	WorkspaceLine         string
+	WorkspaceRoot         string
 	Resolved              *appassembly.ResolvedSpec
 	SessionStore          session.Store
 	ExecRuntime           toolexec.Runtime
@@ -512,7 +515,7 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 			cfg, _ := c.modelFactory.ConfigForAlias(c.modelAlias)
 			return cfg
 		}(),
-		WorkspaceRoot:    c.workspace.CWD,
+		WorkspaceRoot:    firstNonEmptyString(c.workspaceRoot, c.workspace.CWD),
 		ExecutionRuntime: c.executionRuntimeForSession(),
 		AppVersion:       c.version,
 	}

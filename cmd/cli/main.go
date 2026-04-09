@@ -520,6 +520,7 @@ func runCLI(ctx context.Context, args []string) error {
 		ContextWindow:         *contextWindow,
 		Workspace:             workspace,
 		WorkspaceLine:         workspaceStatusLine(workspace.CWD),
+		WorkspaceRoot:         resolvedWorkspaceRoot,
 		Resolved:              resolved,
 		SessionStore:          store,
 		ExecRuntime:           execRuntime,
