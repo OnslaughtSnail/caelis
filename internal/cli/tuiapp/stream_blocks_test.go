@@ -779,3 +779,184 @@ func TestRenderMentionList_UsesAgentsTitleForAtPrefix(t *testing.T) {
 		t.Fatalf("did not expect Files title for @ mention overlay, got:\n%s", view)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// MainACPTurnBlock regression tests
+// ---------------------------------------------------------------------------
+
+func TestMainACPTurnBlock_MultiChunkAssistantStreamAccumulates(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+
+	chunks := []string{"Hello", ", I", " am", " an", " AI", " assistant."}
+	for _, chunk := range chunks {
+		_, _ = m.Update(tuievents.ACPProjectionMsg{
+			Scope:     tuievents.ACPProjectionMain,
+			ScopeID:   "root-session",
+			Stream:    "assistant",
+			DeltaText: chunk,
+			FullText:  "", // delta-only, FullText intentionally omitted
+		})
+	}
+
+	blockID := strings.TrimSpace(m.activeMainACPTurnID)
+	block, ok := m.doc.Find(blockID).(*MainACPTurnBlock)
+	if !ok || block == nil {
+		t.Fatalf("expected MainACPTurnBlock for root-session")
+	}
+	if len(block.Events) != 1 || block.Events[0].Kind != SEAssistant {
+		t.Fatalf("expected single assistant event, got %d events: %#v", len(block.Events), block.Events)
+	}
+	if got := block.Events[0].Text; got != "Hello, I am an AI assistant." {
+		t.Fatalf("expected accumulated text, got %q", got)
+	}
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "Hello, I am an AI assistant.") {
+		t.Fatalf("expected full accumulated text in viewport, got:\n%s", view)
+	}
+}
+
+func TestMainACPTurnBlock_ToolCallAndResultRealTimeProjection(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+
+	// Assistant text first
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Let me check that file.",
+	})
+
+	// Tool call (in-progress)
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-1",
+		ToolName:   "READ",
+		ToolArgs:   map[string]any{"path": "/tmp/demo.txt"},
+		ToolStatus: "in_progress",
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "READ") {
+		t.Fatalf("expected in-progress tool call visible in viewport, got:\n%s", view)
+	}
+
+	// Tool result (completed)
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-1",
+		ToolName:   "READ",
+		ToolArgs:   map[string]any{"path": "/tmp/demo.txt"},
+		ToolResult: map[string]any{"content": "file contents here"},
+		ToolStatus: "completed",
+	})
+
+	view = strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "Let me check that file.") {
+		t.Fatalf("expected assistant text in viewport after tool result, got:\n%s", view)
+	}
+	if !strings.Contains(view, "READ") {
+		t.Fatalf("expected tool name in viewport after tool result, got:\n%s", view)
+	}
+
+	blockID := strings.TrimSpace(m.activeMainACPTurnID)
+	block, _ := m.doc.Find(blockID).(*MainACPTurnBlock)
+	if block == nil {
+		t.Fatal("expected MainACPTurnBlock")
+	}
+	toolEvents := 0
+	for _, ev := range block.Events {
+		if ev.Kind == SEToolCall {
+			toolEvents++
+		}
+	}
+	if toolEvents == 0 {
+		t.Fatalf("expected at least one tool event in block, got events: %#v", block.Events)
+	}
+}
+
+func TestMainACPTurnBlock_FinalSnapshotFillsMissedContent(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+
+	// First chunk only
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Hello",
+	})
+
+	// Final snapshot with full text (simulates Finalize catch-up)
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:    tuievents.ACPProjectionMain,
+		ScopeID:  "root-session",
+		Stream:   "assistant",
+		FullText: "Hello, I am an AI.",
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "Hello, I am an AI.") {
+		t.Fatalf("expected final snapshot to replace incomplete stream, got:\n%s", view)
+	}
+}
+
+func TestMainACPTurnBlock_PreviousTurnBaselineDoesNotPolluteCurrent(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	// Simulate previous turn
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Previous turn answer.",
+	})
+
+	// Finalize the turn via TaskResultMsg (mirrors real lifecycle)
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	// Verify first turn block is finalized
+	if m.activeMainACPTurnID != "" {
+		t.Fatal("expected activeMainACPTurnID to be cleared after TaskResultMsg")
+	}
+
+	// Start new turn — must create a fresh block
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Current turn answer.",
+	})
+
+	newBlockID := strings.TrimSpace(m.activeMainACPTurnID)
+	newBlock, _ := m.doc.Find(newBlockID).(*MainACPTurnBlock)
+	if newBlock == nil {
+		t.Fatal("expected new MainACPTurnBlock for second turn")
+	}
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	currCount := strings.Count(view, "Current turn answer.")
+	if currCount != 1 {
+		t.Fatalf("expected current turn answer exactly once, got %d in:\n%s", currCount, view)
+	}
+	// The new turn block should only contain the new text, not the old
+	if len(newBlock.Events) != 1 || newBlock.Events[0].Kind != SEAssistant {
+		t.Fatalf("expected single assistant event in new block, got %d events", len(newBlock.Events))
+	}
+	if got := newBlock.Events[0].Text; got != "Current turn answer." {
+		t.Fatalf("expected only current turn text in new block, got %q", got)
+	}
+}

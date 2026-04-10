@@ -30,6 +30,7 @@ func (m *Model) bottomSectionHeight() int {
 	// Spacer + optional plan + optional pending queue + hint row + hint/header
 	// gap + workspace/model row + composer section label.
 	lines += m.preComposerFixedHeight()
+	lines += m.promptModalReservedHeight()
 
 	// Composer top padding between workspace/model row and input.
 	lines += tuikit.ComposerPadTop
@@ -48,6 +49,17 @@ func (m *Model) bottomSectionHeight() int {
 	lines += tuikit.StatusBarPadBottom
 
 	return lines
+}
+
+func (m *Model) promptModalReservedHeight() int {
+	if m == nil || m.activePrompt == nil || m.width <= 0 || m.height <= 0 {
+		return 0
+	}
+	modal := ansi.Strip(m.renderPromptModal())
+	if strings.TrimSpace(modal) == "" {
+		return 0
+	}
+	return strings.Count(modal, "\n") + 1
 }
 
 // renderedStyledLines returns the unwrapped styled lines from all document

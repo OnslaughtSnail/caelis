@@ -44,12 +44,16 @@ func renderEventPolicyFor(msg tea.Msg) (renderEventPolicy, bool) {
 		return renderEventPolicy{lane: renderLaneToolStream, flushLogChunks: true, dismissHints: true}, true
 	case tuievents.ParticipantTurnStartMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
+	case tuievents.ACPMainTurnStartMsg:
+		return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 	case tuievents.ParticipantToolMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 	case tuievents.ParticipantStatusMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true}, true
 	case tuievents.ACPProjectionMsg:
 		switch typed.Scope {
+		case tuievents.ACPProjectionMain:
+			return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 		case tuievents.ACPProjectionParticipant:
 			return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 		case tuievents.ACPProjectionSubagent:
@@ -178,6 +182,9 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 
 	case tuievents.ParticipantTurnStartMsg:
 		model, cmd := m.handleParticipantTurnStart(typed)
+		return model, tea.Batch(policyCmd, cmd), true
+	case tuievents.ACPMainTurnStartMsg:
+		model, cmd := m.handleMainACPTurnStart(typed)
 		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.ParticipantToolMsg:
 		model, cmd := m.handleParticipantToolMsg(typed)
@@ -392,10 +399,12 @@ func (m *Model) handleTaskResultMsg(msg tuievents.TaskResultMsg) (tea.Model, tea
 		m.finalizeAssistantBlock()
 		m.finalizeReasoningBlock()
 	}
+	m.finalizeActiveMainACPTurn(msg.Interrupted, msg.Err)
 	if msg.SuppressTurnDivider {
 		m.finalizeActiveParticipantTurn(msg.Interrupted, msg.Err)
 	}
 	_ = m.finalizeActivityBlock()
+	m.collapseTurnEndMutationPanels()
 	if !m.runStartedAt.IsZero() {
 		m.lastRunDuration = time.Since(m.runStartedAt)
 		m.hasLastRunDuration = true

@@ -84,6 +84,91 @@ func lastHint(msgs []any) string {
 	return ""
 }
 
+func TestHandleResume_ReplaysMainACPProjectionWithoutParticipantContainer(t *testing.T) {
+	store := inmemory.New()
+	target := &session.Session{AppName: "app", UserID: "u", ID: "resume-main-acp"}
+	if _, err := store.GetOrCreate(context.Background(), target); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), target, &session.Event{
+		ID:        "ev-user-1",
+		SessionID: target.ID,
+		Message:   model.NewTextMessage(model.RoleUser, "介绍一下你自己"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), target, &session.Event{
+		ID:        "ev-assistant-1",
+		SessionID: target.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "我是 copilot 的 ACP 主控输出"),
+		Meta:      map[string]any{"_ui_agent": "copilot"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: target.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:      context.Background(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "current",
+		workspace:    workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore: store,
+		gateway:      gw,
+		tuiSender:    sender,
+	}
+	console.sessionID = target.ID
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: target.ID, Kind: "turn_start", SessionID: target.ID},
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: target.ID, Kind: "projection", SessionID: target.ID, Stream: "assistant", DeltaText: "我是 copilot 的 ACP 主控输出。"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	console.sessionID = "current"
+
+	if _, err := handleResume(console, []string{target.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawMainTurn bool
+	var sawMainProjection bool
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.ACPMainTurnStartMsg:
+			if msg.SessionID == target.ID {
+				sawMainTurn = true
+			}
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope == tuievents.ACPProjectionMain && msg.ScopeID == target.ID && strings.Contains(msg.DeltaText+msg.FullText, "ACP 主控输出") {
+				sawMainProjection = true
+			}
+		case tuievents.ParticipantTurnStartMsg:
+			t.Fatalf("did not expect ACP main replay to enter participant container: %#v", msg)
+		case tuievents.RawDeltaMsg:
+			t.Fatalf("did not expect canonical ACP assistant replay to bypass main ACP projection: %#v", msg)
+		}
+	}
+	if !sawMainTurn || !sawMainProjection {
+		t.Fatalf("expected main ACP replay messages, got %#v", sender.Snapshot())
+	}
+}
+
 func TestHandleResume_BootstrapsRunningSubagentWithoutRemoteReplay(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})

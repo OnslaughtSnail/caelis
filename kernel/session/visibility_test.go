@@ -68,3 +68,39 @@ func TestIsCanonicalHistoryEvent(t *testing.T) {
 		t.Fatal("lifecycle event must not be canonical")
 	}
 }
+
+func TestIsInvocationVisibleEvent_ExcludesACPToolProtocolEvents(t *testing.T) {
+	evCall := &Event{
+		ID:   "ev-acp-call",
+		Time: time.Now(),
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "call-1",
+			Name: "READ",
+			Args: `{"path":"main.go"}`,
+		}}, ""),
+		Meta: map[string]any{"controller_kind": "acp"},
+	}
+	if IsInvocationVisibleEvent(evCall) {
+		t.Fatal("ACP tool call event must not be invocation-visible")
+	}
+
+	evResult := &Event{
+		ID:      "ev-acp-result",
+		Time:    time.Now(),
+		Message: model.MessageFromToolResponse(&model.ToolResponse{ID: "call-1", Name: "READ", Result: map[string]any{"ok": true}}),
+		Meta:    map[string]any{"controller_kind": "acp"},
+	}
+	if IsInvocationVisibleEvent(evResult) {
+		t.Fatal("ACP tool result event must not be invocation-visible")
+	}
+
+	evText := &Event{
+		ID:      "ev-acp-text",
+		Time:    time.Now(),
+		Message: model.NewTextMessage(model.RoleAssistant, "ACP summary"),
+		Meta:    map[string]any{"controller_kind": "acp"},
+	}
+	if !IsInvocationVisibleEvent(evText) {
+		t.Fatal("ACP assistant narrative should remain invocation-visible until handoff replacement lands")
+	}
+}

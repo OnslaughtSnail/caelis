@@ -64,6 +64,10 @@ type RunTurnRequest struct {
 	SessionID           string
 	Input               string
 	ContentParts        []model.ContentPart
+	InvocationPrelude   []model.Message
+	ControllerKind      string
+	ControllerID        string
+	EpochID             string
 	Agent               agent.Agent
 	Model               model.LLM
 	ContextWindowTokens int
@@ -183,6 +187,10 @@ func (g *Gateway) RunTurn(ctx context.Context, req RunTurnRequest) (RunTurnResul
 		SessionRef:          ref,
 		Input:               req.Input,
 		ContentParts:        append([]model.ContentPart(nil), req.ContentParts...),
+		InvocationPrelude:   append([]model.Message(nil), req.InvocationPrelude...),
+		ControllerKind:      strings.TrimSpace(req.ControllerKind),
+		ControllerID:        strings.TrimSpace(req.ControllerID),
+		EpochID:             strings.TrimSpace(req.EpochID),
 		Agent:               req.Agent,
 		Model:               req.Model,
 		ContextWindowTokens: req.ContextWindowTokens,

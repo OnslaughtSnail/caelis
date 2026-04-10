@@ -215,6 +215,170 @@ func renderNarrativeGlamourRows(blockID, raw, rolePrefix string, lineStyle tuiki
 }
 
 // ---------------------------------------------------------------------------
+// MainACPTurnBlock — root ACP-controlled turn in the main transcript.
+// ---------------------------------------------------------------------------
+
+type MainACPTurnBlock struct {
+	id        string
+	SessionID string
+	Status    string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Events    []SubagentEvent
+}
+
+func NewMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
+	return &MainACPTurnBlock{
+		id:        nextBlockID(),
+		SessionID: strings.TrimSpace(sessionID),
+		Status:    "running",
+		StartedAt: time.Now(),
+	}
+}
+
+func (b *MainACPTurnBlock) BlockID() string { return b.id }
+func (b *MainACPTurnBlock) Kind() BlockKind { return BlockMainACPTurn }
+
+func (b *MainACPTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+	if b == nil {
+		return
+	}
+	if idx := latestParticipantNarrativeEventIndex(b.Events, kind); idx >= 0 {
+		b.Events[idx].Text = collapseRepeatedNarrativeText(appendDeltaStreamChunk(b.Events[idx].Text, chunk))
+		b.Events = b.Events[:idx+1]
+		return
+	}
+	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+}
+
+func (b *MainACPTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+	if b == nil {
+		return
+	}
+	chunk = strings.TrimSpace(chunk)
+	if chunk == "" {
+		return
+	}
+	if idx := latestParticipantNarrativeEventIndex(b.Events, kind); idx >= 0 {
+		b.Events[idx].Text = collapseRepeatedNarrativeText(chunk)
+		b.Events = b.Events[:idx+1]
+		return
+	}
+	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+}
+
+func (b *MainACPTurnBlock) UpdateTool(callID, name, args, output string, final bool, err bool) {
+	if b == nil {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	if !final {
+		for i := len(b.Events) - 1; i >= 0; i-- {
+			ev := &b.Events[i]
+			if ev.Kind != SEToolCall || strings.TrimSpace(ev.CallID) != callID || ev.Done {
+				continue
+			}
+			if strings.TrimSpace(ev.Name) == "" {
+				ev.Name = strings.TrimSpace(name)
+			}
+			if strings.TrimSpace(ev.Args) == "" {
+				ev.Args = strings.TrimSpace(args)
+			}
+			return
+		}
+		b.Events = append(b.Events, SubagentEvent{
+			Kind:   SEToolCall,
+			CallID: callID,
+			Name:   strings.TrimSpace(name),
+			Args:   strings.TrimSpace(args),
+		})
+		return
+	}
+	finalEvent := SubagentEvent{
+		Kind:   SEToolCall,
+		CallID: callID,
+		Name:   strings.TrimSpace(name),
+		Args:   strings.TrimSpace(args),
+		Output: strings.TrimSpace(output),
+		Done:   true,
+		Err:    err,
+	}
+	for i := len(b.Events) - 1; i >= 0; i-- {
+		ev := &b.Events[i]
+		if ev.Kind != SEToolCall || strings.TrimSpace(ev.CallID) != callID {
+			continue
+		}
+		if !ev.Done {
+			if strings.TrimSpace(finalEvent.Name) == "" {
+				finalEvent.Name = strings.TrimSpace(ev.Name)
+			}
+			if strings.TrimSpace(finalEvent.Args) == "" {
+				finalEvent.Args = strings.TrimSpace(ev.Args)
+			}
+			ev.Name = finalEvent.Name
+			ev.Args = finalEvent.Args
+			ev.Output = finalEvent.Output
+			ev.Done = true
+			ev.Err = finalEvent.Err
+			return
+		}
+		if strings.TrimSpace(finalEvent.Name) == "" {
+			finalEvent.Name = strings.TrimSpace(ev.Name)
+		}
+		if strings.TrimSpace(finalEvent.Args) == "" {
+			finalEvent.Args = strings.TrimSpace(ev.Args)
+		}
+		break
+	}
+	b.Events = append(b.Events, finalEvent)
+}
+
+func (b *MainACPTurnBlock) UpdatePlan(entries []planEntryState) {
+	if b == nil {
+		return
+	}
+	if n := len(b.Events); n > 0 && b.Events[n-1].Kind == SEPlan {
+		b.Events[n-1].PlanEntries = entries
+		return
+	}
+	b.Events = append(b.Events, SubagentEvent{
+		Kind:        SEPlan,
+		PlanEntries: entries,
+	})
+}
+
+func (b *MainACPTurnBlock) SetStatus(state string, occurredAt time.Time) {
+	if b == nil {
+		return
+	}
+	b.Status = strings.ToLower(strings.TrimSpace(state))
+	switch b.Status {
+	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
+		if b.EndedAt.IsZero() {
+			if !occurredAt.IsZero() {
+				b.EndedAt = occurredAt
+			} else {
+				b.EndedAt = time.Now()
+			}
+		}
+	default:
+		b.EndedAt = time.Time{}
+	}
+}
+
+func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
+	if b == nil {
+		return nil
+	}
+	return renderACPTranscriptRows(b.id, b.Events, b.Status, maxInt(8, ctx.Width), ctx, acpTranscriptRenderOptions{
+		UseStatusPlaceholder:   true,
+		PlaceholderAsMeta:      true,
+		HideWaitingApprovalRow: true,
+		HideCompletedRow:       true,
+	})
+}
+
+// ---------------------------------------------------------------------------
 // ParticipantTurnBlock — inline external-agent turn inside the main transcript.
 // ---------------------------------------------------------------------------
 

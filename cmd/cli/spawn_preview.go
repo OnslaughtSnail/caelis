@@ -15,21 +15,44 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )
 
-func (c *cliConsole) forwardSessionEventToTUI(ctx context.Context, rootSessionID string, update sessionstream.Update) {
+func (c *cliConsole) forwardSessionEventToTUI(ctx context.Context, rootSessionID string, update sessionstream.Update, _ map[string]toolCallSnapshot) {
 	if c == nil || c.tuiSender == nil || update.Event == nil {
 		return
 	}
-	if strings.TrimSpace(update.SessionID) == "" || strings.TrimSpace(update.SessionID) == strings.TrimSpace(rootSessionID) {
+	updateSessionID := strings.TrimSpace(update.SessionID)
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	if updateSessionID == "" {
 		return
 	}
+	if matchesMainACPRootSession(updateSessionID, rootSessionID, update.Event) {
+		return // ACP root events are rendered via ACP projection, not kernel stream
+	}
 	if meta, ok := runtime.DelegationMetadataFromEvent(update.Event); ok {
-		if parent := strings.TrimSpace(meta.ParentSessionID); parent != "" && parent != strings.TrimSpace(rootSessionID) {
+		if parent := strings.TrimSpace(meta.ParentSessionID); parent != "" && parent != rootSessionID {
 			return
 		}
 	}
 	for _, msg := range c.projectSubagentUpdate(update) {
 		c.sendSubagentProjectionMsg(ctx, rootSessionID, msg)
 	}
+}
+
+func matchesMainACPRootSession(updateSessionID string, rootSessionID string, ev *session.Event) bool {
+	updateSessionID = strings.TrimSpace(updateSessionID)
+	rootSessionID = strings.TrimSpace(rootSessionID)
+	if updateSessionID == "" {
+		return false
+	}
+	if updateSessionID == rootSessionID {
+		return true
+	}
+	if !isACPRootLiveStreamEvent(ev) || !isMainACPEvent(ev) {
+		return false
+	}
+	if meta, ok := runtime.DelegationMetadataFromEvent(ev); ok && strings.TrimSpace(meta.ParentSessionID) != "" {
+		return false
+	}
+	return true
 }
 
 type subagentProjectionTarget struct {

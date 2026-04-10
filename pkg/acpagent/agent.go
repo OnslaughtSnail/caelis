@@ -155,6 +155,9 @@ func (a *Agent) Run(inv agent.InvocationContext) iter.Seq2[*session.Event, error
 		if warning != nil && !yield(warning, nil) {
 			return
 		}
+		if !freshSession {
+			projector.SeedNarrative(previousTurnNarrative(inv, promptCtx.EventIndex, a.cfg.ID))
+		}
 
 		if !initResp.AgentCapabilities.Prompt.Image {
 			prompt = filterImageBlocks(prompt)
@@ -449,7 +452,7 @@ func liveProjectionEvent(item acpprojector.Projection, agentID string, overlay b
 			return session.MarkOverlay(ev)
 		}
 		return ev
-	case item.ToolStatus == "in_progress":
+	case item.ToolCallID != "":
 		return session.MarkUIOnly(ev)
 	default:
 		return nil
@@ -478,6 +481,10 @@ func (r *turnRecorder) Observe(item acpprojector.Projection) {
 	case item.ToolCallID != "" && item.ToolStatus == "":
 		ev := session.CloneEvent(item.Event)
 		ev.Time = time.Now()
+		if ev.Meta == nil {
+			ev.Meta = map[string]any{}
+		}
+		ev.Meta["acp_live_tool_call"] = true
 		r.events = append(r.events, annotateAgentEvent(ev, r.agentID))
 	case item.ToolStatus == "completed" || item.ToolStatus == "failed":
 		ev := session.CloneEvent(item.Event)
@@ -743,4 +750,49 @@ func derefString(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+func previousTurnNarrative(inv agent.InvocationContext, promptIndex int, agentID string) (assistant string, reasoning string) {
+	if inv == nil || promptIndex <= 0 || strings.TrimSpace(agentID) == "" {
+		return "", ""
+	}
+	for i := promptIndex - 1; i >= 0; i-- {
+		ev := inv.Events().At(i)
+		if ev == nil {
+			continue
+		}
+		if ev.Message.Role == model.RoleUser {
+			break
+		}
+		if session.EventTypeOf(ev) == session.EventTypeCompaction || session.IsTransient(ev) || session.IsPartial(ev) || session.IsUIOnly(ev) {
+			continue
+		}
+		if strings.TrimSpace(asString(ev.Meta["agent_id"])) != strings.TrimSpace(agentID) {
+			continue
+		}
+		if assistant == "" {
+			assistant = strings.TrimSpace(ev.Message.TextContent())
+		}
+		if reasoning == "" {
+			reasoning = strings.TrimSpace(ev.Message.ReasoningText())
+		}
+		if assistant != "" && reasoning != "" {
+			break
+		}
+	}
+	return assistant, reasoning
+}
+
+func asString(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return fmt.Sprint(value)
+	}
 }

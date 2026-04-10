@@ -194,11 +194,18 @@ func TestShouldPersistExternalProjectionEvent_SkipsPartialNarrative(t *testing.T
 	}
 }
 
-func TestMergeExternalNarrativeChunk_DeduplicatesCumulativeReplay(t *testing.T) {
+func TestMergeNarrativeChunk_DeduplicatesCumulativeReplay(t *testing.T) {
 	prefix := "我是 Gemini CLI，专注于软件工程任务的交互式 AI"
 	full := prefix + " 代理。我以高级软件工程师的身份协助你进行代码分析。"
-	if got := mergeExternalNarrativeChunk(prefix, full); got != full {
-		t.Fatalf("expected cumulative replay to replace previous snapshot, got %q", got)
+	next, delta, changed := acpprojector.MergeNarrativeChunk(prefix, full)
+	if next != full {
+		t.Fatalf("expected cumulative replay to replace previous snapshot, got %q", next)
+	}
+	if !changed {
+		t.Fatal("expected changed=true for cumulative replay merge")
+	}
+	if delta == "" {
+		t.Fatal("expected non-empty delta for cumulative replay merge")
 	}
 }
 

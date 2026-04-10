@@ -51,6 +51,7 @@ const (
 	BlockDivider         BlockKind = "divider"
 	BlockBashPanel       BlockKind = "bash_panel"
 	BlockSubagent        BlockKind = "subagent"
+	BlockMainACPTurn     BlockKind = "main_acp_turn"
 	BlockParticipantTurn BlockKind = "participant_turn"
 	BlockActivity        BlockKind = "activity"
 	BlockWelcome         BlockKind = "welcome"

@@ -921,7 +921,7 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 				"delegation_id":       "dlg-1",
 			},
 		},
-	})
+	}, nil)
 	// Should get SubagentStartMsg + ACPProjectionMsg, but NOT TaskStreamMsg.
 	var hasStart, hasStream bool
 	for _, m := range sender.msgs {
@@ -972,7 +972,7 @@ func TestForwardSessionEventToTUI_PersistsSpawnProjectionEvents(t *testing.T) {
 				"delegation_id":       "dlg-1",
 			},
 		},
-	})
+	}, nil)
 	events, err := c.acpProjectionStore().LoadEvents(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1014,9 +1014,37 @@ func TestForwardSessionEventToTUI_IgnoresNestedGrandchildEvents(t *testing.T) {
 				"agent_id":            "codex",
 			},
 		},
-	})
+	}, nil)
 	if len(sender.msgs) != 0 {
 		t.Fatalf("expected nested grandchild events to stay out of root TUI projection, got %#v", sender.msgs)
+	}
+}
+
+func TestForwardSessionEventToTUI_SuppressesRootACPEventsFromKernelStream(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{
+		sessionID: "root-session",
+		tuiSender: sender,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"acp"}},
+			},
+		}},
+	}
+	c.forwardSessionEventToTUI(context.Background(), "root-session", sessionstream.Update{
+		SessionID: "root-session",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "streamed chunk"),
+			Meta: map[string]any{
+				"partial":   true,
+				"channel":   "answer",
+				"_ui_agent": "copilot",
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if len(sender.msgs) != 0 {
+		t.Fatalf("expected ACP root events from kernel stream to be suppressed, got %#v", sender.msgs)
 	}
 }
 

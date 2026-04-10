@@ -190,7 +190,21 @@ func IsInvocationVisibleEvent(ev *Event) bool {
 	if ev == nil || IsLifecycle(ev) || IsPartial(ev) || IsUIOnly(ev) || IsNotice(ev) || IsMirror(ev) {
 		return false
 	}
+	if isForeignControllerToolProtocolEvent(ev) {
+		return false
+	}
 	return true
+}
+
+func isForeignControllerToolProtocolEvent(ev *Event) bool {
+	if ev == nil || ev.Meta == nil {
+		return false
+	}
+	controllerKind, _ := ev.Meta["controller_kind"].(string)
+	if strings.TrimSpace(strings.ToLower(controllerKind)) != "acp" {
+		return false
+	}
+	return len(ev.Message.ToolCalls()) > 0 || ev.Message.ToolResponse() != nil
 }
 
 func eventNoticeMeta(meta map[string]any) (Notice, bool) {

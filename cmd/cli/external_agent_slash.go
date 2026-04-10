@@ -15,10 +15,10 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/acpprojector"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
-	"github.com/OnslaughtSnail/caelis/internal/cli/tuikit"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	coreacpmeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
@@ -660,25 +660,9 @@ func (c *cliConsole) forwardExternalAgentUpdate(ctx context.Context, turn *exter
 				turn.sawReasoningStream.Store(true)
 			}
 		}
-		if strings.TrimSpace(item.SessionID) != "" {
-			sessionID = strings.TrimSpace(item.SessionID)
-		}
+		msg := projectionToACPMsg(item, tuievents.ACPProjectionParticipant, sessionID, displayLabel)
 		if c.tuiSender != nil {
-			c.tuiSender.Send(tuievents.ACPProjectionMsg{
-				Scope:         tuievents.ACPProjectionParticipant,
-				ScopeID:       sessionID,
-				Actor:         displayLabel,
-				Stream:        item.Stream,
-				DeltaText:     tuikit.SanitizeLogText(item.DeltaText),
-				FullText:      tuikit.SanitizeLogText(item.FullText),
-				ToolCallID:    item.ToolCallID,
-				ToolName:      item.ToolName,
-				ToolArgs:      item.ToolArgs,
-				ToolResult:    item.ToolResult,
-				ToolStatus:    item.ToolStatus,
-				PlanEntries:   acpPlanEntriesToTUI(item.PlanEntries),
-				HasPlanUpdate: item.PlanEntries != nil,
-			})
+			c.tuiSender.Send(msg)
 		}
 		_ = c.appendExternalParticipantProjection(ctx, turn, item)
 	}
@@ -762,6 +746,9 @@ func (c *cliConsole) appendSessionEvent(ctx context.Context, sess *session.Sessi
 		ev.Time = time.Now()
 	}
 	ev.SessionID = sess.ID
+	if epoch, err := coreacpmeta.ControllerEpochFromStore(ctx, c.sessionStore, sess); err == nil {
+		annotateControllerEpochEvent(ev, epoch)
+	}
 	session.EnsureEventType(ev)
 	return c.sessionStore.AppendEvent(ctx, sess, ev)
 }
@@ -786,42 +773,6 @@ func externalACPToolDisplayName(title string, kind string) string {
 		return strings.ToUpper(kind)
 	}
 	return "TOOL"
-}
-
-func mergeExternalNarrativeChunk(existing string, incoming string) string {
-	if incoming == "" {
-		return existing
-	}
-	if existing == "" {
-		return incoming
-	}
-	if incoming == existing {
-		return existing
-	}
-
-	const stableReplayThreshold = 12
-	if len([]rune(existing)) >= stableReplayThreshold && strings.HasPrefix(incoming, existing) {
-		return incoming
-	}
-	if len([]rune(incoming)) >= stableReplayThreshold && strings.HasPrefix(existing, incoming) {
-		return existing
-	}
-	if suffix := overlappingExternalNarrativeSuffix(existing, incoming, 6); suffix != incoming {
-		return existing + suffix
-	}
-	return existing + incoming
-}
-
-func overlappingExternalNarrativeSuffix(existing string, incoming string, minOverlap int) string {
-	existingRunes := []rune(existing)
-	incomingRunes := []rune(incoming)
-	limit := minInt(len(existingRunes), len(incomingRunes))
-	for overlap := limit; overlap >= minOverlap; overlap-- {
-		if string(existingRunes[len(existingRunes)-overlap:]) == string(incomingRunes[:overlap]) {
-			return string(incomingRunes[overlap:])
-		}
-	}
-	return incoming
 }
 
 func externalApprovalRequestFromACP(req acpclient.RequestPermissionRequest) toolexec.ApprovalRequest {

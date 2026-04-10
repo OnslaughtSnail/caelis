@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
@@ -183,6 +184,7 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 			continue
 		}
 		prepareEvent(h.ctx, h.sess, recoveryEvent)
+		annotateControllerMeta(recoveryEvent, h.req.ControllerKind, h.req.ControllerID, h.req.EpochID)
 		if err := h.runtime.logStore.AppendEvent(h.ctx, h.sess, recoveryEvent); err != nil {
 			h.emitTerminalError(err)
 			return nil, false
@@ -191,9 +193,18 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 			return nil, false
 		}
 	}
+	allEvents := append([]*session.Event(nil), existing...)
+	for _, recoveryEvent := range recoveryEvents {
+		if recoveryEvent == nil {
+			continue
+		}
+		allEvents = append(allEvents, recoveryEvent)
+	}
+	allEvents = append(allEvents, buildInvocationPreludeEvents(h.req.InvocationPrelude)...)
 	userMsg := model.MessageFromTextAndContentParts(model.RoleUser, sub.Text, prepareUserContentParts(sub.Text, sub.ContentParts))
 	userEvent := &session.Event{Message: userMsg}
 	prepareEvent(h.ctx, h.sess, userEvent)
+	annotateControllerMeta(userEvent, h.req.ControllerKind, h.req.ControllerID, h.req.EpochID)
 	if err := h.runtime.logStore.AppendEvent(h.ctx, h.sess, userEvent); err != nil {
 		h.emitTerminalError(err)
 		return nil, false
@@ -201,7 +212,8 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 	if !h.appendOutput(userEvent, nil, false) {
 		return nil, false
 	}
-	allEvents, err := h.runtime.listContextWindowEvents(h.ctx, h.sess)
+	allEvents = append(allEvents, userEvent)
+	updatedEvents, err := h.runtime.listContextWindowEvents(h.ctx, h.sess)
 	if err != nil {
 		h.emitTerminalError(err)
 		return nil, false
@@ -209,7 +221,7 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 	compactionEvent, compactErr := h.runtime.compactIfNeededWithNotify(h.ctx, compactInput{
 		Session:             h.sess,
 		Model:               h.req.Model,
-		Events:              allEvents,
+		Events:              updatedEvents,
 		ContextWindowTokens: h.req.ContextWindowTokens,
 		Trigger:             triggerAuto,
 		Force:               false,
@@ -232,6 +244,70 @@ func (h *runHandle) applySubmission(sub *Submission) ([]*session.Event, bool) {
 			h.emitTerminalError(err)
 			return nil, false
 		}
+		allEvents = insertPreludeBeforeTrailingUser(allEvents, buildInvocationPreludeEvents(h.req.InvocationPrelude))
 	}
 	return allEvents, true
+}
+
+func buildInvocationPreludeEvents(messages []model.Message) []*session.Event {
+	if len(messages) == 0 {
+		return nil
+	}
+	events := make([]*session.Event, 0, len(messages))
+	for _, msg := range messages {
+		if strings.TrimSpace(string(msg.Role)) == "" {
+			continue
+		}
+		if strings.TrimSpace(msg.TextContent()) == "" && len(msg.Parts) == 0 {
+			continue
+		}
+		events = append(events, session.MarkOverlay(&session.Event{
+			ID:      eventID(),
+			Time:    now(),
+			Message: msg,
+		}))
+	}
+	return events
+}
+
+func annotateControllerMeta(ev *session.Event, kind string, controllerID string, epochID string) {
+	if ev == nil {
+		return
+	}
+	kind = strings.TrimSpace(kind)
+	controllerID = strings.TrimSpace(controllerID)
+	epochID = strings.TrimSpace(epochID)
+	if kind == "" && controllerID == "" && epochID == "" {
+		return
+	}
+	if ev.Meta == nil {
+		ev.Meta = map[string]any{}
+	}
+	if kind != "" {
+		ev.Meta["controller_kind"] = kind
+	}
+	if controllerID != "" {
+		ev.Meta["controller_id"] = controllerID
+	}
+	if epochID != "" {
+		ev.Meta["epoch_id"] = epochID
+	}
+}
+
+func insertPreludeBeforeTrailingUser(events []*session.Event, prelude []*session.Event) []*session.Event {
+	if len(prelude) == 0 {
+		return events
+	}
+	if len(events) == 0 {
+		return append([]*session.Event(nil), prelude...)
+	}
+	last := events[len(events)-1]
+	if last == nil || last.Message.Role != model.RoleUser {
+		return append(events, prelude...)
+	}
+	out := make([]*session.Event, 0, len(events)+len(prelude))
+	out = append(out, events[:len(events)-1]...)
+	out = append(out, prelude...)
+	out = append(out, last)
+	return out
 }

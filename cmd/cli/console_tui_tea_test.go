@@ -615,6 +615,25 @@ func TestReadTUIStatus_UsesConnectedModelContextAndReasoningLabel(t *testing.T) 
 	}
 }
 
+func TestReadTUIStatus_HidesContextUsageForACPMainAgent(t *testing.T) {
+	store := &appConfigStore{data: appConfig{
+		MainAgent: "copilot",
+		Agents: map[string]agentRecord{
+			"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+		},
+	}}
+	c := &cliConsole{
+		modelAlias:       "gemini/gemini-2.5-pro",
+		configStore:      store,
+		lastPromptTokens: 516,
+		contextWindow:    205000,
+	}
+	_, contextText := c.readTUIStatus()
+	if contextText != "0" {
+		t.Fatalf("expected ACP main-agent context usage to stay hidden, got %q", contextText)
+	}
+}
+
 func TestReadTUIStatus_ShowsFixedReasoningState(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{

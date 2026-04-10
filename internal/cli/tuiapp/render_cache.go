@@ -74,7 +74,7 @@ func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, 
 			case BlockAssistant, BlockReasoning:
 				wrappedStyled = m.wrapNarrativeRowStyled(row, wrapWidth)
 				plainParts = m.wrapNarrativeRowPlain(row, wrapWidth)
-			case BlockParticipantTurn:
+			case BlockMainACPTurn, BlockParticipantTurn:
 				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
 				plainParts = normalizeWrappedPlainSegments(graphemeHardWrap(plainLine, wrapWidth))
 			default:
@@ -312,6 +312,12 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addString(b.Summary)
 		writeActivityEntries(builder, b.Entries)
 		writeRenderedRows(builder, b.cachedRows)
+	case *MainACPTurnBlock:
+		builder.addString(b.SessionID)
+		builder.addString(b.Status)
+		builder.addTime(b.StartedAt)
+		builder.addTime(b.EndedAt)
+		writeSubagentEvents(builder, b.Events)
 	case *WelcomeBlock:
 		builder.addString(b.Version)
 		builder.addString(b.Workspace)

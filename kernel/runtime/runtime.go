@@ -84,6 +84,13 @@ type RunRequest struct {
 	// When non-empty, the runtime builds a user message with these parts
 	// instead of using Input as plain text.
 	ContentParts []model.ContentPart
+	// InvocationPrelude is a non-persisted set of synthetic messages visible
+	// only to the current invocation. It is intended for hidden handoff
+	// context injection and similar orchestration overlays.
+	InvocationPrelude []model.Message
+	ControllerKind    string
+	ControllerID      string
+	EpochID           string
 
 	// Capabilities
 	Agent                 agent.Agent

@@ -407,6 +407,81 @@ func TestACPAgentRunPreservesNarrativeOrderAroundToolLifecycle(t *testing.T) {
 	}
 }
 
+func TestACPAgentRunSeedsProjectorFromPriorRemoteTurn(t *testing.T) {
+	store := sessioninmemory.New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-existing-projector"}
+	if _, err := store.GetOrCreate(t.Context(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := acpmeta.UpdateControllerSession(t.Context(), store, sess, func(acpmeta.ControllerSession) acpmeta.ControllerSession {
+		return acpmeta.ControllerSession{AgentID: "copilot", SessionID: "remote-existing"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restore := stubACPClientStart(func(_ context.Context, cfg acpclient.Config) (sessionClient, error) {
+		return &fakeSessionClient{
+			initializeResp: acpclient.InitializeResponse{
+				AgentCapabilities: acpclient.AgentCapabilities{
+					Prompt: acpclient.PromptCapabilities{Image: true},
+				},
+			},
+			onLoadSession: func(string) {},
+			onPrompt: func(_ []json.RawMessage) {
+				cfg.OnUpdate(acpclient.UpdateEnvelope{
+					SessionID: "remote-existing",
+					Update: acpclient.ContentChunk{
+						SessionUpdate: acpclient.UpdateAgentMessage,
+						Content:       mustMarshalRaw(acpclient.TextContent{Type: "text", Text: "Earlier answer."}),
+					},
+				})
+				cfg.OnUpdate(acpclient.UpdateEnvelope{
+					SessionID: "remote-existing",
+					Update: acpclient.ContentChunk{
+						SessionUpdate: acpclient.UpdateAgentMessage,
+						Content:       mustMarshalRaw(acpclient.TextContent{Type: "text", Text: "Earlier answer. New answer."}),
+					},
+				})
+			},
+		}, nil
+	})
+	defer restore()
+
+	ag, err := New(Config{
+		ID:            "copilot",
+		Command:       "copilot-acp",
+		WorkspaceRoot: "/workspace",
+		SessionCWD:    "/workspace",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inv := testInvocationContext{
+		Context: session.WithStoresContext(t.Context(), sess, store, store),
+		sess:    sess,
+		events: session.NewEvents([]*session.Event{
+			{Message: model.NewTextMessage(model.RoleUser, "first")},
+			{Message: model.NewTextMessage(model.RoleAssistant, "Earlier answer."), Meta: map[string]any{"agent_id": "copilot"}},
+			{Message: model.NewTextMessage(model.RoleUser, "second")},
+		}),
+		state: session.NewReadonlyState(nil),
+	}
+
+	var events []*session.Event
+	for ev, runErr := range ag.Run(inv) {
+		if runErr != nil {
+			t.Fatalf("run error: %v", runErr)
+		}
+		events = append(events, ev)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected a single canonical assistant event, got %+v", events)
+	}
+	if got := strings.TrimSpace(events[0].Message.TextContent()); got != "New answer." {
+		t.Fatalf("expected prior turn replay to be stripped, got %q", got)
+	}
+}
+
 type fakeSessionClient struct {
 	initializeResp acpclient.InitializeResponse
 	newSessionResp acpclient.NewSessionResponse

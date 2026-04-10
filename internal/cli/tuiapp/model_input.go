@@ -234,6 +234,7 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	if _, ok := blk.(*TranscriptBlock); ok {
 		if diff := m.findInlineDiffBlockByAnchorBlockID(bid); diff != nil {
 			diff.Expanded = !diff.Expanded
+			m.syncMutationAnchorState(bid)
 			return true
 		}
 		if panel := m.findInlineBashPanelByAnchorBlockID(bid); panel != nil {
@@ -294,6 +295,7 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 		}
 	}
 	bp.Expanded = !bp.Expanded
+	m.syncMutationAnchorStateForPanel(bp)
 	return true
 }
 
@@ -990,8 +992,8 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 	if displayLine == "" {
 		return
 	}
-	if m.lastCommittedStyle == tuikit.LineStyleUser &&
-		normalizeUserDisplayLine(strings.TrimPrefix(strings.TrimSpace(m.lastCommittedRaw), ">")) == normalizeUserDisplayLine(displayLine) {
+	normalized := normalizeUserDisplayLine(displayLine)
+	if normalized != "" && normalizeUserDisplayLine(m.lastUserDisplayLine) == normalized {
 		return
 	}
 	userLine := "> " + displayLine
@@ -1002,6 +1004,7 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 	m.doc.Append(block)
 	m.lastCommittedStyle = tuikit.LineStyleUser
 	m.lastCommittedRaw = userLine
+	m.lastUserDisplayLine = displayLine
 	m.hasCommittedLine = true
 }
 

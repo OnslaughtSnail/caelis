@@ -143,8 +143,8 @@ func TestACPProjectionStore_LoadIndexBuildsCallAndScopeViews(t *testing.T) {
 	}
 }
 
-func TestProjectionNarrativeSnapshot_PrefersLatestFullText(t *testing.T) {
-	assistant, reasoning := projectionNarrativeSnapshot([]acpProjectionPersistedEvent{
+func TestProjectionNarrativeSnapshotFromEvents_PrefersLatestFullText(t *testing.T) {
+	assistant, reasoning := projectionNarrativeSnapshotFromEvents([]acpProjectionPersistedEvent{
 		{Kind: "projection", Stream: "assistant", DeltaText: "先列出仓库结构，然后继续说明。", FullText: "先列出仓库结构，然后继续说明。"},
 		{Kind: "projection", ToolCallID: "tool-1", ToolName: "READ"},
 		{Kind: "projection", Stream: "assistant", FullText: "先列出仓库结构，然后继续说明。最后给出总结。"},
@@ -155,6 +155,43 @@ func TestProjectionNarrativeSnapshot_PrefersLatestFullText(t *testing.T) {
 	}
 	if reasoning != "思考中" {
 		t.Fatalf("unexpected reasoning snapshot %q", reasoning)
+	}
+}
+
+func TestACPProjectionStore_LatestScopeNarrativeSnapshot_UsesLastTurnOnly(t *testing.T) {
+	store := inmemory.New()
+	console := &cliConsole{
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "sess-1",
+		sessionStore: store,
+	}
+	if _, err := store.GetOrCreate(context.Background(), &session.Session{
+		AppName: "app",
+		UserID:  "u",
+		ID:      "sess-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	projectionStore := console.acpProjectionStore()
+	scopeID := "remote-main-1"
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: scopeID, SessionID: scopeID, Kind: "turn_start"},
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: scopeID, SessionID: scopeID, Kind: "projection", Stream: "assistant", DeltaText: "上一轮输出", FullText: "上一轮输出"},
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: scopeID, SessionID: scopeID, Kind: "turn_start"},
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: scopeID, SessionID: scopeID, Kind: "projection", Stream: "assistant", DeltaText: "当前轮输出", FullText: "当前轮输出"},
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: scopeID, SessionID: scopeID, Kind: "projection", Stream: "reasoning", DeltaText: "当前思考", FullText: "当前思考"},
+	} {
+		if err := projectionStore.AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assistant, reasoning := projectionStore.LatestScopeNarrativeSnapshot(context.Background(), tuievents.ACPProjectionMain, scopeID)
+	if assistant != "当前轮输出" {
+		t.Fatalf("expected latest assistant snapshot, got %q", assistant)
+	}
+	if reasoning != "当前思考" {
+		t.Fatalf("expected latest reasoning snapshot, got %q", reasoning)
 	}
 }
 

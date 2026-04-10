@@ -1863,6 +1863,7 @@ func TestExtractToolCallName(t *testing.T) {
 		isStart bool
 	}{
 		{"▸ BASH echo hello", "BASH", true},
+		{"▾ PATCH build.sh +1 -1", "PATCH", true},
 		{"▸ read_file {path: /foo}", "READ_FILE", true},
 		{"▸ SPAWN delegate", "SPAWN", true},
 		{"✓ BASH completed", "", false}, // result, not start

@@ -481,6 +481,9 @@ func (c *cliConsole) readTUIStatus() (string, string) {
 	if level := c.statusReasoningLevelLabel(); level != "" {
 		modelLabel = modelLabel + " [" + level + "]"
 	}
+	if c.currentMainAgentUsesACP() {
+		return modelLabel, "0"
+	}
 	pt := c.lastPromptTokens
 	if pt < 0 {
 		pt = 0

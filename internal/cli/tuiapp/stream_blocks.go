@@ -190,15 +190,11 @@ func mergedMutationToolLine(previous string, current string) (string, bool) {
 		return "", false
 	}
 	prevTrimmed := strings.TrimSpace(previous)
-	if prevTrimmed == "" || !strings.HasPrefix(prevTrimmed, "▸ ") {
+	if prevTrimmed == "" {
 		return "", false
 	}
-	prevRest := strings.TrimSpace(strings.TrimPrefix(prevTrimmed, "▸ "))
-	prevParts := strings.Fields(prevRest)
-	if len(prevParts) < 2 {
-		return "", false
-	}
-	if !strings.EqualFold(toolName, strings.TrimSpace(prevParts[0])) {
+	prevToolName, ok := extractToolCallName(prevTrimmed)
+	if !ok || !strings.EqualFold(toolName, prevToolName) {
 		return "", false
 	}
 	if hasMutationSummarySuffix(prevTrimmed) {
@@ -248,9 +244,6 @@ func (m *Model) findMutationSummaryAnchor(toolName string) *TranscriptBlock {
 			continue
 		}
 		raw := strings.TrimSpace(tb.Raw)
-		if !strings.HasPrefix(raw, "▸ ") {
-			continue
-		}
 		callName, ok := extractToolCallName(raw)
 		if !ok || !strings.EqualFold(callName, toolName) {
 			continue
@@ -1274,7 +1267,9 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
 	block := NewDiffBlock(msg)
-	if anchorID := m.latestDiffAnchorBlockID(msg.Tool); anchorID != "" {
+	anchorID := ""
+	if resolvedAnchorID := m.latestDiffAnchorBlockID(msg.Tool); resolvedAnchorID != "" {
+		anchorID = resolvedAnchorID
 		block.Inline = true
 		if m.diffAnchorIndex == nil {
 			m.diffAnchorIndex = map[string]string{}
@@ -1283,6 +1278,7 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 			if existing, _ := m.doc.Find(existingID).(*DiffBlock); existing != nil {
 				existing.Msg = msg
 				existing.Inline = true
+				m.syncMutationAnchorState(anchorID)
 				m.hasCommittedLine = true
 				m.lastCommittedStyle = tuikit.LineStyleDefault
 				m.lastCommittedRaw = ""
@@ -1294,6 +1290,9 @@ func (m *Model) handleDiffBlock(msg tuievents.DiffBlockMsg) (tea.Model, tea.Cmd)
 		m.diffAnchorIndex[anchorID] = block.BlockID()
 	} else {
 		m.doc.Append(block)
+	}
+	if anchorID != "" && isMutationToolName(msg.Tool) {
+		m.syncMutationAnchorState(anchorID)
 	}
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleDefault
@@ -1350,6 +1349,61 @@ func (m *Model) ensureParticipantTurnBlock(sessionID string, actor string) *Part
 	m.doc.Append(block)
 	m.participantTurnIDs[sessionID] = block.BlockID()
 	return block
+}
+
+func (m *Model) ensureMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
+	if m == nil {
+		return nil
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(m.pendingMainACPSessionID)
+	}
+	if sessionID == "" {
+		return nil
+	}
+	if blockID := strings.TrimSpace(m.activeMainACPTurnID); blockID != "" {
+		if block, _ := m.doc.Find(blockID).(*MainACPTurnBlock); block != nil {
+			if strings.TrimSpace(block.SessionID) == "" {
+				block.SessionID = sessionID
+			}
+			return block
+		}
+	}
+	block := NewMainACPTurnBlock(sessionID)
+	if strings.EqualFold(strings.TrimSpace(m.pendingMainACPSessionID), sessionID) && !m.pendingMainACPStartedAt.IsZero() {
+		block.StartedAt = m.pendingMainACPStartedAt
+	}
+	m.doc.Append(block)
+	m.activeMainACPTurnID = block.BlockID()
+	m.pendingMainACPSessionID = ""
+	m.pendingMainACPStartedAt = time.Time{}
+	return block
+}
+
+func (m *Model) handleMainACPTurnStart(msg tuievents.ACPMainTurnStartMsg) (tea.Model, tea.Cmd) {
+	if m == nil {
+		return m, nil
+	}
+	_ = m.finalizeActivityBlock()
+	m.finalizeAssistantBlock()
+	m.finalizeReasoningBlock()
+	sessionID := strings.TrimSpace(msg.SessionID)
+	if sessionID == "" {
+		return m, nil
+	}
+	if blockID := strings.TrimSpace(m.activeMainACPTurnID); blockID != "" {
+		if block, _ := m.doc.Find(blockID).(*MainACPTurnBlock); block != nil && strings.EqualFold(strings.TrimSpace(block.SessionID), sessionID) {
+			if !msg.OccurredAt.IsZero() && (block.StartedAt.IsZero() || msg.OccurredAt.Before(block.StartedAt)) {
+				block.StartedAt = msg.OccurredAt
+			}
+			return m, nil
+		}
+	}
+	m.finalizeActiveMainACPTurn(false, nil)
+	m.pendingMainACPSessionID = sessionID
+	m.pendingMainACPStartedAt = msg.OccurredAt
+	return m, nil
 }
 
 func (m *Model) handleParticipantTurnStart(msg tuievents.ParticipantTurnStartMsg) (tea.Model, tea.Cmd) {
@@ -1469,6 +1523,36 @@ func (m *Model) finalizeActiveParticipantTurn(interrupted bool, err error) {
 	m.activeParticipantTurnSessionID = ""
 }
 
+func (m *Model) finalizeActiveMainACPTurn(interrupted bool, err error) {
+	if m == nil {
+		return
+	}
+	blockID := strings.TrimSpace(m.activeMainACPTurnID)
+	if blockID == "" {
+		m.pendingMainACPSessionID = ""
+		m.pendingMainACPStartedAt = time.Time{}
+		return
+	}
+	block, _ := m.doc.Find(blockID).(*MainACPTurnBlock)
+	if block == nil {
+		m.activeMainACPTurnID = ""
+		m.pendingMainACPSessionID = ""
+		m.pendingMainACPStartedAt = time.Time{}
+		return
+	}
+	state := "completed"
+	switch {
+	case interrupted:
+		state = "interrupted"
+	case err != nil:
+		state = "failed"
+	}
+	block.SetStatus(state, time.Time{})
+	m.activeMainACPTurnID = ""
+	m.pendingMainACPSessionID = ""
+	m.pendingMainACPStartedAt = time.Time{}
+}
+
 func (m *Model) handleToolStreamMsg(msg tuievents.TaskStreamMsg) (tea.Model, tea.Cmd) {
 	_ = m.finalizeActivityBlock()
 	var cmd tea.Cmd
@@ -1527,6 +1611,7 @@ func (m *Model) resetConversationView() {
 	m.subagentBlockIDs = nil
 	m.subagentSessions = nil
 	m.subagentSessionRefs = nil
+	m.activeMainACPTurnID = ""
 	m.participantTurnIDs = nil
 	m.activeParticipantTurnSessionID = ""
 	m.pendingToolAnchors = nil
@@ -1539,6 +1624,7 @@ func (m *Model) resetConversationView() {
 	m.hasCommittedLine = false
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
+	m.lastUserDisplayLine = ""
 	m.transientIsRetry = false
 	m.pendingQueue = nil
 	m.hintEntries = nil
@@ -1564,6 +1650,7 @@ func (m *Model) resetConversationView() {
 func (m *Model) refreshHistoryTailState() {
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
+	m.lastUserDisplayLine = ""
 	m.hasCommittedLine = false
 	blocks := m.doc.Blocks()
 	for i := len(blocks) - 1; i >= 0; i-- {
@@ -1579,6 +1666,9 @@ func (m *Model) refreshHistoryTailState() {
 		}
 		m.lastCommittedRaw = raw
 		m.lastCommittedStyle = tuikit.DetectLineStyle(raw)
+		if m.lastCommittedStyle == tuikit.LineStyleUser {
+			m.lastUserDisplayLine = strings.TrimPrefix(strings.TrimSpace(raw), ">")
+		}
 		m.hasCommittedLine = true
 		return
 	}

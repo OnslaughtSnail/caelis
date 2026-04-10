@@ -12,6 +12,8 @@ import (
 
 func (m *Model) handleACPProjection(msg tuievents.ACPProjectionMsg) (tea.Model, tea.Cmd) {
 	switch msg.Scope {
+	case tuievents.ACPProjectionMain:
+		return m.handleMainACPProjection(msg)
 	case tuievents.ACPProjectionParticipant:
 		return m.handleParticipantACPProjection(msg)
 	case tuievents.ACPProjectionSubagent:
@@ -19,6 +21,47 @@ func (m *Model) handleACPProjection(msg tuievents.ACPProjectionMsg) (tea.Model, 
 	default:
 		return m, nil
 	}
+}
+
+func (m *Model) handleMainACPProjection(msg tuievents.ACPProjectionMsg) (tea.Model, tea.Cmd) {
+	block := m.ensureMainACPTurnBlock(strings.TrimSpace(msg.ScopeID))
+	if block == nil {
+		return m, nil
+	}
+	if !msg.OccurredAt.IsZero() && (block.StartedAt.IsZero() || msg.OccurredAt.Before(block.StartedAt)) {
+		block.StartedAt = msg.OccurredAt
+	}
+	if kind, text, final, ok := acpProjectionStreamPayload(msg); ok {
+		switch kind {
+		case SEReasoning:
+			if final {
+				block.ReplaceFinalStreamChunk(SEReasoning, text)
+			} else {
+				block.AppendStreamChunk(SEReasoning, text)
+			}
+		default:
+			if final {
+				block.ReplaceFinalStreamChunk(SEAssistant, text)
+			} else {
+				block.AppendStreamChunk(SEAssistant, text)
+			}
+		}
+		return m, m.requestStreamViewportSync()
+	}
+	if msg.HasPlanUpdate {
+		entries := make([]planEntryState, 0, len(msg.PlanEntries))
+		for _, entry := range msg.PlanEntries {
+			entries = append(entries, planEntryState{Content: entry.Content, Status: entry.Status})
+		}
+		block.UpdatePlan(entries)
+		return m, m.requestStreamViewportSync()
+	}
+	args, output, final, err, ok := acpProjectionToolPayload(msg)
+	if !ok {
+		return m, nil
+	}
+	block.UpdateTool(msg.ToolCallID, msg.ToolName, args, output, final, err)
+	return m, m.requestStreamViewportSync()
 }
 
 func (m *Model) handleParticipantACPProjection(msg tuievents.ACPProjectionMsg) (tea.Model, tea.Cmd) {
