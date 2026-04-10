@@ -86,6 +86,8 @@ func (b HandoffBundle) RenderLLMView() string {
 	if tail := strings.TrimSpace(b.RecentTranscriptTail); tail != "" {
 		fmt.Fprintf(&sb, "## Recent Transcript\n\n%s\n\n", tail)
 	}
+	sb.WriteString("---\n")
+	sb.WriteString("Injected working context only. The current live user message follows in a separate prompt block.\n\n")
 
 	return strings.TrimSpace(sb.String())
 }

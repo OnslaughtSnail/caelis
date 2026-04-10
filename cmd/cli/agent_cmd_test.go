@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/epochhandoff"
@@ -53,8 +55,25 @@ func TestHandleAgentUseBuiltinAddsAndSwitchesMainAgent(t *testing.T) {
 		path: filepath.Join(t.TempDir(), "config.json"),
 		data: defaultAppConfig(),
 	}
+	client := &stubMainACPClient{
+		modes: &acpclient.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acpclient.SessionMode{
+				{ID: "default", Name: "Default"},
+			},
+		},
+		configOptions: []acpclient.SessionConfigOption{
+			{ID: acpConfigModel, Category: "model", CurrentValue: "gpt-5-mini"},
+		},
+	}
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
 	uiOut := &bytes.Buffer{}
 	console := &cliConsole{
+		baseCtx:       context.Background(),
 		configStore:   store,
 		agentRegistry: appagents.NewRegistry(),
 		out:           uiOut,
@@ -87,9 +106,26 @@ func TestHandleAgentUseRefreshesBTWAvailabilityInTUICommands(t *testing.T) {
 		path: filepath.Join(t.TempDir(), "config.json"),
 		data: defaultAppConfig(),
 	}
+	client := &stubMainACPClient{
+		modes: &acpclient.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acpclient.SessionMode{
+				{ID: "default", Name: "Default"},
+			},
+		},
+		configOptions: []acpclient.SessionConfigOption{
+			{ID: acpConfigModel, Category: "model", CurrentValue: "gpt-5-mini"},
+		},
+	}
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
 	sender := &testSender{}
 	uiOut := &bytes.Buffer{}
 	console := &cliConsole{
+		baseCtx:       context.Background(),
 		configStore:   store,
 		agentRegistry: appagents.NewRegistry(),
 		tuiSender:     sender,
@@ -124,6 +160,188 @@ func TestHandleAgentUseRefreshesBTWAvailabilityInTUICommands(t *testing.T) {
 	}
 }
 
+func TestHandleAgentUseTUIUsesHintAndACPStatusInsteadOfPrinting(t *testing.T) {
+	store := &appConfigStore{
+		path: filepath.Join(t.TempDir(), "config.json"),
+		data: defaultAppConfig(),
+	}
+	sessionStore := inmemory.New()
+	root := &session.Session{AppName: "app", UserID: "u", ID: "sess-1"}
+	if _, err := sessionStore.GetOrCreate(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	uiOut := &bytes.Buffer{}
+	client := &stubMainACPClient{
+		modes: &acpclient.SessionModeState{
+			CurrentModeID: "plan",
+			AvailableModes: []acpclient.SessionMode{
+				{ID: "default", Name: "Default"},
+				{ID: "plan", Name: "Plan"},
+			},
+		},
+		configOptions: []acpclient.SessionConfigOption{
+			{
+				ID:           acpConfigModel,
+				Category:     "model",
+				CurrentValue: "copilot/gpt-5",
+				Options: []acpclient.SessionConfigSelectOption{
+					{Value: "copilot/gpt-5", Name: "copilot/gpt-5"},
+				},
+			},
+			{
+				ID:           acpConfigReasoningEffort,
+				Category:     "thought_level",
+				CurrentValue: "high",
+				Options: []acpclient.SessionConfigSelectOption{
+					{Value: "high", Name: "High"},
+				},
+			},
+		},
+	}
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
+
+	console := &cliConsole{
+		baseCtx:       t.Context(),
+		appName:       "app",
+		userID:        "u",
+		sessionID:     root.ID,
+		sessionStore:  sessionStore,
+		configStore:   store,
+		agentRegistry: appagents.NewRegistry(),
+		tuiSender:     sender,
+		out:           uiOut,
+		ui:            newUI(uiOut, true, false),
+		commands: map[string]slashCommand{
+			"btw":  {Usage: "/btw <question>"},
+			"help": {Usage: "/help"},
+		},
+	}
+
+	if _, err := handleAgent(console, []string{"use", "codex"}); err != nil {
+		t.Fatalf("switch builtin main agent: %v", err)
+	}
+	if uiOut.Len() != 0 {
+		t.Fatalf("expected no direct output in TUI mode, got %q", uiOut.String())
+	}
+
+	var hint tuievents.SetHintMsg
+	var status tuievents.SetStatusMsg
+	var foundHint bool
+	var foundStatus bool
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.SetHintMsg:
+			hint = msg
+			foundHint = true
+		case tuievents.SetStatusMsg:
+			status = msg
+			foundStatus = true
+		}
+	}
+	if !foundHint {
+		t.Fatal("expected transient hint after switching main agent")
+	}
+	if hint.Hint != "main agent: codex" {
+		t.Fatalf("unexpected hint %q", hint.Hint)
+	}
+	if hint.ClearAfter <= 0 {
+		t.Fatalf("expected auto-clearing hint, got %s", hint.ClearAfter)
+	}
+	if !foundStatus {
+		t.Fatal("expected status refresh after switching main agent")
+	}
+	if status.Model != "copilot/gpt-5 [high]" {
+		t.Fatalf("expected ACP status model, got %q", status.Model)
+	}
+}
+
+func TestHandleAgentUse_RestoresPersistedACPSettings(t *testing.T) {
+	store := &appConfigStore{
+		path: filepath.Join(t.TempDir(), "config.json"),
+		data: appConfig{
+			MainAgent: "self",
+			Agents: map[string]agentRecord{
+				"copilot": {
+					Command: "copilot",
+					Args:    []string{"--acp", "--stdio"},
+					ACP: &agentACPRecord{
+						Model:           "gpt-5-mini",
+						ReasoningEffort: "medium",
+					},
+				},
+			},
+		},
+	}
+	sessionStore := inmemory.New()
+	root := &session.Session{AppName: "app", UserID: "u", ID: "sess-restore-pref"}
+	if _, err := sessionStore.GetOrCreate(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	client := &stubMainACPClient{
+		modes: &acpclient.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acpclient.SessionMode{
+				{ID: "default", Name: "Default"},
+			},
+		},
+		configOptions: []acpclient.SessionConfigOption{
+			{
+				ID:           acpConfigModel,
+				Category:     "model",
+				CurrentValue: "gpt-4.1",
+				Options: []acpclient.SessionConfigSelectOption{
+					{Value: "gpt-4.1", Name: "GPT-4.1"},
+					{Value: "gpt-5-mini", Name: "GPT-5 Mini"},
+				},
+			},
+			{
+				ID:           acpConfigReasoningEffort,
+				Category:     "thought_level",
+				CurrentValue: "low",
+				Options: []acpclient.SessionConfigSelectOption{
+					{Value: "low", Name: "Low"},
+					{Value: "medium", Name: "Medium"},
+				},
+			},
+		},
+	}
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
+
+	out := bytes.NewBuffer(nil)
+	console := &cliConsole{
+		baseCtx:      t.Context(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    root.ID,
+		sessionStore: sessionStore,
+		configStore:  store,
+		agentRegistry: appagents.NewRegistry(
+			appagents.Descriptor{ID: "copilot", Transport: appagents.TransportACP, Command: "copilot"},
+		),
+		out: out,
+		ui:  newUI(out, true, false),
+	}
+
+	if _, err := handleAgent(console, []string{"use", "copilot"}); err != nil {
+		t.Fatalf("switch to copilot: %v", err)
+	}
+	if len(client.setConfigCalls) < 2 {
+		t.Fatalf("expected persisted ACP settings to be restored before probing, got %v", client.setConfigCalls)
+	}
+	if want := []string{"model=gpt-5-mini", "reasoning_effort=medium"}; !slices.Equal(client.setConfigCalls[:2], want) {
+		t.Fatalf("expected persisted ACP settings restore prefix %v, got %v", want, client.setConfigCalls)
+	}
+}
+
 func TestHandleAgentUseRejectsWhileRunActive(t *testing.T) {
 	store := &appConfigStore{
 		path: filepath.Join(t.TempDir(), "config.json"),
@@ -150,8 +368,25 @@ func TestHandleAgentRemoveCurrentMainAgentFallsBackToSelf(t *testing.T) {
 		path: filepath.Join(t.TempDir(), "config.json"),
 		data: defaultAppConfig(),
 	}
+	client := &stubMainACPClient{
+		modes: &acpclient.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acpclient.SessionMode{
+				{ID: "default", Name: "Default"},
+			},
+		},
+		configOptions: []acpclient.SessionConfigOption{
+			{ID: acpConfigModel, Category: "model", CurrentValue: "gpt-5-mini"},
+		},
+	}
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
 	uiOut := &bytes.Buffer{}
 	console := &cliConsole{
+		baseCtx:       context.Background(),
 		configStore:   store,
 		agentRegistry: appagents.NewRegistry(),
 		out:           uiOut,

@@ -4340,7 +4340,7 @@ func TestEnterDoesNotSubmitBTWOverlayWhenCommandUnavailable(t *testing.T) {
 	var called bool
 	m := NewModel(Config{
 		Commands: []string{"status"},
-		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+		ExecuteLine: func(_ Submission) tuievents.TaskResultMsg {
 			called = true
 			return tuievents.TaskResultMsg{ContinueRunning: true}
 		},
@@ -4452,6 +4452,35 @@ func TestUserMessageMsgDoesNotDuplicateAfterACPMainTurnStart(t *testing.T) {
 	}
 	if len(userLines) != 1 {
 		t.Fatalf("expected a single committed user line after ACP main turn start, got %+v", userLines)
+	}
+}
+
+func TestUserMessageMsgRepeatsAcrossTurnsAfterACPOutput(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	_, _ = m.submitLine("继续")
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Checks complete.",
+		FullText:  "Checks complete.",
+	})
+	_, _ = m.Update(tuievents.UserMessageMsg{Text: "继续"})
+
+	var userLines []string
+	for _, line := range m.renderedStyledLines() {
+		plain := strings.TrimSpace(ansi.Strip(line))
+		if strings.HasPrefix(plain, "> ") {
+			userLines = append(userLines, plain)
+		}
+	}
+	if len(userLines) != 2 {
+		t.Fatalf("expected repeated user line across turns, got %+v", userLines)
 	}
 }
 

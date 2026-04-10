@@ -148,6 +148,13 @@ func (c *Client) SetMode(ctx context.Context, sessionID string, modeID string) e
 	return c.core.SetMode(ctx, sessionID, modeID)
 }
 
+func (c *Client) SetConfigOption(ctx context.Context, sessionID string, configID string, value string) (SetSessionConfigOptionResponse, error) {
+	if c == nil || c.core == nil {
+		return SetSessionConfigOptionResponse{}, fmt.Errorf("acpclient: client is unavailable")
+	}
+	return c.core.SetConfigOption(ctx, sessionID, configID, value)
+}
+
 func (c *Client) Prompt(ctx context.Context, sessionID string, text string, meta map[string]any) (PromptResponse, error) {
 	if c == nil || c.core == nil {
 		return PromptResponse{}, fmt.Errorf("acpclient: client is unavailable")

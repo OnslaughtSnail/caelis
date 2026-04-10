@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/OnslaughtSnail/caelis/internal/epochhandoff"
@@ -53,7 +54,43 @@ func buildHandoffTranscriptTail(events []*session.Event) string {
 	if len(tail) == 0 {
 		tail = filtered
 	}
-	return strings.TrimSpace(compact.EventsToTranscript(tail))
+	return strings.TrimSpace(formatHandoffTranscriptTail(tail))
+}
+
+func formatHandoffTranscriptTail(events []*session.Event) string {
+	var b strings.Builder
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		role := strings.TrimSpace(string(ev.Message.Role))
+		if role == "" {
+			continue
+		}
+		text := strings.TrimSpace(handoffTranscriptEventText(ev))
+		if text == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "%s: %s\n", role, text)
+	}
+	return b.String()
+}
+
+func handoffTranscriptEventText(ev *session.Event) string {
+	if ev == nil {
+		return ""
+	}
+	msg := ev.Message
+	if msg.Role == model.RoleUser {
+		return visibleUserText(msg)
+	}
+	if text := strings.TrimSpace(msg.TextContent()); text != "" {
+		return text
+	}
+	if reasoning := strings.TrimSpace(msg.ReasoningText()); reasoning != "" {
+		return "reasoning: " + reasoning
+	}
+	return strings.TrimSpace(compact.EventToText(ev))
 }
 
 func (c *cliConsole) buildPendingSelfHandoff(ctx context.Context) ([]model.Message, error) {

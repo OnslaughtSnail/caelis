@@ -421,11 +421,11 @@ func runCLI(ctx context.Context, args []string) error {
 			ExecutionRuntime: execRuntimeView,
 			AppVersion:       version.String(),
 		}
-		needsLocalModel, err := mainSessionRequiresLocalModel(mainAgentInput)
+		_, usesACP, err := resolveMainSessionAgentDescriptor(mainAgentInput)
 		if err != nil {
 			return err
 		}
-		if needsLocalModel && llm == nil {
+		if !usesACP && llm == nil {
 			return fmt.Errorf("no model configured, run /connect first or pass -model with a configured provider/model")
 		}
 		if strings.HasPrefix(strings.TrimSpace(singleInput), "/compact") {

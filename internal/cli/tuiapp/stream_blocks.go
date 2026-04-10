@@ -1625,6 +1625,7 @@ func (m *Model) resetConversationView() {
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.lastUserDisplayLine = ""
+	m.userDisplayDedupOK = false
 	m.transientIsRetry = false
 	m.pendingQueue = nil
 	m.hintEntries = nil
@@ -1651,6 +1652,7 @@ func (m *Model) refreshHistoryTailState() {
 	m.lastCommittedStyle = tuikit.LineStyleDefault
 	m.lastCommittedRaw = ""
 	m.lastUserDisplayLine = ""
+	m.userDisplayDedupOK = false
 	m.hasCommittedLine = false
 	blocks := m.doc.Blocks()
 	for i := len(blocks) - 1; i >= 0; i-- {

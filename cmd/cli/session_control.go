@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
@@ -88,6 +89,28 @@ func (c *cliConsole) togglePlanMode() (string, error) {
 	if c == nil {
 		return "", nil
 	}
+	if c.currentMainAgentUsesACP() {
+		client, sessionID, err := c.ensureMainACPControlSession(c.baseCtx)
+		if err != nil {
+			return "", err
+		}
+		next, ok := c.acpMainModeCycleTarget()
+		if !ok {
+			return "", fmt.Errorf("ACP main agent does not expose switchable modes; no local fallback is applied")
+		}
+		if err := c.syncACPMainMode(c.baseCtx, client, sessionID, next); err != nil {
+			return "", err
+		}
+		c.syncTUIStatus()
+		label := strings.TrimSpace(next.Name)
+		if label == "" {
+			label = strings.TrimSpace(next.ID)
+		}
+		if label == "" {
+			label = "ACP"
+		}
+		return strings.ToLower(label) + " mode enabled", nil
+	}
 	next := sessionmode.Next(c.sessionMode)
 	if err := c.setSessionMode(next); err != nil {
 		return "", err
@@ -106,7 +129,22 @@ func (c *cliConsole) sessionModeLabel() string {
 	if c == nil {
 		return ""
 	}
+	if c.currentMainAgentUsesACP() {
+		if label := c.acpMainModeLabel(); label != "" {
+			return label
+		}
+	}
 	return sessionmode.DisplayLabel(c.sessionMode)
+}
+
+func (c *cliConsole) currentApprovalMode() string {
+	if c == nil {
+		return sessionmode.DefaultMode
+	}
+	if c.currentMainAgentUsesACP() {
+		return c.acpMainApprovalMode()
+	}
+	return sessionmode.Normalize(c.sessionMode)
 }
 
 func (c *cliConsole) injectedPrompt(input string) string {

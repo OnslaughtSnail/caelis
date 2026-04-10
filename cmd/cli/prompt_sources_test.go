@@ -208,43 +208,6 @@ func TestBuildPromptAssembleSpec_IncludesEnvironmentContextWithoutOptionalFragme
 	}
 }
 
-func TestBuildPromptAssembleSpec_ACPMainSessionSkipsLocalToolingGuidance(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	workspace := t.TempDir()
-
-	result, err := buildPromptAssembleSpec(buildAgentInput{
-		AppName:                     "demo-app",
-		PromptRole:                  promptRoleACPMainSession,
-		WorkspaceDir:                workspace,
-		BasePrompt:                  "session override",
-		DefaultAgent:                "codex",
-		EnableExperimentalLSPPrompt: true,
-	})
-	if err != nil {
-		t.Fatalf("buildPromptAssembleSpec failed: %v", err)
-	}
-	if result.Spec.SkillsMetaPrompt != "" {
-		t.Fatalf("expected ACP main-session prompt to skip local skills metadata, got %q", result.Spec.SkillsMetaPrompt)
-	}
-	if len(result.Spec.Additional) != 3 {
-		t.Fatalf("expected role + user instructions + environment context, got %+v", result.Spec.Additional)
-	}
-	roleFragment := result.Spec.Additional[0]
-	if !strings.Contains(roleFragment.Content, "## ACP Main Session Role") {
-		t.Fatalf("unexpected ACP role fragment: %+v", roleFragment)
-	}
-	if !strings.Contains(roleFragment.Content, "do not assume local Caelis tool names") {
-		t.Fatalf("expected ACP role guidance to strip local tool contract assumptions, got %q", roleFragment.Content)
-	}
-	if got := result.Spec.Additional[1].Source; got != "cli:user-custom-instructions" {
-		t.Fatalf("expected user instruction fragment, got %q", got)
-	}
-	if got := result.Spec.Additional[2].Source; got != "cli:workspace-context" {
-		t.Fatalf("expected environment context fragment, got %q", got)
-	}
-}
-
 func TestBuildUserCustomInstructionsPrompt_PreservesMarkdownAndSkipsEmptySections(t *testing.T) {
 	content := buildUserCustomInstructionsPrompt(
 		"",

@@ -63,6 +63,12 @@ type agentRecord struct {
 	Env         map[string]string `json:"env,omitempty"`
 	WorkDir     string            `json:"workDir,omitempty"`
 	Stability   string            `json:"stability,omitempty"`
+	ACP         *agentACPRecord   `json:"acp,omitempty"`
+}
+
+type agentACPRecord struct {
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type runtimeSettings struct {
@@ -522,6 +528,58 @@ func (s *appConfigStore) UpsertAgent(name string, rec agentRecord) error {
 	}
 	rec.Name = name
 	normalizeAgentRecord(&rec)
+	s.data.Agents[name] = rec
+	return s.save()
+}
+
+func (s *appConfigStore) ACPAgentSettings(name string) (agentACPRecord, bool) {
+	if s == nil {
+		return agentACPRecord{}, false
+	}
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return agentACPRecord{}, false
+	}
+	rec, ok := s.data.Agents[name]
+	if !ok || rec.ACP == nil {
+		return agentACPRecord{}, false
+	}
+	out := *rec.ACP
+	normalizeAgentACPRecord(&out)
+	if isEmptyAgentACPRecord(out) {
+		return agentACPRecord{}, false
+	}
+	return out, true
+}
+
+func (s *appConfigStore) SetACPAgentSettings(name string, settings agentACPRecord) error {
+	if s == nil {
+		return nil
+	}
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return nil
+	}
+	rec, ok := s.data.Agents[name]
+	if !ok {
+		return fmt.Errorf("cli config: unknown agent %q", name)
+	}
+	normalizeAgentACPRecord(&settings)
+	if isEmptyAgentACPRecord(settings) {
+		if rec.ACP == nil {
+			return nil
+		}
+		rec.ACP = nil
+		s.data.Agents[name] = rec
+		return s.save()
+	}
+	if rec.ACP != nil && rec.ACP.Model == settings.Model && rec.ACP.ReasoningEffort == settings.ReasoningEffort {
+		return nil
+	}
+	rec.ACP = &agentACPRecord{
+		Model:           settings.Model,
+		ReasoningEffort: settings.ReasoningEffort,
+	}
 	s.data.Agents[name] = rec
 	return s.save()
 }
@@ -1066,6 +1124,24 @@ func normalizeAgentRecord(rec *agentRecord) {
 	rec.Stability = appagents.NormalizeStability(rec.Stability)
 	rec.Args = normalizeStringSlice(rec.Args)
 	rec.Env = normalizeStringMap(rec.Env)
+	if rec.ACP != nil {
+		normalizeAgentACPRecord(rec.ACP)
+		if isEmptyAgentACPRecord(*rec.ACP) {
+			rec.ACP = nil
+		}
+	}
+}
+
+func normalizeAgentACPRecord(rec *agentACPRecord) {
+	if rec == nil {
+		return
+	}
+	rec.Model = strings.TrimSpace(rec.Model)
+	rec.ReasoningEffort = strings.TrimSpace(rec.ReasoningEffort)
+}
+
+func isEmptyAgentACPRecord(rec agentACPRecord) bool {
+	return strings.TrimSpace(rec.Model) == "" && strings.TrimSpace(rec.ReasoningEffort) == ""
 }
 
 func normalizeStringSlice(values []string) []string {

@@ -227,6 +227,13 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	if bid == "" {
 		return false
 	}
+	if contentLine >= 0 && contentLine < len(m.viewportClickTokens) {
+		if token := strings.TrimSpace(m.viewportClickTokens[contentLine]); token != "" {
+			if m.tryToggleACPToolPanelToken(bid, token) {
+				return true
+			}
+		}
+	}
 	blk := m.doc.Find(bid)
 	if blk == nil {
 		return false
@@ -950,6 +957,23 @@ func (m *Model) allowsBTWSubmission() bool {
 	return false
 }
 
+func (m *Model) tryToggleACPToolPanelToken(blockID string, token string) bool {
+	callID, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_tool_panel:")
+	if !ok || strings.TrimSpace(callID) == "" {
+		return false
+	}
+	switch blk := m.doc.Find(strings.TrimSpace(blockID)).(type) {
+	case *ParticipantTurnBlock:
+		blk.toggleToolPanelExpanded(callID)
+		return true
+	case *MainACPTurnBlock:
+		blk.toggleToolPanelExpanded(callID)
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) submissionModeForLine(line string) SubmissionMode {
 	trimmed := strings.TrimSpace(line)
 	if m.allowsBTWSubmission() && (trimmed == "/btw" || strings.HasPrefix(trimmed, "/btw ")) {
@@ -1005,7 +1029,7 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 		return
 	}
 	normalized := normalizeUserDisplayLine(displayLine)
-	if normalized != "" && normalizeUserDisplayLine(m.lastUserDisplayLine) == normalized {
+	if m.userDisplayDedupOK && normalized != "" && normalizeUserDisplayLine(m.lastUserDisplayLine) == normalized {
 		return
 	}
 	userLine := "> " + displayLine
@@ -1017,6 +1041,7 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 	m.lastCommittedStyle = tuikit.LineStyleUser
 	m.lastCommittedRaw = userLine
 	m.lastUserDisplayLine = displayLine
+	m.userDisplayDedupOK = true
 	m.hasCommittedLine = true
 }
 

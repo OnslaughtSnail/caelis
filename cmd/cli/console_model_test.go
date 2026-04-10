@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
@@ -291,5 +295,185 @@ func TestPersistSessionModelAlias_StoresACPMetadata(t *testing.T) {
 	meta, _ := acpState["meta"].(map[string]any)
 	if got := coreacpmeta.ModelAlias(meta); got != "minimax/minimax-m2.7-highspeed" {
 		t.Fatalf("expected persisted model alias, got %q", got)
+	}
+}
+
+func TestHandleModelUse_UsesACPMainConfigOption(t *testing.T) {
+	console := &cliConsole{
+		baseCtx:   context.Background(),
+		appName:   "app",
+		userID:    "u",
+		sessionID: "sess-1",
+		configStore: &appConfigStore{
+			path: filepath.Join(t.TempDir(), "config.json"),
+			data: appConfig{
+				MainAgent: "copilot",
+				Agents: map[string]agentRecord{
+					"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+				},
+			},
+		},
+		persistentMainACP: &persistentMainACPState{
+			client:          &stubMainACPClient{},
+			agentID:         "copilot",
+			remoteSessionID: "remote-1",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "openai/gpt-5-mini",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "openai/gpt-5-mini", Name: "GPT-5 Mini"},
+						{Value: "openai/gpt-5", Name: "GPT-5"},
+					},
+				},
+			},
+		},
+		out: &bytes.Buffer{},
+	}
+	client := console.persistentMainACP.client.(*stubMainACPClient)
+	client.configOptions = cloneACPConfigOptions(console.persistentMainACP.configOptions)
+
+	if _, err := handleModel(console, []string{"use", "openai/gpt-5"}); err != nil {
+		t.Fatalf("switch ACP main model: %v", err)
+	}
+	if len(client.setConfigCalls) != 1 || client.setConfigCalls[0] != "model=openai/gpt-5" {
+		t.Fatalf("expected ACP config switch call, got %v", client.setConfigCalls)
+	}
+	if got := console.currentSessionModelAlias(); got != "openai/gpt-5" {
+		t.Fatalf("expected mirrored ACP model alias, got %q", got)
+	}
+}
+
+func TestHandleModelUse_UsesACPMainReasoningConfigOptionAfterModelSwitch(t *testing.T) {
+	console := &cliConsole{
+		baseCtx:   context.Background(),
+		appName:   "app",
+		userID:    "u",
+		sessionID: "sess-1",
+		configStore: &appConfigStore{
+			path: filepath.Join(t.TempDir(), "config.json"),
+			data: appConfig{
+				MainAgent: "copilot",
+				Agents: map[string]agentRecord{
+					"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+				},
+			},
+		},
+		persistentMainACP: &persistentMainACPState{
+			client:          &stubMainACPClient{},
+			agentID:         "copilot",
+			remoteSessionID: "remote-1",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "openai/gpt-5-mini",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "openai/gpt-5-mini", Name: "GPT-5 Mini"},
+						{Value: "openai/o3", Name: "O3"},
+					},
+				},
+			},
+		},
+		out: &bytes.Buffer{},
+	}
+	client := console.persistentMainACP.client.(*stubMainACPClient)
+	client.configOptions = cloneACPConfigOptions(console.persistentMainACP.configOptions)
+	client.onSetConfig = func(configID string, value string, current []acpclient.SessionConfigOption) []acpclient.SessionConfigOption {
+		if strings.EqualFold(configID, acpConfigModel) {
+			for i := range current {
+				if strings.EqualFold(current[i].ID, acpConfigModel) {
+					current[i].CurrentValue = value
+				}
+			}
+			return append(current, acpclient.SessionConfigOption{
+				ID:           acpConfigReasoningEffort,
+				Category:     "thought_level",
+				CurrentValue: "medium",
+				Options: []acpclient.SessionConfigSelectOption{
+					{Value: "low", Name: "Low"},
+					{Value: "medium", Name: "Medium"},
+					{Value: "high", Name: "High"},
+				},
+			})
+		}
+		for i := range current {
+			if strings.EqualFold(current[i].ID, acpConfigReasoningEffort) {
+				current[i].CurrentValue = value
+			}
+		}
+		return current
+	}
+
+	if _, err := handleModel(console, []string{"use", "openai/o3", "high"}); err != nil {
+		t.Fatalf("switch ACP main model + reasoning: %v", err)
+	}
+	if want := []string{"model=openai/o3", "reasoning_effort=high"}; !slices.Equal(client.setConfigCalls, want) {
+		t.Fatalf("expected ACP config switch calls %v, got %v", want, client.setConfigCalls)
+	}
+	settings, ok := console.configStore.ACPAgentSettings("copilot")
+	if !ok {
+		t.Fatal("expected persisted ACP agent settings")
+	}
+	if settings.Model != "openai/o3" || settings.ReasoningEffort != "high" {
+		t.Fatalf("unexpected persisted ACP settings %#v", settings)
+	}
+}
+
+func TestHandleModelUse_ACPMainRejectsUnsupportedReasoningWithoutSwitchingModel(t *testing.T) {
+	console := &cliConsole{
+		baseCtx:   context.Background(),
+		appName:   "app",
+		userID:    "u",
+		sessionID: "sess-1",
+		configStore: &appConfigStore{
+			path: filepath.Join(t.TempDir(), "config.json"),
+			data: appConfig{
+				MainAgent: "copilot",
+				Agents: map[string]agentRecord{
+					"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+				},
+			},
+		},
+		persistentMainACP: &persistentMainACPState{
+			client:          &stubMainACPClient{},
+			agentID:         "copilot",
+			remoteSessionID: "remote-1",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "openai/gpt-5-mini",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "openai/gpt-5-mini", Name: "GPT-5 Mini"},
+						{Value: "openai/o3", Name: "O3"},
+					},
+				},
+			},
+			modelProfiles: []acpMainModelProfile{
+				{
+					ID:   "openai/o3",
+					Name: "O3",
+					Reasoning: []tuiapp.SlashArgCandidate{
+						{Value: "low", Display: "Low"},
+						{Value: "high", Display: "High"},
+					},
+				},
+			},
+		},
+		out: &bytes.Buffer{},
+	}
+	client := console.persistentMainACP.client.(*stubMainACPClient)
+	client.configOptions = cloneACPConfigOptions(console.persistentMainACP.configOptions)
+
+	if _, err := handleModel(console, []string{"use", "openai/o3", "medium"}); err == nil {
+		t.Fatal("expected unsupported ACP reasoning error")
+	}
+	if len(client.setConfigCalls) != 0 {
+		t.Fatalf("expected no ACP config mutations on invalid reasoning, got %v", client.setConfigCalls)
+	}
+	if got := console.currentSessionModelAlias(); got != "openai/gpt-5-mini" {
+		t.Fatalf("expected ACP model alias unchanged, got %q", got)
 	}
 }

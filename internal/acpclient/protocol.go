@@ -15,6 +15,7 @@ const (
 	MethodSessionList          = internalacp.MethodSessionList
 	MethodSessionLoad          = internalacp.MethodSessionLoad
 	MethodSessionSetMode       = internalacp.MethodSessionSetMode
+	MethodSessionSetConfig     = internalacp.MethodSessionSetConfig
 	MethodSessionPrompt        = internalacp.MethodSessionPrompt
 	MethodSessionCancel        = internalacp.MethodSessionCancel
 	MethodSessionUpdate        = internalacp.MethodSessionUpdate
@@ -64,6 +65,8 @@ type LoadSessionRequest = internalacp.LoadSessionRequest
 type LoadSessionResponse = internalacp.LoadSessionResponse
 type SetSessionModeRequest = internalacp.SetSessionModeRequest
 type SetSessionModeResponse = internalacp.SetSessionModeResponse
+type SetSessionConfigOptionRequest = internalacp.SetSessionConfigOptionRequest
+type SetSessionConfigOptionResponse = internalacp.SetSessionConfigOptionResponse
 type SessionListRequest = internalacp.SessionListRequest
 type SessionSummary = internalacp.SessionSummary
 type SessionListResponse = internalacp.SessionListResponse

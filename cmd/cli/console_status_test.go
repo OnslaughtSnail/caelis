@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
@@ -212,5 +213,64 @@ func TestRefreshContextUsageFromEvent_FallsBackToRuntimeEstimateWithoutUsage(t *
 	console.refreshContextUsageFromEvent(assistantEvent)
 	if console.lastPromptTokens <= 0 {
 		t.Fatalf("expected runtime usage fallback to populate status tokens, got %d", console.lastPromptTokens)
+	}
+}
+
+func TestHandleStatus_UsesACPMainView(t *testing.T) {
+	execRT := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
+	var out bytes.Buffer
+	console := &cliConsole{
+		baseCtx:     context.Background(),
+		appName:     "app",
+		userID:      "u",
+		sessionID:   "sess-1",
+		workspace:   workspaceContext{CWD: "/tmp/ws"},
+		execRuntime: execRT,
+		sandboxType: execRT.SandboxType(),
+		modelAlias:  "local/fallback-model",
+		out:         &out,
+		ui:          newUI(&out, true, false),
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		persistentMainACP: &persistentMainACPState{
+			agentID:         "copilot",
+			remoteSessionID: "remote-1234567890",
+			modes: &acpclient.SessionModeState{
+				CurrentModeID: "plan",
+				AvailableModes: []acpclient.SessionMode{
+					{ID: "plan", Name: "Plan"},
+				},
+			},
+			configOptions: []acpclient.SessionConfigOption{
+				{ID: acpConfigModel, Category: "model", CurrentValue: "copilot/gpt-5"},
+				{
+					ID:           acpConfigReasoningEffort,
+					Category:     "thought_level",
+					CurrentValue: "high",
+					Options:      []acpclient.SessionConfigSelectOption{{Value: "high", Name: "High"}},
+				},
+			},
+		},
+	}
+
+	if _, err := handleStatus(console, nil); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "ACP Main") || !strings.Contains(text, "main_agent") || !strings.Contains(text, "copilot") {
+		t.Fatalf("expected ACP main section, got: %s", text)
+	}
+	if !strings.Contains(text, "copilot/gpt-5") {
+		t.Fatalf("expected ACP model alias, got: %s", text)
+	}
+	if strings.Contains(text, "local/fallback-model") {
+		t.Fatalf("did not expect local fallback model in ACP status: %s", text)
+	}
+	if !strings.Contains(text, "managed by ACP main agent") {
+		t.Fatalf("expected ACP context note, got: %s", text)
 	}
 }

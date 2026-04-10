@@ -74,15 +74,13 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Content: userInstructions,
 		})
 	}
-	if promptRoleUsesLocalTooling(in.PromptRole) {
-		if agentSupport := buildSystemAgentDelegationPrompt(in.DefaultAgent, in.AgentDescriptors); agentSupport != "" {
-			additional = append(additional, appprompting.PromptFragment{
-				Kind:    appprompting.PromptFragmentKindSystem,
-				Stage:   "capability_guidance",
-				Source:  "cli:acp-agent-support",
-				Content: agentSupport,
-			})
-		}
+	if agentSupport := buildSystemAgentDelegationPrompt(in.DefaultAgent, in.AgentDescriptors); agentSupport != "" {
+		additional = append(additional, appprompting.PromptFragment{
+			Kind:    appprompting.PromptFragmentKindSystem,
+			Stage:   "capability_guidance",
+			Source:  "cli:acp-agent-support",
+			Content: agentSupport,
+		})
 	}
 	if workspaceContext := builtInEnvironmentContextPrompt(workspaceDir); workspaceContext != "" {
 		additional = append(additional, appprompting.PromptFragment{
@@ -92,7 +90,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Content: workspaceContext,
 		})
 	}
-	if promptRoleUsesLocalTooling(in.PromptRole) && in.EnableExperimentalLSPPrompt {
+	if in.EnableExperimentalLSPPrompt {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindSystem,
 			Stage:   "capability_guidance",
@@ -113,10 +111,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 	}, nil
 }
 
-func skillsMetaPrompt(role string, metas []appskills.Meta) string {
-	if !promptRoleUsesLocalTooling(role) {
-		return ""
-	}
+func skillsMetaPrompt(_ string, metas []appskills.Meta) string {
 	return appskills.BuildMetaPrompt(metas)
 }
 

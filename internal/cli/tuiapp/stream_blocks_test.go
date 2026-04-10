@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -385,6 +386,137 @@ func TestParticipantTurnBlock_FinalToolResultAttachesToOriginalCallOrder(t *test
 	}
 }
 
+func TestParticipantTurnBlock_ACPToolResultRendersInlinePanelUnderCall(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "evan(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-run",
+		ToolName:   "RUN",
+		ToolArgs:   map[string]any{"_display": "python3 hello.py"},
+		ToolStatus: "in_progress",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-run",
+		ToolName:   "RUN",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "Hello, world!"},
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "RUN") || !strings.Contains(view, "python3 hello.py") {
+		t.Fatalf("expected RUN call line in viewport, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Hello, world!") {
+		t.Fatalf("expected tool output in viewport, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ Hello, world!") {
+		t.Fatalf("expected ACP tool output to render inside a panel, not as a standalone result row, got:\n%s", view)
+	}
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected ACP tool output to render inside a drawer panel, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_ACPToolPanelClickToggleMatchesBash(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+	m.viewport.SetWidth(24)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "evan(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-run",
+		ToolName:   "RUN",
+		ToolArgs:   map[string]any{"_display": "python3 hello.py --format json --verbose --limit 20"},
+		ToolStatus: "in_progress",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "evan(copilot)",
+		ToolCallID: "tool-run",
+		ToolName:   "RUN",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "line-1\nline-2"},
+	})
+
+	blockID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	block, ok := m.doc.Find(blockID).(*ParticipantTurnBlock)
+	if !ok || block == nil {
+		t.Fatal("expected participant turn block")
+	}
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "▾ RUN ") {
+		t.Fatalf("expected expanded ACP tool call arrow, got:\n%s", view)
+	}
+	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected ACP tool output before collapse, got:\n%s", view)
+	}
+
+	token := "acp_tool_panel:tool-run"
+	clickableLines := make([]int, 0, 2)
+	for i, id := range m.viewportBlockIDs {
+		if id == blockID && m.viewportClickTokens[i] == token {
+			clickableLines = append(clickableLines, i)
+		}
+	}
+	if len(clickableLines) == 0 {
+		t.Fatal("expected ACP tool header to expose a click token")
+	}
+
+	vy := clickableLines[len(clickableLines)-1] - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+
+	if block.toolPanelExpanded("tool-run") {
+		t.Fatal("expected ACP tool panel to collapse after click")
+	}
+	view = stripModelView(m)
+	if !strings.Contains(view, "▸ RUN ") {
+		t.Fatalf("expected collapsed ACP tool call arrow, got:\n%s", view)
+	}
+	if strings.Contains(view, "line-1") || strings.Contains(view, "line-2") {
+		t.Fatalf("expected collapsed ACP tool panel to hide body, got:\n%s", view)
+	}
+
+	m.syncViewportContent()
+	clickableLines = clickableLines[:0]
+	for i, id := range m.viewportBlockIDs {
+		if id == blockID && m.viewportClickTokens[i] == token {
+			clickableLines = append(clickableLines, i)
+		}
+	}
+	if len(clickableLines) == 0 {
+		t.Fatal("expected ACP tool header to stay clickable after collapse")
+	}
+
+	vy = clickableLines[0] - m.viewport.YOffset()
+	_, _ = m.Update(mouseClick(5, vy, tea.MouseLeft))
+	_, _ = m.Update(mouseRelease(5, vy, tea.MouseLeft))
+
+	if !block.toolPanelExpanded("tool-run") {
+		t.Fatal("expected ACP tool panel to re-expand after second click")
+	}
+	view = stripModelView(m)
+	if !strings.Contains(view, "▾ RUN ") {
+		t.Fatalf("expected re-expanded ACP tool call arrow, got:\n%s", view)
+	}
+	if !strings.Contains(view, "line-1") || !strings.Contains(view, "line-2") {
+		t.Fatalf("expected ACP tool output after re-expand, got:\n%s", view)
+	}
+}
+
 func TestParticipantTurnBlock_WrapsLongToolRowsInsideViewport(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -433,6 +565,55 @@ func TestParticipantTurnBlock_HeaderOmitsCompletedMetaAndBodyStatusRow(t *testin
 	}
 	if strings.Contains(view, "✓ completed") {
 		t.Fatalf("did not expect completed body status row, got:\n%s", view)
+	}
+}
+
+func TestParticipantTurnBlock_TerminalStatusCollapsesAllToolPanels(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ParticipantTurnStartMsg{SessionID: "child-1", Actor: "ruby(copilot)"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "ruby(copilot)",
+		ToolCallID: "tool-find",
+		ToolName:   "FIND",
+		ToolArgs:   map[string]any{"_display": "src/**/*.go"},
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "match-1\nmatch-2"},
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionParticipant,
+		ScopeID:    "child-1",
+		Actor:      "ruby(copilot)",
+		ToolCallID: "tool-view",
+		ToolName:   "VIEW",
+		ToolArgs:   map[string]any{"_display": "/tmp/demo.txt"},
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "file-body"},
+	})
+
+	blockID := strings.TrimSpace(m.participantTurnIDs["child-1"])
+	block, ok := m.doc.Find(blockID).(*ParticipantTurnBlock)
+	if !ok || block == nil {
+		t.Fatal("expected participant turn block")
+	}
+	if !block.toolPanelExpanded("tool-find") || !block.toolPanelExpanded("tool-view") {
+		t.Fatal("expected tool panels to start expanded before terminal status")
+	}
+
+	_, _ = m.Update(tuievents.ParticipantStatusMsg{SessionID: "child-1", State: "completed"})
+
+	if block.toolPanelExpanded("tool-find") || block.toolPanelExpanded("tool-view") {
+		t.Fatal("expected terminal participant turn to collapse all tool panels")
+	}
+	view := stripModelView(m)
+	if strings.Contains(view, "match-1") || strings.Contains(view, "file-body") {
+		t.Fatalf("expected collapsed participant turn to hide panel bodies, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ FIND") || !strings.Contains(view, "▸ VIEW") {
+		t.Fatalf("expected collapsed tool call headers to remain visible, got:\n%s", view)
 	}
 }
 
@@ -883,6 +1064,121 @@ func TestMainACPTurnBlock_ToolCallAndResultRealTimeProjection(t *testing.T) {
 	}
 }
 
+func TestMainACPTurnBlock_ACPToolResultRendersInlinePanelUnderCall(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-run",
+		ToolName:   "RUN",
+		ToolArgs:   map[string]any{"_display": "python3 hello.py"},
+		ToolStatus: "in_progress",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-run",
+		ToolName:   "RUN",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "Hello from main ACP"},
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "RUN") || !strings.Contains(view, "python3 hello.py") {
+		t.Fatalf("expected RUN call line in viewport, got:\n%s", view)
+	}
+	if !strings.Contains(view, "Hello from main ACP") {
+		t.Fatalf("expected tool output in viewport, got:\n%s", view)
+	}
+	if strings.Contains(view, "✓ Hello from main ACP") {
+		t.Fatalf("expected ACP main tool output to render inside a panel, not as a standalone result row, got:\n%s", view)
+	}
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected ACP main tool output to render inside a drawer panel, got:\n%s", view)
+	}
+}
+
+func TestMainACPTurnBlock_TerminalStatusCollapsesAllToolPanels(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-find",
+		ToolName:   "FIND",
+		ToolArgs:   map[string]any{"_display": "src/**/*.go"},
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "match-1\nmatch-2"},
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-view",
+		ToolName:   "VIEW",
+		ToolArgs:   map[string]any{"_display": "/tmp/demo.txt"},
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"content": "file-body"},
+	})
+
+	blockID := strings.TrimSpace(m.activeMainACPTurnID)
+	block, ok := m.doc.Find(blockID).(*MainACPTurnBlock)
+	if !ok || block == nil {
+		t.Fatal("expected main ACP turn block")
+	}
+	if !block.toolPanelExpanded("call-find") || !block.toolPanelExpanded("call-view") {
+		t.Fatal("expected main ACP tool panels to start expanded before terminal status")
+	}
+
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	if block.toolPanelExpanded("call-find") || block.toolPanelExpanded("call-view") {
+		t.Fatal("expected finalized main ACP turn to collapse all tool panels")
+	}
+	view := stripModelView(m)
+	if strings.Contains(view, "match-1") || strings.Contains(view, "file-body") {
+		t.Fatalf("expected collapsed main ACP turn to hide panel bodies, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ FIND") || !strings.Contains(view, "▸ VIEW") {
+		t.Fatalf("expected collapsed main ACP tool headers to remain visible, got:\n%s", view)
+	}
+}
+
+func TestMainACPTurnBlock_SpawnToolRenderingRemainsUnchanged(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-spawn",
+		ToolName:   "SPAWN",
+		ToolArgs:   map[string]any{"_display": "delegate work"},
+		ToolStatus: "in_progress",
+	})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:      tuievents.ACPProjectionMain,
+		ScopeID:    "root-session",
+		ToolCallID: "call-spawn",
+		ToolName:   "SPAWN",
+		ToolStatus: "completed",
+		ToolResult: map[string]any{"summary": "spawned helper"},
+	})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if !strings.Contains(view, "SPAWN") || !strings.Contains(view, "spawned helper") {
+		t.Fatalf("expected spawn lifecycle to remain visible, got:\n%s", view)
+	}
+	if strings.Contains(view, "╭") || strings.Contains(view, "╰") {
+		t.Fatalf("expected SPAWN lifecycle to keep existing non-panel rendering, got:\n%s", view)
+	}
+}
+
 func TestMainACPTurnBlock_FinalSnapshotFillsMissedContent(t *testing.T) {
 	m := newTestModel()
 	resizeModel(m)
@@ -958,5 +1254,42 @@ func TestMainACPTurnBlock_PreviousTurnBaselineDoesNotPolluteCurrent(t *testing.T
 	}
 	if got := newBlock.Events[0].Text; got != "Current turn answer." {
 		t.Fatalf("expected only current turn text in new block, got %q", got)
+	}
+}
+
+func TestMainACPTurnBlock_UserMessageFinalizesTurnBeforeNextReplay(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Previous turn answer.",
+	})
+	_, _ = m.Update(tuievents.UserMessageMsg{Text: "next question"})
+
+	if m.activeMainACPTurnID != "" {
+		t.Fatal("expected user message to finalize the previous ACP turn")
+	}
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Current turn answer.",
+	})
+
+	view := stripModelView(m)
+	prevIdx := strings.Index(view, "Previous turn answer.")
+	userIdx := strings.Index(view, "> next question")
+	currIdx := strings.Index(view, "Current turn answer.")
+	if prevIdx < 0 || userIdx < 0 || currIdx < 0 {
+		t.Fatalf("expected previous answer, user question, and current answer in view, got:\n%s", view)
+	}
+	if prevIdx >= userIdx || userIdx >= currIdx {
+		t.Fatalf("expected ACP replay to stay ordered across user boundary, got:\n%s", view)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	coreacpmeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
@@ -223,7 +224,7 @@ func extractUserRequests(events []*session.Event, limit int) []string {
 		if ev == nil || ev.Message.Role != model.RoleUser {
 			continue
 		}
-		text := strings.TrimSpace(ev.Message.TextContent())
+		text := strings.TrimSpace(sessionmode.VisibleText(ev.Message.TextContent()))
 		if text == "" {
 			continue
 		}

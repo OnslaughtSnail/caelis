@@ -9,7 +9,7 @@ import (
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 )
 
-const agentCommandUsage = "usage: /agent list | /agent use <self|name> | /agent add <builtin> | /agent rm <name>"
+const agentCommandUsage = "usage: /agent use <self|name> | /agent add <builtin> | /agent list | /agent rm <name>"
 
 func handleAgent(c *cliConsole, args []string) (bool, error) {
 	if c == nil || c.configStore == nil {
@@ -33,12 +33,28 @@ func handleAgent(c *cliConsole, args []string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if addedBuiltin {
-			c.printf("agent added: %s\n", target)
+		if err := c.applyMainAgentSelectionState(c.baseCtx); err != nil {
+			_, _, _ = switchMainAgent(c, previous)
+			_ = c.applyMainAgentSelectionState(c.baseCtx)
+			return false, err
 		}
 		if previous == target {
+			if c.tuiSender != nil {
+				c.showTransientHint("main agent: " + target)
+				return false, nil
+			}
+			if addedBuiltin {
+				c.printf("agent added: %s\n", target)
+			}
 			c.printf("main agent unchanged: %s\n", target)
 			return false, nil
+		}
+		if c.tuiSender != nil {
+			c.showTransientHint("main agent: " + target)
+			return false, nil
+		}
+		if addedBuiltin {
+			c.printf("agent added: %s\n", target)
 		}
 		c.printf("main agent switched: %s -> %s\n", previous, target)
 		c.printf("applies on the next turn; current session history is preserved\n")

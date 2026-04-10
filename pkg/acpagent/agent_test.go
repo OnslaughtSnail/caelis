@@ -80,7 +80,6 @@ func TestACPAgentRunStartsFreshRemoteSessionAndPersistsControllerSession(t *test
 		Command:       "codex-acp",
 		WorkspaceRoot: "/workspace",
 		SessionCWD:    "/workspace",
-		SystemPrompt:  "Be precise.",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -103,12 +102,12 @@ func TestACPAgentRunStartsFreshRemoteSessionAndPersistsControllerSession(t *test
 		events = append(events, ev)
 	}
 
-	if len(seenPrompt) < 2 {
-		t.Fatalf("expected system prelude + user prompt, got %d blocks", len(seenPrompt))
+	if len(seenPrompt) != 1 {
+		t.Fatalf("expected only the user prompt block, got %d blocks", len(seenPrompt))
 	}
 	first := decodePromptBlock(t, seenPrompt[0])
-	if !strings.Contains(first["text"], "Persistent operating instructions") {
-		t.Fatalf("expected system prelude in first prompt block, got %#v", first)
+	if got := strings.TrimSpace(first["text"]); got != "inspect repo" {
+		t.Fatalf("expected the live user prompt only, got %#v", first)
 	}
 
 	ref, err := acpmeta.ControllerSessionFromStore(ctx, store, sess)
@@ -186,7 +185,6 @@ func TestACPAgentRunReloadsPersistedControllerSessionWithoutPrelude(t *testing.T
 		Command:       "copilot-acp",
 		WorkspaceRoot: "/workspace",
 		SessionCWD:    "/workspace",
-		SystemPrompt:  "Do not resend me.",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -33,7 +33,6 @@ type Config struct {
 	SessionCWD        string
 	Runtime           toolexec.Runtime
 	ClientInfoVersion string
-	SystemPrompt      string
 	SessionMeta       map[string]any
 }
 
@@ -66,7 +65,6 @@ func New(cfg Config) (*Agent, error) {
 	cfg.WorkDir = strings.TrimSpace(cfg.WorkDir)
 	cfg.WorkspaceRoot = strings.TrimSpace(cfg.WorkspaceRoot)
 	cfg.SessionCWD = strings.TrimSpace(cfg.SessionCWD)
-	cfg.SystemPrompt = strings.TrimSpace(cfg.SystemPrompt)
 	cfg.ClientInfoVersion = strings.TrimSpace(cfg.ClientInfoVersion)
 	cfg.Args = append([]string(nil), cfg.Args...)
 	cfg.Env = cloneStringMap(cfg.Env)
@@ -171,9 +169,6 @@ func (a *Agent) Run(inv agent.InvocationContext) iter.Seq2[*session.Event, error
 			if seed := freshSessionSeed(inv, promptCtx.EventIndex); seed != "" {
 				runPrompt = prependTextBlock(runPrompt, seed)
 			}
-		}
-		if freshSession && a.cfg.SystemPrompt != "" {
-			runPrompt = prependTextBlock(runPrompt, sessionPrelude(a.cfg.SystemPrompt))
 		}
 		if inv.Overlay() {
 			runPrompt = prependTextBlock(runPrompt, overlayPromptPrefix)
@@ -435,10 +430,6 @@ func filterImageBlocks(prompt []json.RawMessage) []json.RawMessage {
 		out = append(out, block)
 	}
 	return out
-}
-
-func sessionPrelude(systemPrompt string) string {
-	return "Persistent operating instructions for this workspace session:\n\n" + strings.TrimSpace(systemPrompt)
 }
 
 func liveProjectionEvent(item acpprojector.Projection, agentID string, overlay bool) *session.Event {

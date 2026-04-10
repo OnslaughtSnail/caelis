@@ -322,6 +322,7 @@ type Model struct {
 	lastCommittedStyle  tuikit.LineStyle
 	lastCommittedRaw    string
 	lastUserDisplayLine string
+	userDisplayDedupOK  bool
 	hasCommittedLine    bool
 	planEntries         []planEntryState
 	welcomeCardPending  bool
@@ -339,6 +340,7 @@ type Model struct {
 	viewportStyledLines           []string
 	viewportPlainLines            []string
 	viewportBlockIDs              []string
+	viewportClickTokens           []string
 	frameTopTrim                  int
 	viewport                      viewport.Model
 	userScrolledUp                bool

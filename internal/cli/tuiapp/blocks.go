@@ -219,12 +219,13 @@ func renderNarrativeGlamourRows(blockID, raw, rolePrefix string, lineStyle tuiki
 // ---------------------------------------------------------------------------
 
 type MainACPTurnBlock struct {
-	id        string
-	SessionID string
-	Status    string
-	StartedAt time.Time
-	EndedAt   time.Time
-	Events    []SubagentEvent
+	id            string
+	SessionID     string
+	Status        string
+	StartedAt     time.Time
+	EndedAt       time.Time
+	Events        []SubagentEvent
+	ExpandedTools map[string]bool
 }
 
 func NewMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
@@ -352,9 +353,11 @@ func (b *MainACPTurnBlock) SetStatus(state string, occurredAt time.Time) {
 		return
 	}
 	b.Status = strings.ToLower(strings.TrimSpace(state))
+	collapseTools := false
 	switch b.Status {
 	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
 		if b.EndedAt.IsZero() {
+			collapseTools = true
 			if !occurredAt.IsZero() {
 				b.EndedAt = occurredAt
 			} else {
@@ -363,6 +366,9 @@ func (b *MainACPTurnBlock) SetStatus(state string, occurredAt time.Time) {
 		}
 	default:
 		b.EndedAt = time.Time{}
+	}
+	if collapseTools {
+		b.collapseAllToolPanels()
 	}
 }
 
@@ -375,6 +381,8 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		PlaceholderAsMeta:      true,
 		HideWaitingApprovalRow: true,
 		HideCompletedRow:       true,
+		ToolOutputPanels:       true,
+		ToolPanelExpanded:      b.toolPanelExpanded,
 	})
 }
 
@@ -383,14 +391,15 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 // ---------------------------------------------------------------------------
 
 type ParticipantTurnBlock struct {
-	id        string
-	SessionID string
-	Actor     string
-	Status    string
-	Expanded  bool
-	StartedAt time.Time
-	EndedAt   time.Time
-	Events    []SubagentEvent
+	id            string
+	SessionID     string
+	Actor         string
+	Status        string
+	Expanded      bool
+	StartedAt     time.Time
+	EndedAt       time.Time
+	Events        []SubagentEvent
+	ExpandedTools map[string]bool
 }
 
 func NewParticipantTurnBlock(sessionID, actor string) *ParticipantTurnBlock {
@@ -520,9 +529,11 @@ func (b *ParticipantTurnBlock) SetStatus(state string, approvalTool string, appr
 		return
 	}
 	b.Status = strings.ToLower(strings.TrimSpace(state))
+	collapseTools := false
 	switch b.Status {
 	case "completed", "failed", "interrupted", "cancelled", "canceled", "terminated":
 		if b.EndedAt.IsZero() {
+			collapseTools = true
 			if !occurredAt.IsZero() {
 				b.EndedAt = occurredAt
 			} else {
@@ -531,6 +542,9 @@ func (b *ParticipantTurnBlock) SetStatus(state string, approvalTool string, appr
 		}
 	default:
 		b.EndedAt = time.Time{}
+	}
+	if collapseTools {
+		b.collapseAllToolPanels()
 	}
 	if !strings.EqualFold(b.Status, "waiting_approval") {
 		return
@@ -560,6 +574,8 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		PlaceholderAsMeta:      true,
 		HideWaitingApprovalRow: true,
 		HideCompletedRow:       true,
+		ToolOutputPanels:       true,
+		ToolPanelExpanded:      b.toolPanelExpanded,
 	})...)
 	if b.Expanded && participantTurnIsTerminal(b.Status) {
 		rows = append(rows, StyledRow(b.id, renderParticipantTurnFooter(b, ctx)))
@@ -594,6 +610,110 @@ func renderParticipantTurnHeader(b *ParticipantTurnBlock, ctx BlockRenderContext
 		return left
 	}
 	return left + " " + ctx.Theme.TranscriptMetaStyle().Render("· "+strings.Join(metaParts, " · "))
+}
+
+func toolPanelExpanded(state map[string]bool, callID string) bool {
+	callID = strings.TrimSpace(callID)
+	if callID == "" || state == nil {
+		return true
+	}
+	expanded, ok := state[callID]
+	if !ok {
+		return true
+	}
+	return expanded
+}
+
+func toggleToolPanelExpanded(state *map[string]bool, callID string) bool {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return false
+	}
+	if *state == nil {
+		*state = map[string]bool{}
+	}
+	next := !toolPanelExpanded(*state, callID)
+	(*state)[callID] = next
+	return next
+}
+
+func (b *MainACPTurnBlock) toolPanelExpanded(callID string) bool {
+	if b == nil {
+		return true
+	}
+	return toolPanelExpanded(b.ExpandedTools, callID)
+}
+
+func (b *MainACPTurnBlock) toggleToolPanelExpanded(callID string) bool {
+	if b == nil {
+		return false
+	}
+	return toggleToolPanelExpanded(&b.ExpandedTools, callID)
+}
+
+func (b *MainACPTurnBlock) collapseAllToolPanels() {
+	if b == nil {
+		return
+	}
+	b.ExpandedTools = collapseToolPanelsForEvents(b.ExpandedTools, b.Events)
+}
+
+func (b *ParticipantTurnBlock) toolPanelExpanded(callID string) bool {
+	if b == nil {
+		return true
+	}
+	return toolPanelExpanded(b.ExpandedTools, callID)
+}
+
+func (b *ParticipantTurnBlock) toggleToolPanelExpanded(callID string) bool {
+	if b == nil {
+		return false
+	}
+	return toggleToolPanelExpanded(&b.ExpandedTools, callID)
+}
+
+func (b *ParticipantTurnBlock) collapseAllToolPanels() {
+	if b == nil {
+		return
+	}
+	b.ExpandedTools = collapseToolPanelsForEvents(b.ExpandedTools, b.Events)
+}
+
+func collapseToolPanelsForEvents(state map[string]bool, events []SubagentEvent) map[string]bool {
+	callIDs := collectToolPanelCallIDs(events)
+	if len(callIDs) == 0 {
+		return state
+	}
+	if state == nil {
+		state = map[string]bool{}
+	}
+	for _, callID := range callIDs {
+		state[callID] = false
+	}
+	return state
+}
+
+func collectToolPanelCallIDs(events []SubagentEvent) []string {
+	if len(events) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	callIDs := make([]string, 0, len(events))
+	for _, ev := range events {
+		if ev.Kind != SEToolCall {
+			continue
+		}
+		callID := strings.TrimSpace(ev.CallID)
+		if callID == "" {
+			continue
+		}
+		if _, ok := seen[callID]; ok {
+			continue
+		}
+		seen[callID] = struct{}{}
+		callIDs = append(callIDs, callID)
+	}
+	return callIDs
 }
 
 func participantTurnStatusLabel(state string) string {

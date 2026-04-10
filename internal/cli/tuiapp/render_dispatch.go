@@ -128,6 +128,9 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	if !ok {
 		return m, nil, false
 	}
+	if shouldInvalidateUserDisplayDedup(msg) {
+		m.invalidateUserDisplayDedup()
+	}
 	policyCmd := m.applyRenderEventPolicy(policy)
 
 	switch typed := msg.(type) {
@@ -271,6 +274,34 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	}
 }
 
+func (m *Model) invalidateUserDisplayDedup() {
+	if m == nil {
+		return
+	}
+	m.userDisplayDedupOK = false
+}
+
+func shouldInvalidateUserDisplayDedup(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tuievents.AssistantStreamMsg,
+		tuievents.RawDeltaMsg,
+		tuievents.ReasoningStreamMsg,
+		tuievents.DiffBlockMsg,
+		tuievents.TaskStreamMsg,
+		tuievents.ParticipantToolMsg,
+		tuievents.ParticipantStatusMsg,
+		tuievents.ACPProjectionMsg,
+		tuievents.SubagentStatusMsg,
+		tuievents.SubagentDoneMsg,
+		tuievents.SubagentStreamMsg,
+		tuievents.SubagentToolCallMsg,
+		tuievents.SubagentPlanMsg:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) handlePlanUpdateMsg(msg tuievents.PlanUpdateMsg) tea.Model {
 	m.planEntries = m.planEntries[:0]
 	hasIncomplete := false
@@ -350,6 +381,7 @@ func (m *Model) handleUserMessageMsg(msg tuievents.UserMessageMsg) tea.Model {
 	if m.activeActivityID != "" {
 		_ = m.finalizeActivityBlock()
 	}
+	m.finalizeActiveMainACPTurn(false, nil)
 	m.commitUserDisplayLine(msg.Text)
 	m.ensureViewportLayout()
 	m.syncViewportContent()

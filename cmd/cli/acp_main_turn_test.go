@@ -11,6 +11,7 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
+	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -275,6 +276,11 @@ type stubMainACPClient struct {
 	newSessionCalls  int
 	allowLoadSession bool
 	loadSessionErr   error
+	modes            *acpclient.SessionModeState
+	configOptions    []acpclient.SessionConfigOption
+	setModeCalls     []string
+	setConfigCalls   []string
+	onSetConfig      func(configID string, value string, current []acpclient.SessionConfigOption) []acpclient.SessionConfigOption
 	onPrompt         func(sessionID string, parts []json.RawMessage)
 }
 
@@ -284,7 +290,11 @@ func (c *stubMainACPClient) Initialize(context.Context) (acpclient.InitializeRes
 
 func (c *stubMainACPClient) NewSession(context.Context, string, map[string]any) (acpclient.NewSessionResponse, error) {
 	c.newSessionCalls++
-	return acpclient.NewSessionResponse{SessionID: "remote-main-1"}, nil
+	return acpclient.NewSessionResponse{
+		SessionID:     "remote-main-1",
+		Modes:         cloneACPModeState(c.modes),
+		ConfigOptions: cloneACPConfigOptions(c.configOptions),
+	}, nil
 }
 
 func (c *stubMainACPClient) LoadSession(context.Context, string, string, map[string]any) (acpclient.LoadSessionResponse, error) {
@@ -294,7 +304,10 @@ func (c *stubMainACPClient) LoadSession(context.Context, string, string, map[str
 	if c.loadSessionErr != nil {
 		return acpclient.LoadSessionResponse{}, c.loadSessionErr
 	}
-	return acpclient.LoadSessionResponse{}, nil
+	return acpclient.LoadSessionResponse{
+		Modes:         cloneACPModeState(c.modes),
+		ConfigOptions: cloneACPConfigOptions(c.configOptions),
+	}, nil
 }
 
 func (c *stubMainACPClient) PromptParts(_ context.Context, sessionID string, parts []json.RawMessage, _ map[string]any) (acpclient.PromptResponse, error) {
@@ -304,6 +317,34 @@ func (c *stubMainACPClient) PromptParts(_ context.Context, sessionID string, par
 		c.onPrompt(c.promptSessionID, c.promptParts)
 	}
 	return acpclient.PromptResponse{}, nil
+}
+
+func (c *stubMainACPClient) SetMode(_ context.Context, _ string, modeID string) error {
+	modeID = strings.TrimSpace(modeID)
+	c.setModeCalls = append(c.setModeCalls, modeID)
+	if c.modes == nil {
+		c.modes = &acpclient.SessionModeState{}
+	}
+	c.modes.CurrentModeID = modeID
+	return nil
+}
+
+func (c *stubMainACPClient) SetConfigOption(_ context.Context, _ string, configID string, value string) (acpclient.SetSessionConfigOptionResponse, error) {
+	configID = strings.TrimSpace(configID)
+	value = strings.TrimSpace(value)
+	c.setConfigCalls = append(c.setConfigCalls, configID+"="+value)
+	options := cloneACPConfigOptions(c.configOptions)
+	if c.onSetConfig != nil {
+		options = c.onSetConfig(configID, value, options)
+	} else {
+		for i := range options {
+			if strings.EqualFold(strings.TrimSpace(options[i].ID), configID) {
+				options[i].CurrentValue = value
+			}
+		}
+	}
+	c.configOptions = cloneACPConfigOptions(options)
+	return acpclient.SetSessionConfigOptionResponse{ConfigOptions: cloneACPConfigOptions(c.configOptions)}, nil
 }
 
 func (c *stubMainACPClient) Cancel(context.Context, string) error { return nil }
@@ -401,6 +442,101 @@ func TestRunPreparedACPMainSubmissionContext_HandoffExcludesCurrentUserTurn(t *t
 	}
 	if !strings.Contains(promptText, "先介绍一下自己") {
 		t.Fatalf("expected prior history to appear in handoff context, got:\n%s", promptText)
+	}
+}
+
+func TestRunPreparedACPMainSubmissionContext_CleansInjectedACPContext(t *testing.T) {
+	store := inmemory.New()
+	root := &session.Session{AppName: "app", UserID: "u", ID: "sess-clean"}
+	if _, err := store.GetOrCreate(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range []*session.Event{
+		{
+			ID: "ev-user-1",
+			Message: model.NewTextMessage(model.RoleUser, `<caelis-session-mode mode="plan" hidden="true">
+This turn is running in PLAN mode. Focus on analysis only.
+</caelis-session-mode>
+
+现在处于什么模式？`),
+		},
+		{
+			ID:      "ev-assistant-1",
+			Message: model.NewTextMessage(model.RoleAssistant, "当前处于 PLAN 模式。"),
+		},
+	} {
+		if err := store.AppendEvent(t.Context(), root, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := coreacpmeta.UpdateControllerEpoch(t.Context(), store, root, func(coreacpmeta.ControllerEpoch) coreacpmeta.ControllerEpoch {
+		return coreacpmeta.ControllerEpoch{
+			EpochID:        "1",
+			ControllerKind: coreacpmeta.ControllerKindSelf,
+			ControllerID:   "self",
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{Store: store, AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := &stubMainACPClient{}
+	client.allowLoadSession = true
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
+
+	console := &cliConsole{
+		baseCtx:      t.Context(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    root.ID,
+		sessionStore: store,
+		gateway:      gw,
+		sessionMode:  sessionmode.PlanMode,
+	}
+
+	currentUser := "我刚才问了什么问题？你现在是什么模式？"
+	if err := console.runPreparedACPMainSubmissionContext(t.Context(), preparedPromptSubmission{
+		mainACP: &preparedMainACPSubmission{
+			descriptor: appagents.Descriptor{ID: "copilot", Command: "copilot"},
+		},
+	}, runtime.Submission{
+		Text: currentUser,
+		Mode: runtime.SubmissionConversation,
+	}); err != nil {
+		t.Fatalf("run main ACP turn: %v", err)
+	}
+
+	promptText := flattenMainACPPromptText(t, client.promptParts)
+	if strings.Contains(promptText, "Persistent operating instructions for this workspace session") {
+		t.Fatalf("did not expect system prompt text to be injected into ACP user prompt, got:\n%s", promptText)
+	}
+	if strings.Contains(promptText, "<caelis-session-mode") {
+		t.Fatalf("did not expect session-mode control block in injected ACP context, got:\n%s", promptText)
+	}
+	if strings.Contains(promptText, "[2026-") || strings.Contains(promptText, "[unknown_time]") {
+		t.Fatalf("did not expect timestamp-style transcript lines in injected ACP context, got:\n%s", promptText)
+	}
+	if !strings.Contains(promptText, "## Recent User Requests") || !strings.Contains(promptText, "现在处于什么模式？") {
+		t.Fatalf("expected cleaned user request context, got:\n%s", promptText)
+	}
+	if !strings.Contains(promptText, "Injected working context only. The current live user message follows in a separate prompt block.") {
+		t.Fatalf("expected explicit injected-context separator, got:\n%s", promptText)
+	}
+	last := decodeMainACPTextBlock(t, client.promptParts[len(client.promptParts)-1])
+	if strings.TrimSpace(last) != currentUser {
+		t.Fatalf("expected live user message to stay in its own prompt block, got %q", last)
 	}
 }
 
@@ -539,4 +675,19 @@ func flattenMainACPPromptText(t *testing.T, parts []json.RawMessage) string {
 		}
 	}
 	return strings.Join(texts, "\n")
+}
+
+func decodeMainACPTextBlock(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var header struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		t.Fatalf("unmarshal ACP prompt block: %v", err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(header.Type), "text") {
+		t.Fatalf("expected text block, got %q", header.Type)
+	}
+	return header.Text
 }

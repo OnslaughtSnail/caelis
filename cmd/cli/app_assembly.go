@@ -46,9 +46,8 @@ type buildAgentInput struct {
 }
 
 const (
-	promptRoleMainSession    = "main_session"
-	promptRoleACPMainSession = "acp_main_session"
-	promptRoleACPServer      = "acp_server"
+	promptRoleMainSession = "main_session"
+	promptRoleACPServer   = "acp_server"
 )
 
 func buildAgent(in buildAgentInput) (*llmagent.Agent, error) {
@@ -79,13 +78,15 @@ func buildMainSessionAgent(in buildAgentInput) (agent.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	systemPrompt, err := resolveMainSessionSystemPrompt(in, usesACP)
-	if err != nil {
-		return nil, err
-	}
 	if !usesACP {
+		systemPrompt, err := resolveSystemPrompt(in)
+		if err != nil {
+			return nil, err
+		}
 		return buildResolvedLLMAgent(in, systemPrompt)
 	}
+	// ACP main sessions follow the remote server's prompt contract and do not
+	// receive locally assembled system prompts.
 	return acpagent.New(acpagent.Config{
 		ID:                desc.ID,
 		Name:              desc.Name,
@@ -97,25 +98,7 @@ func buildMainSessionAgent(in buildAgentInput) (agent.Agent, error) {
 		SessionCWD:        in.WorkspaceDir,
 		Runtime:           in.ExecutionRuntime,
 		ClientInfoVersion: in.AppVersion,
-		SystemPrompt:      systemPrompt,
 	})
-}
-
-func resolveMainSessionSystemPrompt(in buildAgentInput, usesACP bool) (string, error) {
-	promptInput := in
-	if usesACP {
-		promptInput.PromptRole = promptRoleACPMainSession
-		promptInput.FrozenPrompt = ""
-	}
-	return resolveSystemPrompt(promptInput)
-}
-
-func mainSessionRequiresLocalModel(in buildAgentInput) (bool, error) {
-	_, usesACP, err := resolveMainSessionAgentDescriptor(in)
-	if err != nil {
-		return false, err
-	}
-	return !usesACP, nil
 }
 
 func resolveMainSessionAgentDescriptor(in buildAgentInput) (appagents.Descriptor, bool, error) {

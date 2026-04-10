@@ -145,34 +145,69 @@ func (r *activeExternalAgentRun) cancel() {
 func (c *cliConsole) currentRunKind() runOccupancy {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
-	if c.activeRunCancel == nil && c.activeRunner == nil {
-		return runOccupancyNone
+	if c.activeRunCancel != nil || c.activeRunner != nil {
+		return c.activeRunKind
 	}
-	return c.activeRunKind
+	if c.activeExternalRunCancel != nil {
+		return runOccupancyExternalAgent
+	}
+	return runOccupancyNone
 }
 
 func (c *cliConsole) setActiveExternalRun(cancel context.CancelFunc) {
 	c.runMu.Lock()
 	defer c.runMu.Unlock()
-	c.activeRunCancel = cancel
-	c.activeRunner = nil
-	if cancel == nil {
-		c.activeRunKind = runOccupancyNone
-		return
+	c.activeExternalRunCancel = cancel
+}
+
+func (c *cliConsole) clearActiveExternalRun() {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	c.activeExternalRunCancel = nil
+}
+
+func (c *cliConsole) hasActiveExternalRun() bool {
+	if c == nil {
+		return false
 	}
-	c.activeRunKind = runOccupancyExternalAgent
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return c.activeExternalRunCancel != nil
 }
 
 func (c *cliConsole) availableCommandNames() []string {
 	names := map[string]struct{}{}
-	for name := range c.commands {
-		if strings.EqualFold(strings.TrimSpace(name), "btw") && c.currentMainAgentUsesACP() {
-			continue
+	if c.currentMainAgentUsesACP() {
+		for name := range c.commands {
+			if !isACPMainCoreLocalCommand(name) {
+				continue
+			}
+			names[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 		}
-		names[name] = struct{}{}
-	}
-	for _, item := range c.dynamicSlashAgents() {
-		names[item.ID] = struct{}{}
+		for _, item := range c.acpMainAvailableCommands() {
+			name := strings.ToLower(strings.TrimSpace(item.Name))
+			if !looksLikeSlashCommandToken(name) || isACPMainCoreLocalCommand(name) {
+				continue
+			}
+			names[name] = struct{}{}
+		}
+		for _, item := range c.dynamicSlashAgents() {
+			name := strings.ToLower(strings.TrimSpace(item.ID))
+			if !looksLikeSlashCommandToken(name) || isACPMainCoreLocalCommand(name) {
+				continue
+			}
+			names[name] = struct{}{}
+		}
+	} else {
+		for name := range c.commands {
+			if strings.EqualFold(strings.TrimSpace(name), "btw") && c.currentMainAgentUsesACP() {
+				continue
+			}
+			names[name] = struct{}{}
+		}
+		for _, item := range c.dynamicSlashAgents() {
+			names[item.ID] = struct{}{}
+		}
 	}
 	out := make([]string, 0, len(names))
 	for name := range names {
@@ -180,6 +215,15 @@ func (c *cliConsole) availableCommandNames() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func isACPMainCoreLocalCommand(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "help", "status", "new", "resume", "agent", "model", "quit", "exit":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *cliConsole) dynamicSlashAgents() []appagents.Descriptor {
@@ -233,6 +277,22 @@ func (c *cliConsole) notifyCommandListChanged() {
 	c.tuiSender.Send(tuievents.SetCommandsMsg{Commands: c.availableCommandNames()})
 }
 
+func (c *cliConsole) isACPMainRemoteSlashCommand(name string) bool {
+	if c == nil || !c.currentMainAgentUsesACP() {
+		return false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || isACPMainCoreLocalCommand(name) {
+		return false
+	}
+	for _, item := range c.acpMainAvailableCommands() {
+		if strings.EqualFold(strings.TrimSpace(item.Name), name) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *cliConsole) runExternalAgentSlashContext(ctx context.Context, desc appagents.Descriptor, prompt string) error {
 	ctx = cliContext(ctx)
 	prompt, err := c.prepareExternalParticipantPrompt(prompt)
@@ -247,6 +307,9 @@ func (c *cliConsole) runExternalAgentSlashContext(ctx context.Context, desc appa
 	case runOccupancyMainSession:
 		return fmt.Errorf("/%s is only available while the main session is idle", strings.TrimSpace(desc.ID))
 	case runOccupancyExternalAgent:
+		return errExternalAgentRunBusy
+	}
+	if c.hasActiveExternalRun() {
 		return errExternalAgentRunBusy
 	}
 	participants, err := c.loadSessionParticipants(ctx)
@@ -289,6 +352,9 @@ func (c *cliConsole) routeExternalParticipantContext(ctx context.Context, alias 
 	case runOccupancyMainSession:
 		return fmt.Errorf("@%s is only available while the main session is idle", strings.TrimSpace(alias))
 	case runOccupancyExternalAgent:
+		return errExternalAgentRunBusy
+	}
+	if c.hasActiveExternalRun() {
 		return errExternalAgentRunBusy
 	}
 	participant, ok, err := c.lookupParticipantByAlias(ctx, alias)
@@ -339,7 +405,7 @@ func (c *cliConsole) startExternalAgentTurnAsyncContext(ctx context.Context, tur
 	c.setActiveExternalRun(turn.stop)
 
 	go func() {
-		defer c.clearActiveRun()
+		defer c.clearActiveExternalRun()
 		err := c.runExternalAgentTurnOnce(runCtx, turn)
 		switch {
 		case err == nil:
@@ -533,7 +599,7 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 		callID = runState.callID
 		runState.mu.RUnlock()
 	}
-	decision := acpclient.ResolveApproveAllOnce(c.sessionMode, agentID, req)
+	decision := c.externalPermissionDecision(agentID, req, runState)
 	if resp, ok := decision.AutoResponse(); ok {
 		return resp, nil
 	}
@@ -589,7 +655,29 @@ func (c *cliConsole) handleExternalPermissionRequest(ctx context.Context, req ac
 		}
 		return acpclient.PermissionSelectedOutcome(selectedID), nil
 	}
+	if requireInteractive {
+		_ = c.updateParticipantStatus(statusCtx, sessionID, "failed")
+		return acpclient.RequestPermissionResponse{}, &toolexec.ApprovalAbortedError{Reason: "no interactive approver available"}
+	}
 	return externalPermissionOutcome(req, true), nil
+}
+
+func (c *cliConsole) externalPermissionDecision(agentID string, req acpclient.RequestPermissionRequest, runState *activeExternalAgentRun) acpclient.PermissionResolution {
+	if c.shouldDeferACPServerPermissionPolicy(agentID, runState) {
+		return acpclient.PermissionResolution{Decision: acpclient.PermissionDecisionAskUser}
+	}
+	return acpclient.ResolveApproveAllOnce(c.currentApprovalMode(), agentID, req)
+}
+
+func (c *cliConsole) shouldDeferACPServerPermissionPolicy(agentID string, runState *activeExternalAgentRun) bool {
+	if c == nil || runState != nil || !c.currentMainAgentUsesACP() {
+		return false
+	}
+	desc, usesACP, err := c.currentMainACPDescriptor()
+	if err != nil || !usesACP {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(desc.ID), strings.TrimSpace(agentID))
 }
 
 func (c *cliConsole) readExternalPermissionChoice(ctx context.Context, req acpclient.RequestPermissionRequest) (string, error) {

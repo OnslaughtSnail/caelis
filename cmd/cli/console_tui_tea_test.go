@@ -8,12 +8,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
+	"github.com/OnslaughtSnail/caelis/kernel/session/inmemory"
 )
 
 func TestBubbleTeaHardQuitFilterInterceptsQuitMsg(t *testing.T) {
@@ -194,6 +198,127 @@ func TestCompleteModelCommandCandidates_UsesSubcommands(t *testing.T) {
 	}
 }
 
+func TestCompleteModelCommandCandidates_ACPMainOnlyUsesUse(t *testing.T) {
+	c := &cliConsole{
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+	}
+	got := c.completeModelCommandCandidates("", 10)
+	if len(got) != 1 || got[0].Value != "use" {
+		t.Fatalf("unexpected ACP main model action candidates: %+v", got)
+	}
+}
+
+func TestStartTUIACPBootstrap_ShowsProgressBeforeACPConnectCompletes(t *testing.T) {
+	store := inmemory.New()
+	client := &stubMainACPClient{
+		modes: &acpclient.SessionModeState{
+			CurrentModeID: "default",
+			AvailableModes: []acpclient.SessionMode{
+				{ID: "default", Name: "Default"},
+			},
+		},
+		configOptions: []acpclient.SessionConfigOption{
+			{
+				ID:           acpConfigModel,
+				Category:     "model",
+				CurrentValue: "copilot/gpt-5",
+			},
+			{
+				ID:           acpConfigReasoningEffort,
+				Category:     "thought_level",
+				CurrentValue: "high",
+				Options: []acpclient.SessionConfigSelectOption{
+					{Value: "high", Name: "High"},
+				},
+			},
+		},
+	}
+	blockConnect := make(chan struct{})
+	prevHook := startMainACPClientHook
+	startMainACPClientHook = func(context.Context, acpclient.Config) (mainACPClient, error) {
+		<-blockConnect
+		return client, nil
+	}
+	defer func() { startMainACPClientHook = prevHook }()
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:      context.Background(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "sess-bootstrap",
+		sessionStore: store,
+		tuiSender:    sender,
+		workspace:    workspaceContext{CWD: "/workspace"},
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	console.startTUIACPBootstrap(ctx, sender)
+
+	waitForTest(t, func() bool {
+		var sawRunning bool
+		var sawStatus bool
+		var sawHint bool
+		var sawLog bool
+		for _, raw := range sender.Snapshot() {
+			switch msg := raw.(type) {
+			case tuievents.SetRunningMsg:
+				sawRunning = sawRunning || msg.Running
+			case tuievents.SetStatusMsg:
+				sawStatus = sawStatus || strings.Contains(msg.Model, "connecting copilot ACP")
+			case tuievents.SetHintMsg:
+				sawHint = sawHint || strings.Contains(msg.Hint, "connecting to copilot ACP server")
+			case tuievents.LogChunkMsg:
+				sawLog = sawLog || strings.Contains(msg.Chunk, "connecting to copilot ACP server")
+			}
+		}
+		return sawRunning && sawStatus && sawHint && sawLog
+	})
+
+	close(blockConnect)
+
+	waitForTest(t, func() bool {
+		var sawStopped bool
+		var sawConnectedLog bool
+		var sawFinalStatus bool
+		for _, raw := range sender.Snapshot() {
+			switch msg := raw.(type) {
+			case tuievents.SetRunningMsg:
+				sawStopped = sawStopped || !msg.Running
+			case tuievents.LogChunkMsg:
+				sawConnectedLog = sawConnectedLog || strings.Contains(msg.Chunk, "connected to copilot ACP server")
+			case tuievents.SetStatusMsg:
+				sawFinalStatus = sawFinalStatus || msg.Model == "copilot/gpt-5 [high]"
+			}
+		}
+		return sawStopped && sawConnectedLog && sawFinalStatus
+	})
+}
+
+func waitForTest(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
+}
+
 func TestCompleteSlashArgCandidates_ModelUseReturnsAliasCandidates(t *testing.T) {
 	factory := modelproviders.NewFactory()
 	cfg := modelproviders.Config{
@@ -354,6 +479,142 @@ func TestCompleteModelReasoningCandidates_EffortModel(t *testing.T) {
 	}
 	if got[0].Value != "low" || got[3].Value != "xhigh" {
 		t.Fatalf("unexpected reasoning candidates: %+v", got)
+	}
+}
+
+func TestCompleteModelReasoningCandidates_ACPMainDoesNotUseLocalCatalogFallback(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:           "openai/o3",
+		Provider:        "openai",
+		API:             modelproviders.APIOpenAI,
+		Model:           "o3",
+		ReasoningLevels: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
+		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+	}
+	modelcatalogApplyConfigDefaults(&cfg)
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+	c := &cliConsole{
+		modelFactory: factory,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		persistentMainACP: &persistentMainACPState{
+			agentID: "copilot",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "openai/gpt-5-mini",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "openai/gpt-5-mini", Name: "GPT-5 Mini"},
+						{Value: "openai/o3", Name: "O3"},
+					},
+				},
+			},
+		},
+	}
+	got := c.completeModelReasoningCandidates("openai/o3", "", 10)
+	if len(got) != 0 {
+		t.Fatalf("expected no ACP reasoning candidates without server profile cache, got %+v", got)
+	}
+}
+
+func TestCompleteModelReasoningCandidates_ACPMainDoesNotUseBareAliasFactoryFallback(t *testing.T) {
+	factory := modelproviders.NewFactory()
+	cfg := modelproviders.Config{
+		Alias:           "openai/o3",
+		Provider:        "openai",
+		API:             modelproviders.APIOpenAI,
+		Model:           "o3",
+		ReasoningLevels: []string{"none", "minimal", "low", "medium", "high", "xhigh"},
+		Auth:            modelproviders.AuthConfig{Type: modelproviders.AuthAPIKey},
+	}
+	modelcatalogApplyConfigDefaults(&cfg)
+	if err := factory.Register(cfg); err != nil {
+		t.Fatalf("register config: %v", err)
+	}
+	c := &cliConsole{
+		modelFactory: factory,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		persistentMainACP: &persistentMainACPState{
+			agentID: "copilot",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "gpt-4.1",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "gpt-4.1", Name: "GPT-4.1"},
+						{Value: "o3", Name: "O3"},
+					},
+				},
+			},
+		},
+	}
+	got := c.completeModelReasoningCandidates("o3", "", 10)
+	if len(got) != 0 {
+		t.Fatalf("expected no ACP reasoning candidates without server profile cache, got %+v", got)
+	}
+}
+
+func TestCompleteModelReasoningCandidates_ACPMainUsesServerProfileCache(t *testing.T) {
+	c := &cliConsole{
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		persistentMainACP: &persistentMainACPState{
+			agentID: "copilot",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "claude-sonnet-4.6",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "claude-sonnet-4.6", Name: "Claude Sonnet 4.6"},
+						{Value: "gpt-5-mini", Name: "GPT-5 mini"},
+						{Value: "gpt-4.1", Name: "GPT-4.1"},
+					},
+				},
+			},
+			modelProfiles: []acpMainModelProfile{
+				{
+					ID:   "gpt-5-mini",
+					Name: "GPT-5 mini",
+					Reasoning: []tuiapp.SlashArgCandidate{
+						{Value: "low", Display: "Low"},
+						{Value: "medium", Display: "Medium"},
+						{Value: "high", Display: "High"},
+					},
+				},
+				{
+					ID:   "gpt-4.1",
+					Name: "GPT-4.1",
+				},
+			},
+		},
+	}
+
+	got := c.completeModelReasoningCandidates("gpt-5-mini", "", 10)
+	if len(got) != 3 || got[0].Value != "low" || got[2].Value != "high" {
+		t.Fatalf("unexpected server-cached reasoning candidates: %+v", got)
+	}
+	got = c.completeModelReasoningCandidates("gpt-4.1", "", 10)
+	if len(got) != 0 {
+		t.Fatalf("expected no reasoning candidates for non-reasoning ACP model, got %+v", got)
 	}
 }
 
@@ -631,6 +892,88 @@ func TestReadTUIStatus_HidesContextUsageForACPMainAgent(t *testing.T) {
 	_, contextText := c.readTUIStatus()
 	if contextText != "0" {
 		t.Fatalf("expected ACP main-agent context usage to stay hidden, got %q", contextText)
+	}
+}
+
+func TestReadTUIStatus_UsesACPMainMirrorModelAndReasoning(t *testing.T) {
+	store := &appConfigStore{data: appConfig{
+		MainAgent: "copilot",
+		Agents: map[string]agentRecord{
+			"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+		},
+	}}
+	c := &cliConsole{
+		modelAlias:  "deepseek/deepseek-chat",
+		configStore: store,
+		persistentMainACP: &persistentMainACPState{
+			agentID:         "copilot",
+			remoteSessionID: "remote-1",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigModel,
+					Category:     "model",
+					CurrentValue: "openai/gpt-5",
+				},
+				{
+					ID:           acpConfigReasoningEffort,
+					Category:     "thought_level",
+					CurrentValue: "on",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "on", Name: "On"},
+					},
+				},
+			},
+		},
+	}
+	modelText, contextText := c.readTUIStatus()
+	if modelText != "openai/gpt-5 [reasoning on]" {
+		t.Fatalf("unexpected ACP model text %q", modelText)
+	}
+	if contextText != "0" {
+		t.Fatalf("expected ACP context hidden, got %q", contextText)
+	}
+}
+
+func TestCompleteModelCandidates_UsesACPMainOptions(t *testing.T) {
+	store := &appConfigStore{data: appConfig{
+		MainAgent: "copilot",
+		Agents: map[string]agentRecord{
+			"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+		},
+	}}
+	c := &cliConsole{
+		configStore: store,
+		persistentMainACP: &persistentMainACPState{
+			agentID:         "copilot",
+			remoteSessionID: "remote-1",
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:       acpConfigModel,
+					Category: "model",
+					Options: []acpclient.SessionConfigSelectOption{
+						{Value: "openai/gpt-5", Name: "GPT-5"},
+						{Value: "openai/gpt-5-mini", Name: "GPT-5 Mini"},
+					},
+				},
+			},
+		},
+	}
+	got := c.completeModelCandidates("mini", 10)
+	if len(got) != 1 || got[0].Value != "openai/gpt-5-mini" {
+		t.Fatalf("unexpected ACP model candidates: %+v", got)
+	}
+}
+
+func TestCompleteAgentActionCandidates_PrefersUseFirst(t *testing.T) {
+	got := completeAgentActionCandidates("", 10)
+	want := []string{"use", "add", "list", "rm"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected action count: %+v", got)
+	}
+	for i, one := range want {
+		if got[i].Value != one {
+			t.Fatalf("unexpected action order at %d: got=%q want=%q", i, got[i].Value, one)
+		}
 	}
 }
 

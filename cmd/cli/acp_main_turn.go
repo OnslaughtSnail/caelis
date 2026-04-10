@@ -32,6 +32,8 @@ type mainACPClient interface {
 	Initialize(context.Context) (acpclient.InitializeResponse, error)
 	NewSession(context.Context, string, map[string]any) (acpclient.NewSessionResponse, error)
 	LoadSession(context.Context, string, string, map[string]any) (acpclient.LoadSessionResponse, error)
+	SetMode(context.Context, string, string) error
+	SetConfigOption(context.Context, string, string, string) (acpclient.SetSessionConfigOptionResponse, error)
 	PromptParts(context.Context, string, []json.RawMessage, map[string]any) (acpclient.PromptResponse, error)
 	Cancel(context.Context, string) error
 	StderrTail(int) string
@@ -52,7 +54,13 @@ type persistentMainACPState struct {
 	agentID         string
 	remoteSessionID string
 	capabilities    acpclient.AgentCapabilities
+	modes           *acpclient.SessionModeState
+	configOptions   []acpclient.SessionConfigOption
+	availableCmds   []acpMainAvailableCommand
+	modelProfiles   []acpMainModelProfile
+	bootstrapState  mainACPBootstrapState
 	closed          bool
+	baseOnUpdate    func(acpclient.UpdateEnvelope)
 	// onUpdate is the mutable per-turn callback; the client config delegates
 	// to this field so it can change between turns without restarting.
 	onUpdate func(acpclient.UpdateEnvelope)
@@ -63,8 +71,12 @@ func (s *persistentMainACPState) dispatchUpdate(env acpclient.UpdateEnvelope) {
 		return
 	}
 	s.mu.Lock()
+	baseFn := s.baseOnUpdate
 	fn := s.onUpdate
 	s.mu.Unlock()
+	if baseFn != nil {
+		baseFn(env)
+	}
 	if fn != nil {
 		fn(env)
 	}
@@ -111,6 +123,10 @@ func (s *persistentMainACPState) close() {
 	}
 	s.closed = true
 	s.client = nil
+	s.modes = nil
+	s.configOptions = nil
+	s.modelProfiles = nil
+	s.bootstrapState = mainACPBootstrapNone
 }
 
 type activeMainACPClient struct {
@@ -465,7 +481,7 @@ func (c *cliConsole) runPreparedACPMainSubmissionContext(ctx context.Context, pr
 	// - persistentMainACP has a live session → reuse directly (no LoadSession)
 	// - persistentMainACP has no session → check stored session for possible
 	//   reconnect (LoadSession only), else NewSession
-	remoteSessionID, freshSession, reconnected, err := c.ensureMainACPRemoteSession(stateCtx, client, agentID, sessionMeta, freshClient)
+	remoteSessionID, freshSession, reconnected, err := c.ensureMainACPRemoteSession(stateCtx, client, agentID, sessionMeta, freshClient, false)
 	if err != nil {
 		c.closePersistentMainACP()
 		return mainACPClientError(err, client)
@@ -527,9 +543,6 @@ func (c *cliConsole) runPreparedACPMainSubmissionContext(ctx context.Context, pr
 
 	if c.persistentMainACP != nil && !c.persistentMainACP.capabilities.Prompt.Image {
 		prompt = filterMainACPImageBlocks(prompt)
-	}
-	if systemPrompt := strings.TrimSpace(prepared.mainACP.systemPrompt); freshSession && systemPrompt != "" {
-		prompt = prependMainACPTextBlock(prompt, mainACPSessionPrelude(systemPrompt))
 	}
 	if len(prompt) == 0 {
 		return fmt.Errorf("main ACP: prompt is empty")
@@ -593,6 +606,9 @@ func (c *cliConsole) forwardMainACPClientUpdate(ctx context.Context, tracker *ma
 	if c == nil || tracker == nil || env.Update == nil {
 		return
 	}
+	if c.updateMainACPStateFromUpdate(env) {
+		c.syncTUIStatus()
+	}
 	for _, item := range tracker.Project(env) {
 		c.emitMainACPProjectionMsg(ctx, projectionToACPMsg(item, tuievents.ACPProjectionMain, c.sessionID, ""))
 	}
@@ -609,20 +625,28 @@ func (c *cliConsole) mainACPSessionMeta(ctx context.Context) (map[string]any, er
 	return coreacpmeta.SessionMetaFromState(values), nil
 }
 
-func (c *cliConsole) ensureMainACPRemoteSession(ctx context.Context, client mainACPClient, agentID string, sessionMeta map[string]any, freshClient bool) (string, bool, bool, error) {
+func (c *cliConsole) ensureMainACPRemoteSession(ctx context.Context, client mainACPClient, agentID string, sessionMeta map[string]any, freshClient bool, promptless bool) (string, bool, bool, error) {
 	// If persistent state already has a remote session for this agent,
 	// reuse it directly — no LoadSession needed for continuous multi-turn.
 	if c.persistentMainACP != nil && !freshClient {
-		c.persistentMainACP.mu.Lock()
-		existing := c.persistentMainACP.remoteSessionID
-		c.persistentMainACP.mu.Unlock()
+		existing, _, _, _ := c.persistentMainACP.snapshotSessionState()
 		if existing != "" {
-			return existing, false, false, nil
+			if promptless {
+				return existing, false, false, nil
+			}
+			switch c.persistentMainACP.consumeBootstrapState(existing) {
+			case mainACPBootstrapFresh:
+				return existing, true, false, nil
+			case mainACPBootstrapReconnected:
+				return existing, false, true, nil
+			default:
+				return existing, false, false, nil
+			}
 		}
 	}
 
 	// Check stored session for reconnect after app restart / fresh client start.
-	stored, err := coreacpmeta.ControllerSessionFromStore(ctx, c.sessionStore, c.currentSessionRef())
+	storedSessionID, hasStoredSession, err := c.currentSessionACPRemoteSession(ctx, agentID)
 	if err != nil {
 		return "", false, false, err
 	}
@@ -630,15 +654,17 @@ func (c *cliConsole) ensureMainACPRemoteSession(ctx context.Context, client main
 
 	// Attempt LoadSession only when we have a stored session for the same agent
 	// AND we just started a fresh client (reconnect scenario).
-	if freshClient && stored.AgentID == agentID && strings.TrimSpace(stored.SessionID) != "" {
-		if _, err := client.LoadSession(ctx, stored.SessionID, sessionCWD, sessionMeta); err == nil {
-			remoteSessionID := strings.TrimSpace(stored.SessionID)
+	if freshClient && hasStoredSession {
+		if resp, err := client.LoadSession(ctx, storedSessionID, sessionCWD, sessionMeta); err == nil {
+			remoteSessionID := strings.TrimSpace(storedSessionID)
 			if c.persistentMainACP != nil {
-				c.persistentMainACP.mu.Lock()
-				c.persistentMainACP.remoteSessionID = remoteSessionID
-				c.persistentMainACP.mu.Unlock()
+				bootstrap := mainACPBootstrapNone
+				if promptless {
+					bootstrap = mainACPBootstrapReconnected
+				}
+				c.persistentMainACP.storeSessionState(remoteSessionID, resp.Modes, resp.ConfigOptions, bootstrap)
 			}
-			return remoteSessionID, false, true, nil // reconnected=true
+			return remoteSessionID, false, !promptless, nil
 		}
 		// LoadSession failed — fall through to NewSession.
 	}
@@ -652,20 +678,17 @@ func (c *cliConsole) ensureMainACPRemoteSession(ctx context.Context, client main
 	if sessionID == "" {
 		return "", false, false, fmt.Errorf("main ACP: remote session id is empty")
 	}
-	if err := coreacpmeta.UpdateControllerSession(ctx, c.sessionStore, c.currentSessionRef(), func(_ coreacpmeta.ControllerSession) coreacpmeta.ControllerSession {
-		return coreacpmeta.ControllerSession{
-			AgentID:   agentID,
-			SessionID: sessionID,
-		}
-	}); err != nil {
+	if err := c.persistMainACPRemoteSession(ctx, agentID, sessionID); err != nil {
 		return "", false, false, err
 	}
 	if c.persistentMainACP != nil {
-		c.persistentMainACP.mu.Lock()
-		c.persistentMainACP.remoteSessionID = sessionID
-		c.persistentMainACP.mu.Unlock()
+		bootstrap := mainACPBootstrapNone
+		if promptless {
+			bootstrap = mainACPBootstrapFresh
+		}
+		c.persistentMainACP.storeSessionState(sessionID, resp.Modes, resp.ConfigOptions, bootstrap)
 	}
-	return sessionID, true, false, nil
+	return sessionID, !promptless, false, nil
 }
 
 // ensurePersistentMainACPClient returns the persistent ACP client, starting a
@@ -680,6 +703,14 @@ func (c *cliConsole) ensurePersistentMainACPClient(ctx context.Context, desc app
 
 	state := &persistentMainACPState{
 		agentID: agentID,
+		baseOnUpdate: func(env acpclient.UpdateEnvelope) {
+			if c.updateMainACPStateFromUpdate(env) {
+				c.syncTUIStatus()
+				if _, ok := env.Update.(acpclient.AvailableCommandsUpdate); ok {
+					c.notifyCommandListChanged()
+				}
+			}
+		},
 	}
 	client, err := startMainACPClientHook(ctx, acpclient.Config{
 		Command:    strings.TrimSpace(desc.Command),
@@ -826,10 +857,6 @@ func filterMainACPImageBlocks(prompt []json.RawMessage) []json.RawMessage {
 		out = append(out, block)
 	}
 	return out
-}
-
-func mainACPSessionPrelude(systemPrompt string) string {
-	return "Persistent operating instructions for this workspace session:\n\n" + strings.TrimSpace(systemPrompt)
 }
 
 func mainACPClientError(err error, client mainACPClient) error {

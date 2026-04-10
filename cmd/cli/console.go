@@ -92,14 +92,15 @@ type cliConsole struct {
 	approver *terminalApprover
 	commands map[string]slashCommand
 
-	runMu           sync.Mutex
-	tuiForwardMu    sync.Mutex
-	activeRunCancel context.CancelFunc
-	activeRunner    sessionsvc.TurnHandle
-	activeRunKind   runOccupancy
-	interruptMu     sync.Mutex
-	lastInterruptAt time.Time
-	outMu           sync.Mutex
+	runMu                   sync.Mutex
+	tuiForwardMu            sync.Mutex
+	activeRunCancel         context.CancelFunc
+	activeRunner            sessionsvc.TurnHandle
+	activeRunKind           runOccupancy
+	activeExternalRunCancel context.CancelFunc
+	interruptMu             sync.Mutex
+	lastInterruptAt         time.Time
+	outMu                   sync.Mutex
 
 	imageCache          *image.Cache
 	pendingAttachments  []model.ContentPart
@@ -120,6 +121,17 @@ type cliConsole struct {
 	sessionService      *sessionsvc.Service
 	gateway             *appgateway.Gateway
 	newACPAdapter       acpext.AdapterFactory
+}
+
+func sendTUIMsg(sender interface{ Send(msg any) }, msg any) {
+	if sender == nil {
+		return
+	}
+	if _, ok := sender.(*teaProgramSender); ok {
+		go sender.Send(msg)
+		return
+	}
+	sender.Send(msg)
 }
 
 type replayContextKey string
@@ -273,7 +285,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		ui:                    baseUI,
 	}
 	console.approver = newTerminalApprover(console.prompter, out, baseUI)
-	console.approver.modeResolver = func() string { return console.sessionMode }
+	console.approver.modeResolver = func() string { return console.currentApprovalMode() }
 	console.commands = map[string]slashCommand{
 		"help":    {Usage: "/help", Description: "Show available commands", Handle: handleHelp},
 		"btw":     {Usage: "/btw <question>", Description: "Ask an ephemeral side question without modifying history", Handle: handleBTW},
@@ -288,7 +300,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type (auto/bwrap/landlock experimental)",
 			Handle:      handleSandbox,
 		},
-		"agent":   {Usage: "/agent list | use <self|name> | add <builtin> | rm <name>", Description: "Manage configured ACP agents and switch the main controller", Handle: handleAgent},
+		"agent":   {Usage: "/agent use <self|name> | add <builtin> | list | rm <name>", Description: "Manage configured ACP agents and switch the main controller", Handle: handleAgent},
 		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
@@ -385,6 +397,21 @@ func (c *cliConsole) handleSlashContext(ctx context.Context, line string) (bool,
 		return false, nil
 	}
 	cmd := strings.ToLower(parts[0])
+	if c.currentMainAgentUsesACP() {
+		if handler, ok := c.commands[cmd]; ok && isACPMainCoreLocalCommand(cmd) {
+			return handler.Handle(c, parts[1:])
+		}
+		if desc, ok := c.dynamicSlashAgentDescriptor(cmd); ok {
+			return false, c.runExternalAgentSlashContext(ctx, desc, strings.TrimSpace(strings.Join(parts[1:], " ")))
+		}
+		if c.isACPMainRemoteSlashCommand(cmd) {
+			return false, c.runPromptWithAttachmentsContext(ctx, strings.TrimSpace(line), nil)
+		}
+		if suggestion := closestCommand(cmd, c.availableCommandNames()); suggestion != "" {
+			return false, fmt.Errorf("unknown command %q -- did you mean /%s?", cmd, suggestion)
+		}
+		return false, fmt.Errorf("unknown command %q, use /help", cmd)
+	}
 	handler, ok := c.commands[cmd]
 	if !ok {
 		if desc, ok := c.dynamicSlashAgentDescriptor(cmd); ok {
@@ -441,7 +468,7 @@ func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp
 }
 
 func (c *cliConsole) runPromptWithAttachmentsContext(ctx context.Context, input string, attachments []tuiapp.Attachment) error {
-	if c.currentRunKind() == runOccupancyExternalAgent {
+	if c.hasActiveExternalRun() {
 		return errExternalAgentRunBusy
 	}
 	if c.currentRunKind() == runOccupancyMainSession && c.getActiveRunner() == nil {
@@ -473,8 +500,7 @@ type preparedPromptSubmission struct {
 }
 
 type preparedMainACPSubmission struct {
-	descriptor   appagents.Descriptor
-	systemPrompt string
+	descriptor appagents.Descriptor
 }
 
 func (c *cliConsole) sessionBoundary() (*sessionsvc.Service, error) {
@@ -575,11 +601,11 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 		ExecutionRuntime: c.executionRuntimeForSession(),
 		AppVersion:       c.version,
 	}
-	needsLocalModel, err := mainSessionRequiresLocalModel(agentInput)
+	desc, usesACP, err := resolveMainSessionAgentDescriptor(agentInput)
 	if err != nil {
 		return preparedPromptSubmission{}, err
 	}
-	if needsLocalModel && c.llm == nil {
+	if !usesACP && c.llm == nil {
 		return preparedPromptSubmission{}, fmt.Errorf("no model configured, use /connect to add provider and select model")
 	}
 	resolvedInput := input
@@ -600,8 +626,6 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 			}
 		}
 	}
-	resolvedInput = c.injectedPrompt(resolvedInput)
-	controlInput := strings.TrimSpace(c.injectedPrompt(""))
 	// Load image content parts from resolved file references.
 	var resolvedImageParts []model.ContentPart
 	if c.inputRefs != nil && len(resolvedPaths) > 0 {
@@ -640,6 +664,26 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	}
 	contentParts = append(contentParts, resolvedImageParts...)
 	runInput := resolvedInput
+	controlInput := ""
+	var ag agent.Agent
+	var mainACP *preparedMainACPSubmission
+	if usesACP {
+		mainACP = &preparedMainACPSubmission{
+			descriptor: desc,
+		}
+	} else {
+		systemPrompt, err := c.ensureSessionPrompt(c.baseCtx)
+		if err != nil {
+			return preparedPromptSubmission{}, err
+		}
+		agentInput.FrozenPrompt = systemPrompt
+		runInput = c.injectedPrompt(runInput)
+		controlInput = strings.TrimSpace(c.injectedPrompt(""))
+		ag, err = buildResolvedLLMAgent(agentInput, systemPrompt)
+		if err != nil {
+			return preparedPromptSubmission{}, err
+		}
+	}
 	if len(contentParts) > 0 {
 		if controlInput != "" {
 			contentParts = append([]model.ContentPart{{
@@ -651,32 +695,6 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	}
 	if c.tuiSender != nil && consumedPending > 0 {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
-	}
-	systemPrompt, err := c.ensureSessionPrompt(c.baseCtx)
-	if err != nil {
-		return preparedPromptSubmission{}, err
-	}
-	agentInput.FrozenPrompt = systemPrompt
-	desc, usesACP, err := resolveMainSessionAgentDescriptor(agentInput)
-	if err != nil {
-		return preparedPromptSubmission{}, err
-	}
-	systemPrompt, err = resolveMainSessionSystemPrompt(agentInput, usesACP)
-	if err != nil {
-		return preparedPromptSubmission{}, err
-	}
-	var ag agent.Agent
-	var mainACP *preparedMainACPSubmission
-	if usesACP {
-		mainACP = &preparedMainACPSubmission{
-			descriptor:   desc,
-			systemPrompt: systemPrompt,
-		}
-	} else {
-		ag, err = buildResolvedLLMAgent(agentInput, systemPrompt)
-		if err != nil {
-			return preparedPromptSubmission{}, err
-		}
 	}
 	return preparedPromptSubmission{
 		agent:        ag,
@@ -791,7 +809,7 @@ func (c *cliConsole) persistSessionModelAlias(ctx context.Context) error {
 	if c == nil || c.sessionStore == nil {
 		return nil
 	}
-	alias := strings.TrimSpace(c.modelAlias)
+	alias := c.currentSessionModelAlias()
 	if alias == "" || strings.TrimSpace(c.appName) == "" || strings.TrimSpace(c.userID) == "" || strings.TrimSpace(c.sessionID) == "" {
 		return nil
 	}
@@ -813,7 +831,7 @@ func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) er
 }
 
 func (c *cliConsole) runBTWContext(ctx context.Context, question string, attachments []tuiapp.Attachment) error {
-	if c.currentRunKind() == runOccupancyExternalAgent {
+	if c.hasActiveExternalRun() {
 		return errExternalAgentRunBusy
 	}
 	if c.currentMainAgentUsesACP() {
@@ -1333,7 +1351,7 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 				delete(pendingToolCalls, resp.ID)
 			}
 		}
-		emittedTaskStream := c.emitTaskStreamFromToolResult(resp, callArgs)
+		emittedTaskStream, taskStreamHasOutput := c.emitTaskStreamFromToolResult(resp, callArgs)
 		toolName := strings.TrimSpace(resp.Name)
 		if strings.EqualFold(toolName, tool.SpawnToolName) {
 			if update, ok := subagentDomainUpdateFromSpawnToolResponse(c.sessionID, resp); ok {
@@ -1348,7 +1366,7 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 			}
 		}
 		if strings.EqualFold(strings.TrimSpace(resp.Name), toolshell.BashToolName) {
-			if !emittedTaskStream {
+			if !emittedTaskStream || !taskStreamHasOutput {
 				c.emitReplayBashOutput(resp)
 			}
 			state := "completed"
@@ -1514,17 +1532,18 @@ func formatSessionNoticeChunk(notice session.Notice) string {
 	}
 }
 
-func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, callArgs map[string]any) bool {
+func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, callArgs map[string]any) (bool, bool) {
 	if c == nil || c.tuiSender == nil || resp == nil {
-		return false
+		return false, false
 	}
 	events := taskstream.EventsFromResult(resp.Result)
 	if len(events) == 0 {
 		if msg, ok := syntheticTaskStreamMsgFromToolResult(resp, callArgs); ok {
 			c.tuiSender.Send(msg)
 		}
-		return false
+		return false, false
 	}
+	hasOutput := false
 	for _, ev := range events {
 		label := ev.Label
 		if label == "" {
@@ -1536,6 +1555,9 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, call
 		}
 		if shouldRebindReplayBashCallID(resp, ev, callID) {
 			callID = resp.ID
+		}
+		if strings.TrimSpace(ev.Stream) != "" && strings.TrimSpace(ev.Chunk) != "" {
+			hasOutput = true
 		}
 		msg := tuievents.TaskStreamMsg{
 			Label:  label,
@@ -1552,7 +1574,7 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, call
 		}
 		c.tuiSender.Send(msg)
 	}
-	return true
+	return true, hasOutput
 }
 
 func shouldRebindReplayBashCallID(resp *model.ToolResponse, ev taskstream.Event, callID string) bool {
@@ -1718,6 +1740,9 @@ func (c *cliConsole) getActiveRunner() sessionsvc.TurnHandle {
 func (c *cliConsole) cancelActiveRun() bool {
 	c.runMu.Lock()
 	cancel := c.activeRunCancel
+	if cancel == nil {
+		cancel = c.activeExternalRunCancel
+	}
 	c.runMu.Unlock()
 	if cancel == nil {
 		return false
@@ -1752,6 +1777,39 @@ func (c *cliConsole) registerInterruptAndShouldExit() bool {
 
 func handleHelp(c *cliConsole, args []string) (bool, error) {
 	_ = args
+	if c.currentMainAgentUsesACP() {
+		helpSection := func(title string, names []string) {
+			c.ui.Section(title)
+			for _, name := range names {
+				cmd, ok := c.commands[name]
+				if !ok {
+					continue
+				}
+				if name == "model" {
+					c.ui.Plain("  %-24s %s\n", "/model use <alias> [reasoning]", "Switch ACP main model or reasoning")
+					continue
+				}
+				c.ui.Plain("  %-24s %s\n", cmd.Usage, cmd.Description)
+			}
+		}
+		helpSection("Core", []string{"new", "resume", "status", "agent", "model", "help", "exit", "quit"})
+		if items := c.acpMainAvailableCommands(); len(items) > 0 {
+			c.ui.Section("ACP Commands")
+			for _, item := range items {
+				name := strings.TrimSpace(item.Name)
+				if name == "" || isACPMainCoreLocalCommand(name) {
+					continue
+				}
+				usage := "/" + name
+				if hint := strings.TrimSpace(item.Hint); hint != "" {
+					usage = hint
+				}
+				desc := strings.TrimSpace(item.Description)
+				c.ui.Plain("  %-24s %s\n", usage, desc)
+			}
+		}
+		return false, nil
+	}
 	helpSection := func(title string, names []string) {
 		c.ui.Section(title)
 		for _, name := range names {
@@ -1918,7 +1976,7 @@ func (c *cliConsole) syncTUIStatus() {
 		return
 	}
 	modelText, contextText := c.readTUIStatus()
-	c.tuiSender.Send(tuievents.SetStatusMsg{
+	sendTUIMsg(c.tuiSender, tuievents.SetStatusMsg{
 		Workspace: c.readWorkspaceStatusLine(),
 		Model:     modelText,
 		Context:   contextText,
@@ -1927,63 +1985,36 @@ func (c *cliConsole) syncTUIStatus() {
 
 func handleStatus(c *cliConsole, args []string) (bool, error) {
 	_ = args
+	if c.currentMainAgentUsesACP() {
+		return handleACPMainStatus(c)
+	}
+	return handleLocalStatus(c)
+}
+
+func handleLocalStatus(c *cliConsole) (bool, error) {
 	c.ui.Section("Model")
-	c.ui.KeyValue("model", c.modelAlias)
+	c.ui.KeyValue("model", c.currentSessionModelAlias())
 	c.ui.KeyValue("stream", fmt.Sprintf("%v", c.streamModel))
 	effortLabel := strings.TrimSpace(c.reasoningEffort)
 	if effortLabel == "" {
 		effortLabel = "auto"
 	}
 	c.ui.KeyValue("reasoning", fmt.Sprintf("%s (budget=%d)", effortLabel, c.thinkingBudget))
-	c.ui.KeyValue("effort", c.reasoningEffort)
-	c.ui.KeyValue("reasoning", fmt.Sprintf("%v", c.showReasoning))
+	c.ui.KeyValue("show_reasoning", fmt.Sprintf("%v", c.showReasoning))
 
 	c.ui.Section("Session")
 	c.ui.KeyValue("workspace", c.workspace.CWD)
 	c.ui.KeyValue("session", idutil.ShortDisplay(c.sessionID))
-	c.ui.KeyValue("mode", sessionmode.Normalize(c.sessionMode))
+	c.ui.KeyValue("mode", c.sessionModeLabel())
 
-	c.ui.Section("Security")
-	mode := c.execRuntime.PermissionMode()
-	switch mode {
-	case toolexec.PermissionModeFullControl:
-		c.ui.KeyValue("permission", fmt.Sprintf("%s  route=host", mode))
-	default:
-		if c.execRuntime.FallbackToHost() {
-			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=host (fallback, reason=%s)",
-				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType()), c.execRuntime.FallbackReason()))
-		} else {
-			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=sandbox",
-				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType())))
-		}
-	}
-	c.ui.KeyValue("sandbox_policy", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
-
-	if c.rt != nil {
-		runState, err := c.rt.RunState(c.baseCtx, runtime.RunStateRequest{
-			AppName:   c.appName,
-			UserID:    c.userID,
-			SessionID: c.sessionID,
-		})
-		if err != nil {
-			return false, err
-		}
-		c.ui.Section("Runtime")
-		if runState.HasLifecycle {
-			c.ui.KeyValue("run_state", fmt.Sprintf("%s  phase=%s", runState.Status, stringOrDash(runState.Phase)))
-			if strings.TrimSpace(runState.Error) != "" {
-				c.ui.KeyValue("error", truncateInline(runState.Error, 160))
-			}
-			if strings.TrimSpace(string(runState.ErrorCode)) != "" {
-				c.ui.KeyValue("error_code", string(runState.ErrorCode))
-			}
-		} else {
-			c.ui.KeyValue("run_state", "none")
-		}
+	renderStatusSecurity(c)
+	if err := renderStatusRuntime(c); err != nil {
+		return false, err
 	}
 
 	if c.llm == nil {
-		c.ui.KeyValue("context", "not available (no model configured)")
+		c.ui.Section("Context")
+		c.ui.KeyValue("usage", "not available (no model configured)")
 		return false, nil
 	}
 	usage, err := c.rt.ContextUsage(c.baseCtx, runtime.UsageRequest{
@@ -1999,6 +2030,93 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 	c.ui.Section("Context")
 	c.ui.KeyValue("usage", fmt.Sprintf("%s  input_budget=%d  events=%d", formatUsage(usage), usage.InputBudget, usage.EventCount))
 	return false, nil
+}
+
+func handleACPMainStatus(c *cliConsole) (bool, error) {
+	desc, _, err := c.currentMainACPDescriptor()
+	if err != nil {
+		return false, err
+	}
+	remoteSessionID, remoteOK, err := c.currentSessionACPRemoteSession(c.baseCtx, desc.ID)
+	if err != nil {
+		return false, err
+	}
+
+	c.ui.Section("ACP Main")
+	c.ui.KeyValue("main_agent", firstNonEmptyString(strings.TrimSpace(desc.ID), currentMainAgentName(c)))
+	c.ui.KeyValue("model", c.acpMainStatusModelAlias())
+	reasoning := c.acpMainStatusReasoningLabel()
+	if reasoning == "" {
+		reasoning = "auto/off"
+	}
+	c.ui.KeyValue("reasoning", reasoning)
+	c.ui.KeyValue("remote_session", statusRemoteSessionLabel(remoteSessionID, remoteOK))
+
+	c.ui.Section("Session")
+	c.ui.KeyValue("workspace", c.workspace.CWD)
+	c.ui.KeyValue("session", idutil.ShortDisplay(c.sessionID))
+	c.ui.KeyValue("mode", c.sessionModeLabel())
+
+	renderStatusSecurity(c)
+	if err := renderStatusRuntime(c); err != nil {
+		return false, err
+	}
+
+	c.ui.Section("Context")
+	c.ui.KeyValue("usage", "not available (managed by ACP main agent)")
+	return false, nil
+}
+
+func renderStatusSecurity(c *cliConsole) {
+	c.ui.Section("Security")
+	mode := c.execRuntime.PermissionMode()
+	switch mode {
+	case toolexec.PermissionModeFullControl:
+		c.ui.KeyValue("permission", fmt.Sprintf("%s  route=host", mode))
+	default:
+		if c.execRuntime.FallbackToHost() {
+			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=host (fallback, reason=%s)",
+				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType()), c.execRuntime.FallbackReason()))
+		} else {
+			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=sandbox",
+				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType())))
+		}
+	}
+	c.ui.KeyValue("sandbox_policy", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
+}
+
+func renderStatusRuntime(c *cliConsole) error {
+	if c.rt == nil {
+		return nil
+	}
+	runState, err := c.rt.RunState(c.baseCtx, runtime.RunStateRequest{
+		AppName:   c.appName,
+		UserID:    c.userID,
+		SessionID: c.sessionID,
+	})
+	if err != nil {
+		return err
+	}
+	c.ui.Section("Runtime")
+	if runState.HasLifecycle {
+		c.ui.KeyValue("run_state", fmt.Sprintf("%s  phase=%s", runState.Status, stringOrDash(runState.Phase)))
+		if strings.TrimSpace(runState.Error) != "" {
+			c.ui.KeyValue("error", truncateInline(runState.Error, 160))
+		}
+		if strings.TrimSpace(string(runState.ErrorCode)) != "" {
+			c.ui.KeyValue("error_code", string(runState.ErrorCode))
+		}
+	} else {
+		c.ui.KeyValue("run_state", "none")
+	}
+	return nil
+}
+
+func statusRemoteSessionLabel(sessionID string, ok bool) string {
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		return "(not initialized)"
+	}
+	return idutil.ShortDisplay(sessionID)
 }
 
 func handlePermission(c *cliConsole, args []string) (bool, error) {
@@ -2072,6 +2190,18 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 }
 
 func handleModel(c *cliConsole, args []string) (bool, error) {
+	if c != nil && c.currentMainAgentUsesACP() {
+		if len(args) == 0 {
+			return false, fmt.Errorf("usage: /model use <alias> [reasoning]")
+		}
+		if strings.EqualFold(strings.TrimSpace(args[0]), "del") {
+			return false, fmt.Errorf("/model del is unavailable when the main agent uses ACP")
+		}
+		if strings.EqualFold(strings.TrimSpace(args[0]), "use") {
+			return handleModelUse(c, args[1:])
+		}
+		return handleModelUse(c, args)
+	}
 	if len(args) == 0 {
 		return false, fmt.Errorf("usage: /model use <alias> [reasoning] | /model del [alias ...]")
 	}
@@ -2088,6 +2218,9 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 func handleModelUse(c *cliConsole, args []string) (bool, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return false, fmt.Errorf("usage: /model use <alias> [reasoning]")
+	}
+	if c.currentMainAgentUsesACP() {
+		return c.handleACPMainModelUse(c.baseCtx, args)
 	}
 	if c.modelFactory == nil {
 		return false, fmt.Errorf("model factory is not configured")
@@ -2535,6 +2668,9 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 			continue
 		}
 		if isDelegatedSubagentHistoryEvent(ev) {
+			continue
+		}
+		if !session.IsCanonicalHistoryEvent(ev) && !isParticipantMirrorEvent(ev) && !isMainACPEvent(ev) {
 			continue
 		}
 		msg := ev.Message
