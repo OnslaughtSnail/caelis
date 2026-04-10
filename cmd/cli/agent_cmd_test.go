@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
+	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
 	"github.com/OnslaughtSnail/caelis/internal/epochhandoff"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
@@ -77,6 +79,48 @@ func TestHandleAgentUseBuiltinAddsAndSwitchesMainAgent(t *testing.T) {
 	}
 	if got := console.configStore.MainAgent(); got != "self" {
 		t.Fatalf("expected main agent self, got %q", got)
+	}
+}
+
+func TestHandleAgentUseRefreshesBTWAvailabilityInTUICommands(t *testing.T) {
+	store := &appConfigStore{
+		path: filepath.Join(t.TempDir(), "config.json"),
+		data: defaultAppConfig(),
+	}
+	sender := &testSender{}
+	uiOut := &bytes.Buffer{}
+	console := &cliConsole{
+		configStore:   store,
+		agentRegistry: appagents.NewRegistry(),
+		tuiSender:     sender,
+		out:           uiOut,
+		ui:            newUI(uiOut, true, false),
+		commands: map[string]slashCommand{
+			"btw":    {Usage: "/btw <question>"},
+			"help":   {Usage: "/help"},
+			"status": {Usage: "/status"},
+		},
+	}
+
+	if _, err := handleAgent(console, []string{"use", "codex"}); err != nil {
+		t.Fatalf("switch builtin main agent: %v", err)
+	}
+
+	var latest tuievents.SetCommandsMsg
+	var found bool
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.SetCommandsMsg)
+		if !ok {
+			continue
+		}
+		latest = msg
+		found = true
+	}
+	if !found {
+		t.Fatal("expected command refresh after switching main agent")
+	}
+	if slices.Contains(latest.Commands, "btw") {
+		t.Fatalf("did not expect /btw after switching to ACP main agent, got %v", latest.Commands)
 	}
 }
 

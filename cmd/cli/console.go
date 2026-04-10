@@ -138,6 +138,8 @@ const (
 	btwControlCloseTag = "</caelis-btw>"
 )
 
+var errBTWUnavailableForACPMain = errors.New("/btw is unavailable when the main agent uses ACP")
+
 func cliContext(ctx context.Context) context.Context {
 	if ctx != nil {
 		return ctx
@@ -813,6 +815,9 @@ func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) er
 func (c *cliConsole) runBTWContext(ctx context.Context, question string, attachments []tuiapp.Attachment) error {
 	if c.currentRunKind() == runOccupancyExternalAgent {
 		return errExternalAgentRunBusy
+	}
+	if c.currentMainAgentUsesACP() {
+		return errBTWUnavailableForACPMain
 	}
 	question = strings.TrimSpace(question)
 	if question == "/btw" || strings.HasPrefix(question, "/btw ") {

@@ -54,6 +54,30 @@ func TestDynamicSlashAgents_NilConsoleReturnsNil(t *testing.T) {
 	}
 }
 
+func TestAvailableCommandNames_HidesBTWWhenMainAgentUsesACP(t *testing.T) {
+	console := &cliConsole{
+		commands: map[string]slashCommand{
+			"btw":    {Usage: "/btw <question>"},
+			"help":   {Usage: "/help"},
+			"status": {Usage: "/status"},
+		},
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "codex",
+			Agents: map[string]agentRecord{
+				"codex": {Command: "/bin/codex"},
+			},
+		}},
+	}
+
+	got := console.availableCommandNames()
+	if slices.Contains(got, "btw") {
+		t.Fatalf("did not expect /btw in command list for ACP main agent, got %v", got)
+	}
+	if !slices.Contains(got, "help") || !slices.Contains(got, "status") {
+		t.Fatalf("expected other commands to remain available, got %v", got)
+	}
+}
+
 func TestRunExternalAgentSlash_RequiresIdleMainSession(t *testing.T) {
 	console := &cliConsole{}
 	console.setActiveRunCancel(func() {})
@@ -100,6 +124,21 @@ func TestRunPromptAndBTWRejectDuringExternalAgentRun(t *testing.T) {
 	}
 	if err := console.runBTW("status?", nil); !errors.Is(err, errExternalAgentRunBusy) {
 		t.Fatalf("expected /btw rejection, got %v", err)
+	}
+}
+
+func TestBTWRejectsWhenMainAgentUsesACP(t *testing.T) {
+	console := &cliConsole{
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "codex",
+			Agents: map[string]agentRecord{
+				"codex": {Command: "/bin/codex"},
+			},
+		}},
+	}
+
+	if err := console.runBTW("status?", nil); !errors.Is(err, errBTWUnavailableForACPMain) {
+		t.Fatalf("expected ACP main-agent /btw rejection, got %v", err)
 	}
 }
 

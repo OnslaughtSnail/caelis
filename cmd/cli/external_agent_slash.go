@@ -166,6 +166,9 @@ func (c *cliConsole) setActiveExternalRun(cancel context.CancelFunc) {
 func (c *cliConsole) availableCommandNames() []string {
 	names := map[string]struct{}{}
 	for name := range c.commands {
+		if strings.EqualFold(strings.TrimSpace(name), "btw") && c.currentMainAgentUsesACP() {
+			continue
+		}
 		names[name] = struct{}{}
 	}
 	for _, item := range c.dynamicSlashAgents() {

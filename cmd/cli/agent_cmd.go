@@ -175,12 +175,14 @@ func switchMainAgent(c *cliConsole, rawTarget string) (string, bool, error) {
 		if err := c.configStore.SetMainAgent("self"); err != nil {
 			return "", false, err
 		}
+		c.notifyCommandListChanged()
 		return "self", false, nil
 	}
 	if _, ok := c.lookupConfiguredAgent(target); ok {
 		if err := c.configStore.SetMainAgent(target); err != nil {
 			return "", false, err
 		}
+		c.notifyCommandListChanged()
 		return target, false, nil
 	}
 	preset, ok := appagents.LookupBuiltin(target)
@@ -203,6 +205,7 @@ func switchMainAgent(c *cliConsole, rawTarget string) (string, bool, error) {
 	if err := c.configStore.SetMainAgent(target); err != nil {
 		return "", false, err
 	}
+	c.notifyCommandListChanged()
 	return target, true, nil
 }
 

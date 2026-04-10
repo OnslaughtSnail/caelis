@@ -4300,6 +4300,7 @@ func TestEnterWhileRunningShowsHintWhenReplacingPendingMessage(t *testing.T) {
 func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
 	var got Submission
 	m := NewModel(Config{
+		Commands: []string{"btw", "status"},
 		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
 			got = submission
 			return tuievents.TaskResultMsg{ContinueRunning: true}
@@ -4332,6 +4333,38 @@ func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
 	}
 	if m.btwOverlay == nil || m.btwOverlay.Question != "config file name?" {
 		t.Fatalf("expected btw overlay question, got %+v", m.btwOverlay)
+	}
+}
+
+func TestEnterDoesNotSubmitBTWOverlayWhenCommandUnavailable(t *testing.T) {
+	var called bool
+	m := NewModel(Config{
+		Commands: []string{"status"},
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = true
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		},
+	})
+	resizeModel(m)
+
+	m.running = true
+	typeRunes(m, "/btw config file name?")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected hint command")
+	}
+	if called {
+		t.Fatal("did not expect /btw to submit while unavailable")
+	}
+	if got := strings.ToLower(strings.TrimSpace(m.hint)); !strings.Contains(got, "slash commands are unavailable while running") {
+		t.Fatalf("expected running slash-command hint, got %q", m.hint)
+	}
+	if m.pendingQueue != nil {
+		t.Fatalf("did not expect pending queue entry, got %+v", m.pendingQueue)
+	}
+	if m.btwOverlay != nil {
+		t.Fatalf("did not expect btw overlay, got %+v", m.btwOverlay)
 	}
 }
 
