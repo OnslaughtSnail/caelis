@@ -504,7 +504,7 @@ func TestHandleSlashContext_ACPMainRoutesDynamicSlashAgent(t *testing.T) {
 	t.Cleanup(func() {
 		startExternalSlashACPClientHook = prevStarter
 	})
-	startExternalSlashACPClientHook = func(_ *cliConsole, _ context.Context, runState *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (externalSlashACPClient, func(), error) {
+	startExternalSlashACPClientHook = func(_ *cliConsole, _ context.Context, _ *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (externalSlashACPClient, func(), error) {
 		if got, want := strings.TrimSpace(desc.ID), "copilot"; got != want {
 			t.Fatalf("unexpected descriptor %q want %q", got, want)
 		}
