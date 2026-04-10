@@ -7,7 +7,7 @@ import (
 )
 
 func FormatToolStart(name string, args map[string]any) string {
-	return strings.TrimSpace(FormatToolArgsValue(name, args))
+	return sanitizeToolDisplayText(FormatToolArgsValue(name, args))
 }
 
 func FormatToolResult(name string, args map[string]any, result map[string]any, status string) string {
@@ -38,11 +38,24 @@ func FormatToolResult(name string, args map[string]any, result map[string]any, s
 func FormatToolArgsValue(name string, raw any) string {
 	values, ok := raw.(map[string]any)
 	if ok && values != nil {
-		if display := strings.TrimSpace(asString(values["_display"])); display != "" {
+		if display := sanitizeToolDisplayText(asString(values["_display"])); display != "" {
 			return display
 		}
+		if _, hasDisplay := values["_display"]; hasDisplay && len(values) == 1 {
+			return ""
+		}
 	}
-	return strings.TrimSpace(toolArgsWithName(name, raw))
+	return sanitizeToolDisplayText(toolArgsWithName(name, raw))
+}
+
+func sanitizeToolDisplayText(text string) string {
+	text = strings.TrimSpace(text)
+	switch strings.ToLower(text) {
+	case "", "null", "{}", "[]", "map[]":
+		return ""
+	default:
+		return text
+	}
 }
 
 func MarshalToolInput(args map[string]any) string {

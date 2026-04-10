@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -176,6 +177,49 @@ func TestAppConfig_LoadOrInitAndPersist(t *testing.T) {
 	settings = store4.ModelRuntimeSettings("openai/gpt-4o-mini")
 	if settings.ReasoningEffort != "xhigh" {
 		t.Fatalf("expected normalized runtime settings, got %#v", settings)
+	}
+}
+
+func TestAppConfig_ACPAgentSettings_RoundTrip(t *testing.T) {
+	store := &appConfigStore{
+		path: filepath.Join(t.TempDir(), "config.json"),
+		data: appConfig{
+			Version: configVersion,
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		},
+	}
+
+	if err := store.SetACPAgentSettings("copilot", agentACPRecord{
+		Model:           "gpt-5-mini",
+		ReasoningEffort: "medium",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settings, ok := store.ACPAgentSettings("copilot")
+	if !ok {
+		t.Fatal("expected ACP agent settings")
+	}
+	if settings.Model != "gpt-5-mini" || settings.ReasoningEffort != "medium" {
+		t.Fatalf("unexpected ACP settings %#v", settings)
+	}
+
+	reloaded := &appConfigStore{data: defaultAppConfig(), path: store.path}
+	raw, err := os.ReadFile(store.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &reloaded.data); err != nil {
+		t.Fatal(err)
+	}
+	mergeAppConfigDefaults(&reloaded.data)
+	settings, ok = reloaded.ACPAgentSettings("copilot")
+	if !ok {
+		t.Fatal("expected ACP agent settings after reload")
+	}
+	if settings.Model != "gpt-5-mini" || settings.ReasoningEffort != "medium" {
+		t.Fatalf("unexpected reloaded ACP settings %#v", settings)
 	}
 }
 
@@ -488,6 +532,7 @@ func TestAppConfig_ResolvesAgentServerPlaceholdersAndBuildsRegistry(t *testing.T
 	}
 	raw := `{
   "version": 1,
+  "mainAgent": "codex",
   "defaultAgent": "codex",
   "agents": {
     "codex": {
@@ -518,6 +563,9 @@ func TestAppConfig_ResolvesAgentServerPlaceholdersAndBuildsRegistry(t *testing.T
 	store, err := loadOrInitAppConfig("demo-app")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := store.MainAgent(); got != "codex" {
+		t.Fatalf("expected mainAgent codex, got %q", got)
 	}
 	reg, err := store.AgentRegistry()
 	if err != nil {

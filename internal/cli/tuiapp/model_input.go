@@ -227,6 +227,13 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	if bid == "" {
 		return false
 	}
+	if contentLine >= 0 && contentLine < len(m.viewportClickTokens) {
+		if token := strings.TrimSpace(m.viewportClickTokens[contentLine]); token != "" {
+			if m.tryToggleACPToolPanelToken(bid, token) {
+				return true
+			}
+		}
+	}
 	blk := m.doc.Find(bid)
 	if blk == nil {
 		return false
@@ -234,6 +241,7 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 	if _, ok := blk.(*TranscriptBlock); ok {
 		if diff := m.findInlineDiffBlockByAnchorBlockID(bid); diff != nil {
 			diff.Expanded = !diff.Expanded
+			m.syncMutationAnchorState(bid)
 			return true
 		}
 		if panel := m.findInlineBashPanelByAnchorBlockID(bid); panel != nil {
@@ -294,6 +302,7 @@ func (m *Model) tryTogglePanelAtClick(mouse tea.Mouse) bool {
 		}
 	}
 	bp.Expanded = !bp.Expanded
+	m.syncMutationAnchorStateForPanel(bp)
 	return true
 }
 
@@ -701,7 +710,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if line == "" && len(attachments) == 0 {
 			return m, nil
 		}
-		mode := submissionModeForLine(line)
+		mode := m.submissionModeForLine(line)
 		if m.running {
 			if strings.HasPrefix(line, "/") && mode != SubmissionModeOverlay {
 				return m, m.showHint("slash commands are unavailable while running", hintOptions{
@@ -864,7 +873,7 @@ func (m *Model) submitLineWithDisplay(execLine string, displayLine string) (tea.
 
 func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine string, attachments []Attachment) (tea.Model, tea.Cmd) {
 	alreadyRunning := m.running
-	mode := submissionModeForLine(execLine)
+	mode := m.submissionModeForLine(execLine)
 	layoutMayChange := mode == SubmissionModeOverlay || alreadyRunning
 	attachments = cloneAttachments(attachments)
 	displayLine = strings.TrimSpace(displayLine)
@@ -936,9 +945,38 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	return m, tea.Batch(cmds...)
 }
 
-func submissionModeForLine(line string) SubmissionMode {
+func (m *Model) allowsBTWSubmission() bool {
+	if m == nil || len(m.cfg.Commands) == 0 {
+		return true
+	}
+	for _, one := range m.cfg.Commands {
+		if strings.EqualFold(strings.TrimSpace(one), "btw") {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) tryToggleACPToolPanelToken(blockID string, token string) bool {
+	callID, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_tool_panel:")
+	if !ok || strings.TrimSpace(callID) == "" {
+		return false
+	}
+	switch blk := m.doc.Find(strings.TrimSpace(blockID)).(type) {
+	case *ParticipantTurnBlock:
+		blk.toggleToolPanelExpanded(callID)
+		return true
+	case *MainACPTurnBlock:
+		blk.toggleToolPanelExpanded(callID)
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) submissionModeForLine(line string) SubmissionMode {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "/btw" || strings.HasPrefix(trimmed, "/btw ") {
+	if m.allowsBTWSubmission() && (trimmed == "/btw" || strings.HasPrefix(trimmed, "/btw ")) {
 		return SubmissionModeOverlay
 	}
 	return SubmissionModeDefault
@@ -990,8 +1028,8 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 	if displayLine == "" {
 		return
 	}
-	if m.lastCommittedStyle == tuikit.LineStyleUser &&
-		normalizeUserDisplayLine(strings.TrimPrefix(strings.TrimSpace(m.lastCommittedRaw), ">")) == normalizeUserDisplayLine(displayLine) {
+	normalized := normalizeUserDisplayLine(displayLine)
+	if m.userDisplayDedupOK && normalized != "" && normalizeUserDisplayLine(m.lastUserDisplayLine) == normalized {
 		return
 	}
 	userLine := "> " + displayLine
@@ -1002,6 +1040,8 @@ func (m *Model) commitUserDisplayLine(displayLine string) {
 	m.doc.Append(block)
 	m.lastCommittedStyle = tuikit.LineStyleUser
 	m.lastCommittedRaw = userLine
+	m.lastUserDisplayLine = displayLine
+	m.userDisplayDedupOK = true
 	m.hasCommittedLine = true
 }
 

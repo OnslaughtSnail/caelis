@@ -133,6 +133,22 @@ func (m *Model) finalizeActivityBlock() tea.Cmd {
 		m.refreshHistoryTailState()
 		return m.requestStreamViewportSync()
 	}
+	if ab.BlockKindField == activityBlockExploration {
+		if prev := m.findPreviousFinalizedActivityBlock(ab.BlockID(), activityBlockExploration); prev != nil {
+			prev.Entries = append(prev.Entries, ab.Entries...)
+			prev.Active = false
+			prev.Finalized = true
+			prev.Expanded = false
+			prevState := prev.toFoldedState()
+			prev.Summary = m.activityBlockSummary(prevState)
+			prevState.summary = prev.Summary
+			m.doc.Remove(ab.BlockID())
+			m.activeActivityID = ""
+			_ = m.syncActivityBlockBlock(prev)
+			m.refreshHistoryTailState()
+			return m.requestStreamViewportSync()
+		}
+	}
 	// Render finalized summary line.
 	summaryLine := m.renderActivitySummaryLine(foldedState)
 	rawSummary := ansi.Strip(summaryLine)
@@ -173,6 +189,24 @@ func (m *Model) finalizeActivityBlock() tea.Cmd {
 	return m.requestStreamViewportSync()
 }
 
+func (m *Model) findPreviousFinalizedActivityBlock(blockID string, kind activityBlockKind) *ActivityBlock {
+	if m == nil || m.doc == nil || strings.TrimSpace(blockID) == "" {
+		return nil
+	}
+	blocks := m.doc.Blocks()
+	for i, block := range blocks {
+		if block.BlockID() != blockID || i == 0 {
+			continue
+		}
+		prev, _ := blocks[i-1].(*ActivityBlock)
+		if prev == nil || prev.BlockKindField != kind || !prev.Finalized {
+			return nil
+		}
+		return prev
+	}
+	return nil
+}
+
 // findPreviousTranscriptBlock returns the TranscriptBlock right before the given block ID.
 func (m *Model) findPreviousTranscriptBlock(blockID string) *TranscriptBlock {
 	blocks := m.doc.Blocks()
@@ -192,7 +226,11 @@ func (m *Model) renderActivityBlockLines(block *foldedActivityBlockState) []stri
 	}
 	if block.kind == activityBlockTaskMonitor {
 		if block.finalized && block.expanded {
-			lines := []string{m.renderTaskMonitorInlineLine(block, true)}
+			header := m.renderTaskMonitorInlineLine(block, true)
+			if activityBlockHasTaskWriteEntries(block.entries) {
+				header = m.theme.ReasoningStyle().Render("▾ " + strings.TrimSpace(taskMonitorInlineText(block.entries, true)))
+			}
+			lines := []string{header}
 			displayEntries := buildActivityDisplayEntries(block.entries)
 			if len(displayEntries) > activityBlockPreviewLines {
 				displayEntries = displayEntries[len(displayEntries)-activityBlockPreviewLines:]
@@ -251,16 +289,7 @@ func (m *Model) renderExplorationMeta(block *foldedActivityBlockState) string {
 	if block == nil {
 		return ""
 	}
-	files := uniqueReadPaths(block.entries)
-	searches := countActivityCalls(block.entries, "SEARCH")
-	parts := make([]string, 0, 2)
-	if len(files) > 0 {
-		parts = append(parts, fmt.Sprintf("%d files", len(files)))
-	}
-	if searches > 0 {
-		parts = append(parts, fmt.Sprintf("%d searches", searches))
-	}
-	return strings.Join(parts, "  ")
+	return strings.Join(explorationSummaryParts(block.entries), "  ")
 }
 
 func (m *Model) renderTaskMonitorMeta(block *foldedActivityBlockState) string {
@@ -299,6 +328,9 @@ func (m *Model) renderActivitySummaryLine(block *foldedActivityBlockState) strin
 		default:
 			text = "Explored"
 		}
+	}
+	if block.expanded {
+		return m.theme.ReasoningStyle().Render("▾ " + text)
 	}
 	prefix := m.renderActivitySummaryPrefix(block)
 	return prefix + " " + m.renderActivitySummaryText(text)
@@ -476,19 +508,7 @@ func (m *Model) activityBlockSummary(block *foldedActivityBlockState) string {
 	case activityBlockTaskMonitor:
 		return taskMonitorInlineText(block.entries, true)
 	default:
-		parts := make([]string, 0, 2)
-		if fileCount := len(uniqueReadPaths(block.entries)); fileCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d files", fileCount))
-		}
-		if searchCount := countActivityCalls(block.entries, "SEARCH"); searchCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d searches", searchCount))
-		}
-		if listCount := countActivityCalls(block.entries, "LIST"); listCount > 0 && len(parts) == 0 {
-			parts = append(parts, fmt.Sprintf("%d paths", listCount))
-		}
-		if globCount := countActivityCalls(block.entries, "GLOB"); globCount > 0 && len(parts) == 0 {
-			parts = append(parts, fmt.Sprintf("%d patterns", globCount))
-		}
+		parts := explorationSummaryParts(block.entries)
 		if len(parts) == 0 && len(block.entries) > 0 {
 			parts = append(parts, fmt.Sprintf("%d actions", len(block.entries)))
 		}
@@ -497,6 +517,23 @@ func (m *Model) activityBlockSummary(block *foldedActivityBlockState) string {
 		}
 		return "Explored " + strings.Join(parts, ", ")
 	}
+}
+
+func explorationSummaryParts(entries []activityEntry) []string {
+	parts := make([]string, 0, 4)
+	if listCount := countActivityCalls(entries, "LIST"); listCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d paths", listCount))
+	}
+	if fileCount := len(uniqueReadPaths(entries)); fileCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d files", fileCount))
+	}
+	if searchCount := countActivityCalls(entries, "SEARCH"); searchCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d searches", searchCount))
+	}
+	if globCount := countActivityCalls(entries, "GLOB"); globCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d patterns", globCount))
+	}
+	return parts
 }
 
 func summarizeTaskMonitorAction(verb string, count int) string {

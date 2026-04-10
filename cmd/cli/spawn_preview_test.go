@@ -251,8 +251,50 @@ func TestSubagentDomainUpdatesFromSpawnToolError_Timeout(t *testing.T) {
 	if updates[0].Target.SpawnID != "call-spawn-1" {
 		t.Fatalf("expected provisional spawn id to use tool call id, got %#v", updates[0].Target)
 	}
+	if updates[1].Kind != subagentDomainStream || updates[1].Stream != "assistant" || !strings.Contains(updates[1].Chunk, "context deadline exceeded") {
+		t.Fatalf("expected assistant error stream update, got %#v", updates[1])
+	}
 	if updates[2].Kind != subagentDomainTerminal || updates[2].Status != "timed_out" {
 		t.Fatalf("expected timed_out terminal update, got %#v", updates[2])
+	}
+}
+
+func TestRenderSubagentDomainUpdates_SpawnErrorAvoidsNestedSpawnToolRow(t *testing.T) {
+	updates := subagentDomainUpdatesFromSpawnToolError("parent-1", &model.ToolResponse{
+		ID:   "call-spawn-1",
+		Name: tool.SpawnToolName,
+		Result: map[string]any{
+			"agent": "codex",
+			"error": "acp rpc error -32603: Internal error",
+		},
+	})
+	msgs := renderSubagentDomainUpdates(updates)
+	var (
+		startFound    bool
+		streamFound   bool
+		nestedToolMsg bool
+		doneFound     bool
+	)
+	for _, raw := range msgs {
+		switch msg := raw.(type) {
+		case tuievents.SubagentStartMsg:
+			startFound = true
+		case tuievents.ACPProjectionMsg:
+			if msg.ToolCallID != "" || msg.ToolName != "" {
+				nestedToolMsg = true
+			}
+			if msg.Scope == tuievents.ACPProjectionSubagent && msg.Stream == "assistant" && strings.Contains(msg.DeltaText, "Internal error") {
+				streamFound = true
+			}
+		case tuievents.SubagentDoneMsg:
+			doneFound = msg.State == "failed"
+		}
+	}
+	if !startFound || !streamFound || !doneFound {
+		t.Fatalf("expected start, assistant error stream, and terminal messages, got %#v", msgs)
+	}
+	if nestedToolMsg {
+		t.Fatalf("did not expect spawn startup failure to render as nested tool call, got %#v", msgs)
 	}
 }
 
@@ -879,7 +921,7 @@ func TestForwardSessionEventToTUI_RoutesSpawnEventsToSubagentPanel(t *testing.T)
 				"delegation_id":       "dlg-1",
 			},
 		},
-	})
+	}, nil)
 	// Should get SubagentStartMsg + ACPProjectionMsg, but NOT TaskStreamMsg.
 	var hasStart, hasStream bool
 	for _, m := range sender.msgs {
@@ -930,7 +972,7 @@ func TestForwardSessionEventToTUI_PersistsSpawnProjectionEvents(t *testing.T) {
 				"delegation_id":       "dlg-1",
 			},
 		},
-	})
+	}, nil)
 	events, err := c.acpProjectionStore().LoadEvents(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -972,9 +1014,37 @@ func TestForwardSessionEventToTUI_IgnoresNestedGrandchildEvents(t *testing.T) {
 				"agent_id":            "codex",
 			},
 		},
-	})
+	}, nil)
 	if len(sender.msgs) != 0 {
 		t.Fatalf("expected nested grandchild events to stay out of root TUI projection, got %#v", sender.msgs)
+	}
+}
+
+func TestForwardSessionEventToTUI_SuppressesRootACPEventsFromKernelStream(t *testing.T) {
+	sender := &testSender{}
+	c := &cliConsole{
+		sessionID: "root-session",
+		tuiSender: sender,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"acp"}},
+			},
+		}},
+	}
+	c.forwardSessionEventToTUI(context.Background(), "root-session", sessionstream.Update{
+		SessionID: "root-session",
+		Event: &session.Event{
+			Message: model.NewTextMessage(model.RoleAssistant, "streamed chunk"),
+			Meta: map[string]any{
+				"partial":   true,
+				"channel":   "answer",
+				"_ui_agent": "copilot",
+			},
+		},
+	}, map[string]toolCallSnapshot{})
+	if len(sender.msgs) != 0 {
+		t.Fatalf("expected ACP root events from kernel stream to be suppressed, got %#v", sender.msgs)
 	}
 }
 

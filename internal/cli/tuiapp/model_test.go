@@ -177,6 +177,13 @@ func TestSlashArgQueryAtCursor(t *testing.T) {
 	if cmd != "agent rm" || query != "claude" {
 		t.Fatalf("unexpected agent rm parse: cmd=%q query=%q", cmd, query)
 	}
+	cmd, query, ok = slashArgQueryAtCursor([]rune("/agent use codex"), len([]rune("/agent use codex")))
+	if !ok {
+		t.Fatal("expected slash-arg query for /agent use main agent target")
+	}
+	if cmd != "agent use" || query != "codex" {
+		t.Fatalf("unexpected agent use parse: cmd=%q query=%q", cmd, query)
+	}
 	_, _, ok = slashArgQueryAtCursor([]rune("/agent list "), len([]rune("/agent list ")))
 	if ok {
 		t.Fatal("did not expect picker parse for /agent list")
@@ -931,6 +938,7 @@ func TestAgentSlashArgOpensOnTrailingSpaceAndAdvancesToBuiltinStep(t *testing.T)
 					{Value: "list", Display: "list"},
 					{Value: "add", Display: "add"},
 					{Value: "rm", Display: "rm"},
+					{Value: "use", Display: "use"},
 				}, nil
 			case "agent add":
 				return []SlashArgCandidate{
@@ -947,7 +955,7 @@ func TestAgentSlashArgOpensOnTrailingSpaceAndAdvancesToBuiltinStep(t *testing.T)
 	if !m.slashArgActive {
 		t.Fatal("expected slash-arg active for /agent")
 	}
-	if len(m.slashArgCandidates) != 3 {
+	if len(m.slashArgCandidates) != 4 {
 		t.Fatalf("expected agent action candidates, got %d", len(m.slashArgCandidates))
 	}
 	_, _ = m.Update(keyPress(tea.KeyDown))
@@ -986,6 +994,35 @@ func TestAgentAddExecutesOnSingleEnterWhenBuiltinAlreadyComplete(t *testing.T) {
 	}
 	if called != "/agent add codex" {
 		t.Fatalf("expected '/agent add codex', got %q", called)
+	}
+}
+
+func TestAgentUseExecutesOnSingleEnterWhenTargetAlreadyComplete(t *testing.T) {
+	called := ""
+	m := NewModel(Config{
+		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
+			called = strings.TrimSpace(submission.Text)
+			return tuievents.TaskResultMsg{}
+		},
+		SlashArgComplete: func(command string, _ string, _ int) ([]SlashArgCandidate, error) {
+			if command != "agent use" {
+				return nil, nil
+			}
+			return []SlashArgCandidate{{Value: "self", Display: "self"}}, nil
+		},
+	})
+	resizeModel(m)
+	typeRunes(m, "/agent use self")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected command for exact /agent use target")
+	}
+	if !findAndRunTaskResult(cmd(), m) {
+		t.Fatal("expected TaskResultMsg in submit command")
+	}
+	if called != "/agent use self" {
+		t.Fatalf("expected '/agent use self', got %q", called)
 	}
 }
 
@@ -2503,8 +2540,8 @@ func TestApprovalPromptUsesChoiceListAndArrowSubmit(t *testing.T) {
 	if m.activePrompt.choiceIndex != 0 {
 		t.Fatalf("expected default selection at allow, got %d", m.activePrompt.choiceIndex)
 	}
-	if got := m.bottomSectionHeight(); got != baseBottom {
-		t.Fatalf("expected prompt overlay not to change bottom height, before=%d after=%d", baseBottom, got)
+	if got := m.bottomSectionHeight(); got <= baseBottom {
+		t.Fatalf("expected prompt overlay to reserve bottom space, before=%d after=%d", baseBottom, got)
 	}
 	view := stripModelView(m)
 	if !strings.Contains(view, "BASH: pfctl -s info") {
@@ -2703,9 +2740,12 @@ func TestPromptModalAnchorsNearInputBar(t *testing.T) {
 	}
 	modal := ansi.Strip(m.renderPromptModal())
 	modalHeight := strings.Count(modal, "\n") + 1
-	wantTop := maxInt(0, len(viewLines)-m.bottomSectionHeight()-modalHeight)
+	wantTop := maxInt(0, len(viewLines)-m.bottomSectionHeight())
 	if top != wantTop {
 		t.Fatalf("expected prompt modal anchored above bottom area, got row=%d want=%d", top, wantTop)
+	}
+	if top+modalHeight > len(viewLines)-m.preComposerFixedHeight() {
+		t.Fatalf("expected prompt modal to stay within reserved bottom space, got top=%d height=%d", top, modalHeight)
 	}
 }
 
@@ -4260,6 +4300,7 @@ func TestEnterWhileRunningShowsHintWhenReplacingPendingMessage(t *testing.T) {
 func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
 	var got Submission
 	m := NewModel(Config{
+		Commands: []string{"btw", "status"},
 		ExecuteLine: func(submission Submission) tuievents.TaskResultMsg {
 			got = submission
 			return tuievents.TaskResultMsg{ContinueRunning: true}
@@ -4292,6 +4333,38 @@ func TestEnterSubmitsBTWWhileRunningWithoutHistoryOrPendingQueue(t *testing.T) {
 	}
 	if m.btwOverlay == nil || m.btwOverlay.Question != "config file name?" {
 		t.Fatalf("expected btw overlay question, got %+v", m.btwOverlay)
+	}
+}
+
+func TestEnterDoesNotSubmitBTWOverlayWhenCommandUnavailable(t *testing.T) {
+	var called bool
+	m := NewModel(Config{
+		Commands: []string{"status"},
+		ExecuteLine: func(_ Submission) tuievents.TaskResultMsg {
+			called = true
+			return tuievents.TaskResultMsg{ContinueRunning: true}
+		},
+	})
+	resizeModel(m)
+
+	m.running = true
+	typeRunes(m, "/btw config file name?")
+
+	_, cmd := m.Update(keyPress(tea.KeyEnter))
+	if cmd == nil {
+		t.Fatal("expected hint command")
+	}
+	if called {
+		t.Fatal("did not expect /btw to submit while unavailable")
+	}
+	if got := strings.ToLower(strings.TrimSpace(m.hint)); !strings.Contains(got, "slash commands are unavailable while running") {
+		t.Fatalf("expected running slash-command hint, got %q", m.hint)
+	}
+	if m.pendingQueue != nil {
+		t.Fatalf("did not expect pending queue entry, got %+v", m.pendingQueue)
+	}
+	if m.btwOverlay != nil {
+		t.Fatalf("did not expect btw overlay, got %+v", m.btwOverlay)
 	}
 }
 
@@ -4357,6 +4430,71 @@ func TestUserMessageMsgDoesNotDuplicateCommittedAttachmentLine(t *testing.T) {
 	}
 	if len(userLines) != 1 {
 		t.Fatalf("expected a single committed user line after runtime replay, got %+v", userLines)
+	}
+}
+
+func TestUserMessageMsgDoesNotDuplicateAfterACPMainTurnStart(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	_, _ = m.submitLine("演示一下你的工具调用能力")
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.UserMessageMsg{Text: "演示一下你的工具调用能力"})
+
+	var userLines []string
+	for _, line := range m.renderedStyledLines() {
+		plain := strings.TrimSpace(ansi.Strip(line))
+		if strings.HasPrefix(plain, "> ") {
+			userLines = append(userLines, plain)
+		}
+	}
+	if len(userLines) != 1 {
+		t.Fatalf("expected a single committed user line after ACP main turn start, got %+v", userLines)
+	}
+}
+
+func TestUserMessageMsgRepeatsAcrossTurnsAfterACPOutput(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	_, _ = m.submitLine("继续")
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+	_, _ = m.Update(tuievents.ACPProjectionMsg{
+		Scope:     tuievents.ACPProjectionMain,
+		ScopeID:   "root-session",
+		Stream:    "assistant",
+		DeltaText: "Checks complete.",
+		FullText:  "Checks complete.",
+	})
+	_, _ = m.Update(tuievents.UserMessageMsg{Text: "继续"})
+
+	var userLines []string
+	for _, line := range m.renderedStyledLines() {
+		plain := strings.TrimSpace(ansi.Strip(line))
+		if strings.HasPrefix(plain, "> ") {
+			userLines = append(userLines, plain)
+		}
+	}
+	if len(userLines) != 2 {
+		t.Fatalf("expected repeated user line across turns, got %+v", userLines)
+	}
+}
+
+func TestACPMainTurnStartDoesNotRenderWaitingPlaceholderWithoutProjection(t *testing.T) {
+	m := NewModel(Config{
+		ExecuteLine: noopExecute,
+	})
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.ACPMainTurnStartMsg{SessionID: "root-session"})
+
+	view := strings.Join(m.viewportPlainLines, "\n")
+	if strings.Contains(view, "waiting for agent output") {
+		t.Fatalf("did not expect empty main ACP placeholder, got:\n%s", view)
 	}
 }
 
@@ -4738,11 +4876,73 @@ func TestWriteResultMergesIntoAnchorLineEvenAfterDiffBlock(t *testing.T) {
 	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "✓ WRITE +1 -0\n"})
 
 	joined := ansi.Strip(strings.Join(m.renderedStyledLines(), "\n"))
-	if !strings.Contains(joined, "▸ WRITE build.sh +1 -0") {
+	if !strings.Contains(joined, "▾ WRITE build.sh +1 -0") {
 		t.Fatalf("expected write result merged into anchor line after diff block, got %q", joined)
 	}
 	if strings.Contains(joined, "✓ WRITE +1 -0") {
 		t.Fatalf("did not expect standalone write result line after diff block, got %q", joined)
+	}
+}
+
+func TestMutationPanelsCollapseAtTurnEndAndSyncAnchors(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ WRITE out.txt\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "WRITE", CallID: "write-1", Reset: true, State: "running"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "WRITE", CallID: "write-1", Stream: "stdout", Chunk: "written\n"})
+	_, _ = m.Update(tuievents.ToolStreamMsg{Tool: "WRITE", CallID: "write-1", State: "completed", Final: true})
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ PATCH build.sh +1 -1\n"})
+	_, _ = m.Update(tuievents.DiffBlockMsg{
+		Tool: "PATCH",
+		Path: "build.sh",
+		Old:  "old\n",
+		New:  "new\n",
+	})
+
+	view := stripModelView(m)
+	if !strings.Contains(view, "▾ WRITE out.txt") {
+		t.Fatalf("expected expanded write anchor to use down-chevron, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▾ PATCH build.sh +1 -1") {
+		t.Fatalf("expected expanded patch anchor to use down-chevron, got:\n%s", view)
+	}
+
+	writeBlockID := m.toolOutputBlockIDs["write-1"]
+	if writeBlockID == "" {
+		t.Fatal("expected write panel block")
+	}
+	writePanel, _ := m.doc.Find(writeBlockID).(*BashPanelBlock)
+	if writePanel == nil || !writePanel.Expanded {
+		t.Fatalf("expected write panel expanded before turn end, got %#v", writePanel)
+	}
+
+	var diffBlock *DiffBlock
+	for _, block := range m.doc.Blocks() {
+		if candidate, ok := block.(*DiffBlock); ok {
+			diffBlock = candidate
+			break
+		}
+	}
+	if diffBlock == nil || !diffBlock.Expanded {
+		t.Fatalf("expected patch diff expanded before turn end, got %#v", diffBlock)
+	}
+
+	_, _ = m.Update(tuievents.TaskResultMsg{})
+
+	view = stripModelView(m)
+	if !strings.Contains(view, "▸ WRITE out.txt") || strings.Contains(view, "▾ WRITE out.txt") {
+		t.Fatalf("expected write anchor collapsed at turn end, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ PATCH build.sh +1 -1") || strings.Contains(view, "▾ PATCH build.sh +1 -1") {
+		t.Fatalf("expected patch anchor collapsed at turn end, got:\n%s", view)
+	}
+	if writePanel.Expanded {
+		t.Fatal("expected write panel collapsed at turn end")
+	}
+	if diffBlock.Expanded {
+		t.Fatal("expected patch diff collapsed at turn end")
 	}
 }
 
@@ -5791,6 +5991,25 @@ func TestExplorationBlockIncludesReadInSummary(t *testing.T) {
 	view := stripModelView(m)
 	if !strings.Contains(view, "▸ Explored 1 files") {
 		t.Fatalf("expected read activity included in exploration summary, got:\n%s", view)
+	}
+}
+
+func TestAdjacentExplorationBlocksMergeAndAccumulateSummary(t *testing.T) {
+	m := newTestModel()
+	resizeModel(m)
+
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ LIST .\n"})
+	_ = m.finalizeActivityBlock()
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ READ state.go\n"})
+	_, _ = m.Update(tuievents.LogChunkMsg{Chunk: "▸ SEARCH . {query=enter}\n"})
+	_, _ = m.Update(tuievents.AssistantStreamMsg{Kind: "answer", Text: "done", Final: true})
+
+	view := stripModelView(m)
+	if strings.Count(view, "Explored") != 1 {
+		t.Fatalf("expected adjacent exploration blocks to merge, got:\n%s", view)
+	}
+	if !strings.Contains(view, "▸ Explored 1 paths, 1 files, 1 searches") {
+		t.Fatalf("expected merged exploration summary to accumulate all counts, got:\n%s", view)
 	}
 }
 

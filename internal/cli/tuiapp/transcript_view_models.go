@@ -17,11 +17,14 @@ type PanelViewModel struct {
 }
 
 type ToolEventViewModel struct {
-	Name   string
-	Args   string
-	Output string
-	Done   bool
-	Err    bool
+	Name       string
+	Args       string
+	Output     string
+	Done       bool
+	Err        bool
+	Expandable bool
+	Expanded   bool
+	ClickToken string
 }
 
 type WelcomeViewModel struct {
@@ -130,7 +133,7 @@ func renderToolEventViewModelLines(blockID string, vm ToolEventViewModel, width 
 	segments := renderToolEventViewModelSegments(vm, width, theme)
 	rows := make([]RenderedRow, 0, len(segments))
 	for _, segment := range segments {
-		rows = append(rows, StyledPlainRow(blockID, segment.Plain, segment.Styled))
+		rows = append(rows, StyledPlainClickableRow(blockID, segment.Plain, segment.Styled, vm.ClickToken))
 	}
 	return rows
 }
@@ -183,7 +186,11 @@ func styleToolEventLine(theme tuikit.Theme, line string, style tuikit.LineStyle)
 func renderToolEventViewModelPlain(vm ToolEventViewModel) (string, tuikit.LineStyle) {
 	name := cmp.Or(strings.TrimSpace(vm.Name), "TOOL")
 	if !vm.Done {
-		line := "▸ " + name
+		prefix := "▸"
+		if vm.Expandable && vm.Expanded {
+			prefix = "▾"
+		}
+		line := prefix + " " + name
 		if vm.Args != "" {
 			line += " " + vm.Args
 		}

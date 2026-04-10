@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 const defaultFriendlyWaitMS = 5000
@@ -752,7 +752,36 @@ func summarizeACPToolResult(result map[string]any) string {
 	if stderr := strings.TrimSpace(asString(result["stderr"])); stderr != "" {
 		return truncateInline(stderr, 160)
 	}
+	for _, key := range []string{"content", "detailedContent", "text"} {
+		if value := strings.TrimSpace(extractACPTextValue(result[key])); value != "" {
+			return truncateInline(value, 160)
+		}
+	}
 	return ""
+}
+
+func extractACPTextValue(raw any) string {
+	switch typed := raw.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value := strings.TrimSpace(extractACPTextValue(item)); value != "" {
+				parts = append(parts, value)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		for _, key := range []string{"text", "value", "content", "detailedContent"} {
+			if value := strings.TrimSpace(extractACPTextValue(typed[key])); value != "" {
+				return value
+			}
+		}
+	}
+	return strings.TrimSpace(asString(raw))
 }
 
 func formatToolResultLine(prefix string, toolName string, summary string) string {

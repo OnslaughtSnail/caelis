@@ -52,6 +52,43 @@ func TestMessages_SkipsUIOnlyAndRuntimeSystemNotices(t *testing.T) {
 	}
 }
 
+func TestMessages_SkipsACPToolProtocolHistory(t *testing.T) {
+	now := time.Now()
+	events := NewEvents([]*Event{
+		{ID: "user", Time: now, Message: model.NewTextMessage(model.RoleUser, "刚才都做了什么？")},
+		{
+			ID:      "acp-text",
+			Time:    now,
+			Message: model.NewTextMessage(model.RoleAssistant, "ACP 已完成一轮工具演示。"),
+			Meta:    map[string]any{"controller_kind": "acp"},
+		},
+		{
+			ID:   "acp-call",
+			Time: now,
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "call-1",
+				Name: "FETCH",
+				Args: `{"url":"https://example.com"}`,
+			}}, ""),
+			Meta: map[string]any{"controller_kind": "acp"},
+		},
+		{
+			ID:      "acp-result",
+			Time:    now,
+			Message: model.MessageFromToolResponse(&model.ToolResponse{ID: "call-1", Name: "FETCH", Result: map[string]any{"error": "fetch failed"}}),
+			Meta:    map[string]any{"controller_kind": "acp"},
+		},
+	})
+
+	got := Messages(events, "sys", nil)
+	if len(got) != 2 {
+		t.Fatalf("expected user + ACP narrative only, got %+v", got)
+	}
+	if got[1].Role != model.RoleAssistant || got[1].TextContent() != "ACP 已完成一轮工具演示。" {
+		t.Fatalf("unexpected surviving ACP narrative: %+v", got[1])
+	}
+}
+
 func TestPendingToolCalls_ReturnsOnlyUnmatchedCallsInOrder(t *testing.T) {
 	now := time.Now()
 	events := []*Event{

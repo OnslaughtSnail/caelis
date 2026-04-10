@@ -8,11 +8,11 @@ import (
 	"github.com/OnslaughtSnail/caelis/internal/app/acpadapter"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/task"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 )

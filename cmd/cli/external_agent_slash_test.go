@@ -54,6 +54,80 @@ func TestDynamicSlashAgents_NilConsoleReturnsNil(t *testing.T) {
 	}
 }
 
+func TestAvailableCommandNames_HidesBTWWhenMainAgentUsesACP(t *testing.T) {
+	console := &cliConsole{
+		commands: map[string]slashCommand{
+			"btw":    {Usage: "/btw <question>"},
+			"help":   {Usage: "/help"},
+			"status": {Usage: "/status"},
+		},
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "codex",
+			Agents: map[string]agentRecord{
+				"codex": {Command: "/bin/codex"},
+			},
+		}},
+	}
+
+	got := console.availableCommandNames()
+	if slices.Contains(got, "btw") {
+		t.Fatalf("did not expect /btw in command list for ACP main agent, got %v", got)
+	}
+	if !slices.Contains(got, "help") || !slices.Contains(got, "status") {
+		t.Fatalf("expected other commands to remain available, got %v", got)
+	}
+}
+
+func TestAvailableCommandNames_ACPMainIncludesDynamicSlashAgents(t *testing.T) {
+	console := &cliConsole{
+		commands: map[string]slashCommand{
+			"help":    {Usage: "/help"},
+			"status":  {Usage: "/status"},
+			"new":     {Usage: "/new"},
+			"resume":  {Usage: "/resume"},
+			"agent":   {Usage: "/agent"},
+			"model":   {Usage: "/model"},
+			"quit":    {Usage: "/quit"},
+			"exit":    {Usage: "/exit"},
+			"compact": {Usage: "/compact"},
+			"fork":    {Usage: "/fork"},
+			"sandbox": {Usage: "/sandbox"},
+			"btw":     {Usage: "/btw"},
+		},
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		persistentMainACP: &persistentMainACPState{
+			agentID: "copilot",
+			availableCmds: []acpMainAvailableCommand{
+				{Name: "compact", Description: "Compact remotely"},
+				{Name: "status", Description: "Remote status"},
+			},
+		},
+		agentRegistry: appagents.NewRegistry(
+			appagents.Descriptor{ID: "gemini", Transport: appagents.TransportACP, Command: "gemini"},
+		),
+	}
+
+	got := console.availableCommandNames()
+	for _, one := range []string{"help", "status", "new", "resume", "agent", "model", "quit", "exit", "compact"} {
+		if !slices.Contains(got, one) {
+			t.Fatalf("expected command %q in ACP main command list, got %v", one, got)
+		}
+	}
+	if !slices.Contains(got, "copilot") {
+		t.Fatalf("expected configured ACP slash agent in ACP main command list, got %v", got)
+	}
+	for _, one := range []string{"fork", "sandbox", "btw", "gemini"} {
+		if slices.Contains(got, one) {
+			t.Fatalf("did not expect command %q in ACP main command list, got %v", one, got)
+		}
+	}
+}
+
 func TestRunExternalAgentSlash_RequiresIdleMainSession(t *testing.T) {
 	console := &cliConsole{}
 	console.setActiveRunCancel(func() {})
@@ -100,6 +174,21 @@ func TestRunPromptAndBTWRejectDuringExternalAgentRun(t *testing.T) {
 	}
 	if err := console.runBTW("status?", nil); !errors.Is(err, errExternalAgentRunBusy) {
 		t.Fatalf("expected /btw rejection, got %v", err)
+	}
+}
+
+func TestBTWRejectsWhenMainAgentUsesACP(t *testing.T) {
+	console := &cliConsole{
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "codex",
+			Agents: map[string]agentRecord{
+				"codex": {Command: "/bin/codex"},
+			},
+		}},
+	}
+
+	if err := console.runBTW("status?", nil); !errors.Is(err, errBTWUnavailableForACPMain) {
+		t.Fatalf("expected ACP main-agent /btw rejection, got %v", err)
 	}
 }
 
@@ -194,11 +283,18 @@ func TestShouldPersistExternalProjectionEvent_SkipsPartialNarrative(t *testing.T
 	}
 }
 
-func TestMergeExternalNarrativeChunk_DeduplicatesCumulativeReplay(t *testing.T) {
+func TestMergeNarrativeChunk_DeduplicatesCumulativeReplay(t *testing.T) {
 	prefix := "我是 Gemini CLI，专注于软件工程任务的交互式 AI"
 	full := prefix + " 代理。我以高级软件工程师的身份协助你进行代码分析。"
-	if got := mergeExternalNarrativeChunk(prefix, full); got != full {
-		t.Fatalf("expected cumulative replay to replace previous snapshot, got %q", got)
+	next, delta, changed := acpprojector.MergeNarrativeChunk(prefix, full)
+	if next != full {
+		t.Fatalf("expected cumulative replay to replace previous snapshot, got %q", next)
+	}
+	if !changed {
+		t.Fatal("expected changed=true for cumulative replay merge")
+	}
+	if delta == "" {
+		t.Fatal("expected non-empty delta for cumulative replay merge")
 	}
 }
 
@@ -397,6 +493,134 @@ func TestRouteExternalParticipantContext_LoadsExistingSessionIntoNewTurn(t *test
 	}
 }
 
+func TestHandleSlashContext_ACPMainRoutesDynamicSlashAgent(t *testing.T) {
+	store := inmemory.New()
+	root := &session.Session{AppName: "app", UserID: "u", ID: "root"}
+	if _, err := store.GetOrCreate(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	client := &stubExternalSlashACPClient{promptDone: make(chan struct{})}
+	prevStarter := startExternalSlashACPClientHook
+	t.Cleanup(func() {
+		startExternalSlashACPClientHook = prevStarter
+	})
+	startExternalSlashACPClientHook = func(_ *cliConsole, _ context.Context, _ *activeExternalAgentRun, desc appagents.Descriptor, turn *externalAgentTurn) (externalSlashACPClient, func(), error) {
+		if got, want := strings.TrimSpace(desc.ID), "copilot"; got != want {
+			t.Fatalf("unexpected descriptor %q want %q", got, want)
+		}
+		if turn == nil || turn.mode != externalAgentTurnNew {
+			t.Fatalf("expected new turn, got %+v", turn)
+		}
+		return client, func() {}, nil
+	}
+
+	console := &cliConsole{
+		baseCtx:      context.Background(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    root.ID,
+		sessionStore: store,
+		workspace:    workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:    &testSender{},
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		agentRegistry: appagents.NewRegistry(
+			appagents.Descriptor{ID: "copilot", Transport: appagents.TransportACP, Command: "copilot"},
+		),
+	}
+
+	if _, err := console.handleSlashContext(context.Background(), "/copilot 演示一下工具调用能力"); err != nil {
+		t.Fatalf("expected ACP main dynamic slash route, got %v", err)
+	}
+	waitForExternalPromptDone(t, client.promptDone)
+
+	if client.promptCalls != 1 || client.promptText != "演示一下工具调用能力" {
+		t.Fatalf("unexpected external prompt invocation calls=%d text=%q", client.promptCalls, client.promptText)
+	}
+}
+
+func TestRunExternalAgentSlash_ACPMainStillRequiresIdleMainSession(t *testing.T) {
+	store := inmemory.New()
+	root := &session.Session{AppName: "app", UserID: "u", ID: "root"}
+	if _, err := store.GetOrCreate(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	console := &cliConsole{
+		baseCtx:         context.Background(),
+		appName:         "app",
+		userID:          "u",
+		sessionID:       root.ID,
+		sessionStore:    store,
+		workspace:       workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:       &testSender{},
+		activeRunCancel: func() {},
+		activeRunKind:   runOccupancyMainSession,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		agentRegistry: appagents.NewRegistry(
+			appagents.Descriptor{ID: "copilot", Transport: appagents.TransportACP, Command: "copilot"},
+		),
+	}
+
+	err := console.runExternalAgentSlashContext(context.Background(), appagents.Descriptor{
+		ID:        "copilot",
+		Transport: appagents.TransportACP,
+		Command:   "copilot",
+	}, "并行检查仓库")
+	if err == nil || err.Error() != "/copilot is only available while the main session is idle" {
+		t.Fatalf("expected ACP main busy error, got %v", err)
+	}
+}
+
+func TestRouteExternalParticipantContext_ACPMainStillRequiresIdleMainSession(t *testing.T) {
+	store := inmemory.New()
+	root := &session.Session{AppName: "app", UserID: "u", ID: "root"}
+	if _, err := store.GetOrCreate(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	console := &cliConsole{
+		baseCtx:         context.Background(),
+		appName:         "app",
+		userID:          "u",
+		sessionID:       root.ID,
+		sessionStore:    store,
+		workspace:       workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:       &testSender{},
+		activeRunCancel: func() {},
+		activeRunKind:   runOccupancyMainSession,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		agentRegistry: appagents.NewRegistry(
+			appagents.Descriptor{ID: "copilot", Transport: appagents.TransportACP, Command: "copilot"},
+		),
+	}
+	if err := console.registerExternalParticipant(context.Background(), externalParticipant{
+		Alias:          "cole",
+		AgentID:        "copilot",
+		ChildSessionID: "child-1",
+		DisplayLabel:   "cole(copilot)",
+		Status:         "completed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := console.routeExternalParticipantContext(context.Background(), "cole", "继续分析"); err == nil || err.Error() != "@cole is only available while the main session is idle" {
+		t.Fatalf("expected ACP main busy error for participant route, got %v", err)
+	}
+}
+
 func TestFinalizeExternalTurnStreams_SkipsDuplicateFinalWhenStreamAlreadyObserved(t *testing.T) {
 	sender := &testSender{}
 	console := &cliConsole{tuiSender: sender}
@@ -443,6 +667,52 @@ func TestHandleExternalPermissionRequest_FullAccessAutoSelectsAllowOnceWithoutPr
 	}
 	if prompter.reads != 0 {
 		t.Fatalf("expected no interactive prompt, got %d reads", prompter.reads)
+	}
+}
+
+func TestHandleExternalPermissionRequest_ACPMainDefersToServerPermissionFlow(t *testing.T) {
+	prompter := &stubLineEditor{lines: []string{"Allow once"}}
+	console := &cliConsole{
+		sessionMode: sessionmode.DefaultMode,
+		configStore: &appConfigStore{data: appConfig{
+			MainAgent: "copilot",
+			Agents: map[string]agentRecord{
+				"copilot": {Command: "copilot", Args: []string{"--acp", "--stdio"}},
+			},
+		}},
+		persistentMainACP: &persistentMainACPState{
+			agentID: "copilot",
+			modes: &acpclient.SessionModeState{
+				CurrentModeID: "https://agentclientprotocol.com/protocol/session-modes#autopilot",
+			},
+			configOptions: []acpclient.SessionConfigOption{
+				{
+					ID:           acpConfigMode,
+					Category:     "mode",
+					CurrentValue: "https://agentclientprotocol.com/protocol/session-modes#autopilot",
+				},
+			},
+		},
+		approver: newTerminalApprover(prompter, io.Discard, newUI(io.Discard, true, false)),
+	}
+	console.approver.modeResolver = func() string { return console.currentApprovalMode() }
+
+	resp, err := console.handleExternalPermissionRequest(context.Background(), acpclient.RequestPermissionRequest{
+		SessionID: "child-copilot",
+		Options: []acpclient.PermissionOption{
+			{OptionID: "allow_always", Name: "Always allow", Kind: "allow_always"},
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
+		},
+	}, "copilot", nil)
+	if err != nil {
+		t.Fatalf("permission request: %v", err)
+	}
+	if got := selectedPermissionOptionID(t, resp); got != "allow_once" {
+		t.Fatalf("expected allow_once, got %q", got)
+	}
+	if prompter.reads != 1 {
+		t.Fatalf("expected interactive prompt, got %d reads", prompter.reads)
 	}
 }
 

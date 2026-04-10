@@ -53,7 +53,7 @@ func builtInRolePrompt(role string) string {
 	}
 }
 
-func builtInCapabilityGuidancePrompt() string {
+func builtInCapabilityGuidancePrompt(_ string) string {
 	return strings.Join([]string{
 		"## Capability Guidance",
 		"",

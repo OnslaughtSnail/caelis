@@ -7,34 +7,23 @@ import (
 	"sync"
 	"time"
 
-	coremeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	"github.com/OnslaughtSnail/caelis/kernel/delegation"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
-	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 const (
-	metaParentSessionID = "parent_session_id"
-	metaChildSessionID  = "child_session_id"
-	metaParentToolCall  = "parent_tool_call_id"
-	metaParentToolName  = "parent_tool_name"
-	metaDelegationID    = "delegation_id"
+	metaParentSessionID = delegation.MetaParentSessionID
+	metaChildSessionID  = delegation.MetaChildSessionID
+	metaParentToolCall  = delegation.MetaParentToolCall
+	metaParentToolName  = delegation.MetaParentToolName
+	metaDelegationID    = delegation.MetaDelegationID
 )
 
-type delegationLineage struct {
-	ParentSessionID string
-	ChildSessionID  string
-	ParentToolCall  string
-	ParentToolName  string
-	DelegationID    string
-	TaskID          string
-}
-
-type delegationLineageContextKey struct{}
+type delegationLineage = delegation.Lineage
 
 type runtimeSubagentRunner struct {
 	runtime *Runtime
@@ -181,15 +170,7 @@ func (r *runtimeSubagentRunner) unregisterCancel(sessionID string) {
 }
 
 func resolveChildSessionID(parentSessionID string, requested string) (string, error) {
-	requested = strings.TrimSpace(requested)
-	parentSessionID = strings.TrimSpace(parentSessionID)
-	if requested == "" {
-		return idutil.NewSessionID(), nil
-	}
-	if requested == parentSessionID {
-		return "", fmt.Errorf("runtime: delegated child session_id must differ from parent session")
-	}
-	return requested, nil
+	return delegation.ResolveChildSessionID(parentSessionID, requested, idutil.NewSessionID)
 }
 
 func ResolveChildSessionID(parentSessionID string, requested string) (string, error) {
@@ -197,24 +178,11 @@ func ResolveChildSessionID(parentSessionID string, requested string) (string, er
 }
 
 func withDelegationLineage(ctx context.Context, lineage delegationLineage) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, delegationLineageContextKey{}, lineage)
+	return delegation.WithLineage(ctx, lineage)
 }
 
 func detachSubagentContext(ctx context.Context, lineage delegationLineage) context.Context {
-	base := withDelegationLineage(context.Background(), lineage)
-	if approver, ok := toolexec.ApproverFromContext(ctx); ok {
-		base = toolexec.WithApprover(base, approver)
-	}
-	if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
-		base = policy.WithToolAuthorizer(base, authorizer)
-	}
-	if streamer, ok := sessionstream.StreamerFromContext(ctx); ok {
-		base = sessionstream.WithStreamer(base, streamer)
-	}
-	return base
+	return delegation.DetachContext(ctx, lineage)
 }
 
 func DetachDelegationContext(ctx context.Context, meta DelegationMetadata) context.Context {
@@ -228,25 +196,7 @@ func DetachDelegationContext(ctx context.Context, meta DelegationMetadata) conte
 }
 
 func attachSubagentContext(ctx context.Context, lineage delegationLineage) context.Context {
-	base := withDelegationLineage(context.Background(), lineage)
-	if approver, ok := toolexec.ApproverFromContext(ctx); ok {
-		base = toolexec.WithApprover(base, approver)
-	}
-	if authorizer, ok := policy.ToolAuthorizerFromContext(ctx); ok {
-		base = policy.WithToolAuthorizer(base, authorizer)
-	}
-	if streamer, ok := sessionstream.StreamerFromContext(ctx); ok {
-		base = sessionstream.WithStreamer(base, streamer)
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		var cancel context.CancelFunc
-		base, cancel = context.WithDeadline(base, deadline)
-		context.AfterFunc(ctx, cancel)
-		return base
-	}
-	base, cancel := context.WithCancel(base)
-	context.AfterFunc(ctx, cancel)
-	return base
+	return delegation.AttachContext(ctx, lineage)
 }
 
 func AttachDelegationContext(ctx context.Context, meta DelegationMetadata) context.Context {
@@ -260,11 +210,7 @@ func AttachDelegationContext(ctx context.Context, meta DelegationMetadata) conte
 }
 
 func delegationLineageFromContext(ctx context.Context) (delegationLineage, bool) {
-	if ctx == nil {
-		return delegationLineage{}, false
-	}
-	lineage, ok := ctx.Value(delegationLineageContextKey{}).(delegationLineage)
-	return lineage, ok
+	return delegation.LineageFromContext(ctx)
 }
 
 func annotateDelegationMeta(ctx context.Context, ev *session.Event, sessionID string) {
@@ -275,28 +221,7 @@ func annotateDelegationMeta(ctx context.Context, ev *session.Event, sessionID st
 	if !ok {
 		return
 	}
-	if ev.Meta == nil {
-		ev.Meta = map[string]any{}
-	}
-	if value := strings.TrimSpace(lineage.ParentSessionID); value != "" {
-		ev.Meta[metaParentSessionID] = value
-	}
-	childSessionID := strings.TrimSpace(lineage.ChildSessionID)
-	if childSessionID == "" {
-		childSessionID = strings.TrimSpace(sessionID)
-	}
-	if childSessionID != "" {
-		ev.Meta[metaChildSessionID] = childSessionID
-	}
-	if value := strings.TrimSpace(lineage.ParentToolCall); value != "" {
-		ev.Meta[metaParentToolCall] = value
-	}
-	if value := strings.TrimSpace(lineage.ParentToolName); value != "" {
-		ev.Meta[metaParentToolName] = value
-	}
-	if value := strings.TrimSpace(lineage.DelegationID); value != "" {
-		ev.Meta[metaDelegationID] = value
-	}
+	delegation.AnnotateEvent(ev, sessionID, lineage)
 }
 
 func prepareEvent(ctx context.Context, sess *session.Session, ev *session.Event) *session.Event {
@@ -407,102 +332,15 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func (r *runtimeSubagentRunner) seedChildSessionMeta(ctx context.Context, childSessionID string, agentName string) error {
-	if r == nil || r.runtime == nil || r.runtime.logStore == nil || r.runtime.stateStore == nil {
-		return nil
-	}
-	childSessionID = strings.TrimSpace(childSessionID)
-	if childSessionID == "" {
-		return nil
-	}
-	meta := r.childSessionMeta(ctx, childSessionID, agentName)
-	if len(meta) == 0 {
+	if r == nil || r.runtime == nil {
 		return nil
 	}
 	child := &session.Session{
 		AppName: r.req.AppName,
 		UserID:  r.req.UserID,
-		ID:      childSessionID,
+		ID:      strings.TrimSpace(childSessionID),
 	}
-	if _, err := r.runtime.logStore.GetOrCreate(ctx, child); err != nil {
-		return err
-	}
-	return mergeChildSessionMeta(ctx, r.runtime.stateStore, child, meta)
-}
-
-func (r *runtimeSubagentRunner) childSessionMeta(ctx context.Context, childSessionID string, agentName string) map[string]any {
-	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
-		return meta
-	}
-	meta := coremeta.CloneMeta(r.sessionMeta(ctx, r.parent.ID))
-	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
-		return coremeta.WithDelegatedChild(meta, true)
-	}
-	return meta
-}
-
-func (r *runtimeSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {
-	if r == nil || r.runtime == nil || r.runtime.stateStore == nil {
-		return nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-	values, err := r.runtime.stateStore.SnapshotState(ctx, &session.Session{
-		AppName: r.req.AppName,
-		UserID:  r.req.UserID,
-		ID:      sessionID,
-	})
-	if err != nil {
-		return nil
-	}
-	acpState, _ := values["acp"].(map[string]any)
-	if len(acpState) == 0 {
-		return nil
-	}
-	meta, _ := acpState["meta"].(map[string]any)
-	return coremeta.CloneMeta(meta)
-}
-
-func mergeChildSessionMeta(ctx context.Context, store session.StateStore, sess *session.Session, meta map[string]any) error {
-	if store == nil || sess == nil || len(meta) == 0 {
-		return nil
-	}
-	merge := func(values map[string]any) map[string]any {
-		if values == nil {
-			values = map[string]any{}
-		}
-		acpState, _ := values["acp"].(map[string]any)
-		if acpState == nil {
-			acpState = map[string]any{}
-		} else {
-			acpState = cloneMap(acpState)
-		}
-		acpState["meta"] = coremeta.CloneMeta(meta)
-		values["acp"] = acpState
-		return values
-	}
-	if updater, ok := store.(session.StateUpdateStore); ok {
-		return updater.UpdateState(ctx, sess, func(values map[string]any) (map[string]any, error) {
-			return merge(values), nil
-		})
-	}
-	values, err := store.SnapshotState(ctx, sess)
-	if err != nil {
-		return err
-	}
-	return store.ReplaceState(ctx, sess, merge(values))
-}
-
-func cloneMap(values map[string]any) map[string]any {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make(map[string]any, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
-	return out
+	return delegation.SeedChildSessionMeta(ctx, r.runtime.logStore, r.runtime.stateStore, r.parent, child, agentName)
 }
 
 func (r *runtimeSubagentRunner) runDetachedSubagent(ctx context.Context, childReq RunRequest, lineage delegationLineage) {
@@ -588,7 +426,9 @@ func (r *runtimeSubagentRunner) InspectSubagent(ctx context.Context, sessionID s
 			result.UpdatedAt = ev.Time
 		}
 		if result.DelegationID == "" {
-			result.DelegationID = strings.TrimSpace(subagentStringValue(ev.Meta[metaDelegationID]))
+			if meta, ok := delegation.MetadataFromEvent(ev); ok {
+				result.DelegationID = strings.TrimSpace(meta.DelegationID)
+			}
 		}
 	}
 	result.Assistant = FinalAssistantText(events)
@@ -597,14 +437,4 @@ func (r *runtimeSubagentRunner) InspectSubagent(ctx context.Context, sessionID s
 		result.Running = true
 	}
 	return result, nil
-}
-
-func subagentStringValue(value any) string {
-	if value == nil {
-		return ""
-	}
-	if text, ok := value.(string); ok {
-		return text
-	}
-	return fmt.Sprint(value)
 }

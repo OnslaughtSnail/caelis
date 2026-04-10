@@ -44,12 +44,16 @@ func renderEventPolicyFor(msg tea.Msg) (renderEventPolicy, bool) {
 		return renderEventPolicy{lane: renderLaneToolStream, flushLogChunks: true, dismissHints: true}, true
 	case tuievents.ParticipantTurnStartMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
+	case tuievents.ACPMainTurnStartMsg:
+		return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 	case tuievents.ParticipantToolMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 	case tuievents.ParticipantStatusMsg:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true}, true
 	case tuievents.ACPProjectionMsg:
 		switch typed.Scope {
+		case tuievents.ACPProjectionMain:
+			return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 		case tuievents.ACPProjectionParticipant:
 			return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, flushTaskStreams: true, dismissHints: true}, true
 		case tuievents.ACPProjectionSubagent:
@@ -124,6 +128,9 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	if !ok {
 		return m, nil, false
 	}
+	if shouldInvalidateUserDisplayDedup(msg) {
+		m.invalidateUserDisplayDedup()
+	}
 	policyCmd := m.applyRenderEventPolicy(policy)
 
 	switch typed := msg.(type) {
@@ -178,6 +185,9 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 
 	case tuievents.ParticipantTurnStartMsg:
 		model, cmd := m.handleParticipantTurnStart(typed)
+		return model, tea.Batch(policyCmd, cmd), true
+	case tuievents.ACPMainTurnStartMsg:
+		model, cmd := m.handleMainACPTurnStart(typed)
 		return model, tea.Batch(policyCmd, cmd), true
 	case tuievents.ParticipantToolMsg:
 		model, cmd := m.handleParticipantToolMsg(typed)
@@ -264,6 +274,34 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	}
 }
 
+func (m *Model) invalidateUserDisplayDedup() {
+	if m == nil {
+		return
+	}
+	m.userDisplayDedupOK = false
+}
+
+func shouldInvalidateUserDisplayDedup(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tuievents.AssistantStreamMsg,
+		tuievents.RawDeltaMsg,
+		tuievents.ReasoningStreamMsg,
+		tuievents.DiffBlockMsg,
+		tuievents.TaskStreamMsg,
+		tuievents.ParticipantToolMsg,
+		tuievents.ParticipantStatusMsg,
+		tuievents.ACPProjectionMsg,
+		tuievents.SubagentStatusMsg,
+		tuievents.SubagentDoneMsg,
+		tuievents.SubagentStreamMsg,
+		tuievents.SubagentToolCallMsg,
+		tuievents.SubagentPlanMsg:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) handlePlanUpdateMsg(msg tuievents.PlanUpdateMsg) tea.Model {
 	m.planEntries = m.planEntries[:0]
 	hasIncomplete := false
@@ -343,6 +381,7 @@ func (m *Model) handleUserMessageMsg(msg tuievents.UserMessageMsg) tea.Model {
 	if m.activeActivityID != "" {
 		_ = m.finalizeActivityBlock()
 	}
+	m.finalizeActiveMainACPTurn(false, nil)
 	m.commitUserDisplayLine(msg.Text)
 	m.ensureViewportLayout()
 	m.syncViewportContent()
@@ -392,10 +431,12 @@ func (m *Model) handleTaskResultMsg(msg tuievents.TaskResultMsg) (tea.Model, tea
 		m.finalizeAssistantBlock()
 		m.finalizeReasoningBlock()
 	}
+	m.finalizeActiveMainACPTurn(msg.Interrupted, msg.Err)
 	if msg.SuppressTurnDivider {
 		m.finalizeActiveParticipantTurn(msg.Interrupted, msg.Err)
 	}
 	_ = m.finalizeActivityBlock()
+	m.collapseTurnEndMutationPanels()
 	if !m.runStartedAt.IsZero() {
 		m.lastRunDuration = time.Since(m.runStartedAt)
 		m.hasLastRunDuration = true

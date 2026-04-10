@@ -118,6 +118,29 @@ func TestWelcomePanelTruncatesLongWorkspaceValue(t *testing.T) {
 	}
 }
 
+func TestWrapRenderedRowsForViewport_PropagatesClickTokenAcrossWrappedLines(t *testing.T) {
+	m := newTestModel()
+	row := StyledPlainClickableRow(
+		"block-1",
+		"▾ RUN python3 hello.py --format json --verbose --limit 20",
+		"▾ RUN python3 hello.py --format json --verbose --limit 20",
+		"acp_tool_panel:tool-run",
+	)
+
+	styled, plain, tokens := m.wrapRenderedRowsForViewport(&TranscriptBlock{id: "block-1"}, []RenderedRow{row}, 16)
+	if len(styled) < 2 || len(plain) < 2 {
+		t.Fatalf("expected wrapped viewport rows, got styled=%d plain=%d", len(styled), len(plain))
+	}
+	if len(tokens) != len(plain) {
+		t.Fatalf("expected click tokens for each wrapped row, got %d tokens for %d lines", len(tokens), len(plain))
+	}
+	for i, token := range tokens {
+		if token != "acp_tool_panel:tool-run" {
+			t.Fatalf("expected wrapped row %d to preserve click token, got %q", i, token)
+		}
+	}
+}
+
 func TestBashPanelScrollbarHiddenUntilRecentScroll(t *testing.T) {
 	panel := NewBashPanelBlock("BASH", "call-1")
 	panel.Lines = []toolOutputLine{
@@ -1863,6 +1886,7 @@ func TestExtractToolCallName(t *testing.T) {
 		isStart bool
 	}{
 		{"▸ BASH echo hello", "BASH", true},
+		{"▾ PATCH build.sh +1 -1", "PATCH", true},
 		{"▸ read_file {path: /foo}", "READ_FILE", true},
 		{"▸ SPAWN delegate", "SPAWN", true},
 		{"✓ BASH completed", "", false}, // result, not start

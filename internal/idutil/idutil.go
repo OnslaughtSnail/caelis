@@ -1,51 +1,25 @@
 package idutil
 
-import (
-	"strings"
+import coreid "github.com/OnslaughtSnail/caelis/pkg/idutil"
 
-	"github.com/google/uuid"
-)
-
-const (
-	sessionPrefix         = "s-"
-	runPrefix             = "r-"
-	taskPrefix            = "t-"
-	delegationPrefix      = "dlg_"
-	sessionTokenLength    = 12
-	runTokenLength        = 12
-	taskTokenLength       = 12
-	delegationTokenLength = 12
-	DisplayPrefixLength   = 10
-)
+const DisplayPrefixLength = coreid.DisplayPrefixLength
 
 func NewSessionID() string {
-	return sessionPrefix + compactUUID(sessionTokenLength)
+	return coreid.NewSessionID()
 }
 
 func NewDelegationID() string {
-	return delegationPrefix + compactUUID(delegationTokenLength)
+	return coreid.NewDelegationID()
 }
 
 func NewRunID() string {
-	return runPrefix + compactUUID(runTokenLength)
+	return coreid.NewRunID()
 }
 
 func NewTaskID() string {
-	return taskPrefix + compactUUID(taskTokenLength)
+	return coreid.NewTaskID()
 }
 
 func ShortDisplay(id string) string {
-	value := strings.TrimSpace(id)
-	if len(value) <= DisplayPrefixLength {
-		return value
-	}
-	return value[:DisplayPrefixLength]
-}
-
-func compactUUID(n int) string {
-	value := strings.ReplaceAll(uuid.NewString(), "-", "")
-	if n <= 0 || n >= len(value) {
-		return value
-	}
-	return value[:n]
+	return coreid.ShortDisplay(id)
 }

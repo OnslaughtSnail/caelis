@@ -84,6 +84,246 @@ func lastHint(msgs []any) string {
 	return ""
 }
 
+func TestHandleResume_ReplaysMainACPProjectionWithoutParticipantContainer(t *testing.T) {
+	store := inmemory.New()
+	target := &session.Session{AppName: "app", UserID: "u", ID: "resume-main-acp"}
+	if _, err := store.GetOrCreate(context.Background(), target); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), target, &session.Event{
+		ID:        "ev-user-1",
+		SessionID: target.ID,
+		Message:   model.NewTextMessage(model.RoleUser, "介绍一下你自己"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), target, &session.Event{
+		ID:        "ev-assistant-1",
+		SessionID: target.ID,
+		Message:   model.NewTextMessage(model.RoleAssistant, "我是 copilot 的 ACP 主控输出"),
+		Meta:      map[string]any{"_ui_agent": "copilot"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := sessionsvc.New(sessionsvc.ServiceConfig{
+		Store:   store,
+		AppName: "app",
+		UserID:  "u",
+		Index: resumeIndexStub{
+			resolveID: target.ID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, err := appgateway.New(svc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:      context.Background(),
+		appName:      "app",
+		userID:       "u",
+		sessionID:    "current",
+		workspace:    workspaceContext{Key: "wk", CWD: "/workspace"},
+		sessionStore: store,
+		gateway:      gw,
+		tuiSender:    sender,
+	}
+	console.sessionID = target.ID
+	for _, ev := range []acpProjectionPersistedEvent{
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: target.ID, Kind: "turn_start", SessionID: target.ID},
+		{Scope: string(tuievents.ACPProjectionMain), ScopeID: target.ID, Kind: "projection", SessionID: target.ID, Stream: "assistant", DeltaText: "我是 copilot 的 ACP 主控输出。"},
+	} {
+		if err := console.acpProjectionStore().AppendEvent(context.Background(), ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	console.sessionID = "current"
+
+	if _, err := handleResume(console, []string{target.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawMainTurn bool
+	var sawMainProjection bool
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.ACPMainTurnStartMsg:
+			if msg.SessionID == target.ID {
+				sawMainTurn = true
+			}
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope == tuievents.ACPProjectionMain && msg.ScopeID == target.ID && strings.Contains(msg.DeltaText+msg.FullText, "ACP 主控输出") {
+				sawMainProjection = true
+			}
+		case tuievents.ParticipantTurnStartMsg:
+			t.Fatalf("did not expect ACP main replay to enter participant container: %#v", msg)
+		case tuievents.RawDeltaMsg:
+			t.Fatalf("did not expect canonical ACP assistant replay to bypass main ACP projection: %#v", msg)
+		}
+	}
+	if !sawMainTurn || !sawMainProjection {
+		t.Fatalf("expected main ACP replay messages, got %#v", sender.Snapshot())
+	}
+}
+
+func TestRenderSessionEvents_SkipsCheckpointArtifactsAndKeepsACPReplayTurnOrder(t *testing.T) {
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:        context.Background(),
+		appName:        "app",
+		userID:         "u",
+		sessionID:      "resume-main-acp",
+		workspace:      workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender:      sender,
+		spawnPreviewer: newSpawnPreviewProjector(),
+	}
+
+	checkpoint := session.MarkMirror(&session.Event{
+		ID:        "ev-checkpoint",
+		SessionID: "resume-main-acp",
+		Message:   model.NewTextMessage(model.RoleSystem, `{"system":{"checkpoint_id":"ckpt-1"}}`),
+		Meta: map[string]any{
+			"event_type":       "epoch_checkpoint",
+			"epoch_checkpoint": true,
+		},
+	})
+	checkpoint.Meta["event_type"] = "epoch_checkpoint"
+	checkpoint.Meta["epoch_checkpoint"] = true
+
+	events := []*session.Event{
+		{
+			ID:        "ev-user-1",
+			SessionID: "resume-main-acp",
+			Message:   model.NewTextMessage(model.RoleUser, "我刚才问了什么问题？你现在是什么模式？"),
+		},
+		{
+			ID:        "ev-assistant-1",
+			SessionID: "resume-main-acp",
+			Message:   model.NewTextMessage(model.RoleAssistant, "你刚才问了：“现在处于什么模式？”"),
+			Meta:      map[string]any{"_ui_agent": "copilot"},
+		},
+		checkpoint,
+		{
+			ID:        "ev-user-2",
+			SessionID: "resume-main-acp",
+			Message:   model.NewTextMessage(model.RoleUser, "你现在应该是在autopilot模式下，试一下能不能执行具体的操作"),
+		},
+		{
+			ID:        "ev-assistant-2",
+			SessionID: "resume-main-acp",
+			Message:   model.NewTextMessage(model.RoleAssistant, "收到，当前已切换到自动执行（autopilot）模式。"),
+			Meta:      map[string]any{"_ui_agent": "copilot"},
+		},
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	got := []string{}
+	for _, raw := range sender.Snapshot() {
+		switch msg := raw.(type) {
+		case tuievents.UserMessageMsg:
+			got = append(got, "user:"+msg.Text)
+		case tuievents.ACPMainTurnStartMsg:
+			if msg.SessionID == "resume-main-acp" {
+				got = append(got, "turn")
+			}
+		case tuievents.ACPProjectionMsg:
+			if msg.Scope == tuievents.ACPProjectionMain && msg.Stream == "assistant" {
+				text := strings.TrimSpace(msg.DeltaText)
+				if text == "" {
+					text = strings.TrimSpace(msg.FullText)
+				}
+				if text != "" {
+					got = append(got, "assistant:"+text)
+				}
+			}
+		case tuievents.LogChunkMsg:
+			if strings.Contains(msg.Chunk, "checkpoint_id") || strings.Contains(msg.Chunk, "epoch_checkpoint") {
+				t.Fatalf("did not expect checkpoint artifact to replay into transcript, got %#v", sender.Snapshot())
+			}
+		}
+	}
+
+	want := []string{
+		"user:我刚才问了什么问题？你现在是什么模式？",
+		"turn",
+		"assistant:你刚才问了：“现在处于什么模式？”",
+		"user:你现在应该是在autopilot模式下，试一下能不能执行具体的操作",
+		"turn",
+		"assistant:收到，当前已切换到自动执行（autopilot）模式。",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("expected ACP replay order %v, got %v", want, got)
+	}
+}
+
+func TestRenderSessionEvents_ReplaysMainACPMirrorToolHistory(t *testing.T) {
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:   context.Background(),
+		appName:   "app",
+		userID:    "u",
+		sessionID: "resume-main-acp",
+		workspace: workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender: sender,
+	}
+
+	callEvent := session.MarkMirror(&session.Event{
+		ID:        "ev-call",
+		SessionID: "resume-main-acp",
+		Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+			ID:   "tc-1",
+			Name: "RUN",
+			Args: `{"command":"python3 hello.py","_acp_kind":"execute"}`,
+		}}, ""),
+		Meta: map[string]any{"_ui_agent": "copilot"},
+	})
+	respEvent := session.MarkMirror(&session.Event{
+		ID:        "ev-resp",
+		SessionID: "resume-main-acp",
+		Message: model.MessageFromToolResponse(&model.ToolResponse{
+			ID:   "tc-1",
+			Name: "RUN",
+			Result: map[string]any{
+				"content": "hello from copilot",
+			},
+		}),
+		Meta: map[string]any{
+			"_ui_agent":       "copilot",
+			"acp_tool_status": "completed",
+		},
+	})
+
+	if err := console.renderSessionEvents([]*session.Event{callEvent, respEvent}); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		sawToolCall bool
+		sawToolResp bool
+	)
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.ACPProjectionMsg)
+		if !ok || msg.Scope != tuievents.ACPProjectionMain {
+			continue
+		}
+		if msg.ToolCallID == "tc-1" && msg.ToolName == "RUN" && msg.ToolStatus == "" {
+			sawToolCall = true
+		}
+		if msg.ToolCallID == "tc-1" && msg.ToolName == "RUN" && msg.ToolStatus == "completed" {
+			sawToolResp = true
+		}
+	}
+	if !sawToolCall || !sawToolResp {
+		t.Fatalf("expected ACP main tool replay messages, got %#v", sender.Snapshot())
+	}
+}
+
 func TestHandleResume_BootstrapsRunningSubagentWithoutRemoteReplay(t *testing.T) {
 	store := inmemory.New()
 	rt, err := runtime.New(runtime.Config{LogStore: store, StateStore: store})
@@ -951,6 +1191,66 @@ func TestRenderSessionEvents_ReplayedBashTaskStreamUsesOriginalCallID(t *testing
 	if foundWrongCallID {
 		t.Fatalf("did not expect replayed bash stdout to stay bound to self-referential task id, got %#v", sender.Snapshot())
 	}
+}
+
+func TestRenderSessionEvents_ReplaysBashStdoutWhenTaskStreamOnlyCarriesState(t *testing.T) {
+	events := []*session.Event{
+		{
+			ID:        "ev-bash-call",
+			SessionID: "resume-parent",
+			Message: model.MessageFromToolCalls(model.RoleAssistant, []model.ToolCall{{
+				ID:   "call-bash-1",
+				Name: "BASH",
+				Args: `{"command":"echo hello"}`,
+			}}, ""),
+		},
+		{
+			ID:        "ev-bash-result",
+			SessionID: "resume-parent",
+			Message: model.MessageFromToolResponse(&model.ToolResponse{
+				ID:   "call-bash-1",
+				Name: "BASH",
+				Result: map[string]any{
+					"stdout": "hello from fallback\n",
+					"metadata": map[string]any{
+						"task_stream": []any{
+							map[string]any{
+								"label":   "BASH",
+								"task_id": "task-bash-1",
+								"state":   "completed",
+								"final":   true,
+							},
+						},
+					},
+				},
+			}),
+		},
+	}
+
+	sender := &testSender{}
+	console := &cliConsole{
+		baseCtx:   context.Background(),
+		appName:   "app",
+		userID:    "u",
+		sessionID: "resume-parent",
+		workspace: workspaceContext{Key: "wk", CWD: "/workspace"},
+		tuiSender: sender,
+	}
+
+	if err := console.renderSessionEvents(events); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range sender.Snapshot() {
+		msg, ok := raw.(tuievents.TaskStreamMsg)
+		if !ok {
+			continue
+		}
+		if msg.CallID == "call-bash-1" && msg.Stream == "stdout" && strings.Contains(msg.Chunk, "hello from fallback") {
+			return
+		}
+	}
+	t.Fatalf("expected bash stdout fallback replay, got %#v", sender.Snapshot())
 }
 
 func TestHandleResume_ReplaysRunningSubagentOnlyFromLocalProjectionLog(t *testing.T) {

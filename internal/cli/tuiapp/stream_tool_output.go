@@ -50,15 +50,30 @@ func (m *Model) resolveCallAnchor(callID, toolName string) string {
 // Returns the name and true if the line is a tool call start; empty and false otherwise.
 func extractToolCallName(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "▸") {
+	switch {
+	case strings.HasPrefix(trimmed, "▸"):
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "▸"))
+	case strings.HasPrefix(trimmed, "▾"):
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "▾"))
+	case strings.HasPrefix(trimmed, "▶"):
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "▶"))
+	default:
 		return "", false
 	}
-	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "▸"))
-	fields := strings.Fields(rest)
+	fields := strings.Fields(trimmed)
 	if len(fields) == 0 {
 		return "", false
 	}
 	return strings.ToUpper(fields[0]), true
+}
+
+func isMutationToolName(toolName string) bool {
+	switch strings.ToUpper(strings.TrimSpace(toolName)) {
+	case "PATCH", "WRITE":
+		return true
+	default:
+		return false
+	}
 }
 
 // panelProducingTools lists the tool names that generate companion panels.
@@ -151,6 +166,7 @@ func (m *Model) ensureBashPanelBlock(key, toolName, callID string, reset bool) *
 					bp.CallID = strings.TrimSpace(callID)
 				}
 				m.syncInlineBashAnchorState(bp)
+				m.syncMutationAnchorStateForPanel(bp)
 				return bp
 			}
 		}
@@ -158,7 +174,12 @@ func (m *Model) ensureBashPanelBlock(key, toolName, callID string, reset bool) *
 	bp := NewBashPanelBlock(toolName, callID)
 	bp.Key = key
 	// Anchor panel after its specific tool call line.
-	anchorID := m.resolveCallAnchor(callID, toolName)
+	anchorID := ""
+	if panelProducingTools[strings.ToUpper(strings.TrimSpace(toolName))] {
+		anchorID = m.resolveCallAnchor(callID, toolName)
+	} else if isMutationToolName(toolName) {
+		anchorID = m.resolveMutationAnchor(callID, toolName)
+	}
 	if anchorID != "" {
 		m.doc.InsertAfter(anchorID, bp)
 	} else {
@@ -166,7 +187,25 @@ func (m *Model) ensureBashPanelBlock(key, toolName, callID string, reset bool) *
 	}
 	m.toolOutputBlockIDs[key] = bp.BlockID()
 	m.syncInlineBashAnchorState(bp)
+	m.syncMutationAnchorStateForPanel(bp)
 	return bp
+}
+
+func (m *Model) resolveMutationAnchor(callID, toolName string) string {
+	if m == nil {
+		return ""
+	}
+	anchor := m.findMutationSummaryAnchor(toolName)
+	if anchor == nil {
+		return ""
+	}
+	if strings.TrimSpace(callID) != "" {
+		if m.callAnchorIndex == nil {
+			m.callAnchorIndex = map[string]string{}
+		}
+		m.callAnchorIndex[callID] = anchor.BlockID()
+	}
+	return anchor.BlockID()
 }
 
 func (m *Model) applyBashPanelState(panel *BashPanelBlock, state string, final bool) {
@@ -197,6 +236,7 @@ func (m *Model) applyBashPanelState(panel *BashPanelBlock, state string, final b
 	}
 	panel.UpdatedAt = now
 	m.syncInlineBashAnchorState(panel)
+	m.syncMutationAnchorStateForPanel(panel)
 }
 
 func (m *Model) scheduleInlineBashCollapse(panel *BashPanelBlock) {
@@ -222,6 +262,7 @@ func (m *Model) toggleInlineBashPanel(panel *BashPanelBlock) {
 	cancelInlineCollapse(&panel.CollapseAt, &panel.CollapseFrom, &panel.VisibleLines)
 	panel.Expanded = !panel.Expanded
 	m.syncInlineBashAnchorState(panel)
+	m.syncMutationAnchorStateForPanel(panel)
 }
 
 func isTerminalToolOutputState(state string) bool {
@@ -267,6 +308,105 @@ func (m *Model) syncInlineBashAnchorState(panel *BashPanelBlock) {
 		return
 	}
 	tb.Raw = inlineBashAnchorLabel(tb.Raw, panel.Expanded)
+}
+
+func (m *Model) syncMutationAnchorStateForPanel(panel *BashPanelBlock) {
+	if m == nil || panel == nil || !isMutationToolName(panel.ToolName) {
+		return
+	}
+	callID := strings.TrimSpace(panel.CallID)
+	if callID == "" {
+		return
+	}
+	anchorID := strings.TrimSpace(m.callAnchorIndex[callID])
+	if anchorID == "" {
+		anchorID = m.resolveMutationAnchor(callID, panel.ToolName)
+	}
+	if anchorID == "" {
+		return
+	}
+	m.syncMutationAnchorState(anchorID)
+}
+
+func (m *Model) syncMutationAnchorState(anchorID string) {
+	if m == nil {
+		return
+	}
+	anchorID = strings.TrimSpace(anchorID)
+	if anchorID == "" {
+		return
+	}
+	tb := m.findTranscriptBlock(anchorID)
+	if tb == nil {
+		return
+	}
+	tb.Raw = inlineBashAnchorLabel(tb.Raw, m.mutationAnchorExpanded(anchorID))
+}
+
+func (m *Model) mutationAnchorExpanded(anchorID string) bool {
+	if m == nil {
+		return false
+	}
+	anchorID = strings.TrimSpace(anchorID)
+	if anchorID == "" {
+		return false
+	}
+	if m.diffAnchorIndex != nil {
+		if blockID := strings.TrimSpace(m.diffAnchorIndex[anchorID]); blockID != "" {
+			if block, _ := m.doc.Find(blockID).(*DiffBlock); block != nil && block.Inline && block.Expanded && isMutationToolName(block.Msg.Tool) {
+				return true
+			}
+		}
+	}
+	for callID, mappedAnchorID := range m.callAnchorIndex {
+		if strings.TrimSpace(mappedAnchorID) != anchorID {
+			continue
+		}
+		panel := m.findBashPanelBlock(callID)
+		if panel == nil || !isMutationToolName(panel.ToolName) {
+			continue
+		}
+		if panel.Expanded {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) collapseTurnEndMutationPanels() {
+	if m == nil || m.doc == nil {
+		return
+	}
+	anchorIDs := map[string]struct{}{}
+	for _, block := range m.doc.Blocks() {
+		switch typed := block.(type) {
+		case *DiffBlock:
+			if !typed.Inline || !isMutationToolName(typed.Msg.Tool) || !typed.Expanded {
+				continue
+			}
+			typed.Expanded = false
+			for anchorID, blockID := range m.diffAnchorIndex {
+				if strings.TrimSpace(blockID) == typed.BlockID() {
+					anchorIDs[strings.TrimSpace(anchorID)] = struct{}{}
+				}
+			}
+		case *BashPanelBlock:
+			if !isMutationToolName(typed.ToolName) || !typed.Expanded {
+				continue
+			}
+			typed.Expanded = false
+			callID := strings.TrimSpace(typed.CallID)
+			if callID == "" {
+				continue
+			}
+			if anchorID := strings.TrimSpace(m.callAnchorIndex[callID]); anchorID != "" {
+				anchorIDs[anchorID] = struct{}{}
+			}
+		}
+	}
+	for anchorID := range anchorIDs {
+		m.syncMutationAnchorState(anchorID)
+	}
 }
 
 func inlineBashAnchorLabel(raw string, expanded bool) string {

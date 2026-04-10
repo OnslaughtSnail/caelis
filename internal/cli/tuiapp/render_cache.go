@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ type viewportRenderEntry struct {
 	cacheKey    string
 	styledLines []string
 	plainLines  []string
+	clickTokens []string
 }
 
 func (m *Model) rebuildViewportRenderCache(ctx BlockRenderContext) {
@@ -38,21 +40,23 @@ func (m *Model) rebuildViewportRenderCache(ctx BlockRenderContext) {
 }
 
 func (m *Model) renderViewportEntry(block Block, cacheKey string, ctx BlockRenderContext) viewportRenderEntry {
-	styledLines, plainLines := m.wrapRenderedRowsForViewport(block, block.Render(ctx), ctx.Width)
+	styledLines, plainLines, clickTokens := m.wrapRenderedRowsForViewport(block, block.Render(ctx), ctx.Width)
 	return viewportRenderEntry{
 		blockID:     block.BlockID(),
 		cacheKey:    cacheKey,
 		styledLines: styledLines,
 		plainLines:  plainLines,
+		clickTokens: clickTokens,
 	}
 }
 
-func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, wrapWidth int) ([]string, []string) {
+func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, wrapWidth int) ([]string, []string, []string) {
 	if wrapWidth <= 0 {
 		wrapWidth = 1
 	}
 	styledLines := make([]string, 0, len(rawRows)+8)
 	plainLines := make([]string, 0, len(rawRows)+8)
+	clickTokens := make([]string, 0, len(rawRows)+8)
 
 	for _, row := range rawRows {
 		styledLine := m.adaptHistoryLineForViewport(row.Styled, wrapWidth)
@@ -74,7 +78,7 @@ func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, 
 			case BlockAssistant, BlockReasoning:
 				wrappedStyled = m.wrapNarrativeRowStyled(row, wrapWidth)
 				plainParts = m.wrapNarrativeRowPlain(row, wrapWidth)
-			case BlockParticipantTurn:
+			case BlockMainACPTurn, BlockParticipantTurn:
 				wrappedStyled = hardWrapDisplayLine(styledLine, wrapWidth)
 				plainParts = normalizeWrappedPlainSegments(graphemeHardWrap(plainLine, wrapWidth))
 			default:
@@ -86,6 +90,7 @@ func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, 
 		if wrappedStyled == "" {
 			styledLines = append(styledLines, "")
 			plainLines = append(plainLines, "")
+			clickTokens = append(clickTokens, row.ClickToken)
 			continue
 		}
 
@@ -95,19 +100,24 @@ func (m *Model) wrapRenderedRowsForViewport(block Block, rawRows []RenderedRow, 
 		}
 		styledLines = append(styledLines, sParts...)
 		plainLines = append(plainLines, plainParts...)
+		for range sParts {
+			clickTokens = append(clickTokens, row.ClickToken)
+		}
 	}
 
-	return styledLines, plainLines
+	return styledLines, plainLines, clickTokens
 }
 
 func (m *Model) rebuildViewportLineCaches(ctx BlockRenderContext) {
 	styledLines := make([]string, 0, 64)
 	plainLines := make([]string, 0, 64)
 	blockIDs := make([]string, 0, 64)
+	clickTokens := make([]string, 0, 64)
 
 	for _, entry := range m.viewportRenderEntries {
 		styledLines = append(styledLines, entry.styledLines...)
 		plainLines = append(plainLines, entry.plainLines...)
+		clickTokens = append(clickTokens, entry.clickTokens...)
 		for range entry.styledLines {
 			blockIDs = append(blockIDs, entry.blockID)
 		}
@@ -121,6 +131,7 @@ func (m *Model) rebuildViewportLineCaches(ctx BlockRenderContext) {
 	m.viewportStyledLines = append(m.viewportStyledLines[:0], styledLines...)
 	m.viewportPlainLines = append(m.viewportPlainLines[:0], plainLines...)
 	m.viewportBlockIDs = append(m.viewportBlockIDs[:0], blockIDs...)
+	m.viewportClickTokens = append(m.viewportClickTokens[:0], clickTokens...)
 }
 
 func (m *Model) renderStreamViewportLines(ctx BlockRenderContext) ([]string, []string, []string) {
@@ -252,6 +263,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addBool(b.Expanded)
 		builder.addTime(b.StartedAt)
 		builder.addTime(b.EndedAt)
+		writeExpandedTools(builder, b.ExpandedTools)
 		writeSubagentEvents(builder, b.Events)
 	case *DiffBlock:
 		builder.addBool(b.Inline)
@@ -312,6 +324,13 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addString(b.Summary)
 		writeActivityEntries(builder, b.Entries)
 		writeRenderedRows(builder, b.cachedRows)
+	case *MainACPTurnBlock:
+		builder.addString(b.SessionID)
+		builder.addString(b.Status)
+		builder.addTime(b.StartedAt)
+		builder.addTime(b.EndedAt)
+		writeExpandedTools(builder, b.ExpandedTools)
+		writeSubagentEvents(builder, b.Events)
 	case *WelcomeBlock:
 		builder.addString(b.Version)
 		builder.addString(b.Workspace)
@@ -326,6 +345,23 @@ func writeToolOutputLines(builder *blockKeyBuilder, lines []toolOutputLine) {
 	for _, line := range lines {
 		builder.addString(line.stream)
 		builder.addString(line.text)
+	}
+}
+
+func writeExpandedTools(builder *blockKeyBuilder, values map[string]bool) {
+	if len(values) == 0 {
+		builder.addInt(0)
+		return
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	builder.addInt(len(keys))
+	for _, key := range keys {
+		builder.addString(key)
+		builder.addBool(values[key])
 	}
 }
 

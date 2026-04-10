@@ -17,6 +17,7 @@ type RenderedRow struct {
 	Styled     string // ANSI-colored display text
 	Plain      string // plain text for selection/copy
 	BlockID    string // originating block ID
+	ClickToken string // optional interaction token for row-level hit testing
 	PreWrapped bool   // if true, already wrapped to viewport width — skip re-wrapping
 }
 
@@ -30,6 +31,10 @@ func StyledRow(blockID, styled string) RenderedRow {
 // just a presentation transform of that same content.
 func StyledPlainRow(blockID, plain, styled string) RenderedRow {
 	return RenderedRow{Styled: styled, Plain: plain, BlockID: blockID}
+}
+
+func StyledPlainClickableRow(blockID, plain, styled, clickToken string) RenderedRow {
+	return RenderedRow{Styled: styled, Plain: plain, BlockID: blockID, ClickToken: clickToken}
 }
 
 // PlainRow creates a RenderedRow from a plain text line (no ANSI).
@@ -51,6 +56,7 @@ const (
 	BlockDivider         BlockKind = "divider"
 	BlockBashPanel       BlockKind = "bash_panel"
 	BlockSubagent        BlockKind = "subagent"
+	BlockMainACPTurn     BlockKind = "main_acp_turn"
 	BlockParticipantTurn BlockKind = "participant_turn"
 	BlockActivity        BlockKind = "activity"
 	BlockWelcome         BlockKind = "welcome"

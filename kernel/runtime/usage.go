@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	compact "github.com/OnslaughtSnail/caelis/kernel/compaction"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 )
@@ -53,7 +54,7 @@ func (r *Runtime) ContextUsage(ctx context.Context, req UsageRequest) (ContextUs
 	if inputBudget < 1 {
 		inputBudget = 1
 	}
-	current := estimateEventsTokens(window)
+	current := compact.EstimateEventsTokens(window)
 	ratio := float64(current) / float64(inputBudget)
 	if ratio < 0 {
 		ratio = 0

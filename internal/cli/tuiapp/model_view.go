@@ -43,6 +43,11 @@ func (m *Model) View() tea.View {
 		sections = append(sections, m.placeInMainColumn(pendingView))
 		sections = append(sections, "")
 	}
+	if reserve := m.promptModalReservedHeight(); reserve > 0 {
+		for range reserve {
+			sections = append(sections, "")
+		}
+	}
 
 	// 2. Hint row (contextual guidance).
 	sections = append(sections, m.placeInMainColumn(m.renderHintRow()))
@@ -88,7 +93,7 @@ func (m *Model) View() tea.View {
 
 	if m.activePrompt != nil && m.width > 0 && m.height > 0 {
 		if promptView := m.renderPromptModal(); promptView != "" {
-			view = overlayAboveBottomAreaLeft(view, promptView, m.width, m.mainColumnX()+inputHorizontalInset, bottomHeight, 0)
+			view = overlayAboveBottomAreaLeft(view, promptView, m.width, m.mainColumnX()+inputHorizontalInset, maxInt(0, bottomHeight-m.promptModalReservedHeight()), 0)
 		}
 	} else if overlayView := m.renderInputOverlay(); overlayView != "" && m.width > 0 && m.height > 0 {
 		view = overlayAboveBottomAreaLeft(view, overlayView, m.width, m.mainColumnX()+inputHorizontalInset, bottomHeight, 0)

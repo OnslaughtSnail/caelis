@@ -90,14 +90,28 @@ func (c *CoreClient) SetMode(ctx context.Context, sessionID string, modeID strin
 	}, &SetSessionModeResponse{})
 }
 
+func (c *CoreClient) SetConfigOption(ctx context.Context, sessionID string, configID string, value string) (SetSessionConfigOptionResponse, error) {
+	var resp SetSessionConfigOptionResponse
+	err := c.conn.Call(ctx, MethodSessionSetConfig, SetSessionConfigOptionRequest{
+		SessionID: sessionID,
+		ConfigID:  configID,
+		Value:     value,
+	}, &resp)
+	return resp, err
+}
+
 func (c *CoreClient) Prompt(ctx context.Context, sessionID string, text string, meta map[string]any) (PromptResponse, error) {
+	return c.PromptParts(ctx, sessionID, []json.RawMessage{
+		mustMarshalRaw(TextContent{Type: "text", Text: text}),
+	}, meta)
+}
+
+func (c *CoreClient) PromptParts(ctx context.Context, sessionID string, prompt []json.RawMessage, meta map[string]any) (PromptResponse, error) {
 	var resp PromptResponse
 	err := c.conn.Call(ctx, MethodSessionPrompt, PromptRequest{
 		SessionID: sessionID,
-		Prompt: []json.RawMessage{
-			mustMarshalRaw(TextContent{Type: "text", Text: text}),
-		},
-		Meta: meta,
+		Prompt:    append([]json.RawMessage(nil), prompt...),
+		Meta:      meta,
 	}, &resp)
 	return resp, err
 }

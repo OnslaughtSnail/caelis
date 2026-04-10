@@ -145,6 +145,23 @@ func TestSummarizeToolResponse_WriteUnchangedUsesCompactSummary(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolResponse_ACPStructuredContentUsesReadableSummary(t *testing.T) {
+	got := summarizeToolResponseWithCall("WRITE", map[string]any{
+		"content": []any{
+			map[string]any{"text": "Created quicksort.go and ran it."},
+		},
+		"detailedContent": []any{
+			map[string]any{"text": "Program output: [1 2 3]"},
+		},
+	}, nil)
+	if !strings.Contains(got, "Created quicksort.go and ran it.") {
+		t.Fatalf("expected ACP structured content summary, got %q", got)
+	}
+	if strings.Contains(got, "{keys=") {
+		t.Fatalf("expected structured ACP result to avoid fallback key summary, got %q", got)
+	}
+}
+
 func TestSummarizeToolResponse_SpawnRendersAssistantWithoutChildID(t *testing.T) {
 	got := summarizeToolResponse("SPAWN", map[string]any{
 		"child_session_id": "s-1234567890ab",

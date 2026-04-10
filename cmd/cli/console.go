@@ -14,12 +14,10 @@ import (
 	"time"
 	"unicode"
 
-	coreacpmeta "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/internal/app/acpext"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
 	appassembly "github.com/OnslaughtSnail/caelis/internal/app/assembly"
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
@@ -28,16 +26,18 @@ import (
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
 	toolshell "github.com/OnslaughtSnail/caelis/kernel/tool/builtin/shell"
+	coreacpmeta "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 
 	"github.com/OnslaughtSnail/caelis/internal/approvalqueue"
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuiapp"
 	"github.com/OnslaughtSnail/caelis/internal/cli/tuievents"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type cliConsole struct {
@@ -50,6 +50,7 @@ type cliConsole struct {
 	contextWindow int
 	workspace     workspaceContext
 	workspaceLine string
+	workspaceRoot string
 
 	resolved              *appassembly.ResolvedSpec
 	sessionStore          session.Store
@@ -91,13 +92,15 @@ type cliConsole struct {
 	approver *terminalApprover
 	commands map[string]slashCommand
 
-	runMu           sync.Mutex
-	activeRunCancel context.CancelFunc
-	activeRunner    sessionsvc.TurnHandle
-	activeRunKind   runOccupancy
-	interruptMu     sync.Mutex
-	lastInterruptAt time.Time
-	outMu           sync.Mutex
+	runMu                   sync.Mutex
+	tuiForwardMu            sync.Mutex
+	activeRunCancel         context.CancelFunc
+	activeRunner            sessionsvc.TurnHandle
+	activeRunKind           runOccupancy
+	activeExternalRunCancel context.CancelFunc
+	interruptMu             sync.Mutex
+	lastInterruptAt         time.Time
+	outMu                   sync.Mutex
 
 	imageCache          *image.Cache
 	pendingAttachments  []model.ContentPart
@@ -108,6 +111,7 @@ type cliConsole struct {
 	spawnPreviewer      *spawnPreviewProjector
 	resumeReplayMu      sync.Mutex
 	resumeReplayCancel  context.CancelFunc
+	persistentMainACP   *persistentMainACPState
 	bashWatchMu         sync.Mutex
 	bashTaskWatches     map[string]context.CancelFunc
 	connectModelCacheMu sync.Mutex
@@ -119,9 +123,24 @@ type cliConsole struct {
 	newACPAdapter       acpext.AdapterFactory
 }
 
+func sendTUIMsg(sender interface{ Send(msg any) }, msg any) {
+	if sender == nil {
+		return
+	}
+	if _, ok := sender.(*teaProgramSender); ok {
+		go sender.Send(msg)
+		return
+	}
+	sender.Send(msg)
+}
+
 type replayContextKey string
 
 const replayContextMarker replayContextKey = "resume_replay"
+
+type mainACPProjectionStateKey string
+
+const mainACPProjectionStateMarker mainACPProjectionStateKey = "main_acp_projection_state"
 
 const interruptExitWindow = 2 * time.Second
 const transientHintDuration = 1600 * time.Millisecond
@@ -131,11 +150,52 @@ const (
 	btwControlCloseTag = "</caelis-btw>"
 )
 
+var errBTWUnavailableForACPMain = errors.New("/btw is unavailable when the main agent uses ACP")
+
 func cliContext(ctx context.Context) context.Context {
 	if ctx != nil {
 		return ctx
 	}
 	return context.Background()
+}
+
+// mainACPProjectionState tracks turn-level state for ACP projection rendering.
+// The turnStarted field prevents duplicate turn-start emissions from
+// emitMainACPTurnStart and emitMainACPProjectionMsg.
+//
+// ACP events flow exclusively through the ACP client OnUpdate callback (via
+// mainACPProjectionTracker in acp_main_turn.go). The kernel session stream
+// does not participate in ACP rendering; ACP root events from the kernel
+// stream are suppressed entirely.
+type mainACPProjectionState struct {
+	mu          sync.Mutex
+	turnStarted bool
+}
+
+func withMainACPProjectionState(ctx context.Context) context.Context {
+	ctx = cliContext(ctx)
+	return context.WithValue(ctx, mainACPProjectionStateMarker, &mainACPProjectionState{})
+}
+
+func mainACPProjectionStateFromContext(ctx context.Context) *mainACPProjectionState {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(mainACPProjectionStateMarker).(*mainACPProjectionState)
+	return state
+}
+
+func (s *mainACPProjectionState) markTurnStarted() bool {
+	if s == nil {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnStarted {
+		return false
+	}
+	s.turnStarted = true
+	return true
 }
 
 type slashCommand struct {
@@ -179,6 +239,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		contextWindow:         cfg.ContextWindow,
 		workspace:             cfg.Workspace,
 		workspaceLine:         strings.TrimSpace(cfg.WorkspaceLine),
+		workspaceRoot:         strings.TrimSpace(cfg.WorkspaceRoot),
 		resolved:              cfg.Resolved,
 		sessionStore:          cfg.SessionStore,
 		execRuntime:           cfg.ExecRuntime,
@@ -224,7 +285,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 		ui:                    baseUI,
 	}
 	console.approver = newTerminalApprover(console.prompter, out, baseUI)
-	console.approver.modeResolver = func() string { return console.sessionMode }
+	console.approver.modeResolver = func() string { return console.currentApprovalMode() }
 	console.commands = map[string]slashCommand{
 		"help":    {Usage: "/help", Description: "Show available commands", Handle: handleHelp},
 		"btw":     {Usage: "/btw <question>", Description: "Ask an ephemeral side question without modifying history", Handle: handleBTW},
@@ -239,7 +300,7 @@ func newCLIConsole(cfg cliConsoleConfig) *cliConsole {
 			Description: "View or switch sandbox type (auto/bwrap/landlock experimental)",
 			Handle:      handleSandbox,
 		},
-		"agent":   {Usage: "/agent list | add <builtin> | rm <name>", Description: "Manage configured ACP agents", Handle: handleAgent},
+		"agent":   {Usage: "/agent use <self|name> | add <builtin> | list | rm <name>", Description: "Manage configured ACP agents and switch the main controller", Handle: handleAgent},
 		"model":   {Usage: "/model use <alias> [reasoning] | /model del [alias ...]", Description: "Switch models or remove configured models", Handle: handleModel},
 		"connect": {Usage: "/connect", Description: "Interactive provider and model setup", Handle: handleConnect},
 		"resume":  {Usage: "/resume [session-id]", Description: "Resume latest or specified session", Handle: handleResume},
@@ -258,6 +319,7 @@ type cliConsoleConfig struct {
 	ContextWindow         int
 	Workspace             workspaceContext
 	WorkspaceLine         string
+	WorkspaceRoot         string
 	Resolved              *appassembly.ResolvedSpec
 	SessionStore          session.Store
 	ExecRuntime           toolexec.Runtime
@@ -335,6 +397,21 @@ func (c *cliConsole) handleSlashContext(ctx context.Context, line string) (bool,
 		return false, nil
 	}
 	cmd := strings.ToLower(parts[0])
+	if c.currentMainAgentUsesACP() {
+		if handler, ok := c.commands[cmd]; ok && isACPMainCoreLocalCommand(cmd) {
+			return handler.Handle(c, parts[1:])
+		}
+		if desc, ok := c.dynamicSlashAgentDescriptor(cmd); ok {
+			return false, c.runExternalAgentSlashContext(ctx, desc, strings.TrimSpace(strings.Join(parts[1:], " ")))
+		}
+		if c.isACPMainRemoteSlashCommand(cmd) {
+			return false, c.runPromptWithAttachmentsContext(ctx, strings.TrimSpace(line), nil)
+		}
+		if suggestion := closestCommand(cmd, c.availableCommandNames()); suggestion != "" {
+			return false, fmt.Errorf("unknown command %q -- did you mean /%s?", cmd, suggestion)
+		}
+		return false, fmt.Errorf("unknown command %q, use /help", cmd)
+	}
 	handler, ok := c.commands[cmd]
 	if !ok {
 		if desc, ok := c.dynamicSlashAgentDescriptor(cmd); ok {
@@ -391,8 +468,11 @@ func (c *cliConsole) runPromptWithAttachments(input string, attachments []tuiapp
 }
 
 func (c *cliConsole) runPromptWithAttachmentsContext(ctx context.Context, input string, attachments []tuiapp.Attachment) error {
-	if c.currentRunKind() == runOccupancyExternalAgent {
+	if c.hasActiveExternalRun() {
 		return errExternalAgentRunBusy
+	}
+	if c.currentRunKind() == runOccupancyMainSession && c.getActiveRunner() == nil {
+		return fmt.Errorf("a main session run is active; wait for it to finish or interrupt it first")
 	}
 	prepared, err := c.preparePromptSubmission(input, attachments)
 	if err != nil {
@@ -414,8 +494,13 @@ func (c *cliConsole) runPromptWithAttachmentsContext(ctx context.Context, input 
 
 type preparedPromptSubmission struct {
 	agent        agent.Agent
+	mainACP      *preparedMainACPSubmission
 	runInput     string
 	contentParts []model.ContentPart
+}
+
+type preparedMainACPSubmission struct {
+	descriptor appagents.Descriptor
 }
 
 func (c *cliConsole) sessionBoundary() (*sessionsvc.Service, error) {
@@ -490,16 +575,46 @@ func (c *cliConsole) sessionGateway() (*appgateway.Gateway, error) {
 }
 
 func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.Attachment) (preparedPromptSubmission, error) {
-	if c.llm == nil {
+	agentInput := buildAgentInput{
+		AppName:                     c.appName,
+		PromptRole:                  promptRoleMainSession,
+		WorkspaceDir:                c.workspace.CWD,
+		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
+		BasePrompt:                  c.systemPrompt,
+		SkillDirs:                   c.skillDirs,
+		MainAgent:                   c.configStore.MainAgent(),
+		DefaultAgent:                c.configStore.DefaultAgent(),
+		AgentDescriptors:            c.configStore.AgentDescriptors(),
+		StreamModel:                 c.streamModel,
+		ThinkingBudget:              c.thinkingBudget,
+		ReasoningEffort:             c.reasoningEffort,
+		ModelProvider:               resolveProviderName(c.modelFactory, c.modelAlias),
+		ModelName:                   resolveModelName(c.modelFactory, c.modelAlias),
+		ModelConfig: func() modelproviders.Config {
+			if c.modelFactory == nil {
+				return modelproviders.Config{}
+			}
+			cfg, _ := c.modelFactory.ConfigForAlias(c.modelAlias)
+			return cfg
+		}(),
+		WorkspaceRoot:    firstNonEmptyString(c.workspaceRoot, c.workspace.CWD),
+		ExecutionRuntime: c.executionRuntimeForSession(),
+		AppVersion:       c.version,
+	}
+	desc, usesACP, err := resolveMainSessionAgentDescriptor(agentInput)
+	if err != nil {
+		return preparedPromptSubmission{}, err
+	}
+	if !usesACP && c.llm == nil {
 		return preparedPromptSubmission{}, fmt.Errorf("no model configured, use /connect to add provider and select model")
 	}
 	resolvedInput := input
 	visibleInput := input
 	var resolvedPaths []string
 	if c.inputRefs != nil {
-		result, err := c.inputRefs.RewriteInput(input)
-		if err != nil {
-			c.ui.Warn("input reference resolution skipped: %v\n", err)
+		result, rewriteErr := c.inputRefs.RewriteInput(input)
+		if rewriteErr != nil {
+			c.ui.Warn("input reference resolution skipped: %v\n", rewriteErr)
 		} else {
 			resolvedInput = result.Text
 			if displayText := strings.TrimSpace(result.DisplayText); displayText != "" {
@@ -511,8 +626,6 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 			}
 		}
 	}
-	resolvedInput = c.injectedPrompt(resolvedInput)
-	controlInput := strings.TrimSpace(c.injectedPrompt(""))
 	// Load image content parts from resolved file references.
 	var resolvedImageParts []model.ContentPart
 	if c.inputRefs != nil && len(resolvedPaths) > 0 {
@@ -551,6 +664,26 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	}
 	contentParts = append(contentParts, resolvedImageParts...)
 	runInput := resolvedInput
+	controlInput := ""
+	var ag agent.Agent
+	var mainACP *preparedMainACPSubmission
+	if usesACP {
+		mainACP = &preparedMainACPSubmission{
+			descriptor: desc,
+		}
+	} else {
+		systemPrompt, err := c.ensureSessionPrompt(c.baseCtx)
+		if err != nil {
+			return preparedPromptSubmission{}, err
+		}
+		agentInput.FrozenPrompt = systemPrompt
+		runInput = c.injectedPrompt(runInput)
+		controlInput = strings.TrimSpace(c.injectedPrompt(""))
+		ag, err = buildResolvedLLMAgent(agentInput, systemPrompt)
+		if err != nil {
+			return preparedPromptSubmission{}, err
+		}
+	}
 	if len(contentParts) > 0 {
 		if controlInput != "" {
 			contentParts = append([]model.ContentPart{{
@@ -563,47 +696,28 @@ func (c *cliConsole) preparePromptSubmission(input string, attachments []tuiapp.
 	if c.tuiSender != nil && consumedPending > 0 {
 		c.tuiSender.Send(tuievents.AttachmentCountMsg{Count: 0})
 	}
-	systemPrompt, err := c.ensureSessionPrompt(c.baseCtx)
-	if err != nil {
-		return preparedPromptSubmission{}, err
-	}
-	ag, err := buildAgent(buildAgentInput{
-		AppName:                     c.appName,
-		PromptRole:                  promptRoleMainSession,
-		WorkspaceDir:                c.workspace.CWD,
-		EnableExperimentalLSPPrompt: c.enableExperimentalLSP,
-		BasePrompt:                  c.systemPrompt,
-		FrozenPrompt:                systemPrompt,
-		SkillDirs:                   c.skillDirs,
-		DefaultAgent:                c.configStore.DefaultAgent(),
-		AgentDescriptors:            c.configStore.AgentDescriptors(),
-		StreamModel:                 c.streamModel,
-		ThinkingBudget:              c.thinkingBudget,
-		ReasoningEffort:             c.reasoningEffort,
-		ModelProvider:               resolveProviderName(c.modelFactory, c.modelAlias),
-		ModelName:                   resolveModelName(c.modelFactory, c.modelAlias),
-		ModelConfig: func() modelproviders.Config {
-			if c.modelFactory == nil {
-				return modelproviders.Config{}
-			}
-			cfg, _ := c.modelFactory.ConfigForAlias(c.modelAlias)
-			return cfg
-		}(),
-	})
-	if err != nil {
-		return preparedPromptSubmission{}, err
-	}
 	return preparedPromptSubmission{
 		agent:        ag,
+		mainACP:      mainACP,
 		runInput:     runInput,
 		contentParts: append([]model.ContentPart(nil), contentParts...),
 	}, nil
 }
 
 func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared preparedPromptSubmission, submission runtime.Submission) error {
+	if prepared.mainACP != nil {
+		return c.runPreparedACPMainSubmissionContext(ctx, prepared, submission)
+	}
 	ctx = cliContext(ctx)
+	epochID, invocationPrelude, _, err := c.prepareMainControllerTurn(ctx, coreacpmeta.ControllerKindSelf, "self")
+	if err != nil {
+		return err
+	}
+	c.closePersistentMainACP()
 	ctx = toolexec.WithApprover(ctx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
+	pendingTUIToolCalls := map[string]toolCallSnapshot{}
+	rootSessionID := strings.TrimSpace(c.sessionID)
 	if err := c.persistSessionModelAlias(ctx); err != nil {
 		return err
 	}
@@ -638,10 +752,9 @@ func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared 
 			})
 		}))
 		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(streamCtx context.Context, update sessionstream.Update) {
-			c.forwardSessionEventToTUI(streamCtx, c.sessionID, update)
+			c.forwardSessionEventToTUI(streamCtx, rootSessionID, update, pendingTUIToolCalls)
 		}))
 	}
-	pendingTUIToolCalls := map[string]toolCallSnapshot{}
 	gw, err := c.sessionGateway()
 	if err != nil {
 		return err
@@ -651,6 +764,10 @@ func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared 
 		SessionID:           c.sessionID,
 		Input:               submission.Text,
 		ContentParts:        submission.ContentParts,
+		InvocationPrelude:   invocationPrelude,
+		ControllerKind:      coreacpmeta.ControllerKindSelf,
+		ControllerID:        "self",
+		EpochID:             epochID,
 		Agent:               prepared.agent,
 		Model:               c.llm,
 		ContextWindowTokens: c.contextWindow,
@@ -659,6 +776,10 @@ func (c *cliConsole) runPreparedSubmissionContext(ctx context.Context, prepared 
 		return err
 	}
 	c.sessionID = runResult.Session.SessionID
+	rootSessionID = c.sessionID
+	if c.tuiSender != nil && c.currentMainAgentUsesACP() {
+		c.emitMainACPTurnStart(ctx, c.sessionID)
+	}
 	runner := runResult.Handle
 	interruptCtx := context.WithoutCancel(ctx)
 	cancel := func() {
@@ -688,7 +809,7 @@ func (c *cliConsole) persistSessionModelAlias(ctx context.Context) error {
 	if c == nil || c.sessionStore == nil {
 		return nil
 	}
-	alias := strings.TrimSpace(c.modelAlias)
+	alias := c.currentSessionModelAlias()
 	if alias == "" || strings.TrimSpace(c.appName) == "" || strings.TrimSpace(c.userID) == "" || strings.TrimSpace(c.sessionID) == "" {
 		return nil
 	}
@@ -700,36 +821,9 @@ func (c *cliConsole) persistSessionModelAlias(ctx context.Context) error {
 	if _, err := c.sessionStore.GetOrCreate(ctx, sess); err != nil {
 		return err
 	}
-	if updater, ok := c.sessionStore.(session.StateUpdateStore); ok {
-		return updater.UpdateState(ctx, sess, func(values map[string]any) (map[string]any, error) {
-			if values == nil {
-				values = map[string]any{}
-			}
-			acpState, _ := values["acp"].(map[string]any)
-			if acpState == nil {
-				acpState = map[string]any{}
-			}
-			meta, _ := acpState["meta"].(map[string]any)
-			acpState["meta"] = coreacpmeta.WithModelAlias(meta, alias)
-			values["acp"] = acpState
-			return values, nil
-		})
-	}
-	values, err := c.sessionStore.SnapshotState(ctx, sess)
-	if err != nil {
-		return err
-	}
-	if values == nil {
-		values = map[string]any{}
-	}
-	acpState, _ := values["acp"].(map[string]any)
-	if acpState == nil {
-		acpState = map[string]any{}
-	}
-	meta, _ := acpState["meta"].(map[string]any)
-	acpState["meta"] = coreacpmeta.WithModelAlias(meta, alias)
-	values["acp"] = acpState
-	return c.sessionStore.ReplaceState(ctx, sess, values)
+	return coreacpmeta.UpdateSessionMeta(ctx, c.sessionStore, sess, func(meta map[string]any) map[string]any {
+		return coreacpmeta.WithModelAlias(meta, alias)
+	})
 }
 
 func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) error {
@@ -737,8 +831,11 @@ func (c *cliConsole) runBTW(question string, attachments []tuiapp.Attachment) er
 }
 
 func (c *cliConsole) runBTWContext(ctx context.Context, question string, attachments []tuiapp.Attachment) error {
-	if c.currentRunKind() == runOccupancyExternalAgent {
+	if c.hasActiveExternalRun() {
 		return errExternalAgentRunBusy
+	}
+	if c.currentMainAgentUsesACP() {
+		return errBTWUnavailableForACPMain
 	}
 	question = strings.TrimSpace(question)
 	if question == "/btw" || strings.HasPrefix(question, "/btw ") {
@@ -769,6 +866,8 @@ func (c *cliConsole) startBTWAsyncContext(ctx context.Context, prepared prepared
 	ctx = cliContext(ctx)
 	ctx = toolexec.WithApprover(ctx, c.approver)
 	ctx = kernelpolicy.WithToolAuthorizer(ctx, c.approver)
+	pendingTUIToolCalls := map[string]toolCallSnapshot{}
+	rootSessionID := strings.TrimSpace(c.sessionID)
 	if c.tuiSender != nil {
 		ctx = taskstream.WithStreamer(ctx, taskstream.StreamerFunc(func(_ context.Context, ev taskstream.Event) {
 			if c.tuiSender == nil {
@@ -800,7 +899,7 @@ func (c *cliConsole) startBTWAsyncContext(ctx context.Context, prepared prepared
 			})
 		}))
 		ctx = sessionstream.WithStreamer(ctx, sessionstream.StreamerFunc(func(streamCtx context.Context, update sessionstream.Update) {
-			c.forwardSessionEventToTUI(streamCtx, c.sessionID, update)
+			c.forwardSessionEventToTUI(streamCtx, rootSessionID, update, pendingTUIToolCalls)
 		}))
 	}
 	gw, err := c.sessionGateway()
@@ -818,6 +917,7 @@ func (c *cliConsole) startBTWAsyncContext(ctx context.Context, prepared prepared
 		return err
 	}
 	c.sessionID = runResult.Session.SessionID
+	rootSessionID = c.sessionID
 	runner := runResult.Handle
 	interruptCtx := context.WithoutCancel(ctx)
 	if err := runner.Submit(submission); err != nil {
@@ -836,7 +936,6 @@ func (c *cliConsole) startBTWAsyncContext(ctx context.Context, prepared prepared
 				c.tuiSender.Send(tuievents.SetRunningMsg{Running: false})
 			}
 		}()
-		pendingTUIToolCalls := map[string]toolCallSnapshot{}
 		err := runRunner(runner, runRenderConfig{
 			ShowReasoning: c.showReasoning,
 			Verbose:       c.ui.verbose,
@@ -1008,6 +1107,39 @@ func eventParticipantSessionID(ev *session.Event) string {
 	return strings.TrimSpace(asString(ev.Meta[metaChildSessionID]))
 }
 
+func eventACPAgentID(ev *session.Event) string {
+	if ev == nil || len(ev.Meta) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(asString(ev.Meta["_ui_agent"]))
+}
+
+func isACPRootLiveStreamEvent(ev *session.Event) bool {
+	if strings.TrimSpace(eventACPAgentID(ev)) == "" {
+		return false
+	}
+	if ev == nil {
+		return false
+	}
+	if eventIsPartial(ev) {
+		return true
+	}
+	if len(ev.Message.ToolCalls()) > 0 {
+		return true
+	}
+	return ev.Message.ToolResponse() != nil && session.IsUIOnly(ev)
+}
+
+func isMainACPEvent(ev *session.Event) bool {
+	if ev == nil {
+		return false
+	}
+	if strings.TrimSpace(eventACPAgentID(ev)) == "" {
+		return false
+	}
+	return !isParticipantMirrorEvent(ev)
+}
+
 func isParticipantMirrorEvent(ev *session.Event) bool {
 	return ev != nil && session.IsMirror(ev) && strings.TrimSpace(eventParticipantDisplay(ev)) != ""
 }
@@ -1067,6 +1199,8 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 	if c == nil || c.tuiSender == nil || ev == nil {
 		return false
 	}
+	c.tuiForwardMu.Lock()
+	defer c.tuiForwardMu.Unlock()
 	if session.IsOverlay(ev) {
 		c.emitAssistantEventToTUI(ev)
 		return true
@@ -1083,6 +1217,9 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 			c.tuiSender.Send(tuievents.LogChunkMsg{Chunk: text + "\n"})
 			return true
 		}
+	}
+	if !opts.ReplayMode && isMainACPEvent(ev) {
+		return true
 	}
 	if msg.Role == model.RoleAssistant {
 		// Keep assistant rendering deterministic, even for mixed assistant+toolcall events.
@@ -1214,7 +1351,7 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 				delete(pendingToolCalls, resp.ID)
 			}
 		}
-		emittedTaskStream := c.emitTaskStreamFromToolResult(resp, callArgs)
+		emittedTaskStream, taskStreamHasOutput := c.emitTaskStreamFromToolResult(resp, callArgs)
 		toolName := strings.TrimSpace(resp.Name)
 		if strings.EqualFold(toolName, tool.SpawnToolName) {
 			if update, ok := subagentDomainUpdateFromSpawnToolResponse(c.sessionID, resp); ok {
@@ -1229,7 +1366,7 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 			}
 		}
 		if strings.EqualFold(strings.TrimSpace(resp.Name), toolshell.BashToolName) {
-			if !emittedTaskStream {
+			if !emittedTaskStream || !taskStreamHasOutput {
 				c.emitReplayBashOutput(resp)
 			}
 			state := "completed"
@@ -1308,6 +1445,56 @@ func (c *cliConsole) forwardEventToTUIWithOptionsContext(ctx context.Context, ev
 	return handled
 }
 
+// emitMainACPTurnStart marks the beginning of an ACP main turn in the TUI.
+// No longer persists to the projection log; the main session jsonl is the
+// single source of truth for main-controller history.
+func (c *cliConsole) emitMainACPTurnStart(ctx context.Context, sessionID string) {
+	if c == nil || c.tuiSender == nil || !c.currentMainAgentUsesACP() {
+		return
+	}
+	if isReplayContext(ctx) {
+		return
+	}
+	sessionID = strings.TrimSpace(firstNonEmptyText(sessionID, c.sessionID))
+	if sessionID == "" {
+		return
+	}
+	state := mainACPProjectionStateFromContext(ctx)
+	if state != nil && !state.markTurnStarted() {
+		return
+	}
+	c.tuiSender.Send(tuievents.ACPMainTurnStartMsg{
+		SessionID:  sessionID,
+		OccurredAt: time.Now(),
+	})
+}
+
+// emitMainACPProjectionMsg sends an ACP projection event to the TUI for live
+// rendering only. Main-scope events are no longer persisted to the projection
+// log; the canonical events recorded by mainACPTurnRecorder and written to the
+// session jsonl are the durable source.
+func (c *cliConsole) emitMainACPProjectionMsg(ctx context.Context, msg tuievents.ACPProjectionMsg) bool {
+	if c == nil || c.tuiSender == nil {
+		return false
+	}
+	msg.Scope = tuievents.ACPProjectionMain
+	msg.ScopeID = strings.TrimSpace(firstNonEmptyText(msg.ScopeID, c.sessionID))
+	if msg.ScopeID == "" {
+		return false
+	}
+	if !isReplayContext(ctx) {
+		state := mainACPProjectionStateFromContext(ctx)
+		if state == nil || state.markTurnStarted() {
+			c.tuiSender.Send(tuievents.ACPMainTurnStartMsg{
+				SessionID:  msg.ScopeID,
+				OccurredAt: time.Now(),
+			})
+		}
+	}
+	c.tuiSender.Send(msg)
+	return true
+}
+
 func (c *cliConsole) emitReplayBashOutput(resp *model.ToolResponse) {
 	if c == nil || c.tuiSender == nil || resp == nil || !strings.EqualFold(strings.TrimSpace(resp.Name), toolshell.BashToolName) {
 		return
@@ -1345,17 +1532,18 @@ func formatSessionNoticeChunk(notice session.Notice) string {
 	}
 }
 
-func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, callArgs map[string]any) bool {
+func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, callArgs map[string]any) (bool, bool) {
 	if c == nil || c.tuiSender == nil || resp == nil {
-		return false
+		return false, false
 	}
 	events := taskstream.EventsFromResult(resp.Result)
 	if len(events) == 0 {
 		if msg, ok := syntheticTaskStreamMsgFromToolResult(resp, callArgs); ok {
 			c.tuiSender.Send(msg)
 		}
-		return false
+		return false, false
 	}
+	hasOutput := false
 	for _, ev := range events {
 		label := ev.Label
 		if label == "" {
@@ -1367,6 +1555,9 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, call
 		}
 		if shouldRebindReplayBashCallID(resp, ev, callID) {
 			callID = resp.ID
+		}
+		if strings.TrimSpace(ev.Stream) != "" && strings.TrimSpace(ev.Chunk) != "" {
+			hasOutput = true
 		}
 		msg := tuievents.TaskStreamMsg{
 			Label:  label,
@@ -1383,7 +1574,7 @@ func (c *cliConsole) emitTaskStreamFromToolResult(resp *model.ToolResponse, call
 		}
 		c.tuiSender.Send(msg)
 	}
-	return true
+	return true, hasOutput
 }
 
 func shouldRebindReplayBashCallID(resp *model.ToolResponse, ev taskstream.Event, callID string) bool {
@@ -1549,6 +1740,9 @@ func (c *cliConsole) getActiveRunner() sessionsvc.TurnHandle {
 func (c *cliConsole) cancelActiveRun() bool {
 	c.runMu.Lock()
 	cancel := c.activeRunCancel
+	if cancel == nil {
+		cancel = c.activeExternalRunCancel
+	}
 	c.runMu.Unlock()
 	if cancel == nil {
 		return false
@@ -1583,6 +1777,39 @@ func (c *cliConsole) registerInterruptAndShouldExit() bool {
 
 func handleHelp(c *cliConsole, args []string) (bool, error) {
 	_ = args
+	if c.currentMainAgentUsesACP() {
+		helpSection := func(title string, names []string) {
+			c.ui.Section(title)
+			for _, name := range names {
+				cmd, ok := c.commands[name]
+				if !ok {
+					continue
+				}
+				if name == "model" {
+					c.ui.Plain("  %-24s %s\n", "/model use <alias> [reasoning]", "Switch ACP main model or reasoning")
+					continue
+				}
+				c.ui.Plain("  %-24s %s\n", cmd.Usage, cmd.Description)
+			}
+		}
+		helpSection("Core", []string{"new", "resume", "status", "agent", "model", "help", "exit", "quit"})
+		if items := c.acpMainAvailableCommands(); len(items) > 0 {
+			c.ui.Section("ACP Commands")
+			for _, item := range items {
+				name := strings.TrimSpace(item.Name)
+				if name == "" || isACPMainCoreLocalCommand(name) {
+					continue
+				}
+				usage := "/" + name
+				if hint := strings.TrimSpace(item.Hint); hint != "" {
+					usage = hint
+				}
+				desc := strings.TrimSpace(item.Description)
+				c.ui.Plain("  %-24s %s\n", usage, desc)
+			}
+		}
+		return false, nil
+	}
 	helpSection := func(title string, names []string) {
 		c.ui.Section(title)
 		for _, name := range names {
@@ -1749,7 +1976,7 @@ func (c *cliConsole) syncTUIStatus() {
 		return
 	}
 	modelText, contextText := c.readTUIStatus()
-	c.tuiSender.Send(tuievents.SetStatusMsg{
+	sendTUIMsg(c.tuiSender, tuievents.SetStatusMsg{
 		Workspace: c.readWorkspaceStatusLine(),
 		Model:     modelText,
 		Context:   contextText,
@@ -1758,63 +1985,36 @@ func (c *cliConsole) syncTUIStatus() {
 
 func handleStatus(c *cliConsole, args []string) (bool, error) {
 	_ = args
+	if c.currentMainAgentUsesACP() {
+		return handleACPMainStatus(c)
+	}
+	return handleLocalStatus(c)
+}
+
+func handleLocalStatus(c *cliConsole) (bool, error) {
 	c.ui.Section("Model")
-	c.ui.KeyValue("model", c.modelAlias)
+	c.ui.KeyValue("model", c.currentSessionModelAlias())
 	c.ui.KeyValue("stream", fmt.Sprintf("%v", c.streamModel))
 	effortLabel := strings.TrimSpace(c.reasoningEffort)
 	if effortLabel == "" {
 		effortLabel = "auto"
 	}
 	c.ui.KeyValue("reasoning", fmt.Sprintf("%s (budget=%d)", effortLabel, c.thinkingBudget))
-	c.ui.KeyValue("effort", c.reasoningEffort)
-	c.ui.KeyValue("reasoning", fmt.Sprintf("%v", c.showReasoning))
+	c.ui.KeyValue("show_reasoning", fmt.Sprintf("%v", c.showReasoning))
 
 	c.ui.Section("Session")
 	c.ui.KeyValue("workspace", c.workspace.CWD)
 	c.ui.KeyValue("session", idutil.ShortDisplay(c.sessionID))
-	c.ui.KeyValue("mode", sessionmode.Normalize(c.sessionMode))
+	c.ui.KeyValue("mode", c.sessionModeLabel())
 
-	c.ui.Section("Security")
-	mode := c.execRuntime.PermissionMode()
-	switch mode {
-	case toolexec.PermissionModeFullControl:
-		c.ui.KeyValue("permission", fmt.Sprintf("%s  route=host", mode))
-	default:
-		if c.execRuntime.FallbackToHost() {
-			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=host (fallback, reason=%s)",
-				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType()), c.execRuntime.FallbackReason()))
-		} else {
-			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=sandbox",
-				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType())))
-		}
-	}
-	c.ui.KeyValue("sandbox_policy", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
-
-	if c.rt != nil {
-		runState, err := c.rt.RunState(c.baseCtx, runtime.RunStateRequest{
-			AppName:   c.appName,
-			UserID:    c.userID,
-			SessionID: c.sessionID,
-		})
-		if err != nil {
-			return false, err
-		}
-		c.ui.Section("Runtime")
-		if runState.HasLifecycle {
-			c.ui.KeyValue("run_state", fmt.Sprintf("%s  phase=%s", runState.Status, stringOrDash(runState.Phase)))
-			if strings.TrimSpace(runState.Error) != "" {
-				c.ui.KeyValue("error", truncateInline(runState.Error, 160))
-			}
-			if strings.TrimSpace(string(runState.ErrorCode)) != "" {
-				c.ui.KeyValue("error_code", string(runState.ErrorCode))
-			}
-		} else {
-			c.ui.KeyValue("run_state", "none")
-		}
+	renderStatusSecurity(c)
+	if err := renderStatusRuntime(c); err != nil {
+		return false, err
 	}
 
 	if c.llm == nil {
-		c.ui.KeyValue("context", "not available (no model configured)")
+		c.ui.Section("Context")
+		c.ui.KeyValue("usage", "not available (no model configured)")
 		return false, nil
 	}
 	usage, err := c.rt.ContextUsage(c.baseCtx, runtime.UsageRequest{
@@ -1830,6 +2030,93 @@ func handleStatus(c *cliConsole, args []string) (bool, error) {
 	c.ui.Section("Context")
 	c.ui.KeyValue("usage", fmt.Sprintf("%s  input_budget=%d  events=%d", formatUsage(usage), usage.InputBudget, usage.EventCount))
 	return false, nil
+}
+
+func handleACPMainStatus(c *cliConsole) (bool, error) {
+	desc, _, err := c.currentMainACPDescriptor()
+	if err != nil {
+		return false, err
+	}
+	remoteSessionID, remoteOK, err := c.currentSessionACPRemoteSession(c.baseCtx, desc.ID)
+	if err != nil {
+		return false, err
+	}
+
+	c.ui.Section("ACP Main")
+	c.ui.KeyValue("main_agent", firstNonEmptyString(strings.TrimSpace(desc.ID), currentMainAgentName(c)))
+	c.ui.KeyValue("model", c.acpMainStatusModelAlias())
+	reasoning := c.acpMainStatusReasoningLabel()
+	if reasoning == "" {
+		reasoning = "auto/off"
+	}
+	c.ui.KeyValue("reasoning", reasoning)
+	c.ui.KeyValue("remote_session", statusRemoteSessionLabel(remoteSessionID, remoteOK))
+
+	c.ui.Section("Session")
+	c.ui.KeyValue("workspace", c.workspace.CWD)
+	c.ui.KeyValue("session", idutil.ShortDisplay(c.sessionID))
+	c.ui.KeyValue("mode", c.sessionModeLabel())
+
+	renderStatusSecurity(c)
+	if err := renderStatusRuntime(c); err != nil {
+		return false, err
+	}
+
+	c.ui.Section("Context")
+	c.ui.KeyValue("usage", "not available (managed by ACP main agent)")
+	return false, nil
+}
+
+func renderStatusSecurity(c *cliConsole) {
+	c.ui.Section("Security")
+	mode := c.execRuntime.PermissionMode()
+	switch mode {
+	case toolexec.PermissionModeFullControl:
+		c.ui.KeyValue("permission", fmt.Sprintf("%s  route=host", mode))
+	default:
+		if c.execRuntime.FallbackToHost() {
+			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=host (fallback, reason=%s)",
+				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType()), c.execRuntime.FallbackReason()))
+		} else {
+			c.ui.KeyValue("permission", fmt.Sprintf("%s  sandbox=%s  route=sandbox",
+				mode, sandboxTypeDisplayLabel(c.execRuntime.SandboxType())))
+		}
+	}
+	c.ui.KeyValue("sandbox_policy", runtimePolicyHint(c.execRuntime.SandboxPolicy()))
+}
+
+func renderStatusRuntime(c *cliConsole) error {
+	if c.rt == nil {
+		return nil
+	}
+	runState, err := c.rt.RunState(c.baseCtx, runtime.RunStateRequest{
+		AppName:   c.appName,
+		UserID:    c.userID,
+		SessionID: c.sessionID,
+	})
+	if err != nil {
+		return err
+	}
+	c.ui.Section("Runtime")
+	if runState.HasLifecycle {
+		c.ui.KeyValue("run_state", fmt.Sprintf("%s  phase=%s", runState.Status, stringOrDash(runState.Phase)))
+		if strings.TrimSpace(runState.Error) != "" {
+			c.ui.KeyValue("error", truncateInline(runState.Error, 160))
+		}
+		if strings.TrimSpace(string(runState.ErrorCode)) != "" {
+			c.ui.KeyValue("error_code", string(runState.ErrorCode))
+		}
+	} else {
+		c.ui.KeyValue("run_state", "none")
+	}
+	return nil
+}
+
+func statusRemoteSessionLabel(sessionID string, ok bool) string {
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		return "(not initialized)"
+	}
+	return idutil.ShortDisplay(sessionID)
 }
 
 func handlePermission(c *cliConsole, args []string) (bool, error) {
@@ -1903,6 +2190,18 @@ func handleSandbox(c *cliConsole, args []string) (bool, error) {
 }
 
 func handleModel(c *cliConsole, args []string) (bool, error) {
+	if c != nil && c.currentMainAgentUsesACP() {
+		if len(args) == 0 {
+			return false, fmt.Errorf("usage: /model use <alias> [reasoning]")
+		}
+		if strings.EqualFold(strings.TrimSpace(args[0]), "del") {
+			return false, fmt.Errorf("/model del is unavailable when the main agent uses ACP")
+		}
+		if strings.EqualFold(strings.TrimSpace(args[0]), "use") {
+			return handleModelUse(c, args[1:])
+		}
+		return handleModelUse(c, args)
+	}
 	if len(args) == 0 {
 		return false, fmt.Errorf("usage: /model use <alias> [reasoning] | /model del [alias ...]")
 	}
@@ -1919,6 +2218,9 @@ func handleModel(c *cliConsole, args []string) (bool, error) {
 func handleModelUse(c *cliConsole, args []string) (bool, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return false, fmt.Errorf("usage: /model use <alias> [reasoning]")
+	}
+	if c.currentMainAgentUsesACP() {
+		return c.handleACPMainModelUse(c.baseCtx, args)
 	}
 	if c.modelFactory == nil {
 		return false, fmt.Errorf("model factory is not configured")
@@ -2124,6 +2426,9 @@ func (c *cliConsole) printModelSwitchMessage(format string, args ...any) {
 // current model. Uses the explicit CLI override first, then the connected model
 // config value, then falls back to the model capability catalog.
 func (c *cliConsole) resolveContextWindowForDisplay() int {
+	if c.currentMainAgentUsesACP() {
+		return 0
+	}
 	if c.contextWindow > 0 {
 		return c.contextWindow
 	}
@@ -2142,6 +2447,17 @@ func (c *cliConsole) resolveContextWindowForDisplay() int {
 		return caps.ContextWindowTokens
 	}
 	return 0
+}
+
+func (c *cliConsole) currentMainAgentUsesACP() bool {
+	if c == nil || c.configStore == nil {
+		return false
+	}
+	_, usesACP, err := resolveMainSessionAgentDescriptor(buildAgentInput{
+		MainAgent:        c.configStore.MainAgent(),
+		AgentDescriptors: c.configStore.AgentDescriptors(),
+	})
+	return err == nil && usesACP
 }
 
 func (c *cliConsole) applyModelRuntimeSettings(alias string) {
@@ -2323,13 +2639,12 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 	if c.tuiSender == nil || len(events) == 0 {
 		return nil
 	}
-	// In TUI mode, replay directly through structured events so assistant
-	// Markdown is rendered by the same block renderer as live streaming,
-	// avoiding mixed prefix-coloring and formatting artifacts.
-	// /resume is intentionally a static local replay: it rebuilds the UI from
-	// durable session events plus locally persisted ACP projection logs only.
-	// Reconnecting to remote ACP sessions belongs to explicit follow-up flows
-	// such as TASK write or @participant, not to resume itself.
+	// /resume rebuilds the UI exclusively from the durable main session events.
+	// ACP main events are replayed directly from session events (single-track).
+	// Participant and subagent projections are still restored from the JSONL
+	// projection log since they are not part of the main session timeline.
+	// Reconnecting to remote ACP sessions is deferred: it only happens when the
+	// user actively continues a particular controller.
 	c.tuiSender.Send(tuievents.ClearHistoryMsg{})
 	c.tuiSender.Send(tuievents.PlanUpdateMsg{})
 	c.spawnPreviewer = newSpawnPreviewProjector()
@@ -2342,15 +2657,20 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 		Context:   contextText,
 	})
 	pendingToolCalls := map[string]toolCallSnapshot{}
+	// Load participant/subagent projection index (not main scope).
 	var acpProjectionEvents map[string][]acpProjectionPersistedEvent
 	if projectionIndex := c.loadACPProjectionIndex(replayCtx); projectionIndex != nil {
 		acpProjectionEvents = projectionIndex.ByCallID
 	}
+	acpTurnActive := false
 	for _, ev := range events {
 		if ev == nil || eventIsPartial(ev) {
 			continue
 		}
 		if isDelegatedSubagentHistoryEvent(ev) {
+			continue
+		}
+		if !session.IsCanonicalHistoryEvent(ev) && !isParticipantMirrorEvent(ev) && !isMainACPEvent(ev) {
 			continue
 		}
 		msg := ev.Message
@@ -2368,8 +2688,24 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 					}
 				}
 			}
+			acpTurnActive = false
 			continue
 		}
+		// Replay ACP main events from session events directly (single-track).
+		if isMainACPEvent(ev) {
+			if !acpTurnActive {
+				agentID := eventACPAgentID(ev)
+				c.tuiSender.Send(tuievents.ACPMainTurnStartMsg{
+					SessionID:  rootSessionID,
+					OccurredAt: ev.Time,
+				})
+				_ = agentID // used for future agent-display rendering
+				acpTurnActive = true
+			}
+			replayMainACPSessionEventWithState(c.tuiSender, ev, rootSessionID, pendingToolCalls)
+			continue
+		}
+		acpTurnActive = false
 		if c.forwardEventToTUIWithOptions(ev, pendingToolCalls, tuiForwardOptions{
 			ShowMutationDiff: false,
 			ReplayMode:       true,
@@ -2390,6 +2726,82 @@ func (c *cliConsole) renderSessionEvents(events []*session.Event) error {
 	c.restoreResumedSubagentPanels(replayCtx, rootSessionID, events)
 	c.tuiSender.Send(tuievents.TaskResultMsg{})
 	return nil
+}
+
+// replayMainACPSessionEvent converts a canonical ACP session event into TUI
+// messages for resume replay. This replaces the former projection-log-based
+// replay for the main ACP scope.
+func replayMainACPSessionEvent(sender interface{ Send(msg any) }, ev *session.Event, scopeID string) {
+	replayMainACPSessionEventWithState(sender, ev, scopeID, nil)
+}
+
+func replayMainACPSessionEventWithState(sender interface{ Send(msg any) }, ev *session.Event, scopeID string, pendingToolCalls map[string]toolCallSnapshot) {
+	if sender == nil || ev == nil {
+		return
+	}
+	msg := ev.Message
+	// Narrative text.
+	if text := strings.TrimSpace(msg.TextContent()); text != "" && msg.ReasoningText() == "" {
+		sender.Send(tuievents.ACPProjectionMsg{
+			Scope:     tuievents.ACPProjectionMain,
+			ScopeID:   scopeID,
+			Stream:    "assistant",
+			DeltaText: text,
+			FullText:  text,
+		})
+	}
+	if reasoning := strings.TrimSpace(msg.ReasoningText()); reasoning != "" {
+		sender.Send(tuievents.ACPProjectionMsg{
+			Scope:     tuievents.ACPProjectionMain,
+			ScopeID:   scopeID,
+			Stream:    "reasoning",
+			DeltaText: reasoning,
+			FullText:  reasoning,
+		})
+	}
+	// Tool calls.
+	for _, call := range msg.ToolCalls() {
+		callArgs := parseToolArgsForDisplay(call.Args)
+		if pendingToolCalls != nil && strings.TrimSpace(call.ID) != "" {
+			pendingToolCalls[call.ID] = toolCallSnapshot{
+				Name: strings.TrimSpace(call.Name),
+				Args: cloneAnyMap(callArgs),
+			}
+		}
+		sender.Send(tuievents.ACPProjectionMsg{
+			Scope:      tuievents.ACPProjectionMain,
+			ScopeID:    scopeID,
+			ToolCallID: call.ID,
+			ToolName:   call.Name,
+			ToolArgs:   cloneAnyMap(callArgs),
+		})
+	}
+	// Tool responses.
+	if resp := msg.ToolResponse(); resp != nil {
+		var callArgs map[string]any
+		if pendingToolCalls != nil && strings.TrimSpace(resp.ID) != "" {
+			if snapshot, ok := pendingToolCalls[resp.ID]; ok {
+				callArgs = cloneAnyMap(snapshot.Args)
+				delete(pendingToolCalls, resp.ID)
+			}
+		}
+		status := strings.ToLower(strings.TrimSpace(asString(ev.Meta["acp_tool_status"])))
+		if status == "" {
+			status = "completed"
+		}
+		if status == "completed" && hasToolError(resp.Result) {
+			status = "failed"
+		}
+		sender.Send(tuievents.ACPProjectionMsg{
+			Scope:      tuievents.ACPProjectionMain,
+			ScopeID:    scopeID,
+			ToolCallID: resp.ID,
+			ToolName:   resp.Name,
+			ToolStatus: status,
+			ToolArgs:   cloneAnyMap(callArgs),
+			ToolResult: cloneAnyMap(resp.Result),
+		})
+	}
 }
 
 func isDelegatedSubagentHistoryEvent(ev *session.Event) bool {

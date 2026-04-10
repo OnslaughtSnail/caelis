@@ -58,7 +58,7 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 			Content: rolePrompt,
 		})
 	}
-	if capabilityPrompt := builtInCapabilityGuidancePrompt(); capabilityPrompt != "" {
+	if capabilityPrompt := builtInCapabilityGuidancePrompt(in.PromptRole); capabilityPrompt != "" {
 		additional = append(additional, appprompting.PromptFragment{
 			Kind:    appprompting.PromptFragmentKindSystem,
 			Stage:   "capability_guidance",
@@ -103,12 +103,16 @@ func buildPromptAssembleSpec(in buildAgentInput) (promptSpecResult, error) {
 		Spec: appprompting.AssembleSpec{
 			IdentityPrompt:   builtInSystemIdentityPrompt(in.AppName),
 			IdentitySource:   "cli:built-in-identity",
-			SkillsMetaPrompt: appskills.BuildMetaPrompt(discovered.Metas),
+			SkillsMetaPrompt: skillsMetaPrompt(in.PromptRole, discovered.Metas),
 			SkillsMetaSource: "skills metadata",
 			Additional:       additional,
 		},
 		Warnings: warnings,
 	}, nil
+}
+
+func skillsMetaPrompt(_ string, metas []appskills.Meta) string {
+	return appskills.BuildMetaPrompt(metas)
 }
 
 func resolveWorkspaceDir(workspaceDir string) (string, error) {

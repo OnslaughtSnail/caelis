@@ -147,9 +147,15 @@ type ParticipantStatusMsg struct {
 type ACPProjectionScope string
 
 const (
+	ACPProjectionMain        ACPProjectionScope = "main"
 	ACPProjectionParticipant ACPProjectionScope = "participant"
 	ACPProjectionSubagent    ACPProjectionScope = "subagent"
 )
+
+type ACPMainTurnStartMsg struct {
+	SessionID  string
+	OccurredAt time.Time
+}
 
 type ACPProjectionMsg struct {
 	Scope         ACPProjectionScope

@@ -14,16 +14,17 @@ import (
 	internalacp "github.com/OnslaughtSnail/caelis/internal/acp"
 	"github.com/OnslaughtSnail/caelis/internal/acpclient"
 	appagents "github.com/OnslaughtSnail/caelis/internal/app/agents"
-	"github.com/OnslaughtSnail/caelis/internal/idutil"
 	"github.com/OnslaughtSnail/caelis/internal/sessionmode"
 	"github.com/OnslaughtSnail/caelis/internal/version"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
+	"github.com/OnslaughtSnail/caelis/kernel/delegation"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/model"
 	"github.com/OnslaughtSnail/caelis/kernel/policy"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
 	"github.com/OnslaughtSnail/caelis/kernel/session"
 	"github.com/OnslaughtSnail/caelis/kernel/sessionstream"
+	"github.com/OnslaughtSnail/caelis/pkg/idutil"
 )
 
 type AdapterFactory func(*internalacp.Conn) (internalacp.Adapter, error)
@@ -185,7 +186,11 @@ func (r *selfACPSubagentRunner) RunSubagent(ctx context.Context, req agent.Subag
 	if cwd := strings.TrimSpace(req.ChildCWD); cwd != "" {
 		target.childCWD = cwd
 	}
-	sessionMeta := r.childSessionMeta(ctx, target.requestedSessionID, desc.ID)
+	sessionMeta := delegation.ChildSessionMeta(ctx, r.store, r.parent, &session.Session{
+		AppName: r.parent.AppName,
+		UserID:  r.parent.UserID,
+		ID:      strings.TrimSpace(target.requestedSessionID),
+	}, desc.ID)
 	metaBase := r.delegationMetadata(ctx, target.requestedSessionID)
 	idleTimeout := req.IdleTimeout
 	if idleTimeout <= 0 {
@@ -771,41 +776,6 @@ func (r *selfACPSubagentRunner) existingChildDelegation(ctx context.Context, chi
 		return meta, true
 	}
 	return runtime.DelegationMetadata{}, false
-}
-
-func (r *selfACPSubagentRunner) childSessionMeta(ctx context.Context, childSessionID string, agentName string) map[string]any {
-	if meta := r.sessionMeta(ctx, strings.TrimSpace(childSessionID)); len(meta) > 0 {
-		return meta
-	}
-	meta := internalacp.CloneMeta(r.sessionMeta(ctx, r.parent.ID))
-	if strings.EqualFold(strings.TrimSpace(agentName), "self") {
-		return internalacp.WithDelegatedChild(meta, true)
-	}
-	return meta
-}
-
-func (r *selfACPSubagentRunner) sessionMeta(ctx context.Context, sessionID string) map[string]any {
-	if r == nil || r.store == nil || r.parent == nil {
-		return nil
-	}
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-	values, err := r.store.SnapshotState(ctx, &session.Session{
-		AppName: r.parent.AppName,
-		UserID:  r.parent.UserID,
-		ID:      sessionID,
-	})
-	if err != nil {
-		return nil
-	}
-	acpState, _ := values["acp"].(map[string]any)
-	if len(acpState) == 0 {
-		return nil
-	}
-	meta, _ := acpState["meta"].(map[string]any)
-	return internalacp.CloneMeta(meta)
 }
 
 func (r *selfACPSubagentRunner) currentParentSessionMode(ctx context.Context) string {

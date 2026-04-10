@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.0.39 - 2026-04-09
+
+### Kernel SDK Restructure And Runtime Slimming
+- Split task orchestration, delegation state, lifecycle state, replay buffers, compaction helpers, and concurrency leases out of `kernel/runtime`, leaving a narrower execution core and promoting reusable public kernel services for runs and sessions.
+- Removed direct `kernel -> internal/*` dependencies by lifting shared utilities and ACP/session metadata helpers into public packages, tightening the boundary required for `kernel` to serve as an Agent SDK.
+- Reworked compaction around structured continuation checkpoints and tail preservation so long-running tasks survive repeated context compression with better recall of objectives, constraints, progress, blockers, and next actions.
+
+### ACP Main-Agent Continuity And Prompting
+- Added ACP-native main-agent support that can hand off control from the built-in local agent to an external ACP controller while preserving session continuity through stored controller sessions, checkpoint seeding, and recent transcript replay on fresh remote sessions.
+- Introduced ACP-specific main-session prompting so external controllers no longer receive Caelis-local tool contracts or delegation guidance that do not exist on the remote side.
+- Tightened ACP event projection and failure handling, including ordered event recording, cleaner `SPAWN` error panels, and improved session restart notices when remote controller sessions need to be recreated.
+
+### TUI Agent Switching, Recovery, And Quality
+- Added `/agent use <self|name>` to the TUI/CLI command surface with completion support, one-step switching to builtin ACP presets, idle-state safeguards, and automatic fallback to `self` when the active configured main agent is removed.
+- Fixed several TUI interaction regressions, including erroneous running-state transitions after invalid participant commands, better slash-argument execution behavior, and more reliable cancellation semantics around external-agent activity.
+- Bumped release metadata to `v0.0.39` in `CHANGELOG.md`, `README.md`, and `VERSION` for the next tagged release.
+
 ## v0.0.38 - 2026-04-08
 
 ### ACP Projection, Resume, And Transcript Unification

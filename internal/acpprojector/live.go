@@ -42,6 +42,16 @@ func NewLiveProjector() *LiveProjector {
 	return &LiveProjector{toolCalls: map[string]toolCallSnapshot{}}
 }
 
+func (p *LiveProjector) SeedNarrative(assistant string, reasoning string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.assistant = strings.TrimSpace(assistant)
+	p.reasoning = strings.TrimSpace(reasoning)
+}
+
 func (p *LiveProjector) Snapshot() (assistant string, reasoning string) {
 	if p == nil {
 		return "", ""
@@ -89,7 +99,7 @@ func (p *LiveProjector) projectContent(sessionID string, update acpclient.Conten
 	defer p.mu.Unlock()
 	switch strings.TrimSpace(update.SessionUpdate) {
 	case acpclient.UpdateAgentMessage:
-		next, delta, changed := MergeNarrativeChunk(p.assistant, text)
+		next, delta, changed := appendNarrativeChunk(p.assistant, text)
 		if !changed {
 			return Projection{}, false
 		}
@@ -105,7 +115,7 @@ func (p *LiveProjector) projectContent(sessionID string, update acpclient.Conten
 			FullText:  p.assistant,
 		}, true
 	case acpclient.UpdateAgentThought:
-		next, delta, changed := MergeNarrativeChunk(p.reasoning, text)
+		next, delta, changed := appendNarrativeChunk(p.reasoning, text)
 		if !changed {
 			return Projection{}, false
 		}
@@ -123,6 +133,33 @@ func (p *LiveProjector) projectContent(sessionID string, update acpclient.Conten
 	default:
 		return Projection{}, false
 	}
+}
+
+// appendNarrativeChunk handles live ACP streaming by deduplicating cumulative
+// text using simple prefix matching. Unlike MergeNarrativeChunk, it does not
+// use overlap heuristics — the ACP protocol is trusted as-is.
+func appendNarrativeChunk(existing string, incoming string) (next string, delta string, changed bool) {
+	incoming = normalizeNarrativeChunkBoundary(existing, incoming)
+	if incoming == "" || incoming == existing {
+		return existing, "", false
+	}
+	if existing == "" {
+		return incoming, incoming, true
+	}
+	// Cumulative dedup: if incoming is an extension of existing, emit only the new suffix.
+	if strings.HasPrefix(incoming, existing) {
+		suffix := incoming[len(existing):]
+		if suffix == "" {
+			return existing, "", false
+		}
+		return incoming, suffix, true
+	}
+	// Stale cumulative: if existing already contains incoming, suppress.
+	if strings.HasPrefix(existing, incoming) {
+		return existing, "", false
+	}
+	// Otherwise append incoming as new delta (trust the protocol).
+	return existing + incoming, incoming, true
 }
 
 func (p *LiveProjector) projectToolCall(sessionID string, update acpclient.ToolCall) (Projection, bool) {

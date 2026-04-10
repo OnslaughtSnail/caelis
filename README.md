@@ -18,6 +18,9 @@
 The codebase is organized around a small runtime kernel plus CLI-owned application wiring:
 
 - `cmd/cli`: console mode, ACP mode, config/session wiring, prompt assembly inputs.
+- `pkg/acpagent`: public ACP-backed main-controller adapter that implements `kernel/agent.Agent`.
+- `kernel/runservice`: public turn assembly facade over `kernel/runtime`.
+- `kernel/sessionsvc`: public session/workspace facade for channels and gateways.
 - `internal/app/assembly`: provider registration and tool/policy assembly.
 - `internal/app/prompting`: prompt fragment assembly.
 - `internal/app/skills`: skill metadata discovery and prompt rendering.
@@ -25,6 +28,8 @@ The codebase is organized around a small runtime kernel plus CLI-owned applicati
 - `kernel/runtime`: run loop, replay, lifecycle, compaction, tasks, delegation, and persistence.
 - `kernel/session`: session/event types, visibility rules, projections, and context windows.
 - `kernel/tool`: built-in tool implementations and tool capability metadata.
+
+The older `internal/app/runservice` and `internal/app/sessionsvc` packages are retained as compatibility wrappers around the public kernel packages while call sites migrate.
 
 ## Build
 
@@ -73,7 +78,7 @@ go run ./cmd/cli acp \
   -permission-mode default
 ```
 
-If no model is configured yet, start the console and run `/connect`.
+If no local model is configured yet, start the console and run `/connect`. This is not required when the main conversation agent is switched to an external ACP controller.
 
 ## Runtime And Permissions
 
@@ -120,6 +125,8 @@ Current interactive slash commands:
 
 ACP agent presets can be managed with `/agent`. Once configured, ACP agent IDs are exposed as dynamic slash commands, so adding `codex`, `gemini`, or `claude` enables `/codex ...`, `/gemini ...`, or `/claude ...` turns in the console. These run as external participant sessions rather than replacing the main conversation agent.
 
+To switch the main conversation controller to an external ACP agent, set `mainAgent` in the CLI config to one of the configured ACP agent IDs. `defaultAgent` still controls the default `SPAWN` target; `mainAgent` controls who owns the root conversation turn loop.
+
 ## Prompt Assembly And Skills
 
 Prompt assembly combines:
@@ -149,7 +156,7 @@ User-facing MCP tool loading is no longer supported in the CLI runtime. Older AC
 
 ## Release
 
-- Current release: `v0.0.38`
+- Current release: `v0.0.39`
 - Version source: git tag at release time, with `VERSION` used as the local fallback
 - Changelog: `CHANGELOG.md`
 
@@ -159,7 +166,7 @@ Local dry run:
 make release-dry-run
 ```
 
-CI release is triggered by pushing a version tag such as `v0.0.38`.
+CI release is triggered by pushing a version tag such as `v0.0.39`.
 
 ## npm Package
 

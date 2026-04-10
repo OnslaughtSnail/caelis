@@ -295,6 +295,9 @@ type Model struct {
 	subagentBlockIDs               map[string]string
 	subagentSessions               map[string]*SubagentSessionState
 	subagentSessionRefs            map[string][]string
+	activeMainACPTurnID            string
+	pendingMainACPSessionID        string
+	pendingMainACPStartedAt        time.Time
 	participantTurnIDs             map[string]string
 	activeParticipantTurnSessionID string
 
@@ -313,18 +316,20 @@ type Model struct {
 	// watch/wait/write/cancel events route back to the original panel.
 	taskOriginCallID map[string]string
 
-	streamLine         string
-	pendingLogChunk    string
-	pendingTaskStreams []tuievents.TaskStreamMsg
-	lastCommittedStyle tuikit.LineStyle
-	lastCommittedRaw   string
-	hasCommittedLine   bool
-	planEntries        []planEntryState
-	welcomeCardPending bool
-	runStartedAt       time.Time
-	lastRunDuration    time.Duration
-	hasLastRunDuration bool
-	showTurnDivider    bool
+	streamLine          string
+	pendingLogChunk     string
+	pendingTaskStreams  []tuievents.TaskStreamMsg
+	lastCommittedStyle  tuikit.LineStyle
+	lastCommittedRaw    string
+	lastUserDisplayLine string
+	userDisplayDedupOK  bool
+	hasCommittedLine    bool
+	planEntries         []planEntryState
+	welcomeCardPending  bool
+	runStartedAt        time.Time
+	lastRunDuration     time.Duration
+	hasLastRunDuration  bool
+	showTurnDivider     bool
 
 	// Transient log replacement tracking — now uses block IDs.
 	transientBlockID string
@@ -335,6 +340,7 @@ type Model struct {
 	viewportStyledLines           []string
 	viewportPlainLines            []string
 	viewportBlockIDs              []string
+	viewportClickTokens           []string
 	frameTopTrim                  int
 	viewport                      viewport.Model
 	userScrolledUp                bool

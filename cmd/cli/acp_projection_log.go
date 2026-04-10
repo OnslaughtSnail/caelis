@@ -237,6 +237,58 @@ func parsePersistedEventTime(raw string) time.Time {
 	return ts
 }
 
+func projectionNarrativeSnapshotFromEvents(events []acpProjectionPersistedEvent) (assistant string, reasoning string) {
+	for _, ev := range events {
+		if !strings.EqualFold(strings.TrimSpace(ev.Kind), "projection") {
+			continue
+		}
+		stream := strings.ToLower(strings.TrimSpace(ev.Stream))
+		switch stream {
+		case "assistant", "answer":
+			switch {
+			case strings.TrimSpace(ev.FullText) != "":
+				assistant = ev.FullText
+			case strings.TrimSpace(ev.DeltaText) != "":
+				next, _, _ := acpprojector.MergeNarrativeChunk(assistant, ev.DeltaText)
+				assistant = next
+			}
+		case "reasoning":
+			switch {
+			case strings.TrimSpace(ev.FullText) != "":
+				reasoning = ev.FullText
+			case strings.TrimSpace(ev.DeltaText) != "":
+				next, _, _ := acpprojector.MergeNarrativeChunk(reasoning, ev.DeltaText)
+				reasoning = next
+			}
+		}
+	}
+	return strings.TrimSpace(assistant), strings.TrimSpace(reasoning)
+}
+
+func splitACPProjectionTurns(events []acpProjectionPersistedEvent) [][]acpProjectionPersistedEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	turns := make([][]acpProjectionPersistedEvent, 0, 8)
+	current := make([]acpProjectionPersistedEvent, 0, 8)
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		turn := append([]acpProjectionPersistedEvent(nil), current...)
+		turns = append(turns, turn)
+		current = current[:0]
+	}
+	for _, ev := range events {
+		if strings.EqualFold(strings.TrimSpace(ev.Kind), "turn_start") {
+			flush()
+		}
+		current = append(current, ev)
+	}
+	flush()
+	return turns
+}
+
 func isReplayContext(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -325,6 +377,29 @@ func (s ACPProjectionStore) AppendParticipantStatusByIDs(ctx context.Context, ca
 	})
 }
 
+func (s ACPProjectionStore) AppendMainTurnStart(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	return s.AppendEvent(ctx, acpProjectionPersistedEvent{
+		Scope:     string(tuievents.ACPProjectionMain),
+		ScopeID:   sessionID,
+		Kind:      "turn_start",
+		SessionID: sessionID,
+	})
+}
+
+func (s ACPProjectionStore) AppendMainProjection(ctx context.Context, msg tuievents.ACPProjectionMsg) error {
+	sessionID := strings.TrimSpace(msg.ScopeID)
+	if sessionID == "" {
+		return nil
+	}
+	msg.Scope = tuievents.ACPProjectionMain
+	msg.ScopeID = sessionID
+	return s.AppendEvent(ctx, acpMsgToPersistedProjection(msg))
+}
+
 func subagentProjectionEvent(msg any) (acpProjectionPersistedEvent, bool) {
 	switch typed := msg.(type) {
 	case tuievents.SubagentStartMsg:
@@ -362,23 +437,7 @@ func subagentProjectionEvent(msg any) (acpProjectionPersistedEvent, bool) {
 		if typed.Scope != tuievents.ACPProjectionSubagent {
 			return acpProjectionPersistedEvent{}, false
 		}
-		return acpProjectionPersistedEvent{
-			Scope:         string(tuievents.ACPProjectionSubagent),
-			ScopeID:       strings.TrimSpace(typed.ScopeID),
-			Kind:          "projection",
-			SessionID:     strings.TrimSpace(typed.ScopeID),
-			Actor:         strings.TrimSpace(typed.Actor),
-			Stream:        strings.TrimSpace(typed.Stream),
-			DeltaText:     typed.DeltaText,
-			FullText:      typed.FullText,
-			ToolCallID:    strings.TrimSpace(typed.ToolCallID),
-			ToolName:      strings.TrimSpace(typed.ToolName),
-			ToolArgs:      cloneAnyMap(typed.ToolArgs),
-			ToolResult:    cloneAnyMap(typed.ToolResult),
-			ToolStatus:    strings.TrimSpace(typed.ToolStatus),
-			PlanEntries:   append([]tuievents.PlanEntry(nil), typed.PlanEntries...),
-			HasPlanUpdate: typed.HasPlanUpdate,
-		}, true
+		return acpMsgToPersistedProjection(typed), true
 	default:
 		return acpProjectionPersistedEvent{}, false
 	}
@@ -419,22 +478,12 @@ func participantReplayMessage(ev acpProjectionPersistedEvent) (any, bool) {
 			OccurredAt: parsePersistedEventTime(ev.Time),
 		}, true
 	case "projection":
-		return tuievents.ACPProjectionMsg{
-			Scope:         tuievents.ACPProjectionParticipant,
-			ScopeID:       chooseNonEmptyString(sessionID, strings.TrimSpace(ev.ScopeID)),
-			Actor:         actor,
-			OccurredAt:    parsePersistedEventTime(ev.Time),
-			Stream:        strings.TrimSpace(ev.Stream),
-			DeltaText:     ev.DeltaText,
-			FullText:      ev.FullText,
-			ToolCallID:    strings.TrimSpace(ev.ToolCallID),
-			ToolName:      strings.TrimSpace(ev.ToolName),
-			ToolArgs:      cloneAnyMap(ev.ToolArgs),
-			ToolResult:    cloneAnyMap(ev.ToolResult),
-			ToolStatus:    strings.TrimSpace(ev.ToolStatus),
-			PlanEntries:   append([]tuievents.PlanEntry(nil), ev.PlanEntries...),
-			HasPlanUpdate: ev.HasPlanUpdate,
-		}, true
+		msg := replayProjectionMsgFromEvent(ev, tuievents.ACPProjectionParticipant)
+		if actor == "" {
+			actor = sessionID
+		}
+		msg.Actor = actor
+		return msg, true
 	case "status":
 		return tuievents.ParticipantStatusMsg{
 			SessionID:       chooseNonEmptyString(sessionID, strings.TrimSpace(ev.ScopeID)),
@@ -443,6 +492,24 @@ func participantReplayMessage(ev acpProjectionPersistedEvent) (any, bool) {
 			ApprovalCommand: strings.TrimSpace(ev.ApprovalCommand),
 			OccurredAt:      parsePersistedEventTime(ev.Time),
 		}, true
+	default:
+		return nil, false
+	}
+}
+
+func mainReplayMessage(ev acpProjectionPersistedEvent) (any, bool) {
+	sessionID := chooseNonEmptyString(strings.TrimSpace(ev.SessionID), strings.TrimSpace(ev.ScopeID))
+	switch strings.TrimSpace(ev.Kind) {
+	case "turn_start":
+		if sessionID == "" {
+			return nil, false
+		}
+		return tuievents.ACPMainTurnStartMsg{
+			SessionID:  sessionID,
+			OccurredAt: parsePersistedEventTime(ev.Time),
+		}, true
+	case "projection":
+		return replayProjectionMsgFromEvent(ev, tuievents.ACPProjectionMain), true
 	default:
 		return nil, false
 	}
@@ -462,22 +529,7 @@ func subagentReplayMessage(ev acpProjectionPersistedEvent) (any, bool) {
 			OccurredAt:   parsePersistedEventTime(ev.Time),
 		}, true
 	case "projection":
-		return tuievents.ACPProjectionMsg{
-			Scope:         tuievents.ACPProjectionSubagent,
-			ScopeID:       strings.TrimSpace(ev.ScopeID),
-			Actor:         strings.TrimSpace(ev.Actor),
-			OccurredAt:    parsePersistedEventTime(ev.Time),
-			Stream:        strings.TrimSpace(ev.Stream),
-			DeltaText:     ev.DeltaText,
-			FullText:      ev.FullText,
-			ToolCallID:    strings.TrimSpace(ev.ToolCallID),
-			ToolName:      strings.TrimSpace(ev.ToolName),
-			ToolArgs:      cloneAnyMap(ev.ToolArgs),
-			ToolResult:    cloneAnyMap(ev.ToolResult),
-			ToolStatus:    strings.TrimSpace(ev.ToolStatus),
-			PlanEntries:   append([]tuievents.PlanEntry(nil), ev.PlanEntries...),
-			HasPlanUpdate: ev.HasPlanUpdate,
-		}, true
+		return replayProjectionMsgFromEvent(ev, tuievents.ACPProjectionSubagent), true
 	case "status":
 		state := strings.ToLower(strings.TrimSpace(ev.Status))
 		if state == "completed" || state == "failed" || state == "interrupted" || state == "timed_out" {
@@ -517,6 +569,33 @@ func (s ACPProjectionStore) ReplaySubagentEvents(ctx context.Context, rootSessio
 	return replayed
 }
 
+func (s ACPProjectionStore) LatestScopeNarrativeSnapshot(ctx context.Context, scope tuievents.ACPProjectionScope, scopeID string) (assistant string, reasoning string) {
+	scopeID = strings.TrimSpace(scopeID)
+	if scopeID == "" {
+		return "", ""
+	}
+	index, err := s.LoadIndex(ctx)
+	if err != nil || index == nil {
+		return "", ""
+	}
+	scopeIndex := index.ByScopeID[scope]
+	if len(scopeIndex) == 0 {
+		return "", ""
+	}
+	events := scopeIndex[scopeID]
+	if len(events) == 0 {
+		return "", ""
+	}
+	turns := splitACPProjectionTurns(events)
+	for i := len(turns) - 1; i >= 0; i-- {
+		assistant, reasoning = projectionNarrativeSnapshotFromEvents(turns[i])
+		if assistant != "" || reasoning != "" {
+			return assistant, reasoning
+		}
+	}
+	return projectionNarrativeSnapshotFromEvents(events)
+}
+
 func replaySubagentContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -532,6 +611,23 @@ func (s ACPProjectionStore) ReplayParticipantEvents(events []acpProjectionPersis
 	replayed := false
 	for _, ev := range events {
 		msg, ok := participantReplayMessage(ev)
+		if !ok {
+			continue
+		}
+		c.tuiSender.Send(msg)
+		replayed = true
+	}
+	return replayed
+}
+
+func (s ACPProjectionStore) ReplayMainEvents(events []acpProjectionPersistedEvent) bool {
+	c := s.console
+	if c == nil || c.tuiSender == nil || len(events) == 0 {
+		return false
+	}
+	replayed := false
+	for _, ev := range events {
+		msg, ok := mainReplayMessage(ev)
 		if !ok {
 			continue
 		}

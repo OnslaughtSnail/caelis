@@ -33,11 +33,15 @@ func (m *Model) finishPrompt(line string, err error) {
 	}
 	if len(m.pendingPrompt) == 0 {
 		m.activePrompt = nil
+		m.ensureViewportLayout()
+		m.syncViewportContent()
 		return
 	}
 	next := m.pendingPrompt[0]
 	m.pendingPrompt = m.pendingPrompt[1:]
 	m.activePrompt = newPromptState(next)
+	m.ensureViewportLayout()
+	m.syncViewportContent()
 }
 
 func (m *Model) handlePromptKey(msg tea.KeyMsg) tea.Cmd {

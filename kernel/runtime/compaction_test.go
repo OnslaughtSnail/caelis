@@ -400,6 +400,61 @@ func TestCompactionEvent_StructuredMarkdownFormat(t *testing.T) {
 	}
 }
 
+func TestRuntimeCompact_CanSummarizeLongAutonomousTurn(t *testing.T) {
+	store := inmemory.New()
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "s-long-autonomous-turn"}
+	if _, err := store.GetOrCreate(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendEvent(context.Background(), sess, &session.Event{
+		ID:      "u1",
+		Message: model.NewTextMessage(model.RoleUser, "finish the refactor and keep the task moving"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		text := strings.Repeat("assistant-progress ", 80)
+		if err := store.AppendEvent(context.Background(), sess, &session.Event{
+			ID:      fmt.Sprintf("a%d", i),
+			Message: model.NewTextMessage(model.RoleAssistant, text),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rt, err := New(Config{
+		LogStore:   store,
+		StateStore: store,
+		Compaction: CompactionConfig{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := rt.Compact(context.Background(), CompactRequest{
+		AppName:             sess.AppName,
+		UserID:              sess.UserID,
+		SessionID:           sess.ID,
+		Model:               newRuntimeTestLLM("fake"),
+		ContextWindowTokens: 4096,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev == nil {
+		t.Fatal("expected compaction event for long autonomous turn")
+	}
+	window, err := store.ListContextWindowEvents(context.Background(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(window) <= 1 {
+		t.Fatalf("expected recent suffix to survive compaction, got %d window events", len(window))
+	}
+	if !isCompactionEvent(window[0]) {
+		t.Fatalf("expected compaction event at window head, got %#v", window[0])
+	}
+}
+
 func TestCompactionNotice_StructuredNotHumanText(t *testing.T) {
 	ev := compactionNoticeEvent(triggerAuto, 5000, 2000, "start")
 	if ev == nil {

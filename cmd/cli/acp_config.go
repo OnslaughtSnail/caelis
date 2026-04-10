@@ -339,11 +339,17 @@ func cloneACPConfigMap(values map[string]string) map[string]string {
 
 func acpReasoningConfigForAlias(factory *modelproviders.Factory, configStore *appConfigStore, alias string) modelproviders.Config {
 	alias = resolveACPSelectedModelAlias(alias, map[string]string{acpConfigModel: alias}, configStore)
-	cfg := modelproviders.Config{Alias: alias}
 	if factory != nil {
 		if foundCfg, ok := factory.ConfigForAlias(alias); ok {
 			return foundCfg
 		}
+		if foundCfg, ok := resolveFactoryConfigForBareAlias(factory, alias); ok {
+			return foundCfg
+		}
+	}
+	cfg := modelproviders.Config{Alias: alias}
+	if inferredCfg, ok := inferCatalogConfigForBareAlias(alias); ok {
+		return inferredCfg
 	}
 	if strings.TrimSpace(cfg.Provider) == "" || strings.TrimSpace(cfg.Model) == "" {
 		parts := strings.SplitN(alias, "/", 2)
@@ -353,6 +359,77 @@ func acpReasoningConfigForAlias(factory *modelproviders.Factory, configStore *ap
 		}
 	}
 	return cfg
+}
+
+func resolveFactoryConfigForBareAlias(factory *modelproviders.Factory, alias string) (modelproviders.Config, bool) {
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	if factory == nil || alias == "" || strings.Contains(alias, "/") {
+		return modelproviders.Config{}, false
+	}
+	matches := make([]modelproviders.Config, 0, 2)
+	for _, one := range factory.ListModels() {
+		cfg, ok := factory.ConfigForAlias(one)
+		if !ok {
+			continue
+		}
+		modelName := strings.ToLower(strings.TrimSpace(cfg.Model))
+		if modelName == "" {
+			continue
+		}
+		if modelName != alias && canonicalModelRef(cfg.Provider, cfg.Model) != alias {
+			continue
+		}
+		matches = append(matches, cfg)
+		if len(matches) > 1 {
+			return modelproviders.Config{}, false
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return modelproviders.Config{}, false
+}
+
+func inferCatalogConfigForBareAlias(alias string) (modelproviders.Config, bool) {
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	if alias == "" || strings.Contains(alias, "/") {
+		return modelproviders.Config{}, false
+	}
+	type providerConfig struct {
+		provider string
+		api      modelproviders.APIType
+	}
+	seen := map[string]providerConfig{}
+	for _, tpl := range providerTemplates {
+		provider := strings.ToLower(strings.TrimSpace(tpl.provider))
+		if provider == "" {
+			continue
+		}
+		if _, ok := seen[provider]; !ok {
+			seen[provider] = providerConfig{provider: provider, api: tpl.api}
+		}
+	}
+	matches := make([]modelproviders.Config, 0, 2)
+	for _, one := range seen {
+		if _, ok := lookupSuggestedCatalogModelCapabilities(one.provider, alias); !ok {
+			if _, ok := lookupCatalogModelCapabilities(one.provider, alias); !ok {
+				continue
+			}
+		}
+		matches = append(matches, modelproviders.Config{
+			Alias:    canonicalModelRef(one.provider, alias),
+			Provider: one.provider,
+			API:      one.api,
+			Model:    alias,
+		})
+		if len(matches) > 1 {
+			return modelproviders.Config{}, false
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], true
+	}
+	return modelproviders.Config{}, false
 }
 
 func normalizeACPReasoningSelection(cfg modelproviders.Config, raw string) string {

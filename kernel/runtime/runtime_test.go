@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	internalacp "github.com/OnslaughtSnail/caelis/internal/acpmeta"
 	"github.com/OnslaughtSnail/caelis/kernel/agent"
 	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
 	"github.com/OnslaughtSnail/caelis/kernel/llmagent"
@@ -23,6 +22,7 @@ import (
 	taskinmemory "github.com/OnslaughtSnail/caelis/kernel/task/inmemory"
 	"github.com/OnslaughtSnail/caelis/kernel/taskstream"
 	"github.com/OnslaughtSnail/caelis/kernel/tool"
+	internalacp "github.com/OnslaughtSnail/caelis/pkg/acpmeta"
 )
 
 type fixedAgent struct{}
@@ -98,6 +98,28 @@ func (a overlayInspectAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session
 			a.t.Fatalf("expected overlay user event appended to context, got %#v", last)
 		}
 		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "overlay answer")}, nil)
+	}
+}
+
+type invocationPreludeInspectAgent struct {
+	t *testing.T
+}
+
+func (a invocationPreludeInspectAgent) Name() string { return "invocation-prelude-inspect" }
+func (a invocationPreludeInspectAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if ctx.Events().Len() < 2 {
+			a.t.Fatalf("expected prelude + user events, got %d", ctx.Events().Len())
+		}
+		prelude := ctx.Events().At(ctx.Events().Len() - 2)
+		last := ctx.Events().At(ctx.Events().Len() - 1)
+		if prelude == nil || !session.IsOverlay(prelude) || prelude.Message.Role != model.RoleUser || !strings.Contains(prelude.Message.TextContent(), "handoff checkpoint") {
+			a.t.Fatalf("expected overlay handoff prelude before user event, got %#v", prelude)
+		}
+		if last == nil || last.Message.Role != model.RoleUser || strings.TrimSpace(last.Message.TextContent()) != "继续处理这个任务" {
+			a.t.Fatalf("expected trailing user event, got %#v", last)
+		}
+		yield(&session.Event{Message: model.NewTextMessage(model.RoleAssistant, "ok")}, nil)
 	}
 }
 
@@ -178,6 +200,26 @@ func TestNew_UsesExplicitStores(t *testing.T) {
 	}
 	if rt.logStore != store || rt.stateStore != store {
 		t.Fatalf("expected explicit stores to be retained, got log=%T state=%T", rt.logStore, rt.stateStore)
+	}
+}
+
+func TestRuntimeRun_AllowsAgentWithoutModel(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{LogStore: store, StateStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runErr := range runEvents(context.Background(), t, rt, RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "s-no-model",
+		Input:     "hello",
+		Agent:     fixedAgent{},
+		CoreTools: tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+	}) {
+		if runErr != nil {
+			t.Fatalf("unexpected run error: %v", runErr)
+		}
 	}
 }
 
@@ -992,6 +1034,44 @@ func TestDetachSubagentContext_DoesNotInheritTaskStreamer(t *testing.T) {
 
 	if _, ok := taskstream.StreamerFromContext(detached); ok {
 		t.Fatal("expected detached delegated context to omit task streamer")
+	}
+}
+
+func TestRuntimeRun_InvocationPreludeIsVisibleOnlyToCurrentRun(t *testing.T) {
+	store := inmemory.New()
+	rt, err := New(Config{LogStore: store, StateStore: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runErr := range runEvents(t.Context(), t, rt, RunRequest{
+		AppName:   "app",
+		UserID:    "u",
+		SessionID: "sess-prelude",
+		Input:     "继续处理这个任务",
+		InvocationPrelude: []model.Message{
+			model.NewTextMessage(model.RoleUser, "[System-generated handoff checkpoint]\n\nCompleted work: fixed issue"),
+		},
+		Agent:               invocationPreludeInspectAgent{t: t},
+		Model:               newRuntimeTestLLM("fake"),
+		CoreTools:           tool.CoreToolsConfig{Runtime: newCoreRuntime(t)},
+		ContextWindowTokens: 16000,
+	}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+	}
+	sess := &session.Session{AppName: "app", UserID: "u", ID: "sess-prelude"}
+	events, err := store.ListEvents(t.Context(), sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev == nil {
+			continue
+		}
+		if strings.Contains(ev.Message.TextContent(), "handoff checkpoint") {
+			t.Fatalf("expected invocation prelude to remain non-persisted, found %#v", ev)
+		}
 	}
 }
 

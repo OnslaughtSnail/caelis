@@ -247,37 +247,3 @@ func latestAssistantText(ctx context.Context, r *Runtime, appName, userID, sessi
 	}
 	return FinalAssistantText(events), nil
 }
-
-func stringValue(values map[string]any, key string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	raw, ok := values[key]
-	if !ok || raw == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(raw))
-}
-
-func boolValue(values map[string]any, key string) bool {
-	if len(values) == 0 {
-		return false
-	}
-	raw, ok := values[key]
-	if !ok || raw == nil {
-		return false
-	}
-	value, ok := raw.(bool)
-	return ok && value
-}
-
-func recoveredBashPreview(session toolexec.Session) string {
-	if session == nil || strings.TrimSpace(session.Ref().SessionID) == "" {
-		return ""
-	}
-	stdout, stderr, _, _, err := session.ReadOutput(0, 0)
-	if err != nil {
-		return ""
-	}
-	return bashOutputPreview(stdout, stderr)
-}

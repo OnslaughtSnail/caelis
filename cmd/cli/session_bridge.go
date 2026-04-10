@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	appgateway "github.com/OnslaughtSnail/caelis/internal/app/gateway"
-	"github.com/OnslaughtSnail/caelis/internal/app/sessionsvc"
+	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 )
 
 type cliSessionIndexAdapter struct {
