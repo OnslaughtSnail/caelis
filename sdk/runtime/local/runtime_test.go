@@ -1,0 +1,3033 @@
+package local
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"iter"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	sdkcompact "github.com/OnslaughtSnail/caelis/sdk/compact"
+	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
+	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
+	policypresets "github.com/OnslaughtSnail/caelis/sdk/policy/presets"
+	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
+	"github.com/OnslaughtSnail/caelis/sdk/runtime/agents/chat"
+	"github.com/OnslaughtSnail/caelis/sdk/sandbox/host"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
+	"github.com/OnslaughtSnail/caelis/sdk/session/inmemory"
+	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
+	taskfile "github.com/OnslaughtSnail/caelis/sdk/task/file"
+	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
+	"github.com/OnslaughtSnail/caelis/sdk/tool/builtin/filesystem"
+	sdkplan "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/plan"
+	"github.com/OnslaughtSnail/caelis/sdk/tool/builtin/shell"
+	spawntool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/spawn"
+	tasktool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/task"
+)
+
+func TestRuntimeRunPersistsMinimalChatTurn(t *testing.T) {
+	t.Parallel()
+
+	sessions := inmemory.NewService(inmemory.NewStore(inmemory.Config{
+		SessionIDGenerator: func() string { return "sess-1" },
+	}))
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-1",
+			CWD: "/tmp/project",
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		RunIDGenerator: func() string { return "run-1" },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: staticModel{text: "world"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := result.Handle.RunID(); got != "run-1" {
+		t.Fatalf("RunID() = %q, want %q", got, "run-1")
+	}
+
+	var count int
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event != nil {
+			count++
+		}
+	}
+	if got, want := count, 2; got != want {
+		t.Fatalf("runner event count = %d, want %d", got, want)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 2; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	if got := loaded.Events[1].Text; got != "world" {
+		t.Fatalf("assistant text = %q, want %q", got, "world")
+	}
+
+	state, err := runtime.RunState(context.Background(), session.SessionRef)
+	if err != nil {
+		t.Fatalf("RunState() error = %v", err)
+	}
+	if state.Status != sdkruntime.RunLifecycleStatusCompleted {
+		t.Fatalf("state.Status = %q, want %q", state.Status, sdkruntime.RunLifecycleStatusCompleted)
+	}
+}
+
+func TestRuntimeRunAppliesAssemblyModeAndConfigOverridesFromSessionState(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-assembly-overrides")
+	if err := sessions.UpdateState(context.Background(), session.SessionRef, func(state map[string]any) (map[string]any, error) {
+		state = sdkplugin.SetCurrentModeID(state, "plan")
+		state = sdkplugin.SetCurrentConfigValue(state, "reasoning", "deep")
+		return state, nil
+	}); err != nil {
+		t.Fatalf("UpdateState() error = %v", err)
+	}
+
+	factory := &attemptFactory{
+		agents: []sdkruntime.Agent{seqAgent{events: []*sdksession.Event{assistantEvent("ok")}}},
+	}
+	runtime, err := New(Config{
+		Sessions:     sessions,
+		AgentFactory: factory,
+		Assembly: sdkplugin.ResolvedAssembly{
+			Modes: []sdkplugin.ModeConfig{
+				{
+					ID: "default",
+					Runtime: sdkplugin.RuntimeOverrides{
+						PolicyMode:   "default",
+						SystemPrompt: "mode-default-marker",
+					},
+				},
+				{
+					ID: "plan",
+					Runtime: sdkplugin.RuntimeOverrides{
+						PolicyMode:   "plan",
+						SystemPrompt: "mode-plan-marker",
+					},
+				},
+			},
+			Configs: []sdkplugin.ConfigOption{{
+				ID:           "reasoning",
+				DefaultValue: "balanced",
+				Options: []sdkplugin.ConfigSelectOption{
+					{
+						Value: "balanced",
+						Runtime: sdkplugin.RuntimeOverrides{
+							Reasoning: sdkmodel.ReasoningConfig{Effort: "medium"},
+						},
+					},
+					{
+						Value: "deep",
+						Runtime: sdkplugin.RuntimeOverrides{
+							Reasoning: sdkmodel.ReasoningConfig{Effort: "high"},
+						},
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	specs := factory.Specs()
+	if got, want := len(specs), 1; got != want {
+		t.Fatalf("factory specs len = %d, want %d", got, want)
+	}
+	spec := specs[0]
+	if got := strings.TrimSpace(spec.Metadata["policy_mode"].(string)); got != "plan" {
+		t.Fatalf("policy_mode = %q, want %q", got, "plan")
+	}
+	if got := strings.TrimSpace(spec.Metadata["system_prompt"].(string)); got != "mode-plan-marker" {
+		t.Fatalf("system_prompt = %q, want %q", got, "mode-plan-marker")
+	}
+	if got := strings.TrimSpace(spec.Metadata["reasoning_effort"].(string)); got != "high" {
+		t.Fatalf("reasoning_effort = %q, want %q", got, "high")
+	}
+}
+
+func TestRuntimeRunAppliesConfigOverridesInDeclaredOrder(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-assembly-order")
+	if err := sessions.UpdateState(context.Background(), session.SessionRef, func(state map[string]any) (map[string]any, error) {
+		state = sdkplugin.SetCurrentConfigValue(state, "first", "on")
+		state = sdkplugin.SetCurrentConfigValue(state, "second", "on")
+		return state, nil
+	}); err != nil {
+		t.Fatalf("UpdateState() error = %v", err)
+	}
+
+	factory := &attemptFactory{
+		agents: []sdkruntime.Agent{seqAgent{events: []*sdksession.Event{assistantEvent("ok")}}},
+	}
+	runtime, err := New(Config{
+		Sessions:     sessions,
+		AgentFactory: factory,
+		Assembly: sdkplugin.ResolvedAssembly{
+			Configs: []sdkplugin.ConfigOption{
+				{
+					ID: "first",
+					Options: []sdkplugin.ConfigSelectOption{{
+						Value: "on",
+						Runtime: sdkplugin.RuntimeOverrides{
+							SystemPrompt: "first-prompt",
+						},
+					}},
+				},
+				{
+					ID: "second",
+					Options: []sdkplugin.ConfigSelectOption{{
+						Value: "on",
+						Runtime: sdkplugin.RuntimeOverrides{
+							SystemPrompt: "second-prompt",
+						},
+					}},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	specs := factory.Specs()
+	if got, want := len(specs), 1; got != want {
+		t.Fatalf("factory specs len = %d, want %d", got, want)
+	}
+	if got := strings.TrimSpace(specs[0].Metadata["system_prompt"].(string)); got != "second-prompt" {
+		t.Fatalf("system_prompt = %q, want %q", got, "second-prompt")
+	}
+}
+
+func TestRuntimeRunFallsBackToDefaultForStaleConfigValue(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-assembly-stale")
+	if err := sessions.UpdateState(context.Background(), session.SessionRef, func(state map[string]any) (map[string]any, error) {
+		state = sdkplugin.SetCurrentConfigValue(state, "reasoning", "stale")
+		return state, nil
+	}); err != nil {
+		t.Fatalf("UpdateState() error = %v", err)
+	}
+
+	factory := &attemptFactory{
+		agents: []sdkruntime.Agent{seqAgent{events: []*sdksession.Event{assistantEvent("ok")}}},
+	}
+	runtime, err := New(Config{
+		Sessions:     sessions,
+		AgentFactory: factory,
+		Assembly: sdkplugin.ResolvedAssembly{
+			Configs: []sdkplugin.ConfigOption{{
+				ID:           "reasoning",
+				DefaultValue: "balanced",
+				Options: []sdkplugin.ConfigSelectOption{
+					{
+						Value: "balanced",
+						Runtime: sdkplugin.RuntimeOverrides{
+							SystemPrompt: "balanced-prompt",
+							Reasoning:    sdkmodel.ReasoningConfig{Effort: "medium"},
+						},
+					},
+					{
+						Value: "deep",
+						Runtime: sdkplugin.RuntimeOverrides{
+							SystemPrompt: "deep-prompt",
+							Reasoning:    sdkmodel.ReasoningConfig{Effort: "high"},
+						},
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	specs := factory.Specs()
+	if got, want := len(specs), 1; got != want {
+		t.Fatalf("factory specs len = %d, want %d", got, want)
+	}
+	spec := specs[0]
+	if got := strings.TrimSpace(spec.Metadata["system_prompt"].(string)); got != "balanced-prompt" {
+		t.Fatalf("system_prompt = %q, want %q", got, "balanced-prompt")
+	}
+	if got := strings.TrimSpace(spec.Metadata["reasoning_effort"].(string)); got != "medium" {
+		t.Fatalf("reasoning_effort = %q, want %q", got, "medium")
+	}
+}
+
+func TestRuntimeRunReplaysPersistedHistoryFromFileStore(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
+		RootDir:            root,
+		SessionIDGenerator: func() string { return "sess-file-replay" },
+	}))
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-file-replay",
+			CWD: t.TempDir(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	runtime1, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		RunIDGenerator: func() string { return "run-1" },
+	})
+	if err != nil {
+		t.Fatalf("New(runtime1) error = %v", err)
+	}
+
+	if _, err := runtime1.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: staticModel{text: "world"},
+		},
+	}); err != nil {
+		t.Fatalf("runtime1.Run() error = %v", err)
+	}
+
+	reopenedSessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{RootDir: root}))
+	runtime2, err := New(Config{
+		Sessions: reopenedSessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		RunIDGenerator: func() string { return "run-2" },
+	})
+	if err != nil {
+		t.Fatalf("New(runtime2) error = %v", err)
+	}
+
+	replayModel := &historyReplayModel{
+		t:         t,
+		wantTexts: []string{"hello", "world", "again"},
+		replyText: "history ok",
+	}
+	result, err := runtime2.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "again",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: replayModel,
+		},
+	})
+	if err != nil {
+		t.Fatalf("runtime2.Run() error = %v", err)
+	}
+
+	var finalText string
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event != nil && event.Type == sdksession.EventTypeAssistant {
+			finalText = event.Text
+		}
+	}
+	if finalText != "history ok" {
+		t.Fatalf("final assistant text = %q, want %q", finalText, "history ok")
+	}
+	if replayModel.calls != 1 {
+		t.Fatalf("history replay model calls = %d, want %d", replayModel.calls, 1)
+	}
+
+	loaded, err := reopenedSessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 4; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	if got := loaded.Events[3].Text; got != "history ok" {
+		t.Fatalf("assistant replay text = %q, want %q", got, "history ok")
+	}
+}
+
+func TestRuntimeCompactionInjectsCheckpointAndTrimsOldHistory(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-compact-heuristic")
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Project objective: build compact runtime. Constraint: do not lose blocker continuity."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack objective"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Current blocker: provider intermittently returns 529 overloaded_error when histories get too large."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack blocker"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Next action: validate with real e2e tests and tune the compact prompt."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack next"))
+
+	model := &contextProbeModel{
+		t: t,
+		wantMessageContains: []string{
+			"CONTEXT CHECKPOINT",
+			"build compact runtime",
+			"529 overloaded_error",
+		},
+		wantMessagesOmit: []string{
+			"Project objective: build compact runtime",
+			"Current blocker: provider intermittently returns 529 overloaded_error",
+		},
+		replyText: "checkpoint ok",
+	}
+
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{
+			Enabled:                    true,
+			WatermarkRatio:             0.7,
+			ForceWatermarkRatio:        0.85,
+			DefaultContextWindowTokens: 64,
+			ReserveOutputTokens:        16,
+			SafetyMarginTokens:         8,
+			RetainedUserTokenLimit:     24,
+			SegmentTokenBudget:         80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "continue",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if model.compactionCalls != 1 {
+		t.Fatalf("compactionCalls = %d, want 1", model.compactionCalls)
+	}
+	if model.normalCalls != 1 {
+		t.Fatalf("normalCalls = %d, want 1", model.normalCalls)
+	}
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	sawCompact := false
+	var compactText string
+	for _, event := range loaded.Events {
+		if event != nil && event.Type == sdksession.EventTypeCompact {
+			sawCompact = true
+			compactText = strings.TrimSpace(event.Text)
+			break
+		}
+	}
+	if !sawCompact {
+		t.Fatal("expected durable compact event in session history")
+	}
+	if !strings.Contains(compactText, "build compact runtime") {
+		t.Fatalf("compact event text = %q, want compact objective", compactText)
+	}
+}
+
+func TestRuntimeCompactionUsesModelGeneratedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-compact-model")
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Project objective: preserve context continuity during very long coding sessions."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Current blocker: checkpoint quality drops when summaries become too generic."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Next action: run realistic compact e2e tests and tune the summary prompt."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+
+	model := &modelCheckpointProbe{
+		t: t,
+	}
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{
+			Enabled:                    true,
+			WatermarkRatio:             0.7,
+			ForceWatermarkRatio:        0.85,
+			DefaultContextWindowTokens: 64,
+			ReserveOutputTokens:        16,
+			SafetyMarginTokens:         8,
+			RetainedUserTokenLimit:     24,
+			SegmentTokenBudget:         80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "continue",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if model.compactionCalls == 0 {
+		t.Fatal("expected at least one model-backed compaction call")
+	}
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	var compactText string
+	for _, event := range loaded.Events {
+		if event != nil && event.Type == sdksession.EventTypeCompact {
+			compactText = strings.TrimSpace(event.Text)
+		}
+	}
+	if !strings.Contains(compactText, "preserve context continuity during very long coding sessions") {
+		t.Fatalf("compact event text = %q, want canonical continuity objective", compactText)
+	}
+	compactEvent, ok := latestCompactEventForTest(loaded.Events)
+	if !ok {
+		t.Fatal("expected compact event in durable history")
+	}
+	data, ok := sdkcompact.CompactEventDataFromEvent(compactEvent)
+	if !ok {
+		t.Fatal("expected compact event metadata")
+	}
+	if len(data.ReplacementHistory) == 0 {
+		t.Fatal("expected replacement history on compact event")
+	}
+	last := data.ReplacementHistory[len(data.ReplacementHistory)-1]
+	if last == nil || !strings.Contains(strings.ToLower(last.Text), "preserve context continuity during very long coding sessions") {
+		t.Fatalf("replacement history summary = %+v, want compact continuity objective", last)
+	}
+	if data.Revision <= 0 {
+		t.Fatalf("compact revision = %d, want > 0", data.Revision)
+	}
+}
+
+func TestRuntimeCompactionReplaysFromEventsAfterReload(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
+		RootDir:            root,
+		SessionIDGenerator: func() string { return "sess-compact-replay" },
+	}))
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-compact-replay",
+			CWD: t.TempDir(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Project objective: replay compacted history strictly from append-only events."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Current blocker: raw transcript replay grows too large under long sessions."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Next action: verify reload from file-backed events only."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+
+	runtime1, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{
+			Enabled:                    true,
+			WatermarkRatio:             0.7,
+			ForceWatermarkRatio:        0.85,
+			DefaultContextWindowTokens: 64,
+			ReserveOutputTokens:        16,
+			SafetyMarginTokens:         8,
+			RetainedUserTokenLimit:     48,
+			SegmentTokenBudget:         80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(runtime1) error = %v", err)
+	}
+
+	if _, err := runtime1.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "continue",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name: "chat",
+			Model: &contextProbeModel{
+				t:         t,
+				replyText: "seed ok",
+				compactBody: `CONTEXT CHECKPOINT
+
+Objective: replay compacted history strictly from append-only events
+Blocker: raw transcript replay grows too large under long sessions
+Next action: verify reload from file-backed events only
+
+## Current Progress
+- compact summary persisted as a durable event
+
+## Next Actions
+1. verify reload from file-backed events only`,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("runtime1.Run() error = %v", err)
+	}
+
+	reopenedSessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{RootDir: root}))
+	reopenedState, err := reopenedSessions.SnapshotState(context.Background(), session.SessionRef)
+	if err != nil {
+		t.Fatalf("SnapshotState() error = %v", err)
+	}
+	if len(reopenedState) != 0 {
+		t.Fatalf("reopened state = %v, want compact replay to not depend on session state", reopenedState)
+	}
+	runtime2, err := New(Config{
+		Sessions: reopenedSessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{
+			Enabled:                    true,
+			WatermarkRatio:             0.95,
+			ForceWatermarkRatio:        0.99,
+			DefaultContextWindowTokens: 4096,
+			ReserveOutputTokens:        16,
+			SafetyMarginTokens:         8,
+			RetainedUserTokenLimit:     48,
+			SegmentTokenBudget:         80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(runtime2) error = %v", err)
+	}
+
+	replayModel := &contextProbeModel{
+		t: t,
+		wantMessageContains: []string{
+			"CONTEXT CHECKPOINT",
+			"replay compacted history strictly from append-only events",
+			"verify reload from file-backed events only",
+		},
+		replyText: "replay ok",
+	}
+	result, err := runtime2.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "continue after reload",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: replayModel,
+		},
+	})
+	if err != nil {
+		t.Fatalf("runtime2.Run() error = %v", err)
+	}
+	var finalText string
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event != nil && event.Type == sdksession.EventTypeAssistant {
+			finalText = strings.TrimSpace(event.Text)
+		}
+	}
+	if finalText != "replay ok" {
+		t.Fatalf("final assistant text = %q, want %q", finalText, "replay ok")
+	}
+}
+
+func TestSelectRetainedUserInputsIncludesNonContiguousRecentUsers(t *testing.T) {
+	t.Parallel()
+
+	keepBlocker := "Keep blocker continuity exact across compact."
+	validateE2E := "Validate real compact e2e output before changing heuristics."
+	events := []*sdksession.Event{
+		{ID: "user-1", Type: sdksession.EventTypeUser, Text: "Very old objective turn that should not be retained."},
+		{ID: "assistant-1", Type: sdksession.EventTypeAssistant, Text: "ack"},
+		{ID: "user-2", Type: sdksession.EventTypeUser, Text: keepBlocker},
+		{ID: "assistant-2", Type: sdksession.EventTypeAssistant, Text: "ack"},
+		{ID: "user-3", Type: sdksession.EventTypeUser, Text: validateE2E},
+	}
+
+	got, selected := selectRetainedUserInputs(events, estimateTextTokens(keepBlocker)+estimateTextTokens(validateE2E)+4)
+	if len(got) < 2 {
+		t.Fatalf("retained users = %v, want at least the two most recent user turns", got)
+	}
+	if !reflect.DeepEqual(got[len(got)-2:], []string{keepBlocker, validateE2E}) {
+		t.Fatalf("retained users tail = %v, want %v", got[len(got)-2:], []string{keepBlocker, validateE2E})
+	}
+	if len(selected) < 2 {
+		t.Fatalf("selected retained indexes = %v, want at least 2", selected)
+	}
+}
+
+func TestSnapshotUsageUsesPromptBaselinePlusReplayDelta(t *testing.T) {
+	t.Parallel()
+
+	compactor := &codexStyleCompactor{cfg: normalizeCompactionConfig(CompactionConfig{
+		Enabled:                    true,
+		DefaultContextWindowTokens: 32000,
+		ReserveOutputTokens:        5000,
+		SafetyMarginTokens:         2048,
+	})}
+	assistant := assistantEvent("Short visible assistant reply.")
+	assistant.ID = "assistant-1"
+	assistant.Meta = map[string]any{
+		"provider":          "stub",
+		"model":             "test-model",
+		"prompt_tokens":     120,
+		"completion_tokens": 900,
+		"total_tokens":      1020,
+	}
+	followUp := userTextEvent("Follow up with the latest status update.")
+	followUp.ID = "user-2"
+	events := []*sdksession.Event{assistant, followUp}
+
+	usage := compactor.snapshotUsage(sdkcompact.Request{}, events)
+	want := 120 + estimatePromptEventTokens(assistant) + estimatePromptEventTokens(followUp)
+	if usage.TotalTokens != want {
+		t.Fatalf("usage.TotalTokens = %d, want %d", usage.TotalTokens, want)
+	}
+	if usage.Source != sdkcompact.UsageSourceProvider {
+		t.Fatalf("usage.Source = %q, want provider", usage.Source)
+	}
+	if usage.AsOfEventID != "assistant-1" {
+		t.Fatalf("usage.AsOfEventID = %q, want %q", usage.AsOfEventID, "assistant-1")
+	}
+}
+
+func TestSnapshotUsageTotalOnlyFallbackDoesNotDoubleCountSnapshotGroup(t *testing.T) {
+	t.Parallel()
+
+	compactor := &codexStyleCompactor{cfg: normalizeCompactionConfig(CompactionConfig{
+		Enabled:                    true,
+		DefaultContextWindowTokens: 32000,
+	})}
+	assistant := assistantEvent("Assistant reply already captured in transcript.")
+	assistant.ID = "assistant-1"
+	assistant.Meta = map[string]any{
+		"provider":     "stub",
+		"model":        "test-model",
+		"total_tokens": 400,
+	}
+	followUp := userTextEvent("User turn added after the provider snapshot.")
+	followUp.ID = "user-2"
+	events := []*sdksession.Event{assistant, followUp}
+
+	usage := compactor.snapshotUsage(sdkcompact.Request{}, events)
+	want := 400 + estimatePromptEventTokens(followUp)
+	if usage.TotalTokens != want {
+		t.Fatalf("usage.TotalTokens = %d, want %d", usage.TotalTokens, want)
+	}
+}
+
+func TestSnapshotUsageClampsEffectiveBudgetForSmallWindows(t *testing.T) {
+	t.Parallel()
+
+	compactor := &codexStyleCompactor{cfg: normalizeCompactionConfig(CompactionConfig{
+		Enabled:                    true,
+		DefaultContextWindowTokens: 2048,
+		ReserveOutputTokens:        5000,
+		SafetyMarginTokens:         2048,
+	})}
+
+	usage := compactor.snapshotUsage(sdkcompact.Request{}, []*sdksession.Event{userTextEvent("small window probe")})
+	if usage.EffectiveInputBudget != 1280 {
+		t.Fatalf("usage.EffectiveInputBudget = %d, want %d", usage.EffectiveInputBudget, 1280)
+	}
+	if usage.EffectiveInputBudget <= 0 || usage.EffectiveInputBudget > usage.ContextWindowTokens {
+		t.Fatalf("effective input budget out of range: %+v", usage)
+	}
+}
+
+func TestSnapshotUsagePreservesConfiguredMarginsForLongWindows(t *testing.T) {
+	t.Parallel()
+
+	compactor := &codexStyleCompactor{cfg: normalizeCompactionConfig(CompactionConfig{
+		Enabled:                    true,
+		DefaultContextWindowTokens: 200000,
+		ReserveOutputTokens:        5000,
+		SafetyMarginTokens:         2048,
+	})}
+
+	usage := compactor.snapshotUsage(sdkcompact.Request{}, []*sdksession.Event{userTextEvent("long window probe")})
+	if usage.EffectiveInputBudget != 192952 {
+		t.Fatalf("usage.EffectiveInputBudget = %d, want %d", usage.EffectiveInputBudget, 192952)
+	}
+}
+
+func TestPrepareCompactionFitsPendingInputWithinBudget(t *testing.T) {
+	t.Parallel()
+
+	compactor := &codexStyleCompactor{cfg: normalizeCompactionConfig(CompactionConfig{
+		Enabled:                    true,
+		WatermarkRatio:             0.6,
+		ForceWatermarkRatio:        0.75,
+		DefaultContextWindowTokens: 192,
+		ReserveOutputTokens:        32,
+		SafetyMarginTokens:         16,
+		RetainedUserTokenLimit:     96,
+		SegmentTokenBudget:         80,
+	})}
+	events := []*sdksession.Event{
+		userTextEvent(strings.Repeat("Objective continuity detail. ", 8)),
+		assistantEvent("ack"),
+		userTextEvent(strings.Repeat("Most recent blocker and progress detail. ", 8)),
+	}
+	pending := userTextEvent(strings.Repeat("New user turn that must still fit after compaction. ", 6))
+
+	result, err := compactor.Prepare(context.Background(), sdkcompact.Request{
+		Session: sdksession.Session{
+			SessionRef: sdksession.SessionRef{
+				AppName: "caelis",
+				UserID:  "user-1",
+			},
+		},
+		Events:        events,
+		PendingEvents: []*sdksession.Event{pending},
+		Model: staticModel{text: `Objective: preserve compact budget
+Blocker: pre-turn prompt is near the limit
+Next action: fit the pending user turn inside the compacted prompt
+
+- keep only the minimal continuity handoff`},
+	})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+	if !result.Compacted {
+		t.Fatal("expected compaction to trigger")
+	}
+	if result.Usage.TotalTokens > result.Usage.EffectiveInputBudget {
+		t.Fatalf("usage.TotalTokens = %d, want <= effective budget %d", result.Usage.TotalTokens, result.Usage.EffectiveInputBudget)
+	}
+	data, ok := sdkcompact.CompactEventDataFromEvent(result.CompactEvent)
+	if !ok {
+		t.Fatal("expected compact event data")
+	}
+	if len(data.ReplacementHistory) == 0 {
+		t.Fatal("expected replacement history after compaction")
+	}
+}
+
+func TestRuntimeCompactionIgnoresStateOnlyPlanSnapshot(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-compact-state-omit")
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Objective: keep compaction event-only."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Blocker: runtime state can drift away from durable events."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Next action: compact only from canonical events and verify no state leakage."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack"))
+
+	if err := sessions.UpdateState(context.Background(), session.SessionRef, func(state map[string]any) (map[string]any, error) {
+		if state == nil {
+			state = map[string]any{}
+		}
+		state["plan"] = map[string]any{
+			"version": 1,
+			"entries": []any{
+				map[string]any{
+					"content": "state-only plan item that must never leak into compaction",
+					"status":  "in_progress",
+				},
+			},
+		}
+		return state, nil
+	}); err != nil {
+		t.Fatalf("UpdateState() error = %v", err)
+	}
+
+	model := &contextProbeModel{
+		t: t,
+		wantCompactionInputContains: []string{
+			"Objective: keep compaction event-only.",
+		},
+		wantCompactionInputOmit: []string{
+			"Current runtime state:",
+			"state-only plan item that must never leak into compaction",
+		},
+		replyText: "ok",
+	}
+
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{
+			Enabled:                    true,
+			WatermarkRatio:             0.7,
+			ForceWatermarkRatio:        0.85,
+			DefaultContextWindowTokens: 64,
+			ReserveOutputTokens:        16,
+			SafetyMarginTokens:         8,
+			RetainedUserTokenLimit:     24,
+			SegmentTokenBudget:         80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "continue",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+		},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if model.compactionCalls != 1 {
+		t.Fatalf("compactionCalls = %d, want 1", model.compactionCalls)
+	}
+}
+
+func TestRenderCompactionEventIncludesPlanEntries(t *testing.T) {
+	t.Parallel()
+
+	event := &sdksession.Event{
+		Type:       sdksession.EventTypePlan,
+		Visibility: sdksession.VisibilityCanonical,
+		Text:       "execution plan refreshed",
+		Protocol: &sdksession.EventProtocol{
+			UpdateType: string(sdksession.ProtocolUpdateTypePlan),
+			Plan: &sdksession.ProtocolPlan{
+				Entries: []sdksession.ProtocolPlanEntry{
+					{Content: "run provider compact e2e", Status: "in_progress"},
+					{Content: "verify append-only replay", Status: "pending"},
+				},
+			},
+		},
+	}
+
+	got := renderCompactionEvent(event)
+	for _, needle := range []string{
+		"PLAN:",
+		"execution plan refreshed",
+		"run provider compact e2e [in_progress]",
+		"verify append-only replay [pending]",
+	} {
+		if !strings.Contains(got, needle) {
+			t.Fatalf("renderCompactionEvent() = %q, want substring %q", got, needle)
+		}
+	}
+}
+
+func TestPreferredCompactionAnchorsUseLatestExplicitHistory(t *testing.T) {
+	t.Parallel()
+
+	baseText := `CONTEXT CHECKPOINT
+
+Objective: stale compact objective
+Blocker: stale compact blocker
+Next action: stale compact next action
+
+- old noisy detail`
+	events := []*sdksession.Event{
+		userTextEvent("Objective: even older transcript objective"),
+		userTextEvent(`CONTEXT CHECKPOINT
+
+Objective: synthetic summary objective
+Blocker: synthetic summary blocker
+Next action: synthetic summary next action`),
+		userTextEvent("Objective: fresh runtime objective\nBlocker: waiting for e2e confirmation\nNext action: run the provider continuity test"),
+	}
+
+	anchors := preferredCompactionAnchors(baseText, events)
+	if anchors.Objective != "fresh runtime objective" {
+		t.Fatalf("anchors.Objective = %q, want %q", anchors.Objective, "fresh runtime objective")
+	}
+	if anchors.Blocker != "waiting for e2e confirmation" {
+		t.Fatalf("anchors.Blocker = %q, want %q", anchors.Blocker, "waiting for e2e confirmation")
+	}
+	if anchors.NextAction != "run the provider continuity test" {
+		t.Fatalf("anchors.NextAction = %q, want %q", anchors.NextAction, "run the provider continuity test")
+	}
+}
+
+func TestCompactableEventsIgnoreReplacementOverlayHistory(t *testing.T) {
+	t.Parallel()
+
+	retainedMsg := sdkmodel.NewTextMessage(sdkmodel.RoleUser, "Retained user text from the previous compact.")
+	overlay := &sdksession.Event{
+		Type:       sdksession.EventTypeUser,
+		Visibility: sdksession.VisibilityOverlay,
+		Message:    &retainedMsg,
+		Text:       retainedMsg.TextContent(),
+	}
+	canonical := userTextEvent("Fresh canonical user event after the latest compact.")
+	events := []*sdksession.Event{
+		overlay,
+		canonical,
+	}
+
+	got := compactableEvents(events)
+	if len(got) != 1 {
+		t.Fatalf("compactableEvents() count = %d, want 1 (%v)", len(got), got)
+	}
+	if text := eventTextForCompaction(got[0]); text != "Fresh canonical user event after the latest compact." {
+		t.Fatalf("compactable event text = %q, want fresh canonical event", text)
+	}
+}
+
+func TestRenderCompactionEventFallsBackToMessageText(t *testing.T) {
+	t.Parallel()
+
+	message := sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "message-only assistant text")
+	event := &sdksession.Event{
+		Type:       sdksession.EventTypeAssistant,
+		Visibility: sdksession.VisibilityCanonical,
+		Message:    &message,
+	}
+
+	got := renderCompactionEvent(event)
+	if !strings.Contains(got, "message-only assistant text") {
+		t.Fatalf("renderCompactionEvent() = %q, want message text fallback", got)
+	}
+}
+
+func TestSelectRetainedUserInputsTruncatesLongRecentUser(t *testing.T) {
+	t.Parallel()
+
+	longUser := strings.Repeat("latest user continuity detail ", 24)
+	events := []*sdksession.Event{
+		{ID: "user-long", Type: sdksession.EventTypeUser, Text: longUser},
+	}
+
+	got, selected := selectRetainedUserInputs(events, max(estimateTextTokens(longUser)/4, 8))
+	if len(got) != 1 {
+		t.Fatalf("retained user count = %d, want 1 (%v)", len(got), got)
+	}
+	if got[0] == longUser {
+		t.Fatalf("retained user text was not truncated: %q", got[0])
+	}
+	if !strings.Contains(got[0], "...") {
+		t.Fatalf("retained user text = %q, want ellipsis truncation", got[0])
+	}
+	if len(selected) != 1 {
+		t.Fatalf("selected retained indexes = %v, want 1", selected)
+	}
+	if estimateTextTokens(got[0]) > max(estimateTextTokens(longUser)/4, 8)+2 {
+		t.Fatalf("truncated retained text still exceeds budget: %q", got[0])
+	}
+}
+
+func TestRuntimeRecoversFromContextOverflowByCompactingMidTurn(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-compact-overflow")
+	model := &overflowRecoveryModel{t: t}
+	tool := sdktool.NamedTool{
+		Def: sdktool.Definition{
+			Name:        "ECHO",
+			Description: "echo input",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Invoke: func(_ context.Context, call sdktool.Call) (sdktool.Result, error) {
+			return sdktool.Result{
+				ID:   call.ID,
+				Name: call.Name,
+				Content: []sdkmodel.Part{
+					sdkmodel.NewJSONPart([]byte(`{"value":"pong"}`)),
+				},
+			}, nil
+		},
+	}
+
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		Compaction: CompactionConfig{
+			Enabled:                    true,
+			WatermarkRatio:             0.95,
+			ForceWatermarkRatio:        0.99,
+			DefaultContextWindowTokens: 128,
+			ReserveOutputTokens:        16,
+			SafetyMarginTokens:         8,
+			RetainedUserTokenLimit:     32,
+			SegmentTokenBudget:         80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "Use ECHO and then finish.",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+			Tools: []sdktool.Tool{tool},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	var finalText string
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event != nil && event.Type == sdksession.EventTypeAssistant {
+			finalText = strings.TrimSpace(event.Text)
+		}
+	}
+	if finalText != "recovered after compact" {
+		t.Fatalf("finalText = %q, want %q", finalText, "recovered after compact")
+	}
+	if model.compactionCalls != 1 {
+		t.Fatalf("compactionCalls = %d, want 1", model.compactionCalls)
+	}
+	if !model.sawCheckpointOnRetry {
+		t.Fatal("expected retry to see compact checkpoint with tool result continuity")
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	sawCompact := false
+	for _, event := range loaded.Events {
+		if event != nil && event.Type == sdksession.EventTypeCompact {
+			sawCompact = true
+			if !strings.Contains(strings.ToLower(event.Text), "pong") {
+				t.Fatalf("compact event text = %q, want retained tool result summary", event.Text)
+			}
+		}
+	}
+	if !sawCompact {
+		t.Fatal("expected compact event after overflow recovery")
+	}
+	compactEvent, ok := latestCompactEventForTest(loaded.Events)
+	if !ok {
+		t.Fatal("expected latest compact event")
+	}
+	data, ok := sdkcompact.CompactEventDataFromEvent(compactEvent)
+	if !ok || len(data.ReplacementHistory) == 0 {
+		t.Fatalf("compact metadata missing replacement history: %+v", compactEvent.Meta)
+	}
+	foundPong := false
+	for _, event := range data.ReplacementHistory {
+		if event != nil && strings.Contains(strings.ToLower(event.Text), "pong") {
+			foundPong = true
+			break
+		}
+	}
+	if !foundPong {
+		t.Fatalf("replacement history = %+v, want tool result continuity", data.ReplacementHistory)
+	}
+}
+
+func TestRuntimeRecoveryInterruptsOrphanedBashTask(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workdir := t.TempDir()
+	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
+		RootDir:            root,
+		SessionIDGenerator: func() string { return "sess-orphan-bash" },
+	}))
+	tasks := taskfile.NewStore(taskfile.Config{RootDir: filepath.Join(root, "tasks")})
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: workdir,
+			CWD: workdir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	runtime1, err := New(Config{
+		Sessions:  sessions,
+		TaskStore: tasks,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New(runtime1) error = %v", err)
+	}
+	snapshot, err := runtime1.tasks.StartBash(context.Background(), session, session.SessionRef, hostRuntimeForTest(t, workdir), sdktask.BashStartRequest{
+		Command:    "sleep 5; printf 'late output'",
+		Workdir:    workdir,
+		Yield:      5 * time.Millisecond,
+		ParentCall: "bash-1",
+		ParentTool: shell.BashToolName,
+	})
+	if err != nil {
+		t.Fatalf("StartBash() error = %v", err)
+	}
+	if !snapshot.Running {
+		t.Fatalf("snapshot.Running = %v, want true", snapshot.Running)
+	}
+
+	reopenedSessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{RootDir: root}))
+	runtime2, err := New(Config{
+		Sessions:  reopenedSessions,
+		TaskStore: tasks,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{Enabled: true, WatermarkRatio: 0.8, ForceWatermarkRatio: 0.9, DefaultContextWindowTokens: 4096},
+	})
+	if err != nil {
+		t.Fatalf("New(runtime2) error = %v", err)
+	}
+	_, err = runtime2.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "resume after orphaned task",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: staticModel{text: "ok"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("runtime2.Run() error = %v", err)
+	}
+
+	entry, err := tasks.Get(context.Background(), snapshot.Ref.TaskID)
+	if err != nil {
+		t.Fatalf("tasks.Get() error = %v", err)
+	}
+	if entry == nil {
+		t.Fatal("tasks.Get() returned nil entry")
+	}
+	if entry.Running {
+		t.Fatalf("entry.Running = %v, want false", entry.Running)
+	}
+	if entry.State != sdktask.StateInterrupted {
+		t.Fatalf("entry.State = %q, want %q", entry.State, sdktask.StateInterrupted)
+	}
+	if got, _ := entry.Result["result"].(string); !strings.Contains(got, "interrupted during resume") {
+		t.Fatalf("entry.Result[result] = %q, want interrupted summary", got)
+	}
+}
+
+func TestRuntimeRunRetriesBeforeAnyEventIsEmitted(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-retry")
+	factory := &attemptFactory{
+		agents: []sdkruntime.Agent{
+			seqAgent{err: errors.New("model: http status 529 body={\"error\":\"overloaded_error\"}")},
+			seqAgent{events: []*sdksession.Event{
+				assistantEvent("world"),
+			}},
+		},
+	}
+	var delays []time.Duration
+	runtime, err := New(Config{
+		Sessions:       sessions,
+		AgentFactory:   factory,
+		RunIDGenerator: func() string { return "run-retry" },
+		Sleep: func(context.Context, time.Duration) error {
+			delays = append(delays, 0)
+			return nil
+		},
+		Retry: RetryConfig{
+			MaxRetries: 2,
+			BaseDelay:  25 * time.Millisecond,
+			MaxDelay:   25 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got, want := factory.Calls(), 2; got != want {
+		t.Fatalf("factory calls = %d, want %d", got, want)
+	}
+	if got, want := len(delays), 1; got != want {
+		t.Fatalf("sleep call count = %d, want %d", got, want)
+	}
+
+	var (
+		count       int
+		noticeCount int
+	)
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event == nil {
+			continue
+		}
+		count++
+		if sdksession.IsNotice(event) {
+			noticeCount++
+			if !strings.Contains(event.Text, "retrying") {
+				t.Fatalf("notice text = %q, want retry warning", event.Text)
+			}
+		}
+	}
+	if got, want := count, 3; got != want {
+		t.Fatalf("runner event count = %d, want %d", got, want)
+	}
+	if got, want := noticeCount, 1; got != want {
+		t.Fatalf("notice count = %d, want %d", got, want)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 2; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	for _, event := range loaded.Events {
+		if sdksession.IsNotice(event) {
+			t.Fatal("retry notice must not be persisted")
+		}
+	}
+}
+
+func TestRuntimeRunDoesNotRetryAfterAnyEventIsEmitted(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-no-retry")
+	factory := &attemptFactory{
+		agents: []sdkruntime.Agent{
+			seqAgent{
+				events: []*sdksession.Event{assistantEvent("partial")},
+				err:    errors.New("model stream interrupted"),
+			},
+			seqAgent{events: []*sdksession.Event{assistantEvent("should-not-run")}},
+		},
+	}
+	runtime, err := New(Config{
+		Sessions:       sessions,
+		AgentFactory:   factory,
+		RunIDGenerator: func() string { return "run-no-retry" },
+		Sleep: func(context.Context, time.Duration) error {
+			t.Fatal("sleep should not be called after emitted event")
+			return nil
+		},
+		Retry: RetryConfig{
+			MaxRetries: 2,
+			BaseDelay:  time.Millisecond,
+			MaxDelay:   time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
+	})
+	if err == nil {
+		t.Fatal("Run() error = nil, want failure")
+	}
+	if got, want := factory.Calls(), 1; got != want {
+		t.Fatalf("factory calls = %d, want %d", got, want)
+	}
+
+	loaded, loadErr := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if loadErr != nil {
+		t.Fatalf("LoadSession() error = %v", loadErr)
+	}
+	if got, want := len(loaded.Events), 2; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	if got := loaded.Events[1].Text; got != "partial" {
+		t.Fatalf("assistant text = %q, want %q", got, "partial")
+	}
+
+	state, stateErr := runtime.RunState(context.Background(), session.SessionRef)
+	if stateErr != nil {
+		t.Fatalf("RunState() error = %v", stateErr)
+	}
+	if state.Status != sdkruntime.RunLifecycleStatusFailed {
+		t.Fatalf("state.Status = %q, want %q", state.Status, sdkruntime.RunLifecycleStatusFailed)
+	}
+}
+
+func TestRuntimeRunPersistsToolLoopEvents(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-tools")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		RunIDGenerator: func() string { return "run-tools" },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	model := &toolLoopRuntimeModel{}
+	tool := sdktool.NamedTool{
+		Def: sdktool.Definition{
+			Name:        "ECHO",
+			Description: "echo input",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Invoke: func(_ context.Context, call sdktool.Call) (sdktool.Result, error) {
+			return sdktool.Result{
+				ID:   call.ID,
+				Name: call.Name,
+				Content: []sdkmodel.Part{
+					sdkmodel.NewJSONPart([]byte(`{"value":"pong"}`)),
+				},
+			}, nil
+		},
+	}
+
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "say pong",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+			Tools: []sdktool.Tool{tool},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	var count int
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event != nil {
+			count++
+		}
+	}
+	if got, want := count, 4; got != want {
+		t.Fatalf("runner event count = %d, want %d", got, want)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 4; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	if loaded.Events[1].Type != sdksession.EventTypeToolCall {
+		t.Fatalf("loaded.Events[1].Type = %q, want tool_call", loaded.Events[1].Type)
+	}
+	if loaded.Events[1].Protocol == nil || loaded.Events[1].Protocol.ToolCall == nil || loaded.Events[1].Protocol.UpdateType != string(sdksession.ProtocolUpdateTypeToolCall) {
+		t.Fatalf("loaded.Events[1].Protocol = %+v, want tool_call protocol payload", loaded.Events[1].Protocol)
+	}
+	if loaded.Events[2].Type != sdksession.EventTypeToolResult {
+		t.Fatalf("loaded.Events[2].Type = %q, want tool_result", loaded.Events[2].Type)
+	}
+	if loaded.Events[2].Protocol == nil || loaded.Events[2].Protocol.ToolCall == nil || loaded.Events[2].Protocol.UpdateType != string(sdksession.ProtocolUpdateTypeToolUpdate) {
+		t.Fatalf("loaded.Events[2].Protocol = %+v, want tool_call_update protocol payload", loaded.Events[2].Protocol)
+	}
+	if got := loaded.Events[3].Text; got != "pong" {
+		t.Fatalf("final assistant text = %q, want %q", got, "pong")
+	}
+	if loaded.Events[0].Protocol == nil || loaded.Events[0].Protocol.UpdateType != string(sdksession.ProtocolUpdateTypeUserMessage) {
+		t.Fatalf("loaded.Events[0].Protocol = %+v, want user_message protocol payload", loaded.Events[0].Protocol)
+	}
+	if loaded.Events[3].Protocol == nil || loaded.Events[3].Protocol.UpdateType != string(sdksession.ProtocolUpdateTypeAgentMessage) {
+		t.Fatalf("loaded.Events[3].Protocol = %+v, want agent_message protocol payload", loaded.Events[3].Protocol)
+	}
+}
+
+func TestRuntimeRunPersistsPlanLoopAndState(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-plan")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use PLAN when asked to organize work.",
+		},
+		RunIDGenerator: func() string { return "run-plan" },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	model := &planLoopRuntimeModel{}
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "make a plan",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+			Tools: []sdktool.Tool{sdkplan.New()},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	var sawPlan bool
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event != nil && event.Type == sdksession.EventTypePlan {
+			sawPlan = true
+		}
+	}
+	if !sawPlan {
+		t.Fatal("expected plan event in runner output")
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	var planEvent *sdksession.Event
+	for _, event := range loaded.Events {
+		if event != nil && event.Type == sdksession.EventTypePlan {
+			planEvent = event
+			break
+		}
+	}
+	if planEvent == nil || planEvent.Protocol == nil || planEvent.Protocol.Plan == nil {
+		t.Fatalf("plan event = %+v, want protocol plan payload", planEvent)
+	}
+	if got, want := len(planEvent.Protocol.Plan.Entries), 2; got != want {
+		t.Fatalf("len(plan entries) = %d, want %d", got, want)
+	}
+	state, err := sessions.SnapshotState(context.Background(), session.SessionRef)
+	if err != nil {
+		t.Fatalf("SnapshotState() error = %v", err)
+	}
+	planState, ok := state["plan"].(map[string]any)
+	if !ok {
+		t.Fatalf("state[plan] = %#v, want plan map", state["plan"])
+	}
+	entries, _ := planState["entries"].([]map[string]any)
+	if len(entries) == 0 {
+		rawEntries, _ := planState["entries"].([]any)
+		if got, want := len(rawEntries), 2; got != want {
+			t.Fatalf("len(state plan entries) = %d, want %d", got, want)
+		}
+	}
+}
+
+func TestRuntimePolicyDefaultDeniesWriteOutsideAllowedRoots(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-policy-default")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		DefaultPolicyMode: policypresets.ModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	writeTool, err := filesystem.NewWrite(hostRuntimeForTest(t, session.CWD))
+	if err != nil {
+		t.Fatalf("filesystem.NewWrite() error = %v", err)
+	}
+	model := &denyWriteRuntimeModel{}
+	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "write outside workspace",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+			Tools: []sdktool.Tool{writeTool},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 4; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	toolResult := loaded.Events[2]
+	if toolResult.Type != sdksession.EventTypeToolResult {
+		t.Fatalf("tool result type = %q, want tool_result", toolResult.Type)
+	}
+	if got := toolResult.Meta["policy_action"]; got != "deny" {
+		t.Fatalf("policy_action = %v, want %q", got, "deny")
+	}
+}
+
+func TestRuntimePolicyFullAccessBlocksDangerousBash(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-policy-full")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		DefaultPolicyMode: policypresets.ModeFullAccess,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	bashTool, err := shell.NewBash(shell.BashConfig{Runtime: hostRuntimeForTest(t, session.CWD)})
+	if err != nil {
+		t.Fatalf("shell.NewBash() error = %v", err)
+	}
+	model := &denyBashRuntimeModel{}
+	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "run dangerous bash",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+			Tools: []sdktool.Tool{bashTool},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	toolResult := loaded.Events[2]
+	if got := toolResult.Meta["policy_action"]; got != "deny" {
+		t.Fatalf("policy_action = %v, want %q", got, "deny")
+	}
+}
+
+func TestRuntimePolicyDefaultBashEscalationWaitsApprovalThenExecutes(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-policy-approval")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		DefaultPolicyMode: policypresets.ModeDefault,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	bashTool, err := shell.NewBash(shell.BashConfig{Runtime: hostRuntimeForTest(t, session.CWD)})
+	if err != nil {
+		t.Fatalf("shell.NewBash() error = %v", err)
+	}
+	target := filepath.Join(session.CWD, "approved.txt")
+	model := &approveEscalatedBashRuntimeModel{command: "printf 'approved\\n' > " + shellQuoteForTest(target)}
+	requester := approvalRequesterFunc(func(ctx context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
+		state, err := runtime.RunState(ctx, session.SessionRef)
+		if err != nil {
+			t.Fatalf("RunState() during approval error = %v", err)
+		}
+		if state.Status != sdkruntime.RunLifecycleStatusWaitingApproval || !state.WaitingApproval {
+			t.Fatalf("run state during approval = %+v, want waiting_approval", state)
+		}
+		if req.Approval == nil || req.Approval.ToolCall.Name != shell.BashToolName {
+			t.Fatalf("approval request = %+v, want BASH tool call", req.Approval)
+		}
+		return sdkruntime.ApprovalResponse{
+			Outcome:  "selected",
+			OptionID: "allow_once",
+			Approved: true,
+		}, nil
+	})
+	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef:        session.SessionRef,
+		Input:             "write inside workspace",
+		ApprovalRequester: requester,
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: model,
+			Tools: []sdktool.Tool{bashTool},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "approved" {
+		t.Fatalf("written content = %q, want %q", got, "approved")
+	}
+	state, err := runtime.RunState(context.Background(), session.SessionRef)
+	if err != nil {
+		t.Fatalf("RunState() error = %v", err)
+	}
+	if state.Status != sdkruntime.RunLifecycleStatusCompleted {
+		t.Fatalf("final run state = %+v, want completed", state)
+	}
+}
+
+func TestRuntimeBashYieldThenTaskWaitLoop(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-bash-task-loop")
+	taskStore := taskfile.NewStore(taskfile.Config{RootDir: t.TempDir()})
+	runtime, err := New(Config{
+		Sessions:  sessions,
+		TaskStore: taskStore,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		DefaultPolicyMode: policypresets.ModeFullAccess,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	bashTool, err := shell.NewBash(shell.BashConfig{Runtime: hostRuntimeForTest(t, session.CWD)})
+	if err != nil {
+		t.Fatalf("shell.NewBash() error = %v", err)
+	}
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "run async bash",
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: &bashTaskLoopRuntimeModel{t: t},
+			Tools: []sdktool.Tool{bashTool, tasktool.New()},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	var finalText string
+	var runningToolUpdate bool
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event == nil {
+			continue
+		}
+		if event.Type == sdksession.EventTypeToolResult && event.Protocol != nil && event.Protocol.ToolCall != nil && event.Protocol.ToolCall.Status == "running" {
+			runningToolUpdate = true
+		}
+		if event.Type == sdksession.EventTypeAssistant {
+			finalText = strings.TrimSpace(event.Text)
+		}
+	}
+	if !runningToolUpdate {
+		t.Fatal("expected running tool update after yielded BASH")
+	}
+	if finalText != "async bash done" {
+		t.Fatalf("finalText = %q, want %q", finalText, "async bash done")
+	}
+	runtime.tasks.mu.RLock()
+	activeCount := len(runtime.tasks.tasks)
+	runtime.tasks.mu.RUnlock()
+	if activeCount != 0 {
+		t.Fatalf("active task cache = %d, want 0 after completion", activeCount)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if len(loaded.Events) < 6 {
+		t.Fatalf("len(loaded.Events) = %d, want >= 6", len(loaded.Events))
+	}
+	var sawTaskID bool
+	for _, event := range loaded.Events {
+		if event == nil || event.Type != sdksession.EventTypeToolResult || event.Meta == nil {
+			continue
+		}
+		if taskID, _ := event.Meta["task_id"].(string); strings.TrimSpace(taskID) != "" {
+			sawTaskID = true
+			break
+		}
+	}
+	if !sawTaskID {
+		t.Fatal("expected persisted tool result with task_id metadata")
+	}
+	task, err := runtime.tasks.lookupBash(session.SessionRef, mustSessionTaskID(t, loaded.Events))
+	if err != nil {
+		t.Fatalf("task fallback lookup error = %v", err)
+	}
+	status, err := task.session.Status(context.Background())
+	if err != nil {
+		t.Fatalf("task session Status() error = %v", err)
+	}
+	if status.Running {
+		t.Fatalf("rehydrated completed task still running: %+v", status)
+	}
+	resultPayload, _ := task.result["stdout"].(string)
+	if !strings.Contains(resultPayload, "async bash done") {
+		t.Fatalf("rehydrated task stdout = %q, want async bash done", resultPayload)
+	}
+	terminals := runtime.Terminals()
+	if terminals == nil {
+		t.Fatal("Terminals() = nil")
+	}
+	snap, err := terminals.Read(context.Background(), sdkterminal.ReadRequest{
+		Ref: sdkterminal.Ref{
+			SessionID: session.SessionID,
+			TaskID:    mustSessionTaskID(t, loaded.Events),
+		},
+	})
+	if err != nil {
+		t.Fatalf("terminal Read() error = %v", err)
+	}
+	if snap.Running {
+		t.Fatalf("terminal snapshot still running: %+v", snap)
+	}
+	terminalText := terminalFramesText(snap.Frames)
+	if !strings.Contains(terminalText, "async bash done") {
+		t.Fatalf("terminal snapshot text = %q, want async bash done", terminalText)
+	}
+}
+
+func TestRuntimeTerminalSubscribeStreamsRunningTask(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-terminal-subscribe")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		DefaultPolicyMode: policypresets.ModeFullAccess,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	sandbox := hostRuntimeForTest(t, session.CWD)
+	snapshot, err := runtime.tasks.StartBash(context.Background(), session, session.SessionRef, sandbox, sdktask.BashStartRequest{
+		Command: "printf 'stream'; sleep 0.05; printf ' terminal'",
+		Workdir: session.CWD,
+		Yield:   1 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("StartBash() error = %v", err)
+	}
+	terminals := runtime.Terminals()
+	if terminals == nil {
+		t.Fatal("Terminals() = nil")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var (
+		text   strings.Builder
+		closed bool
+	)
+	for frame, seqErr := range terminals.Subscribe(ctx, sdkterminal.SubscribeRequest{
+		Ref: sdkterminal.Ref{
+			SessionID: session.SessionID,
+			TaskID:    snapshot.Ref.TaskID,
+		},
+		PollInterval: 10 * time.Millisecond,
+	}) {
+		if seqErr != nil {
+			t.Fatalf("terminal Subscribe() error = %v", seqErr)
+		}
+		if frame == nil {
+			continue
+		}
+		text.WriteString(frame.Text)
+		if frame.Closed {
+			closed = true
+		}
+	}
+	if !closed {
+		t.Fatal("expected terminal subscription to emit closed frame")
+	}
+	if got := text.String(); !strings.Contains(got, "stream terminal") {
+		t.Fatalf("terminal text = %q, want %q", got, "stream terminal")
+	}
+}
+
+type staticModel struct {
+	text string
+}
+
+func (m staticModel) Name() string { return "stub" }
+
+func (m staticModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, m.text),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+			},
+		}, nil)
+	}
+}
+
+type historyReplayModel struct {
+	t         *testing.T
+	wantTexts []string
+	replyText string
+	calls     int
+}
+
+func (m *historyReplayModel) Name() string { return "history-replay" }
+
+func (m *historyReplayModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	if req == nil {
+		m.t.Fatal("Generate() request = nil")
+	}
+	got := make([]string, 0, len(req.Messages))
+	for _, message := range req.Messages {
+		if text := strings.TrimSpace(message.TextContent()); text != "" {
+			got = append(got, text)
+		}
+	}
+	if len(got) != len(m.wantTexts) {
+		m.t.Fatalf("replayed message count = %d, want %d (%v)", len(got), len(m.wantTexts), got)
+	}
+	for i := range m.wantTexts {
+		if got[i] != m.wantTexts[i] {
+			m.t.Fatalf("replayed message[%d] = %q, want %q (all=%v)", i, got[i], m.wantTexts[i], got)
+		}
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, m.replyText),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+			},
+		}, nil)
+	}
+}
+
+type toolLoopRuntimeModel struct {
+	calls int
+}
+
+func (m *toolLoopRuntimeModel) Name() string { return "tool-loop" }
+
+func (m *toolLoopRuntimeModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if callIndex == 1 {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "call-1",
+						Name: "ECHO",
+						Args: string(mustJSONRaw(tmap("value", "pong"))),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+			return
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "pong"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonStop,
+			},
+		}, nil)
+	}
+}
+
+type planLoopRuntimeModel struct {
+	calls int
+}
+
+func (m *planLoopRuntimeModel) Name() string { return "plan-loop" }
+
+func (m *planLoopRuntimeModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if callIndex == 1 {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "plan-1",
+						Name: sdkplan.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"entries": []map[string]any{
+								{"content": "Inspect repo", "status": "completed"},
+								{"content": "Implement runtime bridge", "status": "in_progress"},
+							},
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+			return
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "plan ready"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonStop,
+			},
+		}, nil)
+	}
+}
+
+func mustJSONRaw(value map[string]any) json.RawMessage {
+	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func tmap(key string, value any) map[string]any {
+	return map[string]any{key: value}
+}
+
+func newTestSessionService(t *testing.T, sessionID string) (sdksession.Service, sdksession.Session) {
+	t.Helper()
+	sessions := inmemory.NewService(inmemory.NewStore(inmemory.Config{
+		SessionIDGenerator: func() string { return sessionID },
+	}))
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-1",
+			CWD: t.TempDir(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	return sessions, session
+}
+
+func hostRuntimeForTest(t *testing.T, cwd string) *host.Runtime {
+	t.Helper()
+	rt, err := host.New(host.Config{CWD: cwd})
+	if err != nil {
+		t.Fatalf("host.New() error = %v", err)
+	}
+	return rt
+}
+
+func assistantEvent(text string) *sdksession.Event {
+	message := sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, text)
+	return &sdksession.Event{
+		Type:       sdksession.EventTypeAssistant,
+		Visibility: sdksession.VisibilityCanonical,
+		Message:    &message,
+		Text:       text,
+	}
+}
+
+func userTextEvent(text string) *sdksession.Event {
+	message := sdkmodel.NewTextMessage(sdkmodel.RoleUser, text)
+	return &sdksession.Event{
+		Type:       sdksession.EventTypeUser,
+		Visibility: sdksession.VisibilityCanonical,
+		Message:    &message,
+		Text:       strings.TrimSpace(text),
+	}
+}
+
+func appendTestEvent(t *testing.T, sessions sdksession.Service, ref sdksession.SessionRef, event *sdksession.Event) {
+	t.Helper()
+	if _, err := sessions.AppendEvent(context.Background(), sdksession.AppendEventRequest{
+		SessionRef: ref,
+		Event:      event,
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+}
+
+type contextProbeModel struct {
+	t                           *testing.T
+	calls                       int
+	compactionCalls             int
+	normalCalls                 int
+	compactBody                 string
+	wantCompactionInputContains []string
+	wantCompactionInputOmit     []string
+	wantMessageContains         []string
+	wantMessagesOmit            []string
+	replyText                   string
+}
+
+func (m *contextProbeModel) Name() string { return "context-probe" }
+
+func (m *contextProbeModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	instructions := requestInstructionsText(req)
+	messages := requestMessageTexts(req)
+	if strings.Contains(instructions, "CONTEXT CHECKPOINT COMPACTION") {
+		m.compactionCalls++
+		compactionInput := strings.Join(requestMessageTexts(req), "\n")
+		for _, needle := range m.wantCompactionInputContains {
+			if !strings.Contains(compactionInput, needle) {
+				m.t.Fatalf("compaction input missing %q: %q", needle, compactionInput)
+			}
+		}
+		for _, needle := range m.wantCompactionInputOmit {
+			if strings.Contains(compactionInput, needle) {
+				m.t.Fatalf("compaction input unexpectedly contains %q: %q", needle, compactionInput)
+			}
+		}
+		body := strings.TrimSpace(m.compactBody)
+		if body == "" {
+			body = `CONTEXT CHECKPOINT
+
+## Objective
+- build compact runtime
+
+## User Constraints
+- do not lose blocker continuity
+
+## Durable Decisions
+- prefer compact event replacement history
+
+## Verified Facts
+- provider intermittently returns 529 overloaded_error when histories get too large
+
+## Current Progress
+- checkpoint event inserted into durable history
+
+## Open Questions / Risks
+- compaction quality must preserve blockers
+
+## Next Actions
+1. validate with real e2e tests and tune the compact prompt
+
+## Active Tasks
+- none
+
+## Active Participants
+- none
+
+## Latest Blockers
+- provider intermittently returns 529 overloaded_error
+
+## Operational Notes
+- files touched: sdk/runtime/local/compaction.go
+- commands run: go test ./sdk/...`
+		}
+		return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, body),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+				},
+			}, nil)
+		}
+	}
+	m.normalCalls++
+	for _, needle := range m.wantMessageContains {
+		found := false
+		for _, text := range messages {
+			if strings.Contains(text, needle) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.t.Fatalf("messages missing %q: %v", needle, messages)
+		}
+	}
+	for _, needle := range m.wantMessagesOmit {
+		for _, text := range messages {
+			if strings.Contains(text, needle) {
+				m.t.Fatalf("messages still contain summarized text %q: %v", needle, messages)
+			}
+		}
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, m.replyText),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+			},
+		}, nil)
+	}
+}
+
+type modelCheckpointProbe struct {
+	t               *testing.T
+	compactionCalls int
+	normalCalls     int
+}
+
+func (m *modelCheckpointProbe) Name() string { return "model-checkpoint-probe" }
+
+func (m *modelCheckpointProbe) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	instructions := requestInstructionsText(req)
+	if strings.Contains(instructions, "CONTEXT CHECKPOINT COMPACTION") {
+		m.compactionCalls++
+		body := `CONTEXT CHECKPOINT
+
+## Objective
+- model checkpoint objective
+
+## User Constraints
+- do not lose blocker continuity
+
+## Durable Decisions
+- compact before each turn when budget is exceeded
+
+## Verified Facts
+- provider intermittently returns 529 overloaded_error
+
+## Current Progress
+- checkpoint builder is being implemented
+
+## Open Questions / Risks
+- summary quality can drift if prompts are too generic
+
+## Next Actions
+1. run realistic compact e2e tests and tune the summary prompt
+
+## Active Tasks
+- none
+
+## Active Participants
+- none
+
+## Latest Blockers
+- checkpoint quality drops when summaries become too generic
+
+## Operational Notes
+- files touched: sdk/runtime/local/runtime.go
+- commands run: go test ./sdk/...`
+		return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, body),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+				},
+			}, nil)
+		}
+	}
+	m.normalCalls++
+	found := false
+	for _, text := range requestMessageTexts(req) {
+		if strings.Contains(text, "preserve context continuity during very long coding sessions") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.t.Fatalf("normal call messages missing canonical checkpoint objective: %v", requestMessageTexts(req))
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "ok"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+			},
+		}, nil)
+	}
+}
+
+type overflowRecoveryModel struct {
+	t                    *testing.T
+	calls                int
+	compactionCalls      int
+	sawCheckpointOnRetry bool
+}
+
+func (m *overflowRecoveryModel) Name() string { return "overflow-recovery" }
+
+func (m *overflowRecoveryModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	instructions := requestInstructionsText(req)
+	if strings.Contains(instructions, "CONTEXT CHECKPOINT COMPACTION") {
+		m.compactionCalls++
+		compactionInput := strings.Join(requestMessageTexts(req), "\n")
+		if !strings.Contains(compactionInput, "TOOL_RESULT ECHO") || !strings.Contains(compactionInput, "pong") {
+			m.t.Fatalf("compaction input missing tool result continuity: %q", compactionInput)
+		}
+		body := `CONTEXT CHECKPOINT
+
+Objective: finish the tool-assisted turn after overflow
+Blocker: normal prompt overflowed after the tool result
+Next action: resume from the compact checkpoint and return the final answer
+
+## Current Progress
+- the ECHO tool already returned pong
+
+## Next Actions
+1. resume from the compact checkpoint and return the final answer`
+		return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, body),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+				},
+			}, nil)
+		}
+	}
+	if requestHasToolResult(req, "ECHO") {
+		return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+			yield(nil, &sdkmodel.ContextOverflowError{Cause: errors.New("prompt is too long after tool loop")})
+		}
+	}
+	for _, text := range requestMessageTexts(req) {
+		if strings.Contains(text, "CONTEXT CHECKPOINT") && strings.Contains(strings.ToLower(text), "pong") {
+			m.sawCheckpointOnRetry = true
+			return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+				yield(&sdkmodel.StreamEvent{
+					Type: sdkmodel.StreamEventTurnDone,
+					Response: &sdkmodel.Response{
+						Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "recovered after compact"),
+						TurnComplete: true,
+						StepComplete: true,
+						Status:       sdkmodel.ResponseStatusCompleted,
+					},
+				}, nil)
+			}
+		}
+	}
+	if m.calls != 1 {
+		m.t.Fatalf("unexpected non-compaction request without checkpoint: %v", requestMessageTexts(req))
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+					ID:   "call-overflow-1",
+					Name: "ECHO",
+					Args: string(mustJSONRaw(tmap("value", "pong"))),
+				}}, ""),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonToolCalls,
+			},
+		}, nil)
+	}
+}
+
+func requestInstructionsText(req *sdkmodel.Request) string {
+	if req == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(req.Instructions))
+	for _, part := range req.Instructions {
+		if part.Text != nil && strings.TrimSpace(part.Text.Text) != "" {
+			parts = append(parts, strings.TrimSpace(part.Text.Text))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func requestMessageTexts(req *sdkmodel.Request) []string {
+	if req == nil {
+		return nil
+	}
+	out := make([]string, 0, len(req.Messages))
+	for _, message := range req.Messages {
+		if text := strings.TrimSpace(message.TextContent()); text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func requestHasToolResult(req *sdkmodel.Request, name string) bool {
+	if req == nil {
+		return false
+	}
+	for _, message := range req.Messages {
+		for _, result := range message.ToolResults() {
+			if strings.EqualFold(strings.TrimSpace(result.Name), strings.TrimSpace(name)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func latestCompactEventForTest(events []*sdksession.Event) (*sdksession.Event, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i] != nil && events[i].Type == sdksession.EventTypeCompact {
+			return events[i], true
+		}
+	}
+	return nil, false
+}
+
+type denyWriteRuntimeModel struct{ calls int }
+
+func (m *denyWriteRuntimeModel) Name() string { return "deny-write" }
+
+func (m *denyWriteRuntimeModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if callIndex == 1 {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "write-1",
+						Name: filesystem.WriteToolName,
+						Args: string(mustJSONRaw(map[string]any{"path": "/etc/blocked.txt", "content": "x"})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+			return
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "denied"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonStop,
+			},
+		}, nil)
+	}
+}
+
+type denyBashRuntimeModel struct{ calls int }
+
+func (m *denyBashRuntimeModel) Name() string { return "deny-bash" }
+
+func (m *denyBashRuntimeModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if callIndex == 1 {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "bash-1",
+						Name: shell.BashToolName,
+						Args: string(mustJSONRaw(map[string]any{"command": "rm -rf /"})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+			return
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "blocked"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonStop,
+			},
+		}, nil)
+	}
+}
+
+type approveEscalatedBashRuntimeModel struct {
+	calls   int
+	command string
+}
+
+func (m *approveEscalatedBashRuntimeModel) Name() string { return "approve-escalated-bash" }
+
+func (m *approveEscalatedBashRuntimeModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if callIndex == 1 {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "bash-approve-1",
+						Name: shell.BashToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"command":         m.command,
+							"workdir":         ".",
+							"yield_time_ms":   200,
+							"with_escalation": true,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+			return
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "done"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonStop,
+			},
+		}, nil)
+	}
+}
+
+func shellQuoteForTest(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+type bashTaskLoopRuntimeModel struct {
+	t      *testing.T
+	calls  int
+	taskID string
+}
+
+func (m *bashTaskLoopRuntimeModel) Name() string { return "bash-task-loop" }
+
+func (m *bashTaskLoopRuntimeModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	if callIndex == 2 {
+		m.taskID = mustFindTaskID(m.t, req)
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		switch callIndex {
+		case 1:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "bash-async-1",
+						Name: shell.BashToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"command":       "sleep 0.05; printf 'async bash done'",
+							"workdir":       ".",
+							"yield_time_ms": 5,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		case 2:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "task-wait-1",
+						Name: tasktool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"action":        "wait",
+							"task_id":       m.taskID,
+							"yield_time_ms": 250,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		default:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "async bash done"),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonStop,
+				},
+			}, nil)
+		}
+	}
+}
+
+func mustFindTaskID(t *testing.T, req *sdkmodel.Request) string {
+	t.Helper()
+	if req == nil {
+		t.Fatal("request = nil")
+	}
+	for _, message := range req.Messages {
+		for _, result := range message.ToolResults() {
+			for _, part := range result.Content {
+				if part.Kind != sdkmodel.PartKindJSON || part.JSON == nil {
+					continue
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(part.JSONValue(), &payload); err != nil {
+					continue
+				}
+				if taskID, _ := payload["task_id"].(string); strings.TrimSpace(taskID) != "" {
+					return strings.TrimSpace(taskID)
+				}
+			}
+		}
+	}
+	raw, _ := json.MarshalIndent(req, "", "  ")
+	t.Fatalf("did not find yielded task_id in request transcript:\n%s", string(raw))
+	return ""
+}
+
+type spawnTaskLoopRuntimeModel struct {
+	t      *testing.T
+	calls  int
+	taskID string
+}
+
+type spawnApprovalTaskLoopRuntimeModel struct {
+	t      *testing.T
+	agent  string
+	calls  int
+	taskID string
+}
+
+type spawnProbeTaskLoopRuntimeModel struct {
+	t      *testing.T
+	calls  int
+	taskID string
+}
+
+func (m *spawnTaskLoopRuntimeModel) Name() string { return "spawn-task-loop" }
+
+func (m *spawnApprovalTaskLoopRuntimeModel) Name() string { return "spawn-approval-task-loop" }
+
+func (m *spawnProbeTaskLoopRuntimeModel) Name() string { return "spawn-probe-task-loop" }
+
+func (m *spawnTaskLoopRuntimeModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	if callIndex == 2 {
+		m.taskID = mustFindTaskID(m.t, req)
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		switch callIndex {
+		case 1:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "spawn-1",
+						Name: spawntool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"agent":         "self",
+							"prompt":        "Reply with exactly: spawn child ok",
+							"yield_time_ms": 5,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		case 2:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "task-wait-spawn-1",
+						Name: tasktool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"action":        "wait",
+							"task_id":       m.taskID,
+							"yield_time_ms": 300,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		default:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "spawn child ok"),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonStop,
+				},
+			}, nil)
+		}
+	}
+}
+
+func (m *spawnApprovalTaskLoopRuntimeModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	if callIndex == 2 {
+		m.taskID = mustFindTaskID(m.t, req)
+	}
+	agent := strings.TrimSpace(m.agent)
+	if agent == "" {
+		agent = "codex"
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		switch callIndex {
+		case 1:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "spawn-approval-1",
+						Name: spawntool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"agent":         agent,
+							"prompt":        "Run the approval flow and reply with exactly: child approval ok",
+							"yield_time_ms": 5,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		case 2:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "task-wait-spawn-approval-1",
+						Name: tasktool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"action":        "wait",
+							"task_id":       m.taskID,
+							"yield_time_ms": 600,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		default:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "child approval ok"),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonStop,
+				},
+			}, nil)
+		}
+	}
+}
+
+func (m *spawnProbeTaskLoopRuntimeModel) Generate(_ context.Context, req *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	if callIndex == 2 {
+		m.taskID = mustFindTaskID(m.t, req)
+	}
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		switch callIndex {
+		case 1:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "spawn-probe-1",
+						Name: spawntool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"agent":         "self",
+							"prompt":        "Check whether SPAWN is available and reply with exactly the result.",
+							"yield_time_ms": 5,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		case 2:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "task-wait-spawn-probe-1",
+						Name: tasktool.ToolName,
+						Args: string(mustJSONRaw(map[string]any{
+							"action":        "wait",
+							"task_id":       m.taskID,
+							"yield_time_ms": 300,
+						})),
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+		default:
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "spawn disabled"),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonStop,
+				},
+			}, nil)
+		}
+	}
+}
+
+func mustSessionTaskID(t *testing.T, events []*sdksession.Event) string {
+	t.Helper()
+	for _, event := range events {
+		if event == nil || event.Meta == nil {
+			continue
+		}
+		if taskID, _ := event.Meta["task_id"].(string); strings.TrimSpace(taskID) != "" {
+			return strings.TrimSpace(taskID)
+		}
+	}
+	t.Fatal("did not find task_id in persisted session events")
+	return ""
+}
+
+func terminalFramesText(frames []sdkterminal.Frame) string {
+	var out strings.Builder
+	for _, frame := range frames {
+		out.WriteString(frame.Text)
+	}
+	return out.String()
+}
+
+type approvalRequesterFunc func(context.Context, sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error)
+
+func (f approvalRequesterFunc) RequestApproval(ctx context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
+	return f(ctx, req)
+}
+
+type attemptFactory struct {
+	mu     sync.Mutex
+	agents []sdkruntime.Agent
+	specs  []sdkruntime.AgentSpec
+	calls  int
+}
+
+func (f *attemptFactory) NewAgent(_ context.Context, spec sdkruntime.AgentSpec) (sdkruntime.Agent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.calls >= len(f.agents) {
+		return nil, errors.New("no more agents configured")
+	}
+	f.specs = append(f.specs, spec)
+	agent := f.agents[f.calls]
+	f.calls++
+	return agent, nil
+}
+
+func (f *attemptFactory) Calls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func (f *attemptFactory) Specs() []sdkruntime.AgentSpec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]sdkruntime.AgentSpec, len(f.specs))
+	copy(out, f.specs)
+	return out
+}
+
+type seqAgent struct {
+	events []*sdksession.Event
+	err    error
+}
+
+func (a seqAgent) Name() string { return "seq" }
+
+func (a seqAgent) Run(sdkruntime.Context) iter.Seq2[*sdksession.Event, error] {
+	return func(yield func(*sdksession.Event, error) bool) {
+		for _, event := range a.events {
+			if !yield(sdksession.CloneEvent(event), nil) {
+				return
+			}
+		}
+		if a.err != nil {
+			yield(nil, a.err)
+		}
+	}
+}

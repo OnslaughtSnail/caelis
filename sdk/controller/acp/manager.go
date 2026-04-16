@@ -1,0 +1,667 @@
+package acp
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	sdkacpclient "github.com/OnslaughtSnail/caelis/acp/client"
+	sdkcontroller "github.com/OnslaughtSnail/caelis/sdk/controller"
+	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdksubagentacp "github.com/OnslaughtSnail/caelis/sdk/subagent/acp"
+)
+
+type Config struct {
+	Registry   *sdksubagentacp.Registry
+	ClientInfo *sdkacpclient.Implementation
+	Clock      func() time.Time
+}
+
+type Manager struct {
+	registry   *sdksubagentacp.Registry
+	clientInfo *sdkacpclient.Implementation
+	clock      func() time.Time
+
+	counter atomic.Uint64
+
+	mu           sync.RWMutex
+	controllers  map[string]*controllerRun
+	participants map[string]*participantRun
+}
+
+type controllerRun struct {
+	parentSessionID string
+	agent           string
+	client          *sdkacpclient.Client
+	remoteSessionID string
+	binding         sdksession.ControllerBinding
+
+	mu                sync.Mutex
+	turnID            string
+	turnSession       sdksession.Session
+	turnMode          string
+	approvalRequester sdkcontroller.ApprovalRequester
+	events            []*sdksession.Event
+	updatedAt         time.Time
+}
+
+type participantRun struct {
+	id              string
+	parentSessionID string
+	agent           string
+	client          *sdkacpclient.Client
+	remoteSessionID string
+	binding         sdksession.ParticipantBinding
+}
+
+func NewManager(cfg Config) (*Manager, error) {
+	if cfg.Registry == nil {
+		return nil, fmt.Errorf("sdk/controller/acp: registry is required")
+	}
+	clock := cfg.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	return &Manager{
+		registry:     cfg.Registry,
+		clientInfo:   cfg.ClientInfo,
+		clock:        clock,
+		controllers:  map[string]*controllerRun{},
+		participants: map[string]*participantRun{},
+	}, nil
+}
+
+func (m *Manager) Activate(ctx context.Context, req sdkcontroller.HandoffRequest) (sdksession.ControllerBinding, error) {
+	req = sdkcontroller.NormalizeHandoffRequest(req)
+	parentSessionID := strings.TrimSpace(req.Session.SessionID)
+	if parentSessionID == "" {
+		return sdksession.ControllerBinding{}, fmt.Errorf("sdk/controller/acp: parent session id is required")
+	}
+	cfg, err := m.registry.Resolve(req.Agent)
+	if err != nil {
+		return sdksession.ControllerBinding{}, err
+	}
+
+	run := &controllerRun{
+		parentSessionID: parentSessionID,
+		agent:           strings.TrimSpace(cfg.Name),
+		binding:         controllerBinding(cfg.Name, req.Source, m.nextID("controller"), m.clock()),
+		updatedAt:       m.clock(),
+	}
+	client, remoteSessionID, err := m.startClient(ctx, req.Session.CWD, cfg,
+		func(env sdkacpclient.UpdateEnvelope) {
+			run.handleUpdate(m.clock, env)
+		},
+		func(ctx context.Context, in sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
+			return run.permissionHandler(ctx, in)
+		},
+	)
+	if err != nil {
+		return sdksession.ControllerBinding{}, err
+	}
+	run.client = client
+	run.remoteSessionID = remoteSessionID
+
+	m.mu.Lock()
+	if old := m.controllers[parentSessionID]; old != nil && old.client != nil {
+		_ = old.client.Close()
+	}
+	m.controllers[parentSessionID] = run
+	m.mu.Unlock()
+	return sdksession.CloneControllerBinding(run.binding), nil
+}
+
+func (m *Manager) Deactivate(_ context.Context, ref sdksession.SessionRef) error {
+	ref = sdksession.NormalizeSessionRef(ref)
+	if ref.SessionID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	run := m.controllers[ref.SessionID]
+	delete(m.controllers, ref.SessionID)
+	m.mu.Unlock()
+	if run != nil && run.client != nil {
+		_ = run.client.Close()
+	}
+	return nil
+}
+
+func (m *Manager) RunTurn(ctx context.Context, req sdkcontroller.TurnRequest) (sdkcontroller.TurnResult, error) {
+	req = sdkcontroller.NormalizeTurnRequest(req)
+	sessionID := strings.TrimSpace(req.SessionRef.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(req.Session.SessionID)
+	}
+	m.mu.RLock()
+	run := m.controllers[sessionID]
+	m.mu.RUnlock()
+	if run == nil {
+		return sdkcontroller.TurnResult{}, fmt.Errorf("sdk/controller/acp: no active ACP controller for session %q", sessionID)
+	}
+
+	prompt := buildPromptParts(req.Input, req.ContentParts)
+	run.beginTurn(req)
+	defer run.endTurn()
+	if len(prompt) == 0 {
+		return sdkcontroller.TurnResult{UpdatedAt: m.clock()}, nil
+	}
+	if _, err := run.client.PromptParts(ctx, run.remoteSessionID, prompt, nil); err != nil {
+		return sdkcontroller.TurnResult{}, err
+	}
+	return sdkcontroller.TurnResult{
+		Events:    run.snapshotEvents(),
+		UpdatedAt: m.clock(),
+	}, nil
+}
+
+func (m *Manager) Attach(ctx context.Context, req sdkcontroller.AttachRequest) (sdksession.ParticipantBinding, error) {
+	req = sdkcontroller.NormalizeAttachRequest(req)
+	if strings.TrimSpace(req.Session.SessionID) == "" {
+		return sdksession.ParticipantBinding{}, fmt.Errorf("sdk/controller/acp: session id is required")
+	}
+	cfg, err := m.registry.Resolve(req.Agent)
+	if err != nil {
+		return sdksession.ParticipantBinding{}, err
+	}
+	run, err := m.startParticipant(ctx, req.Session, cfg, req)
+	if err != nil {
+		return sdksession.ParticipantBinding{}, err
+	}
+	return sdksession.CloneParticipantBinding(run.binding), nil
+}
+
+func (m *Manager) Detach(_ context.Context, req sdkcontroller.DetachRequest) error {
+	req = sdkcontroller.NormalizeDetachRequest(req)
+	if req.ParticipantID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	run := m.participants[req.ParticipantID]
+	delete(m.participants, req.ParticipantID)
+	m.mu.Unlock()
+	if run != nil && run.client != nil {
+		_ = run.client.Close()
+	}
+	return nil
+}
+
+func (m *Manager) startParticipant(
+	ctx context.Context,
+	session sdksession.Session,
+	cfg sdksubagentacp.AgentConfig,
+	req sdkcontroller.AttachRequest,
+) (*participantRun, error) {
+	client, remoteSessionID, err := m.startClient(ctx, session.CWD, cfg, nil,
+		m.permissionHandler(sdksession.CloneSession(session), strings.TrimSpace(cfg.Name), "", nil),
+	)
+	if err != nil {
+		return nil, err
+	}
+	id := m.nextID(firstNonEmpty(req.Agent, "participant"))
+	role := req.Role
+	if role == "" {
+		role = sdksession.ParticipantRoleSidecar
+	}
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		label = strings.TrimSpace(req.Agent)
+	}
+	run := &participantRun{
+		id:              id,
+		parentSessionID: strings.TrimSpace(session.SessionID),
+		agent:           strings.TrimSpace(req.Agent),
+		client:          client,
+		remoteSessionID: remoteSessionID,
+		binding: sdksession.ParticipantBinding{
+			ID:            id,
+			Kind:          sdksession.ParticipantKindACP,
+			Role:          role,
+			Label:         label,
+			SessionID:     remoteSessionID,
+			Source:        firstNonEmpty(req.Source, "user_attach"),
+			AttachedAt:    m.clock(),
+			ControllerRef: strings.TrimSpace(session.Controller.EpochID),
+		},
+	}
+	m.mu.Lock()
+	m.participants[id] = run
+	m.mu.Unlock()
+	return run, nil
+}
+
+func (m *Manager) startClient(
+	ctx context.Context,
+	cwd string,
+	cfg sdksubagentacp.AgentConfig,
+	onUpdate func(sdkacpclient.UpdateEnvelope),
+	onPermission func(context.Context, sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error),
+) (*sdkacpclient.Client, string, error) {
+	client, err := sdkacpclient.Start(ctx, sdkacpclient.Config{
+		Command:    cfg.Command,
+		Args:       append([]string(nil), cfg.Args...),
+		Env:        maps.Clone(cfg.Env),
+		WorkDir:    pickWorkDir(cfg.WorkDir, cwd),
+		ClientInfo: m.clientInfo,
+		OnUpdate:   onUpdate,
+		OnPermissionRequest: func(ctx context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
+			return onPermission(ctx, req)
+		},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := client.Initialize(ctx); err != nil {
+		_ = client.Close()
+		return nil, "", err
+	}
+	resp, err := client.NewSession(ctx, strings.TrimSpace(cwd), nil)
+	if err != nil {
+		_ = client.Close()
+		return nil, "", err
+	}
+	return client, strings.TrimSpace(resp.SessionID), nil
+}
+
+func (m *Manager) permissionHandler(
+	session sdksession.Session,
+	agent string,
+	mode string,
+	requester sdkcontroller.ApprovalRequester,
+) func(context.Context, sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
+	return func(ctx context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
+		trimmedAgent := strings.TrimSpace(agent)
+		if !strings.EqualFold(trimmedAgent, "self") {
+			resolution := sdkacpclient.ResolveApproveAllOnce(mode, trimmedAgent, req)
+			if auto, ok := resolution.AutoResponse(); ok {
+				return auto, nil
+			}
+		}
+		if requester != nil {
+			resp, err := requester.RequestControllerApproval(ctx, translateApprovalRequest(session, trimmedAgent, mode, req))
+			if err != nil {
+				return sdkacpclient.RequestPermissionResponse{}, err
+			}
+			if strings.EqualFold(strings.TrimSpace(resp.Outcome), "selected") && strings.TrimSpace(resp.OptionID) != "" {
+				return sdkacpclient.PermissionSelectedOutcome(resp.OptionID), nil
+			}
+		}
+		return rejectOnce(), nil
+	}
+}
+
+func (r *controllerRun) permissionHandler(ctx context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
+	if r == nil {
+		return rejectOnce(), nil
+	}
+	r.mu.Lock()
+	session := sdksession.CloneSession(r.turnSession)
+	mode := strings.TrimSpace(r.turnMode)
+	requester := r.approvalRequester
+	agent := strings.TrimSpace(r.agent)
+	r.mu.Unlock()
+	resolution := sdkacpclient.ResolveApproveAllOnce(mode, agent, req)
+	if !strings.EqualFold(agent, "self") {
+		if auto, ok := resolution.AutoResponse(); ok {
+			return auto, nil
+		}
+	}
+	if requester != nil {
+		resp, err := requester.RequestControllerApproval(ctx, translateApprovalRequest(session, agent, mode, req))
+		if err != nil {
+			return sdkacpclient.RequestPermissionResponse{}, err
+		}
+		if strings.EqualFold(strings.TrimSpace(resp.Outcome), "selected") && strings.TrimSpace(resp.OptionID) != "" {
+			return sdkacpclient.PermissionSelectedOutcome(resp.OptionID), nil
+		}
+	}
+	return rejectOnce(), nil
+}
+
+func rejectOnce() sdkacpclient.RequestPermissionResponse {
+	return sdkacpclient.PermissionSelectedOutcome("reject_once")
+}
+
+func translateApprovalRequest(
+	session sdksession.Session,
+	agent string,
+	mode string,
+	req sdkacpclient.RequestPermissionRequest,
+) sdkcontroller.ApprovalRequest {
+	options := make([]sdkcontroller.ApprovalOption, 0, len(req.Options))
+	for _, item := range req.Options {
+		options = append(options, sdkcontroller.ApprovalOption{
+			ID:   strings.TrimSpace(item.OptionID),
+			Name: strings.TrimSpace(item.Name),
+			Kind: strings.TrimSpace(item.Kind),
+		})
+	}
+	return sdkcontroller.ApprovalRequest{
+		SessionRef: sdksession.NormalizeSessionRef(session.SessionRef),
+		Session:    sdksession.CloneSession(session),
+		Agent:      strings.TrimSpace(agent),
+		Mode:       strings.TrimSpace(mode),
+		ToolCall: sdkcontroller.ApprovalToolCall{
+			ID:     strings.TrimSpace(req.ToolCall.ToolCallID),
+			Name:   toolCallName(req.ToolCall),
+			Kind:   derefString(req.ToolCall.Kind),
+			Title:  derefString(req.ToolCall.Title),
+			Status: derefString(req.ToolCall.Status),
+		},
+		Options: options,
+	}
+}
+
+func toolCallName(update sdkacpclient.ToolCallUpdate) string {
+	if output, ok := update.RawOutput.(map[string]any); ok {
+		if name, _ := output["name"].(string); strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+	if input, ok := update.RawInput.(map[string]any); ok {
+		if name, _ := input["name"].(string); strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+	return "UNKNOWN"
+}
+
+func controllerBinding(agent string, source string, epochID string, now time.Time) sdksession.ControllerBinding {
+	return sdksession.ControllerBinding{
+		Kind:         sdksession.ControllerKindACP,
+		ControllerID: strings.TrimSpace(agent),
+		Label:        strings.TrimSpace(agent),
+		EpochID:      strings.TrimSpace(epochID),
+		AttachedAt:   now,
+		Source:       firstNonEmpty(source, "handoff"),
+	}
+}
+
+func (r *controllerRun) beginTurn(req sdkcontroller.TurnRequest) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turnID = strings.TrimSpace(req.TurnID)
+	r.turnSession = sdksession.CloneSession(req.Session)
+	r.turnMode = strings.TrimSpace(req.Mode)
+	r.approvalRequester = req.ApprovalRequester
+	r.events = nil
+}
+
+func (r *controllerRun) endTurn() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turnID = ""
+	r.turnSession = sdksession.Session{}
+	r.turnMode = ""
+	r.approvalRequester = nil
+}
+
+func (r *controllerRun) snapshotEvents() []*sdksession.Event {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*sdksession.Event, 0, len(r.events))
+	for _, event := range r.events {
+		out = append(out, sdksession.CloneEvent(event))
+	}
+	return out
+}
+
+func (r *controllerRun) handleUpdate(clock func() time.Time, env sdkacpclient.UpdateEnvelope) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.turnID == "" {
+		return
+	}
+	event := normalizeACPUpdateEvent(clock, r.binding, r.remoteSessionID, r.turnID, env.Update)
+	if event == nil {
+		return
+	}
+	r.updatedAt = clock()
+	r.events = append(r.events, event)
+}
+
+func normalizeACPUpdateEvent(
+	clock func() time.Time,
+	binding sdksession.ControllerBinding,
+	remoteSessionID string,
+	turnID string,
+	update sdkacpclient.Update,
+) *sdksession.Event {
+	controller := sdksession.ControllerRef{
+		Kind:    sdksession.ControllerKindACP,
+		ID:      strings.TrimSpace(binding.ControllerID),
+		EpochID: strings.TrimSpace(binding.EpochID),
+	}
+	scope := &sdksession.EventScope{
+		TurnID:     strings.TrimSpace(turnID),
+		Source:     "acp",
+		Controller: controller,
+		ACP: sdksession.ACPRef{
+			SessionID: strings.TrimSpace(remoteSessionID),
+		},
+	}
+	now := time.Now
+	if clock != nil {
+		now = clock
+	}
+	switch typed := update.(type) {
+	case sdkacpclient.ContentChunk:
+		text := contentChunkText(typed)
+		if text == "" {
+			return nil
+		}
+		event := &sdksession.Event{
+			Visibility: sdksession.VisibilityCanonical,
+			Time:       now(),
+			Actor:      sdksession.ActorRef{Kind: sdksession.ActorKindController, Name: strings.TrimSpace(binding.Label)},
+			Scope:      scope,
+			Text:       text,
+			Message:    ptrMessage(messageForContentChunk(typed, text)),
+			Protocol:   &sdksession.EventProtocol{UpdateType: typed.SessionUpdate},
+		}
+		switch strings.TrimSpace(typed.SessionUpdate) {
+		case sdkacpclient.UpdateUserMessage:
+			event.Type = sdksession.EventTypeUser
+			event.Actor = sdksession.ActorRef{Kind: sdksession.ActorKindUser, Name: "user"}
+		default:
+			event.Type = sdksession.EventTypeAssistant
+		}
+		scope.ACP.EventType = strings.TrimSpace(typed.SessionUpdate)
+		return event
+	case sdkacpclient.ToolCall:
+		scope.ACP.EventType = strings.TrimSpace(typed.SessionUpdate)
+		return &sdksession.Event{
+			Type:       sdksession.EventTypeToolCall,
+			Visibility: sdksession.VisibilityCanonical,
+			Time:       now(),
+			Actor:      sdksession.ActorRef{Kind: sdksession.ActorKindController, Name: strings.TrimSpace(binding.Label)},
+			Scope:      scope,
+			Text:       firstNonEmpty(strings.TrimSpace(typed.Title), strings.TrimSpace(typed.Kind), "tool call"),
+			Protocol: &sdksession.EventProtocol{
+				UpdateType: typed.SessionUpdate,
+				ToolCall: &sdksession.ProtocolToolCall{
+					ID:       strings.TrimSpace(typed.ToolCallID),
+					Kind:     strings.TrimSpace(typed.Kind),
+					Title:    strings.TrimSpace(typed.Title),
+					Status:   strings.TrimSpace(typed.Status),
+					RawInput: cloneMap(typed.RawInput),
+				},
+			},
+		}
+	case sdkacpclient.ToolCallUpdate:
+		scope.ACP.EventType = strings.TrimSpace(typed.SessionUpdate)
+		return &sdksession.Event{
+			Type:       toolEventTypeFromStatus(derefString(typed.Status)),
+			Visibility: sdksession.VisibilityCanonical,
+			Time:       now(),
+			Actor:      sdksession.ActorRef{Kind: sdksession.ActorKindController, Name: strings.TrimSpace(binding.Label)},
+			Scope:      scope,
+			Text:       firstNonEmpty(strings.TrimSpace(derefString(typed.Title)), strings.TrimSpace(derefString(typed.Kind)), "tool update"),
+			Protocol: &sdksession.EventProtocol{
+				UpdateType: typed.SessionUpdate,
+				ToolCall: &sdksession.ProtocolToolCall{
+					ID:        strings.TrimSpace(typed.ToolCallID),
+					Kind:      strings.TrimSpace(derefString(typed.Kind)),
+					Title:     strings.TrimSpace(derefString(typed.Title)),
+					Status:    strings.TrimSpace(derefString(typed.Status)),
+					RawInput:  cloneMap(typed.RawInput),
+					RawOutput: cloneMap(typed.RawOutput),
+				},
+			},
+		}
+	case sdkacpclient.PlanUpdate:
+		scope.ACP.EventType = strings.TrimSpace(typed.SessionUpdate)
+		return &sdksession.Event{
+			Type:       sdksession.EventTypePlan,
+			Visibility: sdksession.VisibilityCanonical,
+			Time:       now(),
+			Actor:      sdksession.ActorRef{Kind: sdksession.ActorKindController, Name: strings.TrimSpace(binding.Label)},
+			Scope:      scope,
+			Text:       "plan updated",
+			Protocol: &sdksession.EventProtocol{
+				UpdateType: typed.SessionUpdate,
+				Plan:       &sdksession.ProtocolPlan{Entries: planEntries(typed.Entries)},
+			},
+		}
+	}
+	return nil
+}
+
+func contentChunkText(chunk sdkacpclient.ContentChunk) string {
+	var text sdkacpclient.TextChunk
+	if err := json.Unmarshal(chunk.Content, &text); err == nil {
+		return strings.TrimSpace(text.Text)
+	}
+	return strings.TrimSpace(string(chunk.Content))
+}
+
+func messageForContentChunk(chunk sdkacpclient.ContentChunk, text string) sdkmodel.Message {
+	role := sdkmodel.RoleAssistant
+	if strings.TrimSpace(chunk.SessionUpdate) == sdkacpclient.UpdateUserMessage {
+		role = sdkmodel.RoleUser
+	}
+	return sdkmodel.NewTextMessage(role, text)
+}
+
+func planEntries(in []sdkacpclient.PlanEntry) []sdksession.ProtocolPlanEntry {
+	out := make([]sdksession.ProtocolPlanEntry, 0, len(in))
+	for _, item := range in {
+		out = append(out, sdksession.ProtocolPlanEntry{
+			Content:  strings.TrimSpace(item.Content),
+			Status:   strings.TrimSpace(item.Status),
+			Priority: "",
+		})
+	}
+	return out
+}
+
+func toolEventTypeFromStatus(status string) sdksession.EventType {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "cancelled":
+		return sdksession.EventTypeToolResult
+	default:
+		return sdksession.EventTypeToolCall
+	}
+}
+
+func buildPromptParts(input string, parts []sdkmodel.ContentPart) []json.RawMessage {
+	if len(parts) == 0 {
+		input = strings.TrimSpace(input)
+		if input == "" {
+			return nil
+		}
+		raw, _ := json.Marshal(sdkacpclient.TextContent{
+			Type: "text",
+			Text: input,
+		})
+		return []json.RawMessage{raw}
+	}
+	out := make([]json.RawMessage, 0, len(parts))
+	for _, part := range parts {
+		switch part.Type {
+		case sdkmodel.ContentPartImage:
+			raw, _ := json.Marshal(sdkacpclient.ImageContent{
+				Type:     "image",
+				MimeType: strings.TrimSpace(part.MimeType),
+				Data:     strings.TrimSpace(part.Data),
+				Name:     strings.TrimSpace(part.FileName),
+			})
+			out = append(out, raw)
+		default:
+			text := strings.TrimSpace(part.Text)
+			if text == "" {
+				continue
+			}
+			raw, _ := json.Marshal(sdkacpclient.TextContent{
+				Type: "text",
+				Text: text,
+			})
+			out = append(out, raw)
+		}
+	}
+	if len(out) == 0 && strings.TrimSpace(input) != "" {
+		raw, _ := json.Marshal(sdkacpclient.TextContent{
+			Type: "text",
+			Text: strings.TrimSpace(input),
+		})
+		out = append(out, raw)
+	}
+	return out
+}
+
+func ptrMessage(msg sdkmodel.Message) *sdkmodel.Message {
+	return &msg
+}
+
+func cloneMap(in any) map[string]any {
+	values, ok := in.(map[string]any)
+	if !ok || len(values) == 0 {
+		return nil
+	}
+	return maps.Clone(values)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func pickWorkDir(preferred string, fallback string) string {
+	if strings.TrimSpace(preferred) != "" {
+		return strings.TrimSpace(preferred)
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func derefString(in *string) string {
+	if in == nil {
+		return ""
+	}
+	return strings.TrimSpace(*in)
+}
+
+func (m *Manager) nextID(prefix string) string {
+	n := m.counter.Add(1)
+	return fmt.Sprintf("%s-%d", prefix, n)
+}

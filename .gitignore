@@ -6,3 +6,4 @@ dist/
 /bin/
 /cli
 .DS_Store
+tmp/
