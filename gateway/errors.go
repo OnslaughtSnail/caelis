@@ -7,6 +7,7 @@ type ErrorKind string
 const (
 	KindValidation  ErrorKind = "validation"
 	KindConflict    ErrorKind = "conflict"
+	KindNotFound    ErrorKind = "not_found"
 	KindInternal    ErrorKind = "internal"
 	KindApproval    ErrorKind = "approval"
 	KindUnsupported ErrorKind = "unsupported"
@@ -17,6 +18,10 @@ const (
 	CodeActiveRunConflict     = "active_run_conflict"
 	CodeInvalidRequest        = "invalid_request"
 	CodeSubmissionUnsupported = "submission_unsupported"
+	CodeSessionNotFound       = "session_not_found"
+	CodeBindingNotFound       = "binding_not_found"
+	CodeNoResumableSession    = "no_resumable_session"
+	CodeNoActiveRun           = "no_active_run"
 )
 
 type Error struct {

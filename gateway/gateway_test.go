@@ -73,6 +73,276 @@ func TestStartSessionDelegatesToSDKSessions(t *testing.T) {
 	}
 }
 
+func TestLoadSessionDelegatesToSDKSessionsAndBinds(t *testing.T) {
+	t.Parallel()
+
+	loaded := sdksession.LoadedSession{
+		Session: sdksession.Session{
+			SessionRef: sdksession.SessionRef{
+				AppName: "caelis", UserID: "u", SessionID: "s2", WorkspaceKey: "ws",
+			},
+			CWD: "/tmp/ws",
+		},
+	}
+	svc := &recordingSessionService{loadSessionResult: loaded}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got, err := gw.LoadSession(context.Background(), LoadSessionRequest{
+		SessionRef: loaded.Session.SessionRef,
+		Limit:      32,
+		BindingKey: "surface-headless",
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got.Session.SessionID != "s2" || svc.loadReq.Limit != 32 {
+		t.Fatalf("LoadSession() = %+v, loadReq = %+v", got, svc.loadReq)
+	}
+	current, ok := gw.CurrentSession("surface-headless")
+	if !ok || current.SessionID != "s2" {
+		t.Fatalf("CurrentSession() = %+v, %v", current, ok)
+	}
+}
+
+func TestListSessionsDelegatesToSDKSessions(t *testing.T) {
+	t.Parallel()
+
+	want := sdksession.SessionList{
+		Sessions: []sdksession.SessionSummary{{SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s2", WorkspaceKey: "ws",
+		}}},
+	}
+	svc := &recordingSessionService{listSessionsResult: want}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	got, err := gw.ListSessions(context.Background(), ListSessionsRequest{
+		AppName:      "caelis",
+		UserID:       "u",
+		WorkspaceKey: "ws",
+		Limit:        5,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+	if len(got.Sessions) != 1 || got.Sessions[0].SessionID != "s2" {
+		t.Fatalf("ListSessions() = %+v", got)
+	}
+	if svc.listReq.Limit != 5 || svc.listReq.WorkspaceKey != "ws" {
+		t.Fatalf("listReq = %+v", svc.listReq)
+	}
+}
+
+func TestResumeSessionUsesMostRecentExcludingCurrentBinding(t *testing.T) {
+	t.Parallel()
+
+	current := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		CWD: "/tmp/ws",
+	}
+	next := sdksession.LoadedSession{
+		Session: sdksession.Session{
+			SessionRef: sdksession.SessionRef{
+				AppName: "caelis", UserID: "u", SessionID: "s2", WorkspaceKey: "ws",
+			},
+			CWD: "/tmp/ws",
+		},
+	}
+	svc := &recordingSessionService{
+		startSessionResult: current,
+		loadSessionResult:  next,
+		listSessionsResult: sdksession.SessionList{
+			Sessions: []sdksession.SessionSummary{
+				{SessionRef: current.SessionRef, UpdatedAt: time.Unix(200, 0)},
+				{SessionRef: next.Session.SessionRef, UpdatedAt: time.Unix(100, 0)},
+			},
+		},
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := gw.StartSession(context.Background(), StartSessionRequest{
+		AppName:    "caelis",
+		UserID:     "u",
+		Workspace:  sdksession.WorkspaceRef{Key: "ws", CWD: "/tmp/ws"},
+		BindingKey: "surface-1",
+	}); err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	loaded, err := gw.ResumeSession(context.Background(), ResumeSessionRequest{
+		AppName:    "caelis",
+		UserID:     "u",
+		Workspace:  sdksession.WorkspaceRef{Key: "ws"},
+		BindingKey: "surface-1",
+	})
+	if err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	if loaded.Session.SessionID != "s2" || svc.loadReq.SessionRef.SessionID != "s2" {
+		t.Fatalf("ResumeSession() = %+v, loadReq = %+v", loaded, svc.loadReq)
+	}
+	currentRef, ok := gw.CurrentSession("surface-1")
+	if !ok || currentRef.SessionID != "s2" {
+		t.Fatalf("CurrentSession() = %+v, %v", currentRef, ok)
+	}
+}
+
+func TestResumeSessionResolvesUniquePrefix(t *testing.T) {
+	t.Parallel()
+
+	target := sdksession.LoadedSession{
+		Session: sdksession.Session{
+			SessionRef: sdksession.SessionRef{
+				AppName: "caelis", UserID: "u", SessionID: "s-12345678", WorkspaceKey: "ws",
+			},
+		},
+	}
+	svc := &recordingSessionService{
+		loadSessionResult: target,
+		listSessionsResult: sdksession.SessionList{
+			Sessions: []sdksession.SessionSummary{
+				{SessionRef: target.Session.SessionRef},
+				{SessionRef: sdksession.SessionRef{AppName: "caelis", UserID: "u", SessionID: "s-87654321", WorkspaceKey: "ws"}},
+			},
+		},
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := gw.ResumeSession(context.Background(), ResumeSessionRequest{
+		AppName:   "caelis",
+		UserID:    "u",
+		Workspace: sdksession.WorkspaceRef{Key: "ws"},
+		SessionID: "s-1234",
+	}); err != nil {
+		t.Fatalf("ResumeSession() error = %v", err)
+	}
+	if svc.loadReq.SessionRef.SessionID != "s-12345678" {
+		t.Fatalf("loadReq = %+v", svc.loadReq)
+	}
+}
+
+func TestForkSessionCopiesSourceMetadataAndBinds(t *testing.T) {
+	t.Parallel()
+
+	source := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		CWD:      "/tmp/ws",
+		Title:    "Original",
+		Metadata: map[string]any{"mode": "main"},
+	}
+	forked := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s2", WorkspaceKey: "ws",
+		},
+		CWD: "/tmp/ws",
+	}
+	svc := &recordingSessionService{
+		sessionResult:      source,
+		startSessionResult: forked,
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	started, err := gw.ForkSession(context.Background(), ForkSessionRequest{
+		SourceSessionRef: source.SessionRef,
+		BindingKey:       "surface-fork",
+		Metadata:         map[string]any{"mode": "fork"},
+	})
+	if err != nil {
+		t.Fatalf("ForkSession() error = %v", err)
+	}
+	if started.SessionID != "s2" || svc.startReq.AppName != "caelis" || svc.startReq.Title != "Original" {
+		t.Fatalf("ForkSession() started=%+v startReq=%+v", started, svc.startReq)
+	}
+	if got := svc.startReq.Metadata["forked_from_session_id"]; got != "s1" {
+		t.Fatalf("fork metadata = %+v", svc.startReq.Metadata)
+	}
+	current, ok := gw.CurrentSession("surface-fork")
+	if !ok || current.SessionID != "s2" {
+		t.Fatalf("CurrentSession() = %+v, %v", current, ok)
+	}
+}
+
+func TestInterruptCancelsActiveRunByBinding(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		CWD: "/tmp/ws",
+	}
+	rt := &cancellableRuntime{session: session, cancelled: make(chan struct{})}
+	svc := &recordingSessionService{startSessionResult: session, sessionResult: session}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  rt,
+		Resolver: staticResolver{resolved: ResolvedTurn{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := gw.StartSession(context.Background(), StartSessionRequest{
+		AppName:    "caelis",
+		UserID:     "u",
+		Workspace:  sdksession.WorkspaceRef{Key: "ws", CWD: "/tmp/ws"},
+		BindingKey: "surface-1",
+	}); err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	if _, err := gw.BeginTurn(context.Background(), BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+	}); err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+
+	if err := gw.Interrupt(context.Background(), InterruptRequest{BindingKey: "surface-1"}); err != nil {
+		t.Fatalf("Interrupt() error = %v", err)
+	}
+	select {
+	case <-rt.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Interrupt() did not cancel runtime context")
+	}
+}
+
 func TestBeginTurnRejectsSecondActiveRunForSameSession(t *testing.T) {
 	t.Parallel()
 
@@ -314,6 +584,22 @@ func (r *blockingRuntime) RunState(context.Context, sdksession.SessionRef) (sdkr
 	return sdkruntime.RunState{}, nil
 }
 
+type cancellableRuntime struct {
+	session   sdksession.Session
+	cancelled chan struct{}
+}
+
+func (r *cancellableRuntime) Run(ctx context.Context, req sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
+	_ = req
+	<-ctx.Done()
+	close(r.cancelled)
+	return sdkruntime.RunResult{}, ctx.Err()
+}
+
+func (r *cancellableRuntime) RunState(context.Context, sdksession.SessionRef) (sdkruntime.RunState, error) {
+	return sdkruntime.RunState{}, nil
+}
+
 type staticSessionService struct {
 	session sdksession.Session
 }
@@ -359,6 +645,85 @@ func (s staticSessionService) UpdateState(context.Context, sdksession.SessionRef
 }
 
 type mockSessionService struct{ staticSessionService }
+
+type recordingSessionService struct {
+	startReq           sdksession.StartSessionRequest
+	loadReq            sdksession.LoadSessionRequest
+	listReq            sdksession.ListSessionsRequest
+	sessionReq         sdksession.SessionRef
+	startSessionResult sdksession.Session
+	loadSessionResult  sdksession.LoadedSession
+	listSessionsResult sdksession.SessionList
+	sessionResult      sdksession.Session
+	startErr           error
+	loadErr            error
+	listErr            error
+	sessionErr         error
+}
+
+func (s *recordingSessionService) StartSession(_ context.Context, req sdksession.StartSessionRequest) (sdksession.Session, error) {
+	s.startReq = req
+	if s.startErr != nil {
+		return sdksession.Session{}, s.startErr
+	}
+	return s.startSessionResult, nil
+}
+
+func (s *recordingSessionService) LoadSession(_ context.Context, req sdksession.LoadSessionRequest) (sdksession.LoadedSession, error) {
+	s.loadReq = req
+	if s.loadErr != nil {
+		return sdksession.LoadedSession{}, s.loadErr
+	}
+	return s.loadSessionResult, nil
+}
+
+func (s *recordingSessionService) Session(_ context.Context, ref sdksession.SessionRef) (sdksession.Session, error) {
+	s.sessionReq = ref
+	if s.sessionErr != nil {
+		return sdksession.Session{}, s.sessionErr
+	}
+	return s.sessionResult, nil
+}
+
+func (s *recordingSessionService) AppendEvent(_ context.Context, req sdksession.AppendEventRequest) (*sdksession.Event, error) {
+	return req.Event, nil
+}
+
+func (s *recordingSessionService) Events(context.Context, sdksession.EventsRequest) ([]*sdksession.Event, error) {
+	return nil, nil
+}
+
+func (s *recordingSessionService) ListSessions(_ context.Context, req sdksession.ListSessionsRequest) (sdksession.SessionList, error) {
+	s.listReq = req
+	if s.listErr != nil {
+		return sdksession.SessionList{}, s.listErr
+	}
+	return s.listSessionsResult, nil
+}
+
+func (s *recordingSessionService) BindController(context.Context, sdksession.BindControllerRequest) (sdksession.Session, error) {
+	return s.sessionResult, nil
+}
+
+func (s *recordingSessionService) PutParticipant(context.Context, sdksession.PutParticipantRequest) (sdksession.Session, error) {
+	return s.sessionResult, nil
+}
+
+func (s *recordingSessionService) RemoveParticipant(context.Context, sdksession.RemoveParticipantRequest) (sdksession.Session, error) {
+	return s.sessionResult, nil
+}
+
+func (s *recordingSessionService) SnapshotState(context.Context, sdksession.SessionRef) (map[string]any, error) {
+	return nil, nil
+}
+
+func (s *recordingSessionService) ReplaceState(context.Context, sdksession.SessionRef, map[string]any) error {
+	return nil
+}
+
+func (s *recordingSessionService) UpdateState(context.Context, sdksession.SessionRef, func(map[string]any) (map[string]any, error)) error {
+	return nil
+}
 
 type staticResolver struct {
 	resolved ResolvedTurn

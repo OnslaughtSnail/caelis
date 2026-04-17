@@ -28,6 +28,47 @@ type StartSessionRequest struct {
 	PreferredSessionID string
 	Title              string
 	Metadata           map[string]any
+	BindingKey         string
+}
+
+type LoadSessionRequest struct {
+	SessionRef       sdksession.SessionRef
+	Limit            int
+	IncludeTransient bool
+	BindingKey       string
+}
+
+type ForkSessionRequest struct {
+	SourceSessionRef   sdksession.SessionRef
+	PreferredSessionID string
+	Title              string
+	Metadata           map[string]any
+	BindingKey         string
+}
+
+type ResumeSessionRequest struct {
+	AppName          string
+	UserID           string
+	Workspace        sdksession.WorkspaceRef
+	SessionID        string
+	ExcludeSessionID string
+	Limit            int
+	IncludeTransient bool
+	BindingKey       string
+}
+
+type ListSessionsRequest struct {
+	AppName      string
+	UserID       string
+	WorkspaceKey string
+	Cursor       string
+	Limit        int
+}
+
+type InterruptRequest struct {
+	SessionRef sdksession.SessionRef
+	BindingKey string
+	Reason     string
 }
 
 type ResolvedTurn struct {
