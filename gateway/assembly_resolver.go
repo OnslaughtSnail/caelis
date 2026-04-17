@@ -151,7 +151,7 @@ func applyAssemblySelections(metadata map[string]any, assembly sdkplugin.Resolve
 		if !ok {
 			return &Error{
 				Kind:        KindValidation,
-				Code:        CodeInvalidRequest,
+				Code:        CodeModeNotFound,
 				UserVisible: true,
 				Message:     fmt.Sprintf("gateway: unknown mode %q", modeID),
 			}

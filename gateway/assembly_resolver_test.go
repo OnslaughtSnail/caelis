@@ -151,7 +151,7 @@ func TestAssemblyResolverRejectsUnknownMode(t *testing.T) {
 		t.Fatal("ResolveTurn() error = nil, want invalid request")
 	}
 	var gwErr *Error
-	if !As(err, &gwErr) || gwErr.Code != CodeInvalidRequest {
+	if !As(err, &gwErr) || gwErr.Code != CodeModeNotFound {
 		t.Fatalf("ResolveTurn() error = %v", err)
 	}
 }

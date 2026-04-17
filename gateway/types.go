@@ -83,9 +83,26 @@ type EventKind string
 
 const (
 	EventKindSessionEvent      EventKind = "session_event"
+	EventKindUserMessage       EventKind = "user_message"
+	EventKindAssistantMessage  EventKind = "assistant_message"
+	EventKindPlanUpdate        EventKind = "plan_update"
+	EventKindToolCall          EventKind = "tool_call"
+	EventKindToolResult        EventKind = "tool_result"
+	EventKindParticipant       EventKind = "participant"
+	EventKindHandoff           EventKind = "handoff"
+	EventKindCompact           EventKind = "compact"
+	EventKindNotice            EventKind = "notice"
+	EventKindSessionLifecycle  EventKind = "session_lifecycle"
+	EventKindSystemMessage     EventKind = "system_message"
 	EventKindApprovalRequested EventKind = "approval_requested"
 	EventKindLifecycle         EventKind = "lifecycle"
 )
+
+type UsageSnapshot struct {
+	PromptTokens     int `json:"prompt_tokens,omitempty"`
+	CompletionTokens int `json:"completion_tokens,omitempty"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
+}
 
 type Event struct {
 	Kind         EventKind
@@ -94,6 +111,7 @@ type Event struct {
 	TurnID       string
 	SessionRef   sdksession.SessionRef
 	SessionEvent *sdksession.Event
+	Usage        *UsageSnapshot
 	Approval     *sdkruntime.ApprovalRequest
 }
 

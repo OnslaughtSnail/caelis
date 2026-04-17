@@ -18,10 +18,13 @@ const (
 	CodeActiveRunConflict     = "active_run_conflict"
 	CodeInvalidRequest        = "invalid_request"
 	CodeSubmissionUnsupported = "submission_unsupported"
+	CodeApprovalNotPending    = "approval_not_pending"
 	CodeSessionNotFound       = "session_not_found"
+	CodeSessionAmbiguous      = "session_ambiguous"
 	CodeBindingNotFound       = "binding_not_found"
 	CodeNoResumableSession    = "no_resumable_session"
 	CodeNoActiveRun           = "no_active_run"
+	CodeModeNotFound          = "mode_not_found"
 )
 
 type Error struct {

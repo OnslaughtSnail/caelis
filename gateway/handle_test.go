@@ -33,6 +33,49 @@ func TestTurnHandleReplaysEventsAfterCursor(t *testing.T) {
 	}
 }
 
+func TestTurnHandleCanonicalizesAssistantEventAndUsage(t *testing.T) {
+	t.Parallel()
+
+	handle := newTurnHandle(turnHandleConfig{
+		handleID: "h1",
+		runID:    "run-1",
+		turnID:   "turn-1",
+		sessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		createdAt: time.Unix(100, 0),
+	})
+	handle.publishSessionEvent(&sdksession.Event{
+		ID:   "e1",
+		Type: sdksession.EventTypeAssistant,
+		Text: "done",
+		Meta: map[string]any{
+			"usage": map[string]any{
+				"prompt_tokens":     12,
+				"completion_tokens": 5,
+				"total_tokens":      17,
+			},
+		},
+	})
+
+	replayed, next, err := handle.EventsAfter("")
+	if err != nil {
+		t.Fatalf("EventsAfter() error = %v", err)
+	}
+	if len(replayed) != 1 || next != "e1" {
+		t.Fatalf("EventsAfter() = %#v, %q", replayed, next)
+	}
+	if replayed[0].Event.Kind != EventKindAssistantMessage {
+		t.Fatalf("event kind = %q, want %q", replayed[0].Event.Kind, EventKindAssistantMessage)
+	}
+	if got := AssistantText(replayed[0].Event); got != "done" {
+		t.Fatalf("AssistantText() = %q, want %q", got, "done")
+	}
+	if replayed[0].Event.Usage == nil || replayed[0].Event.Usage.PromptTokens != 12 || replayed[0].Event.Usage.CompletionTokens != 5 || replayed[0].Event.Usage.TotalTokens != 17 {
+		t.Fatalf("usage = %+v", replayed[0].Event.Usage)
+	}
+}
+
 func TestTurnHandleSubmitRoutesApprovalAndContinuation(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +175,32 @@ func TestTurnHandleSubmitRejectsUnsupportedWithoutRunner(t *testing.T) {
 	var gwErr *Error
 	if !As(err, &gwErr) || gwErr.Code != CodeSubmissionUnsupported {
 		t.Fatalf("Submit() error = %v, want submission unsupported", err)
+	}
+}
+
+func TestTurnHandleApprovalSubmitRejectsWithoutPendingRequest(t *testing.T) {
+	t.Parallel()
+
+	handle := newTurnHandle(turnHandleConfig{
+		handleID: "h1",
+		runID:    "run-1",
+		turnID:   "turn-1",
+		sessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		createdAt: time.Unix(100, 0),
+	})
+
+	err := handle.Submit(context.Background(), SubmitRequest{
+		Kind:     SubmissionKindApproval,
+		Approval: &ApprovalDecision{Approved: true, Outcome: "approved"},
+	})
+	if err == nil {
+		t.Fatal("Submit(approval) error = nil, want approval-not-pending")
+	}
+	var gwErr *Error
+	if !As(err, &gwErr) || gwErr.Code != CodeApprovalNotPending {
+		t.Fatalf("Submit(approval) error = %v, want approval_not_pending", err)
 	}
 }
 

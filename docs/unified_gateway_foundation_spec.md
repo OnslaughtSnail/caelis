@@ -2,10 +2,21 @@
 
 ## Status
 
-This document is the authority for the next refactor layer after the SDK
-foundation cleanup.
+This document is the authority for the current `sdk`-backed Unified Gateway
+layer.
 
-It defines the target shape of a `sdk`-backed Unified Gateway.
+The foundational local gateway now exists in code and is the active reference
+boundary for:
+
+- session lifecycle through `gateway`
+- turn orchestration through `gateway`
+- local headless and minimal local interactive entry through the new `cmd/cli`
+
+This document now defines:
+
+- the accepted Stage 1 boundary
+- the current acceptance target
+- the remaining deferred work after local acceptance
 
 ## Product Goal
 
@@ -39,22 +50,54 @@ That layer is the Unified Gateway.
 
 ## Scope Of This Phase
 
-This phase should build the extensibility skeleton only.
+This phase should build and validate the local extensibility skeleton.
 
 In scope:
 
 - define the Unified Gateway contract
 - define `sdk -> gateway -> adapters` layering
+- land one app-owned composition root on top of the new `sdk`
+- land local headless and minimal local interactive adoption on the new gateway
+- expose canonical gateway events for local adapters
 - reserve extension points for daemon mode and remote channels
-- keep old code available only as behavior reference
 
 Out of scope:
 
-- switching the production CLI to the new gateway
-- deleting legacy code immediately
 - implementing Telegram / Discord / webhook adapters
 - implementing daemon registration or remote transport
+- implementing ACP main adoption on the new gateway
+- implementing durable reconnect across process restart
+- implementing channel-scoped auth, pairing, or remote actor policy
 - copying OpenClaw feature-for-feature
+
+## Stage 1 Acceptance Target
+
+The Unified Gateway should be considered acceptable for Stage 1 when all of the
+following are true:
+
+- it depends only on the new `sdk`
+- one app-owned composition root assembles `sdk -> gateway -> adapter` without
+  any legacy bootstrap path
+- local headless and minimal local interactive turns both run through the same
+  gateway turn contract
+- adapters consume canonical gateway events rather than parsing raw SDK runtime
+  behavior directly
+- session lifecycle, turn lifecycle, approval bridging, interrupt, and current
+  local resume/binding flows are covered by tests
+- remaining ACP / remote / daemon work is explicitly deferred rather than
+  implied complete
+
+## Deferred After Stage 1
+
+The following work remains intentionally deferred after local acceptance:
+
+- ACP main adoption on the Unified Gateway
+- canonical control-plane state for epoch / handoff continuity
+- durable reconnect and resumable streaming across process restart
+- richer channel binding with actor identity, ownership, expiry, and rebind
+  policy
+- daemon host lifecycle
+- remote transport and remote channel adapters
 
 ## Architectural Position
 

@@ -63,7 +63,7 @@ func TestStreamHandleWritesAssistantTextAndDeniesApproval(t *testing.T) {
 		},
 		{
 			Event: appgateway.Event{
-				Kind: appgateway.EventKindSessionEvent,
+				Kind: appgateway.EventKindAssistantMessage,
 				SessionEvent: &sdksession.Event{
 					Type: sdksession.EventTypeAssistant,
 					Text: "interactive ok",

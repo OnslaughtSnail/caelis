@@ -447,7 +447,7 @@ func resolveSessionSummary(sessions []sdksession.SessionSummary, target string) 
 	default:
 		return sdksession.SessionSummary{}, &Error{
 			Kind:        KindConflict,
-			Code:        CodeInvalidRequest,
+			Code:        CodeSessionAmbiguous,
 			UserVisible: true,
 			Message:     "gateway: session id is ambiguous",
 		}

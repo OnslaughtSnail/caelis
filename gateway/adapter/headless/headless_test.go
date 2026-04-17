@@ -17,12 +17,9 @@ func TestRunOnceDrainsAssistantOutput(t *testing.T) {
 		{
 			Cursor: "e1",
 			Event: gateway.Event{
-				Kind: gateway.EventKindSessionEvent,
-				SessionEvent: &sdksession.Event{
-					ID:   "e1",
-					Type: sdksession.EventTypeAssistant,
-					Text: "done",
-				},
+				Kind:         gateway.EventKindAssistantMessage,
+				SessionEvent: &sdksession.Event{ID: "e1", Type: sdksession.EventTypeAssistant, Text: "done"},
+				Usage:        &gateway.UsageSnapshot{PromptTokens: 11},
 			},
 		},
 	})
@@ -46,6 +43,9 @@ func TestRunOnceDrainsAssistantOutput(t *testing.T) {
 	}
 	if result.Output != "done" {
 		t.Fatalf("RunOnce() output = %q, want %q", result.Output, "done")
+	}
+	if result.PromptTokens != 11 {
+		t.Fatalf("RunOnce() prompt tokens = %d, want %d", result.PromptTokens, 11)
 	}
 }
 

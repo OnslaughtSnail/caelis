@@ -2,10 +2,8 @@ package headless
 
 import (
 	"context"
-	"strings"
 
 	"github.com/OnslaughtSnail/caelis/gateway"
-	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
@@ -62,10 +60,10 @@ func RunOnce(ctx context.Context, starter Starter, req gateway.BeginTurnRequest,
 			}
 			continue
 		}
-		if text := assistantText(env.Event.SessionEvent); text != "" {
+		if text := gateway.AssistantText(env.Event); text != "" {
 			out.Output = text
 		}
-		if prompt := promptTokens(env.Event.SessionEvent); prompt > 0 {
+		if prompt := gateway.PromptTokens(env.Event); prompt > 0 {
 			out.PromptTokens = prompt
 		}
 	}
@@ -80,52 +78,4 @@ func resolveApproval(ctx context.Context, opts Options, req *sdkruntime.Approval
 		return gateway.ApprovalDecision{Approved: true, Outcome: "approved"}, nil
 	}
 	return gateway.ApprovalDecision{Approved: false, Outcome: "rejected"}, nil
-}
-
-func assistantText(event *sdksession.Event) string {
-	if event == nil {
-		return ""
-	}
-	if event.Message != nil {
-		if text := strings.TrimSpace(event.Message.TextContent()); text != "" {
-			return text
-		}
-	}
-	if event.Type == sdksession.EventTypeAssistant {
-		return strings.TrimSpace(event.Text)
-	}
-	if event.Type == sdksession.EventTypeAssistant && event.Message == nil {
-		return strings.TrimSpace(event.Text)
-	}
-	if event.Type == sdksession.EventTypeAssistant && event.Message != nil {
-		return strings.TrimSpace(event.Message.TextContent())
-	}
-	if event.Message != nil && event.Message.Role == sdkmodel.RoleAssistant {
-		return strings.TrimSpace(event.Message.TextContent())
-	}
-	return ""
-}
-
-func promptTokens(event *sdksession.Event) int {
-	if event == nil || event.Meta == nil {
-		return 0
-	}
-	usageRaw, ok := event.Meta["usage"]
-	if !ok {
-		return 0
-	}
-	usage, ok := usageRaw.(map[string]any)
-	if !ok {
-		return 0
-	}
-	switch value := usage["prompt_tokens"].(type) {
-	case int:
-		return value
-	case int64:
-		return int(value)
-	case float64:
-		return int(value)
-	default:
-		return 0
-	}
 }

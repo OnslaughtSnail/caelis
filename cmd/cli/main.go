@@ -15,7 +15,6 @@ import (
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	headlessadapter "github.com/OnslaughtSnail/caelis/gateway/adapter/headless"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
-	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
 type outputFormat string
@@ -199,28 +198,12 @@ func streamHandle(ctx context.Context, handle appgateway.TurnHandle, stdout io.W
 			}); err != nil {
 				return err
 			}
-		case appgateway.EventKindSessionEvent:
-			if text := assistantText(env.Event.SessionEvent); text != "" {
-				fmt.Fprintln(stdout, text)
-			}
+		}
+		if text := appgateway.AssistantText(env.Event); text != "" {
+			fmt.Fprintln(stdout, text)
 		}
 	}
 	return nil
-}
-
-func assistantText(event *sdksession.Event) string {
-	if event == nil {
-		return ""
-	}
-	if event.Message != nil {
-		if text := strings.TrimSpace(event.Message.TextContent()); text != "" {
-			return text
-		}
-	}
-	if event.Type == sdksession.EventTypeAssistant {
-		return strings.TrimSpace(event.Text)
-	}
-	return ""
 }
 
 func writeResult(w io.Writer, format outputFormat, result runResult) error {

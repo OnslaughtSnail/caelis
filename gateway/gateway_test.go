@@ -249,6 +249,41 @@ func TestResumeSessionResolvesUniquePrefix(t *testing.T) {
 	}
 }
 
+func TestResumeSessionRejectsAmbiguousPrefix(t *testing.T) {
+	t.Parallel()
+
+	svc := &recordingSessionService{
+		listSessionsResult: sdksession.SessionList{
+			Sessions: []sdksession.SessionSummary{
+				{SessionRef: sdksession.SessionRef{AppName: "caelis", UserID: "u", SessionID: "s-12345678", WorkspaceKey: "ws"}},
+				{SessionRef: sdksession.SessionRef{AppName: "caelis", UserID: "u", SessionID: "s-12349999", WorkspaceKey: "ws"}},
+			},
+		},
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = gw.ResumeSession(context.Background(), ResumeSessionRequest{
+		AppName:   "caelis",
+		UserID:    "u",
+		Workspace: sdksession.WorkspaceRef{Key: "ws"},
+		SessionID: "s-1234",
+	})
+	if err == nil {
+		t.Fatal("ResumeSession() error = nil, want ambiguous session error")
+	}
+	var gwErr *Error
+	if !As(err, &gwErr) || gwErr.Code != CodeSessionAmbiguous {
+		t.Fatalf("ResumeSession() error = %v, want session_ambiguous", err)
+	}
+}
+
 func TestForkSessionCopiesSourceMetadataAndBinds(t *testing.T) {
 	t.Parallel()
 

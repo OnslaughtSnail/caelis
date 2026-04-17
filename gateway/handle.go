@@ -85,7 +85,12 @@ func (h *turnHandle) Submit(ctx context.Context, req SubmitRequest) error {
 		h.pendingApprovalCh = nil
 		h.mu.Unlock()
 		if wait == nil {
-			return &Error{Kind: KindApproval, Code: CodeSubmissionUnsupported, Message: "gateway: no approval is pending"}
+			return &Error{
+				Kind:        KindApproval,
+				Code:        CodeApprovalNotPending,
+				UserVisible: true,
+				Message:     "gateway: no approval is pending",
+			}
 		}
 		select {
 		case wait <- *req.Approval:
@@ -160,12 +165,13 @@ func (h *turnHandle) publishSessionEvent(event *sdksession.Event) {
 	h.publish(EventEnvelope{
 		Cursor: event.ID,
 		Event: Event{
-			Kind:         EventKindSessionEvent,
+			Kind:         sessionEventKind(event),
 			HandleID:     h.handleID,
 			RunID:        h.runID,
 			TurnID:       h.turnID,
 			SessionRef:   h.sessionRef,
 			SessionEvent: event,
+			Usage:        usageSnapshotFromSessionEvent(event),
 		},
 	})
 }
