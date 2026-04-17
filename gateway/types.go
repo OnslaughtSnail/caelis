@@ -21,6 +21,15 @@ type BeginTurnRequest struct {
 
 type TurnIntent = BeginTurnRequest
 
+type StartSessionRequest struct {
+	AppName            string
+	UserID             string
+	Workspace          sdksession.WorkspaceRef
+	PreferredSessionID string
+	Title              string
+	Metadata           map[string]any
+}
+
 type ResolvedTurn struct {
 	RunRequest sdkruntime.RunRequest
 }

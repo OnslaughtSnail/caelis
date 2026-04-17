@@ -27,9 +27,10 @@ type Options struct {
 }
 
 type Result struct {
-	Session    sdksession.Session
-	Output     string
-	LastCursor string
+	Session      sdksession.Session
+	Output       string
+	LastCursor   string
+	PromptTokens int
 }
 
 func RunOnce(ctx context.Context, starter Starter, req gateway.BeginTurnRequest, opts Options) (Result, error) {
@@ -63,6 +64,9 @@ func RunOnce(ctx context.Context, starter Starter, req gateway.BeginTurnRequest,
 		}
 		if text := assistantText(env.Event.SessionEvent); text != "" {
 			out.Output = text
+		}
+		if prompt := promptTokens(env.Event.SessionEvent); prompt > 0 {
+			out.PromptTokens = prompt
 		}
 	}
 	return out, nil
@@ -100,4 +104,28 @@ func assistantText(event *sdksession.Event) string {
 		return strings.TrimSpace(event.Message.TextContent())
 	}
 	return ""
+}
+
+func promptTokens(event *sdksession.Event) int {
+	if event == nil || event.Meta == nil {
+		return 0
+	}
+	usageRaw, ok := event.Meta["usage"]
+	if !ok {
+		return 0
+	}
+	usage, ok := usageRaw.(map[string]any)
+	if !ok {
+		return 0
+	}
+	switch value := usage["prompt_tokens"].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	default:
+		return 0
+	}
 }

@@ -91,6 +91,25 @@ func TestTurnHandleCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestTurnHandleCloseAfterFinishDoesNotDoubleClose(t *testing.T) {
+	t.Parallel()
+
+	handle := newTurnHandle(turnHandleConfig{
+		handleID: "h1",
+		runID:    "run-1",
+		turnID:   "turn-1",
+		sessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		createdAt: time.Unix(100, 0),
+	})
+
+	handle.finish()
+	if err := handle.Close(); err != nil {
+		t.Fatalf("Close(after finish) error = %v", err)
+	}
+}
+
 func TestTurnHandleSubmitRejectsUnsupportedWithoutRunner(t *testing.T) {
 	t.Parallel()
 

@@ -19,7 +19,6 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	"github.com/OnslaughtSnail/caelis/kernel/plugin"
 	"github.com/OnslaughtSnail/caelis/kernel/runtime"
-	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
 
 	image "github.com/OnslaughtSnail/caelis/internal/cli/imageutil"
 	"github.com/OnslaughtSnail/caelis/internal/sandboxhelper"
@@ -462,10 +461,6 @@ func runCLI(ctx context.Context, args []string) error {
 			}
 			return nil
 		}
-		ag, err := buildMainSessionAgent(mainAgentInput)
-		if err != nil {
-			return err
-		}
 		resolvedInput := singleInput
 		var contentParts []model.ContentPart
 		if inputRefs != nil {
@@ -492,19 +487,19 @@ func runCLI(ctx context.Context, args []string) error {
 				}
 			}
 		}
-		headlessResult, runErr := runHeadlessOnce(ctx, serviceSet.SessionService, sessionsvc.RunTurnRequest{
-			SessionRef: sessionsvc.SessionRef{
-				AppName:      *appName,
-				UserID:       *userID,
-				SessionID:    *sessionID,
-				WorkspaceKey: workspace.Key,
-			},
-			Input:               resolvedInput,
-			ContentParts:        contentParts,
-			Agent:               ag,
-			Model:               llm,
-			ContextWindowTokens: *contextWindow,
-		})
+		headlessResult, runErr := runCLIHeadlessOnce(ctx, cliSDKHeadlessConfig{
+			StoreDir:       *storeDir,
+			AppName:        *appName,
+			UserID:         *userID,
+			SessionID:      *sessionID,
+			WorkspaceKey:   workspace.Key,
+			WorkspaceCWD:   workspace.CWD,
+			ModelAlias:     alias,
+			ContextWindow:  *contextWindow,
+			PermissionMode: *permissionMode,
+			ModelFactory:   factory,
+			AgentInput:     mainAgentInput,
+		}, resolvedInput, contentParts)
 		if runErr != nil {
 			return runErr
 		}

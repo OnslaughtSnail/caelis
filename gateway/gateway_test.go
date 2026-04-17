@@ -37,6 +37,42 @@ func TestNewRequiresSessionsRuntimeAndResolver(t *testing.T) {
 	}
 }
 
+func TestStartSessionDelegatesToSDKSessions(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		CWD: "/tmp/ws",
+	}
+	svc := staticSessionService{session: session}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	started, err := gw.StartSession(context.Background(), StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "u",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws",
+			CWD: "/tmp/ws",
+		},
+		PreferredSessionID: "s1",
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	if started.SessionID != "s1" || started.CWD != "/tmp/ws" {
+		t.Fatalf("StartSession() = %+v", started)
+	}
+}
+
 func TestBeginTurnRejectsSecondActiveRunForSameSession(t *testing.T) {
 	t.Parallel()
 

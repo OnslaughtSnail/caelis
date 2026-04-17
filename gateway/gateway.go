@@ -53,6 +53,20 @@ func New(cfg Config) (*Gateway, error) {
 	}, nil
 }
 
+func (g *Gateway) StartSession(ctx context.Context, req StartSessionRequest) (sdksession.Session, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return g.sessions.StartSession(ctx, sdksession.StartSessionRequest{
+		AppName:            req.AppName,
+		UserID:             req.UserID,
+		Workspace:          req.Workspace,
+		PreferredSessionID: req.PreferredSessionID,
+		Title:              req.Title,
+		Metadata:           cloneMap(req.Metadata),
+	})
+}
+
 func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTurnResult, error) {
 	if ctx == nil {
 		ctx = context.Background()

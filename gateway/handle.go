@@ -30,6 +30,7 @@ type turnHandle struct {
 	mu                sync.Mutex
 	events            []EventEnvelope
 	eventsCh          chan EventEnvelope
+	eventsClosed      bool
 	closed            bool
 	finished          bool
 	runner            sdkruntime.Runner
@@ -133,7 +134,7 @@ func (h *turnHandle) Close() error {
 	}
 	h.closed = true
 	if h.finished {
-		close(h.eventsCh)
+		h.closeEventsLocked()
 	}
 	return nil
 }
@@ -224,6 +225,14 @@ func (h *turnHandle) finish() {
 		return
 	}
 	h.finished = true
+	h.closeEventsLocked()
+}
+
+func (h *turnHandle) closeEventsLocked() {
+	if h.eventsClosed {
+		return
+	}
+	h.eventsClosed = true
 	close(h.eventsCh)
 }
 

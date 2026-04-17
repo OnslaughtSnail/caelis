@@ -7,9 +7,10 @@ import (
 	"io"
 	"strings"
 
-	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
-	"github.com/OnslaughtSnail/caelis/kernel/model"
-	"github.com/OnslaughtSnail/caelis/kernel/sessionsvc"
+	appgateway "github.com/OnslaughtSnail/caelis/gateway"
+	headlessadapter "github.com/OnslaughtSnail/caelis/gateway/adapter/headless"
+	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
 type headlessOutputFormat string
@@ -23,6 +24,20 @@ type headlessRunResult struct {
 	SessionID    string `json:"session_id"`
 	Output       string `json:"output"`
 	PromptTokens int    `json:"prompt_tokens,omitempty"`
+}
+
+type headlessGateway interface {
+	StartSession(context.Context, appgateway.StartSessionRequest) (sdksession.Session, error)
+	BeginTurn(context.Context, appgateway.BeginTurnRequest) (appgateway.BeginTurnResult, error)
+}
+
+type headlessGatewayRunRequest struct {
+	AppName      string
+	UserID       string
+	SessionID    string
+	Workspace    sdksession.WorkspaceRef
+	Input        string
+	ContentParts []sdkmodel.ContentPart
 }
 
 func parseHeadlessOutputFormat(raw string) (headlessOutputFormat, error) {
@@ -66,66 +81,35 @@ func resolveSingleShotInput(
 	return "", false, nil
 }
 
-func runHeadlessOnce(ctx context.Context, svc *sessionsvc.Service, req sessionsvc.RunTurnRequest) (headlessRunResult, error) {
+func runHeadlessOnce(ctx context.Context, gw headlessGateway, req headlessGatewayRunRequest) (headlessRunResult, error) {
 	if ctx == nil {
 		return headlessRunResult{}, fmt.Errorf("cli: context is required")
 	}
-	var (
-		lastAssistant string
-		answerPartial strings.Builder
-		promptTokens  int
-	)
-	runResult, err := svc.RunTurn(ctx, req)
+	if gw == nil {
+		return headlessRunResult{}, fmt.Errorf("cli: headless gateway is required")
+	}
+	session, err := gw.StartSession(ctx, appgateway.StartSessionRequest{
+		AppName:            req.AppName,
+		UserID:             req.UserID,
+		Workspace:          req.Workspace,
+		PreferredSessionID: req.SessionID,
+	})
 	if err != nil {
 		return headlessRunResult{}, err
 	}
-	runner := runResult.Handle
-	defer runner.Close() // Close always returns nil; safe to ignore.
-	for ev, err := range runner.Events() {
-		if err != nil {
-			if toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalRequired) ||
-				toolexec.IsErrorCode(err, toolexec.ErrorCodeApprovalAborted) {
-				return headlessRunResult{}, fmt.Errorf("headless mode cannot handle interactive approval prompts: %w", err)
-			}
-			return headlessRunResult{}, err
-		}
-		if ev == nil {
-			continue
-		}
-		if ev.Meta != nil {
-			if usageRaw, ok := ev.Meta["usage"]; ok {
-				if usageMap, ok := usageRaw.(map[string]any); ok {
-					prompt := toInt(usageMap["prompt_tokens"])
-					if prompt > 0 {
-						promptTokens = prompt
-					}
-				}
-			}
-		}
-		msg := ev.Message
-		if msg.Role != model.RoleAssistant {
-			continue
-		}
-		if eventIsPartial(ev) {
-			if eventChannel(ev) == "answer" {
-				answerPartial.WriteString(msg.TextContent())
-			}
-			continue
-		}
-		text := strings.TrimSpace(msg.TextContent())
-		if text == "" {
-			continue
-		}
-		lastAssistant = text
-		answerPartial.Reset()
-	}
-	if strings.TrimSpace(lastAssistant) == "" {
-		lastAssistant = strings.TrimSpace(answerPartial.String())
+	result, err := headlessadapter.RunOnce(ctx, gw, appgateway.BeginTurnRequest{
+		SessionRef:   session.SessionRef,
+		Input:        req.Input,
+		ContentParts: append([]sdkmodel.ContentPart(nil), req.ContentParts...),
+		Surface:      "headless",
+	}, headlessadapter.Options{})
+	if err != nil {
+		return headlessRunResult{}, err
 	}
 	return headlessRunResult{
-		SessionID:    strings.TrimSpace(runResult.Session.SessionID),
-		Output:       strings.TrimSpace(lastAssistant),
-		PromptTokens: promptTokens,
+		SessionID:    strings.TrimSpace(result.Session.SessionID),
+		Output:       strings.TrimSpace(result.Output),
+		PromptTokens: result.PromptTokens,
 	}, nil
 }
 
