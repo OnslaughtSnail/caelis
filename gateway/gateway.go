@@ -24,6 +24,7 @@ type Config struct {
 type Gateway struct {
 	sessions sdksession.Service
 	runtime  sdkruntime.Runtime
+	control  sdkruntime.ControlPlane
 	resolver TurnResolver
 	clock    func() time.Time
 
@@ -54,11 +55,19 @@ func New(cfg Config) (*Gateway, error) {
 	return &Gateway{
 		sessions: cfg.Sessions,
 		runtime:  cfg.Runtime,
+		control:  resolveControlPlane(cfg.Runtime),
 		resolver: cfg.Resolver,
 		clock:    cfg.Clock,
 		active:   map[string]*turnHandle{},
 		bindings: map[string]sessionBinding{},
 	}, nil
+}
+
+func resolveControlPlane(runtime sdkruntime.Runtime) sdkruntime.ControlPlane {
+	if control, ok := runtime.(sdkruntime.ControlPlane); ok {
+		return control
+	}
+	return nil
 }
 
 func (g *Gateway) StartSession(ctx context.Context, req StartSessionRequest) (sdksession.Session, error) {
@@ -211,6 +220,55 @@ func (g *Gateway) Interrupt(ctx context.Context, req InterruptRequest) error {
 		}
 	}
 	return nil
+}
+
+func (g *Gateway) HandoffController(ctx context.Context, req HandoffControllerRequest) (sdksession.Session, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if g.control == nil {
+		return sdksession.Session{}, &Error{
+			Kind:        KindUnsupported,
+			Code:        CodeControlPlaneUnsupported,
+			UserVisible: true,
+			Message:     "gateway: control plane is not available",
+		}
+	}
+	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	session, err := g.control.HandoffController(ctx, sdkruntime.HandoffControllerRequest{
+		SessionRef: ref,
+		Kind:       req.Kind,
+		Agent:      strings.TrimSpace(req.Agent),
+		Source:     strings.TrimSpace(req.Source),
+		Reason:     strings.TrimSpace(req.Reason),
+	})
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	g.bind(req.BindingKey, session.SessionRef)
+	return session, nil
+}
+
+func (g *Gateway) ControlPlaneState(ctx context.Context, req ControlPlaneStateRequest) (ControlPlaneState, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
+	if err != nil {
+		return ControlPlaneState{}, err
+	}
+	session, err := g.sessions.Session(ctx, ref)
+	if err != nil {
+		return ControlPlaneState{}, wrapSessionError(err)
+	}
+	runState, err := g.runtime.RunState(ctx, ref)
+	if err != nil && !errors.Is(err, sdksession.ErrSessionNotFound) {
+		return ControlPlaneState{}, err
+	}
+	return buildControlPlaneState(session, runState), nil
 }
 
 func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTurnResult, error) {
@@ -455,13 +513,17 @@ func resolveSessionSummary(sessions []sdksession.SessionSummary, target string) 
 }
 
 func (g *Gateway) interruptTarget(req InterruptRequest) (sdksession.SessionRef, error) {
-	if strings.TrimSpace(req.SessionRef.SessionID) != "" {
-		return req.SessionRef, nil
+	return g.sessionTarget(req.SessionRef, req.BindingKey)
+}
+
+func (g *Gateway) sessionTarget(ref sdksession.SessionRef, bindingKey string) (sdksession.SessionRef, error) {
+	if strings.TrimSpace(ref.SessionID) != "" {
+		return ref, nil
 	}
-	if current, ok := g.CurrentSession(req.BindingKey); ok {
+	if current, ok := g.CurrentSession(bindingKey); ok {
 		return current, nil
 	}
-	if strings.TrimSpace(req.BindingKey) != "" {
+	if strings.TrimSpace(bindingKey) != "" {
 		return sdksession.SessionRef{}, &Error{
 			Kind:        KindNotFound,
 			Code:        CodeBindingNotFound,

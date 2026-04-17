@@ -71,6 +71,50 @@ type InterruptRequest struct {
 	Reason     string
 }
 
+type HandoffControllerRequest struct {
+	SessionRef sdksession.SessionRef
+	BindingKey string
+	Kind       sdksession.ControllerKind
+	Agent      string
+	Source     string
+	Reason     string
+}
+
+type ControlPlaneStateRequest struct {
+	SessionRef sdksession.SessionRef
+	BindingKey string
+}
+
+type ControllerState struct {
+	Kind         sdksession.ControllerKind `json:"kind,omitempty"`
+	ControllerID string                    `json:"controller_id,omitempty"`
+	Label        string                    `json:"label,omitempty"`
+	EpochID      string                    `json:"epoch_id,omitempty"`
+	AttachedAt   time.Time                 `json:"attached_at,omitempty"`
+	Source       string                    `json:"source,omitempty"`
+}
+
+type ParticipantState struct {
+	ID            string                     `json:"id,omitempty"`
+	Kind          sdksession.ParticipantKind `json:"kind,omitempty"`
+	Role          sdksession.ParticipantRole `json:"role,omitempty"`
+	Label         string                     `json:"label,omitempty"`
+	SessionID     string                     `json:"session_id,omitempty"`
+	Source        string                     `json:"source,omitempty"`
+	ParentTurnID  string                     `json:"parent_turn_id,omitempty"`
+	DelegationID  string                     `json:"delegation_id,omitempty"`
+	AttachedAt    time.Time                  `json:"attached_at,omitempty"`
+	ControllerRef string                     `json:"controller_ref,omitempty"`
+}
+
+type ControlPlaneState struct {
+	SessionRef    sdksession.SessionRef `json:"session_ref"`
+	Controller    ControllerState       `json:"controller"`
+	Participants  []ParticipantState    `json:"participants,omitempty"`
+	RunState      sdkruntime.RunState   `json:"run_state,omitempty"`
+	HasActiveTurn bool                  `json:"has_active_turn,omitempty"`
+}
+
 type ResolvedTurn struct {
 	RunRequest sdkruntime.RunRequest
 }

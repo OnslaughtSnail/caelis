@@ -11,6 +11,8 @@ boundary for:
 - session lifecycle through `gateway`
 - turn orchestration through `gateway`
 - local headless and minimal local interactive entry through the new `cmd/cli`
+- minimal control-plane state and ACP main controller handoff/adoption through
+  the new `gateway`
 
 This document now defines:
 
@@ -59,6 +61,8 @@ In scope:
 - land one app-owned composition root on top of the new `sdk`
 - land local headless and minimal local interactive adoption on the new gateway
 - expose canonical gateway events for local adapters
+- land minimal control-plane state and ACP main controller handoff on the new
+  gateway
 - reserve extension points for daemon mode and remote channels
 
 Out of scope:
@@ -91,8 +95,9 @@ following are true:
 
 The following work remains intentionally deferred after local acceptance:
 
-- ACP main adoption on the Unified Gateway
-- canonical control-plane state for epoch / handoff continuity
+- full ACP adapter and surface adoption beyond minimal controller handoff
+- richer canonical control-plane state for epoch / handoff continuity and ACP
+  projection recovery
 - durable reconnect and resumable streaming across process restart
 - richer channel binding with actor identity, ownership, expiry, and rebind
   policy

@@ -83,6 +83,7 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 		Sessions:          sessions,
 		AgentFactory:      chat.Factory{},
 		DefaultPolicyMode: policyMode(cfg.PermissionMode),
+		Assembly:          cfg.Assembly,
 	})
 	if err != nil {
 		return nil, err

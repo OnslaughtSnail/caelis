@@ -378,6 +378,96 @@ func TestInterruptCancelsActiveRunByBinding(t *testing.T) {
 	}
 }
 
+func TestHandoffControllerDelegatesToRuntimeControlPlaneAndUpdatesBinding(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		Controller: sdksession.ControllerBinding{
+			Kind:         sdksession.ControllerKindACP,
+			ControllerID: "acp-controller",
+			EpochID:      "epoch-1",
+		},
+	}
+	rt := &controlPlaneRuntime{
+		session:     session,
+		runState:    sdkruntime.RunState{Status: sdkruntime.RunLifecycleStatusRunning, ActiveRunID: "run-1"},
+		handoffResp: session,
+	}
+	svc := &recordingSessionService{sessionResult: session, startSessionResult: session}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  rt,
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := gw.StartSession(context.Background(), StartSessionRequest{
+		AppName:    "caelis",
+		UserID:     "u",
+		Workspace:  sdksession.WorkspaceRef{Key: "ws", CWD: "/tmp/ws"},
+		BindingKey: "surface-acp",
+	}); err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	updated, err := gw.HandoffController(context.Background(), HandoffControllerRequest{
+		BindingKey: "surface-acp",
+		Kind:       sdksession.ControllerKindACP,
+		Agent:      "codex",
+		Source:     "user",
+		Reason:     "delegate main control",
+	})
+	if err != nil {
+		t.Fatalf("HandoffController() error = %v", err)
+	}
+	if updated.Controller.Kind != sdksession.ControllerKindACP || rt.handoffReq.Agent != "codex" || rt.handoffReq.SessionRef.SessionID != "s1" {
+		t.Fatalf("updated=%+v handoffReq=%+v", updated, rt.handoffReq)
+	}
+
+	state, err := gw.ControlPlaneState(context.Background(), ControlPlaneStateRequest{BindingKey: "surface-acp"})
+	if err != nil {
+		t.Fatalf("ControlPlaneState() error = %v", err)
+	}
+	if state.Controller.Kind != sdksession.ControllerKindACP || state.Controller.EpochID != "epoch-1" || !state.HasActiveTurn {
+		t.Fatalf("control state = %+v", state)
+	}
+}
+
+func TestHandoffControllerRejectsMissingControlPlane(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	_, err = gw.HandoffController(context.Background(), HandoffControllerRequest{
+		SessionRef: session.SessionRef,
+		Kind:       sdksession.ControllerKindACP,
+		Agent:      "codex",
+	})
+	if err == nil {
+		t.Fatal("HandoffController() error = nil, want unsupported")
+	}
+	var gwErr *Error
+	if !As(err, &gwErr) || gwErr.Code != CodeControlPlaneUnsupported {
+		t.Fatalf("HandoffController() error = %v", err)
+	}
+}
+
 func TestBeginTurnRejectsSecondActiveRunForSameSession(t *testing.T) {
 	t.Parallel()
 
@@ -633,6 +723,34 @@ func (r *cancellableRuntime) Run(ctx context.Context, req sdkruntime.RunRequest)
 
 func (r *cancellableRuntime) RunState(context.Context, sdksession.SessionRef) (sdkruntime.RunState, error) {
 	return sdkruntime.RunState{}, nil
+}
+
+type controlPlaneRuntime struct {
+	session     sdksession.Session
+	runState    sdkruntime.RunState
+	handoffReq  sdkruntime.HandoffControllerRequest
+	handoffResp sdksession.Session
+}
+
+func (r *controlPlaneRuntime) Run(context.Context, sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
+	return sdkruntime.RunResult{Session: r.session}, nil
+}
+
+func (r *controlPlaneRuntime) RunState(context.Context, sdksession.SessionRef) (sdkruntime.RunState, error) {
+	return r.runState, nil
+}
+
+func (r *controlPlaneRuntime) HandoffController(_ context.Context, req sdkruntime.HandoffControllerRequest) (sdksession.Session, error) {
+	r.handoffReq = req
+	return r.handoffResp, nil
+}
+
+func (r *controlPlaneRuntime) AttachACPParticipant(context.Context, sdkruntime.AttachACPParticipantRequest) (sdksession.Session, error) {
+	return sdksession.Session{}, nil
+}
+
+func (r *controlPlaneRuntime) DetachACPParticipant(context.Context, sdkruntime.DetachACPParticipantRequest) (sdksession.Session, error) {
+	return sdksession.Session{}, nil
 }
 
 type staticSessionService struct {
