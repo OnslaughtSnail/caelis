@@ -5,7 +5,7 @@ import (
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
-func buildControlPlaneState(session sdksession.Session, runState sdkruntime.RunState) ControlPlaneState {
+func buildControlPlaneState(session sdksession.Session, runState sdkruntime.RunState, events []*sdksession.Event) ControlPlaneState {
 	state := ControlPlaneState{
 		SessionRef: session.SessionRef,
 		Controller: ControllerState{
@@ -18,6 +18,7 @@ func buildControlPlaneState(session sdksession.Session, runState sdkruntime.RunS
 		},
 		RunState: runState,
 	}
+	state.Continuity = buildContinuityState(session, events)
 	if runState.ActiveRunID != "" || runState.WaitingApproval || runState.Status == sdkruntime.RunLifecycleStatusRunning {
 		state.HasActiveTurn = true
 	}

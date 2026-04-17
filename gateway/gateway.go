@@ -35,8 +35,18 @@ type Gateway struct {
 }
 
 type sessionBinding struct {
-	current sdksession.SessionRef
-	boundAt time.Time
+	current         sdksession.SessionRef
+	surface         string
+	actorKind       string
+	actorID         string
+	owner           string
+	boundAt         time.Time
+	updatedAt       time.Time
+	expiresAt       time.Time
+	lastHandleID    string
+	lastRunID       string
+	lastTurnID      string
+	lastEventCursor string
 }
 
 func New(cfg Config) (*Gateway, error) {
@@ -85,8 +95,23 @@ func (g *Gateway) StartSession(ctx context.Context, req StartSessionRequest) (sd
 	if err != nil {
 		return sdksession.Session{}, wrapSessionError(err)
 	}
-	g.bind(req.BindingKey, session.SessionRef)
+	g.bind(req.BindingKey, session.SessionRef, req.Binding)
 	return session, nil
+}
+
+func (g *Gateway) BindSession(ctx context.Context, req BindSessionRequest) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ref, err := g.sessionTarget(req.SessionRef, "")
+	if err != nil {
+		return err
+	}
+	if _, err := g.sessions.Session(ctx, ref); err != nil {
+		return wrapSessionError(err)
+	}
+	g.bind(req.BindingKey, ref, req.Binding)
+	return nil
 }
 
 func (g *Gateway) ForkSession(ctx context.Context, req ForkSessionRequest) (sdksession.Session, error) {
@@ -128,7 +153,7 @@ func (g *Gateway) ForkSession(ctx context.Context, req ForkSessionRequest) (sdks
 	if err != nil {
 		return sdksession.Session{}, wrapSessionError(err)
 	}
-	g.bind(req.BindingKey, started.SessionRef)
+	g.bind(req.BindingKey, started.SessionRef, req.Binding)
 	return started, nil
 }
 
@@ -144,7 +169,7 @@ func (g *Gateway) LoadSession(ctx context.Context, req LoadSessionRequest) (sdks
 	if err != nil {
 		return sdksession.LoadedSession{}, wrapSessionError(err)
 	}
-	g.bind(req.BindingKey, loaded.Session.SessionRef)
+	g.bind(req.BindingKey, loaded.Session.SessionRef, req.Binding)
 	return loaded, nil
 }
 
@@ -174,6 +199,7 @@ func (g *Gateway) ResumeSession(ctx context.Context, req ResumeSessionRequest) (
 		Limit:            limit,
 		IncludeTransient: req.IncludeTransient,
 		BindingKey:       req.BindingKey,
+		Binding:          req.Binding,
 	})
 }
 
@@ -248,7 +274,7 @@ func (g *Gateway) HandoffController(ctx context.Context, req HandoffControllerRe
 	if err != nil {
 		return sdksession.Session{}, err
 	}
-	g.bind(req.BindingKey, session.SessionRef)
+	g.bind(req.BindingKey, session.SessionRef, BindingDescriptor{})
 	return session, nil
 }
 
@@ -264,11 +290,98 @@ func (g *Gateway) ControlPlaneState(ctx context.Context, req ControlPlaneStateRe
 	if err != nil {
 		return ControlPlaneState{}, wrapSessionError(err)
 	}
+	events, err := g.sessions.Events(ctx, sdksession.EventsRequest{
+		SessionRef: ref,
+	})
+	if err != nil {
+		return ControlPlaneState{}, wrapSessionError(err)
+	}
 	runState, err := g.runtime.RunState(ctx, ref)
 	if err != nil && !errors.Is(err, sdksession.ErrSessionNotFound) {
 		return ControlPlaneState{}, err
 	}
-	return buildControlPlaneState(session, runState), nil
+	return buildControlPlaneState(session, runState, events), nil
+}
+
+func (g *Gateway) ReplayEvents(ctx context.Context, req ReplayEventsRequest) (ReplayEventsResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
+	if err != nil {
+		return ReplayEventsResult{}, err
+	}
+	session, err := g.sessions.Session(ctx, ref)
+	if err != nil {
+		return ReplayEventsResult{}, wrapSessionError(err)
+	}
+	events, err := g.sessions.Events(ctx, sdksession.EventsRequest{
+		SessionRef:       ref,
+		Limit:            0,
+		IncludeTransient: req.IncludeTransient,
+	})
+	if err != nil {
+		return ReplayEventsResult{}, wrapSessionError(err)
+	}
+	runState, err := g.runtime.RunState(ctx, ref)
+	if err != nil && !errors.Is(err, sdksession.ErrSessionNotFound) {
+		return ReplayEventsResult{}, err
+	}
+	projected := projectSessionEvents(ref, events)
+	projected = replayAfterCursor(projected, req.Cursor, req.Limit)
+	out := ReplayEventsResult{
+		SessionRef:    ref,
+		Events:        projected,
+		NextCursor:    lastCursor(projected),
+		Durable:       true,
+		HasLiveHandle: g.hasActiveHandle(ref.SessionID),
+		ControlPlane:  buildControlPlaneState(session, runState, events),
+	}
+	return out, nil
+}
+
+func (g *Gateway) LookupBinding(req BindingStateRequest) (BindingState, error) {
+	if strings.TrimSpace(req.BindingKey) == "" {
+		return BindingState{}, &Error{
+			Kind:        KindValidation,
+			Code:        CodeInvalidRequest,
+			UserVisible: true,
+			Message:     "gateway: binding key is required",
+		}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	binding, ok := g.bindingLocked(strings.TrimSpace(req.BindingKey))
+	if !ok {
+		return BindingState{}, &Error{
+			Kind:        KindNotFound,
+			Code:        CodeBindingNotFound,
+			UserVisible: true,
+			Message:     "gateway: binding not found",
+		}
+	}
+	state := BindingState{
+		BindingKey:      strings.TrimSpace(req.BindingKey),
+		SessionRef:      binding.current,
+		Surface:         binding.surface,
+		ActorKind:       binding.actorKind,
+		ActorID:         binding.actorID,
+		Owner:           binding.owner,
+		BoundAt:         binding.boundAt,
+		UpdatedAt:       binding.updatedAt,
+		ExpiresAt:       binding.expiresAt,
+		LastHandleID:    binding.lastHandleID,
+		LastRunID:       binding.lastRunID,
+		LastTurnID:      binding.lastTurnID,
+		LastEventCursor: binding.lastEventCursor,
+	}
+	if active, ok := g.active[binding.current.SessionID]; ok && active != nil {
+		state.HasActiveTurn = true
+		state.LastHandleID = active.HandleID()
+		state.LastRunID = active.RunID()
+		state.LastTurnID = active.TurnID()
+	}
+	return state, nil
 }
 
 func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTurnResult, error) {
@@ -310,6 +423,7 @@ func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTur
 		},
 	})
 	g.active[session.SessionID] = handle
+	g.noteActiveHandleLocked(session.SessionID, handle)
 	g.mu.Unlock()
 
 	go g.runTurn(runCtx, session, req, resolved, handle)
@@ -391,6 +505,7 @@ func (g *Gateway) runTurn(
 			return
 		}
 		handle.publishSessionEvent(event)
+		g.noteSessionCursor(session.SessionID, event.ID)
 	}
 }
 
@@ -410,7 +525,7 @@ func (g *Gateway) CurrentSession(bindingKey string) (sdksession.SessionRef, bool
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	binding, ok := g.bindings[strings.TrimSpace(bindingKey)]
+	binding, ok := g.bindingLocked(strings.TrimSpace(bindingKey))
 	if !ok || strings.TrimSpace(binding.current.SessionID) == "" {
 		return sdksession.SessionRef{}, false
 	}
@@ -426,16 +541,31 @@ func (g *Gateway) ClearBinding(bindingKey string) {
 	delete(g.bindings, strings.TrimSpace(bindingKey))
 }
 
-func (g *Gateway) bind(bindingKey string, ref sdksession.SessionRef) {
+func (g *Gateway) bind(bindingKey string, ref sdksession.SessionRef, desc BindingDescriptor) {
 	if g == nil || strings.TrimSpace(bindingKey) == "" || strings.TrimSpace(ref.SessionID) == "" {
 		return
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.bindings[strings.TrimSpace(bindingKey)] = sessionBinding{
-		current: ref,
-		boundAt: g.clock(),
+	key := strings.TrimSpace(bindingKey)
+	now := g.clock()
+	current, ok := g.bindingLocked(key)
+	if !ok || current.current.SessionID != ref.SessionID {
+		current = sessionBinding{
+			current: ref,
+			boundAt: now,
+		}
 	}
+	current.current = ref
+	current.updatedAt = now
+	current.surface = firstNonEmpty(strings.TrimSpace(desc.Surface), current.surface, key)
+	current.actorKind = firstNonEmpty(strings.TrimSpace(desc.ActorKind), current.actorKind)
+	current.actorID = firstNonEmpty(strings.TrimSpace(desc.ActorID), current.actorID)
+	current.owner = firstNonEmpty(strings.TrimSpace(desc.Owner), current.owner)
+	if !desc.ExpiresAt.IsZero() {
+		current.expiresAt = desc.ExpiresAt
+	}
+	g.bindings[key] = current
 }
 
 func (g *Gateway) resolveResumeTarget(req ResumeSessionRequest, sessions []sdksession.SessionSummary) (sdksession.SessionSummary, error) {
@@ -537,6 +667,55 @@ func (g *Gateway) sessionTarget(ref sdksession.SessionRef, bindingKey string) (s
 		UserVisible: true,
 		Message:     "gateway: session ref or binding key is required",
 	}
+}
+
+func (g *Gateway) hasActiveHandle(sessionID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	handle, ok := g.active[strings.TrimSpace(sessionID)]
+	return ok && handle != nil
+}
+
+func (g *Gateway) noteActiveHandleLocked(sessionID string, handle *turnHandle) {
+	if handle == nil {
+		return
+	}
+	for key, binding := range g.bindings {
+		if binding.current.SessionID != sessionID {
+			continue
+		}
+		binding.lastHandleID = handle.HandleID()
+		binding.lastRunID = handle.RunID()
+		binding.lastTurnID = handle.TurnID()
+		g.bindings[key] = binding
+	}
+}
+
+func (g *Gateway) noteSessionCursor(sessionID string, cursor string) {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(cursor) == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for key, binding := range g.bindings {
+		if binding.current.SessionID != sessionID {
+			continue
+		}
+		binding.lastEventCursor = strings.TrimSpace(cursor)
+		g.bindings[key] = binding
+	}
+}
+
+func (g *Gateway) bindingLocked(bindingKey string) (sessionBinding, bool) {
+	binding, ok := g.bindings[strings.TrimSpace(bindingKey)]
+	if !ok {
+		return sessionBinding{}, false
+	}
+	if !binding.expiresAt.IsZero() && !binding.expiresAt.After(g.clock()) {
+		delete(g.bindings, strings.TrimSpace(bindingKey))
+		return sessionBinding{}, false
+	}
+	return binding, true
 }
 
 func wrapSessionError(err error) error {

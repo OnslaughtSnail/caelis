@@ -13,6 +13,8 @@ boundary for:
 - local headless and minimal local interactive entry through the new `cmd/cli`
 - minimal control-plane state and ACP main controller handoff/adoption through
   the new `gateway`
+- session-backed replay/reconnect, continuity checkpoints, and richer binding
+  state through the new `gateway`
 
 This document now defines:
 
@@ -63,13 +65,14 @@ In scope:
 - expose canonical gateway events for local adapters
 - land minimal control-plane state and ACP main controller handoff on the new
   gateway
+- land session-backed replay/reconnect plus richer binding metadata for local
+  surfaces
 - reserve extension points for daemon mode and remote channels
 
 Out of scope:
 
 - implementing Telegram / Discord / webhook adapters
 - implementing daemon registration or remote transport
-- implementing ACP main adoption on the new gateway
 - implementing durable reconnect across process restart
 - implementing channel-scoped auth, pairing, or remote actor policy
 - copying OpenClaw feature-for-feature
@@ -86,6 +89,10 @@ following are true:
   gateway turn contract
 - adapters consume canonical gateway events rather than parsing raw SDK runtime
   behavior directly
+- session-backed replay and continuity checkpoints are available without
+  depending on live in-memory handles
+- binding state exposes session identity, ownership metadata, and expiry
+  behavior through gateway-owned contract
 - session lifecycle, turn lifecycle, approval bridging, interrupt, and current
   local resume/binding flows are covered by tests
 - remaining ACP / remote / daemon work is explicitly deferred rather than
@@ -95,14 +102,11 @@ following are true:
 
 The following work remains intentionally deferred after local acceptance:
 
-- full ACP adapter and surface adoption beyond minimal controller handoff
-- richer canonical control-plane state for epoch / handoff continuity and ACP
-  projection recovery
-- durable reconnect and resumable streaming across process restart
-- richer channel binding with actor identity, ownership, expiry, and rebind
-  policy
+- full ACP adapter and richer ACP surface adoption beyond minimal controller
+  handoff and local acceptance coverage
 - daemon host lifecycle
 - remote transport and remote channel adapters
+- channel-scoped auth, pairing, and remote actor policy
 
 ## Architectural Position
 
@@ -177,7 +181,7 @@ That protocol should support at least:
 
 - controller kind and controller id
 - epoch and handoff state
-- projection state required for ACP continuity
+- projection and continuity checkpoints required for ACP recovery
 - future per-surface or per-channel metadata
 
 ### 5. Output Surface
@@ -194,6 +198,30 @@ That protocol should support at least:
 - approver / authorization hooks
 - surface-level capability filtering
 - future remote-actor policy checks
+
+## Current Accepted Local Contract
+
+The accepted local gateway contract now includes:
+
+- session lifecycle: `start`, `load`, `resume`, `fork`, `list`
+- explicit binding lifecycle: bind one session to one surface-owned key and
+  inspect binding state through the gateway
+- turn lifecycle: `begin`, `submit`, `interrupt`, `close`
+- live handle replay through `EventsAfter(cursor)`
+- durable session-backed replay through gateway replay APIs built from
+  persisted session events
+- minimal control-plane state with controller binding, participant bindings,
+  run state, and continuity checkpoints
+
+Continuity checkpoints currently mean:
+
+- latest persisted session cursor
+- latest cursor in the active controller epoch
+- latest cursor per participant
+- latest ACP-origin cursor and event type when ACP-origin events exist
+
+This is sufficient for local recovery and adapter continuity without leaking
+raw SDK internals. It is not yet a full remote transport protocol.
 
 ## Turn Handle Contract
 

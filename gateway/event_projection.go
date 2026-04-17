@@ -7,6 +7,61 @@ import (
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
+func projectSessionEvents(ref sdksession.SessionRef, events []*sdksession.Event) []EventEnvelope {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]EventEnvelope, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		out = append(out, EventEnvelope{
+			Cursor: event.ID,
+			Event: Event{
+				Kind:         sessionEventKind(event),
+				TurnID:       turnIDFromSessionEvent(event),
+				SessionRef:   ref,
+				SessionEvent: event,
+				Usage:        usageSnapshotFromSessionEvent(event),
+			},
+		})
+	}
+	return out
+}
+
+func replayAfterCursor(events []EventEnvelope, cursor string, limit int) []EventEnvelope {
+	if len(events) == 0 {
+		return nil
+	}
+	cursor = strings.TrimSpace(cursor)
+	start := 0
+	if cursor != "" {
+		start = len(events)
+		for i, env := range events {
+			if env.Cursor == cursor {
+				start = i + 1
+				break
+			}
+		}
+		if start == len(events) {
+			start = 0
+		}
+	}
+	out := events[start:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func turnIDFromSessionEvent(event *sdksession.Event) string {
+	if event == nil || event.Scope == nil {
+		return ""
+	}
+	return strings.TrimSpace(event.Scope.TurnID)
+}
+
 func sessionEventKind(event *sdksession.Event) EventKind {
 	switch sdksession.EventTypeOf(event) {
 	case sdksession.EventTypeUser:

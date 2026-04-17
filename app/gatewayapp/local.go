@@ -141,6 +141,10 @@ func (s *Stack) StartSession(ctx context.Context, preferredSessionID string, bin
 		Workspace:          s.Workspace,
 		PreferredSessionID: strings.TrimSpace(preferredSessionID),
 		BindingKey:         strings.TrimSpace(bindingKey),
+		Binding: appgateway.BindingDescriptor{
+			Surface: strings.TrimSpace(bindingKey),
+			Owner:   s.AppName,
+		},
 	})
 }
 

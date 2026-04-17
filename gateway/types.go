@@ -29,6 +29,7 @@ type StartSessionRequest struct {
 	Title              string
 	Metadata           map[string]any
 	BindingKey         string
+	Binding            BindingDescriptor
 }
 
 type LoadSessionRequest struct {
@@ -36,6 +37,7 @@ type LoadSessionRequest struct {
 	Limit            int
 	IncludeTransient bool
 	BindingKey       string
+	Binding          BindingDescriptor
 }
 
 type ForkSessionRequest struct {
@@ -44,6 +46,7 @@ type ForkSessionRequest struct {
 	Title              string
 	Metadata           map[string]any
 	BindingKey         string
+	Binding            BindingDescriptor
 }
 
 type ResumeSessionRequest struct {
@@ -55,6 +58,7 @@ type ResumeSessionRequest struct {
 	Limit            int
 	IncludeTransient bool
 	BindingKey       string
+	Binding          BindingDescriptor
 }
 
 type ListSessionsRequest struct {
@@ -71,6 +75,28 @@ type InterruptRequest struct {
 	Reason     string
 }
 
+type BindingDescriptor struct {
+	Surface   string    `json:"surface,omitempty"`
+	ActorKind string    `json:"actor_kind,omitempty"`
+	ActorID   string    `json:"actor_id,omitempty"`
+	Owner     string    `json:"owner,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+type BindSessionRequest struct {
+	SessionRef sdksession.SessionRef `json:"session_ref"`
+	BindingKey string                `json:"binding_key,omitempty"`
+	Binding    BindingDescriptor     `json:"binding,omitempty"`
+}
+
+type ReplayEventsRequest struct {
+	SessionRef       sdksession.SessionRef `json:"session_ref"`
+	BindingKey       string                `json:"binding_key,omitempty"`
+	Cursor           string                `json:"cursor,omitempty"`
+	Limit            int                   `json:"limit,omitempty"`
+	IncludeTransient bool                  `json:"include_transient,omitempty"`
+}
+
 type HandoffControllerRequest struct {
 	SessionRef sdksession.SessionRef
 	BindingKey string
@@ -83,6 +109,10 @@ type HandoffControllerRequest struct {
 type ControlPlaneStateRequest struct {
 	SessionRef sdksession.SessionRef
 	BindingKey string
+}
+
+type BindingStateRequest struct {
+	BindingKey string `json:"binding_key,omitempty"`
 }
 
 type ControllerState struct {
@@ -107,12 +137,52 @@ type ParticipantState struct {
 	ControllerRef string                     `json:"controller_ref,omitempty"`
 }
 
+type ACPProjectionState struct {
+	Cursor    string `json:"cursor,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	EventType string `json:"event_type,omitempty"`
+}
+
+type ContinuityState struct {
+	LastEventCursor    string             `json:"last_event_cursor,omitempty"`
+	ControllerCursor   string             `json:"controller_cursor,omitempty"`
+	ParticipantCursors map[string]string  `json:"participant_cursors,omitempty"`
+	ACPProjection      ACPProjectionState `json:"acp_projection,omitempty"`
+}
+
 type ControlPlaneState struct {
 	SessionRef    sdksession.SessionRef `json:"session_ref"`
 	Controller    ControllerState       `json:"controller"`
 	Participants  []ParticipantState    `json:"participants,omitempty"`
+	Continuity    ContinuityState       `json:"continuity,omitempty"`
 	RunState      sdkruntime.RunState   `json:"run_state,omitempty"`
 	HasActiveTurn bool                  `json:"has_active_turn,omitempty"`
+}
+
+type BindingState struct {
+	BindingKey      string                `json:"binding_key,omitempty"`
+	SessionRef      sdksession.SessionRef `json:"session_ref"`
+	Surface         string                `json:"surface,omitempty"`
+	ActorKind       string                `json:"actor_kind,omitempty"`
+	ActorID         string                `json:"actor_id,omitempty"`
+	Owner           string                `json:"owner,omitempty"`
+	BoundAt         time.Time             `json:"bound_at,omitempty"`
+	UpdatedAt       time.Time             `json:"updated_at,omitempty"`
+	ExpiresAt       time.Time             `json:"expires_at,omitempty"`
+	LastHandleID    string                `json:"last_handle_id,omitempty"`
+	LastRunID       string                `json:"last_run_id,omitempty"`
+	LastTurnID      string                `json:"last_turn_id,omitempty"`
+	LastEventCursor string                `json:"last_event_cursor,omitempty"`
+	HasActiveTurn   bool                  `json:"has_active_turn,omitempty"`
+}
+
+type ReplayEventsResult struct {
+	SessionRef    sdksession.SessionRef `json:"session_ref"`
+	Events        []EventEnvelope       `json:"events,omitempty"`
+	NextCursor    string                `json:"next_cursor,omitempty"`
+	Durable       bool                  `json:"durable,omitempty"`
+	HasLiveHandle bool                  `json:"has_live_handle,omitempty"`
+	ControlPlane  ControlPlaneState     `json:"control_plane"`
 }
 
 type ResolvedTurn struct {

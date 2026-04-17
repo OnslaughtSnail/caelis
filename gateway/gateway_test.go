@@ -390,13 +390,40 @@ func TestHandoffControllerDelegatesToRuntimeControlPlaneAndUpdatesBinding(t *tes
 			ControllerID: "acp-controller",
 			EpochID:      "epoch-1",
 		},
+		Participants: []sdksession.ParticipantBinding{{
+			ID:            "p-1",
+			Kind:          sdksession.ParticipantKindACP,
+			Role:          sdksession.ParticipantRoleDelegated,
+			ControllerRef: "epoch-1",
+		}},
 	}
 	rt := &controlPlaneRuntime{
 		session:     session,
 		runState:    sdkruntime.RunState{Status: sdkruntime.RunLifecycleStatusRunning, ActiveRunID: "run-1"},
 		handoffResp: session,
 	}
-	svc := &recordingSessionService{sessionResult: session, startSessionResult: session}
+	svc := &recordingSessionService{
+		sessionResult:      session,
+		startSessionResult: session,
+		eventsResult: []*sdksession.Event{
+			{
+				ID:   "evt-1",
+				Type: sdksession.EventTypeHandoff,
+				Scope: &sdksession.EventScope{
+					Controller: sdksession.ControllerRef{Kind: sdksession.ControllerKindACP, ID: "acp-controller", EpochID: "epoch-1"},
+					ACP:        sdksession.ACPRef{SessionID: "acp-main", EventType: "agent_message_chunk"},
+				},
+			},
+			{
+				ID:   "evt-2",
+				Type: sdksession.EventTypeParticipant,
+				Scope: &sdksession.EventScope{
+					Controller:  sdksession.ControllerRef{Kind: sdksession.ControllerKindACP, ID: "acp-controller", EpochID: "epoch-1"},
+					Participant: sdksession.ParticipantRef{ID: "p-1", Kind: sdksession.ParticipantKindACP},
+				},
+			},
+		},
+	}
 	gw, err := New(Config{
 		Sessions: svc,
 		Runtime:  rt,
@@ -434,6 +461,15 @@ func TestHandoffControllerDelegatesToRuntimeControlPlaneAndUpdatesBinding(t *tes
 	}
 	if state.Controller.Kind != sdksession.ControllerKindACP || state.Controller.EpochID != "epoch-1" || !state.HasActiveTurn {
 		t.Fatalf("control state = %+v", state)
+	}
+	if state.Continuity.LastEventCursor != "evt-2" || state.Continuity.ControllerCursor != "evt-2" {
+		t.Fatalf("control continuity = %+v", state.Continuity)
+	}
+	if got := state.Continuity.ParticipantCursors["p-1"]; got != "evt-2" {
+		t.Fatalf("participant cursors = %+v", state.Continuity.ParticipantCursors)
+	}
+	if state.Continuity.ACPProjection.Cursor != "evt-1" || state.Continuity.ACPProjection.SessionID != "acp-main" {
+		t.Fatalf("acp projection = %+v", state.Continuity.ACPProjection)
 	}
 }
 
@@ -635,6 +671,180 @@ func TestBeginTurnBridgesApprovalRequestsIntoHandleEvents(t *testing.T) {
 	}
 }
 
+func TestBindSessionStoresBindingMetadataAndExpires(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(100, 0)
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+		Clock: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if err := gw.BindSession(context.Background(), BindSessionRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: "telegram:user-1",
+		Binding: BindingDescriptor{
+			Surface:   "telegram",
+			ActorKind: "user",
+			ActorID:   "user-1",
+			Owner:     "telegram-bot",
+			ExpiresAt: now.Add(time.Minute),
+		},
+	}); err != nil {
+		t.Fatalf("BindSession() error = %v", err)
+	}
+	state, err := gw.LookupBinding(BindingStateRequest{BindingKey: "telegram:user-1"})
+	if err != nil {
+		t.Fatalf("LookupBinding() error = %v", err)
+	}
+	if state.Surface != "telegram" || state.ActorID != "user-1" || state.Owner != "telegram-bot" {
+		t.Fatalf("binding state = %+v", state)
+	}
+
+	now = now.Add(2 * time.Minute)
+	if _, ok := gw.CurrentSession("telegram:user-1"); ok {
+		t.Fatal("CurrentSession() ok = true, want expired binding to be cleared")
+	}
+	_, err = gw.LookupBinding(BindingStateRequest{BindingKey: "telegram:user-1"})
+	if err == nil {
+		t.Fatal("LookupBinding() error = nil, want binding_not_found after expiry")
+	}
+}
+
+func TestBeginTurnUpdatesBindingReplayState(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	runner := &recordingRunner{
+		events: []*sdksession.Event{{ID: "e1", Type: sdksession.EventTypeAssistant}},
+	}
+	rt := &recordingRuntime{
+		session: session,
+		result:  sdkruntime.RunResult{Session: session, Handle: runner},
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{resolved: ResolvedTurn{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := gw.BindSession(context.Background(), BindSessionRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: "surface-1",
+		Binding:    BindingDescriptor{Surface: "interactive"},
+	}); err != nil {
+		t.Fatalf("BindSession() error = %v", err)
+	}
+
+	result, err := gw.BeginTurn(context.Background(), BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+	_ = collectHandleEvents(t, result.Handle)
+
+	state, err := gw.LookupBinding(BindingStateRequest{BindingKey: "surface-1"})
+	if err != nil {
+		t.Fatalf("LookupBinding() error = %v", err)
+	}
+	if state.LastEventCursor != "e1" || state.LastHandleID == "" || state.LastRunID == "" || state.LastTurnID == "" {
+		t.Fatalf("binding replay state = %+v", state)
+	}
+}
+
+func TestReplayEventsReturnsSessionBackedCanonicalReplay(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		Controller: sdksession.ControllerBinding{
+			Kind:         sdksession.ControllerKindACP,
+			ControllerID: "acp-controller",
+			EpochID:      "epoch-1",
+		},
+	}
+	svc := &recordingSessionService{
+		sessionResult: session,
+		eventsResult: []*sdksession.Event{
+			{ID: "e1", Type: sdksession.EventTypeUser, Scope: &sdksession.EventScope{TurnID: "turn-1"}},
+			{ID: "e2", Type: sdksession.EventTypeAssistant, Scope: &sdksession.EventScope{
+				TurnID:     "turn-1",
+				Controller: sdksession.ControllerRef{Kind: sdksession.ControllerKindACP, ID: "acp-controller", EpochID: "epoch-1"},
+				ACP:        sdksession.ACPRef{SessionID: "acp-main", EventType: "agent_message_chunk"},
+			}},
+			{ID: "e3", Type: sdksession.EventTypeToolResult, Scope: &sdksession.EventScope{
+				TurnID:      "turn-1",
+				Controller:  sdksession.ControllerRef{Kind: sdksession.ControllerKindACP, ID: "acp-controller", EpochID: "epoch-1"},
+				Participant: sdksession.ParticipantRef{ID: "participant-1"},
+			}},
+		},
+	}
+	rt := &controlPlaneRuntime{
+		session:  session,
+		runState: sdkruntime.RunState{Status: sdkruntime.RunLifecycleStatusCompleted},
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  rt,
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := gw.BindSession(context.Background(), BindSessionRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: "surface-replay",
+		Binding:    BindingDescriptor{Surface: "headless"},
+	}); err != nil {
+		t.Fatalf("BindSession() error = %v", err)
+	}
+
+	replayed, err := gw.ReplayEvents(context.Background(), ReplayEventsRequest{
+		BindingKey: "surface-replay",
+		Cursor:     "e1",
+	})
+	if err != nil {
+		t.Fatalf("ReplayEvents() error = %v", err)
+	}
+	if len(replayed.Events) != 2 || replayed.Events[0].Cursor != "e2" || replayed.Events[1].Cursor != "e3" {
+		t.Fatalf("ReplayEvents() = %#v", replayed.Events)
+	}
+	if replayed.Events[0].Event.Kind != EventKindAssistantMessage || replayed.Events[0].Event.TurnID != "turn-1" {
+		t.Fatalf("first replay event = %+v", replayed.Events[0])
+	}
+	if !replayed.Durable || replayed.NextCursor != "e3" {
+		t.Fatalf("replay result = %+v", replayed)
+	}
+	if replayed.ControlPlane.Continuity.LastEventCursor != "e3" || replayed.ControlPlane.Continuity.ControllerCursor != "e3" {
+		t.Fatalf("replay continuity = %+v", replayed.ControlPlane.Continuity)
+	}
+	if replayed.ControlPlane.Continuity.ACPProjection.Cursor != "e2" {
+		t.Fatalf("acp projection = %+v", replayed.ControlPlane.Continuity.ACPProjection)
+	}
+}
+
 type mockRuntime struct{}
 
 func (mockRuntime) Run(context.Context, sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
@@ -802,16 +1012,19 @@ type mockSessionService struct{ staticSessionService }
 type recordingSessionService struct {
 	startReq           sdksession.StartSessionRequest
 	loadReq            sdksession.LoadSessionRequest
+	eventsReq          sdksession.EventsRequest
 	listReq            sdksession.ListSessionsRequest
 	sessionReq         sdksession.SessionRef
 	startSessionResult sdksession.Session
 	loadSessionResult  sdksession.LoadedSession
 	listSessionsResult sdksession.SessionList
 	sessionResult      sdksession.Session
+	eventsResult       []*sdksession.Event
 	startErr           error
 	loadErr            error
 	listErr            error
 	sessionErr         error
+	eventsErr          error
 }
 
 func (s *recordingSessionService) StartSession(_ context.Context, req sdksession.StartSessionRequest) (sdksession.Session, error) {
@@ -842,8 +1055,12 @@ func (s *recordingSessionService) AppendEvent(_ context.Context, req sdksession.
 	return req.Event, nil
 }
 
-func (s *recordingSessionService) Events(context.Context, sdksession.EventsRequest) ([]*sdksession.Event, error) {
-	return nil, nil
+func (s *recordingSessionService) Events(_ context.Context, req sdksession.EventsRequest) ([]*sdksession.Event, error) {
+	s.eventsReq = req
+	if s.eventsErr != nil {
+		return nil, s.eventsErr
+	}
+	return append([]*sdksession.Event(nil), s.eventsResult...), nil
 }
 
 func (s *recordingSessionService) ListSessions(_ context.Context, req sdksession.ListSessionsRequest) (sdksession.SessionList, error) {
