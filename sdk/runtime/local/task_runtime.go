@@ -487,10 +487,10 @@ func (tm *taskRuntime) StartSubagent(
 }
 
 func (tm *taskRuntime) Wait(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
-	if task, err := tm.lookupBash(ref, req.TaskID); err == nil {
+	if task, err := tm.lookupBash(ctx, ref, req.TaskID); err == nil {
 		return tm.waitBash(ctx, task, req.Yield)
 	}
-	task, err := tm.lookupSubagent(ref, req.TaskID)
+	task, err := tm.lookupSubagent(ctx, ref, req.TaskID)
 	if err != nil {
 		return sdktask.Snapshot{}, err
 	}
@@ -498,7 +498,7 @@ func (tm *taskRuntime) Wait(ctx context.Context, ref sdksession.SessionRef, req 
 }
 
 func (tm *taskRuntime) Write(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
-	task, err := tm.lookupBash(ref, req.TaskID)
+	task, err := tm.lookupBash(ctx, ref, req.TaskID)
 	if err != nil {
 		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: task %q does not support write", req.TaskID)
 	}
@@ -509,13 +509,13 @@ func (tm *taskRuntime) Write(ctx context.Context, ref sdksession.SessionRef, req
 }
 
 func (tm *taskRuntime) Cancel(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
-	if task, err := tm.lookupBash(ref, req.TaskID); err == nil {
+	if task, err := tm.lookupBash(ctx, ref, req.TaskID); err == nil {
 		if err := task.session.Terminate(ctx); err != nil {
 			return sdktask.Snapshot{}, err
 		}
 		return tm.waitBash(ctx, task, 10*time.Millisecond)
 	}
-	task, err := tm.lookupSubagent(ref, req.TaskID)
+	task, err := tm.lookupSubagent(ctx, ref, req.TaskID)
 	if err != nil {
 		return sdktask.Snapshot{}, err
 	}
@@ -664,7 +664,7 @@ func (tm *taskRuntime) cancelSubagent(ctx context.Context, task *subagentTask) (
 	return snapshot, nil
 }
 
-func (tm *taskRuntime) lookupBash(ref sdksession.SessionRef, taskID string) (*bashTask, error) {
+func (tm *taskRuntime) lookupBash(ctx context.Context, ref sdksession.SessionRef, taskID string) (*bashTask, error) {
 	tm.mu.RLock()
 	task, ok := tm.tasks[strings.TrimSpace(taskID)]
 	tm.mu.RUnlock()
@@ -677,7 +677,7 @@ func (tm *taskRuntime) lookupBash(ref sdksession.SessionRef, taskID string) (*ba
 	if tm.store == nil {
 		return nil, fmt.Errorf("sdk/runtime/local: task %q not found", taskID)
 	}
-	entry, err := tm.store.Get(context.Background(), strings.TrimSpace(taskID))
+	entry, err := tm.store.Get(ctx, strings.TrimSpace(taskID))
 	if err != nil || entry == nil {
 		return nil, fmt.Errorf("sdk/runtime/local: task %q not found", taskID)
 	}
@@ -697,7 +697,7 @@ func (tm *taskRuntime) lookupBash(ref sdksession.SessionRef, taskID string) (*ba
 	return rehydrated, nil
 }
 
-func (tm *taskRuntime) lookupSubagent(ref sdksession.SessionRef, taskID string) (*subagentTask, error) {
+func (tm *taskRuntime) lookupSubagent(ctx context.Context, ref sdksession.SessionRef, taskID string) (*subagentTask, error) {
 	tm.mu.RLock()
 	task, ok := tm.subagents[strings.TrimSpace(taskID)]
 	tm.mu.RUnlock()
@@ -710,7 +710,7 @@ func (tm *taskRuntime) lookupSubagent(ref sdksession.SessionRef, taskID string) 
 	if tm.store == nil {
 		return nil, fmt.Errorf("sdk/runtime/local: task %q not found", taskID)
 	}
-	entry, err := tm.store.Get(context.Background(), strings.TrimSpace(taskID))
+	entry, err := tm.store.Get(ctx, strings.TrimSpace(taskID))
 	if err != nil || entry == nil {
 		return nil, fmt.Errorf("sdk/runtime/local: task %q not found", taskID)
 	}
@@ -1055,7 +1055,7 @@ func taskSpecString(values map[string]any, key string) string {
 	if values == nil {
 		return ""
 	}
-	raw, _ := values[key]
+	raw := values[key]
 	text, _ := raw.(string)
 	return strings.TrimSpace(text)
 }
@@ -1210,11 +1210,11 @@ func (s completedTaskSession) Terminal() sdksandbox.TerminalRef {
 	return sdksandbox.CloneTerminalRef(s.entry.Terminal)
 }
 
-func (completedTaskSession) WriteInput(ctx context.Context, input []byte) error {
+func (completedTaskSession) WriteInput(_ context.Context, _ []byte) error {
 	return fmt.Errorf("sdk/runtime/local: task is not running")
 }
 
-func (s completedTaskSession) ReadOutput(ctx context.Context, stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
+func (s completedTaskSession) ReadOutput(_ context.Context, stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
 	if s.entry == nil || s.entry.Result == nil {
 		return nil, nil, 0, 0, nil
 	}

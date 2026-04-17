@@ -113,10 +113,10 @@ func (t *BashTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 		result, err = t.runtime.Run(ctx, req)
 	} else {
 		result, err = t.runtime.Run(ctx, sdksandbox.CommandRequest{
-			Command:     command,
-			Dir:         workingDir,
-			Timeout:     time.Duration(timeoutMS) * time.Millisecond,
-			RouteHint:   sdksandbox.RouteSandbox,
+			Command:   command,
+			Dir:       workingDir,
+			Timeout:   time.Duration(timeoutMS) * time.Millisecond,
+			RouteHint: sdksandbox.RouteSandbox,
 			Constraints: sdksandbox.Constraints{
 				Route:      sdksandbox.RouteSandbox,
 				Permission: sdksandbox.PermissionWorkspaceWrite,

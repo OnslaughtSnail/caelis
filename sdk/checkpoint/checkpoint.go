@@ -9,22 +9,22 @@ import (
 
 // State is the durable structured checkpoint kept in session state.
 type State struct {
-	Revision              int                     `json:"revision,omitempty"`
-	SummarizedThroughID   string                  `json:"summarized_through_id,omitempty"`
-	UpdatedAt             time.Time               `json:"updated_at,omitempty"`
-	Trigger               string                  `json:"trigger,omitempty"`
-	Generator             string                  `json:"generator,omitempty"`
-	Objective             string                  `json:"objective,omitempty"`
-	UserConstraints       []string                `json:"user_constraints,omitempty"`
-	DurableDecisions      []string                `json:"durable_decisions,omitempty"`
-	VerifiedFacts         []string                `json:"verified_facts,omitempty"`
-	CurrentProgress       []string                `json:"current_progress,omitempty"`
-	OpenQuestionsAndRisks []string                `json:"open_questions_and_risks,omitempty"`
-	NextActions           []string                `json:"next_actions,omitempty"`
-	ActiveTasks           []TaskState             `json:"active_tasks,omitempty"`
-	ActiveParticipants    []ParticipantState      `json:"active_participants,omitempty"`
-	LatestBlockers        []string                `json:"latest_blockers,omitempty"`
-	OperationalAnnex      OperationalAnnex        `json:"operational_annex,omitempty"`
+	Revision              int                `json:"revision,omitempty"`
+	SummarizedThroughID   string             `json:"summarized_through_id,omitempty"`
+	UpdatedAt             time.Time          `json:"updated_at,omitempty"`
+	Trigger               string             `json:"trigger,omitempty"`
+	Generator             string             `json:"generator,omitempty"`
+	Objective             string             `json:"objective,omitempty"`
+	UserConstraints       []string           `json:"user_constraints,omitempty"`
+	DurableDecisions      []string           `json:"durable_decisions,omitempty"`
+	VerifiedFacts         []string           `json:"verified_facts,omitempty"`
+	CurrentProgress       []string           `json:"current_progress,omitempty"`
+	OpenQuestionsAndRisks []string           `json:"open_questions_and_risks,omitempty"`
+	NextActions           []string           `json:"next_actions,omitempty"`
+	ActiveTasks           []TaskState        `json:"active_tasks,omitempty"`
+	ActiveParticipants    []ParticipantState `json:"active_participants,omitempty"`
+	LatestBlockers        []string           `json:"latest_blockers,omitempty"`
+	OperationalAnnex      OperationalAnnex   `json:"operational_annex,omitempty"`
 }
 
 type TaskState struct {

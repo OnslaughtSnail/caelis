@@ -18,6 +18,7 @@ type sandboxRuntimeProvider interface {
 }
 
 type approvalContext struct {
+	ctx        context.Context
 	requester  sdkruntime.ApprovalRequester
 	runtime    *Runtime
 	session    sdksession.Session
@@ -48,7 +49,7 @@ func (r *Runtime) wrapToolsForPolicy(
 		return spec.Tools
 	}
 	modeName := r.policyMode(spec)
-	mode, ok, err := r.policies.Lookup(context.Background(), modeName)
+	mode, ok, err := r.policies.Lookup(approval.ctx, modeName)
 	if err != nil || !ok || mode == nil {
 		return spec.Tools
 	}

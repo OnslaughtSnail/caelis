@@ -81,9 +81,6 @@ func resolveControlPlane(runtime sdkruntime.Runtime) sdkruntime.ControlPlane {
 }
 
 func (g *Gateway) StartSession(ctx context.Context, req StartSessionRequest) (sdksession.Session, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	session, err := g.sessions.StartSession(ctx, sdksession.StartSessionRequest{
 		AppName:            req.AppName,
 		UserID:             req.UserID,
@@ -100,9 +97,6 @@ func (g *Gateway) StartSession(ctx context.Context, req StartSessionRequest) (sd
 }
 
 func (g *Gateway) BindSession(ctx context.Context, req BindSessionRequest) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ref, err := g.sessionTarget(req.SessionRef, "")
 	if err != nil {
 		return err
@@ -115,9 +109,6 @@ func (g *Gateway) BindSession(ctx context.Context, req BindSessionRequest) error
 }
 
 func (g *Gateway) ForkSession(ctx context.Context, req ForkSessionRequest) (sdksession.Session, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if strings.TrimSpace(req.SourceSessionRef.SessionID) == "" {
 		return sdksession.Session{}, &Error{
 			Kind:        KindValidation,
@@ -158,9 +149,6 @@ func (g *Gateway) ForkSession(ctx context.Context, req ForkSessionRequest) (sdks
 }
 
 func (g *Gateway) LoadSession(ctx context.Context, req LoadSessionRequest) (sdksession.LoadedSession, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	loaded, err := g.sessions.LoadSession(ctx, sdksession.LoadSessionRequest{
 		SessionRef:       req.SessionRef,
 		Limit:            req.Limit,
@@ -174,9 +162,6 @@ func (g *Gateway) LoadSession(ctx context.Context, req LoadSessionRequest) (sdks
 }
 
 func (g *Gateway) ResumeSession(ctx context.Context, req ResumeSessionRequest) (sdksession.LoadedSession, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	list, err := g.ListSessions(ctx, ListSessionsRequest{
 		AppName:      req.AppName,
 		UserID:       req.UserID,
@@ -204,9 +189,6 @@ func (g *Gateway) ResumeSession(ctx context.Context, req ResumeSessionRequest) (
 }
 
 func (g *Gateway) ListSessions(ctx context.Context, req ListSessionsRequest) (sdksession.SessionList, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	list, err := g.sessions.ListSessions(ctx, sdksession.ListSessionsRequest{
 		AppName:      req.AppName,
 		UserID:       req.UserID,
@@ -249,9 +231,6 @@ func (g *Gateway) Interrupt(ctx context.Context, req InterruptRequest) error {
 }
 
 func (g *Gateway) HandoffController(ctx context.Context, req HandoffControllerRequest) (sdksession.Session, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if g.control == nil {
 		return sdksession.Session{}, &Error{
 			Kind:        KindUnsupported,
@@ -279,9 +258,6 @@ func (g *Gateway) HandoffController(ctx context.Context, req HandoffControllerRe
 }
 
 func (g *Gateway) ControlPlaneState(ctx context.Context, req ControlPlaneStateRequest) (ControlPlaneState, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
 	if err != nil {
 		return ControlPlaneState{}, err
@@ -304,9 +280,6 @@ func (g *Gateway) ControlPlaneState(ctx context.Context, req ControlPlaneStateRe
 }
 
 func (g *Gateway) ReplayEvents(ctx context.Context, req ReplayEventsRequest) (ReplayEventsResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
 	if err != nil {
 		return ReplayEventsResult{}, err
@@ -385,11 +358,7 @@ func (g *Gateway) LookupBinding(req BindingStateRequest) (BindingState, error) {
 }
 
 func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTurnResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	intent := TurnIntent(req)
-	resolved, err := g.resolver.ResolveTurn(ctx, intent)
+	resolved, err := g.resolver.ResolveTurn(ctx, req)
 	if err != nil {
 		return BeginTurnResult{}, err
 	}
@@ -611,8 +580,8 @@ func resolveSessionSummary(sessions []sdksession.SessionSummary, target string) 
 			continue
 		}
 		if id == target {
-			copy := session
-			exact = &copy
+			matched := session
+			exact = &matched
 			break
 		}
 		if strings.HasPrefix(id, target) {
@@ -746,6 +715,6 @@ func wrapSessionError(err error) error {
 
 type approvalRequesterFunc func(sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error)
 
-func (f approvalRequesterFunc) RequestApproval(ctx context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
+func (f approvalRequesterFunc) RequestApproval(_ context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
 	return f(req)
 }

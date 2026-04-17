@@ -101,7 +101,6 @@ func (a *Agent) Run(ctx sdkruntime.Context) iter.Seq2[*sdksession.Event, error] 
 				if !yield(assistantEvent, nil) {
 					return
 				}
-				messages = append(messages, assistantMessage)
 				return
 			}
 			toolCallEvents := modelToolCallEvents(assistantMessage, final)
@@ -439,7 +438,7 @@ func messagesFromContext(ctx sdkruntime.Context) []sdkmodel.Message {
 	return out
 }
 
-func instructionsFromContext(ctx sdkruntime.Context, systemPrompt string) []sdkmodel.Part {
+func instructionsFromContext(_ sdkruntime.Context, systemPrompt string) []sdkmodel.Part {
 	out := make([]sdkmodel.Part, 0, 1)
 	if strings.TrimSpace(systemPrompt) != "" {
 		out = append(out, sdkmodel.NewTextPart(strings.TrimSpace(systemPrompt)))

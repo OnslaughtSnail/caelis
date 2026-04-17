@@ -67,11 +67,12 @@ func lcsLineCountShort(shorter, longer []string) int {
 	curr := make([]int, len(shorter)+1)
 	for _, longLine := range longer {
 		for i, shortLine := range shorter {
-			if shortLine == longLine {
+			switch {
+			case shortLine == longLine:
 				curr[i+1] = prev[i] + 1
-			} else if curr[i] > prev[i+1] {
+			case curr[i] > prev[i+1]:
 				curr[i+1] = curr[i]
-			} else {
+			default:
 				curr[i+1] = prev[i+1]
 			}
 		}

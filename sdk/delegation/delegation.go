@@ -27,10 +27,10 @@ const (
 // Anchor identifies one delegated child instance for system/runtime use.
 // It is not intended to be exposed to the LLM-facing tool result surface.
 type Anchor struct {
-	TaskID   string `json:"task_id,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
-	Agent    string `json:"agent,omitempty"`
-	AgentID  string `json:"agent_id,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	AgentID   string `json:"agent_id,omitempty"`
 }
 
 // Request describes one SPAWN invocation. System-controlled execution details

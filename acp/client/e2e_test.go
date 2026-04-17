@@ -25,7 +25,7 @@ func TestPublicClientLifecycleAndLoadE2E(t *testing.T) {
 		mu      sync.Mutex
 		updates []sdkacpclient.UpdateEnvelope
 	)
-	client := startE2EClient(t, ctx, e2eClientConfig{
+	client := startE2EClient(ctx, t, e2eClientConfig{
 		SessionRoot: filepath.Join(root, "sessions"),
 		TaskRoot:    filepath.Join(root, "tasks"),
 		Env: map[string]string{
@@ -37,7 +37,7 @@ func TestPublicClientLifecycleAndLoadE2E(t *testing.T) {
 			updates = append(updates, update)
 		},
 	})
-	defer client.Close()
+	defer client.Close(ctx)
 
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize() error = %v; stderr=%q", err, client.StderrTail(4096))
@@ -56,10 +56,10 @@ func TestPublicClientLifecycleAndLoadE2E(t *testing.T) {
 	if got := collectedUpdateKinds(updates); !containsAll(got, sdkacpclient.UpdateUserMessage, sdkacpclient.UpdateAgentMessage) {
 		t.Fatalf("prompt update kinds = %v, want user+assistant", got)
 	}
-	_ = client.Close()
+	_ = client.Close(ctx)
 
 	var replay []sdkacpclient.UpdateEnvelope
-	reload := startE2EClient(t, ctx, e2eClientConfig{
+	reload := startE2EClient(ctx, t, e2eClientConfig{
 		SessionRoot: filepath.Join(root, "sessions"),
 		TaskRoot:    filepath.Join(root, "tasks"),
 		Env: map[string]string{
@@ -69,7 +69,7 @@ func TestPublicClientLifecycleAndLoadE2E(t *testing.T) {
 			replay = append(replay, update)
 		},
 	})
-	defer reload.Close()
+	defer reload.Close(ctx)
 	if _, err := reload.Initialize(ctx); err != nil {
 		t.Fatalf("reload Initialize() error = %v; stderr=%q", err, reload.StderrTail(4096))
 	}
@@ -93,13 +93,13 @@ func TestPublicClientPermissionAndTerminalE2E(t *testing.T) {
 		permissionCount int
 		terminalID      string
 	)
-	client := startE2EClient(t, ctx, e2eClientConfig{
+	client := startE2EClient(ctx, t, e2eClientConfig{
 		SessionRoot: filepath.Join(root, "sessions"),
 		TaskRoot:    filepath.Join(root, "tasks"),
 		Env: map[string]string{
 			"SDK_ACP_SCRIPTED_MODE": "approval_bash",
 		},
-		OnPermissionRequest: func(_ context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
+		OnPermissionRequest: func(_ context.Context, _ sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
 			mu.Lock()
 			permissionCount++
 			mu.Unlock()
@@ -125,7 +125,7 @@ func TestPublicClientPermissionAndTerminalE2E(t *testing.T) {
 			}
 		},
 	})
-	defer client.Close()
+	defer client.Close(ctx)
 
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize() error = %v; stderr=%q", err, client.StderrTail(4096))
@@ -176,7 +176,7 @@ func TestPublicClientModeAndConfigE2E(t *testing.T) {
 	defer cancel()
 
 	var updates []sdkacpclient.UpdateEnvelope
-	client := startE2EClient(t, ctx, e2eClientConfig{
+	client := startE2EClient(ctx, t, e2eClientConfig{
 		SessionRoot: filepath.Join(root, "sessions"),
 		TaskRoot:    filepath.Join(root, "tasks"),
 		Env: map[string]string{
@@ -187,7 +187,7 @@ func TestPublicClientModeAndConfigE2E(t *testing.T) {
 			updates = append(updates, update)
 		},
 	})
-	defer client.Close()
+	defer client.Close(ctx)
 
 	if _, err := client.Initialize(ctx); err != nil {
 		t.Fatalf("Initialize() error = %v; stderr=%q", err, client.StderrTail(4096))
@@ -252,7 +252,7 @@ type e2eClientConfig struct {
 	OnPermissionRequest sdkacpclient.PermissionHandler
 }
 
-func startE2EClient(t *testing.T, ctx context.Context, cfg e2eClientConfig) *sdkacpclient.Client {
+func startE2EClient(ctx context.Context, t *testing.T, cfg e2eClientConfig) *sdkacpclient.Client {
 	t.Helper()
 	env := map[string]string{
 		"SDK_ACP_SESSION_ROOT": cfg.SessionRoot,

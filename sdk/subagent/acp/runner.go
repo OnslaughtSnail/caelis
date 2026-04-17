@@ -117,12 +117,12 @@ func (r *Runner) Spawn(ctx context.Context, spawn sdksubagent.SpawnContext, req 
 		return sdkdelegation.Anchor{}, sdkdelegation.Result{}, err
 	}
 	if _, err := client.Initialize(ctx); err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return sdkdelegation.Anchor{}, sdkdelegation.Result{}, err
 	}
 	sessionResp, err := client.NewSession(ctx, strings.TrimSpace(spawn.CWD), nil)
 	if err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return sdkdelegation.Anchor{}, sdkdelegation.Result{}, err
 	}
 	anchor := sdkdelegation.Anchor{
@@ -135,7 +135,7 @@ func (r *Runner) Spawn(ctx context.Context, spawn sdksubagent.SpawnContext, req 
 	r.mu.Lock()
 	r.runs[anchor.SessionID] = run
 	r.mu.Unlock()
-	go r.drivePrompt(run, strings.TrimSpace(req.Prompt))
+	go r.drivePrompt(ctx, run, strings.TrimSpace(req.Prompt))
 	return anchor, r.waitRun(ctx, run, req.YieldTimeMS), nil
 }
 
@@ -168,8 +168,7 @@ func (r *Runner) Cancel(ctx context.Context, anchor sdkdelegation.Anchor) error 
 	return nil
 }
 
-func (r *Runner) drivePrompt(run *childRun, prompt string) {
-	ctx := context.Background()
+func (r *Runner) drivePrompt(ctx context.Context, run *childRun, prompt string) {
 	resp, err := run.client.Prompt(ctx, run.anchor.SessionID, prompt, nil)
 	run.mu.Lock()
 	defer run.mu.Unlock()
@@ -181,19 +180,19 @@ func (r *Runner) drivePrompt(run *childRun, prompt string) {
 			run.state = sdkdelegation.StateInterrupted
 			run.outputPreview = "interrupted"
 			run.result = ""
-			_ = run.client.Close()
+			_ = run.client.Close(context.WithoutCancel(ctx))
 			return
 		}
 		run.state = sdkdelegation.StateFailed
 		run.outputPreview = compactPreview(err.Error())
 		run.result = ""
-		_ = run.client.Close()
+		_ = run.client.Close(context.WithoutCancel(ctx))
 		return
 	}
 	if strings.EqualFold(strings.TrimSpace(resp.StopReason), "cancelled") {
 		run.state = sdkdelegation.StateCancelled
 		run.outputPreview = "cancelled"
-		_ = run.client.Close()
+		_ = run.client.Close(context.WithoutCancel(ctx))
 		return
 	}
 	if strings.TrimSpace(run.result) == "" {
@@ -201,7 +200,7 @@ func (r *Runner) drivePrompt(run *childRun, prompt string) {
 	}
 	run.state = sdkdelegation.StateCompleted
 	run.outputPreview = compactPreview(run.outputPreview)
-	_ = run.client.Close()
+	_ = run.client.Close(context.WithoutCancel(ctx))
 }
 
 func (r *Runner) waitRun(ctx context.Context, run *childRun, yieldTimeMS int) sdkdelegation.Result {

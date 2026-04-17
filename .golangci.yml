@@ -33,6 +33,18 @@ linters:
           - revive
         path: ^kernel/session/session\.go$
         text: SessionStateStore
+      - linters:
+          - revive
+        path: ^acpbridge/terminal/terminal\.go$
+        text: Terminal(OutputRequest|ExitStatus|OutputResponse|WaitForExitRequest|WaitForExitResponse|KillRequest|ReleaseRequest|Adapter)
+      - linters:
+          - revive
+        path: ^sdk/compact/compact\.go$
+        text: CompactEventData|CompactEventDataFromEvent|CompactEventDataValue
+      - linters:
+          - revive
+        path: ^sdk/session/session\.go$
+        text: SessionRef|SessionSummary|SessionList
     paths:
       - third_party$
       - builtin$

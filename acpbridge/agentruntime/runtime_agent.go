@@ -437,7 +437,7 @@ func (a *RuntimeAgent) terminalAdapter() (acp.TerminalAdapter, bool) {
 }
 
 var (
-	_ acp.Agent = (*RuntimeAgent)(nil)
-	_ acp.TerminalAdapter = (*RuntimeAgent)(nil)
+	_ acp.Agent                    = (*RuntimeAgent)(nil)
+	_ acp.TerminalAdapter          = (*RuntimeAgent)(nil)
 	_ bridgeloader.PromptCallbacks = (acp.PromptCallbacks)(nil)
 )

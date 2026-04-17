@@ -104,7 +104,7 @@ func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (
 
 func (r *AssemblyResolver) snapshotState(ctx context.Context, ref sdksession.SessionRef) (map[string]any, error) {
 	if r == nil || r.sessions == nil || strings.TrimSpace(ref.SessionID) == "" {
-		return nil, nil
+		return map[string]any{}, nil
 	}
 	state, err := r.sessions.SnapshotState(ctx, ref)
 	if err != nil {
@@ -129,7 +129,7 @@ func (r *AssemblyResolver) resolveMetadata(intent TurnIntent, state map[string]a
 		metadata["reasoning_effort"] = reasoning
 	}
 	if len(metadata) == 0 {
-		return nil, nil
+		return map[string]any{}, nil
 	}
 	return metadata, nil
 }

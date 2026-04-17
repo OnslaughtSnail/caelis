@@ -998,7 +998,7 @@ func (s staticSessionService) RemoveParticipant(context.Context, sdksession.Remo
 	return s.session, nil
 }
 func (s staticSessionService) SnapshotState(context.Context, sdksession.SessionRef) (map[string]any, error) {
-	return nil, nil
+	return map[string]any{}, nil
 }
 func (s staticSessionService) ReplaceState(context.Context, sdksession.SessionRef, map[string]any) error {
 	return nil
@@ -1084,7 +1084,7 @@ func (s *recordingSessionService) RemoveParticipant(context.Context, sdksession.
 }
 
 func (s *recordingSessionService) SnapshotState(context.Context, sdksession.SessionRef) (map[string]any, error) {
-	return nil, nil
+	return map[string]any{}, nil
 }
 
 func (s *recordingSessionService) ReplaceState(context.Context, sdksession.SessionRef, map[string]any) error {

@@ -111,14 +111,14 @@ func (m *Manager) Activate(ctx context.Context, req sdkcontroller.HandoffRequest
 
 	m.mu.Lock()
 	if old := m.controllers[parentSessionID]; old != nil && old.client != nil {
-		_ = old.client.Close()
+		_ = old.client.Close(ctx)
 	}
 	m.controllers[parentSessionID] = run
 	m.mu.Unlock()
 	return sdksession.CloneControllerBinding(run.binding), nil
 }
 
-func (m *Manager) Deactivate(_ context.Context, ref sdksession.SessionRef) error {
+func (m *Manager) Deactivate(ctx context.Context, ref sdksession.SessionRef) error {
 	ref = sdksession.NormalizeSessionRef(ref)
 	if ref.SessionID == "" {
 		return nil
@@ -128,7 +128,7 @@ func (m *Manager) Deactivate(_ context.Context, ref sdksession.SessionRef) error
 	delete(m.controllers, ref.SessionID)
 	m.mu.Unlock()
 	if run != nil && run.client != nil {
-		_ = run.client.Close()
+		_ = run.client.Close(context.WithoutCancel(ctx))
 	}
 	return nil
 }
@@ -177,7 +177,7 @@ func (m *Manager) Attach(ctx context.Context, req sdkcontroller.AttachRequest) (
 	return sdksession.CloneParticipantBinding(run.binding), nil
 }
 
-func (m *Manager) Detach(_ context.Context, req sdkcontroller.DetachRequest) error {
+func (m *Manager) Detach(ctx context.Context, req sdkcontroller.DetachRequest) error {
 	req = sdkcontroller.NormalizeDetachRequest(req)
 	if req.ParticipantID == "" {
 		return nil
@@ -187,7 +187,7 @@ func (m *Manager) Detach(_ context.Context, req sdkcontroller.DetachRequest) err
 	delete(m.participants, req.ParticipantID)
 	m.mu.Unlock()
 	if run != nil && run.client != nil {
-		_ = run.client.Close()
+		_ = run.client.Close(context.WithoutCancel(ctx))
 	}
 	return nil
 }
@@ -258,12 +258,12 @@ func (m *Manager) startClient(
 		return nil, "", err
 	}
 	if _, err := client.Initialize(ctx); err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return nil, "", err
 	}
 	resp, err := client.NewSession(ctx, strings.TrimSpace(cwd), nil)
 	if err != nil {
-		_ = client.Close()
+		_ = client.Close(ctx)
 		return nil, "", err
 	}
 	return client, strings.TrimSpace(resp.SessionID), nil

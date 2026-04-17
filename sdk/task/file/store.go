@@ -37,12 +37,12 @@ type Store struct {
 }
 
 type indexDocument struct {
-	Kind      string                 `json:"kind"`
-	Version   int                    `json:"version"`
-	Session   sdksession.SessionRef  `json:"session"`
-	UpdatedAt time.Time              `json:"updated_at"`
-	Tasks     []*sdktask.Entry       `json:"tasks"`
-	Metadata  map[string]any         `json:"metadata,omitempty"`
+	Kind      string                `json:"kind"`
+	Version   int                   `json:"version"`
+	Session   sdksession.SessionRef `json:"session"`
+	UpdatedAt time.Time             `json:"updated_at"`
+	Tasks     []*sdktask.Entry      `json:"tasks"`
+	Metadata  map[string]any        `json:"metadata,omitempty"`
 }
 
 type blobRecord struct {
@@ -170,7 +170,7 @@ func (s *Store) ListSession(_ context.Context, ref sdksession.SessionRef) ([]*sd
 	doc, err := s.readIndex(ref)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return []*sdktask.Entry{}, nil
 		}
 		return nil, err
 	}
@@ -186,15 +186,15 @@ func (s *Store) ListSession(_ context.Context, ref sdksession.SessionRef) ([]*sd
 
 func (s *Store) writeFinalBlobs(entry *sdktask.Entry) (map[string]string, error) {
 	if entry == nil || entry.Result == nil {
-		return nil, nil
+		return map[string]string{}, nil
 	}
 	if entry.Running {
-		return nil, nil
+		return map[string]string{}, nil
 	}
 	stdout, _ := entry.Result["stdout"].(string)
 	stderr, _ := entry.Result["stderr"].(string)
 	if strings.TrimSpace(stdout) == "" && strings.TrimSpace(stderr) == "" {
-		return nil, nil
+		return map[string]string{}, nil
 	}
 	records, err := s.readBlobs(entry.Session)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -236,7 +236,7 @@ func (s *Store) writeFinalBlobs(entry *sdktask.Entry) (map[string]string, error)
 func (s *Store) hydrateEntry(session sdksession.SessionRef, entry *sdktask.Entry) (*sdktask.Entry, error) {
 	entry = sdktask.CloneEntry(entry)
 	if entry == nil {
-		return nil, nil
+		return nil, fmt.Errorf("sdk/task/file: entry is required")
 	}
 	stdoutBlob, _ := entry.Result["stdout_blob"].(string)
 	stderrBlob, _ := entry.Result["stderr_blob"].(string)

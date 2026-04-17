@@ -607,7 +607,7 @@ func TestRuntimeProviderCompactionPlanContinuityE2E(t *testing.T) {
 		}
 	}
 
-	finalText := runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	finalText := runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "From the current session plan, what is the exact step currently marked in_progress? Reply with the step content only and nothing else.",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -687,7 +687,7 @@ func TestRuntimeProviderCompactionMultiCompactLongTaskE2E(t *testing.T) {
 		"Keep the same exact objective, blocker, and next action. Note epsilon: prompt-budget assertions, compact trigger reliability, and append-only replay.",
 		"Keep the same exact objective, blocker, and next action. Note zeta: compact checkpoint density, replay safety, and long-task continuity.",
 	})
-	_ = runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	_ = runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "Acknowledge the current compact-hardening session in one short line.",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -703,7 +703,7 @@ func TestRuntimeProviderCompactionMultiCompactLongTaskE2E(t *testing.T) {
 	})
 
 	finalQuery := "Reply in one line with the exact objective, blocker, next action, and latest completed milestone from this session."
-	finalText := runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	finalText := runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      finalQuery,
 		AgentSpec: sdkruntime.AgentSpec{
@@ -834,7 +834,7 @@ func TestRuntimeProviderCompactionSegmentedRetryE2E(t *testing.T) {
 		"Keep the same exact objective, blocker, and next action. Note eta: exact-anchor preservation during smaller segment retries.",
 	})
 
-	finalText := runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	finalText := runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "Reply in one line with the exact objective, blocker, and next action from this session.",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -924,7 +924,7 @@ func TestRuntimeProviderCompactionPrefixStabilityE2E(t *testing.T) {
 		"Keep the same exact objective, blocker, and next action. Note theta: cache-friendly prompt prefixes and continuity confidence.",
 	})
 
-	_ = runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	_ = runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "Reply exactly: prefix-stable-a",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -943,7 +943,7 @@ func TestRuntimeProviderCompactionPrefixStabilityE2E(t *testing.T) {
 	stableCompactionCount := snapshotA.CompactionCalls
 	stablePrefix := prefixA
 
-	_ = runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	_ = runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "Reply exactly: prefix-stable-b",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -958,7 +958,7 @@ func TestRuntimeProviderCompactionPrefixStabilityE2E(t *testing.T) {
 		if len(stablePrefix) == 0 {
 			t.Fatalf("prefixB missing compact prefix after refresh: %v", snapshotB.LastNormalMessages)
 		}
-		_ = runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+		_ = runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 			SessionRef: session.SessionRef,
 			Input:      "Reply exactly: prefix-stable-c",
 			AgentSpec: sdkruntime.AgentSpec{
@@ -987,7 +987,7 @@ func TestRuntimeProviderCompactionPrefixStabilityE2E(t *testing.T) {
 		"Keep the same exact objective, blocker, and next action. Note lambda: stable prompt prefixes, replacement-history durability, and post-compact replay growth.",
 		"Keep the same exact objective, blocker, and next action. Note mu: fresh transcript growth should eventually force a later compact refresh.",
 	})
-	_ = runAndCollectAssistantTextForE2E(t, runtime, ctx, sdkruntime.RunRequest{
+	_ = runAndCollectAssistantTextForE2E(ctx, t, runtime, sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "Reply exactly: prefix-stable-d",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -1226,7 +1226,7 @@ func containsMessageForE2E(messages []string, needle string) bool {
 	return false
 }
 
-func runAndCollectAssistantTextForE2E(t *testing.T, runtime *Runtime, ctx context.Context, req sdkruntime.RunRequest) string {
+func runAndCollectAssistantTextForE2E(ctx context.Context, t *testing.T, runtime *Runtime, req sdkruntime.RunRequest) string {
 	t.Helper()
 	result, err := runtime.Run(ctx, req)
 	if err != nil {
@@ -1511,7 +1511,7 @@ func TestRuntimeSpawnACPSubagentApprovalPassthroughE2E(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 	var approvalCount int
-	requester := approvalRequesterFunc(func(ctx context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
+	requester := approvalRequesterFunc(func(_ context.Context, _ sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
 		approvalCount++
 		return sdkruntime.ApprovalResponse{
 			Outcome:  "selected",
@@ -1592,7 +1592,7 @@ func TestRuntimeSpawnACPSubagentFullAccessAutoApprovesE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	requester := approvalRequesterFunc(func(ctx context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
+	requester := approvalRequesterFunc(func(_ context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
 		t.Fatalf("unexpected interactive approval request: %+v", req)
 		return sdkruntime.ApprovalResponse{}, nil
 	})

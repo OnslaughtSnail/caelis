@@ -396,7 +396,7 @@ func handoffEvent(from sdksession.ControllerBinding, to sdksession.ControllerBin
 }
 
 type controllerApprovalRequester struct {
-	requester sdkruntime.ApprovalRequester
+	requester  sdkruntime.ApprovalRequester
 	sessionRef sdksession.SessionRef
 	session    sdksession.Session
 	runID      string

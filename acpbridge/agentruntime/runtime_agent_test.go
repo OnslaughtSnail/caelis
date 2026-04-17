@@ -2,6 +2,7 @@ package agentruntime_test
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"testing"
 
@@ -156,10 +157,10 @@ func TestRuntimeAgentLoadSessionReplaysDurableEvents(t *testing.T) {
 
 func TestRuntimeAgentOptionalMethodsUnsupportedByDefault(t *testing.T) {
 	agent, _ := newRuntimeAgentWithConfig(t, agentruntime.Config{})
-	if _, err := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{}); err != acp.ErrCapabilityUnsupported {
+	if _, err := agent.SetSessionMode(context.Background(), acp.SetSessionModeRequest{}); !errors.Is(err, acp.ErrCapabilityUnsupported) {
 		t.Fatalf("SetSessionMode() error = %v, want ErrCapabilityUnsupported", err)
 	}
-	if _, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{}); err != acp.ErrCapabilityUnsupported {
+	if _, err := agent.SetSessionConfigOption(context.Background(), acp.SetSessionConfigOptionRequest{}); !errors.Is(err, acp.ErrCapabilityUnsupported) {
 		t.Fatalf("SetSessionConfigOption() error = %v, want ErrCapabilityUnsupported", err)
 	}
 }

@@ -125,9 +125,6 @@ func (r *Runtime) Run(ctx context.Context, req sdksandbox.CommandRequest) (sdksa
 }
 
 func (r *Runtime) Start(ctx context.Context, req sdksandbox.CommandRequest) (sdksandbox.Session, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -145,10 +142,10 @@ func (r *Runtime) Start(ctx context.Context, req sdksandbox.CommandRequest) (sdk
 	if err != nil {
 		return nil, err
 	}
-	cmdCtx := context.Background()
+	cmdCtx := context.WithoutCancel(ctx)
 	cancel := func() {}
 	if req.Timeout > 0 {
-		cmdCtx, cancel = context.WithTimeout(context.Background(), req.Timeout)
+		cmdCtx, cancel = context.WithTimeout(cmdCtx, req.Timeout)
 	}
 	cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-lc", req.Command)
 	cmd.Dir = dir
@@ -304,13 +301,13 @@ func (s *hostSession) Status(_ context.Context) (sdksandbox.SessionStatus, error
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return sdksandbox.CloneSessionStatus(sdksandbox.SessionStatus{
-		SessionRef:     s.ref,
-		Terminal:       s.terminal,
-		Running:        s.running,
-		SupportsInput:  s.supportsInput,
-		ExitCode:       s.exitCode,
-		StartedAt:      s.startedAt,
-		UpdatedAt:      s.updatedAt,
+		SessionRef:    s.ref,
+		Terminal:      s.terminal,
+		Running:       s.running,
+		SupportsInput: s.supportsInput,
+		ExitCode:      s.exitCode,
+		StartedAt:     s.startedAt,
+		UpdatedAt:     s.updatedAt,
 	}), nil
 }
 

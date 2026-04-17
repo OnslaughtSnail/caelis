@@ -149,8 +149,7 @@ func (c *serverConn) handleRequest(ctx context.Context, msg jsonrpc.Message) (an
 }
 
 func (c *serverConn) handleNotification(ctx context.Context, msg jsonrpc.Message) {
-	switch msg.Method {
-	case MethodSessionCancel:
+	if msg.Method == MethodSessionCancel {
 		var req CancelNotification
 		if err := decodeParams(msg.Params, &req); err == nil {
 			_ = c.agent.Cancel(ctx, req)
@@ -189,11 +188,6 @@ func responseOrError(result any, err error) (any, *jsonrpc.RPCError) {
 
 func invalidParams(err error) *jsonrpc.RPCError {
 	return &jsonrpc.RPCError{Code: -32602, Message: err.Error()}
-}
-
-func mustJSON(value any) json.RawMessage {
-	raw, _ := json.Marshal(value)
-	return raw
 }
 
 var _ PromptCallbacks = (*serverConn)(nil)

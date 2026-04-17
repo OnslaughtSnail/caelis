@@ -57,7 +57,13 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 
 func NewProcessClient(ctx context.Context, proc *stdio.Process, cfg Config) *Client {
 	serveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	conn := jsonrpc.New(proc.Stdout, proc.Stdin)
+	var stdout io.Reader
+	var stdin io.Writer
+	if proc != nil {
+		stdout = proc.Stdout
+		stdin = proc.Stdin
+	}
+	conn := jsonrpc.New(stdout, stdin)
 	client := &Client{
 		conn:   conn,
 		proc:   proc,
@@ -179,7 +185,7 @@ func (c *Client) TerminalRelease(ctx context.Context, sessionID, terminalID stri
 	}, nil)
 }
 
-func (c *Client) Close() error {
+func (c *Client) Close(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
@@ -191,7 +197,7 @@ func (c *Client) Close() error {
 	case <-c.done:
 	}
 	if c.proc != nil {
-		return c.proc.Close(context.Background())
+		return c.proc.Close(ctx)
 	}
 	return nil
 }

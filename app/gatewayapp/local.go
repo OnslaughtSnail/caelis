@@ -201,7 +201,7 @@ func (l *modelLookup) DefaultAlias() string {
 	return l.defaultAlias
 }
 
-func (l *modelLookup) ResolveModel(_ context.Context, alias string, contextWindow int) (appgateway.ModelResolution, error) {
+func (l *modelLookup) ResolveModel(ctx context.Context, alias string, contextWindow int) (appgateway.ModelResolution, error) {
 	if l == nil {
 		return appgateway.ModelResolution{}, fmt.Errorf("gatewayapp: model lookup is nil")
 	}
@@ -229,7 +229,7 @@ func (l *modelLookup) ResolveModel(_ context.Context, alias string, contextWindo
 		if err != nil {
 			return appgateway.ModelResolution{}, err
 		}
-		return next.ResolveModel(context.Background(), alias, contextWindow)
+		return next.ResolveModel(ctx, alias, contextWindow)
 	}
 	llm, err := l.factory.NewByAlias(alias)
 	if err != nil {

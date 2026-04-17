@@ -116,7 +116,7 @@ func newModeProvider(modes []sdkplugin.ModeConfig, sessions sdksession.Service, 
 
 func (p *modeProvider) SessionModes(ctx context.Context, session sdksession.Session) (*acp.SessionModeState, error) {
 	if p == nil || len(p.available) == 0 {
-		return nil, nil
+		return &acp.SessionModeState{}, nil
 	}
 	currentID := p.defaultID
 	selected, err := p.currentModeID(ctx, session.SessionRef)
@@ -343,7 +343,7 @@ func (p *configProvider) renderOptions(selected map[string]string) []acp.Session
 func (p *configProvider) currentValues(ctx context.Context, ref sdksession.SessionRef) (map[string]string, error) {
 	sessionID := strings.TrimSpace(ref.SessionID)
 	if sessionID == "" {
-		return nil, nil
+		return map[string]string{}, nil
 	}
 	if p.sessions != nil {
 		state, err := p.sessions.SnapshotState(ctx, normalizeSessionRef(ref, p.appName, p.userID))

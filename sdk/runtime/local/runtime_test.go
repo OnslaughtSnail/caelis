@@ -1924,7 +1924,7 @@ func TestRuntimeBashYieldThenTaskWaitLoop(t *testing.T) {
 	if !sawTaskID {
 		t.Fatal("expected persisted tool result with task_id metadata")
 	}
-	task, err := runtime.tasks.lookupBash(session.SessionRef, mustSessionTaskID(t, loaded.Events))
+	task, err := runtime.tasks.lookupBash(context.Background(), session.SessionRef, mustSessionTaskID(t, loaded.Events))
 	if err != nil {
 		t.Fatalf("task fallback lookup error = %v", err)
 	}

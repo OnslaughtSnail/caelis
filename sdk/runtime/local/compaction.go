@@ -148,7 +148,7 @@ func (c *codexStyleCompactor) compact(ctx context.Context, req sdkcompact.Reques
 	if err != nil {
 		return sdkcompact.Result{}, err
 	}
-	retainedUsers, replacementHistory, usage := c.fitReplacementHistoryToBudget(req, compactText, retainedUsers)
+	retainedUsers, replacementHistory, _ := c.fitReplacementHistoryToBudget(req, compactText, retainedUsers)
 	data := sdkcompact.CompactEventData{
 		Revision:            baseData.Revision + 1,
 		SummarizedThroughID: lastEventID(delta),
@@ -159,7 +159,7 @@ func (c *codexStyleCompactor) compact(ctx context.Context, req sdkcompact.Reques
 	}
 	compactEvent := buildCompactEvent(req.Session, compactText, data)
 	promptEvents := sdkcompact.PromptEventsFromLatestCompact([]*sdksession.Event{compactEvent})
-	usage = c.snapshotUsage(req, promptEventsWithPending(promptEvents, req.PendingEvents))
+	usage := c.snapshotUsage(req, promptEventsWithPending(promptEvents, req.PendingEvents))
 	data.TotalTokens = usage.TotalTokens
 	data.ContextWindowTokens = usage.ContextWindowTokens
 	if compactEvent.Meta == nil {
@@ -304,13 +304,7 @@ func (r *Runtime) prepareInvocationContext(
 	ref sdksession.SessionRef,
 	req sdkruntime.RunRequest,
 	pendingInput *sdksession.Event,
-	events []*sdksession.Event,
-	state map[string]any,
 ) ([]*sdksession.Event, map[string]any, error) {
-	state = sdksession.CloneState(state)
-	if state == nil {
-		state = map[string]any{}
-	}
 	if err := r.recoverRuntimeState(ctx, ref); err != nil {
 		return nil, nil, err
 	}
@@ -318,7 +312,7 @@ func (r *Runtime) prepareInvocationContext(
 	if err != nil {
 		return nil, nil, err
 	}
-	state, err = r.sessions.SnapshotState(ctx, ref)
+	state, err := r.sessions.SnapshotState(ctx, ref)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -356,7 +350,7 @@ func (r *Runtime) persistCompactionArtifacts(
 	result sdkcompact.Result,
 ) (*sdksession.Event, error) {
 	if result.CompactEvent == nil {
-		return nil, nil
+		return nil, errors.New("sdk/runtime/local: compact event is required")
 	}
 	persisted, err := r.sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
 		SessionRef: ref,
@@ -840,10 +834,6 @@ func compactTextFromEvent(event *sdksession.Event) string {
 	return strings.TrimSpace(event.Text)
 }
 
-func buildReplacementHistory(compactText string, retainedUsers []string) []*sdksession.Event {
-	return buildReplacementHistoryWithLimits(compactText, retainedUsers, 480, 12)
-}
-
 func buildReplacementHistoryWithLimits(compactText string, retainedUsers []string, maxChars int, maxLines int) []*sdksession.Event {
 	out := make([]*sdksession.Event, 0, len(retainedUsers)+1)
 	for _, text := range retainedUsers {
@@ -867,10 +857,6 @@ func buildReplacementHistoryWithLimits(compactText string, retainedUsers []strin
 		})
 	}
 	return out
-}
-
-func replacementHistorySummaryText(summaryText string) string {
-	return replacementHistorySummaryTextWithLimits(summaryText, 480, 12)
 }
 
 func replacementHistorySummaryTextWithLimits(summaryText string, maxChars int, maxLines int) string {

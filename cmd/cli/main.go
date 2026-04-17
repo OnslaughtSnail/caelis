@@ -189,8 +189,7 @@ func streamHandle(ctx context.Context, handle appgateway.TurnHandle, stdout io.W
 		if env.Err != nil {
 			return env.Err
 		}
-		switch env.Event.Kind {
-		case appgateway.EventKindApprovalRequested:
+		if env.Event.Kind == appgateway.EventKindApprovalRequested {
 			fmt.Fprintln(stderr, "[approval] denied by default")
 			if err := handle.Submit(ctx, appgateway.SubmitRequest{
 				Kind:     appgateway.SubmissionKindApproval,

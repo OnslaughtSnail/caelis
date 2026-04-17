@@ -3,7 +3,6 @@ package local
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
@@ -98,8 +97,4 @@ func subagentInterruptedSummary(entry *sdktask.Entry) string {
 		return "subagent interrupted during resume"
 	}
 	return fmt.Sprintf("%s interrupted during resume", agent)
-}
-
-func cloneAnyMap(values map[string]any) map[string]any {
-	return maps.Clone(values)
 }

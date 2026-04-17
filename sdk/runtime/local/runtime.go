@@ -182,9 +182,6 @@ func (r *Runtime) Run(
 	ctx context.Context,
 	req sdkruntime.RunRequest,
 ) (sdkruntime.RunResult, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ref := sdksession.NormalizeSessionRef(req.SessionRef)
 	session, err := r.sessions.Session(ctx, ref)
 	if err != nil {
@@ -270,6 +267,7 @@ func (r *Runtime) resolveAgent(
 		approvalRequester: req.ApprovalRequester,
 	})
 	spec.Tools = r.wrapToolsForPolicy(session, ref, state, spec, approvalContext{
+		ctx:        ctx,
 		requester:  req.ApprovalRequester,
 		runtime:    r,
 		session:    sdksession.CloneSession(session),
@@ -356,17 +354,7 @@ func (r *Runtime) runAttempt(
 	req sdkruntime.RunRequest,
 	pendingInput *sdksession.Event,
 ) ([]*sdksession.Event, bool, bool, error) {
-	events, err := r.sessions.Events(ctx, sdksession.EventsRequest{
-		SessionRef: ref,
-	})
-	if err != nil {
-		return nil, false, false, err
-	}
-	state, err := r.sessions.SnapshotState(ctx, ref)
-	if err != nil {
-		return nil, false, false, err
-	}
-	events, state, err = r.prepareInvocationContext(ctx, session, ref, req, pendingInput, events, state)
+	events, state, err := r.prepareInvocationContext(ctx, session, ref, req, pendingInput)
 	if err != nil {
 		return nil, false, false, err
 	}

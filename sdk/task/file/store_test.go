@@ -20,12 +20,12 @@ func TestStoreUpsertCompletedTaskSplitsIndexAndBlob(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(Config{RootDir: root, Clock: fixedClock})
 	entry := &sdktask.Entry{
-		TaskID:  "task-1",
-		Kind:    sdktask.KindBash,
-		Session: sessionRef("sess-1"),
-		Title:   "BASH echo hi",
-		State:   sdktask.StateCompleted,
-		Running: false,
+		TaskID:    "task-1",
+		Kind:      sdktask.KindBash,
+		Session:   sessionRef("sess-1"),
+		Title:     "BASH echo hi",
+		State:     sdktask.StateCompleted,
+		Running:   false,
 		CreatedAt: time.Unix(10, 0),
 		UpdatedAt: time.Unix(20, 0),
 		Result: map[string]any{

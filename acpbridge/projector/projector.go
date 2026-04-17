@@ -136,11 +136,11 @@ func explicitUpdates(event *sdksession.Event) []Update {
 	case UpdateToolCall:
 		return explicitToolCallUpdates(event)
 	case UpdateToolCallInfo:
-		update, err := toolCallUpdateForEvent(event)
-		if err != nil || update == nil {
+		update, ok, err := toolCallUpdateForEvent(event)
+		if err != nil || !ok {
 			return nil
 		}
-		return []Update{*update}
+		return []Update{update}
 	case UpdatePlan:
 		if event.Protocol.Plan == nil {
 			return nil
@@ -165,11 +165,11 @@ func inferredUpdates(event *sdksession.Event) []Update {
 	case sdksession.EventTypeToolCall:
 		return inferredToolCallUpdates(event)
 	case sdksession.EventTypeToolResult:
-		update, err := toolCallUpdateForEvent(event)
-		if err != nil || update == nil {
+		update, ok, err := toolCallUpdateForEvent(event)
+		if err != nil || !ok {
 			return nil
 		}
-		return []Update{*update}
+		return []Update{update}
 	case sdksession.EventTypePlan:
 		if event.Protocol == nil || event.Protocol.Plan == nil {
 			return nil
@@ -202,11 +202,11 @@ func inferredAssistantUpdates(event *sdksession.Event) []Update {
 
 func explicitToolCallUpdates(event *sdksession.Event) []Update {
 	out := inferredAssistantMessageOnly(event)
-	call, err := toolCallForEvent(event)
-	if err != nil || call == nil {
+	call, ok, err := toolCallForEvent(event)
+	if err != nil || !ok {
 		return out
 	}
-	out = append(out, *call)
+	out = append(out, call)
 	return out
 }
 
@@ -266,13 +266,13 @@ func singleContentUpdate(kind string, text string) []Update {
 	}}
 }
 
-func toolCallForEvent(event *sdksession.Event) (*ToolCall, error) {
+func toolCallForEvent(event *sdksession.Event) (ToolCall, bool, error) {
 	if event == nil {
-		return nil, nil
+		return ToolCall{}, false, nil
 	}
 	if event.Protocol != nil && event.Protocol.ToolCall != nil {
 		call := event.Protocol.ToolCall
-		return &ToolCall{
+		return ToolCall{
 			SessionUpdate: UpdateToolCall,
 			ToolCallID:    strings.TrimSpace(call.ID),
 			Title:         firstNonEmpty(strings.TrimSpace(call.Title), strings.TrimSpace(call.Name)),
@@ -280,34 +280,34 @@ func toolCallForEvent(event *sdksession.Event) (*ToolCall, error) {
 			Status:        firstNonEmpty(strings.TrimSpace(call.Status), ToolStatusPending),
 			RawInput:      cloneAnyMap(call.RawInput),
 			RawOutput:     cloneAnyMap(call.RawOutput),
-		}, nil
+		}, true, nil
 	}
 	if event.Message == nil {
-		return nil, nil
+		return ToolCall{}, false, nil
 	}
 	calls := event.Message.ToolCalls()
 	if len(calls) == 0 {
-		return nil, nil
+		return ToolCall{}, false, nil
 	}
 	args := parseObject(calls[0].Args)
-	return &ToolCall{
+	return ToolCall{
 		SessionUpdate: UpdateToolCall,
 		ToolCallID:    strings.TrimSpace(calls[0].ID),
 		Title:         summarizeToolCallTitle(calls[0].Name, args),
 		Kind:          toolKindForName(calls[0].Name),
 		Status:        ToolStatusPending,
 		RawInput:      args,
-	}, nil
+	}, true, nil
 }
 
-func toolCallUpdateForEvent(event *sdksession.Event) (*ToolCallUpdate, error) {
+func toolCallUpdateForEvent(event *sdksession.Event) (ToolCallUpdate, bool, error) {
 	if event == nil {
-		return nil, nil
+		return ToolCallUpdate{}, false, nil
 	}
 	if event.Protocol != nil && event.Protocol.ToolCall != nil {
 		update, err := toolCallUpdateFromProtocol(*event.Protocol.ToolCall)
 		if err != nil {
-			return nil, err
+			return ToolCallUpdate{}, false, err
 		}
 		if terminal := bridgeterminal.ContentFromEvent(event); len(terminal) > 0 {
 			update.Content = append(update.Content, terminal...)
@@ -315,14 +315,14 @@ func toolCallUpdateForEvent(event *sdksession.Event) (*ToolCallUpdate, error) {
 		if text := strings.TrimSpace(event.Text); text != "" {
 			update.Content = append(update.Content, ToolCallContent{Type: "content", Content: TextContent{Type: "text", Text: text}})
 		}
-		return &update, nil
+		return update, true, nil
 	}
 	if event.Message == nil {
-		return nil, nil
+		return ToolCallUpdate{}, false, nil
 	}
 	resp := event.Message.ToolResponse()
 	if resp == nil {
-		return nil, nil
+		return ToolCallUpdate{}, false, nil
 	}
 	status := ToolStatusCompleted
 	if raw, ok := event.Meta["is_error"].(bool); ok && raw {
@@ -330,14 +330,14 @@ func toolCallUpdateForEvent(event *sdksession.Event) (*ToolCallUpdate, error) {
 	}
 	name := strings.TrimSpace(resp.Name)
 	kind := toolKindForName(name)
-	return &ToolCallUpdate{
+	return ToolCallUpdate{
 		SessionUpdate: UpdateToolCallInfo,
 		ToolCallID:    strings.TrimSpace(resp.ID),
 		Kind:          stringPtr(kind),
 		Status:        stringPtr(status),
 		RawOutput:     cloneAnyMap(resp.Result),
 		Content:       bridgeterminal.ContentFromEvent(event),
-	}, nil
+	}, true, nil
 }
 
 func toolCallUpdateFromProtocol(call sdksession.ProtocolToolCall) (ToolCallUpdate, error) {

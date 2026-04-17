@@ -20,9 +20,6 @@ func newTerminalService(tasks *taskRuntime) *terminalService {
 }
 
 func (s *terminalService) Read(ctx context.Context, req sdkterminal.ReadRequest) (sdkterminal.Snapshot, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ref := sdkterminal.NormalizeRef(req.Ref)
 	cursor := sdkterminal.CloneCursor(req.Cursor)
 	task, err := s.resolveTask(ctx, ref)
@@ -81,9 +78,6 @@ func (s *terminalService) Read(ctx context.Context, req sdkterminal.ReadRequest)
 
 func (s *terminalService) Subscribe(ctx context.Context, req sdkterminal.SubscribeRequest) iter.Seq2[*sdkterminal.Frame, error] {
 	return func(yield func(*sdkterminal.Frame, error) bool) {
-		if ctx == nil {
-			ctx = context.Background()
-		}
 		ref := sdkterminal.NormalizeRef(req.Ref)
 		cursor := sdkterminal.CloneCursor(req.Cursor)
 		poll := req.PollInterval
@@ -99,8 +93,8 @@ func (s *terminalService) Subscribe(ctx context.Context, req sdkterminal.Subscri
 			}
 			cursor = snap.Cursor
 			for _, frame := range snap.Frames {
-				copy := sdkterminal.CloneFrame(frame)
-				if !yield(&copy, nil) {
+				cloned := sdkterminal.CloneFrame(frame)
+				if !yield(&cloned, nil) {
 					return
 				}
 			}
@@ -136,9 +130,6 @@ func (s *terminalService) Subscribe(ctx context.Context, req sdkterminal.Subscri
 }
 
 func (s *terminalService) Wait(ctx context.Context, ref sdkterminal.Ref) (sdkterminal.Snapshot, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	ref = sdkterminal.NormalizeRef(ref)
 	poll := 100 * time.Millisecond
 	for {
@@ -191,7 +182,7 @@ func (s *terminalService) resolveTask(ctx context.Context, ref sdkterminal.Ref) 
 	}
 	sessionRef := sdksession.SessionRef{SessionID: ref.SessionID}
 	if ref.TaskID != "" {
-		return s.tasks.lookupBash(sessionRef, ref.TaskID)
+		return s.tasks.lookupBash(ctx, sessionRef, ref.TaskID)
 	}
 	if ref.TerminalID == "" {
 		return nil, fmt.Errorf("sdk/runtime/local: task_id or terminal_id is required")

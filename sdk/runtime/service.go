@@ -88,11 +88,11 @@ type DetachACPParticipantRequest struct {
 // HandoffControllerRequest switches the active controller for one session. The
 // request is app-owned and not exposed on the LLM-facing tool surface.
 type HandoffControllerRequest struct {
-	SessionRef sdksession.SessionRef  `json:"session_ref"`
+	SessionRef sdksession.SessionRef     `json:"session_ref"`
 	Kind       sdksession.ControllerKind `json:"kind,omitempty"`
-	Agent      string                `json:"agent,omitempty"`
-	Source     string                `json:"source,omitempty"`
-	Reason     string                `json:"reason,omitempty"`
+	Agent      string                    `json:"agent,omitempty"`
+	Source     string                    `json:"source,omitempty"`
+	Reason     string                    `json:"reason,omitempty"`
 }
 
 // ControlPlane exposes optional session orchestration capabilities such as ACP

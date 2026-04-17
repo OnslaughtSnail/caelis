@@ -407,11 +407,7 @@ func (s *Service) LoadSession(
 	if err != nil {
 		return sdksession.LoadedSession{}, err
 	}
-	events, err := s.store.Events(ctx, sdksession.EventsRequest{
-		SessionRef:       req.SessionRef,
-		Limit:            req.Limit,
-		IncludeTransient: req.IncludeTransient,
-	})
+	events, err := s.store.Events(ctx, sdksession.EventsRequest(req))
 	if err != nil {
 		return sdksession.LoadedSession{}, err
 	}

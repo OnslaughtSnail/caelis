@@ -10,10 +10,10 @@ import (
 
 // RuntimeSnapshot provides current non-transcript runtime state for compaction.
 type RuntimeSnapshot struct {
-	PlanSummary         []string
-	ActiveTasks         []TaskState
-	ActiveParticipants  []ParticipantState
-	LatestBlockers      []string
+	PlanSummary        []string
+	ActiveTasks        []TaskState
+	ActiveParticipants []ParticipantState
+	LatestBlockers     []string
 }
 
 // HeuristicBuild merges a new heuristic checkpoint candidate from prior state,
@@ -27,21 +27,21 @@ func HeuristicBuild(
 ) State {
 	now := time.Now()
 	candidate := State{
-		Revision:             base.Revision + 1,
-		SummarizedThroughID:  lastEventID(events),
-		UpdatedAt:            now,
-		Trigger:              strings.TrimSpace(trigger),
-		Generator:            "heuristic",
-		Objective:            heuristicObjective(base, events),
-		UserConstraints:      heuristicConstraints(events),
-		DurableDecisions:     heuristicDecisions(events),
-		VerifiedFacts:        heuristicFacts(events),
-		CurrentProgress:      heuristicProgress(events, runtime),
+		Revision:              base.Revision + 1,
+		SummarizedThroughID:   lastEventID(events),
+		UpdatedAt:             now,
+		Trigger:               strings.TrimSpace(trigger),
+		Generator:             "heuristic",
+		Objective:             heuristicObjective(base, events),
+		UserConstraints:       heuristicConstraints(events),
+		DurableDecisions:      heuristicDecisions(events),
+		VerifiedFacts:         heuristicFacts(events),
+		CurrentProgress:       heuristicProgress(events, runtime),
 		OpenQuestionsAndRisks: heuristicRisks(events),
-		NextActions:          heuristicNextActions(runtime, events),
-		ActiveTasks:          runtime.ActiveTasks,
-		ActiveParticipants:   runtime.ActiveParticipants,
-		LatestBlockers:       runtime.LatestBlockers,
+		NextActions:           heuristicNextActions(runtime, events),
+		ActiveTasks:           runtime.ActiveTasks,
+		ActiveParticipants:    runtime.ActiveParticipants,
+		LatestBlockers:        runtime.LatestBlockers,
 		OperationalAnnex: OperationalAnnex{
 			FilesTouched: heuristicFilesTouched(events),
 			CommandsRun:  heuristicCommandsRun(events),
