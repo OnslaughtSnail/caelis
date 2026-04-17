@@ -74,6 +74,7 @@ Only the following documents should remain active in `docs/` for this phase:
 2. `docs/plugin_agent_assembly_boundary_plan.md`
 3. `docs/session_controller_event_model.md`
 4. `docs/sdk_compaction_chain_audit_and_design.md`
+5. `docs/unified_gateway_foundation_spec.md`
 
 If a new document is added, another outdated document should usually be removed
 so the set stays small and non-conflicting.
@@ -82,6 +83,7 @@ so the set stays small and non-conflicting.
 
 The next useful work in this phase is:
 
-- continue tightening SDK-internal boundaries
-- keep docs aligned with the current phase
-- avoid spending effort on rewriting upper layers before the SDK foundation is settled
+- keep the SDK foundation stable and unchanged in boundary terms
+- define a `sdk`-backed Unified Gateway as the next-layer product boundary
+- treat old `kernel` / `internal/app` / `cmd/cli` orchestration as legacy
+  reference pending future deletion
