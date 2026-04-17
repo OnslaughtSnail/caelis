@@ -1,0 +1,103 @@
+package headless
+
+import (
+	"context"
+	"strings"
+
+	"github.com/OnslaughtSnail/caelis/gateway"
+	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
+	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+)
+
+type Starter interface {
+	BeginTurn(context.Context, gateway.BeginTurnRequest) (gateway.BeginTurnResult, error)
+}
+
+type ApprovalPolicy string
+
+const (
+	ApprovalPolicyAutoDeny   ApprovalPolicy = "auto_deny"
+	ApprovalPolicyApproveAll ApprovalPolicy = "approve_all"
+)
+
+type Options struct {
+	ApprovalPolicy  ApprovalPolicy
+	ResolveApproval func(context.Context, *sdkruntime.ApprovalRequest) (gateway.ApprovalDecision, error)
+}
+
+type Result struct {
+	Session    sdksession.Session
+	Output     string
+	LastCursor string
+}
+
+func RunOnce(ctx context.Context, starter Starter, req gateway.BeginTurnRequest, opts Options) (Result, error) {
+	result, err := starter.BeginTurn(ctx, req)
+	if err != nil {
+		return Result{}, err
+	}
+	if result.Handle == nil {
+		return Result{Session: result.Session}, nil
+	}
+	defer result.Handle.Close()
+
+	out := Result{Session: result.Session}
+	for env := range result.Handle.Events() {
+		out.LastCursor = env.Cursor
+		if env.Err != nil {
+			return out, env.Err
+		}
+		if env.Event.Kind == gateway.EventKindApprovalRequested {
+			decision, err := resolveApproval(ctx, opts, env.Event.Approval)
+			if err != nil {
+				return out, err
+			}
+			if err := result.Handle.Submit(ctx, gateway.SubmitRequest{
+				Kind:     gateway.SubmissionKindApproval,
+				Approval: &decision,
+			}); err != nil {
+				return out, err
+			}
+			continue
+		}
+		if text := assistantText(env.Event.SessionEvent); text != "" {
+			out.Output = text
+		}
+	}
+	return out, nil
+}
+
+func resolveApproval(ctx context.Context, opts Options, req *sdkruntime.ApprovalRequest) (gateway.ApprovalDecision, error) {
+	if opts.ResolveApproval != nil {
+		return opts.ResolveApproval(ctx, req)
+	}
+	if opts.ApprovalPolicy == ApprovalPolicyApproveAll {
+		return gateway.ApprovalDecision{Approved: true, Outcome: "approved"}, nil
+	}
+	return gateway.ApprovalDecision{Approved: false, Outcome: "rejected"}, nil
+}
+
+func assistantText(event *sdksession.Event) string {
+	if event == nil {
+		return ""
+	}
+	if event.Message != nil {
+		if text := strings.TrimSpace(event.Message.TextContent()); text != "" {
+			return text
+		}
+	}
+	if event.Type == sdksession.EventTypeAssistant {
+		return strings.TrimSpace(event.Text)
+	}
+	if event.Type == sdksession.EventTypeAssistant && event.Message == nil {
+		return strings.TrimSpace(event.Text)
+	}
+	if event.Type == sdksession.EventTypeAssistant && event.Message != nil {
+		return strings.TrimSpace(event.Message.TextContent())
+	}
+	if event.Message != nil && event.Message.Role == sdkmodel.RoleAssistant {
+		return strings.TrimSpace(event.Message.TextContent())
+	}
+	return ""
+}
