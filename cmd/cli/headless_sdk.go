@@ -11,14 +11,13 @@ import (
 	modelproviders "github.com/OnslaughtSnail/caelis/kernel/model/providers"
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
+	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	sdkpolicy "github.com/OnslaughtSnail/caelis/sdk/policy/presets"
-	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	"github.com/OnslaughtSnail/caelis/sdk/runtime/agents/chat"
 	localruntime "github.com/OnslaughtSnail/caelis/sdk/runtime/local"
 	"github.com/OnslaughtSnail/caelis/sdk/sandbox/host"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
-	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 	sdkbuiltin "github.com/OnslaughtSnail/caelis/sdk/tool/builtin"
 )
 
@@ -33,6 +32,7 @@ type cliSDKHeadlessConfig struct {
 	ContextWindow  int
 	PermissionMode string
 	ModelFactory   *modelproviders.Factory
+	Assembly       sdkplugin.ResolvedAssembly
 	AgentInput     buildAgentInput
 }
 
@@ -95,14 +95,28 @@ func buildSDKHeadlessGateway(cfg cliSDKHeadlessConfig) (*appgateway.Gateway, err
 	if err != nil {
 		return nil, err
 	}
-	resolver := &cliHeadlessResolver{
-		defaultAlias:    cfg.ModelAlias,
-		contextWindow:   cfg.ContextWindow,
-		factory:         cfg.ModelFactory,
-		systemPrompt:    systemPrompt,
-		tools:           tools,
-		reasoningEffort: strings.TrimSpace(cfg.AgentInput.ReasoningEffort),
-		thinkingBudget:  cfg.AgentInput.ThinkingBudget,
+	baseMetadata := map[string]any{
+		"system_prompt": systemPrompt,
+	}
+	if reasoning := strings.TrimSpace(cfg.AgentInput.ReasoningEffort); reasoning != "" {
+		baseMetadata["reasoning_effort"] = reasoning
+	}
+	if cfg.AgentInput.ThinkingBudget > 0 {
+		baseMetadata["reasoning_budget_tokens"] = cfg.AgentInput.ThinkingBudget
+	}
+	resolver, err := appgateway.NewAssemblyResolver(appgateway.AssemblyResolverConfig{
+		Sessions:          sessions,
+		Assembly:          cfg.Assembly,
+		DefaultModelAlias: cfg.ModelAlias,
+		ContextWindow:     cfg.ContextWindow,
+		ModelLookup: cliModelLookup{
+			factory: cfg.ModelFactory,
+		},
+		Tools:        tools,
+		BaseMetadata: baseMetadata,
+	})
+	if err != nil {
+		return nil, err
 	}
 	return appgateway.New(appgateway.Config{
 		Sessions: sessions,
@@ -111,46 +125,19 @@ func buildSDKHeadlessGateway(cfg cliSDKHeadlessConfig) (*appgateway.Gateway, err
 	})
 }
 
-type cliHeadlessResolver struct {
-	defaultAlias    string
-	contextWindow   int
-	factory         *modelproviders.Factory
-	systemPrompt    string
-	tools           []sdktool.Tool
-	reasoningEffort string
-	thinkingBudget  int
+type cliModelLookup struct {
+	factory *modelproviders.Factory
 }
 
-func (r *cliHeadlessResolver) ResolveTurn(_ context.Context, intent appgateway.TurnIntent) (appgateway.ResolvedTurn, error) {
-	alias := strings.TrimSpace(intent.ModelHint)
-	if alias == "" {
-		alias = strings.TrimSpace(r.defaultAlias)
-	}
-	llm, providerCfg, err := newSDKModelFromLegacyFactory(r.factory, alias, r.contextWindow)
+func (r cliModelLookup) ResolveModel(_ context.Context, alias string, contextWindow int) (appgateway.ModelResolution, error) {
+	llm, providerCfg, err := newSDKModelFromLegacyFactory(r.factory, alias, contextWindow)
 	if err != nil {
-		return appgateway.ResolvedTurn{}, err
+		return appgateway.ModelResolution{}, err
 	}
-	metadata := map[string]any{
-		"system_prompt": r.systemPrompt,
-	}
-	if reasoning := firstNonEmptyString(r.reasoningEffort, providerCfg.ReasoningEffort, providerCfg.DefaultReasoningEffort); reasoning != "" {
-		metadata["reasoning_effort"] = reasoning
-	}
-	if r.thinkingBudget > 0 {
-		metadata["reasoning_budget_tokens"] = r.thinkingBudget
-	}
-	return appgateway.ResolvedTurn{
-		RunRequest: sdkruntime.RunRequest{
-			SessionRef:   intent.SessionRef,
-			Input:        intent.Input,
-			ContentParts: append([]sdkmodel.ContentPart(nil), intent.ContentParts...),
-			AgentSpec: sdkruntime.AgentSpec{
-				Name:     "main",
-				Model:    llm,
-				Tools:    append([]sdktool.Tool(nil), r.tools...),
-				Metadata: metadata,
-			},
-		},
+	return appgateway.ModelResolution{
+		Model:                  llm,
+		ReasoningEffort:        providerCfg.ReasoningEffort,
+		DefaultReasoningEffort: providerCfg.DefaultReasoningEffort,
 	}, nil
 }
 
