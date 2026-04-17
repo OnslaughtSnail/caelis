@@ -46,7 +46,6 @@ type Config struct {
 	Controllers       sdkcontroller.ACP
 	TaskStore         sdktask.Store
 	Subagents         sdksubagent.Runner
-	SubagentRegistry  sdksubagent.Registry
 }
 
 // Runtime is the baseline local runtime implementation.
@@ -64,7 +63,6 @@ type Runtime struct {
 	assembly          sdkplugin.ResolvedAssembly
 	controllers       sdkcontroller.ACP
 	subagents         sdksubagent.Runner
-	subagentRegistry  sdksubagent.Registry
 	idCounter         atomic.Uint64
 	mu                sync.RWMutex
 	runStates         map[string]sdkruntime.RunState
@@ -93,7 +91,6 @@ func New(cfg Config) (*Runtime, error) {
 		assembly:          sdkplugin.CloneResolvedAssembly(cfg.Assembly),
 		controllers:       cfg.Controllers,
 		subagents:         cfg.Subagents,
-		subagentRegistry:  cfg.SubagentRegistry,
 		runStates:         map[string]sdkruntime.RunState{},
 	}
 	if r.clock == nil {
@@ -112,6 +109,9 @@ func New(cfg Config) (*Runtime, error) {
 	if r.defaultPolicyMode == "" {
 		r.defaultPolicyMode = policypresets.ModeDefault
 	}
+	if err := validateControlPlaneConfig(cfg); err != nil {
+		return nil, err
+	}
 	if err := r.applyAssembly(cfg.Assembly, cfg); err != nil {
 		return nil, err
 	}
@@ -129,7 +129,6 @@ func (r *Runtime) applyAssembly(assembly sdkplugin.ResolvedAssembly, cfg Config)
 	if len(assembly.Agents) == 0 {
 		r.controllers = cfg.Controllers
 		r.subagents = cfg.Subagents
-		r.subagentRegistry = cfg.SubagentRegistry
 		return nil
 	}
 
@@ -146,11 +145,6 @@ func (r *Runtime) applyAssembly(assembly sdkplugin.ResolvedAssembly, cfg Config)
 		return err
 	}
 
-	if cfg.SubagentRegistry != nil {
-		r.subagentRegistry = cfg.SubagentRegistry
-	} else {
-		r.subagentRegistry = registry
-	}
 	if cfg.Subagents != nil {
 		r.subagents = cfg.Subagents
 	} else {
@@ -160,6 +154,16 @@ func (r *Runtime) applyAssembly(assembly sdkplugin.ResolvedAssembly, cfg Config)
 		r.controllers = cfg.Controllers
 	} else {
 		r.controllers = manager
+	}
+	return nil
+}
+
+func validateControlPlaneConfig(cfg Config) error {
+	if len(cfg.Assembly.Agents) == 0 {
+		return nil
+	}
+	if cfg.Controllers != nil || cfg.Subagents != nil {
+		return errors.New("sdk/runtime/local: Assembly.Agents cannot be combined with explicit Controllers or Subagents")
 	}
 	return nil
 }

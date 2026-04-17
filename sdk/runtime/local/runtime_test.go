@@ -14,6 +14,7 @@ import (
 	"time"
 
 	sdkcompact "github.com/OnslaughtSnail/caelis/sdk/compact"
+	sdkcontroller "github.com/OnslaughtSnail/caelis/sdk/controller"
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	policypresets "github.com/OnslaughtSnail/caelis/sdk/policy/presets"
@@ -256,6 +257,54 @@ func TestRuntimeRunAppliesConfigOverridesInDeclaredOrder(t *testing.T) {
 	if got := strings.TrimSpace(specs[0].Metadata["system_prompt"].(string)); got != "second-prompt" {
 		t.Fatalf("system_prompt = %q, want %q", got, "second-prompt")
 	}
+}
+
+func TestNewRejectsMixedAssemblyAndExplicitControlPlane(t *testing.T) {
+	t.Parallel()
+
+	sessions, _ := newTestSessionService(t, "sess-mixed-control-plane")
+	_, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Assembly: sdkplugin.ResolvedAssembly{
+			Agents: []sdkplugin.AgentConfig{{
+				Name:    "self",
+				Command: "bash",
+				Args:    []string{"-lc", "echo ok"},
+			}},
+		},
+		Controllers: stubACPController{},
+	})
+	if err == nil {
+		t.Fatal("expected mixed assembly/control-plane config to fail")
+	}
+	if !strings.Contains(err.Error(), "Assembly.Agents cannot be combined") {
+		t.Fatalf("New() error = %v, want mixed-configuration rejection", err)
+	}
+}
+
+type stubACPController struct{}
+
+func (stubACPController) Activate(context.Context, sdkcontroller.HandoffRequest) (sdksession.ControllerBinding, error) {
+	return sdksession.ControllerBinding{}, nil
+}
+
+func (stubACPController) Deactivate(context.Context, sdksession.SessionRef) error {
+	return nil
+}
+
+func (stubACPController) RunTurn(context.Context, sdkcontroller.TurnRequest) (sdkcontroller.TurnResult, error) {
+	return sdkcontroller.TurnResult{}, nil
+}
+
+func (stubACPController) Attach(context.Context, sdkcontroller.AttachRequest) (sdksession.ParticipantBinding, error) {
+	return sdksession.ParticipantBinding{}, nil
+}
+
+func (stubACPController) Detach(context.Context, sdkcontroller.DetachRequest) error {
+	return nil
 }
 
 func TestRuntimeRunFallsBackToDefaultForStaleConfigValue(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 
 	sdkacpclient "github.com/OnslaughtSnail/caelis/acp/client"
 	sdkcontroller "github.com/OnslaughtSnail/caelis/sdk/controller"
+	"github.com/OnslaughtSnail/caelis/sdk/internal/acputil"
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sdksubagentacp "github.com/OnslaughtSnail/caelis/sdk/subagent/acp"
@@ -276,28 +277,25 @@ func (m *Manager) permissionHandler(
 ) func(context.Context, sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
 	return func(ctx context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
 		trimmedAgent := strings.TrimSpace(agent)
-		if !strings.EqualFold(trimmedAgent, "self") {
-			resolution := sdkacpclient.ResolveApproveAllOnce(mode, trimmedAgent, req)
-			if auto, ok := resolution.AutoResponse(); ok {
-				return auto, nil
-			}
+		if auto, ok := acputil.AutoApproveAllOnce(mode, trimmedAgent, req); ok {
+			return auto, nil
 		}
 		if requester != nil {
 			resp, err := requester.RequestControllerApproval(ctx, translateApprovalRequest(session, trimmedAgent, mode, req))
 			if err != nil {
 				return sdkacpclient.RequestPermissionResponse{}, err
 			}
-			if strings.EqualFold(strings.TrimSpace(resp.Outcome), "selected") && strings.TrimSpace(resp.OptionID) != "" {
-				return sdkacpclient.PermissionSelectedOutcome(resp.OptionID), nil
+			if selected, ok := acputil.SelectedOutcome(resp.Outcome, resp.OptionID); ok {
+				return selected, nil
 			}
 		}
-		return rejectOnce(), nil
+		return acputil.RejectOnce(), nil
 	}
 }
 
 func (r *controllerRun) permissionHandler(ctx context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
 	if r == nil {
-		return rejectOnce(), nil
+		return acputil.RejectOnce(), nil
 	}
 	r.mu.Lock()
 	session := sdksession.CloneSession(r.turnSession)
@@ -305,26 +303,19 @@ func (r *controllerRun) permissionHandler(ctx context.Context, req sdkacpclient.
 	requester := r.approvalRequester
 	agent := strings.TrimSpace(r.agent)
 	r.mu.Unlock()
-	resolution := sdkacpclient.ResolveApproveAllOnce(mode, agent, req)
-	if !strings.EqualFold(agent, "self") {
-		if auto, ok := resolution.AutoResponse(); ok {
-			return auto, nil
-		}
+	if auto, ok := acputil.AutoApproveAllOnce(mode, agent, req); ok {
+		return auto, nil
 	}
 	if requester != nil {
 		resp, err := requester.RequestControllerApproval(ctx, translateApprovalRequest(session, agent, mode, req))
 		if err != nil {
 			return sdkacpclient.RequestPermissionResponse{}, err
 		}
-		if strings.EqualFold(strings.TrimSpace(resp.Outcome), "selected") && strings.TrimSpace(resp.OptionID) != "" {
-			return sdkacpclient.PermissionSelectedOutcome(resp.OptionID), nil
+		if selected, ok := acputil.SelectedOutcome(resp.Outcome, resp.OptionID); ok {
+			return selected, nil
 		}
 	}
-	return rejectOnce(), nil
-}
-
-func rejectOnce() sdkacpclient.RequestPermissionResponse {
-	return sdkacpclient.PermissionSelectedOutcome("reject_once")
+	return acputil.RejectOnce(), nil
 }
 
 func translateApprovalRequest(
@@ -348,27 +339,13 @@ func translateApprovalRequest(
 		Mode:       strings.TrimSpace(mode),
 		ToolCall: sdkcontroller.ApprovalToolCall{
 			ID:     strings.TrimSpace(req.ToolCall.ToolCallID),
-			Name:   toolCallName(req.ToolCall),
+			Name:   acputil.ToolCallName(req.ToolCall),
 			Kind:   derefString(req.ToolCall.Kind),
 			Title:  derefString(req.ToolCall.Title),
 			Status: derefString(req.ToolCall.Status),
 		},
 		Options: options,
 	}
-}
-
-func toolCallName(update sdkacpclient.ToolCallUpdate) string {
-	if output, ok := update.RawOutput.(map[string]any); ok {
-		if name, _ := output["name"].(string); strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name)
-		}
-	}
-	if input, ok := update.RawInput.(map[string]any); ok {
-		if name, _ := input["name"].(string); strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name)
-		}
-	}
-	return "UNKNOWN"
 }
 
 func controllerBinding(agent string, source string, epochID string, now time.Time) sdksession.ControllerBinding {

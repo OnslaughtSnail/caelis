@@ -13,6 +13,7 @@ import (
 
 	sdkacpclient "github.com/OnslaughtSnail/caelis/acp/client"
 	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
+	"github.com/OnslaughtSnail/caelis/sdk/internal/acputil"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sdksubagent "github.com/OnslaughtSnail/caelis/sdk/subagent"
 )
@@ -278,22 +279,19 @@ func (r *Runner) permissionCallback(spawn sdksubagent.SpawnContext, cfg AgentCon
 		return r.permissionHandler
 	}
 	return func(ctx context.Context, req sdkacpclient.RequestPermissionRequest) (sdkacpclient.RequestPermissionResponse, error) {
-		if !strings.EqualFold(strings.TrimSpace(cfg.Name), "self") {
-			resolution := sdkacpclient.ResolveApproveAllOnce(spawn.Mode, cfg.Name, req)
-			if auto, ok := resolution.AutoResponse(); ok {
-				return auto, nil
-			}
+		if auto, ok := acputil.AutoApproveAllOnce(spawn.Mode, cfg.Name, req); ok {
+			return auto, nil
 		}
 		if spawn.ApprovalRequester != nil {
 			resp, err := spawn.ApprovalRequester.RequestSubagentApproval(ctx, translateApprovalRequest(spawn, cfg, agentID, req))
 			if err != nil {
 				return sdkacpclient.RequestPermissionResponse{}, err
 			}
-			if strings.EqualFold(strings.TrimSpace(resp.Outcome), "selected") && strings.TrimSpace(resp.OptionID) != "" {
-				return sdkacpclient.PermissionSelectedOutcome(resp.OptionID), nil
+			if selected, ok := acputil.SelectedOutcome(resp.Outcome, resp.OptionID); ok {
+				return selected, nil
 			}
 		}
-		return sdkacpclient.PermissionSelectedOutcome("reject_once"), nil
+		return acputil.RejectOnce(), nil
 	}
 }
 
@@ -319,7 +317,7 @@ func translateApprovalRequest(
 		Mode:       strings.TrimSpace(spawn.Mode),
 		ToolCall: sdksubagent.ApprovalToolCall{
 			ID:     strings.TrimSpace(req.ToolCall.ToolCallID),
-			Name:   toolCallName(req.ToolCall),
+			Name:   acputil.ToolCallName(req.ToolCall),
 			Kind:   trimStringPtr(req.ToolCall.Kind),
 			Title:  trimStringPtr(req.ToolCall.Title),
 			Status: trimStringPtr(req.ToolCall.Status),
@@ -342,20 +340,6 @@ func trimStringPtr(value *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*value)
-}
-
-func toolCallName(update sdkacpclient.ToolCallUpdate) string {
-	if output, ok := update.RawOutput.(map[string]any); ok {
-		if name, _ := output["name"].(string); strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name)
-		}
-	}
-	if input, ok := update.RawInput.(map[string]any); ok {
-		if name, _ := input["name"].(string); strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name)
-		}
-	}
-	return "UNKNOWN"
 }
 
 func compactPreview(text string) string {
