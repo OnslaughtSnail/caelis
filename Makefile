@@ -3,11 +3,6 @@ VERSION ?= $(if $(strip $(GIT_TAG)),$(strip $(GIT_TAG)),$(shell cat VERSION 2>/d
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 GOFILES := $(shell if command -v rg >/dev/null 2>&1; then rg --files -g '*.go'; else find . -type f -name '*.go' | sed 's|^\./||' | LC_ALL=C sort; fi)
-LDFLAGS := -s -w \
-	-X github.com/OnslaughtSnail/caelis/internal/version.Version=$(VERSION) \
-	-X github.com/OnslaughtSnail/caelis/internal/version.Commit=$(COMMIT) \
-	-X github.com/OnslaughtSnail/caelis/internal/version.Date=$(DATE)
-
 .PHONY: build build-cli fmt fmt-check install lint quality test vet eval-light eval-nightly eval-real-matrix release-dry-run
 
 fmt:
@@ -20,11 +15,11 @@ build:
 	go build ./...
 
 install:
-	go install -ldflags "$(LDFLAGS)" ./cmd/cli
+	go install ./cmd/cli
 
 build-cli:
 	mkdir -p ./.tmp/bin
-	go build -ldflags "$(LDFLAGS)" -o ./.tmp/bin/caelis ./cmd/cli
+	go build -o ./.tmp/bin/caelis ./cmd/cli
 
 vet:
 	go vet ./...

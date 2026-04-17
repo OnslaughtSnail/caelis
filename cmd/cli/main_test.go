@@ -1,151 +1,130 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"runtime"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
-	toolexec "github.com/OnslaughtSnail/caelis/kernel/execenv"
+	appgateway "github.com/OnslaughtSnail/caelis/gateway"
+	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
-type noopCommandRunner struct{}
-
-func cliTestSandboxType() string {
-	if runtime.GOOS == "darwin" {
-		return "seatbelt"
-	}
-	if runtime.GOOS == "linux" {
-		return "landlock"
-	}
-	return "bwrap"
-}
-
-func (noopCommandRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
-	_ = ctx
-	_ = req
-	return toolexec.CommandResult{}, nil
-}
-
-type failingProbeRunner struct{}
-
-func (failingProbeRunner) Run(ctx context.Context, req toolexec.CommandRequest) (toolexec.CommandResult, error) {
-	_ = ctx
-	_ = req
-	return toolexec.CommandResult{}, nil
-}
-
-func (failingProbeRunner) Probe(context.Context) error {
-	return errors.New("sandbox is unavailable")
-}
-
-func TestRejectRemovedExecutionFlags(t *testing.T) {
-	cases := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "exec-mode", args: []string{"-exec-mode", "sandbox"}, want: "-permission-mode"},
-		{name: "bash-strategy", args: []string{"--bash-strategy=strict"}, want: "-permission-mode"},
-		{name: "bash-allowlist", args: []string{"-bash-allowlist=ls,pwd"}, want: "host escalation approval flow"},
-		{name: "bash-deny-meta", args: []string{"--bash-deny-meta=false"}, want: "-permission-mode"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := rejectRemovedExecutionFlags(tc.args)
-			if err == nil {
-				t.Fatal("expected error")
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("expected hint %q in error %q", tc.want, err.Error())
-			}
-		})
-	}
-}
-
-func TestRejectRemovedExecutionFlags_AcceptsNewFlags(t *testing.T) {
-	err := rejectRemovedExecutionFlags([]string{"-permission-mode=default", "-sandbox-type=landlock"})
+func TestResolveInputFromPrompt(t *testing.T) {
+	got, single, err := resolveInput("hello", strings.NewReader(""), true)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("resolveInput() error = %v", err)
+	}
+	if !single || got != "hello" {
+		t.Fatalf("resolveInput() = %q, %v", got, single)
 	}
 }
 
-func TestBuildRuntimePromptHint_IncludesPolicySummary(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		SandboxType:    cliTestSandboxType(),
-		SandboxRunner:  noopCommandRunner{},
+func TestResolveTurnInputForceInteractiveDoesNotConsumePipe(t *testing.T) {
+	stdin := strings.NewReader("piped prompt")
+	got, single, err := resolveTurnInput("", stdin, false, true)
+	if err != nil {
+		t.Fatalf("resolveTurnInput() error = %v", err)
+	}
+	if single || got != "" {
+		t.Fatalf("resolveTurnInput() = %q, %v", got, single)
+	}
+
+	remaining, err := io.ReadAll(stdin)
+	if err != nil {
+		t.Fatalf("ReadAll(stdin) error = %v", err)
+	}
+	if string(remaining) != "piped prompt" {
+		t.Fatalf("remaining stdin = %q", remaining)
+	}
+}
+
+func TestParseOutputFormat(t *testing.T) {
+	if got, err := parseOutputFormat("json"); err != nil || got != outputJSON {
+		t.Fatalf("parseOutputFormat() = %q, %v", got, err)
+	}
+	if _, err := parseOutputFormat("xml"); err == nil {
+		t.Fatal("parseOutputFormat(xml) error = nil")
+	}
+}
+
+func TestStreamHandleWritesAssistantTextAndDeniesApproval(t *testing.T) {
+	handle := newFakeHandle([]appgateway.EventEnvelope{
+		{
+			Event: appgateway.Event{
+				Kind: appgateway.EventKindApprovalRequested,
+				Approval: &sdkruntime.ApprovalRequest{
+					SessionRef: sdksession.SessionRef{SessionID: "s1"},
+				},
+			},
+		},
+		{
+			Event: appgateway.Event{
+				Kind: appgateway.EventKindSessionEvent,
+				SessionEvent: &sdksession.Event{
+					Type: sdksession.EventTypeAssistant,
+					Text: "interactive ok",
+				},
+			},
+		},
 	})
-	if err != nil {
-		t.Fatal(err)
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	if err := streamHandle(context.Background(), handle, &out, &errBuf); err != nil {
+		t.Fatalf("streamHandle() error = %v", err)
 	}
-	hint := buildRuntimePromptHint(rt)
-	if !strings.Contains(hint, "sandbox_policy=workspace_write") {
-		t.Fatalf("expected workspace_write policy hint, got %q", hint)
+	if got := out.String(); !strings.Contains(got, "interactive ok") {
+		t.Fatalf("stdout = %q", got)
 	}
-	if !strings.Contains(hint, "commands run in sandbox by default") {
-		t.Fatalf("expected sandbox default rule, got %q", hint)
+	if got := errBuf.String(); !strings.Contains(got, "denied by default") {
+		t.Fatalf("stderr = %q", got)
 	}
-	if !strings.Contains(hint, "use require_escalated=true only when sandbox limits are blocking a necessary next step") {
-		t.Fatalf("expected escalation guidance, got %q", hint)
-	}
-	if !strings.Contains(hint, "Safe inspection commands may auto-pass host escalation without user approval") {
-		t.Fatalf("expected safe-command escalation hint, got %q", hint)
+	if len(handle.submits) != 1 || handle.submits[0].Approval == nil || handle.submits[0].Approval.Approved {
+		t.Fatalf("submits = %#v", handle.submits)
 	}
 }
 
-func TestBuildRuntimePromptHint_FullControl(t *testing.T) {
-	rt := newCLITestExecRuntime(t, toolexec.PermissionModeFullControl)
-	hint := buildRuntimePromptHint(rt)
-	if !strings.Contains(hint, "permission_mode=full_control route=host") {
-		t.Fatalf("expected full control route hint, got %q", hint)
-	}
-	if !strings.Contains(hint, "sandbox_policy=danger_full_access") {
-		t.Fatalf("expected danger_full_access policy hint, got %q", hint)
-	}
+type fakeHandle struct {
+	events    chan appgateway.EventEnvelope
+	submits   []appgateway.SubmitRequest
+	closed    bool
+	cancelled bool
 }
 
-func TestBuildRuntimePromptHint_DefaultFallbackIncludesReason(t *testing.T) {
-	rt, err := toolexec.New(toolexec.Config{
-		PermissionMode: toolexec.PermissionModeDefault,
-		SandboxType:    cliTestSandboxType(),
-		SandboxRunner:  failingProbeRunner{},
-	})
-	if err != nil {
-		t.Fatal(err)
+func newFakeHandle(events []appgateway.EventEnvelope) *fakeHandle {
+	ch := make(chan appgateway.EventEnvelope, len(events))
+	for _, event := range events {
+		ch <- event
 	}
-	hint := buildRuntimePromptHint(rt)
-	if !strings.Contains(hint, "sandbox is unavailable; all BASH commands require approval then run on host") {
-		t.Fatalf("expected fallback rule, got %q", hint)
-	}
-	if !strings.Contains(hint, "Fallback reason:") {
-		t.Fatalf("expected fallback reason, got %q", hint)
-	}
+	close(ch)
+	return &fakeHandle{events: ch}
 }
 
-func TestFlagProvided(t *testing.T) {
-	if !flagProvided([]string{"-session", "abc"}, "session") {
-		t.Fatal("expected short flag to be detected")
-	}
-	if !flagProvided([]string{"--session=abc"}, "session") {
-		t.Fatal("expected long equals flag to be detected")
-	}
-	if flagProvided([]string{"-model", "x"}, "session") {
-		t.Fatal("did not expect unrelated flag to be detected")
-	}
+func (h *fakeHandle) HandleID() string { return "h1" }
+func (h *fakeHandle) RunID() string    { return "r1" }
+func (h *fakeHandle) TurnID() string   { return "t1" }
+func (h *fakeHandle) SessionRef() sdksession.SessionRef {
+	return sdksession.SessionRef{SessionID: "s1"}
 }
-
-func TestNextConversationSessionID(t *testing.T) {
-	a := nextConversationSessionID()
-	b := nextConversationSessionID()
-	if !strings.HasPrefix(a, "s-") || !strings.HasPrefix(b, "s-") {
-		t.Fatalf("expected session ids to have s- prefix, got %q, %q", a, b)
-	}
-	if len(a) > 16 || len(b) > 16 {
-		t.Fatalf("expected compact session ids, got %q (%d), %q (%d)", a, len(a), b, len(b))
-	}
-	if a == b {
-		t.Fatalf("expected unique session ids, got duplicated %q", a)
-	}
+func (h *fakeHandle) CreatedAt() time.Time { return time.Time{} }
+func (h *fakeHandle) Events() <-chan appgateway.EventEnvelope {
+	return h.events
+}
+func (h *fakeHandle) EventsAfter(string) ([]appgateway.EventEnvelope, string, error) {
+	return nil, "", nil
+}
+func (h *fakeHandle) Submit(_ context.Context, req appgateway.SubmitRequest) error {
+	h.submits = append(h.submits, req)
+	return nil
+}
+func (h *fakeHandle) Cancel() bool {
+	h.cancelled = true
+	return true
+}
+func (h *fakeHandle) Close() error {
+	h.closed = true
+	return nil
 }
