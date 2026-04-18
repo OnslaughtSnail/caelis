@@ -1,7 +1,8 @@
-package gateway
+package core
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
@@ -17,6 +18,7 @@ type BeginTurnRequest struct {
 	ModelHint    string
 	Surface      string
 	Metadata     map[string]any
+	Request      sdkruntime.ModelRequestOptions
 }
 
 type TurnIntent = BeginTurnRequest
@@ -191,6 +193,33 @@ type ResolvedTurn struct {
 
 type TurnResolver interface {
 	ResolveTurn(context.Context, TurnIntent) (ResolvedTurn, error)
+}
+
+type RequestPolicy interface {
+	ResolveTurnRequest(BeginTurnRequest) sdkruntime.ModelRequestOptions
+}
+
+type SurfaceClass string
+
+const (
+	SurfaceClassInteractive SurfaceClass = "interactive"
+	SurfaceClassBatch       SurfaceClass = "batch"
+)
+
+func ClassifySurface(surface string) SurfaceClass {
+	normalized := strings.ToLower(strings.TrimSpace(surface))
+	switch {
+	case normalized == "":
+		return SurfaceClassInteractive
+	case strings.HasPrefix(normalized, "headless"),
+		strings.HasPrefix(normalized, "batch"),
+		strings.HasPrefix(normalized, "cron"),
+		strings.HasPrefix(normalized, "export"),
+		strings.HasPrefix(normalized, "script"):
+		return SurfaceClassBatch
+	default:
+		return SurfaceClassInteractive
+	}
 }
 
 type EventKind string

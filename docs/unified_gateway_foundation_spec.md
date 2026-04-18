@@ -20,6 +20,7 @@ This document now defines:
 
 - the accepted Stage 1 boundary
 - the current acceptance target
+- the current public interface framework for `gateway`
 - the remaining deferred work after local acceptance
 
 ## Product Goal
@@ -139,11 +140,191 @@ Stage 1 should stay physically small:
 - `gateway/`
 - `gateway/adapter/`
 
-In Stage 1, `gateway/` may temporarily contain both gateway core logic and the
-minimal local host lifecycle needed for in-process use.
+The accepted current package layout is:
 
-Dedicated `host` and `transport` packages should only be extracted when daemon
-mode or remote transport becomes real implementation work.
+- `gateway/` root package for stable public contracts
+- `gateway/core/` for session, turn, replay, continuity, and control-plane
+  orchestration
+- `gateway/host/` for host lifecycle and remote routing
+- `gateway/adapter/headless/` for headless translation
+- `gateway/adapter/tui/runtime/` for the TUI-facing gateway adapter boundary
+
+This does not require moving the entire `tui/` tree under `gateway/adapter/`.
+The `tui/` top-level tree remains a presentation shell, while only its
+gateway-facing runtime bridge belongs under `gateway/adapter/tui/`.
+
+Likewise, `app/gatewayapp/` remains an acceptable top-level package in Stage 1
+because it is the app-owned composition root that assembles `sdk -> gateway`,
+not an adapter and not presentation code.
+
+## Interface Framework
+
+This document is also the current authority for the public `gateway` contract.
+
+The rule for this phase is:
+
+- `gateway` root package defines stable product-facing interfaces and types
+- `gateway/core` owns session, turn, handle, replay, continuity, and
+  control-plane orchestration
+- `gateway/host` owns process lifecycle and remote routing concerns
+- `gateway/adapter/...` consumes the root `gateway` contract only
+
+No adapter should import `gateway/core` or `gateway/host` directly.
+
+The current TUI packaging rule is therefore:
+
+- `tui/tuiapp`, `tui/tuikit`, `tui/modelcatalog`, and related UI packages stay
+  under top-level `tui/`
+- only the gateway-bound runtime bridge lives under `gateway/adapter/tui/`
+
+## Root Package Public Interfaces
+
+The `gateway` root package should define these interface families explicitly.
+
+### SessionService
+
+Owns session lookup and binding-facing session flows:
+
+- `StartSession`
+- `LoadSession`
+- `ResumeSession`
+- `ListSessions`
+- `ForkSession`
+- `BindSession`
+- `LookupBinding`
+- `ReplayEvents`
+
+This is the adapter-visible session surface.
+
+### TurnService
+
+Owns turn lifecycle:
+
+- `BeginTurn`
+- `Interrupt`
+
+This is the minimum surface required by headless, TUI, and future GUI adapters.
+
+### ControlPlaneService
+
+Owns controller-facing state and handoff:
+
+- `ControlPlaneState`
+- `HandoffController`
+
+Stage 1 only requires the minimal local ACP adoption already described in this
+document.
+
+### CoreService
+
+The accepted Stage 1 core gateway surface is the union of:
+
+- `SessionService`
+- `TurnService`
+- `ControlPlaneService`
+
+The concrete in-process implementation may still be one `Gateway` type, but
+the contract must be reasoned about in these smaller service slices.
+
+### HostService
+
+The accepted Stage 1 host-facing surface is:
+
+- `Status`
+- `Shutdown`
+- `EnsureRemoteSession`
+- `BeginRemoteTurn`
+
+This belongs to `gateway/host`, not `gateway/core`.
+
+### Deferred Extension Slots
+
+The following are reserved extension areas, but are not Stage 1 required
+interfaces:
+
+- transport listener / server contract
+- remote auth / pairing / allowlist contract
+- channel adapter contract
+- daemon registration / service-install contract
+- durable reconnect across process restart
+
+These should remain explicit deferred extension points rather than implied
+completed APIs.
+
+## Public Request And Response Shapes
+
+The root `gateway` contract should expose only product-facing request and
+response shapes.
+
+### BeginTurnRequest
+
+Must support at least:
+
+- `session_ref`
+- `input`
+- `content_parts`
+- `mode_name`
+- `model_hint`
+- `surface`
+- `metadata`
+- `request`
+
+`request` is the per-turn execution-policy override surface. In Stage 1 it must
+at least support:
+
+- `stream`
+
+The gateway owns surface-aware defaults. Adapters may override them explicitly
+per turn, but should not have to reconstruct runtime defaults themselves.
+
+### Session Requests
+
+The root contract must continue to support these request shapes:
+
+- `StartSessionRequest`
+- `LoadSessionRequest`
+- `ResumeSessionRequest`
+- `ListSessionsRequest`
+- `ForkSessionRequest`
+- `BindSessionRequest`
+- `ReplayEventsRequest`
+
+These shapes must remain product-facing and must not expose raw runtime or
+controller-internal implementation details.
+
+### Control-Plane Requests
+
+The root contract must continue to support:
+
+- `HandoffControllerRequest`
+- `ControlPlaneStateRequest`
+
+Stage 1 does not require a full ACP remote protocol, but it does require that
+minimal controller adoption flows through these gateway-owned request types.
+
+### Host Requests
+
+The Stage 1 host contract must continue to support:
+
+- `RemoteSessionRequest`
+- `RemoteTurnRequest`
+
+These define remote routing metadata and session ownership, but they are not
+the same as a future remote transport protocol.
+
+## Surface Request Policy
+
+The gateway owns request-policy defaults between product surfaces and SDK
+runtime semantics.
+
+Stage 1 requires:
+
+- adapters can omit `request.stream`
+- the gateway can apply a surface-aware default
+- adapters can explicitly override the default
+
+This policy belongs to the gateway contract because it is part of the product
+surface contract, not a TUI-only or headless-only behavior.
 
 ## Contract Goals
 

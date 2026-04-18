@@ -1,10 +1,11 @@
-package gateway
+package host
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	gatewaycore "github.com/OnslaughtSnail/caelis/gateway/core"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
@@ -33,7 +34,7 @@ func TestHostEnsureRemoteSessionPrefersCurrentBinding(t *testing.T) {
 		sessionResult:     session,
 		loadSessionResult: sdksession.LoadedSession{Session: session},
 	}
-	gw, err := New(Config{
+	gw, err := gatewaycore.New(gatewaycore.Config{
 		Sessions: sessions,
 		Runtime:  mockRuntime{},
 		Resolver: staticResolver{},
@@ -41,7 +42,13 @@ func TestHostEnsureRemoteSessionPrefersCurrentBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	gw.bind("telegram:bot:user-1:chat-9", session.SessionRef, BindingDescriptor{Surface: "telegram"})
+	if err := gw.BindSession(context.Background(), gatewaycore.BindSessionRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: "telegram:bot:user-1:chat-9",
+		Binding:    gatewaycore.BindingDescriptor{Surface: "telegram"},
+	}); err != nil {
+		t.Fatalf("BindSession() error = %v", err)
+	}
 
 	host, err := NewHost(HostConfig{Gateway: gw, ID: "host-1"})
 	if err != nil {
@@ -81,13 +88,13 @@ func TestHostBeginRemoteTurnStartsSessionAndUsesRemoteSurface(t *testing.T) {
 			},
 		},
 	}
-	resolver := &recordingResolver{resolved: ResolvedTurn{}}
+	resolver := &recordingResolver{resolved: gatewaycore.ResolvedTurn{}}
 	sessions := &recordingSessionService{
 		startSessionResult: session,
 		sessionResult:      session,
 		listSessionsResult: sdksession.SessionList{},
 	}
-	gw, err := New(Config{
+	gw, err := gatewaycore.New(gatewaycore.Config{
 		Sessions: sessions,
 		Runtime:  runtime,
 		Resolver: resolver,
@@ -111,6 +118,7 @@ func TestHostBeginRemoteTurnStartsSessionAndUsesRemoteSurface(t *testing.T) {
 		},
 		Input:    "remote hello",
 		ModeName: "plan",
+		Request:  sdkruntime.ModelRequestOptions{Stream: boolPtr(false)},
 	})
 	if err != nil {
 		t.Fatalf("BeginRemoteTurn() error = %v", err)
@@ -132,10 +140,63 @@ func TestHostBeginRemoteTurnStartsSessionAndUsesRemoteSurface(t *testing.T) {
 	if runtime.lastReq.SessionRef.SessionID != session.SessionID {
 		t.Fatalf("runtime session = %q, want %q", runtime.lastReq.SessionRef.SessionID, session.SessionID)
 	}
-	if state, err := gw.LookupBinding(BindingStateRequest{BindingKey: "telegram:bot:user-1:chat-9"}); err != nil {
+	if runtime.lastReq.Request.StreamEnabled(true) {
+		t.Fatalf("runtime request stream = true, want explicit false override")
+	}
+	if state, err := gw.LookupBinding(gatewaycore.BindingStateRequest{BindingKey: "telegram:bot:user-1:chat-9"}); err != nil {
 		t.Fatalf("LookupBinding() error = %v", err)
 	} else if state.SessionRef.SessionID != session.SessionID {
 		t.Fatalf("binding session = %q, want %q", state.SessionRef.SessionID, session.SessionID)
+	}
+}
+
+func TestHostEnsureRemoteSessionPersistsBindingExpiry(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(100, 0)
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{SessionID: "session-expiry", AppName: "caelis", UserID: "user-1", WorkspaceKey: "ws"},
+	}
+	sessions := &recordingSessionService{
+		startSessionResult: session,
+		sessionResult:      session,
+		listSessionsResult: sdksession.SessionList{},
+	}
+	gw, err := gatewaycore.New(gatewaycore.Config{
+		Sessions: sessions,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+		Clock: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	host, err := NewHost(HostConfig{Gateway: gw})
+	if err != nil {
+		t.Fatalf("NewHost() error = %v", err)
+	}
+	expiresAt := now.Add(time.Minute)
+	got, err := host.EnsureRemoteSession(context.Background(), RemoteSessionRequest{
+		AppName:   "caelis",
+		UserID:    "user-1",
+		Workspace: sdksession.WorkspaceRef{Key: "ws"},
+		Address:   RemoteAddress{Surface: "telegram", Channel: "bot", AccountID: "user-1", ThreadID: "chat-9"},
+		ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		t.Fatalf("EnsureRemoteSession() error = %v", err)
+	}
+	if got.SessionID != session.SessionID {
+		t.Fatalf("EnsureRemoteSession().SessionID = %q, want %q", got.SessionID, session.SessionID)
+	}
+	state, err := gw.LookupBinding(gatewaycore.BindingStateRequest{BindingKey: "telegram:bot:user-1:chat-9"})
+	if err != nil {
+		t.Fatalf("LookupBinding() error = %v", err)
+	}
+	if !state.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("binding expiry = %s, want %s", state.ExpiresAt, expiresAt)
 	}
 }
 
@@ -155,7 +216,7 @@ func TestHostShutdownCancelsActiveTurns(t *testing.T) {
 		sessionResult:      session,
 		listSessionsResult: sdksession.SessionList{},
 	}
-	gw, err := New(Config{
+	gw, err := gatewaycore.New(gatewaycore.Config{
 		Sessions: sessions,
 		Runtime:  runtime,
 		Resolver: staticResolver{},
@@ -195,3 +256,5 @@ func TestHostShutdownCancelsActiveTurns(t *testing.T) {
 		t.Fatal("host status did not report shutting down")
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }

@@ -1,4 +1,4 @@
-package gateway
+package core
 
 import (
 	"context"
@@ -10,6 +10,15 @@ import (
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
+)
+
+const (
+	// StateCurrentModelAlias is the durable session-state key for a per-session
+	// model alias override selected by the TUI.
+	StateCurrentModelAlias = "gateway.current_model_alias"
+	// StateCurrentSandboxMode is the durable session-state key for a per-session
+	// sandbox/policy mode override selected by the TUI.
+	StateCurrentSandboxMode = "gateway.current_sandbox_mode"
 )
 
 type ModelResolution struct {
@@ -48,6 +57,10 @@ type AssemblyResolver struct {
 	baseMetadata      map[string]any
 }
 
+type modelAliasLister interface {
+	ListModelAliases() []string
+}
+
 func NewAssemblyResolver(cfg AssemblyResolverConfig) (*AssemblyResolver, error) {
 	if cfg.ModelLookup == nil {
 		return nil, fmt.Errorf("gateway: model lookup is required")
@@ -68,17 +81,31 @@ func NewAssemblyResolver(cfg AssemblyResolverConfig) (*AssemblyResolver, error) 
 	}, nil
 }
 
+// SetModelLookup replaces the model lookup used by ResolveTurn. This supports
+// runtime model reconfiguration (e.g. /connect).
+func (r *AssemblyResolver) SetModelLookup(lookup ModelLookup, defaultAlias string) {
+	if r == nil || lookup == nil {
+		return
+	}
+	r.modelLookup = lookup
+	if alias := strings.TrimSpace(defaultAlias); alias != "" {
+		r.defaultModelAlias = alias
+	}
+}
+
 func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (ResolvedTurn, error) {
+	state, err := r.snapshotState(ctx, intent.SessionRef)
+	if err != nil {
+		return ResolvedTurn{}, err
+	}
 	alias := strings.TrimSpace(intent.ModelHint)
+	if alias == "" {
+		alias = CurrentModelAlias(state)
+	}
 	if alias == "" {
 		alias = r.defaultModelAlias
 	}
 	model, err := r.modelLookup.ResolveModel(ctx, alias, r.contextWindow)
-	if err != nil {
-		return ResolvedTurn{}, err
-	}
-
-	state, err := r.snapshotState(ctx, intent.SessionRef)
 	if err != nil {
 		return ResolvedTurn{}, err
 	}
@@ -102,6 +129,27 @@ func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (
 	}, nil
 }
 
+// ListModelAliases returns the known model aliases relevant to one session.
+// Session-local overrides are returned first, followed by resolver-known
+// aliases and the resolver default alias.
+func (r *AssemblyResolver) ListModelAliases(ctx context.Context, ref sdksession.SessionRef) ([]string, error) {
+	state, err := r.snapshotState(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	aliases := make([]string, 0, 4)
+	if alias := CurrentModelAlias(state); alias != "" {
+		aliases = append(aliases, alias)
+	}
+	if lister, ok := r.modelLookup.(modelAliasLister); ok {
+		aliases = append(aliases, lister.ListModelAliases()...)
+	}
+	if r.defaultModelAlias != "" {
+		aliases = append(aliases, r.defaultModelAlias)
+	}
+	return dedupeOrderedStrings(aliases), nil
+}
+
 func (r *AssemblyResolver) snapshotState(ctx context.Context, ref sdksession.SessionRef) (map[string]any, error) {
 	if r == nil || r.sessions == nil || strings.TrimSpace(ref.SessionID) == "" {
 		return map[string]any{}, nil
@@ -121,6 +169,11 @@ func (r *AssemblyResolver) resolveMetadata(intent TurnIntent, state map[string]a
 	if err := applyAssemblySelections(metadata, r.assembly, strings.TrimSpace(intent.ModeName), state); err != nil {
 		return nil, err
 	}
+	if sandboxMode := CurrentSandboxMode(state); sandboxMode != "" {
+		if policyMode := sandboxModePolicyOverride(sandboxMode); policyMode != "" {
+			metadata["policy_mode"] = policyMode
+		}
+	}
 	if reasoning := firstNonEmptyString(
 		stringMetadata(metadata, "reasoning_effort"),
 		model.ReasoningEffort,
@@ -132,6 +185,39 @@ func (r *AssemblyResolver) resolveMetadata(intent TurnIntent, state map[string]a
 		return map[string]any{}, nil
 	}
 	return metadata, nil
+}
+
+// CurrentModelAlias returns the selected per-session model alias override from
+// one session state snapshot.
+func CurrentModelAlias(state map[string]any) string {
+	if state == nil {
+		return ""
+	}
+	value, _ := state[StateCurrentModelAlias].(string)
+	return strings.TrimSpace(value)
+}
+
+// CurrentSandboxMode returns the selected per-session sandbox mode override
+// from one session state snapshot.
+func CurrentSandboxMode(state map[string]any) string {
+	if state == nil {
+		return ""
+	}
+	value, _ := state[StateCurrentSandboxMode].(string)
+	return strings.TrimSpace(value)
+}
+
+func sandboxModePolicyOverride(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return ""
+	case "default":
+		return "default"
+	case "full_control", "full_access":
+		return "full_access"
+	default:
+		return strings.TrimSpace(mode)
+	}
 }
 
 func applyAssemblySelections(metadata map[string]any, assembly sdkplugin.ResolvedAssembly, requestedMode string, state map[string]any) error {
@@ -167,6 +253,27 @@ func applyAssemblySelections(metadata map[string]any, assembly sdkplugin.Resolve
 		applyRuntimeOverrides(metadata, option.Runtime)
 	}
 	return nil
+}
+
+func dedupeOrderedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 type assemblyConfigSelection struct {

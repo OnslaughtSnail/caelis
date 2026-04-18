@@ -1,4 +1,4 @@
-package gateway
+package core
 
 import (
 	"context"
@@ -15,10 +15,11 @@ import (
 )
 
 type Config struct {
-	Sessions sdksession.Service
-	Runtime  sdkruntime.Runtime
-	Resolver TurnResolver
-	Clock    func() time.Time
+	Sessions      sdksession.Service
+	Runtime       sdkruntime.Runtime
+	Resolver      TurnResolver
+	RequestPolicy RequestPolicy
+	Clock         func() time.Time
 }
 
 type Gateway struct {
@@ -26,6 +27,7 @@ type Gateway struct {
 	runtime  sdkruntime.Runtime
 	control  sdkruntime.ControlPlane
 	resolver TurnResolver
+	request  RequestPolicy
 	clock    func() time.Time
 
 	mu       sync.Mutex
@@ -62,11 +64,15 @@ func New(cfg Config) (*Gateway, error) {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
+	if cfg.RequestPolicy == nil {
+		cfg.RequestPolicy = defaultRequestPolicy{}
+	}
 	return &Gateway{
 		sessions: cfg.Sessions,
 		runtime:  cfg.Runtime,
 		control:  resolveControlPlane(cfg.Runtime),
 		resolver: cfg.Resolver,
+		request:  cfg.RequestPolicy,
 		clock:    cfg.Clock,
 		active:   map[string]*turnHandle{},
 		bindings: map[string]sessionBinding{},
@@ -78,6 +84,16 @@ func resolveControlPlane(runtime sdkruntime.Runtime) sdkruntime.ControlPlane {
 		return control
 	}
 	return nil
+}
+
+// Resolver returns the underlying *AssemblyResolver if the gateway's
+// TurnResolver is one. Returns nil otherwise.
+func (g *Gateway) Resolver() *AssemblyResolver {
+	if g == nil {
+		return nil
+	}
+	r, _ := g.resolver.(*AssemblyResolver)
+	return r
 }
 
 func (g *Gateway) StartSession(ctx context.Context, req StartSessionRequest) (sdksession.Session, error) {
@@ -362,6 +378,7 @@ func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTur
 	if err != nil {
 		return BeginTurnResult{}, err
 	}
+	resolved.RunRequest.Request = resolved.RunRequest.Request.WithDefaults(g.requestOptions(req))
 	session, err := g.sessions.Session(ctx, req.SessionRef)
 	if err != nil {
 		return BeginTurnResult{}, wrapSessionError(err)
@@ -401,6 +418,13 @@ func (g *Gateway) BeginTurn(ctx context.Context, req BeginTurnRequest) (BeginTur
 		Session: session,
 		Handle:  handle,
 	}, nil
+}
+
+func (g *Gateway) requestOptions(req BeginTurnRequest) sdkruntime.ModelRequestOptions {
+	if g == nil || g.request == nil {
+		return req.Request
+	}
+	return req.Request.WithDefaults(g.request.ResolveTurnRequest(req))
 }
 
 func (g *Gateway) allocateID(prefix string) string {
@@ -718,3 +742,38 @@ type approvalRequesterFunc func(sdkruntime.ApprovalRequest) (sdkruntime.Approval
 func (f approvalRequesterFunc) RequestApproval(_ context.Context, req sdkruntime.ApprovalRequest) (sdkruntime.ApprovalResponse, error) {
 	return f(req)
 }
+
+func (g *Gateway) ActiveCounts() (int, int) {
+	if g == nil {
+		return 0, 0
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.active), len(g.bindings)
+}
+
+func (g *Gateway) CancelActiveTurns() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	handles := make([]*turnHandle, 0, len(g.active))
+	for _, handle := range g.active {
+		if handle != nil {
+			handles = append(handles, handle)
+		}
+	}
+	g.mu.Unlock()
+	for _, handle := range handles {
+		handle.Cancel()
+	}
+}
+
+type defaultRequestPolicy struct{}
+
+func (defaultRequestPolicy) ResolveTurnRequest(req BeginTurnRequest) sdkruntime.ModelRequestOptions {
+	stream := ClassifySurface(req.Surface) != SurfaceClassBatch
+	return sdkruntime.ModelRequestOptions{Stream: boolPtr(stream)}
+}
+
+func boolPtr(v bool) *bool { return &v }

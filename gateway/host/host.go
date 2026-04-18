@@ -1,4 +1,4 @@
-package gateway
+package host
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	gatewaycore "github.com/OnslaughtSnail/caelis/gateway/core"
+	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
@@ -19,14 +21,14 @@ const (
 )
 
 type HostConfig struct {
-	Gateway *Gateway
+	Gateway *gatewaycore.Gateway
 	ID      string
 	Mode    HostMode
 	Clock   func() time.Time
 }
 
 type Host struct {
-	gateway   *Gateway
+	gateway   *gatewaycore.Gateway
 	id        string
 	mode      HostMode
 	clock     func() time.Time
@@ -71,6 +73,7 @@ type RemoteSessionRequest struct {
 	Actor              RemoteActor
 	Owner              string
 	BindingKey         string
+	ExpiresAt          time.Time
 }
 
 type RemoteTurnRequest struct {
@@ -79,6 +82,7 @@ type RemoteTurnRequest struct {
 	ModeName  string
 	ModelHint string
 	Metadata  map[string]any
+	Request   sdkruntime.ModelRequestOptions
 }
 
 func NewHost(cfg HostConfig) (*Host, error) {
@@ -109,7 +113,7 @@ func (h *Host) Status() HostStatus {
 	h.mu.RLock()
 	shuttingDown := h.shuttingDown
 	h.mu.RUnlock()
-	active, bindings := h.gateway.counts()
+	active, bindings := h.gateway.ActiveCounts()
 	return HostStatus{
 		ID:           h.id,
 		Mode:         h.mode,
@@ -127,12 +131,7 @@ func (h *Host) Shutdown(_ context.Context) error {
 	h.mu.Lock()
 	h.shuttingDown = true
 	h.mu.Unlock()
-	for _, handle := range h.gateway.snapshotActiveHandles() {
-		if handle == nil {
-			continue
-		}
-		handle.Cancel()
-	}
+	h.gateway.CancelActiveTurns()
 	return nil
 }
 
@@ -141,10 +140,10 @@ func (h *Host) EnsureRemoteSession(ctx context.Context, req RemoteSessionRequest
 		return sdksession.Session{}, fmt.Errorf("gateway: host is unavailable")
 	}
 	bindingKey := remoteBindingKey(req.BindingKey, req.Address)
-	binding := remoteBindingDescriptor(req.Address, req.Actor, req.Owner)
+	binding := remoteBindingDescriptor(req.Address, req.Actor, req.Owner, req.ExpiresAt)
 
 	if ref := sdksession.NormalizeSessionRef(req.SessionRef); strings.TrimSpace(ref.SessionID) != "" {
-		loaded, err := h.gateway.LoadSession(ctx, LoadSessionRequest{
+		loaded, err := h.gateway.LoadSession(ctx, gatewaycore.LoadSessionRequest{
 			SessionRef: ref,
 			BindingKey: bindingKey,
 			Binding:    binding,
@@ -155,7 +154,7 @@ func (h *Host) EnsureRemoteSession(ctx context.Context, req RemoteSessionRequest
 		return loaded.Session, nil
 	}
 	if ref, ok := h.gateway.CurrentSession(bindingKey); ok && strings.TrimSpace(ref.SessionID) != "" {
-		loaded, err := h.gateway.LoadSession(ctx, LoadSessionRequest{
+		loaded, err := h.gateway.LoadSession(ctx, gatewaycore.LoadSessionRequest{
 			SessionRef: ref,
 			BindingKey: bindingKey,
 			Binding:    binding,
@@ -166,7 +165,7 @@ func (h *Host) EnsureRemoteSession(ctx context.Context, req RemoteSessionRequest
 		return loaded.Session, nil
 	}
 
-	loaded, err := h.gateway.ResumeSession(ctx, ResumeSessionRequest{
+	loaded, err := h.gateway.ResumeSession(ctx, gatewaycore.ResumeSessionRequest{
 		AppName:    req.AppName,
 		UserID:     req.UserID,
 		Workspace:  req.Workspace,
@@ -176,11 +175,11 @@ func (h *Host) EnsureRemoteSession(ctx context.Context, req RemoteSessionRequest
 	if err == nil {
 		return loaded.Session, nil
 	}
-	var gatewayErr *Error
-	if !errors.As(err, &gatewayErr) || gatewayErr.Code != CodeNoResumableSession {
+	var gatewayErr *gatewaycore.Error
+	if !errors.As(err, &gatewayErr) || gatewayErr.Code != gatewaycore.CodeNoResumableSession {
 		return sdksession.Session{}, err
 	}
-	return h.gateway.StartSession(ctx, StartSessionRequest{
+	return h.gateway.StartSession(ctx, gatewaycore.StartSessionRequest{
 		AppName:            req.AppName,
 		UserID:             req.UserID,
 		Workspace:          req.Workspace,
@@ -192,21 +191,22 @@ func (h *Host) EnsureRemoteSession(ctx context.Context, req RemoteSessionRequest
 	})
 }
 
-func (h *Host) BeginRemoteTurn(ctx context.Context, req RemoteTurnRequest) (BeginTurnResult, error) {
+func (h *Host) BeginRemoteTurn(ctx context.Context, req RemoteTurnRequest) (gatewaycore.BeginTurnResult, error) {
 	if h == nil || h.gateway == nil {
-		return BeginTurnResult{}, fmt.Errorf("gateway: host is unavailable")
+		return gatewaycore.BeginTurnResult{}, fmt.Errorf("gateway: host is unavailable")
 	}
 	session, err := h.EnsureRemoteSession(ctx, req.Session)
 	if err != nil {
-		return BeginTurnResult{}, err
+		return gatewaycore.BeginTurnResult{}, err
 	}
-	beginReq := BeginTurnRequest{
+	beginReq := gatewaycore.BeginTurnRequest{
 		SessionRef: session.SessionRef,
 		Input:      strings.TrimSpace(req.Input),
 		ModeName:   strings.TrimSpace(req.ModeName),
 		ModelHint:  strings.TrimSpace(req.ModelHint),
 		Surface:    strings.TrimSpace(req.Session.Address.Surface),
 		Metadata:   cloneMap(req.Metadata),
+		Request:    req.Request,
 	}
 	return h.gateway.BeginTurn(ctx, beginReq)
 }
@@ -224,12 +224,13 @@ func remoteBindingKey(override string, address RemoteAddress) string {
 	return strings.Join(parts, ":")
 }
 
-func remoteBindingDescriptor(address RemoteAddress, actor RemoteActor, owner string) BindingDescriptor {
-	return BindingDescriptor{
+func remoteBindingDescriptor(address RemoteAddress, actor RemoteActor, owner string, expiresAt time.Time) gatewaycore.BindingDescriptor {
+	return gatewaycore.BindingDescriptor{
 		Surface:   strings.TrimSpace(address.Surface),
 		ActorKind: firstNonEmptyHost(strings.TrimSpace(actor.Kind), "remote_user"),
 		ActorID:   strings.TrimSpace(actor.ID),
 		Owner:     strings.TrimSpace(owner),
+		ExpiresAt: expiresAt,
 	}
 }
 
@@ -242,26 +243,13 @@ func firstNonEmptyHost(values ...string) string {
 	return ""
 }
 
-func (g *Gateway) snapshotActiveHandles() []*turnHandle {
-	if g == nil {
+func cloneMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
 		return nil
 	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	out := make([]*turnHandle, 0, len(g.active))
-	for _, handle := range g.active {
-		if handle != nil {
-			out = append(out, handle)
-		}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
 	}
 	return out
-}
-
-func (g *Gateway) counts() (int, int) {
-	if g == nil {
-		return 0, 0
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return len(g.active), len(g.bindings)
 }

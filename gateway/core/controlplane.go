@@ -1,4 +1,4 @@
-package gateway
+package core
 
 import (
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"

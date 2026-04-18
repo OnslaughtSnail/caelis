@@ -1,4 +1,4 @@
-package gateway
+package core
 
 import (
 	"context"
@@ -623,6 +623,121 @@ func TestBeginTurnLoadsSessionResolvesIntentRunsRuntimeAndPublishesEvents(t *tes
 	}
 }
 
+func TestBeginTurnDefaultsToStreamingRequestsAtGatewayBoundary(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	rt := &recordingRuntime{
+		session: session,
+		result:  sdkruntime.RunResult{Session: session, Handle: &recordingRunner{}},
+		ran:     make(chan struct{}),
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{resolved: ResolvedTurn{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := gw.BeginTurn(context.Background(), BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		Surface:    "cli-tui",
+	})
+	if err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+	result.Handle.Close()
+	<-rt.ran
+
+	if !rt.lastReq.Request.StreamEnabled(false) {
+		t.Fatalf("runtime request stream = false, want true by default")
+	}
+}
+
+func TestBeginTurnAllowsSurfaceToOverrideStreamingPolicy(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	rt := &recordingRuntime{
+		session: session,
+		result:  sdkruntime.RunResult{Session: session, Handle: &recordingRunner{}},
+		ran:     make(chan struct{}),
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{resolved: ResolvedTurn{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := gw.BeginTurn(context.Background(), BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		Surface:    "headless",
+		Request:    sdkruntime.ModelRequestOptions{Stream: boolPtr(false)},
+	})
+	if err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+	result.Handle.Close()
+	<-rt.ran
+
+	if rt.lastReq.Request.StreamEnabled(true) {
+		t.Fatalf("runtime request stream = true, want explicit false override")
+	}
+}
+
+func TestBeginTurnDefaultsHeadlessSurfaceToNonStreaming(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	rt := &recordingRuntime{
+		session: session,
+		result:  sdkruntime.RunResult{Session: session, Handle: &recordingRunner{}},
+		ran:     make(chan struct{}),
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{resolved: ResolvedTurn{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := gw.BeginTurn(context.Background(), BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+		Surface:    "headless",
+	})
+	if err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+	result.Handle.Close()
+	<-rt.ran
+
+	if rt.lastReq.Request.StreamEnabled(true) {
+		t.Fatalf("runtime request stream = true, want false for headless default")
+	}
+}
+
 func TestBeginTurnBridgesApprovalRequestsIntoHandleEvents(t *testing.T) {
 	t.Parallel()
 
@@ -845,6 +960,57 @@ func TestReplayEventsReturnsSessionBackedCanonicalReplay(t *testing.T) {
 	}
 }
 
+func TestReplayEventsResolvesBindingAndAppliesCursorLimit(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	svc := &recordingSessionService{
+		sessionResult: session,
+		eventsResult: []*sdksession.Event{
+			{ID: "e1", Type: sdksession.EventTypeUser, Text: "first"},
+			{ID: "e2", Type: sdksession.EventTypeAssistant, Text: "second", Visibility: sdksession.VisibilityCanonical},
+			{ID: "e3", Type: sdksession.EventTypeAssistant, Text: "third", Visibility: sdksession.VisibilityCanonical},
+		},
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := gw.BindSession(context.Background(), BindSessionRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: "surface-replay",
+		Binding:    BindingDescriptor{Surface: "cli-tui"},
+	}); err != nil {
+		t.Fatalf("BindSession() error = %v", err)
+	}
+
+	replayed, err := gw.ReplayEvents(context.Background(), ReplayEventsRequest{
+		BindingKey: "surface-replay",
+		Cursor:     "e1",
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("ReplayEvents() error = %v", err)
+	}
+	if len(replayed.Events) != 1 {
+		t.Fatalf("ReplayEvents().Events len = %d, want 1", len(replayed.Events))
+	}
+	if got := replayed.Events[0].Cursor; got != "e2" {
+		t.Fatalf("ReplayEvents().Events[0].Cursor = %q, want e2", got)
+	}
+	if replayed.NextCursor != "e2" {
+		t.Fatalf("ReplayEvents().NextCursor = %q, want e2", replayed.NextCursor)
+	}
+}
+
 type mockRuntime struct{}
 
 func (mockRuntime) Run(context.Context, sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
@@ -859,10 +1025,18 @@ type recordingRuntime struct {
 	session sdksession.Session
 	result  sdkruntime.RunResult
 	lastReq sdkruntime.RunRequest
+	ran     chan struct{}
 }
 
 func (r *recordingRuntime) Run(_ context.Context, req sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
 	r.lastReq = req
+	if r.ran != nil {
+		select {
+		case <-r.ran:
+		default:
+			close(r.ran)
+		}
+	}
 	return r.result, nil
 }
 
