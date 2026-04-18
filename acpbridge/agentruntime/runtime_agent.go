@@ -218,6 +218,7 @@ func (a *RuntimeAgent) Prompt(ctx context.Context, req acp.PromptRequest, cb acp
 	result, err := a.runtime.Run(runCtx, sdkruntime.RunRequest{
 		SessionRef:        ref,
 		Input:             input,
+		Request:           sdkruntime.ModelRequestOptions{Stream: boolPtr(true)},
 		ApprovalRequester: approvalRequester{callbacks: cb},
 		AgentSpec:         spec,
 	})
@@ -319,6 +320,8 @@ func (a *RuntimeAgent) clearCancel(sessionID string) {
 	defer a.mu.Unlock()
 	delete(a.cancels, strings.TrimSpace(sessionID))
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func promptText(prompt []json.RawMessage) (string, error) {
 	parts := make([]string, 0, len(prompt))

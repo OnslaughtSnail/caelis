@@ -96,7 +96,30 @@ type AgentSpec struct {
 	Model          sdkmodel.LLM   `json:"-"`
 	Tools          []sdktool.Tool `json:"-"`
 	SubagentRunner SubagentRunner `json:"-"`
+	Request        ModelRequestOptions
 	Metadata       map[string]any `json:"metadata,omitempty"`
+}
+
+// ModelRequestOptions controls per-turn model request behavior independent of
+// provider implementation.
+type ModelRequestOptions struct {
+	Stream *bool `json:"stream,omitempty"`
+}
+
+func (o ModelRequestOptions) WithDefaults(defaults ModelRequestOptions) ModelRequestOptions {
+	out := defaults
+	if o.Stream != nil {
+		value := *o.Stream
+		out.Stream = &value
+	}
+	return out
+}
+
+func (o ModelRequestOptions) StreamEnabled(defaultValue bool) bool {
+	if o.Stream == nil {
+		return defaultValue
+	}
+	return *o.Stream
 }
 
 type SubagentRunRequest = sdkdelegation.Request

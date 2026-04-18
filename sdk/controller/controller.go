@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"iter"
 	"strings"
 	"time"
 
@@ -84,14 +85,21 @@ type TurnRequest struct {
 	TurnID            string                 `json:"turn_id,omitempty"`
 	Input             string                 `json:"input,omitempty"`
 	ContentParts      []sdkmodel.ContentPart `json:"content_parts,omitempty"`
+	Stream            bool                   `json:"stream,omitempty"`
 	Mode              string                 `json:"mode,omitempty"`
 	ApprovalRequester ApprovalRequester      `json:"-"`
 }
 
+type TurnHandle interface {
+	Events() iter.Seq2[*sdksession.Event, error]
+	Cancel() bool
+	Close() error
+}
+
 // TurnResult is one normalized ACP-controller turn result.
 type TurnResult struct {
-	Events    []*sdksession.Event `json:"events,omitempty"`
-	UpdatedAt time.Time           `json:"updated_at,omitempty"`
+	Handle    TurnHandle `json:"-"`
+	UpdatedAt time.Time  `json:"updated_at,omitempty"`
 }
 
 // ACP is the runtime-facing control-plane contract for ACP-backed main

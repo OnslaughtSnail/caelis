@@ -114,6 +114,346 @@ func TestRuntimeRunPersistsMinimalChatTurn(t *testing.T) {
 	}
 }
 
+func drainRunnerEvents(t *testing.T, handle sdkruntime.Runner) ([]*sdksession.Event, error) {
+	t.Helper()
+	if handle == nil {
+		return nil, nil
+	}
+	var events []*sdksession.Event
+	for event, seqErr := range handle.Events() {
+		if seqErr != nil {
+			return events, seqErr
+		}
+		if event != nil {
+			events = append(events, event)
+		}
+	}
+	return events, nil
+}
+
+func lastAssistantText(events []*sdksession.Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event != nil && event.Type == sdksession.EventTypeAssistant {
+			return strings.TrimSpace(event.Text)
+		}
+	}
+	return ""
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func TestRuntimeRunReturnsLiveRunnerBeforeModelCompletion(t *testing.T) {
+	t.Parallel()
+
+	sessions := inmemory.NewService(inmemory.NewStore(inmemory.Config{
+		SessionIDGenerator: func() string { return "sess-live" },
+	}))
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-live",
+			CWD: "/tmp/project",
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	model := &gatedStreamingModel{
+		started:      make(chan struct{}),
+		releaseFinal: make(chan struct{}),
+	}
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		RunIDGenerator: func() string { return "run-live" },
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	type runResult struct {
+		result sdkruntime.RunResult
+		err    error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+			SessionRef: session.SessionRef,
+			Input:      "hello",
+			Request: sdkruntime.ModelRequestOptions{
+				Stream: boolPtr(true),
+			},
+			AgentSpec: sdkruntime.AgentSpec{
+				Name:  "chat",
+				Model: model,
+			},
+		})
+		runDone <- runResult{result: result, err: err}
+	}()
+
+	select {
+	case <-model.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model did not start")
+	}
+
+	var result sdkruntime.RunResult
+	select {
+	case got := <-runDone:
+		if got.err != nil {
+			t.Fatalf("Run() error = %v", got.err)
+		}
+		result = got.result
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Run() did not return before model completion")
+	}
+
+	state, err := runtime.RunState(context.Background(), session.SessionRef)
+	if err != nil {
+		t.Fatalf("RunState() error = %v", err)
+	}
+	if state.Status != sdkruntime.RunLifecycleStatusRunning {
+		t.Fatalf("state.Status = %q, want %q while final response is gated", state.Status, sdkruntime.RunLifecycleStatusRunning)
+	}
+
+	eventCh := make(chan *sdksession.Event, 8)
+	errCh := make(chan error, 1)
+	go func() {
+		for event, seqErr := range result.Handle.Events() {
+			if seqErr != nil {
+				errCh <- seqErr
+				return
+			}
+			eventCh <- event
+		}
+		close(eventCh)
+	}()
+
+	var sawUser bool
+	var sawChunk bool
+	deadline := time.After(2 * time.Second)
+	for !(sawUser && sawChunk) {
+		select {
+		case seqErr := <-errCh:
+			t.Fatalf("runner error = %v", seqErr)
+		case event := <-eventCh:
+			if event == nil {
+				t.Fatal("runner yielded nil event before final completion")
+			}
+			switch {
+			case sdksession.EventTypeOf(event) == sdksession.EventTypeUser:
+				sawUser = true
+			case event.Protocol != nil && event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentMessage) && event.Text == "hel":
+				sawChunk = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for live user + chunk events (sawUser=%v sawChunk=%v)", sawUser, sawChunk)
+		}
+	}
+
+	close(model.releaseFinal)
+
+	var final *sdksession.Event
+	for event := range eventCh {
+		if event != nil && sdksession.EventTypeOf(event) == sdksession.EventTypeAssistant && strings.TrimSpace(event.Text) == "hello" {
+			final = event
+		}
+	}
+	if final == nil {
+		t.Fatal("final assistant event was not emitted")
+	}
+
+	state, err = runtime.RunState(context.Background(), session.SessionRef)
+	if err != nil {
+		t.Fatalf("RunState() after completion error = %v", err)
+	}
+	if state.Status != sdkruntime.RunLifecycleStatusCompleted {
+		t.Fatalf("state.Status = %q, want %q after completion", state.Status, sdkruntime.RunLifecycleStatusCompleted)
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 2; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d (chunk events must stay transient)", got, want)
+	}
+}
+
+func TestRuntimeACPControllerReturnsLiveRunnerBeforeTurnCompletion(t *testing.T) {
+	t.Parallel()
+
+	sessions := inmemory.NewService(inmemory.NewStore(inmemory.Config{
+		SessionIDGenerator: func() string { return "sess-acp-live" },
+	}))
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-acp-live",
+			CWD: "/tmp/project",
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	session, err = sessions.BindController(context.Background(), sdksession.BindControllerRequest{
+		SessionRef: session.SessionRef,
+		Binding: sdksession.ControllerBinding{
+			Kind:         sdksession.ControllerKindACP,
+			ControllerID: "acp-main",
+			Label:        "ACP Main",
+			EpochID:      "epoch-live",
+			Source:       "test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BindController() error = %v", err)
+	}
+
+	releaseFinal := make(chan struct{})
+	streamSeen := make(chan bool, 1)
+	controller := stubACPController{
+		runTurn: func(ctx context.Context, req sdkcontroller.TurnRequest) (sdkcontroller.TurnResult, error) {
+			streamSeen <- req.Stream
+			handle := newTestControllerTurnHandle(nil)
+			go func() {
+				handle.publishEvent(sdksession.MarkUIOnly(&sdksession.Event{
+					Type: sdksession.EventTypeAssistant,
+					Text: "hel",
+					Protocol: &sdksession.EventProtocol{
+						UpdateType: string(sdksession.ProtocolUpdateTypeAgentMessage),
+					},
+				}))
+				<-releaseFinal
+				handle.publishEvent(&sdksession.Event{
+					Type:       sdksession.EventTypeAssistant,
+					Visibility: sdksession.VisibilityCanonical,
+					Text:       "hello",
+					Protocol: &sdksession.EventProtocol{
+						UpdateType: string(sdksession.ProtocolUpdateTypeAgentMessage),
+					},
+				})
+				handle.finish()
+			}()
+			return sdkcontroller.TurnResult{Handle: handle}, nil
+		},
+	}
+	runtime, err := New(Config{
+		Sessions:     sessions,
+		AgentFactory: chat.Factory{SystemPrompt: "Be terse."},
+		Controllers:  controller,
+		RunIDGenerator: func() string {
+			return "run-acp-live"
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	type runResult struct {
+		result sdkruntime.RunResult
+		err    error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+			SessionRef: session.SessionRef,
+			Input:      "hello",
+			Request: sdkruntime.ModelRequestOptions{
+				Stream: boolPtr(true),
+			},
+		})
+		runDone <- runResult{result: result, err: err}
+	}()
+
+	var result sdkruntime.RunResult
+	select {
+	case got := <-runDone:
+		if got.err != nil {
+			t.Fatalf("Run() error = %v", got.err)
+		}
+		result = got.result
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("Run() did not return before ACP final completion")
+	}
+	select {
+	case stream := <-streamSeen:
+		if !stream {
+			t.Fatal("TurnRequest.Stream = false, want true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("controller did not observe stream request")
+	}
+
+	eventCh := make(chan *sdksession.Event, 8)
+	errCh := make(chan error, 1)
+	go func() {
+		for event, seqErr := range result.Handle.Events() {
+			if seqErr != nil {
+				errCh <- seqErr
+				return
+			}
+			eventCh <- event
+		}
+		close(eventCh)
+	}()
+
+	var sawUser bool
+	var sawChunk bool
+	deadline := time.After(2 * time.Second)
+	for !(sawUser && sawChunk) {
+		select {
+		case seqErr := <-errCh:
+			t.Fatalf("runner error = %v", seqErr)
+		case event := <-eventCh:
+			if event == nil {
+				t.Fatal("runner yielded nil event before final completion")
+			}
+			switch {
+			case sdksession.EventTypeOf(event) == sdksession.EventTypeUser:
+				sawUser = true
+			case event.Protocol != nil && event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentMessage) && event.Visibility == sdksession.VisibilityUIOnly:
+				sawChunk = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for live ACP user + chunk events (sawUser=%v sawChunk=%v)", sawUser, sawChunk)
+		}
+	}
+
+	close(releaseFinal)
+
+	var final *sdksession.Event
+	for event := range eventCh {
+		if event != nil && sdksession.EventTypeOf(event) == sdksession.EventTypeAssistant && strings.TrimSpace(event.Text) == "hello" {
+			final = event
+		}
+	}
+	if final == nil {
+		t.Fatal("final ACP assistant event was not emitted")
+	}
+
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	if got, want := len(loaded.Events), 2; got != want {
+		t.Fatalf("len(loaded.Events) = %d, want %d", got, want)
+	}
+	if loaded.Events[1].Visibility != sdksession.VisibilityCanonical || loaded.Events[1].Text != "hello" {
+		t.Fatalf("loaded final event = %+v, want canonical assistant hello", loaded.Events[1])
+	}
+}
+
 func TestRuntimeRunAppliesAssemblyModeAndConfigOverridesFromSessionState(t *testing.T) {
 	t.Parallel()
 
@@ -173,12 +513,16 @@ func TestRuntimeRunAppliesAssemblyModeAndConfigOverridesFromSessionState(t *test
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "hello",
 		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	specs := factory.Specs()
@@ -242,12 +586,16 @@ func TestRuntimeRunAppliesConfigOverridesInDeclaredOrder(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "hello",
 		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	specs := factory.Specs()
@@ -285,7 +633,9 @@ func TestNewRejectsMixedAssemblyAndExplicitControlPlane(t *testing.T) {
 	}
 }
 
-type stubACPController struct{}
+type stubACPController struct {
+	runTurn func(context.Context, sdkcontroller.TurnRequest) (sdkcontroller.TurnResult, error)
+}
 
 func (stubACPController) Activate(context.Context, sdkcontroller.HandoffRequest) (sdksession.ControllerBinding, error) {
 	return sdksession.ControllerBinding{}, nil
@@ -295,8 +645,13 @@ func (stubACPController) Deactivate(context.Context, sdksession.SessionRef) erro
 	return nil
 }
 
-func (stubACPController) RunTurn(context.Context, sdkcontroller.TurnRequest) (sdkcontroller.TurnResult, error) {
-	return sdkcontroller.TurnResult{}, nil
+func (s stubACPController) RunTurn(ctx context.Context, req sdkcontroller.TurnRequest) (sdkcontroller.TurnResult, error) {
+	if s.runTurn != nil {
+		return s.runTurn(ctx, req)
+	}
+	handle := newTestControllerTurnHandle(nil)
+	handle.finish()
+	return sdkcontroller.TurnResult{Handle: handle}, nil
 }
 
 func (stubACPController) Attach(context.Context, sdkcontroller.AttachRequest) (sdksession.ParticipantBinding, error) {
@@ -305,6 +660,74 @@ func (stubACPController) Attach(context.Context, sdkcontroller.AttachRequest) (s
 
 func (stubACPController) Detach(context.Context, sdkcontroller.DetachRequest) error {
 	return nil
+}
+
+type testControllerTurnHandle struct {
+	cancelFn  context.CancelFunc
+	eventsCh  chan testControllerTurnEvent
+	closeOnce sync.Once
+	mu        sync.Mutex
+	cancelled bool
+}
+
+type testControllerTurnEvent struct {
+	event *sdksession.Event
+	err   error
+}
+
+func newTestControllerTurnHandle(cancel context.CancelFunc) *testControllerTurnHandle {
+	return &testControllerTurnHandle{
+		cancelFn: cancel,
+		eventsCh: make(chan testControllerTurnEvent, 16),
+	}
+}
+
+func (h *testControllerTurnHandle) Events() iter.Seq2[*sdksession.Event, error] {
+	return func(yield func(*sdksession.Event, error) bool) {
+		for item := range h.eventsCh {
+			if !yield(sdksession.CloneEvent(item.event), item.err) {
+				return
+			}
+		}
+	}
+}
+
+func (h *testControllerTurnHandle) Cancel() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cancelled {
+		return false
+	}
+	h.cancelled = true
+	if h.cancelFn != nil {
+		h.cancelFn()
+	}
+	return true
+}
+
+func (h *testControllerTurnHandle) Close() error { return nil }
+
+func (h *testControllerTurnHandle) publishEvent(event *sdksession.Event) {
+	if h == nil || event == nil {
+		return
+	}
+	h.eventsCh <- testControllerTurnEvent{event: sdksession.CloneEvent(event)}
+}
+
+func (h *testControllerTurnHandle) publishError(err error) {
+	if h == nil || err == nil {
+		return
+	}
+	h.eventsCh <- testControllerTurnEvent{err: err}
+}
+
+func (h *testControllerTurnHandle) finish() {
+	if h == nil {
+		return
+	}
+	h.closeOnce.Do(func() {
+		close(h.eventsCh)
+	})
 }
 
 func TestRuntimeRunFallsBackToDefaultForStaleConfigValue(t *testing.T) {
@@ -351,12 +774,16 @@ func TestRuntimeRunFallsBackToDefaultForStaleConfigValue(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "hello",
 		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	specs := factory.Specs()
@@ -403,15 +830,19 @@ func TestRuntimeRunReplaysPersistedHistoryFromFileStore(t *testing.T) {
 		t.Fatalf("New(runtime1) error = %v", err)
 	}
 
-	if _, err := runtime1.Run(context.Background(), sdkruntime.RunRequest{
+	result1, err := runtime1.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "hello",
 		AgentSpec: sdkruntime.AgentSpec{
 			Name:  "chat",
 			Model: staticModel{text: "world"},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("runtime1.Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result1.Handle); err != nil {
+		t.Fatalf("runtime1 runner error = %v", err)
 	}
 
 	reopenedSessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{RootDir: root}))
@@ -443,15 +874,11 @@ func TestRuntimeRunReplaysPersistedHistoryFromFileStore(t *testing.T) {
 		t.Fatalf("runtime2.Run() error = %v", err)
 	}
 
-	var finalText string
-	for event, seqErr := range result.Handle.Events() {
-		if seqErr != nil {
-			t.Fatalf("runner error = %v", seqErr)
-		}
-		if event != nil && event.Type == sdksession.EventTypeAssistant {
-			finalText = event.Text
-		}
+	events, seqErr := drainRunnerEvents(t, result.Handle)
+	if seqErr != nil {
+		t.Fatalf("runner error = %v", seqErr)
 	}
+	finalText := lastAssistantText(events)
 	if finalText != "history ok" {
 		t.Fatalf("final assistant text = %q, want %q", finalText, "history ok")
 	}
@@ -518,7 +945,7 @@ func TestRuntimeCompactionInjectsCheckpointAndTrimsOldHistory(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "continue",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -528,6 +955,9 @@ func TestRuntimeCompactionInjectsCheckpointAndTrimsOldHistory(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	if model.compactionCalls != 1 {
@@ -593,7 +1023,7 @@ func TestRuntimeCompactionUsesModelGeneratedCheckpoint(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "continue",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -603,6 +1033,9 @@ func TestRuntimeCompactionUsesModelGeneratedCheckpoint(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 	if model.compactionCalls == 0 {
 		t.Fatal("expected at least one model-backed compaction call")
@@ -688,7 +1121,7 @@ func TestRuntimeCompactionReplaysFromEventsAfterReload(t *testing.T) {
 		t.Fatalf("New(runtime1) error = %v", err)
 	}
 
-	if _, err := runtime1.Run(context.Background(), sdkruntime.RunRequest{
+	result1, err := runtime1.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "continue",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -709,8 +1142,12 @@ Next action: verify reload from file-backed events only
 1. verify reload from file-backed events only`,
 			},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("runtime1.Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result1.Handle); err != nil {
+		t.Fatalf("runtime1 runner error = %v", err)
 	}
 
 	reopenedSessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{RootDir: root}))
@@ -761,15 +1198,11 @@ Next action: verify reload from file-backed events only
 	if err != nil {
 		t.Fatalf("runtime2.Run() error = %v", err)
 	}
-	var finalText string
-	for event, seqErr := range result.Handle.Events() {
-		if seqErr != nil {
-			t.Fatalf("runner error = %v", seqErr)
-		}
-		if event != nil && event.Type == sdksession.EventTypeAssistant {
-			finalText = strings.TrimSpace(event.Text)
-		}
+	events, seqErr := drainRunnerEvents(t, result.Handle)
+	if seqErr != nil {
+		t.Fatalf("runner error = %v", seqErr)
 	}
+	finalText := lastAssistantText(events)
 	if finalText != "replay ok" {
 		t.Fatalf("final assistant text = %q, want %q", finalText, "replay ok")
 	}
@@ -1009,15 +1442,19 @@ func TestRuntimeCompactionIgnoresStateOnlyPlanSnapshot(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	if _, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "continue",
 		AgentSpec: sdkruntime.AgentSpec{
 			Name:  "chat",
 			Model: model,
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 	if model.compactionCalls != 1 {
 		t.Fatalf("compactionCalls = %d, want 1", model.compactionCalls)
@@ -1323,7 +1760,7 @@ func TestRuntimeRecoveryInterruptsOrphanedBashTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(runtime2) error = %v", err)
 	}
-	_, err = runtime2.Run(context.Background(), sdkruntime.RunRequest{
+	result2, err := runtime2.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "resume after orphaned task",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -1333,6 +1770,9 @@ func TestRuntimeRecoveryInterruptsOrphanedBashTask(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("runtime2.Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result2.Handle); err != nil {
+		t.Fatalf("runtime2 runner error = %v", err)
 	}
 
 	entry, err := tasks.Get(context.Background(), snapshot.Ref.TaskID)
@@ -1392,12 +1832,6 @@ func TestRuntimeRunRetriesBeforeAnyEventIsEmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if got, want := factory.Calls(), 2; got != want {
-		t.Fatalf("factory calls = %d, want %d", got, want)
-	}
-	if got, want := len(delays), 1; got != want {
-		t.Fatalf("sleep call count = %d, want %d", got, want)
-	}
 
 	var (
 		count       int
@@ -1423,6 +1857,12 @@ func TestRuntimeRunRetriesBeforeAnyEventIsEmitted(t *testing.T) {
 	}
 	if got, want := noticeCount, 1; got != want {
 		t.Fatalf("notice count = %d, want %d", got, want)
+	}
+	if got, want := factory.Calls(), 2; got != want {
+		t.Fatalf("factory calls = %d, want %d", got, want)
+	}
+	if got, want := len(delays), 1; got != want {
+		t.Fatalf("sleep call count = %d, want %d", got, want)
 	}
 
 	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
@@ -1472,13 +1912,16 @@ func TestRuntimeRunDoesNotRetryAfterAnyEventIsEmitted(t *testing.T) {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "hello",
 		AgentSpec:  sdkruntime.AgentSpec{Name: "chat"},
 	})
-	if err == nil {
-		t.Fatal("Run() error = nil, want failure")
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if _, seqErr := drainRunnerEvents(t, result.Handle); seqErr == nil {
+		t.Fatal("runner error = nil, want failure")
 	}
 	if got, want := factory.Calls(), 1; got != want {
 		t.Fatalf("factory calls = %d, want %d", got, want)
@@ -1695,7 +2138,7 @@ func TestRuntimePolicyDefaultDeniesWriteOutsideAllowedRoots(t *testing.T) {
 		t.Fatalf("filesystem.NewWrite() error = %v", err)
 	}
 	model := &denyWriteRuntimeModel{}
-	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "write outside workspace",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -1706,6 +2149,9 @@ func TestRuntimePolicyDefaultDeniesWriteOutsideAllowedRoots(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
@@ -1746,7 +2192,7 @@ func TestRuntimePolicyFullAccessBlocksDangerousBash(t *testing.T) {
 		t.Fatalf("shell.NewBash() error = %v", err)
 	}
 	model := &denyBashRuntimeModel{}
-	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef: session.SessionRef,
 		Input:      "run dangerous bash",
 		AgentSpec: sdkruntime.AgentSpec{
@@ -1757,6 +2203,9 @@ func TestRuntimePolicyFullAccessBlocksDangerousBash(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
@@ -1809,7 +2258,7 @@ func TestRuntimePolicyDefaultBashEscalationWaitsApprovalThenExecutes(t *testing.
 			Approved: true,
 		}, nil
 	})
-	_, err = runtime.Run(context.Background(), sdkruntime.RunRequest{
+	result, err := runtime.Run(context.Background(), sdkruntime.RunRequest{
 		SessionRef:        session.SessionRef,
 		Input:             "write inside workspace",
 		ApprovalRequester: requester,
@@ -1821,6 +2270,9 @@ func TestRuntimePolicyDefaultBashEscalationWaitsApprovalThenExecutes(t *testing.
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
+	}
+	if _, err := drainRunnerEvents(t, result.Handle); err != nil {
+		t.Fatalf("runner error = %v", err)
 	}
 
 	data, err := os.ReadFile(target)
@@ -2033,6 +2485,44 @@ func (m staticModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdk
 			Type: sdkmodel.StreamEventTurnDone,
 			Response: &sdkmodel.Response{
 				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, m.text),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+			},
+		}, nil)
+	}
+}
+
+type gatedStreamingModel struct {
+	started      chan struct{}
+	releaseFinal chan struct{}
+}
+
+func (m *gatedStreamingModel) Name() string { return "gated-streaming" }
+
+func (m *gatedStreamingModel) Generate(context.Context, *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if m.started != nil {
+			select {
+			case <-m.started:
+			default:
+				close(m.started)
+			}
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventPartDelta,
+			PartDelta: &sdkmodel.PartDelta{
+				Kind:      sdkmodel.PartKindText,
+				TextDelta: "hel",
+			},
+		}, nil)
+		if m.releaseFinal != nil {
+			<-m.releaseFinal
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "hello"),
 				TurnComplete: true,
 				StepComplete: true,
 				Status:       sdkmodel.ResponseStatusCompleted,

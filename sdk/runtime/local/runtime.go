@@ -202,35 +202,43 @@ func (r *Runtime) Run(
 		ActiveRunID: runID,
 		UpdatedAt:   r.now(),
 	})
+	runCtx, cancel := context.WithCancel(ctx)
+	handle := newRunner(runID, cancel)
+	go r.executeKernelTurn(runCtx, session, ref, runID, turnID, req, handle)
+	return sdkruntime.RunResult{
+		Session: session,
+		Handle:  handle,
+	}, nil
+}
+
+func (r *Runtime) executeKernelTurn(
+	ctx context.Context,
+	session sdksession.Session,
+	ref sdksession.SessionRef,
+	runID string,
+	turnID string,
+	req sdkruntime.RunRequest,
+	handle *runner,
+) {
+	defer handle.finish()
 
 	batch := make([]*sdksession.Event, 0, 4)
 	userEvent := buildUserEvent(session, turnID, req.Input, req.ContentParts)
-	if err := r.runWithRetry(ctx, session, ref, runID, turnID, req, userEvent, &batch); err != nil {
+	if err := r.runWithRetry(ctx, session, ref, runID, turnID, req, userEvent, &batch, handle); err != nil {
 		r.setRunState(ref.SessionID, sdkruntime.RunState{
-			Status:      sdkruntime.RunLifecycleStatusFailed,
+			Status:      interruptedOrFailedStatus(ctx, err),
 			ActiveRunID: runID,
 			LastError:   err.Error(),
 			UpdatedAt:   r.now(),
 		})
-		return sdkruntime.RunResult{}, err
-	}
-
-	session, err = r.sessions.Session(ctx, ref)
-	if err != nil {
-		return sdkruntime.RunResult{}, err
+		handle.publishError(err)
+		return
 	}
 	r.setRunState(ref.SessionID, sdkruntime.RunState{
 		Status:      sdkruntime.RunLifecycleStatusCompleted,
 		ActiveRunID: runID,
 		UpdatedAt:   r.now(),
 	})
-	return sdkruntime.RunResult{
-		Session: session,
-		Handle: &runner{
-			runID:  runID,
-			events: batch,
-		},
-	}, nil
 }
 
 // RunState returns the last known run state for one session.
@@ -261,6 +269,7 @@ func (r *Runtime) resolveAgent(
 		return req.Agent, nil
 	}
 	spec := r.applyAssemblySpec(state, req.AgentSpec)
+	spec.Request = req.Request.WithDefaults(spec.Request)
 	modeName := r.policyMode(spec)
 	spec.Tools = r.wrapToolsForRuntime(session, ref, spec, runtimeToolContext{
 		mode:              modeName,
@@ -293,11 +302,12 @@ func (r *Runtime) runWithRetry(
 	req sdkruntime.RunRequest,
 	pendingInput *sdksession.Event,
 	batch *[]*sdksession.Event,
+	sink *runner,
 ) error {
 	attempt := 0
 	overflowRecoveries := 0
 	for {
-		attemptBatch, emitted, inputPersisted, err := r.runAttempt(ctx, session, ref, runID, turnID, req, pendingInput)
+		attemptBatch, emitted, inputPersisted, err := r.runAttempt(ctx, session, ref, runID, turnID, req, pendingInput, sink)
 		if inputPersisted {
 			pendingInput = nil
 		}
@@ -338,6 +348,9 @@ func (r *Runtime) runWithRetry(
 		delay := retryDelayForAttemptWithBounds(attempt, policy.baseDelay, policy.maxDelay)
 		notice := buildRetryNoticeEvent(session, turnID, attempt+1, policy.maxRetries, delay, err)
 		*batch = append(*batch, notice)
+		if sink != nil {
+			sink.publishEvent(notice)
+		}
 		if sleepErr := r.sleep(ctx, delay); sleepErr != nil {
 			return sleepErr
 		}
@@ -353,6 +366,7 @@ func (r *Runtime) runAttempt(
 	turnID string,
 	req sdkruntime.RunRequest,
 	pendingInput *sdksession.Event,
+	sink *runner,
 ) ([]*sdksession.Event, bool, bool, error) {
 	events, state, err := r.prepareInvocationContext(ctx, session, ref, req, pendingInput)
 	if err != nil {
@@ -372,6 +386,9 @@ func (r *Runtime) runAttempt(
 		batch = append(batch, persisted)
 		events = append(events, sdksession.CloneEvent(persisted))
 		inputPersisted = true
+		if sink != nil {
+			sink.publishEvent(persisted)
+		}
 	}
 
 	agent, err := r.resolveAgent(ctx, session, ref, state, runID, turnID, req)
@@ -405,10 +422,16 @@ func (r *Runtime) runAttempt(
 			}
 		}
 		batch = append(batch, sdksession.CloneEvent(normalized))
+		if sink != nil {
+			sink.publishEvent(normalized)
+		}
 		if planEvent, handled, planErr := r.handlePlanEvent(ctx, ref, turnID, normalized); planErr != nil {
 			return batch, emitted, inputPersisted, planErr
 		} else if handled {
 			batch = append(batch, sdksession.CloneEvent(planEvent))
+			if sink != nil {
+				sink.publishEvent(planEvent)
+			}
 		}
 	}
 	if err := r.updateCompactionUsageFromBatch(ctx, ref, batch); err != nil {
@@ -720,26 +743,50 @@ func stringSliceMetadata(meta map[string]any, key string) ([]string, bool) {
 }
 
 type runner struct {
-	runID     string
-	events    []*sdksession.Event
-	mu        sync.Mutex
-	cancelled bool
+	runID      string
+	cancelFn   context.CancelFunc
+	eventsCh   chan runnerEvent
+	closeOnce  sync.Once
+	mu         sync.Mutex
+	cancelled  bool
+	closed     bool
+	submitFunc func(sdkruntime.Submission) error
+}
+
+type runnerEvent struct {
+	event *sdksession.Event
+	err   error
+}
+
+func newRunner(runID string, cancel context.CancelFunc) *runner {
+	return &runner{
+		runID:    runID,
+		cancelFn: cancel,
+		eventsCh: make(chan runnerEvent, 64),
+	}
 }
 
 func (r *runner) RunID() string { return r.runID }
 
 func (r *runner) Events() iter.Seq2[*sdksession.Event, error] {
-	events := sdksession.CloneEvents(r.events)
 	return func(yield func(*sdksession.Event, error) bool) {
-		for _, event := range events {
-			if !yield(event, nil) {
+		for item := range r.eventsCh {
+			if !yield(sdksession.CloneEvent(item.event), item.err) {
 				return
 			}
 		}
 	}
 }
 
-func (r *runner) Submit(sdkruntime.Submission) error { return nil }
+func (r *runner) Submit(sub sdkruntime.Submission) error {
+	r.mu.Lock()
+	fn := r.submitFunc
+	r.mu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(sub)
+}
 
 func (r *runner) Cancel() bool {
 	r.mu.Lock()
@@ -748,7 +795,56 @@ func (r *runner) Cancel() bool {
 		return false
 	}
 	r.cancelled = true
+	if r.cancelFn != nil {
+		r.cancelFn()
+	}
 	return true
 }
 
-func (r *runner) Close() error { return nil }
+func (r *runner) Close() error {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *runner) publishEvent(event *sdksession.Event) {
+	if r == nil || event == nil {
+		return
+	}
+	r.publish(runnerEvent{event: sdksession.CloneEvent(event)})
+}
+
+func (r *runner) publishError(err error) {
+	if r == nil || err == nil {
+		return
+	}
+	r.publish(runnerEvent{err: err})
+}
+
+func (r *runner) publish(item runnerEvent) {
+	if r == nil {
+		return
+	}
+	select {
+	case r.eventsCh <- item:
+	default:
+		r.eventsCh <- item
+	}
+}
+
+func (r *runner) finish() {
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		close(r.eventsCh)
+	})
+}
+
+func interruptedOrFailedStatus(ctx context.Context, err error) sdkruntime.RunLifecycleStatus {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return sdkruntime.RunLifecycleStatusInterrupted
+	}
+	return sdkruntime.RunLifecycleStatusFailed
+}

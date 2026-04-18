@@ -27,6 +27,7 @@ type Agent struct {
 	tools        []sdktool.Tool
 	systemPrompt string
 	reasoning    sdkmodel.ReasoningConfig
+	request      sdkruntime.ModelRequestOptions
 }
 
 // New returns one concrete chat agent.
@@ -69,6 +70,7 @@ func (f Factory) NewAgent(_ context.Context, spec sdkruntime.AgentSpec) (sdkrunt
 		return nil, err
 	}
 	agent.reasoning = reasoningFromMetadata(spec.Metadata)
+	agent.request = spec.Request
 	return agent, nil
 }
 
@@ -79,16 +81,19 @@ func (a *Agent) Name() string {
 func (a *Agent) Run(ctx sdkruntime.Context) iter.Seq2[*sdksession.Event, error] {
 	return func(yield func(*sdksession.Event, error) bool) {
 		messages := messagesFromContext(ctx)
+		stream := a.request.StreamEnabled(false)
 		for step := 0; step < 8; step++ {
 			request := &sdkmodel.Request{
 				Messages:  messages,
 				Tools:     sdktool.ModelSpecs(a.tools),
 				Reasoning: a.reasoning,
-				Stream:    false,
+				Stream:    stream,
 			}
 			request.Instructions = append(request.Instructions, instructionsFromContext(ctx, a.systemPrompt)...)
 
-			final, err := collectFinalResponse(ctx, a.model, request)
+			final, err := collectFinalResponse(ctx, a.model, request, func(event *sdksession.Event) bool {
+				return yield(event, nil)
+			})
 			if err != nil {
 				yield(nil, err)
 				return
@@ -142,11 +147,23 @@ func reasoningFromMetadata(meta map[string]any) sdkmodel.ReasoningConfig {
 	return reasoning
 }
 
-func collectFinalResponse(ctx context.Context, model sdkmodel.LLM, req *sdkmodel.Request) (*sdkmodel.Response, error) {
+func collectFinalResponse(
+	ctx context.Context,
+	model sdkmodel.LLM,
+	req *sdkmodel.Request,
+	yieldChunk func(*sdksession.Event) bool,
+) (*sdkmodel.Response, error) {
 	var final *sdkmodel.Response
 	for event, err := range model.Generate(ctx, req) {
 		if err != nil {
 			return nil, err
+		}
+		if req != nil && req.Stream {
+			if chunk := chunkEventFromStreamEvent(event); chunk != nil && yieldChunk != nil {
+				if !yieldChunk(chunk) {
+					return nil, context.Canceled
+				}
+			}
 		}
 		if event != nil && event.Response != nil && event.TurnComplete {
 			final = event.Response
@@ -158,11 +175,49 @@ func collectFinalResponse(ctx context.Context, model sdkmodel.LLM, req *sdkmodel
 	return final, nil
 }
 
+func chunkEventFromStreamEvent(event *sdkmodel.StreamEvent) *sdksession.Event {
+	if event == nil || event.PartDelta == nil {
+		return nil
+	}
+	delta := event.PartDelta
+	switch delta.Kind {
+	case sdkmodel.PartKindReasoning:
+		if strings.TrimSpace(delta.TextDelta) == "" {
+			return nil
+		}
+		message := sdkmodel.NewReasoningMessage(sdkmodel.RoleAssistant, delta.TextDelta, sdkmodel.ReasoningVisibilityVisible)
+		return sdksession.MarkUIOnly(&sdksession.Event{
+			Type:    sdksession.EventTypeAssistant,
+			Message: &message,
+			Text:    strings.TrimSpace(delta.TextDelta),
+			Protocol: &sdksession.EventProtocol{
+				UpdateType: string(sdksession.ProtocolUpdateTypeAgentThought),
+			},
+		})
+	case sdkmodel.PartKindText:
+		if strings.TrimSpace(delta.TextDelta) == "" {
+			return nil
+		}
+		message := sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, delta.TextDelta)
+		return sdksession.MarkUIOnly(&sdksession.Event{
+			Type:    sdksession.EventTypeAssistant,
+			Message: &message,
+			Text:    delta.TextDelta,
+			Protocol: &sdksession.EventProtocol{
+				UpdateType: string(sdksession.ProtocolUpdateTypeAgentMessage),
+			},
+		})
+	default:
+		return nil
+	}
+}
+
 func modelResponseEvent(message sdkmodel.Message, resp *sdkmodel.Response) *sdksession.Event {
 	out := &sdksession.Event{
-		Type:    sdksession.EventTypeOf(&sdksession.Event{Message: &message}),
-		Message: &message,
-		Text:    message.TextContent(),
+		Type:       sdksession.EventTypeOf(&sdksession.Event{Message: &message}),
+		Visibility: sdksession.VisibilityCanonical,
+		Message:    &message,
+		Text:       message.TextContent(),
 		Protocol: &sdksession.EventProtocol{
 			UpdateType: string(sdksession.ProtocolUpdateTypeAgentMessage),
 		},

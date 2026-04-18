@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"maps"
 	"strings"
 	"sync"
@@ -46,8 +47,10 @@ type controllerRun struct {
 	mu                sync.Mutex
 	turnID            string
 	turnSession       sdksession.Session
+	turnStream        bool
 	turnMode          string
 	approvalRequester sdkcontroller.ApprovalRequester
+	handle            *turnHandle
 	events            []*sdksession.Event
 	updatedAt         time.Time
 }
@@ -147,18 +150,29 @@ func (m *Manager) RunTurn(ctx context.Context, req sdkcontroller.TurnRequest) (s
 	}
 
 	prompt := buildPromptParts(req.Input, req.ContentParts)
-	run.beginTurn(req)
-	defer run.endTurn()
+	turnCtx, cancel := context.WithCancel(ctx)
+	handle := newTurnHandle(cancel)
+	run.beginTurn(req, handle)
 	if len(prompt) == 0 {
-		return sdkcontroller.TurnResult{UpdatedAt: m.clock()}, nil
+		run.finishTurn()
+		handle.finish()
+		return sdkcontroller.TurnResult{Handle: handle, UpdatedAt: m.clock()}, nil
 	}
-	if _, err := run.client.PromptParts(ctx, run.remoteSessionID, prompt, nil); err != nil {
-		return sdkcontroller.TurnResult{}, err
-	}
-	return sdkcontroller.TurnResult{
-		Events:    run.snapshotEvents(),
-		UpdatedAt: m.clock(),
-	}, nil
+	go func() {
+		defer handle.finish()
+		if _, err := run.client.PromptParts(turnCtx, run.remoteSessionID, prompt, nil); err != nil {
+			run.finishTurn()
+			handle.publishError(err)
+			return
+		}
+		buffered, stream := run.finishTurn()
+		if !stream {
+			for _, event := range buffered {
+				handle.publishEvent(event)
+			}
+		}
+	}()
+	return sdkcontroller.TurnResult{Handle: handle, UpdatedAt: m.clock()}, nil
 }
 
 func (m *Manager) Attach(ctx context.Context, req sdkcontroller.AttachRequest) (sdksession.ParticipantBinding, error) {
@@ -359,7 +373,7 @@ func controllerBinding(agent string, source string, epochID string, now time.Tim
 	}
 }
 
-func (r *controllerRun) beginTurn(req sdkcontroller.TurnRequest) {
+func (r *controllerRun) beginTurn(req sdkcontroller.TurnRequest, handle *turnHandle) {
 	if r == nil {
 		return
 	}
@@ -367,34 +381,32 @@ func (r *controllerRun) beginTurn(req sdkcontroller.TurnRequest) {
 	defer r.mu.Unlock()
 	r.turnID = strings.TrimSpace(req.TurnID)
 	r.turnSession = sdksession.CloneSession(req.Session)
+	r.turnStream = req.Stream
 	r.turnMode = strings.TrimSpace(req.Mode)
 	r.approvalRequester = req.ApprovalRequester
+	r.handle = handle
 	r.events = nil
 }
 
-func (r *controllerRun) endTurn() {
+func (r *controllerRun) finishTurn() ([]*sdksession.Event, bool) {
 	if r == nil {
-		return
+		return nil, false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	buffered := make([]*sdksession.Event, 0, len(r.events))
+	for _, event := range r.events {
+		buffered = append(buffered, sdksession.CloneEvent(event))
+	}
+	stream := r.turnStream
 	r.turnID = ""
 	r.turnSession = sdksession.Session{}
+	r.turnStream = false
 	r.turnMode = ""
 	r.approvalRequester = nil
-}
-
-func (r *controllerRun) snapshotEvents() []*sdksession.Event {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]*sdksession.Event, 0, len(r.events))
-	for _, event := range r.events {
-		out = append(out, sdksession.CloneEvent(event))
-	}
-	return out
+	r.handle = nil
+	r.events = nil
+	return buffered, stream
 }
 
 func (r *controllerRun) handleUpdate(clock func() time.Time, env sdkacpclient.UpdateEnvelope) {
@@ -402,16 +414,103 @@ func (r *controllerRun) handleUpdate(clock func() time.Time, env sdkacpclient.Up
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.turnID == "" {
+		r.mu.Unlock()
 		return
 	}
-	event := normalizeACPUpdateEvent(clock, r.binding, r.remoteSessionID, r.turnID, env.Update)
+	turnID := r.turnID
+	stream := r.turnStream
+	handle := r.handle
+	event := normalizeACPUpdateEvent(clock, r.binding, r.remoteSessionID, turnID, env.Update)
 	if event == nil {
+		r.mu.Unlock()
 		return
 	}
 	r.updatedAt = clock()
-	r.events = append(r.events, event)
+	r.events = append(r.events, sdksession.CloneEvent(event))
+	r.mu.Unlock()
+	if stream && handle != nil {
+		handle.publishEvent(event)
+	}
+}
+
+type turnHandle struct {
+	cancelFn  context.CancelFunc
+	eventsCh  chan turnHandleEvent
+	closeOnce sync.Once
+	mu        sync.Mutex
+	cancelled bool
+}
+
+type turnHandleEvent struct {
+	event *sdksession.Event
+	err   error
+}
+
+func newTurnHandle(cancel context.CancelFunc) *turnHandle {
+	return &turnHandle{
+		cancelFn: cancel,
+		eventsCh: make(chan turnHandleEvent, 64),
+	}
+}
+
+func (h *turnHandle) Events() iter.Seq2[*sdksession.Event, error] {
+	return func(yield func(*sdksession.Event, error) bool) {
+		for item := range h.eventsCh {
+			if !yield(sdksession.CloneEvent(item.event), item.err) {
+				return
+			}
+		}
+	}
+}
+
+func (h *turnHandle) Cancel() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cancelled {
+		return false
+	}
+	h.cancelled = true
+	if h.cancelFn != nil {
+		h.cancelFn()
+	}
+	return true
+}
+
+func (h *turnHandle) Close() error { return nil }
+
+func (h *turnHandle) publishEvent(event *sdksession.Event) {
+	if h == nil || event == nil {
+		return
+	}
+	h.publish(turnHandleEvent{event: sdksession.CloneEvent(event)})
+}
+
+func (h *turnHandle) publishError(err error) {
+	if h == nil || err == nil {
+		return
+	}
+	h.publish(turnHandleEvent{err: err})
+}
+
+func (h *turnHandle) publish(item turnHandleEvent) {
+	if h == nil {
+		return
+	}
+	select {
+	case h.eventsCh <- item:
+	default:
+		h.eventsCh <- item
+	}
+}
+
+func (h *turnHandle) finish() {
+	if h == nil {
+		return
+	}
+	h.closeOnce.Do(func() {
+		close(h.eventsCh)
+	})
 }
 
 func normalizeACPUpdateEvent(

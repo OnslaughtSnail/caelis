@@ -151,6 +151,117 @@ func TestRuntimeProviderE2E(t *testing.T) {
 	}
 }
 
+func TestRuntimeProviderLiveTurnE2E(t *testing.T) {
+	spec := e2etest.RequireLLM(t, e2etest.Config{
+		DefaultProvider: "minimax",
+		DefaultModel:    "MiniMax-M2",
+		Timeout:         90 * time.Second,
+		MaxTokens:       512,
+	})
+
+	root := t.TempDir()
+	sessions := newFileSessionService(root, "sess-runtime-live-provider")
+	session, err := sessions.StartSession(context.Background(), sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-live-e2e",
+			CWD: "/tmp/caelis-sdk-runtime-live",
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Answer tersely.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	result, err := runtime.Run(ctx, sdkruntime.RunRequest{
+		SessionRef: session.SessionRef,
+		Input:      "Reply with exactly: runtime live e2e ok",
+		Request: sdkruntime.ModelRequestOptions{
+			Stream: boolPtrForE2E(true),
+		},
+		AgentSpec: sdkruntime.AgentSpec{
+			Name:  "chat",
+			Model: spec.LLM,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run() blocked for %s, want live handle return under 1s", elapsed)
+	}
+
+	var (
+		sawUser      bool
+		sawChunk     bool
+		finalText    string
+		firstEventAt time.Time
+	)
+	for event, seqErr := range result.Handle.Events() {
+		if seqErr != nil {
+			t.Fatalf("runner error = %v", seqErr)
+		}
+		if event == nil {
+			continue
+		}
+		if firstEventAt.IsZero() {
+			firstEventAt = time.Now()
+		}
+		switch {
+		case event.Type == sdksession.EventTypeUser:
+			sawUser = true
+		case event.Type == sdksession.EventTypeAssistant && event.Visibility == sdksession.VisibilityUIOnly && event.Protocol != nil &&
+			(event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentMessage) ||
+				event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentThought)):
+			sawChunk = true
+		case event.Type == sdksession.EventTypeAssistant && event.Visibility == sdksession.VisibilityCanonical:
+			finalText = strings.TrimSpace(event.Text)
+		}
+	}
+	if firstEventAt.IsZero() {
+		t.Fatal("expected at least one live event")
+	}
+	if delay := firstEventAt.Sub(start); delay > 2*time.Second {
+		t.Fatalf("first event arrived after %s, want live publication under 2s", delay)
+	}
+	if !sawUser {
+		t.Fatal("expected live user event before completion")
+	}
+	if !sawChunk {
+		t.Fatal("expected ACP-compatible assistant chunk/thought event before final response")
+	}
+	if finalText == "" {
+		t.Fatal("expected final canonical assistant text")
+	}
+
+	loaded, err := sessions.LoadSession(ctx, sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	for _, event := range loaded.Events {
+		if event == nil || event.Visibility != sdksession.VisibilityUIOnly {
+			continue
+		}
+		t.Fatalf("persisted history unexpectedly contains UI-only chunk event: %+v", event)
+	}
+}
+
 func TestRuntimeProviderToolLoopE2E(t *testing.T) {
 	spec := e2etest.RequireLLM(t, e2etest.Config{
 		DefaultProvider: "minimax",
@@ -1243,6 +1354,8 @@ func runAndCollectAssistantTextForE2E(ctx context.Context, t *testing.T, runtime
 	}
 	return finalText
 }
+
+func boolPtrForE2E(v bool) *bool { return &v }
 
 func TestRuntimeAsyncBashFileE2E(t *testing.T) {
 	root := t.TempDir()

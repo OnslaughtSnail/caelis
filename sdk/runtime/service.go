@@ -49,6 +49,7 @@ type RunRequest struct {
 	SessionRef        sdksession.SessionRef  `json:"session_ref"`
 	Input             string                 `json:"input,omitempty"`
 	ContentParts      []sdkmodel.ContentPart `json:"content_parts,omitempty"`
+	Request           ModelRequestOptions    `json:"request,omitempty"`
 	ApprovalRequester ApprovalRequester      `json:"-"`
 	Agent             Agent                  `json:"-"`
 	AgentSpec         AgentSpec              `json:"-"`

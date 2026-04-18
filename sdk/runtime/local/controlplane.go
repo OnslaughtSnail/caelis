@@ -59,8 +59,26 @@ func (r *Runtime) runACPControllerTurn(
 		ActiveRunID: runID,
 		UpdatedAt:   r.now(),
 	})
+	runCtx, cancel := context.WithCancel(ctx)
+	handle := newRunner(runID, cancel)
+	go r.executeACPControllerTurn(runCtx, session, ref, req, runID, turnID, handle)
+	return sdkruntime.RunResult{
+		Session: session,
+		Handle:  handle,
+	}, nil
+}
 
-	batch := make([]*sdksession.Event, 0, 4)
+func (r *Runtime) executeACPControllerTurn(
+	ctx context.Context,
+	session sdksession.Session,
+	ref sdksession.SessionRef,
+	req sdkruntime.RunRequest,
+	runID string,
+	turnID string,
+	handle *runner,
+) {
+	defer handle.finish()
+
 	userEvent := buildUserEvent(session, turnID, req.Input, req.ContentParts)
 	if userEvent != nil {
 		persisted, err := r.sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
@@ -69,14 +87,15 @@ func (r *Runtime) runACPControllerTurn(
 		})
 		if err != nil {
 			r.setRunState(ref.SessionID, sdkruntime.RunState{
-				Status:      sdkruntime.RunLifecycleStatusFailed,
+				Status:      interruptedOrFailedStatus(ctx, err),
 				ActiveRunID: runID,
 				LastError:   err.Error(),
 				UpdatedAt:   r.now(),
 			})
-			return sdkruntime.RunResult{}, err
+			handle.publishError(err)
+			return
 		}
-		batch = append(batch, persisted)
+		handle.publishEvent(persisted)
 	}
 
 	turnResult, err := r.controllers.RunTurn(ctx, sdkcontroller.TurnRequest{
@@ -85,67 +104,71 @@ func (r *Runtime) runACPControllerTurn(
 		TurnID:            turnID,
 		Input:             req.Input,
 		ContentParts:      req.ContentParts,
+		Stream:            req.Request.StreamEnabled(false),
 		Mode:              r.policyMode(req.AgentSpec),
 		ApprovalRequester: controllerApprovalRequester{requester: req.ApprovalRequester, sessionRef: ref, session: session, runID: runID, turnID: turnID},
 	})
 	if err != nil {
 		r.setRunState(ref.SessionID, sdkruntime.RunState{
-			Status:      sdkruntime.RunLifecycleStatusFailed,
+			Status:      interruptedOrFailedStatus(ctx, err),
 			ActiveRunID: runID,
 			LastError:   err.Error(),
 			UpdatedAt:   r.now(),
 		})
-		return sdkruntime.RunResult{}, err
+		handle.publishError(err)
+		return
 	}
-	for _, event := range turnResult.Events {
-		normalized := normalizeEvent(session, turnID, event)
-		if normalized == nil {
-			continue
-		}
-		if sdksession.IsCanonicalHistoryEvent(normalized) {
-			persisted, appendErr := r.sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
-				SessionRef: ref,
-				Event:      normalized,
-			})
-			if appendErr != nil {
+	if turnResult.Handle != nil {
+		for event, seqErr := range turnResult.Handle.Events() {
+			if seqErr != nil {
 				r.setRunState(ref.SessionID, sdkruntime.RunState{
-					Status:      sdkruntime.RunLifecycleStatusFailed,
+					Status:      interruptedOrFailedStatus(ctx, seqErr),
 					ActiveRunID: runID,
-					LastError:   appendErr.Error(),
+					LastError:   seqErr.Error(),
 					UpdatedAt:   r.now(),
 				})
-				return sdkruntime.RunResult{}, appendErr
+				handle.publishError(seqErr)
+				return
 			}
-			normalized = persisted
+			normalized := normalizeEvent(session, turnID, event)
+			if normalized == nil {
+				continue
+			}
+			if sdksession.IsCanonicalHistoryEvent(normalized) {
+				persisted, appendErr := r.sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
+					SessionRef: ref,
+					Event:      normalized,
+				})
+				if appendErr != nil {
+					r.setRunState(ref.SessionID, sdkruntime.RunState{
+						Status:      interruptedOrFailedStatus(ctx, appendErr),
+						ActiveRunID: runID,
+						LastError:   appendErr.Error(),
+						UpdatedAt:   r.now(),
+					})
+					handle.publishError(appendErr)
+					return
+				}
+				normalized = persisted
+			}
+			if err := r.handleControllerPlanEvent(ctx, ref, normalized); err != nil {
+				r.setRunState(ref.SessionID, sdkruntime.RunState{
+					Status:      interruptedOrFailedStatus(ctx, err),
+					ActiveRunID: runID,
+					LastError:   err.Error(),
+					UpdatedAt:   r.now(),
+				})
+				handle.publishError(err)
+				return
+			}
+			handle.publishEvent(normalized)
 		}
-		if err := r.handleControllerPlanEvent(ctx, ref, normalized); err != nil {
-			r.setRunState(ref.SessionID, sdkruntime.RunState{
-				Status:      sdkruntime.RunLifecycleStatusFailed,
-				ActiveRunID: runID,
-				LastError:   err.Error(),
-				UpdatedAt:   r.now(),
-			})
-			return sdkruntime.RunResult{}, err
-		}
-		batch = append(batch, sdksession.CloneEvent(normalized))
-	}
-
-	updated, err := r.sessions.Session(ctx, ref)
-	if err != nil {
-		return sdkruntime.RunResult{}, err
 	}
 	r.setRunState(ref.SessionID, sdkruntime.RunState{
 		Status:      sdkruntime.RunLifecycleStatusCompleted,
 		ActiveRunID: runID,
 		UpdatedAt:   r.now(),
 	})
-	return sdkruntime.RunResult{
-		Session: updated,
-		Handle: &runner{
-			runID:  runID,
-			events: batch,
-		},
-	}, nil
 }
 
 func (r *Runtime) handleControllerPlanEvent(ctx context.Context, ref sdksession.SessionRef, event *sdksession.Event) error {
