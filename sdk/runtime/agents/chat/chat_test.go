@@ -281,6 +281,63 @@ func TestChatAgentDefaultsToNonStreamingRequests(t *testing.T) {
 	}
 }
 
+func TestChatAgentDoesNotImposeFixedToolLoopCap(t *testing.T) {
+	t.Parallel()
+
+	model := &longToolLoopModel{}
+	tool := sdktool.NamedTool{
+		Def: sdktool.Definition{
+			Name:        "ECHO",
+			Description: "echo input",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Invoke: func(_ context.Context, call sdktool.Call) (sdktool.Result, error) {
+			return sdktool.Result{
+				ID:   call.ID,
+				Name: call.Name,
+				Content: []sdkmodel.Part{
+					sdkmodel.NewJSONPart([]byte(`{"value":"pong"}`)),
+				},
+			}, nil
+		},
+	}
+	agent, err := NewWithTools("chat", model, []sdktool.Tool{tool}, "Use tools when needed.")
+	if err != nil {
+		t.Fatalf("NewWithTools() error = %v", err)
+	}
+
+	ctx := sdkruntime.NewContext(sdkruntime.ContextSpec{
+		Context: context.Background(),
+		Session: sdksession.Session{SessionRef: sdksession.SessionRef{SessionID: "sess-long-loop"}},
+		Events: []*sdksession.Event{{
+			Type:    sdksession.EventTypeUser,
+			Message: ptrMessage(sdkmodel.NewTextMessage(sdkmodel.RoleUser, "loop")),
+			Text:    "loop",
+		}},
+	})
+
+	var (
+		final  *sdksession.Event
+		runErr error
+	)
+	for event, err := range agent.Run(ctx) {
+		if err != nil {
+			runErr = err
+			break
+		}
+		final = event
+	}
+	if runErr != nil {
+		t.Fatalf("Run() error = %v", runErr)
+	}
+	if final == nil || final.Text != "done" {
+		t.Fatalf("final event = %+v, want assistant done", final)
+	}
+	if got, want := model.calls, 10; got != want {
+		t.Fatalf("model calls = %d, want %d", got, want)
+	}
+}
+
 type recordingModel struct {
 	last sdkmodel.Request
 }
@@ -445,5 +502,45 @@ func (m *blockingStreamingModel) Generate(_ context.Context, req *sdkmodel.Reque
 			},
 		}, nil)
 		_ = req
+	}
+}
+
+type longToolLoopModel struct {
+	calls int
+}
+
+func (m *longToolLoopModel) Name() string { return "long-tool-loop" }
+
+func (m *longToolLoopModel) Generate(_ context.Context, _ *sdkmodel.Request) iter.Seq2[*sdkmodel.StreamEvent, error] {
+	m.calls++
+	callIndex := m.calls
+	return func(yield func(*sdkmodel.StreamEvent, error) bool) {
+		if callIndex <= 9 {
+			yield(&sdkmodel.StreamEvent{
+				Type: sdkmodel.StreamEventTurnDone,
+				Response: &sdkmodel.Response{
+					Message: sdkmodel.MessageFromToolCalls(sdkmodel.RoleAssistant, []sdkmodel.ToolCall{{
+						ID:   "call-loop",
+						Name: "ECHO",
+						Args: `{"value":"pong"}`,
+					}}, ""),
+					TurnComplete: true,
+					StepComplete: true,
+					Status:       sdkmodel.ResponseStatusCompleted,
+					FinishReason: sdkmodel.FinishReasonToolCalls,
+				},
+			}, nil)
+			return
+		}
+		yield(&sdkmodel.StreamEvent{
+			Type: sdkmodel.StreamEventTurnDone,
+			Response: &sdkmodel.Response{
+				Message:      sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "done"),
+				TurnComplete: true,
+				StepComplete: true,
+				Status:       sdkmodel.ResponseStatusCompleted,
+				FinishReason: sdkmodel.FinishReasonStop,
+			},
+		}, nil)
 	}
 }

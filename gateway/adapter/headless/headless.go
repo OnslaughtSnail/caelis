@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/OnslaughtSnail/caelis/gateway"
-	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
@@ -21,7 +20,7 @@ const (
 
 type Options struct {
 	ApprovalPolicy  ApprovalPolicy
-	ResolveApproval func(context.Context, *sdkruntime.ApprovalRequest) (gateway.ApprovalDecision, error)
+	ResolveApproval func(context.Context, *gateway.ApprovalPayload) (gateway.ApprovalDecision, error)
 }
 
 type Result struct {
@@ -48,7 +47,7 @@ func RunOnce(ctx context.Context, starter Starter, req gateway.BeginTurnRequest,
 			return out, env.Err
 		}
 		if env.Event.Kind == gateway.EventKindApprovalRequested {
-			decision, err := resolveApproval(ctx, opts, env.Event.Approval)
+			decision, err := resolveApproval(ctx, opts, env.Event.ApprovalPayload)
 			if err != nil {
 				return out, err
 			}
@@ -70,7 +69,7 @@ func RunOnce(ctx context.Context, starter Starter, req gateway.BeginTurnRequest,
 	return out, nil
 }
 
-func resolveApproval(ctx context.Context, opts Options, req *sdkruntime.ApprovalRequest) (gateway.ApprovalDecision, error) {
+func resolveApproval(ctx context.Context, opts Options, req *gateway.ApprovalPayload) (gateway.ApprovalDecision, error) {
 	if opts.ResolveApproval != nil {
 		return opts.ResolveApproval(ctx, req)
 	}

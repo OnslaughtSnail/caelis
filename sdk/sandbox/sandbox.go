@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,7 @@ const (
 	BackendHost     Backend = "host"
 	BackendSeatbelt Backend = "seatbelt"
 	BackendBwrap    Backend = "bwrap"
+	BackendLandlock Backend = "landlock"
 	BackendCustom   Backend = "custom"
 )
 
@@ -114,6 +116,24 @@ type Descriptor struct {
 	Isolation          Isolation     `json:"isolation,omitempty"`
 	Capabilities       CapabilitySet `json:"capabilities,omitempty"`
 	DefaultConstraints Constraints   `json:"default_constraints,omitempty"`
+}
+
+// Config configures one composed sandbox runtime.
+type Config struct {
+	CWD              string   `json:"cwd,omitempty"`
+	RequestedBackend Backend  `json:"requested_backend,omitempty"`
+	HelperPath       string   `json:"helper_path,omitempty"`
+	ReadableRoots    []string `json:"readable_roots,omitempty"`
+	WritableRoots    []string `json:"writable_roots,omitempty"`
+	ReadOnlySubpaths []string `json:"read_only_subpaths,omitempty"`
+}
+
+// Status reports backend selection and fallback state for one runtime.
+type Status struct {
+	RequestedBackend Backend `json:"requested_backend,omitempty"`
+	ResolvedBackend  Backend `json:"resolved_backend,omitempty"`
+	FallbackToHost   bool    `json:"fallback_to_host,omitempty"`
+	FallbackReason   string  `json:"fallback_reason,omitempty"`
 }
 
 // OutputChunk is one stdout/stderr streaming fragment.
@@ -204,11 +224,26 @@ type AsyncRunner interface {
 type Runtime interface {
 	Describe() Descriptor
 	FileSystem() FileSystem
+	FileSystemFor(Constraints) FileSystem
 	Run(context.Context, CommandRequest) (CommandResult, error)
 	Start(context.Context, CommandRequest) (Session, error)
 	OpenSession(string) (Session, error)
+	OpenSessionRef(SessionRef) (Session, error)
+	SupportedBackends() []Backend
+	Status() Status
 	Close() error
 }
+
+// BackendFactory builds one concrete backend runtime.
+type BackendFactory interface {
+	Backend() Backend
+	Build(Config) (Runtime, error)
+}
+
+var (
+	backendFactoriesMu sync.RWMutex
+	backendFactories   = map[Backend]BackendFactory{}
+)
 
 // FuncRunner adapts one function into one Runner.
 type FuncRunner func(context.Context, CommandRequest) (CommandResult, error)

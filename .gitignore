@@ -7,3 +7,6 @@ dist/
 /cli
 .DS_Store
 tmp/
+.superpowers
+.caelis
+plans

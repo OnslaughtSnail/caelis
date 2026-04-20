@@ -86,12 +86,13 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 	if err != nil {
 		return sdktool.Result{}, err
 	}
+	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
 
-	target, err := normalizePathWithFS(t.runtime.FileSystem(), pathArg)
+	target, err := normalizePathWithFS(fsys, pathArg)
 	if err != nil {
 		return sdktool.Result{}, err
 	}
-	info, err := t.runtime.FileSystem().Stat(target)
+	info, err := fsys.Stat(target)
 	if err != nil {
 		return sdktool.Result{}, err
 	}
@@ -122,7 +123,7 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 		root = filepath.Dir(target)
 	}
 	if info.IsDir() {
-		walkErr := walkDir(t.runtime.FileSystem(), target, func(path string, d fs.DirEntry, walkErr error) error {
+		walkErr := walkDir(fsys, target, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return nil
 			}
@@ -135,7 +136,7 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 			if d == nil || d.IsDir() {
 				return nil
 			}
-			_, stop := searchInFile(t.runtime.FileSystem(), path, queryToMatch, caseSensitive, appendMatch)
+			_, stop := searchInFile(fsys, path, queryToMatch, caseSensitive, appendMatch)
 			if stop {
 				return errSearchLimitReached
 			}
@@ -155,7 +156,7 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 				"hits":       []map[string]any{},
 			})
 		}
-		if _, stop := searchInFile(t.runtime.FileSystem(), target, queryToMatch, caseSensitive, appendMatch); stop {
+		if _, stop := searchInFile(fsys, target, queryToMatch, caseSensitive, appendMatch); stop {
 			truncated = true
 		}
 	}

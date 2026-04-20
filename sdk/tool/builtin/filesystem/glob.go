@@ -62,8 +62,9 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if err != nil {
 		return sdktool.Result{}, err
 	}
+	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
 	if !filepath.IsAbs(pattern) {
-		wd, err := t.runtime.FileSystem().Getwd()
+		wd, err := fsys.Getwd()
 		if err != nil {
 			return sdktool.Result{}, err
 		}
@@ -73,7 +74,7 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 
 	matches := make([]string, 0, 16)
 	if !hasPathGlobMeta(filepath.ToSlash(pattern)) {
-		if info, err := t.runtime.FileSystem().Stat(pattern); err == nil {
+		if info, err := fsys.Stat(pattern); err == nil {
 			root := filepath.Dir(pattern)
 			if !shouldExcludePath(root, pattern, info.IsDir(), exclude) {
 				matches = append(matches, pattern)
@@ -93,7 +94,7 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if relPattern == "" {
 		relPattern = filepath.Base(pattern)
 	}
-	if _, err := t.runtime.FileSystem().Stat(root); err != nil {
+	if _, err := fsys.Stat(root); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return toolutil.JSONResult(GlobToolName, map[string]any{
 				"pattern": pattern,
@@ -103,7 +104,7 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 		}
 		return sdktool.Result{}, err
 	}
-	err = walkDir(t.runtime.FileSystem(), root, func(candidate string, d fs.DirEntry, walkErr error) error {
+	err = walkDir(fsys, root, func(candidate string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d == nil {
 			return nil
 		}

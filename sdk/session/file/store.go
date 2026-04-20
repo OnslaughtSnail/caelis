@@ -2,9 +2,12 @@ package file
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +40,7 @@ type Store struct {
 	eventIDGenerator   func() string
 	clock              func() time.Time
 	idCounter          atomic.Uint64
+	pathCache          map[string]string
 }
 
 // Service is the file-backed implementation of session.Service.
@@ -59,6 +63,7 @@ func NewStore(cfg Config) *Store {
 		sessionIDGenerator: cfg.SessionIDGenerator,
 		eventIDGenerator:   cfg.EventIDGenerator,
 		clock:              cfg.Clock,
+		pathCache:          map[string]string{},
 	}
 	if store.rootDir == "" {
 		store.rootDir = filepath.Join(os.TempDir(), "caelis-sdk-sessions")
@@ -97,7 +102,7 @@ func (s *Store) GetOrCreate(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	doc, err := s.readDocument(ref.SessionID)
+	doc, err := s.readDocument(ref.SessionID, ref.WorkspaceKey)
 	switch {
 	case err == nil:
 		if !matchesRef(doc.Session, ref) {
@@ -151,23 +156,18 @@ func (s *Store) List(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	rows, err := os.ReadDir(s.rootDir)
+	paths, err := s.listDocumentPaths()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return sdksession.SessionList{}, nil
-		}
 		return sdksession.SessionList{}, err
 	}
 
-	summaries := make([]sdksession.SessionSummary, 0, len(rows))
-	for _, row := range rows {
-		if row.IsDir() || filepath.Ext(row.Name()) != ".json" {
-			continue
-		}
-		doc, err := s.readDocument(strings.TrimSuffix(row.Name(), filepath.Ext(row.Name())))
+	summaries := make([]sdksession.SessionSummary, 0, len(paths))
+	for _, path := range paths {
+		doc, err := s.readDocumentAt(path)
 		if err != nil {
 			return sdksession.SessionList{}, err
 		}
+		s.pathCache[pathCacheKey(doc.Session.SessionID, doc.Session.WorkspaceKey)] = path
 		session := doc.Session
 		if req.AppName != "" && session.AppName != strings.TrimSpace(req.AppName) {
 			continue
@@ -499,7 +499,7 @@ func (s *Store) readDocumentForRef(ref sdksession.SessionRef) (persistedDocument
 	if normalized.SessionID == "" {
 		return persistedDocument{}, sdksession.ErrInvalidSession
 	}
-	doc, err := s.readDocument(normalized.SessionID)
+	doc, err := s.readDocument(normalized.SessionID, normalized.WorkspaceKey)
 	if err != nil {
 		return persistedDocument{}, err
 	}
@@ -509,8 +509,15 @@ func (s *Store) readDocumentForRef(ref sdksession.SessionRef) (persistedDocument
 	return doc, nil
 }
 
-func (s *Store) readDocument(sessionID string) (persistedDocument, error) {
-	path := s.sessionPath(sessionID)
+func (s *Store) readDocument(sessionID string, workspaceKey ...string) (persistedDocument, error) {
+	path, err := s.resolveDocumentPath(sessionID, firstNonEmpty(workspaceKey...))
+	if err != nil {
+		return persistedDocument{}, err
+	}
+	return s.readDocumentAt(path)
+}
+
+func (s *Store) readDocumentAt(path string) (persistedDocument, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -536,9 +543,6 @@ func (s *Store) readDocument(sessionID string) (persistedDocument, error) {
 }
 
 func (s *Store) writeDocument(doc persistedDocument) error {
-	if err := os.MkdirAll(s.rootDir, 0o755); err != nil {
-		return err
-	}
 	doc.Kind = documentKind
 	doc.Version = documentVersion
 	doc.Session = sdksession.CloneSession(doc.Session)
@@ -551,8 +555,15 @@ func (s *Store) writeDocument(doc persistedDocument) error {
 	}
 	data = append(data, '\n')
 
-	path := s.sessionPath(doc.Session.SessionID)
-	tmp, err := os.CreateTemp(s.rootDir, filepath.Base(path)+".*.tmp")
+	path, err := s.resolveWritePath(doc.Session)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return err
 	}
@@ -565,11 +576,117 @@ func (s *Store) writeDocument(doc persistedDocument) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	s.pathCache[pathCacheKey(doc.Session.SessionID, doc.Session.WorkspaceKey)] = path
+	return nil
 }
 
-func (s *Store) sessionPath(sessionID string) string {
-	return filepath.Join(s.rootDir, sanitizeSessionID(sessionID)+".json")
+func (s *Store) resolveWritePath(session sdksession.Session) (string, error) {
+	key := pathCacheKey(session.SessionID, session.WorkspaceKey)
+	if path, ok := s.pathCache[key]; ok && strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	if path, err := s.findDocumentPath(session.SessionID, session.WorkspaceKey); err == nil {
+		s.pathCache[key] = path
+		return path, nil
+	} else if !errors.Is(err, sdksession.ErrSessionNotFound) {
+		return "", err
+	}
+	return s.newDocumentPath(session), nil
+}
+
+func (s *Store) resolveDocumentPath(sessionID string, workspaceKey string) (string, error) {
+	key := pathCacheKey(sessionID, workspaceKey)
+	if path, ok := s.pathCache[key]; ok && strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	path, err := s.findDocumentPath(sessionID, workspaceKey)
+	if err != nil {
+		return "", err
+	}
+	s.pathCache[key] = path
+	return path, nil
+}
+
+func (s *Store) findDocumentPath(sessionID string, workspaceKey string) (string, error) {
+	searchRoot := s.rootDir
+	if key := strings.TrimSpace(workspaceKey); key != "" {
+		searchRoot = filepath.Join(searchRoot, workspaceDirName(key))
+	}
+	var found string
+	walkErr := filepath.WalkDir(searchRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || filepath.Ext(d.Name()) != ".json" {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), "-"+sanitizeSessionID(sessionID)+".json") {
+			found = path
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
+		if os.IsNotExist(walkErr) {
+			return "", sdksession.ErrSessionNotFound
+		}
+		return "", walkErr
+	}
+	if strings.TrimSpace(found) == "" {
+		return "", sdksession.ErrSessionNotFound
+	}
+	return found, nil
+}
+
+func (s *Store) listDocumentPaths() ([]string, error) {
+	paths := make([]string, 0)
+	err := filepath.WalkDir(s.rootDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || filepath.Ext(d.Name()) != ".json" {
+			return nil
+		}
+		paths = append(paths, path)
+		return nil
+	})
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func (s *Store) newDocumentPath(session sdksession.Session) string {
+	at := session.CreatedAt
+	if at.IsZero() {
+		at = s.now()
+	}
+	dayDir := filepath.Join(
+		s.rootDir,
+		workspaceDirName(session.WorkspaceKey),
+		at.UTC().Format("2006"),
+		at.UTC().Format("01"),
+		at.UTC().Format("02"),
+	)
+	name := fmt.Sprintf(
+		"rollout-%s-%s.json",
+		at.UTC().Format("2006-01-02T15-04-05"),
+		sanitizeSessionID(session.SessionID),
+	)
+	return filepath.Join(dayDir, name)
 }
 
 func (s *Store) nextID(prefix string, custom func() string) string {
@@ -577,6 +694,9 @@ func (s *Store) nextID(prefix string, custom func() string) string {
 		if id := strings.TrimSpace(custom()); id != "" {
 			return id
 		}
+	}
+	if strings.TrimSpace(prefix) == "session" {
+		return nextSessionID()
 	}
 	n := s.idCounter.Add(1)
 	return fmt.Sprintf("%s-%d", prefix, n)
@@ -627,6 +747,43 @@ func sanitizeSessionID(sessionID string) string {
 		return "session"
 	}
 	return b.String()
+}
+
+func workspaceDirName(workspaceKey string) string {
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	if workspaceKey == "" {
+		return "workspace"
+	}
+	return sanitizeSessionID(workspaceKey)
+}
+
+func pathCacheKey(sessionID string, workspaceKey string) string {
+	workspaceKey = strings.TrimSpace(workspaceKey)
+	if workspaceKey == "" {
+		return "*:" + sanitizeSessionID(sessionID)
+	}
+	return workspaceDirName(workspaceKey) + ":" + sanitizeSessionID(sessionID)
+}
+
+func nextSessionID() string {
+	var raw [7]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("s-%d", time.Now().UTC().UnixNano())
+	}
+	token := strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw[:]))
+	if len(token) > 12 {
+		token = token[:12]
+	}
+	return "s-" + token
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func shouldPersistEvent(event *sdksession.Event) bool {

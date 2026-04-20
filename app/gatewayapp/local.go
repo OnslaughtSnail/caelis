@@ -17,7 +17,11 @@ import (
 	sdkpolicy "github.com/OnslaughtSnail/caelis/sdk/policy/presets"
 	"github.com/OnslaughtSnail/caelis/sdk/runtime/agents/chat"
 	localruntime "github.com/OnslaughtSnail/caelis/sdk/runtime/local"
-	"github.com/OnslaughtSnail/caelis/sdk/sandbox/host"
+	sdksandbox "github.com/OnslaughtSnail/caelis/sdk/sandbox"
+	_ "github.com/OnslaughtSnail/caelis/sdk/sandbox/bwrap"
+	_ "github.com/OnslaughtSnail/caelis/sdk/sandbox/host"
+	_ "github.com/OnslaughtSnail/caelis/sdk/sandbox/landlock"
+	_ "github.com/OnslaughtSnail/caelis/sdk/sandbox/seatbelt"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
 	sdkbuiltin "github.com/OnslaughtSnail/caelis/sdk/tool/builtin"
@@ -34,6 +38,7 @@ type Config struct {
 	SystemPrompt   string
 	Assembly       sdkplugin.ResolvedAssembly
 	Model          ModelConfig
+	Sandbox        SandboxConfig
 }
 
 type ModelConfig struct {
@@ -62,11 +67,32 @@ type Stack struct {
 	UserID    string
 	Workspace sdksession.WorkspaceRef
 	lookup    *modelLookup
+	store     *appConfigStore
+	mu        sync.RWMutex
+	runtime   stackRuntimeConfig
+	sandbox   SandboxConfig
+	exec      sdksandbox.Runtime
 }
 
 type SessionRuntimeState struct {
 	ModelAlias  string
+	SessionMode string
 	SandboxMode string
+}
+
+type SandboxStatus struct {
+	RequestedBackend string
+	ResolvedBackend  string
+	Route            string
+	FallbackReason   string
+	SecuritySummary  string
+}
+
+type stackRuntimeConfig struct {
+	PermissionMode string
+	ContextWindow  int
+	Assembly       sdkplugin.ResolvedAssembly
+	BaseMetadata   map[string]any
 }
 
 func NewLocalStack(cfg Config) (*Stack, error) {
@@ -76,62 +102,36 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	workspaceKey := firstNonEmpty(strings.TrimSpace(cfg.WorkspaceKey), "workspace")
 	storeDir := strings.TrimSpace(cfg.StoreDir)
 	if storeDir == "" {
-		storeDir = filepath.Join(workspaceCWD, ".caelis")
+		storeDir = defaultStoreDir()
 	}
-
-	sandboxRuntime, err := host.New(host.Config{CWD: workspaceCWD})
-	if err != nil {
-		return nil, err
-	}
-	tools, err := sdkbuiltin.BuildCoreTools(sdkbuiltin.CoreToolsConfig{Runtime: sandboxRuntime})
-	if err != nil {
-		return nil, err
-	}
+	configStore := newAppConfigStore(storeDir)
 	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
 		RootDir: filepath.Join(storeDir, "sessions"),
 	}))
-	rt, err := localruntime.New(localruntime.Config{
-		Sessions:          sessions,
-		AgentFactory:      chat.Factory{},
-		DefaultPolicyMode: policyMode(cfg.PermissionMode),
-		Assembly:          cfg.Assembly,
-	})
-	if err != nil {
-		return nil, err
-	}
-	lookup, err := newModelLookup(cfg.Model, cfg.ContextWindow)
+	lookup, err := newModelLookup(configStore, cfg.Model, cfg.ContextWindow)
 	if err != nil {
 		return nil, err
 	}
 	baseMetadata := map[string]any{}
-	if prompt := strings.TrimSpace(cfg.SystemPrompt); prompt != "" {
-		baseMetadata["system_prompt"] = prompt
+	systemPrompt, err := buildSystemPrompt(promptConfig{
+		AppName:      appName,
+		WorkspaceDir: workspaceCWD,
+		BasePrompt:   cfg.SystemPrompt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(systemPrompt) != "" {
+		baseMetadata["system_prompt"] = systemPrompt
 	}
 	if reasoning := strings.TrimSpace(cfg.Model.ReasoningEffort); reasoning != "" {
 		baseMetadata["reasoning_effort"] = reasoning
 	}
-	resolver, err := appgateway.NewAssemblyResolver(appgateway.AssemblyResolverConfig{
-		Sessions:          sessions,
-		Assembly:          cfg.Assembly,
-		DefaultModelAlias: lookup.DefaultAlias(),
-		ContextWindow:     cfg.ContextWindow,
-		ModelLookup:       lookup,
-		Tools:             tools,
-		BaseMetadata:      baseMetadata,
-	})
+	doc, err := configStore.Load()
 	if err != nil {
 		return nil, err
 	}
-	gw, err := appgateway.New(appgateway.Config{
-		Sessions: sessions,
-		Runtime:  rt,
-		Resolver: resolver,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &Stack{
-		Gateway:  gw,
+	stack := &Stack{
 		Sessions: sessions,
 		AppName:  appName,
 		UserID:   userID,
@@ -140,7 +140,28 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 			CWD: workspaceCWD,
 		},
 		lookup: lookup,
-	}, nil
+		store:  configStore,
+		runtime: stackRuntimeConfig{
+			PermissionMode: cfg.PermissionMode,
+			ContextWindow:  cfg.ContextWindow,
+			Assembly:       sdkplugin.CloneResolvedAssembly(cfg.Assembly),
+			BaseMetadata:   cloneMap(baseMetadata),
+		},
+		sandbox: mergeSandboxConfig(doc.Sandbox, cfg.Sandbox),
+	}
+	if err := stack.rebuildGateway(); err != nil {
+		return nil, err
+	}
+	return stack, nil
+}
+
+func defaultStoreDir() string {
+	home, err := os.UserHomeDir()
+	if err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".caelis")
+	}
+	cwd := mustGetwd()
+	return filepath.Join(cwd, ".caelis")
 }
 
 func (s *Stack) StartSession(ctx context.Context, preferredSessionID string, bindingKey string) (sdksession.Session, error) {
@@ -178,6 +199,9 @@ func (s *Stack) Connect(cfg ModelConfig) (string, error) {
 		return "", fmt.Errorf("gatewayapp: invalid model config: %w", err)
 	}
 	resolver.SetModelLookup(s.lookup, s.lookup.DefaultAlias())
+	if err := s.saveModelConfigs(); err != nil {
+		return "", err
+	}
 	return alias, nil
 }
 
@@ -197,6 +221,9 @@ func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias s
 		s.lookup.SetDefault(alias)
 		if resolver := s.Gateway.Resolver(); resolver != nil {
 			resolver.SetModelLookup(s.lookup, s.lookup.DefaultAlias())
+		}
+		if err := s.saveModelConfigs(); err != nil {
+			return err
 		}
 	}
 	return s.Sessions.UpdateState(ctx, ref, func(state map[string]any) (map[string]any, error) {
@@ -228,6 +255,9 @@ func (s *Stack) DeleteModel(ctx context.Context, ref sdksession.SessionRef, alia
 	if resolver := s.Gateway.Resolver(); resolver != nil {
 		resolver.SetModelLookup(s.lookup, s.lookup.DefaultAlias())
 	}
+	if err := s.saveModelConfigs(); err != nil {
+		return err
+	}
 	return s.Sessions.UpdateState(ctx, ref, func(state map[string]any) (map[string]any, error) {
 		next := sdksession.CloneState(state)
 		if next == nil {
@@ -241,13 +271,13 @@ func (s *Stack) DeleteModel(ctx context.Context, ref sdksession.SessionRef, alia
 	})
 }
 
-// SetSandboxMode persists one per-session sandbox mode override for
+// SetSessionMode persists one per-session execution mode override for
 // subsequent turns and returns the normalized display label.
-func (s *Stack) SetSandboxMode(ctx context.Context, ref sdksession.SessionRef, mode string) (string, error) {
+func (s *Stack) SetSessionMode(ctx context.Context, ref sdksession.SessionRef, mode string) (string, error) {
 	if s == nil || s.Sessions == nil {
 		return "", fmt.Errorf("gatewayapp: sessions service unavailable")
 	}
-	normalized, err := normalizeSandboxMode(mode)
+	normalized, err := normalizeSessionMode(mode)
 	if err != nil {
 		return "", err
 	}
@@ -256,13 +286,53 @@ func (s *Stack) SetSandboxMode(ctx context.Context, ref sdksession.SessionRef, m
 		if next == nil {
 			next = map[string]any{}
 		}
-		next[appgateway.StateCurrentSandboxMode] = normalized
+		next[appgateway.StateCurrentSessionMode] = normalized
+		delete(next, appgateway.StateCurrentSandboxMode)
 		return next, nil
 	})
 	if err != nil {
 		return "", err
 	}
 	return normalized, nil
+}
+
+func (s *Stack) CycleSessionMode(ctx context.Context, ref sdksession.SessionRef) (string, error) {
+	state, err := s.SessionRuntimeState(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	next := nextSessionMode(state.SessionMode)
+	return s.SetSessionMode(ctx, ref, next)
+}
+
+// SetSandboxMode is the legacy compatibility wrapper. New callers should use
+// SetSessionMode for mode changes and SetSandboxBackend for backend changes.
+func (s *Stack) SetSandboxMode(ctx context.Context, ref sdksession.SessionRef, mode string) (string, error) {
+	return s.SetSessionMode(ctx, ref, mode)
+}
+
+func (s *Stack) SetSandboxBackend(_ context.Context, backend string) (SandboxStatus, error) {
+	if s == nil {
+		return SandboxStatus{}, fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	normalized, err := normalizeSandboxBackend(backend)
+	if err != nil {
+		return SandboxStatus{}, err
+	}
+	s.mu.Lock()
+	previous := s.sandbox
+	s.sandbox.RequestedType = normalized
+	s.mu.Unlock()
+	if err := s.rebuildGateway(); err != nil {
+		s.mu.Lock()
+		s.sandbox = previous
+		s.mu.Unlock()
+		return SandboxStatus{}, err
+	}
+	if err := s.saveSandboxConfig(); err != nil {
+		return SandboxStatus{}, err
+	}
+	return s.SandboxStatus(), nil
 }
 
 // SessionRuntimeState returns the current per-session runtime overrides backed
@@ -275,10 +345,58 @@ func (s *Stack) SessionRuntimeState(ctx context.Context, ref sdksession.SessionR
 	if err != nil {
 		return SessionRuntimeState{}, err
 	}
+	modelAlias := appgateway.CurrentModelAlias(state)
+	if s.lookup != nil && modelAlias != "" && !s.lookup.HasAlias(modelAlias) {
+		modelAlias = ""
+	}
 	return SessionRuntimeState{
-		ModelAlias:  appgateway.CurrentModelAlias(state),
+		ModelAlias:  modelAlias,
+		SessionMode: appgateway.CurrentSessionMode(state),
 		SandboxMode: appgateway.CurrentSandboxMode(state),
 	}, nil
+}
+
+func (s *Stack) SandboxStatus() SandboxStatus {
+	if s == nil {
+		return SandboxStatus{}
+	}
+	s.mu.RLock()
+	cfg := s.sandbox
+	exec := s.exec
+	s.mu.RUnlock()
+	status := SandboxStatus{
+		RequestedBackend: cfg.RequestedType,
+		Route:            string(sdksandbox.RouteSandbox),
+		SecuritySummary:  "sandbox",
+	}
+	if status.RequestedBackend == "" {
+		status.RequestedBackend = "auto"
+	}
+	if exec == nil {
+		status.ResolvedBackend = status.RequestedBackend
+		return status
+	}
+	rtStatus := exec.Status()
+	if strings.TrimSpace(string(rtStatus.RequestedBackend)) != "" {
+		status.RequestedBackend = string(rtStatus.RequestedBackend)
+	}
+	if strings.TrimSpace(string(rtStatus.ResolvedBackend)) != "" {
+		status.ResolvedBackend = string(rtStatus.ResolvedBackend)
+	}
+	status.FallbackReason = strings.TrimSpace(rtStatus.FallbackReason)
+	if rtStatus.FallbackToHost {
+		status.Route = string(sdksandbox.RouteHost)
+		status.SecuritySummary = "host fallback"
+		if status.ResolvedBackend == "" {
+			status.ResolvedBackend = string(sdksandbox.BackendHost)
+		}
+	} else if status.ResolvedBackend != "" {
+		status.SecuritySummary = status.ResolvedBackend
+	}
+	if status.ResolvedBackend == "" {
+		status.ResolvedBackend = status.RequestedBackend
+	}
+	return status
 }
 
 // ListModelAliases returns the current session override plus resolver-known
@@ -299,6 +417,21 @@ func (s *Stack) DefaultModelAlias() string {
 		return ""
 	}
 	return s.lookup.DefaultAlias()
+}
+
+func (s *Stack) HasModelAlias(alias string) bool {
+	if s == nil || s.lookup == nil {
+		return false
+	}
+	return s.lookup.HasAlias(alias)
+}
+
+// ListProviderModels returns configured raw model names for a provider.
+func (s *Stack) ListProviderModels(provider string) []string {
+	if s == nil || s.lookup == nil {
+		return nil
+	}
+	return s.lookup.ListProviderModels(provider)
 }
 
 // CompactSession appends a compaction event to the given session. The note is
@@ -334,15 +467,30 @@ type modelLookup struct {
 	defaultAlias  string
 }
 
-func newModelLookup(cfg ModelConfig, contextWindow int) (*modelLookup, error) {
-	cfg = normalizeModelConfig(cfg)
+func newModelLookup(store *appConfigStore, cfg ModelConfig, contextWindow int) (*modelLookup, error) {
 	lookup := &modelLookup{
 		configs:       map[string]ModelConfig{},
 		contextWindow: contextWindow,
-		defaultAlias:  cfg.Alias,
 	}
-	if _, err := lookup.Upsert(cfg); err != nil {
-		return nil, err
+	if store != nil {
+		doc, err := store.Load()
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range doc.Models.Configs {
+			if _, err := lookup.Upsert(item); err != nil {
+				return nil, err
+			}
+		}
+		if strings.TrimSpace(doc.Models.DefaultAlias) != "" {
+			lookup.SetDefault(doc.Models.DefaultAlias)
+		}
+	}
+	cfg = normalizeModelConfig(cfg)
+	if cfg.Provider != "" && cfg.Model != "" {
+		if _, err := lookup.Upsert(cfg); err != nil {
+			return nil, err
+		}
 	}
 	return lookup, nil
 }
@@ -377,12 +525,36 @@ func (l *modelLookup) ListModelAliases() []string {
 	return dedupeNonEmptyStrings(aliases)
 }
 
+func (l *modelLookup) ListProviderModels(provider string) []string {
+	if l == nil {
+		return nil
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	models := make([]string, 0, len(l.configs))
+	for _, cfg := range l.configs {
+		if strings.EqualFold(strings.TrimSpace(cfg.Provider), provider) && strings.TrimSpace(cfg.Model) != "" {
+			models = append(models, strings.TrimSpace(cfg.Model))
+		}
+	}
+	sort.Strings(models)
+	return dedupeNonEmptyStrings(models)
+}
+
 func (l *modelLookup) ResolveModel(ctx context.Context, alias string, contextWindow int) (appgateway.ModelResolution, error) {
 	if l == nil {
 		return appgateway.ModelResolution{}, fmt.Errorf("gatewayapp: model lookup is nil")
 	}
 	l.mu.RLock()
 	alias = firstNonEmpty(strings.TrimSpace(alias), l.defaultAlias)
+	if alias == "" || len(l.configs) == 0 {
+		l.mu.RUnlock()
+		return appgateway.ModelResolution{}, fmt.Errorf("gatewayapp: no model configured; use /connect")
+	}
 	cfg, ok := l.configs[strings.ToLower(alias)]
 	fallbackContextWindow := l.contextWindow
 	l.mu.RUnlock()
@@ -524,6 +696,118 @@ func (l *modelLookup) SetDefault(alias string) {
 	}
 }
 
+func (l *modelLookup) Snapshot() persistedModelConfig {
+	if l == nil {
+		return persistedModelConfig{}
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	configs := make([]ModelConfig, 0, len(l.configs))
+	for _, cfg := range l.configs {
+		configs = append(configs, cfg)
+	}
+	sort.Slice(configs, func(i, j int) bool {
+		return strings.ToLower(strings.TrimSpace(configs[i].Alias)) < strings.ToLower(strings.TrimSpace(configs[j].Alias))
+	})
+	return persistedModelConfig{
+		DefaultAlias: l.defaultAlias,
+		Configs:      configs,
+	}
+}
+
+func (s *Stack) saveModelConfigs() error {
+	if s == nil || s.store == nil || s.lookup == nil {
+		return nil
+	}
+	doc, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	doc.Models = s.lookup.Snapshot()
+	return s.store.Save(doc)
+}
+
+func (s *Stack) saveSandboxConfig() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	doc, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	s.mu.RLock()
+	doc.Sandbox = s.sandbox
+	s.mu.RUnlock()
+	return s.store.Save(doc)
+}
+
+func (s *Stack) rebuildGateway() error {
+	if s == nil {
+		return fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	s.mu.RLock()
+	sandboxCfg := s.sandbox
+	runtimeCfg := s.runtime
+	s.mu.RUnlock()
+	sandboxRuntime, err := sdksandbox.New(sdksandbox.Config{
+		CWD:              s.Workspace.CWD,
+		RequestedBackend: sdksandbox.Backend(sandboxCfg.RequestedType),
+		HelperPath:       sandboxCfg.HelperPath,
+		ReadableRoots:    append([]string(nil), sandboxCfg.ReadableRoots...),
+		WritableRoots:    append([]string(nil), sandboxCfg.WritableRoots...),
+		ReadOnlySubpaths: append([]string(nil), sandboxCfg.ReadOnlySubpaths...),
+	})
+	if err != nil {
+		return err
+	}
+	tools, err := sdkbuiltin.BuildCoreTools(sdkbuiltin.CoreToolsConfig{Runtime: sandboxRuntime})
+	if err != nil {
+		_ = sandboxRuntime.Close()
+		return err
+	}
+	rt, err := localruntime.New(localruntime.Config{
+		Sessions:          s.Sessions,
+		AgentFactory:      chat.Factory{},
+		DefaultPolicyMode: policyMode(runtimeCfg.PermissionMode),
+		Assembly:          runtimeCfg.Assembly,
+	})
+	if err != nil {
+		_ = sandboxRuntime.Close()
+		return err
+	}
+	resolver, err := appgateway.NewAssemblyResolver(appgateway.AssemblyResolverConfig{
+		Sessions:          s.Sessions,
+		Assembly:          runtimeCfg.Assembly,
+		DefaultModelAlias: s.lookup.DefaultAlias(),
+		ContextWindow:     runtimeCfg.ContextWindow,
+		ModelLookup:       s.lookup,
+		Tools:             tools,
+		BaseMetadata:      cloneMap(runtimeCfg.BaseMetadata),
+	})
+	if err != nil {
+		_ = sandboxRuntime.Close()
+		return err
+	}
+	gw, err := appgateway.New(appgateway.Config{
+		Sessions: s.Sessions,
+		Runtime:  rt,
+		Resolver: resolver,
+	})
+	if err != nil {
+		_ = sandboxRuntime.Close()
+		return err
+	}
+	s.mu.Lock()
+	oldExec := s.exec
+	s.Gateway = gw
+	s.exec = sandboxRuntime
+	s.mu.Unlock()
+	if oldExec != nil {
+		_ = oldExec.Close()
+	}
+	return nil
+}
+
 func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 	cfg.Provider = strings.ToLower(strings.TrimSpace(cfg.Provider))
 	cfg.Model = strings.TrimSpace(cfg.Model)
@@ -566,17 +850,75 @@ func buildAlias(provider string, modelName string) string {
 	return strings.ToLower(provider + "/" + modelName)
 }
 
-func normalizeSandboxMode(mode string) (string, error) {
+func normalizeSessionMode(mode string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "auto":
-		return "auto", nil
-	case "default":
+	case "", "auto", "default":
 		return "default", nil
+	case "plan":
+		return "plan", nil
 	case "full_control", "full_access":
-		return "full_control", nil
+		return "full_access", nil
 	default:
-		return "", fmt.Errorf("gatewayapp: unknown sandbox mode %q", mode)
+		return "", fmt.Errorf("gatewayapp: unknown session mode %q", mode)
 	}
+}
+
+func normalizeSessionModeOrDefault(mode string) string {
+	normalized, err := normalizeSessionMode(mode)
+	if err != nil {
+		return "default"
+	}
+	return normalized
+}
+
+func nextSessionMode(mode string) string {
+	switch normalizeSessionModeOrDefault(mode) {
+	case "plan":
+		return "full_access"
+	case "full_access":
+		return "default"
+	default:
+		return "plan"
+	}
+}
+
+func normalizeSandboxBackend(backend string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "", "auto":
+		return "auto", nil
+	case "seatbelt":
+		return "seatbelt", nil
+	case "bwrap":
+		return "bwrap", nil
+	case "landlock":
+		return "landlock", nil
+	default:
+		return "", fmt.Errorf("gatewayapp: unknown sandbox backend %q", backend)
+	}
+}
+
+func mergeSandboxConfig(stored SandboxConfig, override SandboxConfig) SandboxConfig {
+	stored = normalizeSandboxConfig(stored)
+	override = normalizeSandboxConfig(override)
+	if override.RequestedType != "" {
+		stored.RequestedType = override.RequestedType
+	}
+	if override.HelperPath != "" {
+		stored.HelperPath = override.HelperPath
+	}
+	if len(override.ReadableRoots) > 0 {
+		stored.ReadableRoots = append([]string(nil), override.ReadableRoots...)
+	}
+	if len(override.WritableRoots) > 0 {
+		stored.WritableRoots = append([]string(nil), override.WritableRoots...)
+	}
+	if len(override.ReadOnlySubpaths) > 0 {
+		stored.ReadOnlySubpaths = append([]string(nil), override.ReadOnlySubpaths...)
+	}
+	if stored.RequestedType == "" {
+		stored.RequestedType = "auto"
+	}
+	return stored
 }
 
 func dedupeNonEmptyStrings(values []string) []string {
@@ -601,7 +943,7 @@ func dedupeNonEmptyStrings(values []string) []string {
 }
 
 func policyMode(raw string) string {
-	if strings.EqualFold(strings.TrimSpace(raw), "full_control") {
+	if strings.EqualFold(strings.TrimSpace(raw), "full_control") || strings.EqualFold(strings.TrimSpace(raw), "full_access") {
 		return sdkpolicy.ModeFullAccess
 	}
 	return sdkpolicy.ModeDefault
@@ -614,6 +956,17 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func cloneMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func mustGetwd() string {

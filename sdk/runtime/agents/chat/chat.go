@@ -82,7 +82,7 @@ func (a *Agent) Run(ctx sdkruntime.Context) iter.Seq2[*sdksession.Event, error] 
 	return func(yield func(*sdksession.Event, error) bool) {
 		messages := messagesFromContext(ctx)
 		stream := a.request.StreamEnabled(false)
-		for step := 0; step < 8; step++ {
+		for {
 			request := &sdkmodel.Request{
 				Messages:  messages,
 				Tools:     sdktool.ModelSpecs(a.tools),
@@ -127,7 +127,6 @@ func (a *Agent) Run(ctx sdkruntime.Context) iter.Seq2[*sdksession.Event, error] 
 				messages = append(messages, toolMessage)
 			}
 		}
-		yield(nil, errors.New("sdk/runtime/agents/chat: tool loop exceeded max steps"))
 	}
 }
 

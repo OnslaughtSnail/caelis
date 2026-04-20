@@ -22,6 +22,8 @@ import (
 	tasktool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/task"
 )
 
+const defaultBashYield = 7 * time.Second
+
 type taskRuntime struct {
 	runtime *Runtime
 	store   sdktask.Store
@@ -31,6 +33,14 @@ type taskRuntime struct {
 	subagents map[string]*subagentTask
 	order     map[string][]string
 	backends  map[sdksandbox.Backend]sdksandbox.Runtime
+}
+
+type sandboxRuntimeBackends interface {
+	SupportedBackends() []sdksandbox.Backend
+}
+
+type sandboxSessionRefOpener interface {
+	OpenSessionRef(sdksandbox.SessionRef) (sdksandbox.Session, error)
 }
 
 type bashTask struct {
@@ -145,13 +155,21 @@ func (tm *taskRuntime) registerSandboxRuntime(runtime sdksandbox.Runtime) {
 	if tm == nil || runtime == nil {
 		return
 	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if provider, ok := runtime.(sandboxRuntimeBackends); ok && provider != nil {
+		for _, backend := range provider.SupportedBackends() {
+			if backend == "" {
+				continue
+			}
+			tm.backends[backend] = runtime
+		}
+	}
 	desc := runtime.Describe()
 	backend := desc.Backend
 	if backend == "" {
 		backend = sdksandbox.BackendHost
 	}
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
 	tm.backends[backend] = runtime
 }
 
@@ -183,7 +201,10 @@ func (t runtimeBashTool) Call(ctx context.Context, call sdktool.Call) (sdktool.R
 	if strings.TrimSpace(workdir) == "" && runtime.FileSystem() != nil {
 		workdir, _ = runtime.FileSystem().Getwd()
 	}
-	yieldMS, _ := intArg(args, "yield_time_ms")
+	yieldMS := int(defaultBashYield / time.Millisecond)
+	if parsed := optionalIntArg(args, "yield_time_ms"); parsed != nil {
+		yieldMS = *parsed
+	}
 	if yieldMS < 0 {
 		yieldMS = 0
 	}
@@ -317,6 +338,8 @@ func (r subagentApprovalRequester) RequestSubagentApproval(
 		},
 		Metadata: map[string]any{
 			"subagent": true,
+			"scope":    "subagent",
+			"scope_id": strings.TrimSpace(req.TaskID),
 			"task_id":  strings.TrimSpace(req.TaskID),
 			"agent":    strings.TrimSpace(req.Agent),
 		},
@@ -534,7 +557,6 @@ func (tm *taskRuntime) waitBash(ctx context.Context, task *bashTask, yield time.
 	if err != nil {
 		return sdktask.Snapshot{}, err
 	}
-	result, resultErr := task.session.Result(ctx)
 
 	task.mu.Lock()
 	task.stdoutCursor = nextStdout
@@ -571,6 +593,7 @@ func (tm *taskRuntime) waitBash(ctx context.Context, task *bashTask, yield time.
 		return snapshot, nil
 	}
 
+	result, resultErr := task.session.Result(ctx)
 	task.result = map[string]any{
 		"stdout":    result.Stdout,
 		"stderr":    result.Stderr,
@@ -904,7 +927,18 @@ func (tm *taskRuntime) rehydrateBashTask(entry *sdktask.Entry) (*bashTask, error
 		task.result["result"] = "task interrupted during resume"
 		return task, nil
 	}
-	session, err := runtime.OpenSession(strings.TrimSpace(entry.Terminal.SessionID))
+	var (
+		session sdksandbox.Session
+		err     error
+	)
+	if opener, ok := runtime.(sandboxSessionRefOpener); ok && opener != nil {
+		session, err = opener.OpenSessionRef(sdksandbox.SessionRef{
+			Backend:   backend,
+			SessionID: strings.TrimSpace(entry.Terminal.SessionID),
+		})
+	} else {
+		session, err = runtime.OpenSession(strings.TrimSpace(entry.Terminal.SessionID))
+	}
 	if err != nil {
 		task.session = completedTaskSession{entry: sdktask.CloneEntry(entry)}
 		task.running = false
@@ -1335,6 +1369,22 @@ func intArg(values map[string]any, key string) (int, bool) {
 	if !ok || raw == nil {
 		return 0, false
 	}
+	return parseIntArgValue(raw)
+}
+
+func optionalIntArg(values map[string]any, key string) *int {
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	value, ok := parseIntArgValue(raw)
+	if !ok {
+		return nil
+	}
+	return &value
+}
+
+func parseIntArgValue(raw any) (int, bool) {
 	switch typed := raw.(type) {
 	case float64:
 		return int(typed), true

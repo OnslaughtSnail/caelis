@@ -1,6 +1,7 @@
 package filesystem
 
 import (
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"path"
@@ -10,11 +11,50 @@ import (
 	sdksandbox "github.com/OnslaughtSnail/caelis/sdk/sandbox"
 )
 
+type constraintAwareFileSystemRuntime interface {
+	FileSystemFor(sdksandbox.Constraints) sdksandbox.FileSystem
+}
+
 func runtimeOrDefault(runtime sdksandbox.Runtime) (sdksandbox.Runtime, error) {
 	if runtime == nil {
 		return nil, fmt.Errorf("tool: sandbox runtime is required")
 	}
 	return runtime, nil
+}
+
+func fileSystemFromRuntime(runtime sdksandbox.Runtime, meta map[string]any) sdksandbox.FileSystem {
+	if runtime == nil {
+		return nil
+	}
+	constraints := constraintsFromMetadata(meta)
+	if provider, ok := runtime.(constraintAwareFileSystemRuntime); ok {
+		if fsys := provider.FileSystemFor(constraints); fsys != nil {
+			return fsys
+		}
+	}
+	return runtime.FileSystem()
+}
+
+func constraintsFromMetadata(meta map[string]any) sdksandbox.Constraints {
+	if meta == nil {
+		return sdksandbox.Constraints{}
+	}
+	raw, ok := meta["sandbox_constraints"]
+	if !ok || raw == nil {
+		return sdksandbox.Constraints{}
+	}
+	if typed, ok := raw.(sdksandbox.Constraints); ok {
+		return sdksandbox.NormalizeConstraints(typed)
+	}
+	bytes, err := json.Marshal(raw)
+	if err != nil {
+		return sdksandbox.Constraints{}
+	}
+	var out sdksandbox.Constraints
+	if err := json.Unmarshal(bytes, &out); err != nil {
+		return sdksandbox.Constraints{}
+	}
+	return sdksandbox.NormalizeConstraints(out)
 }
 
 func normalizePathWithFS(fsys sdksandbox.FileSystem, value string) (string, error) {

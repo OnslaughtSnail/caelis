@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -15,6 +14,7 @@ import (
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	headlessadapter "github.com/OnslaughtSnail/caelis/gateway/adapter/headless"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
+	"github.com/OnslaughtSnail/caelis/sdk/sandbox/landlock"
 )
 
 type outputFormat string
@@ -31,6 +31,9 @@ type runResult struct {
 }
 
 func main() {
+	if landlock.MaybeRunInternalHelper(os.Args[1:]) {
+		return
+	}
 	if err := run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -52,14 +55,14 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		format           = fs.String("format", string(outputText), "Output format: text|json")
 		appName          = fs.String("app", envOr("CAELIS_APP_NAME", "caelis"), "App name")
 		userID           = fs.String("user", envOr("CAELIS_USER_ID", "local-user"), "User id")
-		sessionID        = fs.String("session", envOr("CAELIS_SESSION_ID", "default"), "Session id")
-		storeDir         = fs.String("store-dir", envOr("CAELIS_STORE_DIR", filepath.Join(cwd, ".caelis")), "Store directory")
+		sessionID        = fs.String("session", envOr("CAELIS_SESSION_ID", ""), "Session id")
+		storeDir         = fs.String("store-dir", envOr("CAELIS_STORE_DIR", defaultStoreDir(cwd)), "Store directory")
 		workspaceKey     = fs.String("workspace-key", envOr("CAELIS_WORKSPACE_KEY", defaultWorkspaceKey), "Workspace key")
 		workspaceCWD     = fs.String("workspace-cwd", envOr("CAELIS_WORKSPACE_CWD", cwd), "Workspace cwd")
-		systemPrompt     = fs.String("system-prompt", envOr("CAELIS_SYSTEM_PROMPT", "You are Caelis, a concise coding assistant."), "Base system prompt")
+		systemPrompt     = fs.String("system-prompt", envOr("CAELIS_SYSTEM_PROMPT", ""), "Session override text to append into the assembled system prompt")
 		permissionMode   = fs.String("permission-mode", envOr("CAELIS_PERMISSION_MODE", "default"), "Permission mode: default|full_control")
 		modelAlias       = fs.String("model-alias", envOr("CAELIS_MODEL_ALIAS", ""), "Model alias")
-		modelProvider    = fs.String("provider", envOr("CAELIS_MODEL_PROVIDER", "minimax"), "Model provider name")
+		modelProvider    = fs.String("provider", envOr("CAELIS_MODEL_PROVIDER", ""), "Model provider name")
 		modelAPI         = fs.String("api", envOr("CAELIS_MODEL_API", ""), "Model API type")
 		modelName        = fs.String("model", envOr("CAELIS_MODEL_NAME", ""), "Model name")
 		baseURL          = fs.String("base-url", envOr("CAELIS_BASE_URL", ""), "Provider base URL")
@@ -118,9 +121,24 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		if err != nil {
 			return err
 		}
-		return runHeadless(ctx, stack, strings.TrimSpace(*sessionID), input, outFmt, stdout)
+		return runHeadless(ctx, stack, preferredHeadlessSessionID(*sessionID), input, outFmt, stdout)
 	}
-	return runInteractive(ctx, stack, strings.TrimSpace(*sessionID), stdin, stdout, stderr)
+	return runInteractive(ctx, stack, preferredInteractiveSessionID(*sessionID), cfg, renderModelText(cfg), stdin, stdout, stderr)
+}
+
+func defaultStoreDir(cwd string) string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".caelis")
+	}
+	return filepath.Join(cwd, ".caelis")
+}
+
+func preferredInteractiveSessionID(sessionID string) string {
+	return strings.TrimSpace(sessionID)
+}
+
+func preferredHeadlessSessionID(sessionID string) string {
+	return strings.TrimSpace(sessionID)
 }
 
 func runHeadless(ctx context.Context, stack *gatewayapp.Stack, sessionID string, input string, format outputFormat, stdout io.Writer) error {
@@ -143,40 +161,40 @@ func runHeadless(ctx context.Context, stack *gatewayapp.Stack, sessionID string,
 	})
 }
 
-func runInteractive(ctx context.Context, stack *gatewayapp.Stack, sessionID string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
-	session, err := stack.StartSession(ctx, sessionID, "cli-interactive")
-	if err != nil {
-		return err
+func runInteractive(ctx context.Context, stack *gatewayapp.Stack, sessionID string, cfg gatewayapp.Config, displayModelText string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	_ = stderr
+	_ = cfg
+	return runTUI(ctx, stack, strings.TrimSpace(sessionID), displayModelText, stdin, stdout)
+}
+
+func renderModelText(cfg gatewayapp.Config) string {
+	provider := strings.TrimSpace(cfg.Model.Provider)
+	model := strings.TrimSpace(cfg.Model.Model)
+	switch {
+	case provider == "" && model == "":
+		return "not configured"
+	case provider == "":
+		return model
+	case model == "":
+		return provider
+	default:
+		return provider + "/" + model
 	}
-	scanner := bufio.NewScanner(stdin)
-	for {
-		fmt.Fprint(stdout, "> ")
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return err
-			}
-			return nil
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		switch line {
-		case ":q", ":quit", ":exit":
-			return nil
-		}
-		result, err := stack.Gateway.BeginTurn(ctx, appgateway.BeginTurnRequest{
-			SessionRef: session.SessionRef,
-			Input:      line,
-			Surface:    "interactive",
-		})
-		if err != nil {
-			return err
-		}
-		if err := streamHandle(ctx, result.Handle, stdout, stderr); err != nil {
-			return err
-		}
+}
+
+func renderConfiguredModelText(alias string, provider string, model string) string {
+	if trimmedAlias := strings.TrimSpace(alias); trimmedAlias != "" {
+		return trimmedAlias
 	}
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if provider == "" {
+		return model
+	}
+	return provider + "/" + model
 }
 
 func streamHandle(ctx context.Context, handle appgateway.TurnHandle, stdout io.Writer, stderr io.Writer) error {
@@ -242,7 +260,18 @@ func resolveTurnInput(prompt string, stdin io.Reader, stdinTTY bool, forceIntera
 	if forceInteractive {
 		return "", false, nil
 	}
-	return resolveInput(prompt, stdin, stdinTTY)
+	input, singleShot, err := resolveInput(prompt, stdin, stdinTTY)
+	if err != nil {
+		return "", false, err
+	}
+	if singleShot {
+		return input, true, nil
+	}
+	// TTY with no prompt → default to interactive TUI
+	if stdinTTY {
+		return "", false, nil
+	}
+	return "", false, nil
 }
 
 func parseOutputFormat(raw string) (outputFormat, error) {
@@ -328,7 +357,14 @@ func normalizeConfig(cfg gatewayapp.Config) (gatewayapp.Config, error) {
 		}
 	}
 	if strings.TrimSpace(cfg.Model.Model) == "" {
-		return gatewayapp.Config{}, fmt.Errorf("--model is required")
+		// Allow empty model for interactive TUI — user can configure via /connect wizard.
+		cfg.Model.Provider = ""
+		cfg.Model.API = ""
+		cfg.Model.BaseURL = ""
+		cfg.Model.Token = ""
+		cfg.Model.TokenEnv = ""
+		cfg.Model.AuthType = ""
+		cfg.Model.HeaderKey = ""
 	}
 	return cfg, nil
 }

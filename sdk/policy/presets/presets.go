@@ -319,12 +319,40 @@ func candidatePaths(input sdkpolicy.ToolContext) []string {
 	name := toolName(input)
 	switch name {
 	case "READ", "WRITE", "PATCH", "LIST", "SEARCH":
-		return stringValues(args["path"])
+		return resolvePathsAgainstWorkspace(stringValues(args["path"]), input.Options.WorkspaceRoot)
 	case "GLOB":
-		return globRoots(stringValues(args["pattern"]))
+		return globRoots(stringValues(args["pattern"]), input.Options.WorkspaceRoot)
 	default:
 		return nil
 	}
+}
+
+func resolvePathsAgainstWorkspace(paths []string, workspaceRoot string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if resolved := resolvePolicyPath(path, workspaceRoot); resolved != "" {
+			out = append(out, resolved)
+		}
+	}
+	return out
+}
+
+func resolvePolicyPath(value string, workspaceRoot string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	base := strings.TrimSpace(workspaceRoot)
+	if base == "" {
+		base = string(filepath.Separator)
+	}
+	return filepath.Clean(filepath.Join(base, value))
 }
 
 func wantsEscalation(input sdkpolicy.ToolContext) bool {
@@ -337,7 +365,7 @@ func wantsEscalation(input sdkpolicy.ToolContext) bool {
 	return value
 }
 
-func globRoots(patterns []string) []string {
+func globRoots(patterns []string, workspaceRoot string) []string {
 	if len(patterns) == 0 {
 		return nil
 	}
@@ -347,6 +375,7 @@ func globRoots(patterns []string) []string {
 		if pattern == "" {
 			continue
 		}
+		pattern = resolvePolicyPath(pattern, workspaceRoot)
 		root := pattern
 		for i, r := range pattern {
 			if r == '*' || r == '?' || r == '[' {

@@ -247,15 +247,129 @@ type UsageSnapshot struct {
 	TotalTokens      int `json:"total_tokens,omitempty"`
 }
 
+type NarrativeRole string
+
+const (
+	NarrativeRoleUser      NarrativeRole = "user"
+	NarrativeRoleAssistant NarrativeRole = "assistant"
+	NarrativeRoleReasoning NarrativeRole = "reasoning"
+	NarrativeRoleSystem    NarrativeRole = "system"
+	NarrativeRoleNotice    NarrativeRole = "notice"
+)
+
+type EventScope string
+
+const (
+	EventScopeMain        EventScope = "main"
+	EventScopeParticipant EventScope = "participant"
+	EventScopeSubagent    EventScope = "subagent"
+)
+
+type NarrativePayload struct {
+	Role          NarrativeRole `json:"role,omitempty"`
+	Actor         string        `json:"actor,omitempty"`
+	Text          string        `json:"text,omitempty"`
+	ReasoningText string        `json:"reasoning_text,omitempty"`
+	Final         bool          `json:"final,omitempty"`
+	Visibility    string        `json:"visibility,omitempty"`
+	UpdateType    string        `json:"update_type,omitempty"`
+	Scope         EventScope    `json:"scope,omitempty"`
+	ParticipantID string        `json:"participant_id,omitempty"`
+}
+
+type ToolCallPayload struct {
+	CallID         string     `json:"call_id,omitempty"`
+	ToolName       string     `json:"tool_name,omitempty"`
+	ArgsText       string     `json:"args_text,omitempty"`
+	CommandPreview string     `json:"command_preview,omitempty"`
+	Status         string     `json:"status,omitempty"`
+	Actor          string     `json:"actor,omitempty"`
+	Scope          EventScope `json:"scope,omitempty"`
+	ParticipantID  string     `json:"participant_id,omitempty"`
+}
+
+type ToolResultPayload struct {
+	CallID         string     `json:"call_id,omitempty"`
+	ToolName       string     `json:"tool_name,omitempty"`
+	OutputText     string     `json:"output_text,omitempty"`
+	CommandPreview string     `json:"command_preview,omitempty"`
+	Status         string     `json:"status,omitempty"`
+	Error          bool       `json:"error,omitempty"`
+	Actor          string     `json:"actor,omitempty"`
+	Scope          EventScope `json:"scope,omitempty"`
+	ParticipantID  string     `json:"participant_id,omitempty"`
+}
+
+type PlanEntryPayload struct {
+	Content  string `json:"content,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Priority string `json:"priority,omitempty"`
+}
+
+type PlanPayload struct {
+	Entries []PlanEntryPayload `json:"entries,omitempty"`
+}
+
+type ApprovalOption struct {
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+	Kind string `json:"kind,omitempty"`
+}
+
+type ApprovalPayload struct {
+	ToolName       string           `json:"tool_name,omitempty"`
+	CommandPreview string           `json:"command_preview,omitempty"`
+	Options        []ApprovalOption `json:"options,omitempty"`
+}
+
+type ParticipantPayload struct {
+	ParticipantID   string     `json:"participant_id,omitempty"`
+	ParticipantKind string     `json:"participant_kind,omitempty"`
+	Role            string     `json:"role,omitempty"`
+	Label           string     `json:"label,omitempty"`
+	Action          string     `json:"action,omitempty"`
+	SessionID       string     `json:"session_id,omitempty"`
+	ParentTurnID    string     `json:"parent_turn_id,omitempty"`
+	DelegationID    string     `json:"delegation_id,omitempty"`
+	Actor           string     `json:"actor,omitempty"`
+	Scope           EventScope `json:"scope,omitempty"`
+}
+
+type LifecyclePayload struct {
+	Status        string     `json:"status,omitempty"`
+	Reason        string     `json:"reason,omitempty"`
+	Actor         string     `json:"actor,omitempty"`
+	Scope         EventScope `json:"scope,omitempty"`
+	ParticipantID string     `json:"participant_id,omitempty"`
+}
+
+type EventOrigin struct {
+	Scope                EventScope `json:"scope,omitempty"`
+	ScopeID              string     `json:"scope_id,omitempty"`
+	Actor                string     `json:"actor,omitempty"`
+	ParticipantID        string     `json:"participant_id,omitempty"`
+	ParticipantKind      string     `json:"participant_kind,omitempty"`
+	ParticipantSessionID string     `json:"participant_session_id,omitempty"`
+}
+
 type Event struct {
-	Kind         EventKind
-	HandleID     string
-	RunID        string
-	TurnID       string
-	SessionRef   sdksession.SessionRef
-	SessionEvent *sdksession.Event
-	Usage        *UsageSnapshot
-	Approval     *sdkruntime.ApprovalRequest
+	Kind            EventKind
+	HandleID        string
+	RunID           string
+	TurnID          string
+	OccurredAt      time.Time
+	SessionRef      sdksession.SessionRef
+	Origin          *EventOrigin
+	SessionEvent    *sdksession.Event
+	Usage           *UsageSnapshot
+	Approval        *sdkruntime.ApprovalRequest
+	Narrative       *NarrativePayload
+	ToolCall        *ToolCallPayload
+	ToolResult      *ToolResultPayload
+	Plan            *PlanPayload
+	ApprovalPayload *ApprovalPayload
+	Participant     *ParticipantPayload
+	Lifecycle       *LifecyclePayload
 }
 
 type EventEnvelope struct {

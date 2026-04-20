@@ -30,13 +30,18 @@ type Submission struct {
 }
 
 type StatusSnapshot struct {
-	SessionID    string
-	Workspace    string
-	Model        string
-	ModeLabel    string
-	Surface      string
-	PromptTokens int
-	Running      bool
+	SessionID       string
+	Workspace       string
+	Model           string
+	ModeLabel       string
+	SessionMode     string
+	SandboxType     string
+	Route           string
+	FallbackReason  string
+	SecuritySummary string
+	Surface         string
+	PromptTokens    int
+	Running         bool
 }
 
 type ResumeCandidate struct {
@@ -94,6 +99,8 @@ type Driver interface {
 	Connect(context.Context, ConnectConfig) (StatusSnapshot, error)
 	UseModel(context.Context, string) (StatusSnapshot, error)
 	DeleteModel(context.Context, string) error
+	CycleSessionMode(context.Context) (StatusSnapshot, error)
+	SetSandboxBackend(context.Context, string) (StatusSnapshot, error)
 	SetSandboxMode(context.Context, string) (StatusSnapshot, error)
 
 	CompleteMention(context.Context, string, int) ([]string, error)

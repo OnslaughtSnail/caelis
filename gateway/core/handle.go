@@ -169,9 +169,17 @@ func (h *turnHandle) publishSessionEvent(event *sdksession.Event) {
 			HandleID:     h.handleID,
 			RunID:        h.runID,
 			TurnID:       h.turnID,
+			OccurredAt:   event.Time,
 			SessionRef:   h.sessionRef,
+			Origin:       canonicalOriginFromSessionEvent(h.sessionRef, event),
 			SessionEvent: event,
 			Usage:        usageSnapshotFromSessionEvent(event),
+			Narrative:    canonicalNarrativePayload(event),
+			ToolCall:     canonicalToolCallPayload(event),
+			ToolResult:   canonicalToolResultPayload(event),
+			Plan:         canonicalPlanPayload(event),
+			Participant:  canonicalParticipantPayload(event),
+			Lifecycle:    canonicalLifecyclePayload(event),
 		},
 	})
 }
@@ -181,12 +189,14 @@ func (h *turnHandle) publishApproval(req *sdkruntime.ApprovalRequest) <-chan App
 	h.publish(EventEnvelope{
 		Cursor: h.allocateCursor(),
 		Event: Event{
-			Kind:       EventKindApprovalRequested,
-			HandleID:   h.handleID,
-			RunID:      h.runID,
-			TurnID:     h.turnID,
-			SessionRef: h.sessionRef,
-			Approval:   req,
+			Kind:            EventKindApprovalRequested,
+			HandleID:        h.handleID,
+			RunID:           h.runID,
+			TurnID:          h.turnID,
+			SessionRef:      h.sessionRef,
+			Origin:          canonicalOriginFromApproval(req, h.sessionRef, h.turnID),
+			Approval:        req,
+			ApprovalPayload: canonicalApprovalPayload(req),
 		},
 	})
 	return wait

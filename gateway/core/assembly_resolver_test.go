@@ -156,6 +156,30 @@ func TestAssemblyResolverRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+func TestCurrentSessionModeMigratesLegacySandboxState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		state map[string]any
+		want  string
+	}{
+		{name: "empty defaults to default", state: map[string]any{}, want: "default"},
+		{name: "legacy auto becomes default", state: map[string]any{StateCurrentSandboxMode: "auto"}, want: "default"},
+		{name: "legacy full control becomes full_access", state: map[string]any{StateCurrentSandboxMode: "full_control"}, want: "full_access"},
+		{name: "new key wins", state: map[string]any{StateCurrentSandboxMode: "full_control", StateCurrentSessionMode: "plan"}, want: "plan"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CurrentSessionMode(tt.state); got != tt.want {
+				t.Fatalf("CurrentSessionMode(%#v) = %q, want %q", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
 type modelLookupFunc func(context.Context, string, int) (ModelResolution, error)
 
 func (f modelLookupFunc) ResolveModel(ctx context.Context, alias string, contextWindow int) (ModelResolution, error) {

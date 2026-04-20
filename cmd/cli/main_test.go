@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +50,32 @@ func TestParseOutputFormat(t *testing.T) {
 	}
 	if _, err := parseOutputFormat("xml"); err == nil {
 		t.Fatal("parseOutputFormat(xml) error = nil")
+	}
+}
+
+func TestDefaultStoreDirUsesHomeDirectory(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("home directory unavailable")
+	}
+	want := filepath.Join(home, ".caelis")
+	if got := defaultStoreDir(t.TempDir()); got != want {
+		t.Fatalf("defaultStoreDir() = %q, want %q", got, want)
+	}
+}
+
+func TestPreferredSessionIDDefaultsDifferBetweenInteractiveAndHeadless(t *testing.T) {
+	if got := preferredInteractiveSessionID(""); got != "" {
+		t.Fatalf("preferredInteractiveSessionID(\"\") = %q, want empty for fresh TUI session", got)
+	}
+	if got := preferredHeadlessSessionID(""); got != "" {
+		t.Fatalf("preferredHeadlessSessionID(\"\") = %q, want empty for fresh headless session", got)
+	}
+	if got := preferredInteractiveSessionID("sticky"); got != "sticky" {
+		t.Fatalf("preferredInteractiveSessionID(\"sticky\") = %q, want sticky", got)
+	}
+	if got := preferredHeadlessSessionID("sticky"); got != "sticky" {
+		t.Fatalf("preferredHeadlessSessionID(\"sticky\") = %q, want sticky", got)
 	}
 }
 

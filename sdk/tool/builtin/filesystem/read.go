@@ -110,11 +110,12 @@ func (t *ReadTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 		maxTokens = t.cfg.MaxTokens
 	}
 
-	targetPath, err := normalizePathWithFS(t.runtime.FileSystem(), pathArg)
+	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
+	targetPath, err := normalizePathWithFS(fsys, pathArg)
 	if err != nil {
 		return sdktool.Result{}, err
 	}
-	file, err := t.runtime.FileSystem().Open(targetPath)
+	file, err := fsys.Open(targetPath)
 	if err != nil {
 		return sdktool.Result{}, err
 	}

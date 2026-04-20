@@ -47,11 +47,12 @@ func (t *PatchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result
 	if err != nil {
 		return sdktool.Result{}, err
 	}
-	plan, err := planPatchMutation(t.runtime.FileSystem(), args)
+	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
+	plan, err := planPatchMutation(fsys, args)
 	if err != nil {
 		return sdktool.Result{}, err
 	}
-	if err := t.runtime.FileSystem().WriteFile(plan.path, []byte(plan.after), plan.mode); err != nil {
+	if err := fsys.WriteFile(plan.path, []byte(plan.after), plan.mode); err != nil {
 		return sdktool.Result{}, err
 	}
 	diffStats := CountLineDiff(plan.before, plan.after)

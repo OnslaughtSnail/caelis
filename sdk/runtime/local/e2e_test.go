@@ -3,7 +3,9 @@ package local
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
@@ -2055,7 +2057,7 @@ func newFileSessionService(root string, sessionID string) sdksession.Service {
 func readPersistedSessionDocument(t *testing.T, root string, sessionID string) map[string]any {
 	t.Helper()
 
-	path := filepath.Join(root, sessionID+".json")
+	path := findPersistedSessionDocumentPath(t, root, sessionID)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("os.ReadFile(%q) error = %v", path, err)
@@ -2066,6 +2068,32 @@ func readPersistedSessionDocument(t *testing.T, root string, sessionID string) m
 		t.Fatalf("json.Unmarshal(%q) error = %v", path, err)
 	}
 	return doc
+}
+
+func findPersistedSessionDocumentPath(t *testing.T, root string, sessionID string) string {
+	t.Helper()
+
+	var found string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(d.Name()) != ".json" {
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), "-"+sessionID+".json") {
+			found = path
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.SkipAll) {
+		t.Fatalf("WalkDir(%q) error = %v", root, err)
+	}
+	if strings.TrimSpace(found) == "" {
+		t.Fatalf("persisted document for session %q not found under %q", sessionID, root)
+	}
+	return found
 }
 
 func assertPersistedDocumentShape(t *testing.T, doc map[string]any, sessionID string) {

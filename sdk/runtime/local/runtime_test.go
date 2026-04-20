@@ -20,6 +20,7 @@ import (
 	policypresets "github.com/OnslaughtSnail/caelis/sdk/policy/presets"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	"github.com/OnslaughtSnail/caelis/sdk/runtime/agents/chat"
+	sdksandbox "github.com/OnslaughtSnail/caelis/sdk/sandbox"
 	"github.com/OnslaughtSnail/caelis/sdk/sandbox/host"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
@@ -2473,6 +2474,100 @@ func TestRuntimeTerminalSubscribeStreamsRunningTask(t *testing.T) {
 	}
 }
 
+func TestRuntimeBashToolUsesDefaultYieldWhenOmitted(t *testing.T) {
+	t.Parallel()
+
+	_, session, runtime := newRuntimeBashToolTestHarness(t)
+	fake := &yieldProbeSandboxRuntime{session: newYieldProbeSandboxSession()}
+	tool := runtimeBashTool{
+		base:       mustRuntimeBashTool(t, fake),
+		session:    sdksession.CloneSession(session),
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+	}
+
+	result := callRuntimeBashTool(t, tool, map[string]any{
+		"command": "printf 'ok'",
+		"workdir": session.CWD,
+	})
+
+	if got := fake.session.lastWait; got != defaultBashYield {
+		t.Fatalf("omitted yield wait = %v, want %v", got, defaultBashYield)
+	}
+	assertRunningTaskSnapshot(t, result)
+}
+
+func TestRuntimeBashToolKeepsExplicitZeroYield(t *testing.T) {
+	t.Parallel()
+
+	_, session, runtime := newRuntimeBashToolTestHarness(t)
+	fake := &yieldProbeSandboxRuntime{session: newYieldProbeSandboxSession()}
+	tool := runtimeBashTool{
+		base:       mustRuntimeBashTool(t, fake),
+		session:    sdksession.CloneSession(session),
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+	}
+
+	result := callRuntimeBashTool(t, tool, map[string]any{
+		"command":       "printf 'ok'",
+		"workdir":       session.CWD,
+		"yield_time_ms": 0,
+	})
+
+	if got := fake.session.lastWait; got != 0 {
+		t.Fatalf("explicit zero yield wait = %v, want 0", got)
+	}
+	assertRunningTaskSnapshot(t, result)
+}
+
+func TestRuntimeBashToolPassesExplicitYieldThrough(t *testing.T) {
+	t.Parallel()
+
+	_, session, runtime := newRuntimeBashToolTestHarness(t)
+	fake := &yieldProbeSandboxRuntime{session: newYieldProbeSandboxSession()}
+	tool := runtimeBashTool{
+		base:       mustRuntimeBashTool(t, fake),
+		session:    sdksession.CloneSession(session),
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+	}
+
+	result := callRuntimeBashTool(t, tool, map[string]any{
+		"command":       "printf 'ok'",
+		"workdir":       session.CWD,
+		"yield_time_ms": 125,
+	})
+
+	if got := fake.session.lastWait; got != 125*time.Millisecond {
+		t.Fatalf("explicit yield wait = %v, want %v", got, 125*time.Millisecond)
+	}
+	assertRunningTaskSnapshot(t, result)
+}
+
+func TestRuntimeBashToolDoesNotFetchResultWhileStillRunning(t *testing.T) {
+	t.Parallel()
+
+	_, session, runtime := newRuntimeBashToolTestHarness(t)
+	fake := &runningOnlyProbeSandboxRuntime{session: &runningOnlyProbeSandboxSession{}}
+	tool := runtimeBashTool{
+		base:       mustRuntimeBashTool(t, fake),
+		session:    sdksession.CloneSession(session),
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+	}
+
+	result := callRuntimeBashTool(t, tool, map[string]any{
+		"command": "printf 'still-running'",
+		"workdir": session.CWD,
+	})
+
+	if got := fake.session.lastWait; got != defaultBashYield {
+		t.Fatalf("omitted yield wait = %v, want %v", got, defaultBashYield)
+	}
+	assertRunningTaskSnapshot(t, result)
+}
+
 type staticModel struct {
 	text string
 }
@@ -3569,4 +3664,282 @@ func (a seqAgent) Run(sdkruntime.Context) iter.Seq2[*sdksession.Event, error] {
 			yield(nil, a.err)
 		}
 	}
+}
+
+type yieldProbeSandboxRuntime struct {
+	session *yieldProbeSandboxSession
+}
+
+func (r *yieldProbeSandboxRuntime) Describe() sdksandbox.Descriptor {
+	return sdksandbox.Descriptor{
+		Backend:   sdksandbox.BackendHost,
+		Isolation: sdksandbox.IsolationHost,
+		Capabilities: sdksandbox.CapabilitySet{
+			CommandExec:   true,
+			AsyncSessions: true,
+		},
+	}
+}
+
+func (r *yieldProbeSandboxRuntime) FileSystem() sdksandbox.FileSystem { return nil }
+
+func (r *yieldProbeSandboxRuntime) FileSystemFor(sdksandbox.Constraints) sdksandbox.FileSystem {
+	return nil
+}
+
+func (r *yieldProbeSandboxRuntime) Run(context.Context, sdksandbox.CommandRequest) (sdksandbox.CommandResult, error) {
+	return sdksandbox.CommandResult{}, nil
+}
+
+func (r *yieldProbeSandboxRuntime) Start(_ context.Context, req sdksandbox.CommandRequest) (sdksandbox.Session, error) {
+	if r.session == nil {
+		r.session = newYieldProbeSandboxSession()
+	}
+	r.session.command = req.Command
+	r.session.workdir = req.Dir
+	return r.session, nil
+}
+
+func (r *yieldProbeSandboxRuntime) OpenSession(string) (sdksandbox.Session, error) {
+	if r.session == nil {
+		r.session = newYieldProbeSandboxSession()
+	}
+	return r.session, nil
+}
+
+func (r *yieldProbeSandboxRuntime) OpenSessionRef(ref sdksandbox.SessionRef) (sdksandbox.Session, error) {
+	return r.OpenSession(ref.SessionID)
+}
+
+func (r *yieldProbeSandboxRuntime) SupportedBackends() []sdksandbox.Backend {
+	return []sdksandbox.Backend{sdksandbox.BackendHost}
+}
+
+func (r *yieldProbeSandboxRuntime) Status() sdksandbox.Status {
+	return sdksandbox.Status{
+		RequestedBackend: sdksandbox.BackendHost,
+		ResolvedBackend:  sdksandbox.BackendHost,
+	}
+}
+
+func (r *yieldProbeSandboxRuntime) Close() error { return nil }
+
+type yieldProbeSandboxSession struct {
+	command  string
+	workdir  string
+	lastWait time.Duration
+}
+
+func newYieldProbeSandboxSession() *yieldProbeSandboxSession {
+	return &yieldProbeSandboxSession{}
+}
+
+func (s *yieldProbeSandboxSession) Ref() sdksandbox.SessionRef {
+	return sdksandbox.SessionRef{Backend: sdksandbox.BackendHost, SessionID: "yield-probe-session"}
+}
+
+func (s *yieldProbeSandboxSession) Terminal() sdksandbox.TerminalRef {
+	return sdksandbox.TerminalRef{
+		Backend:    sdksandbox.BackendHost,
+		SessionID:  "yield-probe-session",
+		TerminalID: "yield-probe-terminal",
+	}
+}
+
+func (s *yieldProbeSandboxSession) WriteInput(context.Context, []byte) error { return nil }
+
+func (s *yieldProbeSandboxSession) ReadOutput(context.Context, int64, int64) ([]byte, []byte, int64, int64, error) {
+	return nil, nil, 0, 0, nil
+}
+
+func (s *yieldProbeSandboxSession) Status(context.Context) (sdksandbox.SessionStatus, error) {
+	return sdksandbox.SessionStatus{
+		SessionRef:    s.Ref(),
+		Terminal:      s.Terminal(),
+		Running:       true,
+		SupportsInput: true,
+		UpdatedAt:     time.Now(),
+	}, nil
+}
+
+func (s *yieldProbeSandboxSession) Wait(_ context.Context, timeout time.Duration) (sdksandbox.SessionStatus, error) {
+	s.lastWait = timeout
+	return s.Status(context.Background())
+}
+
+func (s *yieldProbeSandboxSession) Result(context.Context) (sdksandbox.CommandResult, error) {
+	return sdksandbox.CommandResult{}, nil
+}
+
+func (s *yieldProbeSandboxSession) Terminate(context.Context) error { return nil }
+
+type runningOnlyProbeSandboxSession struct {
+	lastWait time.Duration
+}
+
+type runningOnlyProbeSandboxRuntime struct {
+	session *runningOnlyProbeSandboxSession
+}
+
+func (s *runningOnlyProbeSandboxSession) Ref() sdksandbox.SessionRef {
+	return sdksandbox.SessionRef{Backend: sdksandbox.BackendHost, SessionID: "running-only-session"}
+}
+
+func (s *runningOnlyProbeSandboxSession) Terminal() sdksandbox.TerminalRef {
+	return sdksandbox.TerminalRef{
+		Backend:    sdksandbox.BackendHost,
+		SessionID:  "running-only-session",
+		TerminalID: "running-only-terminal",
+	}
+}
+
+func (s *runningOnlyProbeSandboxSession) WriteInput(context.Context, []byte) error { return nil }
+
+func (s *runningOnlyProbeSandboxSession) ReadOutput(context.Context, int64, int64) ([]byte, []byte, int64, int64, error) {
+	return nil, nil, 0, 0, nil
+}
+
+func (s *runningOnlyProbeSandboxSession) Status(context.Context) (sdksandbox.SessionStatus, error) {
+	return sdksandbox.SessionStatus{
+		SessionRef:    s.Ref(),
+		Terminal:      s.Terminal(),
+		Running:       true,
+		SupportsInput: true,
+		UpdatedAt:     time.Now(),
+	}, nil
+}
+
+func (s *runningOnlyProbeSandboxSession) Wait(_ context.Context, timeout time.Duration) (sdksandbox.SessionStatus, error) {
+	s.lastWait = timeout
+	return s.Status(context.Background())
+}
+
+func (s *runningOnlyProbeSandboxSession) Result(context.Context) (sdksandbox.CommandResult, error) {
+	panic("waitBash should not request Result while task is still running")
+}
+
+func (s *runningOnlyProbeSandboxSession) Terminate(context.Context) error { return nil }
+
+func (r *runningOnlyProbeSandboxRuntime) Describe() sdksandbox.Descriptor {
+	return sdksandbox.Descriptor{
+		Backend:   sdksandbox.BackendHost,
+		Isolation: sdksandbox.IsolationHost,
+		Capabilities: sdksandbox.CapabilitySet{
+			CommandExec:   true,
+			AsyncSessions: true,
+		},
+	}
+}
+
+func (r *runningOnlyProbeSandboxRuntime) FileSystem() sdksandbox.FileSystem { return nil }
+
+func (r *runningOnlyProbeSandboxRuntime) FileSystemFor(sdksandbox.Constraints) sdksandbox.FileSystem {
+	return nil
+}
+
+func (r *runningOnlyProbeSandboxRuntime) Run(context.Context, sdksandbox.CommandRequest) (sdksandbox.CommandResult, error) {
+	return sdksandbox.CommandResult{}, nil
+}
+
+func (r *runningOnlyProbeSandboxRuntime) Start(_ context.Context, _ sdksandbox.CommandRequest) (sdksandbox.Session, error) {
+	if r.session == nil {
+		r.session = &runningOnlyProbeSandboxSession{}
+	}
+	return r.session, nil
+}
+
+func (r *runningOnlyProbeSandboxRuntime) OpenSession(string) (sdksandbox.Session, error) {
+	if r.session == nil {
+		r.session = &runningOnlyProbeSandboxSession{}
+	}
+	return r.session, nil
+}
+
+func (r *runningOnlyProbeSandboxRuntime) OpenSessionRef(ref sdksandbox.SessionRef) (sdksandbox.Session, error) {
+	return r.OpenSession(ref.SessionID)
+}
+
+func (r *runningOnlyProbeSandboxRuntime) SupportedBackends() []sdksandbox.Backend {
+	return []sdksandbox.Backend{sdksandbox.BackendHost}
+}
+
+func (r *runningOnlyProbeSandboxRuntime) Status() sdksandbox.Status {
+	return sdksandbox.Status{
+		RequestedBackend: sdksandbox.BackendHost,
+		ResolvedBackend:  sdksandbox.BackendHost,
+	}
+}
+
+func (r *runningOnlyProbeSandboxRuntime) Close() error { return nil }
+
+func newRuntimeBashToolTestHarness(t *testing.T) (sdksession.Service, sdksession.Session, *Runtime) {
+	t.Helper()
+
+	sessions, session := newTestSessionService(t, "sess-bash-yield-default")
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Use tools when necessary.",
+		},
+		DefaultPolicyMode: policypresets.ModeFullAccess,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	return sessions, session, runtime
+}
+
+func mustRuntimeBashTool(t *testing.T, runtime sdksandbox.Runtime) sdktool.Tool {
+	t.Helper()
+
+	tool, err := shell.NewBash(shell.BashConfig{Runtime: runtime})
+	if err != nil {
+		t.Fatalf("shell.NewBash() error = %v", err)
+	}
+	return tool
+}
+
+func callRuntimeBashTool(t *testing.T, tool runtimeBashTool, args map[string]any) sdktool.Result {
+	t.Helper()
+
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	result, err := tool.Call(context.Background(), sdktool.Call{
+		ID:    "bash-yield-test",
+		Name:  shell.BashToolName,
+		Input: raw,
+	})
+	if err != nil {
+		t.Fatalf("tool.Call() error = %v", err)
+	}
+	return result
+}
+
+func assertRunningTaskSnapshot(t *testing.T, result sdktool.Result) {
+	t.Helper()
+
+	if len(result.Content) == 0 {
+		t.Fatal("result.Content = empty, want task snapshot payload")
+	}
+	part := result.Content[0]
+	if part.Kind != sdkmodel.PartKindJSON || part.JSON == nil {
+		t.Fatalf("result.Content[0] = %#v, want json part", part)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(part.JSON.Value, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(snapshot) error = %v", err)
+	}
+	if got, _ := payload["state"].(string); got != string(sdktask.StateRunning) {
+		t.Fatalf("snapshot state = %q, want %q", got, sdktask.StateRunning)
+	}
+	if strings.TrimSpace(testStringValue(payload["task_id"])) == "" {
+		t.Fatalf("snapshot task_id missing: %#v", payload)
+	}
+}
+
+func testStringValue(raw any) string {
+	text, _ := raw.(string)
+	return strings.TrimSpace(text)
 }

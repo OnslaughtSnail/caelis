@@ -28,6 +28,18 @@ type TurnResolver = gatewaycore.TurnResolver
 type RequestPolicy = gatewaycore.RequestPolicy
 type EventKind = gatewaycore.EventKind
 type UsageSnapshot = gatewaycore.UsageSnapshot
+type NarrativeRole = gatewaycore.NarrativeRole
+type EventScope = gatewaycore.EventScope
+type NarrativePayload = gatewaycore.NarrativePayload
+type ToolCallPayload = gatewaycore.ToolCallPayload
+type ToolResultPayload = gatewaycore.ToolResultPayload
+type PlanEntryPayload = gatewaycore.PlanEntryPayload
+type PlanPayload = gatewaycore.PlanPayload
+type ApprovalOption = gatewaycore.ApprovalOption
+type ApprovalPayload = gatewaycore.ApprovalPayload
+type ParticipantPayload = gatewaycore.ParticipantPayload
+type LifecyclePayload = gatewaycore.LifecyclePayload
+type EventOrigin = gatewaycore.EventOrigin
 type Event = gatewaycore.Event
 type EventEnvelope = gatewaycore.EventEnvelope
 type SubmissionKind = gatewaycore.SubmissionKind
@@ -43,6 +55,21 @@ type ModelResolution = gatewaycore.ModelResolution
 const (
 	StateCurrentModelAlias  = gatewaycore.StateCurrentModelAlias
 	StateCurrentSandboxMode = gatewaycore.StateCurrentSandboxMode
+	StateCurrentSessionMode = gatewaycore.StateCurrentSessionMode
+)
+
+const (
+	NarrativeRoleUser      = gatewaycore.NarrativeRoleUser
+	NarrativeRoleAssistant = gatewaycore.NarrativeRoleAssistant
+	NarrativeRoleReasoning = gatewaycore.NarrativeRoleReasoning
+	NarrativeRoleSystem    = gatewaycore.NarrativeRoleSystem
+	NarrativeRoleNotice    = gatewaycore.NarrativeRoleNotice
+)
+
+const (
+	EventScopeMain        = gatewaycore.EventScopeMain
+	EventScopeParticipant = gatewaycore.EventScopeParticipant
+	EventScopeSubagent    = gatewaycore.EventScopeSubagent
 )
 
 const (
@@ -100,4 +127,7 @@ func CurrentModelAlias(state map[string]any) string {
 }
 func CurrentSandboxMode(state map[string]any) string {
 	return gatewaycore.CurrentSandboxMode(state)
+}
+func CurrentSessionMode(state map[string]any) string {
+	return gatewaycore.CurrentSessionMode(state)
 }

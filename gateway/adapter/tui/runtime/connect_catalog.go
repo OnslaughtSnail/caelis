@@ -4,13 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	"github.com/OnslaughtSnail/caelis/tui/modelcatalog"
@@ -19,8 +15,6 @@ import (
 const (
 	connectVolcengineStandardValue = "standard"
 	connectVolcengineCodingValue   = "coding-plan"
-	connectCustomModelValue        = "__custom_model__"
-	modelCatalogCacheTTL           = 24 * time.Hour
 )
 
 type providerTemplate struct {
@@ -68,13 +62,7 @@ var providerTemplates = []providerTemplate{
 	{label: "ollama", api: sdkproviders.APIOllama, provider: "ollama", defaultBaseURL: "http://localhost:11434", defaultContextToken: 128000, noAuthRequired: true, commonModels: []string{"qwen2.5:7b", "llama3.1:8b", "deepseek-r1:7b", "gemma3:4b"}},
 }
 
-var (
-	connectDiscoverModelsFn = sdkproviders.DiscoverModels
-	connectCatalogInitMu    sync.Mutex
-	connectCatalogLastSync  time.Time
-)
-
-func completeConnectArgs(ctx context.Context, command string, query string, limit int) ([]SlashArgCandidate, error) {
+func completeConnectArgs(ctx context.Context, driver *GatewayDriver, command string, query string, limit int) ([]SlashArgCandidate, error) {
 	switch {
 	case command == "connect":
 		return completeConnectProviders(query, limit), nil
@@ -85,7 +73,7 @@ func completeConnectArgs(ctx context.Context, command string, query string, limi
 	case strings.HasPrefix(command, "connect-apikey:"):
 		return nil, nil
 	case strings.HasPrefix(command, "connect-model:"):
-		return completeConnectModels(ctx, parseConnectWizardPayload(strings.TrimPrefix(command, "connect-model:")), query, limit)
+		return completeConnectModels(ctx, driver, parseConnectWizardPayload(strings.TrimPrefix(command, "connect-model:")), query, limit)
 	case strings.HasPrefix(command, "connect-context:"):
 		return completeConnectContext(ctx, parseConnectWizardPayload(strings.TrimPrefix(command, "connect-context:")), query, limit)
 	case strings.HasPrefix(command, "connect-maxout:"):
@@ -147,22 +135,17 @@ func completeConnectTimeout(provider string, query string, limit int) []SlashArg
 	return filterSlashArgCandidates(out, query, limit)
 }
 
-func completeConnectModels(ctx context.Context, payload connectWizardPayload, query string, limit int) ([]SlashArgCandidate, error) {
+func completeConnectModels(ctx context.Context, driver *GatewayDriver, payload connectWizardPayload, query string, limit int) ([]SlashArgCandidate, error) {
 	tpl, ok := findProviderTemplate(payload.Provider)
 	if !ok {
 		return nil, nil
 	}
-	_, _ = ensureConnectCatalog(ctx)
-	cfg := buildDiscoveryConfig(tpl, payload)
-	var remoteModels []sdkproviders.RemoteModel
-	if shouldDiscoverConnectModels(tpl) {
-		models, err := connectDiscoverModelsFn(ctx, cfg)
-		if err == nil {
-			remoteModels = models
-		}
+	_ = ctx
+	fallbackModels := fallbackConnectModels(tpl)
+	if driver != nil && driver.stack != nil {
+		fallbackModels = append(fallbackModels, driver.stack.ListProviderModels(tpl.provider)...)
 	}
-	fallbackModels := fallbackConnectModels(tpl, remoteModels)
-	choices := buildConnectModelChoices(tpl.provider, remoteModels, fallbackModels)
+	choices := buildConnectModelChoices(tpl.provider, fallbackModels)
 	out := make([]SlashArgCandidate, 0, len(choices))
 	for _, choice := range choices {
 		if query != "" && !strings.Contains(strings.ToLower(choice.Name+" "+choice.Display+" "+choice.Detail), strings.ToLower(strings.TrimSpace(query))) {
@@ -178,6 +161,27 @@ func completeConnectModels(ctx context.Context, payload connectWizardPayload, qu
 		}
 	}
 	return out, nil
+}
+
+func connectDefaultsForConfig(ctx context.Context, cfg ConnectConfig) (connectModelDefaults, error) {
+	tpl, ok := findProviderTemplate(strings.ToLower(strings.TrimSpace(cfg.Provider)))
+	if !ok {
+		return connectModelDefaults{}, nil
+	}
+	payload := connectWizardPayload{
+		Provider: strings.ToLower(strings.TrimSpace(cfg.Provider)),
+		BaseURL:  strings.TrimSpace(cfg.BaseURL),
+		Timeout:  strconv.Itoa(cfg.TimeoutSeconds),
+		APIKey:   strings.TrimSpace(cfg.APIKey),
+		Model:    strings.TrimSpace(cfg.Model),
+	}
+	if payload.BaseURL == "" {
+		payload.BaseURL = tpl.defaultBaseURL
+	}
+	if strings.TrimSpace(payload.Timeout) == "" || strings.TrimSpace(payload.Timeout) == "0" {
+		payload.Timeout = "60"
+	}
+	return connectDefaultsForPayload(ctx, payload)
 }
 
 func completeConnectContext(ctx context.Context, payload connectWizardPayload, query string, limit int) ([]SlashArgCandidate, error) {
@@ -215,15 +219,7 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 	if !ok {
 		return connectModelDefaults{}, nil
 	}
-	_, _ = ensureConnectCatalog(ctx)
-	cfg := buildDiscoveryConfig(tpl, payload)
-	var remote *sdkproviders.RemoteModel
-	if shouldDiscoverConnectModels(tpl) {
-		models, err := connectDiscoverModelsFn(ctx, cfg)
-		if err == nil {
-			remote = findRemoteModelByName(models, payload.Model)
-		}
-	}
+	_ = ctx
 	baseCaps, baseKnown := modelcatalog.LookupDynamicModelCapabilities(tpl.provider, payload.Model)
 	if !baseKnown {
 		baseCaps, baseKnown = modelcatalog.LookupModelCapabilities(tpl.provider, payload.Model)
@@ -251,18 +247,6 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 			baseCaps.ReasoningEfforts = normalizeReasoningLevels(overlayCaps.ReasoningEfforts)
 		}
 	}
-	if remote != nil {
-		if remote.ContextWindowTokens > 0 {
-			baseCaps.ContextWindowTokens = remote.ContextWindowTokens
-		}
-		if remote.MaxOutputTokens > 0 {
-			baseCaps.MaxOutputTokens = remote.MaxOutputTokens
-			baseCaps.DefaultMaxOutputTokens = remote.MaxOutputTokens
-		}
-		if _, supportsReasoning, _, _, known := connectRemoteCapabilities(remote); known && supportsReasoning && len(baseCaps.ReasoningEfforts) == 0 {
-			baseCaps.ReasoningEfforts = []string{"low", "medium", "high"}
-		}
-	}
 	contextWindow := baseCaps.ContextWindowTokens
 	if contextWindow <= 0 {
 		contextWindow = defaultContextWindowForTemplate(tpl)
@@ -279,52 +263,6 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 		MaxOutput:       maxOutput,
 		ReasoningLevels: normalizeReasoningLevels(baseCaps.ReasoningEfforts),
 	}, nil
-}
-
-func ensureConnectCatalog(ctx context.Context) (modelcatalog.CatalogInitStatus, bool) {
-	connectCatalogInitMu.Lock()
-	defer connectCatalogInitMu.Unlock()
-	if !connectCatalogLastSync.IsZero() && time.Since(connectCatalogLastSync) < modelCatalogCacheTTL {
-		return modelcatalog.CatalogInitStatus{}, false
-	}
-	status := modelcatalog.InitModelCatalogWithStatus(ctx, nil, defaultModelCatalogOverridePath())
-	if status.RemoteFetched || status.RemoteError == nil {
-		connectCatalogLastSync = time.Now()
-	}
-	return status, true
-}
-
-func defaultModelCatalogOverridePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
-		return ""
-	}
-	return filepath.Join(home, ".agents", "model_capabilities.json")
-}
-
-func buildDiscoveryConfig(tpl providerTemplate, payload connectWizardPayload) sdkproviders.Config {
-	baseURL := strings.TrimSpace(payload.BaseURL)
-	if baseURL == "" {
-		baseURL = tpl.defaultBaseURL
-	}
-	timeoutSeconds, _ := strconv.Atoi(strings.TrimSpace(payload.Timeout))
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 60
-	}
-	authType := sdkproviders.AuthAPIKey
-	if tpl.noAuthRequired {
-		authType = sdkproviders.AuthNone
-	}
-	return sdkproviders.Config{
-		Provider: tpl.provider,
-		API:      tpl.api,
-		BaseURL:  baseURL,
-		Timeout:  time.Duration(timeoutSeconds) * time.Second,
-		Auth: sdkproviders.AuthConfig{
-			Type:  authType,
-			Token: strings.TrimSpace(payload.APIKey),
-		},
-	}
 }
 
 func parseConnectWizardPayload(raw string) connectWizardPayload {
@@ -353,7 +291,7 @@ func filterSlashArgCandidates(candidates []SlashArgCandidate, query string, limi
 	query = strings.ToLower(strings.TrimSpace(query))
 	out := make([]SlashArgCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		if query != "" && !strings.Contains(strings.ToLower(candidate.Value+" "+candidate.Display+" "+candidate.Detail), query) {
+		if query != "" && !hasConnectCandidatePrefix(query, candidate.Value, candidate.Display, candidate.Detail) {
 			continue
 		}
 		out = append(out, candidate)
@@ -362,6 +300,22 @@ func filterSlashArgCandidates(candidates []SlashArgCandidate, query string, limi
 		}
 	}
 	return out
+}
+
+func hasConnectCandidatePrefix(query string, values ...string) bool {
+	if query == "" {
+		return true
+	}
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" {
+			continue
+		}
+		if strings.HasPrefix(normalized, query) {
+			return true
+		}
+	}
+	return false
 }
 
 func findProviderTemplate(value string) (providerTemplate, bool) {
@@ -374,13 +328,9 @@ func findProviderTemplate(value string) (providerTemplate, bool) {
 	return providerTemplate{}, false
 }
 
-func buildConnectModelChoices(provider string, remoteModels []sdkproviders.RemoteModel, fallbackModels []string) []connectModelChoice {
+func buildConnectModelChoices(provider string, fallbackModels []string) []connectModelChoice {
 	seen := map[string]struct{}{}
-	out := []connectModelChoice{{
-		Name:    connectCustomModelValue,
-		Display: "custom model",
-		Detail:  "Enter a model name manually.",
-	}}
+	out := make([]connectModelChoice, 0, len(fallbackModels))
 	add := func(name string, detail string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -400,26 +350,14 @@ func buildConnectModelChoices(provider string, remoteModels []sdkproviders.Remot
 	for _, item := range fallbackModels {
 		add(item, "")
 	}
-	for _, item := range remoteModels {
-		add(item.Name, describeRemoteModelDetail(item))
-	}
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Name == connectCustomModelValue {
-			return true
-		}
-		if out[j].Name == connectCustomModelValue {
-			return false
-		}
 		return strings.ToLower(out[i].Display) < strings.ToLower(out[j].Display)
 	})
 	return out
 }
 
-func fallbackConnectModels(tpl providerTemplate, remoteModels []sdkproviders.RemoteModel) []string {
-	if len(remoteModels) > 0 {
-		return nil
-	}
-	if (tpl.api == sdkproviders.APIVolcengineCoding || tpl.provider == "minimax") && len(tpl.commonModels) > 0 {
+func fallbackConnectModels(tpl providerTemplate) []string {
+	if len(tpl.commonModels) > 0 {
 		return append([]string(nil), tpl.commonModels...)
 	}
 	if models := modelcatalog.ListCatalogModels(tpl.provider); len(models) > 0 {
@@ -429,19 +367,6 @@ func fallbackConnectModels(tpl providerTemplate, remoteModels []sdkproviders.Rem
 		return append([]string(nil), tpl.commonModels...)
 	}
 	return commonModelsForProvider(tpl.provider)
-}
-
-func shouldDiscoverConnectModels(tpl providerTemplate) bool {
-	return tpl.provider != "volcengine"
-}
-
-func findRemoteModelByName(models []sdkproviders.RemoteModel, name string) *sdkproviders.RemoteModel {
-	for i := range models {
-		if strings.EqualFold(strings.TrimSpace(models[i].Name), strings.TrimSpace(name)) {
-			return &models[i]
-		}
-	}
-	return nil
 }
 
 func connectDisplayModelRef(provider, modelName string) string {
@@ -457,20 +382,6 @@ func connectDisplayModelRef(provider, modelName string) string {
 		return modelName
 	}
 	return provider + "/" + modelName
-}
-
-func describeRemoteModelDetail(item sdkproviders.RemoteModel) string {
-	parts := make([]string, 0, 3)
-	if item.ContextWindowTokens > 0 {
-		parts = append(parts, fmt.Sprintf("ctx %d", item.ContextWindowTokens))
-	}
-	if item.MaxOutputTokens > 0 {
-		parts = append(parts, fmt.Sprintf("out %d", item.MaxOutputTokens))
-	}
-	if len(item.Capabilities) > 0 {
-		parts = append(parts, strings.Join(item.Capabilities, ","))
-	}
-	return strings.Join(parts, " · ")
 }
 
 func defaultContextWindowForTemplate(tpl providerTemplate) int {

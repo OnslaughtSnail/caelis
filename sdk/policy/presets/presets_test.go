@@ -73,6 +73,48 @@ func TestDefaultModeOnlyApprovesBashEscalation(t *testing.T) {
 	}
 }
 
+func TestDefaultModeAllowsRelativeFilesystemPathsWithinWorkspace(t *testing.T) {
+	t.Parallel()
+
+	cases := []sdkpolicy.ToolContext{
+		readCtx("README.md"),
+		listCtx("."),
+		listCtx("sdk"),
+		searchCtx(".", "prompt"),
+		globCtx("*.md"),
+		globCtx("README*"),
+	}
+	for _, input := range cases {
+		decision, err := DefaultMode().DecideTool(context.Background(), input)
+		if err != nil {
+			t.Fatalf("%s DecideTool() error = %v", input.Tool.Name, err)
+		}
+		if decision.Action != sdkpolicy.ActionAllow {
+			t.Fatalf("%s action = %q, want allow (reason=%q)", input.Tool.Name, decision.Action, decision.Reason)
+		}
+	}
+}
+
+func TestDefaultModeDeniesRelativeFilesystemPathsOutsideWorkspace(t *testing.T) {
+	t.Parallel()
+
+	cases := []sdkpolicy.ToolContext{
+		readCtx("../secret.txt"),
+		listCtx("../outside"),
+		searchCtx("../outside", "prompt"),
+		globCtx("../*.md"),
+	}
+	for _, input := range cases {
+		decision, err := DefaultMode().DecideTool(context.Background(), input)
+		if err != nil {
+			t.Fatalf("%s DecideTool() error = %v", input.Tool.Name, err)
+		}
+		if decision.Action != sdkpolicy.ActionDeny {
+			t.Fatalf("%s action = %q, want deny", input.Tool.Name, decision.Action)
+		}
+	}
+}
+
 func TestFullAccessBlocksDangerousCommands(t *testing.T) {
 	t.Parallel()
 
@@ -105,6 +147,58 @@ func bashCtx(command string, withEscalation bool) sdkpolicy.ToolContext {
 		Call: sdktool.Call{Name: "BASH", Input: raw},
 		Options: sdkpolicy.ModeOptions{
 			WorkspaceRoot: "/workspace",
+			TempRoot:      "/tmp",
+		},
+		Sandbox: sdksandbox.Descriptor{Backend: sdksandbox.BackendHost},
+	}
+}
+
+func readCtx(path string) sdkpolicy.ToolContext {
+	raw, _ := json.Marshal(map[string]any{"path": path})
+	return sdkpolicy.ToolContext{
+		Tool: sdktool.Definition{Name: "READ"},
+		Call: sdktool.Call{Name: "READ", Input: raw},
+		Options: sdkpolicy.ModeOptions{
+			WorkspaceRoot: "/workspace/project",
+			TempRoot:      "/tmp",
+		},
+		Sandbox: sdksandbox.Descriptor{Backend: sdksandbox.BackendHost},
+	}
+}
+
+func listCtx(path string) sdkpolicy.ToolContext {
+	raw, _ := json.Marshal(map[string]any{"path": path})
+	return sdkpolicy.ToolContext{
+		Tool: sdktool.Definition{Name: "LIST"},
+		Call: sdktool.Call{Name: "LIST", Input: raw},
+		Options: sdkpolicy.ModeOptions{
+			WorkspaceRoot: "/workspace/project",
+			TempRoot:      "/tmp",
+		},
+		Sandbox: sdksandbox.Descriptor{Backend: sdksandbox.BackendHost},
+	}
+}
+
+func searchCtx(path string, query string) sdkpolicy.ToolContext {
+	raw, _ := json.Marshal(map[string]any{"path": path, "query": query})
+	return sdkpolicy.ToolContext{
+		Tool: sdktool.Definition{Name: "SEARCH"},
+		Call: sdktool.Call{Name: "SEARCH", Input: raw},
+		Options: sdkpolicy.ModeOptions{
+			WorkspaceRoot: "/workspace/project",
+			TempRoot:      "/tmp",
+		},
+		Sandbox: sdksandbox.Descriptor{Backend: sdksandbox.BackendHost},
+	}
+}
+
+func globCtx(pattern string) sdkpolicy.ToolContext {
+	raw, _ := json.Marshal(map[string]any{"pattern": pattern})
+	return sdkpolicy.ToolContext{
+		Tool: sdktool.Definition{Name: "GLOB"},
+		Call: sdktool.Call{Name: "GLOB", Input: raw},
+		Options: sdkpolicy.ModeOptions{
+			WorkspaceRoot: "/workspace/project",
 			TempRoot:      "/tmp",
 		},
 		Sandbox: sdksandbox.Descriptor{Backend: sdksandbox.BackendHost},

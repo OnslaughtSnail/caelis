@@ -30,6 +30,7 @@ type Runtime struct {
 
 	mu       sync.RWMutex
 	sessions map[string]*hostSession
+	status   sdksandbox.Status
 }
 
 // New returns one host-backed sandbox runtime.
@@ -49,10 +50,18 @@ func New(cfg Config) (*Runtime, error) {
 	return &Runtime{
 		fs:       hostFS{cwd: cwd},
 		sessions: map[string]*hostSession{},
+		status: sdksandbox.Status{
+			RequestedBackend: sdksandbox.BackendHost,
+			ResolvedBackend:  sdksandbox.BackendHost,
+		},
 	}, nil
 }
 
 func (r *Runtime) FileSystem() sdksandbox.FileSystem {
+	return r.fs
+}
+
+func (r *Runtime) FileSystemFor(_ sdksandbox.Constraints) sdksandbox.FileSystem {
 	return r.fs
 }
 
@@ -213,6 +222,22 @@ func (r *Runtime) OpenSession(id string) (sdksandbox.Session, error) {
 		return nil, fmt.Errorf("sdk/sandbox/host: session %q not found", id)
 	}
 	return session, nil
+}
+
+func (r *Runtime) OpenSessionRef(ref sdksandbox.SessionRef) (sdksandbox.Session, error) {
+	ref = sdksandbox.CloneSessionRef(ref)
+	if ref.Backend != "" && ref.Backend != sdksandbox.BackendHost {
+		return nil, fmt.Errorf("sdk/sandbox/host: backend %q is unsupported", ref.Backend)
+	}
+	return r.OpenSession(ref.SessionID)
+}
+
+func (r *Runtime) SupportedBackends() []sdksandbox.Backend {
+	return []sdksandbox.Backend{sdksandbox.BackendHost}
+}
+
+func (r *Runtime) Status() sdksandbox.Status {
+	return r.status
 }
 
 func (r *Runtime) Close() error {
@@ -440,6 +465,20 @@ func mergeEnv(extra map[string]string) []string {
 
 var _ sdksandbox.Runtime = (*Runtime)(nil)
 var _ sdksandbox.Session = (*hostSession)(nil)
+
+type factory struct{}
+
+func (factory) Backend() sdksandbox.Backend { return sdksandbox.BackendHost }
+
+func (factory) Build(cfg sdksandbox.Config) (sdksandbox.Runtime, error) {
+	return New(Config{CWD: cfg.CWD})
+}
+
+func init() {
+	if err := sdksandbox.RegisterBackendFactory(factory{}); err != nil {
+		panic(err)
+	}
+}
 
 func firstNonEmptyRoute(values ...sdksandbox.Route) sdksandbox.Route {
 	for _, value := range values {

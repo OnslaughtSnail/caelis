@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/gateway"
-	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
@@ -17,9 +16,13 @@ func TestRunOnceDrainsAssistantOutput(t *testing.T) {
 		{
 			Cursor: "e1",
 			Event: gateway.Event{
-				Kind:         gateway.EventKindAssistantMessage,
-				SessionEvent: &sdksession.Event{ID: "e1", Type: sdksession.EventTypeAssistant, Text: "done"},
-				Usage:        &gateway.UsageSnapshot{PromptTokens: 11},
+				Kind: gateway.EventKindAssistantMessage,
+				Narrative: &gateway.NarrativePayload{
+					Role:  gateway.NarrativeRoleAssistant,
+					Text:  "done",
+					Final: true,
+				},
+				Usage: &gateway.UsageSnapshot{PromptTokens: 11},
 			},
 		},
 	})
@@ -57,10 +60,8 @@ func TestRunOnceAutoDeniesApprovalByDefault(t *testing.T) {
 			Cursor: "a1",
 			Event: gateway.Event{
 				Kind: gateway.EventKindApprovalRequested,
-				Approval: &sdkruntime.ApprovalRequest{
-					SessionRef: sdksession.SessionRef{
-						AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
-					},
+				ApprovalPayload: &gateway.ApprovalPayload{
+					ToolName: "bash",
 				},
 			},
 		},

@@ -16,9 +16,12 @@ const (
 	// StateCurrentModelAlias is the durable session-state key for a per-session
 	// model alias override selected by the TUI.
 	StateCurrentModelAlias = "gateway.current_model_alias"
-	// StateCurrentSandboxMode is the durable session-state key for a per-session
-	// sandbox/policy mode override selected by the TUI.
+	// StateCurrentSandboxMode is the legacy durable session-state key used by
+	// older TUI builds before session mode and sandbox backend were split.
 	StateCurrentSandboxMode = "gateway.current_sandbox_mode"
+	// StateCurrentSessionMode is the durable session-state key for a per-session
+	// policy mode override selected by the TUI.
+	StateCurrentSessionMode = "gateway.current_session_mode"
 )
 
 type ModelResolution struct {
@@ -61,6 +64,10 @@ type modelAliasLister interface {
 	ListModelAliases() []string
 }
 
+type modelAliasValidator interface {
+	HasAlias(string) bool
+}
+
 func NewAssemblyResolver(cfg AssemblyResolverConfig) (*AssemblyResolver, error) {
 	if cfg.ModelLookup == nil {
 		return nil, fmt.Errorf("gateway: model lookup is required")
@@ -101,6 +108,9 @@ func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (
 	alias := strings.TrimSpace(intent.ModelHint)
 	if alias == "" {
 		alias = CurrentModelAlias(state)
+		if validator, ok := r.modelLookup.(modelAliasValidator); ok && alias != "" && !validator.HasAlias(alias) {
+			alias = ""
+		}
 	}
 	if alias == "" {
 		alias = r.defaultModelAlias
@@ -139,7 +149,9 @@ func (r *AssemblyResolver) ListModelAliases(ctx context.Context, ref sdksession.
 	}
 	aliases := make([]string, 0, 4)
 	if alias := CurrentModelAlias(state); alias != "" {
-		aliases = append(aliases, alias)
+		if validator, ok := r.modelLookup.(modelAliasValidator); !ok || validator.HasAlias(alias) {
+			aliases = append(aliases, alias)
+		}
 	}
 	if lister, ok := r.modelLookup.(modelAliasLister); ok {
 		aliases = append(aliases, lister.ListModelAliases()...)
@@ -169,9 +181,9 @@ func (r *AssemblyResolver) resolveMetadata(intent TurnIntent, state map[string]a
 	if err := applyAssemblySelections(metadata, r.assembly, strings.TrimSpace(intent.ModeName), state); err != nil {
 		return nil, err
 	}
-	if sandboxMode := CurrentSandboxMode(state); sandboxMode != "" {
-		if policyMode := sandboxModePolicyOverride(sandboxMode); policyMode != "" {
-			metadata["policy_mode"] = policyMode
+	if sessionMode := CurrentSessionMode(state); sessionMode != "" {
+		if _, ok := metadata["policy_mode"]; !ok || sessionMode != "default" {
+			metadata["policy_mode"] = sessionMode
 		}
 	}
 	if reasoning := firstNonEmptyString(
@@ -197,8 +209,8 @@ func CurrentModelAlias(state map[string]any) string {
 	return strings.TrimSpace(value)
 }
 
-// CurrentSandboxMode returns the selected per-session sandbox mode override
-// from one session state snapshot.
+// CurrentSandboxMode returns the legacy raw sandbox mode value from session
+// state. New code should prefer CurrentSessionMode.
 func CurrentSandboxMode(state map[string]any) string {
 	if state == nil {
 		return ""
@@ -207,14 +219,27 @@ func CurrentSandboxMode(state map[string]any) string {
 	return strings.TrimSpace(value)
 }
 
-func sandboxModePolicyOverride(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "auto":
-		return ""
-	case "default":
+// CurrentSessionMode returns the normalized per-session execution mode. It
+// reads the new dedicated session-mode key first and falls back to the legacy
+// sandbox-mode key for migration compatibility.
+func CurrentSessionMode(state map[string]any) string {
+	if state == nil {
 		return "default"
+	}
+	if value, _ := state[StateCurrentSessionMode].(string); strings.TrimSpace(value) != "" {
+		return normalizeSessionMode(value)
+	}
+	return normalizeSessionMode(CurrentSandboxMode(state))
+}
+
+func normalizeSessionMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "plan":
+		return "plan"
 	case "full_control", "full_access":
 		return "full_access"
+	case "", "auto", "default":
+		return "default"
 	default:
 		return strings.TrimSpace(mode)
 	}

@@ -7,6 +7,7 @@ import (
 
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 )
 
 func TestTurnHandleReplaysEventsAfterCursor(t *testing.T) {
@@ -73,6 +74,52 @@ func TestTurnHandleCanonicalizesAssistantEventAndUsage(t *testing.T) {
 	}
 	if replayed[0].Event.Usage == nil || replayed[0].Event.Usage.PromptTokens != 12 || replayed[0].Event.Usage.CompletionTokens != 5 || replayed[0].Event.Usage.TotalTokens != 17 {
 		t.Fatalf("usage = %+v", replayed[0].Event.Usage)
+	}
+	if replayed[0].Event.Narrative == nil {
+		t.Fatal("event narrative = nil, want canonical narrative payload")
+	}
+	if replayed[0].Event.Narrative.Role != NarrativeRoleAssistant {
+		t.Fatalf("event narrative role = %q, want %q", replayed[0].Event.Narrative.Role, NarrativeRoleAssistant)
+	}
+	if replayed[0].Event.Narrative.Text != "done" {
+		t.Fatalf("event narrative text = %q, want %q", replayed[0].Event.Narrative.Text, "done")
+	}
+}
+
+func TestTurnHandleCanonicalizesApprovalEvent(t *testing.T) {
+	t.Parallel()
+
+	handle := newTurnHandle(turnHandleConfig{
+		handleID: "h1",
+		runID:    "run-1",
+		turnID:   "turn-1",
+		sessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		createdAt: time.Unix(100, 0),
+	})
+	wait := handle.publishApproval(&sdkruntime.ApprovalRequest{
+		Tool: sdktool.Definition{Name: "bash"},
+	})
+	if wait == nil {
+		t.Fatal("publishApproval() returned nil wait channel")
+	}
+
+	replayed, _, err := handle.EventsAfter("")
+	if err != nil {
+		t.Fatalf("EventsAfter() error = %v", err)
+	}
+	if len(replayed) != 1 {
+		t.Fatalf("EventsAfter() len = %d, want 1", len(replayed))
+	}
+	if replayed[0].Event.ApprovalPayload == nil {
+		t.Fatal("approval payload = nil, want canonical approval payload")
+	}
+	if replayed[0].Event.ApprovalPayload.ToolName != "bash" {
+		t.Fatalf("approval payload tool name = %q, want %q", replayed[0].Event.ApprovalPayload.ToolName, "bash")
+	}
+	if replayed[0].Event.Origin == nil || replayed[0].Event.Origin.Scope != EventScopeMain || replayed[0].Event.Origin.ScopeID != "s1" {
+		t.Fatalf("approval origin = %+v, want main session scope", replayed[0].Event.Origin)
 	}
 }
 

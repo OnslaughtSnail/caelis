@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -22,29 +23,38 @@ type GatewayDriver struct {
 	bindingKey         string
 	defaultModelText   string
 	modelText          string
-	defaultSandboxMode string
-	sandboxMode        string
+	defaultSessionMode string
+	sessionMode        string
+	defaultSandboxType string
+	sandboxType        string
 }
 
-func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, sessionID string, bindingKey string, modelText string) (*GatewayDriver, error) {
+func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSessionID string, bindingKey string, modelText string) (*GatewayDriver, error) {
 	if stack == nil {
 		return nil, fmt.Errorf("tui/runtime: stack is required")
 	}
 	key := firstNonEmpty(strings.TrimSpace(bindingKey), "cli-tui")
-	session, err := stack.StartSession(ctx, strings.TrimSpace(sessionID), key)
-	if err != nil {
-		return nil, err
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return &GatewayDriver{
+	driver := &GatewayDriver{
 		stack:              stack,
-		session:            session,
-		hasSession:         true,
 		bindingKey:         key,
 		defaultModelText:   strings.TrimSpace(modelText),
 		modelText:          strings.TrimSpace(modelText),
-		defaultSandboxMode: "default",
-		sandboxMode:        "default",
-	}, nil
+		defaultSessionMode: "default",
+		sessionMode:        "default",
+		defaultSandboxType: firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
+		sandboxType:        firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
+	}
+	session, err := driver.stack.StartSession(ctx, strings.TrimSpace(preferredSessionID), driver.bindingKey)
+	if err != nil {
+		return nil, err
+	}
+	driver.session = session
+	driver.hasSession = true
+	driver.refreshSessionDisplay(ctx, session)
+	return driver, nil
 }
 
 func (d *GatewayDriver) WorkspaceDir() string {
@@ -52,6 +62,25 @@ func (d *GatewayDriver) WorkspaceDir() string {
 		return ""
 	}
 	return strings.TrimSpace(d.stack.Workspace.CWD)
+}
+
+func (d *GatewayDriver) ensureSession(ctx context.Context) (sdksession.Session, error) {
+	if session, ok := d.currentSession(); ok {
+		return session, nil
+	}
+	if d == nil || d.stack == nil {
+		return sdksession.Session{}, fmt.Errorf("tui/runtime: stack is unavailable")
+	}
+	session, err := d.stack.StartSession(ctx, "", d.bindingKey)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	d.mu.Lock()
+	d.session = session
+	d.hasSession = true
+	d.mu.Unlock()
+	d.refreshSessionDisplay(ctx, session)
+	return session, nil
 }
 
 func (d *GatewayDriver) currentSession() (sdksession.Session, bool) {
@@ -64,41 +93,58 @@ func (d *GatewayDriver) currentSession() (sdksession.Session, bool) {
 }
 
 func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
-	session, ok := d.currentSession()
-	if !ok {
-		return StatusSnapshot{}, fmt.Errorf("tui/runtime: no active session")
-	}
-	modelText, sandboxMode := d.defaultDisplays()
+	modelText, sessionMode, sandboxType := d.defaultDisplays()
 	if d.stack != nil {
 		if alias := strings.TrimSpace(d.stack.DefaultModelAlias()); alias != "" {
 			modelText = alias
 		}
 	}
+	sandboxStatus := gatewayapp.SandboxStatus{}
 	if d.stack != nil {
+		sandboxStatus = d.stack.SandboxStatus()
+	}
+	session, ok := d.currentSession()
+	if ok && d.stack != nil {
 		if state, err := d.stack.SessionRuntimeState(context.Background(), session.SessionRef); err == nil {
 			if strings.TrimSpace(state.ModelAlias) != "" {
 				modelText = strings.TrimSpace(state.ModelAlias)
 			}
-			if strings.TrimSpace(state.SandboxMode) != "" {
-				sandboxMode = strings.TrimSpace(state.SandboxMode)
+			if strings.TrimSpace(state.SessionMode) != "" {
+				sessionMode = strings.TrimSpace(state.SessionMode)
 			}
 		}
 	}
+	sandboxType = firstNonEmpty(sandboxStatus.ResolvedBackend, sandboxStatus.RequestedBackend, sandboxType)
+	route := sandboxStatus.Route
+	securitySummary := sandboxStatus.SecuritySummary
+	if strings.EqualFold(strings.TrimSpace(sessionMode), "full_access") {
+		route = "host"
+		securitySummary = "full access"
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	sessionID := ""
+	if ok {
+		sessionID = session.SessionID
+	}
 	return StatusSnapshot{
-		SessionID: session.SessionID,
-		Workspace: strings.TrimSpace(d.stack.Workspace.CWD),
-		Model:     firstNonEmpty(modelText, d.modelText),
-		ModeLabel: firstNonEmpty(sandboxMode, d.sandboxMode),
-		Surface:   d.bindingKey,
+		SessionID:       sessionID,
+		Workspace:       strings.TrimSpace(d.stack.Workspace.CWD),
+		Model:           firstNonEmpty(modelText, d.modelText),
+		ModeLabel:       firstNonEmpty(sessionMode, d.sessionMode),
+		SessionMode:     firstNonEmpty(sessionMode, d.sessionMode),
+		SandboxType:     firstNonEmpty(sandboxType, d.sandboxType),
+		Route:           route,
+		FallbackReason:  sandboxStatus.FallbackReason,
+		SecuritySummary: securitySummary,
+		Surface:         d.bindingKey,
 	}, nil
 }
 
 func (d *GatewayDriver) Submit(ctx context.Context, submission Submission) (Turn, error) {
-	session, ok := d.currentSession()
-	if !ok {
-		return nil, fmt.Errorf("tui/runtime: no active session")
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return nil, err
 	}
 	result, err := d.stack.Gateway.BeginTurn(ctx, appgateway.BeginTurnRequest{
 		SessionRef: session.SessionRef,
@@ -222,6 +268,17 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 	if !ok {
 		return StatusSnapshot{}, fmt.Errorf("tui/runtime: unknown provider %q", cfg.Provider)
 	}
+	if defaults, err := connectDefaultsForConfig(ctx, cfg); err == nil {
+		if cfg.ContextWindowTokens <= 0 {
+			cfg.ContextWindowTokens = defaults.ContextWindow
+		}
+		if cfg.MaxOutputTokens <= 0 {
+			cfg.MaxOutputTokens = defaults.MaxOutput
+		}
+		if len(cfg.ReasoningLevels) == 0 {
+			cfg.ReasoningLevels = defaults.ReasoningLevels
+		}
+	}
 	baseURL := strings.TrimSpace(cfg.BaseURL)
 	if baseURL == "" {
 		baseURL = tpl.defaultBaseURL
@@ -271,29 +328,36 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 }
 
 func (d *GatewayDriver) UseModel(ctx context.Context, model string) (StatusSnapshot, error) {
-	session, ok := d.currentSession()
-	if !ok {
-		return StatusSnapshot{}, fmt.Errorf("tui/runtime: no active session")
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return StatusSnapshot{}, err
 	}
-	trimmed := strings.TrimSpace(model)
-	if trimmed == "" {
+	alias, err := d.resolveStoredModelAlias(ctx, strings.TrimSpace(model))
+	if err != nil {
+		return StatusSnapshot{}, err
+	}
+	if alias == "" {
 		return StatusSnapshot{}, fmt.Errorf("tui/runtime: model alias is required")
 	}
-	if err := d.stack.UseModel(ctx, session.SessionRef, trimmed); err != nil {
+	if err := d.stack.UseModel(ctx, session.SessionRef, alias); err != nil {
 		return StatusSnapshot{}, err
 	}
 	d.mu.Lock()
-	d.modelText = trimmed
+	d.modelText = alias
 	d.mu.Unlock()
 	return d.Status(ctx)
 }
 
 func (d *GatewayDriver) DeleteModel(ctx context.Context, alias string) error {
-	session, ok := d.currentSession()
-	if !ok {
-		return fmt.Errorf("tui/runtime: no active session")
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return err
 	}
-	if err := d.stack.DeleteModel(ctx, session.SessionRef, alias); err != nil {
+	resolved, err := d.resolveStoredModelAlias(ctx, strings.TrimSpace(alias))
+	if err != nil {
+		return err
+	}
+	if err := d.stack.DeleteModel(ctx, session.SessionRef, resolved); err != nil {
 		return err
 	}
 	d.mu.Lock()
@@ -303,17 +367,43 @@ func (d *GatewayDriver) DeleteModel(ctx context.Context, alias string) error {
 	return nil
 }
 
-func (d *GatewayDriver) SetSandboxMode(ctx context.Context, mode string) (StatusSnapshot, error) {
-	session, ok := d.currentSession()
-	if !ok {
-		return StatusSnapshot{}, fmt.Errorf("tui/runtime: no active session")
+func (d *GatewayDriver) CycleSessionMode(ctx context.Context) (StatusSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return StatusSnapshot{}, err
 	}
-	normalized, err := d.stack.SetSandboxMode(ctx, session.SessionRef, mode)
+	normalized, err := d.stack.CycleSessionMode(ctx, session.SessionRef)
 	if err != nil {
 		return StatusSnapshot{}, err
 	}
 	d.mu.Lock()
-	d.sandboxMode = normalized
+	d.sessionMode = normalized
+	d.mu.Unlock()
+	return d.Status(ctx)
+}
+
+func (d *GatewayDriver) SetSandboxBackend(ctx context.Context, backend string) (StatusSnapshot, error) {
+	status, err := d.stack.SetSandboxBackend(ctx, backend)
+	if err != nil {
+		return StatusSnapshot{}, err
+	}
+	d.mu.Lock()
+	d.sandboxType = firstNonEmpty(status.ResolvedBackend, status.RequestedBackend, d.sandboxType)
+	d.mu.Unlock()
+	return d.Status(ctx)
+}
+
+func (d *GatewayDriver) SetSandboxMode(ctx context.Context, mode string) (StatusSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return StatusSnapshot{}, err
+	}
+	normalized, err := d.stack.SetSessionMode(ctx, session.SessionRef, mode)
+	if err != nil {
+		return StatusSnapshot{}, err
+	}
+	d.mu.Lock()
+	d.sessionMode = normalized
 	d.mu.Unlock()
 	return d.Status(ctx)
 }
@@ -376,15 +466,15 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 	case "model use", "model del":
 		return d.completeModelAliases(ctx, query, limit)
 	case "connect":
-		return completeConnectArgs(ctx, "connect", query, limit)
+		return completeConnectArgs(ctx, d, "connect", query, limit)
 	}
 	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(command)), "connect-") {
-		return completeConnectArgs(ctx, strings.TrimSpace(strings.ToLower(command)), query, limit)
+		return completeConnectArgs(ctx, d, strings.TrimSpace(strings.ToLower(command)), query, limit)
 	}
 	candidates := defaultSlashArgCandidates(strings.TrimSpace(strings.ToLower(command)))
 	out := make([]SlashArgCandidate, 0, min(limit, len(candidates)))
 	for _, candidate := range candidates {
-		if query != "" && !strings.Contains(strings.ToLower(candidate.Value+" "+candidate.Display+" "+candidate.Detail), query) {
+		if query != "" && !hasSlashArgPrefix(query, candidate.Value, candidate.Display, candidate.Detail) {
 			continue
 		}
 		out = append(out, candidate)
@@ -396,11 +486,11 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 }
 
 func (d *GatewayDriver) completeModelAliases(ctx context.Context, query string, limit int) ([]SlashArgCandidate, error) {
-	session, ok := d.currentSession()
-	if !ok {
-		return nil, nil
+	ref := sdksession.SessionRef{}
+	if session, ok := d.currentSession(); ok {
+		ref = session.SessionRef
 	}
-	aliases, err := d.stack.ListModelAliases(ctx, session.SessionRef)
+	aliases, err := d.stack.ListModelAliases(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -410,7 +500,7 @@ func (d *GatewayDriver) completeModelAliases(ctx context.Context, query string, 
 		if display == "" {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(display), query) {
+		if query != "" && !hasSlashArgPrefix(query, display) {
 			continue
 		}
 		out = append(out, SlashArgCandidate{
@@ -423,6 +513,63 @@ func (d *GatewayDriver) completeModelAliases(ctx context.Context, query string, 
 		}
 	}
 	return out, nil
+}
+
+func (d *GatewayDriver) resolveStoredModelAlias(ctx context.Context, input string) (string, error) {
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "" {
+		return "", fmt.Errorf("tui/runtime: model alias is required")
+	}
+	ref := sdksession.SessionRef{}
+	if session, ok := d.currentSession(); ok {
+		ref = session.SessionRef
+	}
+	aliases, err := d.stack.ListModelAliases(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	var exact string
+	prefixMatches := make([]string, 0, 2)
+	for _, alias := range aliases {
+		normalized := strings.ToLower(strings.TrimSpace(alias))
+		if normalized == "" {
+			continue
+		}
+		if normalized == input {
+			exact = strings.TrimSpace(alias)
+			break
+		}
+		if strings.HasPrefix(normalized, input) {
+			prefixMatches = append(prefixMatches, strings.TrimSpace(alias))
+		}
+	}
+	if exact != "" {
+		return exact, nil
+	}
+	switch len(prefixMatches) {
+	case 1:
+		return prefixMatches[0], nil
+	case 0:
+		return "", fmt.Errorf("tui/runtime: unknown model alias %q", input)
+	default:
+		return "", fmt.Errorf("tui/runtime: ambiguous model alias %q", input)
+	}
+}
+
+func hasSlashArgPrefix(query string, values ...string) bool {
+	if query == "" {
+		return true
+	}
+	for _, value := range values {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized == "" {
+			continue
+		}
+		if strings.HasPrefix(normalized, query) {
+			return true
+		}
+	}
+	return false
 }
 
 type gatewayTurn struct {
@@ -445,11 +592,7 @@ func (t gatewayTurn) Close() error { return t.handle.Close() }
 func defaultSlashArgCandidates(command string) []SlashArgCandidate {
 	switch command {
 	case "sandbox":
-		return []SlashArgCandidate{
-			{Value: "auto", Display: "auto", Detail: "Follow runtime default"},
-			{Value: "full_control", Display: "full_control", Detail: "No sandbox restriction"},
-			{Value: "default", Display: "default", Detail: "Project default sandbox mode"},
-		}
+		return sandboxCandidates()
 	case "model":
 		return []SlashArgCandidate{
 			{Value: "use", Display: "use", Detail: "Switch current model alias"},
@@ -457,6 +600,24 @@ func defaultSlashArgCandidates(command string) []SlashArgCandidate {
 		}
 	default:
 		return nil
+	}
+}
+
+func sandboxCandidates() []SlashArgCandidate {
+	switch runtime.GOOS {
+	case "darwin":
+		return []SlashArgCandidate{
+			{Value: "auto", Display: "auto", Detail: "Use the default macOS sandbox backend"},
+			{Value: "seatbelt", Display: "seatbelt", Detail: "Use sandbox-exec seatbelt isolation"},
+		}
+	case "linux":
+		return []SlashArgCandidate{
+			{Value: "auto", Display: "auto", Detail: "Prefer bwrap, then fall back to landlock"},
+			{Value: "bwrap", Display: "bwrap", Detail: "Use bubblewrap container isolation"},
+			{Value: "landlock", Display: "landlock", Detail: "Use the landlock helper sandbox"},
+		}
+	default:
+		return []SlashArgCandidate{{Value: "auto", Display: "auto", Detail: "Use the default sandbox backend"}}
 	}
 }
 
@@ -487,17 +648,17 @@ func min(a, b int) int {
 	return b
 }
 
-func (d *GatewayDriver) defaultDisplays() (string, string) {
+func (d *GatewayDriver) defaultDisplays() (string, string, string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.defaultModelText, d.defaultSandboxMode
+	return d.defaultModelText, d.defaultSessionMode, d.defaultSandboxType
 }
 
 func (d *GatewayDriver) refreshSessionDisplay(ctx context.Context, session sdksession.Session) {
 	if d == nil || d.stack == nil {
 		return
 	}
-	modelText, sandboxMode := d.defaultDisplays()
+	modelText, sessionMode, sandboxType := d.defaultDisplays()
 	if alias := strings.TrimSpace(d.stack.DefaultModelAlias()); alias != "" {
 		modelText = alias
 	}
@@ -505,13 +666,16 @@ func (d *GatewayDriver) refreshSessionDisplay(ctx context.Context, session sdkse
 		if strings.TrimSpace(state.ModelAlias) != "" {
 			modelText = strings.TrimSpace(state.ModelAlias)
 		}
-		if strings.TrimSpace(state.SandboxMode) != "" {
-			sandboxMode = strings.TrimSpace(state.SandboxMode)
+		if strings.TrimSpace(state.SessionMode) != "" {
+			sessionMode = strings.TrimSpace(state.SessionMode)
 		}
 	}
+	sandbox := d.stack.SandboxStatus()
+	sandboxType = firstNonEmpty(sandbox.ResolvedBackend, sandbox.RequestedBackend, sandboxType)
 	d.mu.Lock()
 	d.modelText = modelText
-	d.sandboxMode = sandboxMode
+	d.sessionMode = sessionMode
+	d.sandboxType = sandboxType
 	d.mu.Unlock()
 }
 

@@ -54,11 +54,12 @@ func (t *ListTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if pathArg == "" {
 		pathArg = "."
 	}
-	target, err := normalizePathWithFS(t.runtime.FileSystem(), pathArg)
+	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
+	target, err := normalizePathWithFS(fsys, pathArg)
 	if err != nil {
 		return sdktool.Result{}, err
 	}
-	items, err := t.runtime.FileSystem().ReadDir(target)
+	items, err := fsys.ReadDir(target)
 	if err != nil {
 		return sdktool.Result{}, err
 	}

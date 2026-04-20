@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"maps"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -132,3 +134,94 @@ func TestEffectiveConstraintsMergesLegacyFields(t *testing.T) {
 		t.Fatalf("PathRules = %+v, want normalized workspace rule", got.PathRules)
 	}
 }
+
+func TestNormalizeConfigTreatsAutoBackendAsUnset(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []Backend{"", "auto", "default"} {
+		cfg := NormalizeConfig(Config{
+			RequestedBackend: raw,
+		})
+		if cfg.RequestedBackend != "" {
+			t.Fatalf("NormalizeConfig(%q).RequestedBackend = %q, want empty", raw, cfg.RequestedBackend)
+		}
+	}
+
+	cfg := NormalizeConfig(Config{
+		RequestedBackend: BackendSeatbelt,
+	})
+	if cfg.RequestedBackend != BackendSeatbelt {
+		t.Fatalf("NormalizeConfig(seatbelt).RequestedBackend = %q, want %q", cfg.RequestedBackend, BackendSeatbelt)
+	}
+}
+
+func TestNewAutoBackendPrefersSandboxCandidate(t *testing.T) {
+	t.Parallel()
+
+	wantCandidates, err := candidateBackends("")
+	if err != nil {
+		t.Fatalf("candidateBackends(\"\") error = %v", err)
+	}
+	if len(wantCandidates) == 0 {
+		t.Skip("no auto backend candidates for current platform")
+	}
+	want := wantCandidates[0]
+
+	backendFactoriesMu.Lock()
+	original := maps.Clone(backendFactories)
+	backendFactories = map[Backend]BackendFactory{
+		BackendHost: fakeBackendFactory{backend: BackendHost},
+		want:        fakeBackendFactory{backend: want},
+	}
+	backendFactoriesMu.Unlock()
+	t.Cleanup(func() {
+		backendFactoriesMu.Lock()
+		backendFactories = original
+		backendFactoriesMu.Unlock()
+	})
+
+	rt, err := New(Config{RequestedBackend: "auto"})
+	if err != nil {
+		t.Fatalf("New(auto) error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = rt.Close()
+	})
+
+	status := rt.Status()
+	if status.ResolvedBackend != want {
+		t.Fatalf("Status().ResolvedBackend = %q, want %q on %s", status.ResolvedBackend, want, runtime.GOOS)
+	}
+	if status.FallbackToHost {
+		t.Fatalf("Status().FallbackToHost = true, want false for auto backend")
+	}
+}
+
+type fakeBackendFactory struct {
+	backend Backend
+}
+
+func (f fakeBackendFactory) Backend() Backend { return f.backend }
+
+func (f fakeBackendFactory) Build(Config) (Runtime, error) {
+	return fakeRuntime{backend: f.backend}, nil
+}
+
+type fakeRuntime struct {
+	backend Backend
+}
+
+func (r fakeRuntime) Describe() Descriptor                              { return Descriptor{Backend: r.backend} }
+func (r fakeRuntime) FileSystem() FileSystem                            { return nil }
+func (r fakeRuntime) FileSystemFor(Constraints) FileSystem              { return nil }
+func (r fakeRuntime) Run(context.Context, CommandRequest) (CommandResult, error) {
+	return CommandResult{Backend: r.backend}, nil
+}
+func (r fakeRuntime) Start(context.Context, CommandRequest) (Session, error) { return nil, nil }
+func (r fakeRuntime) OpenSession(string) (Session, error)                    { return nil, nil }
+func (r fakeRuntime) OpenSessionRef(SessionRef) (Session, error)             { return nil, nil }
+func (r fakeRuntime) SupportedBackends() []Backend                           { return []Backend{r.backend} }
+func (r fakeRuntime) Status() Status {
+	return Status{RequestedBackend: r.backend, ResolvedBackend: r.backend}
+}
+func (r fakeRuntime) Close() error { return nil }
