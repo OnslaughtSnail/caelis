@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"time"
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
@@ -30,24 +31,46 @@ type Submission struct {
 }
 
 type StatusSnapshot struct {
-	SessionID       string
-	Workspace       string
-	Model           string
-	ModeLabel       string
-	SessionMode     string
-	SandboxType     string
-	Route           string
-	FallbackReason  string
-	SecuritySummary string
-	Surface         string
-	PromptTokens    int
-	Running         bool
+	SessionID               string
+	Workspace               string
+	StoreDir                string
+	Model                   string
+	Provider                string
+	ModelName               string
+	ModeLabel               string
+	SessionMode             string
+	SandboxType             string
+	SandboxRequestedBackend string
+	SandboxResolvedBackend  string
+	Route                   string
+	FallbackReason          string
+	SecuritySummary         string
+	MissingAPIKey           bool
+	HostExecution           bool
+	FullAccessMode          bool
+	Surface                 string
+	PromptTokens            int
+	CompletionTokens        int
+	TotalTokens             int
+	ContextWindowTokens     int
+	Running                 bool
 }
 
 type ResumeCandidate struct {
 	SessionID string
+	Title     string
 	Prompt    string
+	Model     string
+	Workspace string
 	Age       string
+	UpdatedAt time.Time
+}
+
+type CompletionCandidate struct {
+	Value   string
+	Display string
+	Detail  string
+	Path    string
 }
 
 type SlashArgCandidate struct {
@@ -55,6 +78,30 @@ type SlashArgCandidate struct {
 	Display string
 	Detail  string
 	NoAuth  bool
+}
+
+type AgentCandidate struct {
+	Name        string
+	Description string
+}
+
+type AgentParticipantSnapshot struct {
+	ID        string
+	Label     string
+	AgentName string
+	Kind      string
+	Role      string
+	SessionID string
+}
+
+type AgentStatusSnapshot struct {
+	SessionID       string
+	ControllerKind  string
+	ControllerLabel string
+	ControllerEpoch string
+	HasActiveTurn   bool
+	AvailableAgents []AgentCandidate
+	Participants    []AgentParticipantSnapshot
 }
 
 type ConnectConfig struct {
@@ -102,10 +149,15 @@ type Driver interface {
 	CycleSessionMode(context.Context) (StatusSnapshot, error)
 	SetSandboxBackend(context.Context, string) (StatusSnapshot, error)
 	SetSandboxMode(context.Context, string) (StatusSnapshot, error)
+	ListAgents(context.Context, int) ([]AgentCandidate, error)
+	AgentStatus(context.Context) (AgentStatusSnapshot, error)
+	AddAgent(context.Context, string) (AgentStatusSnapshot, error)
+	RemoveAgent(context.Context, string) (AgentStatusSnapshot, error)
+	HandoffAgent(context.Context, string) (AgentStatusSnapshot, error)
 
-	CompleteMention(context.Context, string, int) ([]string, error)
-	CompleteFile(context.Context, string, int) ([]string, error)
-	CompleteSkill(context.Context, string, int) ([]string, error)
+	CompleteMention(context.Context, string, int) ([]CompletionCandidate, error)
+	CompleteFile(context.Context, string, int) ([]CompletionCandidate, error)
+	CompleteSkill(context.Context, string, int) ([]CompletionCandidate, error)
 	CompleteResume(context.Context, string, int) ([]ResumeCandidate, error)
 	CompleteSlashArg(context.Context, string, string, int) ([]SlashArgCandidate, error)
 }

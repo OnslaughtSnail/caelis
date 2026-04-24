@@ -95,16 +95,23 @@ func (s *appConfigStore) Save(doc AppConfig) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	doc.Models.Configs = dedupeModelConfigs(doc.Models.Configs)
+	doc.Models.Configs = dedupeModelConfigsForSave(doc.Models.Configs)
 	doc.Sandbox = normalizeSandboxConfig(doc.Sandbox)
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("gatewayapp: encode app config: %w", err)
 	}
-	if err := os.WriteFile(s.path, data, 0o644); err != nil {
+	if err := os.WriteFile(s.path, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(s.path, 0o600); err != nil {
 		return err
 	}
 	return nil
@@ -118,6 +125,27 @@ func dedupeModelConfigs(configs []ModelConfig) []ModelConfig {
 	seen := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
 		cfg = normalizeModelConfig(cfg)
+		if cfg.Alias == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(cfg.Alias))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, cfg)
+	}
+	return out
+}
+
+func dedupeModelConfigsForSave(configs []ModelConfig) []ModelConfig {
+	if len(configs) == 0 {
+		return nil
+	}
+	out := make([]ModelConfig, 0, len(configs))
+	seen := make(map[string]struct{}, len(configs))
+	for _, cfg := range configs {
+		cfg = sanitizePersistedModelConfig(cfg)
 		if cfg.Alias == "" {
 			continue
 		}

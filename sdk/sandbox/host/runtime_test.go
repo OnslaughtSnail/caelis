@@ -85,14 +85,7 @@ func TestRuntimeSessionReadOutputWithCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(30 * time.Millisecond)
-	stdout1, _, cursor1, _, err := session.ReadOutput(context.Background(), 0, 0)
-	if err != nil {
-		t.Fatalf("ReadOutput(0,0) error = %v", err)
-	}
-	if got := string(stdout1); !strings.Contains(got, "one") {
-		t.Fatalf("stdout1 = %q, want one", got)
-	}
+	_, cursor1 := waitForStdoutContains(t, session, 0, "one")
 	_, err = session.Wait(context.Background(), 500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("Wait() error = %v", err)
@@ -103,6 +96,25 @@ func TestRuntimeSessionReadOutputWithCursor(t *testing.T) {
 	}
 	if got := string(stdout2); !strings.Contains(got, "two") {
 		t.Fatalf("stdout2 = %q, want two", got)
+	}
+}
+
+func waitForStdoutContains(t *testing.T, session sdksandbox.Session, marker int64, want string) ([]byte, int64) {
+	t.Helper()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		stdout, _, cursor, _, err := session.ReadOutput(context.Background(), marker, 0)
+		if err != nil {
+			t.Fatalf("ReadOutput(%d,0) error = %v", marker, err)
+		}
+		if strings.Contains(string(stdout), want) {
+			return stdout, cursor
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stdout = %q, want %s", string(stdout), want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

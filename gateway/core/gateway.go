@@ -273,6 +273,58 @@ func (g *Gateway) HandoffController(ctx context.Context, req HandoffControllerRe
 	return session, nil
 }
 
+func (g *Gateway) AttachParticipant(ctx context.Context, req AttachParticipantRequest) (sdksession.Session, error) {
+	if g.control == nil {
+		return sdksession.Session{}, &Error{
+			Kind:        KindUnsupported,
+			Code:        CodeControlPlaneUnsupported,
+			UserVisible: true,
+			Message:     "gateway: control plane is not available",
+		}
+	}
+	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	session, err := g.control.AttachACPParticipant(ctx, sdkruntime.AttachACPParticipantRequest{
+		SessionRef: ref,
+		Agent:      strings.TrimSpace(req.Agent),
+		Role:       req.Role,
+		Source:     strings.TrimSpace(req.Source),
+		Label:      strings.TrimSpace(req.Label),
+	})
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	g.bind(req.BindingKey, session.SessionRef, BindingDescriptor{})
+	return session, nil
+}
+
+func (g *Gateway) DetachParticipant(ctx context.Context, req DetachParticipantRequest) (sdksession.Session, error) {
+	if g.control == nil {
+		return sdksession.Session{}, &Error{
+			Kind:        KindUnsupported,
+			Code:        CodeControlPlaneUnsupported,
+			UserVisible: true,
+			Message:     "gateway: control plane is not available",
+		}
+	}
+	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	session, err := g.control.DetachACPParticipant(ctx, sdkruntime.DetachACPParticipantRequest{
+		SessionRef:    ref,
+		ParticipantID: strings.TrimSpace(req.ParticipantID),
+		Source:        strings.TrimSpace(req.Source),
+	})
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	g.bind(req.BindingKey, session.SessionRef, BindingDescriptor{})
+	return session, nil
+}
+
 func (g *Gateway) ControlPlaneState(ctx context.Context, req ControlPlaneStateRequest) (ControlPlaneState, error) {
 	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
 	if err != nil {
@@ -317,7 +369,10 @@ func (g *Gateway) ReplayEvents(ctx context.Context, req ReplayEventsRequest) (Re
 		return ReplayEventsResult{}, err
 	}
 	projected := projectSessionEvents(ref, events)
-	projected = replayAfterCursor(projected, req.Cursor, req.Limit)
+	projected, err = replayAfterCursor(projected, req.Cursor, req.Limit)
+	if err != nil {
+		return ReplayEventsResult{}, err
+	}
 	out := ReplayEventsResult{
 		SessionRef:    ref,
 		Events:        projected,
@@ -750,6 +805,59 @@ func (g *Gateway) ActiveCounts() (int, int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return len(g.active), len(g.bindings)
+}
+
+func (g *Gateway) ActiveTurns() []ActiveTurnState {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]ActiveTurnState, 0, len(g.active))
+	for sessionID, handle := range g.active {
+		if handle == nil {
+			continue
+		}
+		ref := handle.SessionRef()
+		if strings.TrimSpace(ref.SessionID) == "" {
+			ref.SessionID = strings.TrimSpace(sessionID)
+		}
+		out = append(out, ActiveTurnState{
+			SessionRef: ref,
+			HandleID:   handle.HandleID(),
+			RunID:      handle.RunID(),
+			TurnID:     handle.TurnID(),
+			StartedAt:  handle.CreatedAt(),
+		})
+	}
+	return out
+}
+
+func (g *Gateway) ActiveTurn(sessionID string) (ActiveTurnState, bool) {
+	if g == nil {
+		return ActiveTurnState{}, false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ActiveTurnState{}, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	handle := g.active[sessionID]
+	if handle == nil {
+		return ActiveTurnState{}, false
+	}
+	ref := handle.SessionRef()
+	if strings.TrimSpace(ref.SessionID) == "" {
+		ref.SessionID = sessionID
+	}
+	return ActiveTurnState{
+		SessionRef: ref,
+		HandleID:   handle.HandleID(),
+		RunID:      handle.RunID(),
+		TurnID:     handle.TurnID(),
+		StartedAt:  handle.CreatedAt(),
+	}, true
 }
 
 func (g *Gateway) CancelActiveTurns() {

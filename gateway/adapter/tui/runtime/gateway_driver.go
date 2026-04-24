@@ -3,7 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -122,23 +122,78 @@ func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 		securitySummary = "full access"
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	sessionID := ""
 	if ok {
 		sessionID = session.SessionID
 	}
-	return StatusSnapshot{
-		SessionID:       sessionID,
-		Workspace:       strings.TrimSpace(d.stack.Workspace.CWD),
-		Model:           firstNonEmpty(modelText, d.modelText),
-		ModeLabel:       firstNonEmpty(sessionMode, d.sessionMode),
-		SessionMode:     firstNonEmpty(sessionMode, d.sessionMode),
-		SandboxType:     firstNonEmpty(sandboxType, d.sandboxType),
-		Route:           route,
-		FallbackReason:  sandboxStatus.FallbackReason,
-		SecuritySummary: securitySummary,
-		Surface:         d.bindingKey,
-	}, nil
+	liveModelText := d.modelText
+	liveSessionMode := d.sessionMode
+	liveSandboxType := d.sandboxType
+	bindingKey := d.bindingKey
+	d.mu.Unlock()
+
+	status := StatusSnapshot{
+		SessionID:               sessionID,
+		Workspace:               strings.TrimSpace(d.stack.Workspace.CWD),
+		Model:                   firstNonEmpty(modelText, liveModelText),
+		ModeLabel:               firstNonEmpty(sessionMode, liveSessionMode),
+		SessionMode:             firstNonEmpty(sessionMode, liveSessionMode),
+		SandboxType:             firstNonEmpty(sandboxType, liveSandboxType),
+		SandboxRequestedBackend: firstNonEmpty(sandboxStatus.RequestedBackend, "auto"),
+		SandboxResolvedBackend:  firstNonEmpty(sandboxStatus.ResolvedBackend, sandboxStatus.RequestedBackend, liveSandboxType),
+		Route:                   route,
+		FallbackReason:          sandboxStatus.FallbackReason,
+		SecuritySummary:         securitySummary,
+		HostExecution:           strings.EqualFold(strings.TrimSpace(route), "host"),
+		FullAccessMode:          strings.EqualFold(strings.TrimSpace(sessionMode), "full_access"),
+		Surface:                 bindingKey,
+	}
+	if d.stack != nil {
+		req := gatewayapp.DoctorRequest{}
+		if ok {
+			req.SessionRef = session.SessionRef
+		}
+		if report, err := d.stack.Doctor(context.Background(), req); err == nil {
+			status.StoreDir = strings.TrimSpace(report.StoreDir)
+			status.Provider = strings.TrimSpace(report.ActiveProvider)
+			status.ModelName = strings.TrimSpace(report.ActiveModel)
+			status.MissingAPIKey = report.MissingAPIKey
+			status.HostExecution = report.HostExecution
+			status.FullAccessMode = report.FullAccessMode
+			status.SandboxRequestedBackend = firstNonEmpty(strings.TrimSpace(report.SandboxRequestedBackend), status.SandboxRequestedBackend)
+			status.SandboxResolvedBackend = firstNonEmpty(strings.TrimSpace(report.SandboxResolvedBackend), status.SandboxResolvedBackend)
+			status.Route = firstNonEmpty(strings.TrimSpace(report.SandboxRoute), status.Route)
+			status.FallbackReason = firstNonEmpty(strings.TrimSpace(report.SandboxFallbackReason), status.FallbackReason)
+			status.SecuritySummary = firstNonEmpty(strings.TrimSpace(report.SandboxSecuritySummary), status.SecuritySummary)
+			if alias := strings.TrimSpace(report.ActiveModelAlias); alias != "" {
+				status.Model = alias
+			}
+			if mode := strings.TrimSpace(report.SessionMode); mode != "" {
+				status.ModeLabel = mode
+				status.SessionMode = mode
+			}
+			if id := strings.TrimSpace(report.SessionID); id != "" {
+				status.SessionID = id
+			}
+		}
+		if ok {
+			if usage, err := d.stack.SessionUsageSnapshot(context.Background(), session.SessionRef, status.Model); err == nil {
+				status.TotalTokens = usage.TotalTokens
+				status.ContextWindowTokens = usage.ContextWindowTokens
+			}
+		}
+	}
+	if status.TotalTokens > 0 {
+		status.PromptTokens = status.TotalTokens
+	}
+	if status.FullAccessMode {
+		status.HostExecution = true
+		status.Route = firstNonEmpty(strings.TrimSpace(status.Route), "host")
+		if strings.TrimSpace(status.Route) != "host" {
+			status.Route = "host"
+		}
+	}
+	return status, nil
 }
 
 func (d *GatewayDriver) Submit(ctx context.Context, submission Submission) (Turn, error) {
@@ -217,9 +272,9 @@ func (d *GatewayDriver) ResumeSession(ctx context.Context, sessionID string) (sd
 }
 
 func (d *GatewayDriver) ListSessions(ctx context.Context, limit int) ([]ResumeCandidate, error) {
-	if limit <= 0 {
-		limit = 20
-	}
+	limit = normalizeCompletionLimit(limit)
+	ctx, cancel := completionContext(ctx, resumeCompletionTimeout)
+	defer cancel()
 	result, err := d.stack.Gateway.ListSessions(ctx, appgateway.ListSessionsRequest{
 		AppName:      d.stack.AppName,
 		UserID:       d.stack.UserID,
@@ -231,11 +286,7 @@ func (d *GatewayDriver) ListSessions(ctx context.Context, limit int) ([]ResumeCa
 	}
 	out := make([]ResumeCandidate, 0, len(result.Sessions))
 	for _, session := range result.Sessions {
-		out = append(out, ResumeCandidate{
-			SessionID: session.SessionID,
-			Prompt:    strings.TrimSpace(session.Title),
-			Age:       humanAge(session.UpdatedAt),
-		})
+		out = append(out, enrichResumeCandidate(ctx, d.stack, session))
 	}
 	return out, nil
 }
@@ -266,7 +317,19 @@ func (d *GatewayDriver) Compact(ctx context.Context, note string) error {
 func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusSnapshot, error) {
 	tpl, ok := findProviderTemplate(cfg.Provider)
 	if !ok {
-		return StatusSnapshot{}, fmt.Errorf("tui/runtime: unknown provider %q", cfg.Provider)
+		return StatusSnapshot{}, fmt.Errorf("provider %q is not supported", strings.TrimSpace(cfg.Provider))
+	}
+	cfg.Provider = tpl.provider
+	cfg.Model = strings.TrimSpace(cfg.Model)
+	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
+	cfg.APIKey = strings.TrimSpace(cfg.APIKey)
+	cfg.TokenEnv = strings.TrimSpace(cfg.TokenEnv)
+	if env, ok := parseTokenEnvSpec(cfg.APIKey); ok {
+		cfg.TokenEnv = env
+		cfg.APIKey = ""
+	}
+	if err := validateConnectConfig(tpl, cfg); err != nil {
+		return StatusSnapshot{}, err
 	}
 	if defaults, err := connectDefaultsForConfig(ctx, cfg); err == nil {
 		if cfg.ContextWindowTokens <= 0 {
@@ -283,6 +346,15 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 	if baseURL == "" {
 		baseURL = tpl.defaultBaseURL
 	}
+	if tpl.provider == "codefree" {
+		if _, err := sdkproviders.CodeFreeEnsureAuth(ctx, sdkproviders.CodeFreeEnsureAuthOptions{
+			BaseURL:         baseURL,
+			OpenBrowser:     true,
+			CallbackTimeout: 5 * time.Minute,
+		}); err != nil {
+			return StatusSnapshot{}, err
+		}
+	}
 	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
 	if cfg.TimeoutSeconds <= 0 {
 		timeout = 60 * time.Second
@@ -297,12 +369,12 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 		defaultReasoningEffort = reasoningLevels[0]
 	}
 	alias, err := d.stack.Connect(gatewayapp.ModelConfig{
-		Provider:               strings.TrimSpace(tpl.provider),
+		Provider:               strings.TrimSpace(cfg.Provider),
 		API:                    tpl.api,
-		Model:                  strings.TrimSpace(cfg.Model),
+		Model:                  cfg.Model,
 		BaseURL:                baseURL,
-		Token:                  strings.TrimSpace(cfg.APIKey),
-		TokenEnv:               strings.TrimSpace(cfg.TokenEnv),
+		Token:                  cfg.APIKey,
+		TokenEnv:               cfg.TokenEnv,
 		AuthType:               authType,
 		ContextWindowTokens:    cfg.ContextWindowTokens,
 		DefaultReasoningEffort: defaultReasoningEffort,
@@ -408,26 +480,18 @@ func (d *GatewayDriver) SetSandboxMode(ctx context.Context, mode string) (Status
 	return d.Status(ctx)
 }
 
-func (d *GatewayDriver) CompleteMention(context.Context, string, int) ([]string, error) {
-	return nil, nil
-}
-
-func (d *GatewayDriver) CompleteFile(_ context.Context, query string, limit int) ([]string, error) {
-	query = strings.TrimSpace(query)
-	root := d.WorkspaceDir()
-	if root == "" {
+func (d *GatewayDriver) ListAgents(_ context.Context, limit int) ([]AgentCandidate, error) {
+	limit = normalizeCompletionLimit(limit)
+	available := d.stack.ListACPAgents()
+	if len(available) == 0 {
 		return nil, nil
 	}
-	if limit <= 0 {
-		limit = 8
-	}
-	matches, err := filepath.Glob(filepath.Join(root, query+"*"))
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, min(limit, len(matches)))
-	for _, match := range matches {
-		out = append(out, match)
+	out := make([]AgentCandidate, 0, min(limit, len(available)))
+	for _, agent := range available {
+		out = append(out, AgentCandidate{
+			Name:        strings.TrimSpace(agent.Name),
+			Description: strings.TrimSpace(agent.Description),
+		})
 		if len(out) >= limit {
 			break
 		}
@@ -435,11 +499,154 @@ func (d *GatewayDriver) CompleteFile(_ context.Context, query string, limit int)
 	return out, nil
 }
 
-func (d *GatewayDriver) CompleteSkill(context.Context, string, int) ([]string, error) {
-	return nil, nil
+func (d *GatewayDriver) AgentStatus(ctx context.Context) (AgentStatusSnapshot, error) {
+	status := AgentStatusSnapshot{
+		AvailableAgents: d.agentCatalog(0),
+	}
+	session, ok := d.currentSession()
+	if !ok {
+		return status, nil
+	}
+	state, err := d.stack.Gateway.ControlPlaneState(ctx, appgateway.ControlPlaneStateRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	status.SessionID = session.SessionID
+	status.ControllerKind = string(state.Controller.Kind)
+	status.ControllerLabel = strings.TrimSpace(firstNonEmpty(state.Controller.Label, state.Controller.ControllerID, string(state.Controller.Kind)))
+	status.ControllerEpoch = strings.TrimSpace(state.Controller.EpochID)
+	status.HasActiveTurn = state.HasActiveTurn
+	status.Participants = make([]AgentParticipantSnapshot, 0, len(state.Participants))
+	for _, participant := range state.Participants {
+		status.Participants = append(status.Participants, AgentParticipantSnapshot{
+			ID:        strings.TrimSpace(participant.ID),
+			Label:     strings.TrimSpace(firstNonEmpty(participant.Label, participant.ID)),
+			AgentName: strings.TrimSpace(firstNonEmpty(participant.Label, participant.ID)),
+			Kind:      string(participant.Kind),
+			Role:      string(participant.Role),
+			SessionID: strings.TrimSpace(participant.SessionID),
+		})
+	}
+	return status, nil
+}
+
+func (d *GatewayDriver) AddAgent(ctx context.Context, target string) (AgentStatusSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	agent, err := d.resolveAgentName(target)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	if _, err := d.stack.Gateway.AttachParticipant(ctx, appgateway.AttachParticipantRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: d.bindingKey,
+		Agent:      agent,
+		Role:       sdksession.ParticipantRoleSidecar,
+		Source:     "tui_agent_add",
+		Label:      agent,
+	}); err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	return d.AgentStatus(ctx)
+}
+
+func (d *GatewayDriver) RemoveAgent(ctx context.Context, target string) (AgentStatusSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	participantID, err := d.resolveParticipantID(ctx, session.SessionRef, target)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	if _, err := d.stack.Gateway.DetachParticipant(ctx, appgateway.DetachParticipantRequest{
+		SessionRef:    session.SessionRef,
+		BindingKey:    d.bindingKey,
+		ParticipantID: participantID,
+		Source:        "tui_agent_remove",
+	}); err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	return d.AgentStatus(ctx)
+}
+
+func (d *GatewayDriver) HandoffAgent(ctx context.Context, target string) (AgentStatusSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	target = strings.TrimSpace(target)
+	req := appgateway.HandoffControllerRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: d.bindingKey,
+		Source:     "tui_agent_handoff",
+	}
+	switch strings.ToLower(target) {
+	case "", "main", "local", "kernel":
+		req.Kind = sdksession.ControllerKindKernel
+		req.Reason = "resume local control"
+	default:
+		agent, resolveErr := d.resolveAgentName(target)
+		if resolveErr != nil {
+			return AgentStatusSnapshot{}, resolveErr
+		}
+		req.Kind = sdksession.ControllerKindACP
+		req.Agent = agent
+		req.Reason = "handoff to agent"
+	}
+	if _, err := d.stack.Gateway.HandoffController(ctx, req); err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	return d.AgentStatus(ctx)
+}
+
+func (d *GatewayDriver) CompleteMention(context.Context, string, int) ([]CompletionCandidate, error) {
+	// TODO: wire this to a stable agent/participant registry once ACP/subagent
+	// mention targets are modeled outside transient runtime state.
+	return []CompletionCandidate{}, nil
+}
+
+func (d *GatewayDriver) CompleteFile(ctx context.Context, query string, limit int) ([]CompletionCandidate, error) {
+	return completeWorkspaceFiles(ctx, d.WorkspaceDir(), query, limit)
+}
+
+func (d *GatewayDriver) CompleteSkill(ctx context.Context, query string, limit int) ([]CompletionCandidate, error) {
+	limit = normalizeCompletionLimit(limit)
+	ctx, cancel := completionContext(ctx, skillCompletionTimeout)
+	defer cancel()
+
+	skills, err := gatewayapp.DiscoverSkillMeta(nil, d.WorkspaceDir())
+	if err != nil {
+		return nil, err
+	}
+	workspace := d.WorkspaceDir()
+	scored := make([]scoredCompletion, 0, len(skills))
+	for _, skill := range skills {
+		score, ok := scoreSkillMeta(query, skill, workspace)
+		if !ok {
+			continue
+		}
+		pathHint := displayPathHint(workspace, skill.Path)
+		detail := strings.Join(compactNonEmpty([]string{strings.TrimSpace(skill.Description), pathHint}), " · ")
+		scored = append(scored, scoredCompletion{
+			candidate: CompletionCandidate{
+				Value:   strings.TrimSpace(skill.Name),
+				Display: strings.TrimSpace(skill.Name),
+				Detail:  strings.TrimSpace(detail),
+				Path:    strings.TrimSpace(skill.Path),
+			},
+			score: score,
+		})
+	}
+	return sortAndTrimCandidates(scored, limit), nil
 }
 
 func (d *GatewayDriver) CompleteResume(ctx context.Context, query string, limit int) ([]ResumeCandidate, error) {
+	limit = normalizeCompletionLimit(limit)
 	all, err := d.ListSessions(ctx, limit)
 	if err != nil {
 		return nil, err
@@ -448,10 +655,14 @@ func (d *GatewayDriver) CompleteResume(ctx context.Context, query string, limit 
 	if query == "" {
 		return all, nil
 	}
-	out := make([]ResumeCandidate, 0, len(all))
+	out := make([]ResumeCandidate, 0, min(limit, len(all)))
 	for _, item := range all {
-		if strings.Contains(strings.ToLower(item.SessionID), query) || strings.Contains(strings.ToLower(item.Prompt), query) {
-			out = append(out, item)
+		if _, ok := scoreResumeCandidate(query, item); !ok {
+			continue
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
 		}
 	}
 	return out, nil
@@ -463,6 +674,10 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 	}
 	query = strings.TrimSpace(strings.ToLower(query))
 	switch strings.TrimSpace(strings.ToLower(command)) {
+	case "agent add", "agent connect", "agent handoff", "agent use":
+		return d.completeAgentCatalog(query, limit), nil
+	case "agent remove", "agent rm":
+		return d.completeAgentParticipants(ctx, query, limit)
 	case "model use", "model del":
 		return d.completeModelAliases(ctx, query, limit)
 	case "connect":
@@ -513,6 +728,156 @@ func (d *GatewayDriver) completeModelAliases(ctx context.Context, query string, 
 		}
 	}
 	return out, nil
+}
+
+func (d *GatewayDriver) completeAgentCatalog(query string, limit int) []SlashArgCandidate {
+	agents := d.agentCatalog(limit)
+	if len(agents) == 0 {
+		return nil
+	}
+	out := make([]SlashArgCandidate, 0, min(limit, len(agents)))
+	for _, agent := range agents {
+		if query != "" && !hasSlashArgPrefix(query, agent.Name, agent.Description) {
+			continue
+		}
+		out = append(out, SlashArgCandidate{
+			Value:   agent.Name,
+			Display: agent.Name,
+			Detail:  firstNonEmpty(agent.Description, "configured ACP agent"),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (d *GatewayDriver) completeAgentParticipants(ctx context.Context, query string, limit int) ([]SlashArgCandidate, error) {
+	session, ok := d.currentSession()
+	if !ok {
+		return nil, nil
+	}
+	state, err := d.stack.Gateway.ControlPlaneState(ctx, appgateway.ControlPlaneStateRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SlashArgCandidate, 0, min(limit, len(state.Participants)))
+	for _, participant := range state.Participants {
+		id := strings.TrimSpace(participant.ID)
+		label := strings.TrimSpace(firstNonEmpty(participant.Label, participant.ID))
+		if id == "" {
+			continue
+		}
+		if query != "" && !hasSlashArgPrefix(query, id, label, participant.SessionID, string(participant.Role)) {
+			continue
+		}
+		out = append(out, SlashArgCandidate{
+			Value:   id,
+			Display: label,
+			Detail:  strings.Join(compactNonEmpty([]string{string(participant.Role), strings.TrimSpace(participant.SessionID)}), " · "),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (d *GatewayDriver) agentCatalog(limit int) []AgentCandidate {
+	available := d.stack.ListACPAgents()
+	if len(available) == 0 {
+		return nil
+	}
+	if limit <= 0 {
+		limit = len(available)
+	}
+	out := make([]AgentCandidate, 0, min(limit, len(available)))
+	for _, agent := range available {
+		out = append(out, AgentCandidate{
+			Name:        strings.TrimSpace(agent.Name),
+			Description: strings.TrimSpace(agent.Description),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (d *GatewayDriver) resolveAgentName(input string) (string, error) {
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "" {
+		return "", fmt.Errorf("tui/runtime: agent name is required")
+	}
+	var exact string
+	prefixMatches := make([]string, 0, 2)
+	for _, agent := range d.agentCatalog(0) {
+		name := strings.TrimSpace(agent.Name)
+		normalized := strings.ToLower(name)
+		if normalized == "" {
+			continue
+		}
+		if normalized == input {
+			exact = name
+			break
+		}
+		if strings.HasPrefix(normalized, input) {
+			prefixMatches = append(prefixMatches, name)
+		}
+	}
+	if exact != "" {
+		return exact, nil
+	}
+	switch len(prefixMatches) {
+	case 1:
+		return prefixMatches[0], nil
+	case 0:
+		return "", fmt.Errorf("tui/runtime: agent %q is not configured", input)
+	default:
+		return "", fmt.Errorf("tui/runtime: agent %q is ambiguous", input)
+	}
+}
+
+func (d *GatewayDriver) resolveParticipantID(ctx context.Context, ref sdksession.SessionRef, input string) (string, error) {
+	input = strings.ToLower(strings.TrimSpace(input))
+	if input == "" {
+		return "", fmt.Errorf("tui/runtime: participant id is required")
+	}
+	state, err := d.stack.Gateway.ControlPlaneState(ctx, appgateway.ControlPlaneStateRequest{SessionRef: ref})
+	if err != nil {
+		return "", err
+	}
+	var exact string
+	prefixMatches := make([]string, 0, 2)
+	for _, participant := range state.Participants {
+		id := strings.TrimSpace(participant.ID)
+		label := strings.TrimSpace(participant.Label)
+		sessionID := strings.TrimSpace(participant.SessionID)
+		if id == "" {
+			continue
+		}
+		if strings.EqualFold(id, input) || strings.EqualFold(label, input) || strings.EqualFold(sessionID, input) {
+			return id, nil
+		}
+		for _, candidate := range []string{id, label, sessionID} {
+			candidate = strings.ToLower(strings.TrimSpace(candidate))
+			if candidate != "" && strings.HasPrefix(candidate, input) {
+				exact = id
+				prefixMatches = append(prefixMatches, exact)
+				break
+			}
+		}
+	}
+	switch len(dedupeNonEmptyStrings(prefixMatches)) {
+	case 1:
+		return dedupeNonEmptyStrings(prefixMatches)[0], nil
+	case 0:
+		return "", fmt.Errorf("tui/runtime: participant %q is not attached", input)
+	default:
+		return "", fmt.Errorf("tui/runtime: participant %q is ambiguous", input)
+	}
 }
 
 func (d *GatewayDriver) resolveStoredModelAlias(ctx context.Context, input string) (string, error) {
@@ -572,6 +937,70 @@ func hasSlashArgPrefix(query string, values ...string) bool {
 	return false
 }
 
+func validateConnectConfig(tpl providerTemplate, cfg ConnectConfig) error {
+	if strings.TrimSpace(cfg.Model) == "" {
+		return fmt.Errorf("model is required; use /connect and choose or type a model name")
+	}
+	if baseURL := strings.TrimSpace(cfg.BaseURL); baseURL != "" {
+		parsed, err := url.Parse(baseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("base URL is invalid; use a full URL such as %s", tpl.defaultBaseURL)
+		}
+	}
+	if tpl.noAuthRequired {
+		return nil
+	}
+	if strings.TrimSpace(cfg.APIKey) != "" || strings.TrimSpace(cfg.TokenEnv) != "" {
+		return nil
+	}
+	envHint := defaultTokenEnvName(tpl.provider)
+	if envHint == "" {
+		envHint = "YOUR_API_KEY"
+	}
+	return fmt.Errorf("API key is missing; paste a key or enter env:%s in /connect", envHint)
+}
+
+func parseTokenEnvSpec(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	switch {
+	case strings.HasPrefix(strings.ToLower(trimmed), "env:"):
+		env := strings.TrimSpace(trimmed[len("env:"):])
+		return env, env != ""
+	case strings.HasPrefix(trimmed, "$"):
+		env := strings.TrimSpace(strings.TrimPrefix(trimmed, "$"))
+		return env, env != ""
+	default:
+		return "", false
+	}
+}
+
+func defaultTokenEnvName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "minimax":
+		return "MINIMAX_API_KEY"
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "openai-compatible":
+		return "OPENAI_COMPATIBLE_API_KEY"
+	case "openrouter":
+		return "OPENROUTER_API_KEY"
+	case "gemini":
+		return "GEMINI_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "anthropic-compatible":
+		return "ANTHROPIC_COMPATIBLE_API_KEY"
+	case "deepseek":
+		return "DEEPSEEK_API_KEY"
+	case "xiaomi":
+		return "XIAOMI_API_KEY"
+	case "volcengine":
+		return "VOLCENGINE_API_KEY"
+	default:
+		return ""
+	}
+}
+
 type gatewayTurn struct {
 	handle appgateway.TurnHandle
 }
@@ -591,6 +1020,17 @@ func (t gatewayTurn) Close() error { return t.handle.Close() }
 
 func defaultSlashArgCandidates(command string) []SlashArgCandidate {
 	switch command {
+	case "agent":
+		return []SlashArgCandidate{
+			{Value: "list", Display: "list", Detail: "List configured ACP agents"},
+			{Value: "status", Display: "status", Detail: "Show controller and participant status"},
+			{Value: "add", Display: "add", Detail: "Attach an ACP participant to the current session"},
+			{Value: "connect", Display: "connect", Detail: "Alias for add"},
+			{Value: "remove", Display: "remove", Detail: "Detach an attached participant"},
+			{Value: "rm", Display: "rm", Detail: "Alias for remove"},
+			{Value: "handoff", Display: "handoff", Detail: "Hand off the main controller to an ACP agent"},
+			{Value: "use", Display: "use", Detail: "Alias for handoff"},
+		}
 	case "sandbox":
 		return sandboxCandidates()
 	case "model":
@@ -628,6 +1068,27 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func dedupeNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func humanAge(t time.Time) string {

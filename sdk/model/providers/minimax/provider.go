@@ -57,10 +57,6 @@ func New(cfg Config) *Provider {
 	if modelName == "" {
 		modelName = defaultModel
 	}
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	maxTokens := cfg.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 4096
@@ -94,7 +90,7 @@ func New(cfg Config) *Provider {
 		headerKey:       headerKey,
 		headers:         cloneHeaders(cfg.Headers),
 		client:          &client,
-		timeout:         timeout,
+		timeout:         cfg.Timeout,
 		maxTokens:       maxTokens,
 		reasoningEffort: strings.TrimSpace(cfg.ReasoningEffort),
 	}
@@ -131,7 +127,11 @@ func (p *Provider) generateNonStreaming(
 	params anthropic.MessageNewParams,
 	yield func(*sdkmodel.StreamEvent, error) bool,
 ) {
-	runCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	runCtx := ctx
+	cancel := func() {}
+	if p.timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, p.timeout)
+	}
 	defer cancel()
 
 	resp, err := p.clientOrZero().Messages.New(runCtx, params)

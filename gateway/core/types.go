@@ -108,6 +108,26 @@ type HandoffControllerRequest struct {
 	Reason     string
 }
 
+// AttachParticipantRequest attaches one ACP-backed participant to the current
+// session control plane without replacing the main controller.
+type AttachParticipantRequest struct {
+	SessionRef sdksession.SessionRef
+	BindingKey string
+	Agent      string
+	Role       sdksession.ParticipantRole
+	Source     string
+	Label      string
+}
+
+// DetachParticipantRequest removes one attached participant from the current
+// session control plane.
+type DetachParticipantRequest struct {
+	SessionRef    sdksession.SessionRef
+	BindingKey    string
+	ParticipantID string
+	Source        string
+}
+
 type ControlPlaneStateRequest struct {
 	SessionRef sdksession.SessionRef
 	BindingKey string
@@ -115,6 +135,14 @@ type ControlPlaneStateRequest struct {
 
 type BindingStateRequest struct {
 	BindingKey string `json:"binding_key,omitempty"`
+}
+
+type ActiveTurnState struct {
+	SessionRef sdksession.SessionRef `json:"session_ref"`
+	HandleID   string                `json:"handle_id,omitempty"`
+	RunID      string                `json:"run_id,omitempty"`
+	TurnID     string                `json:"turn_id,omitempty"`
+	StartedAt  time.Time             `json:"started_at,omitempty"`
 }
 
 type ControllerState struct {
@@ -277,12 +305,21 @@ type NarrativePayload struct {
 	ParticipantID string        `json:"participant_id,omitempty"`
 }
 
+type ToolStatus string
+
+const (
+	ToolStatusStarted   ToolStatus = "started"
+	ToolStatusRunning   ToolStatus = "running"
+	ToolStatusCompleted ToolStatus = "completed"
+	ToolStatusFailed    ToolStatus = "failed"
+)
+
 type ToolCallPayload struct {
 	CallID         string     `json:"call_id,omitempty"`
 	ToolName       string     `json:"tool_name,omitempty"`
 	ArgsText       string     `json:"args_text,omitempty"`
 	CommandPreview string     `json:"command_preview,omitempty"`
-	Status         string     `json:"status,omitempty"`
+	Status         ToolStatus `json:"status,omitempty"`
 	Actor          string     `json:"actor,omitempty"`
 	Scope          EventScope `json:"scope,omitempty"`
 	ParticipantID  string     `json:"participant_id,omitempty"`
@@ -293,7 +330,7 @@ type ToolResultPayload struct {
 	ToolName       string     `json:"tool_name,omitempty"`
 	OutputText     string     `json:"output_text,omitempty"`
 	CommandPreview string     `json:"command_preview,omitempty"`
-	Status         string     `json:"status,omitempty"`
+	Status         ToolStatus `json:"status,omitempty"`
 	Error          bool       `json:"error,omitempty"`
 	Actor          string     `json:"actor,omitempty"`
 	Scope          EventScope `json:"scope,omitempty"`
@@ -316,31 +353,58 @@ type ApprovalOption struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+type ApprovalStatus string
+
+const (
+	ApprovalStatusPending  ApprovalStatus = "pending"
+	ApprovalStatusApproved ApprovalStatus = "approved"
+	ApprovalStatusRejected ApprovalStatus = "rejected"
+	ApprovalStatusSelected ApprovalStatus = "selected"
+)
+
 type ApprovalPayload struct {
 	ToolName       string           `json:"tool_name,omitempty"`
 	CommandPreview string           `json:"command_preview,omitempty"`
+	Status         ApprovalStatus   `json:"status,omitempty"`
 	Options        []ApprovalOption `json:"options,omitempty"`
 }
 
+type ParticipantAction string
+
+const (
+	ParticipantActionAttached ParticipantAction = "attached"
+	ParticipantActionDetached ParticipantAction = "detached"
+)
+
 type ParticipantPayload struct {
-	ParticipantID   string     `json:"participant_id,omitempty"`
-	ParticipantKind string     `json:"participant_kind,omitempty"`
-	Role            string     `json:"role,omitempty"`
-	Label           string     `json:"label,omitempty"`
-	Action          string     `json:"action,omitempty"`
-	SessionID       string     `json:"session_id,omitempty"`
-	ParentTurnID    string     `json:"parent_turn_id,omitempty"`
-	DelegationID    string     `json:"delegation_id,omitempty"`
-	Actor           string     `json:"actor,omitempty"`
-	Scope           EventScope `json:"scope,omitempty"`
+	ParticipantID   string            `json:"participant_id,omitempty"`
+	ParticipantKind string            `json:"participant_kind,omitempty"`
+	Role            string            `json:"role,omitempty"`
+	Label           string            `json:"label,omitempty"`
+	Action          ParticipantAction `json:"action,omitempty"`
+	SessionID       string            `json:"session_id,omitempty"`
+	ParentTurnID    string            `json:"parent_turn_id,omitempty"`
+	DelegationID    string            `json:"delegation_id,omitempty"`
+	Actor           string            `json:"actor,omitempty"`
+	Scope           EventScope        `json:"scope,omitempty"`
 }
 
+type LifecycleStatus string
+
+const (
+	LifecycleStatusRunning         LifecycleStatus = "running"
+	LifecycleStatusWaitingApproval LifecycleStatus = "waiting_approval"
+	LifecycleStatusInterrupted     LifecycleStatus = "interrupted"
+	LifecycleStatusFailed          LifecycleStatus = "failed"
+	LifecycleStatusCompleted       LifecycleStatus = "completed"
+)
+
 type LifecyclePayload struct {
-	Status        string     `json:"status,omitempty"`
-	Reason        string     `json:"reason,omitempty"`
-	Actor         string     `json:"actor,omitempty"`
-	Scope         EventScope `json:"scope,omitempty"`
-	ParticipantID string     `json:"participant_id,omitempty"`
+	Status        LifecycleStatus `json:"status,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+	Actor         string          `json:"actor,omitempty"`
+	Scope         EventScope      `json:"scope,omitempty"`
+	ParticipantID string          `json:"participant_id,omitempty"`
 }
 
 type EventOrigin struct {
@@ -353,23 +417,44 @@ type EventOrigin struct {
 }
 
 type Event struct {
-	Kind            EventKind
-	HandleID        string
-	RunID           string
-	TurnID          string
-	OccurredAt      time.Time
-	SessionRef      sdksession.SessionRef
-	Origin          *EventOrigin
-	SessionEvent    *sdksession.Event
-	Usage           *UsageSnapshot
-	Approval        *sdkruntime.ApprovalRequest
-	Narrative       *NarrativePayload
-	ToolCall        *ToolCallPayload
-	ToolResult      *ToolResultPayload
-	Plan            *PlanPayload
+	Kind       EventKind
+	HandleID   string
+	RunID      string
+	TurnID     string
+	OccurredAt time.Time
+	SessionRef sdksession.SessionRef
+	Origin     *EventOrigin
+	// Deprecated: raw SDK session event kept for short-term compatibility only.
+	// Adapters should consume Narrative, ToolCall, ToolResult, Plan,
+	// Participant, Lifecycle, and Usage instead of depending on raw session
+	// event shape.
+	SessionEvent *sdksession.Event
+	// Usage is the canonical token snapshot projected from one runtime/session
+	// event. It is stable across UI, headless, and adapter boundaries.
+	Usage *UsageSnapshot
+	// Deprecated: raw runtime approval request kept for short-term compatibility
+	// only. Adapters should consume ApprovalPayload and submit ApprovalDecision
+	// without depending on runtime-owned request internals.
+	Approval *sdkruntime.ApprovalRequest
+	// Narrative carries stable user/assistant/system/notice text. Assistant
+	// reasoning remains separate in ReasoningText so UIs can preserve the answer
+	// boundary without re-parsing raw provider events.
+	Narrative *NarrativePayload
+	// ToolCall is the stable canonical tool invocation view with normalized
+	// status, arguments text, and command preview.
+	ToolCall *ToolCallPayload
+	// ToolResult is the stable canonical tool result/update view with normalized
+	// status and summarized output.
+	ToolResult *ToolResultPayload
+	// Plan is the stable canonical plan snapshot for one event.
+	Plan *PlanPayload
+	// ApprovalPayload is the stable canonical approval request summary for one
+	// event.
 	ApprovalPayload *ApprovalPayload
-	Participant     *ParticipantPayload
-	Lifecycle       *LifecyclePayload
+	// Participant is the stable canonical participant lifecycle payload.
+	Participant *ParticipantPayload
+	// Lifecycle is the stable canonical run/session lifecycle payload.
+	Lifecycle *LifecyclePayload
 }
 
 type EventEnvelope struct {

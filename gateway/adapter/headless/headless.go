@@ -74,7 +74,7 @@ func resolveApproval(ctx context.Context, opts Options, req *gateway.ApprovalPay
 		return opts.ResolveApproval(ctx, req)
 	}
 	if opts.ApprovalPolicy == ApprovalPolicyApproveAll {
-		return gateway.ApprovalDecision{Approved: true, Outcome: "approved"}, nil
+		return gateway.ApprovalDecision{Approved: true, Outcome: string(gateway.ApprovalStatusApproved)}, nil
 	}
-	return gateway.ApprovalDecision{Approved: false, Outcome: "rejected"}, nil
+	return gateway.ApprovalDecision{Approved: false, Outcome: string(gateway.ApprovalStatusRejected)}, nil
 }

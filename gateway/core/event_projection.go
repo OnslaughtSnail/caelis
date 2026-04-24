@@ -40,29 +40,38 @@ func projectSessionEvents(ref sdksession.SessionRef, events []*sdksession.Event)
 	return out
 }
 
-func replayAfterCursor(events []EventEnvelope, cursor string, limit int) []EventEnvelope {
+func replayAfterCursor(events []EventEnvelope, cursor string, limit int) ([]EventEnvelope, error) {
 	if len(events) == 0 {
-		return nil
+		return nil, nil
 	}
-	cursor = strings.TrimSpace(cursor)
-	start := 0
-	if cursor != "" {
-		start = len(events)
-		for i, env := range events {
-			if env.Cursor == cursor {
-				start = i + 1
-				break
-			}
-		}
-		if start == len(events) {
-			start = 0
-		}
+	start, err := startIndexAfterCursor(events, cursor)
+	if err != nil {
+		return nil, err
 	}
 	out := events[start:]
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
-	return out
+	return out, nil
+}
+
+func startIndexAfterCursor(events []EventEnvelope, cursor string) (int, error) {
+	cursor = strings.TrimSpace(cursor)
+	if cursor == "" {
+		return 0, nil
+	}
+	for i, env := range events {
+		if env.Cursor == cursor {
+			return i + 1, nil
+		}
+	}
+	return 0, &Error{
+		Kind:        KindNotFound,
+		Code:        CodeCursorNotFound,
+		UserVisible: true,
+		Message:     "gateway: cursor not found",
+		Detail:      cursor,
+	}
 }
 
 func turnIDFromSessionEvent(event *sdksession.Event) string {
@@ -106,17 +115,25 @@ func usageSnapshotFromSessionEvent(event *sdksession.Event) *UsageSnapshot {
 		return nil
 	}
 	raw, ok := event.Meta["usage"]
-	if !ok {
-		return nil
-	}
-	payload, ok := raw.(map[string]any)
-	if !ok {
-		return nil
+	if ok {
+		payload, ok := raw.(map[string]any)
+		if !ok {
+			return nil
+		}
+		usage := &UsageSnapshot{
+			PromptTokens:     intValue(payload["prompt_tokens"]),
+			CompletionTokens: intValue(payload["completion_tokens"]),
+			TotalTokens:      intValue(payload["total_tokens"]),
+		}
+		if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
+			return nil
+		}
+		return usage
 	}
 	usage := &UsageSnapshot{
-		PromptTokens:     intValue(payload["prompt_tokens"]),
-		CompletionTokens: intValue(payload["completion_tokens"]),
-		TotalTokens:      intValue(payload["total_tokens"]),
+		PromptTokens:     intValue(event.Meta["prompt_tokens"]),
+		CompletionTokens: intValue(event.Meta["completion_tokens"]),
+		TotalTokens:      intValue(event.Meta["total_tokens"]),
 	}
 	if usage.PromptTokens == 0 && usage.CompletionTokens == 0 && usage.TotalTokens == 0 {
 		return nil
@@ -325,7 +342,7 @@ func canonicalToolCallPayload(event *sdksession.Event) *ToolCallPayload {
 	if event == nil || sdksession.EventTypeOf(event) != sdksession.EventTypeToolCall {
 		return nil
 	}
-	callID, toolName, status, argsText, commandPreview := canonicalToolFields(event)
+	callID, toolName, rawStatus, argsText, commandPreview := canonicalToolFields(event)
 	if callID == "" && toolName == "" && argsText == "" && commandPreview == "" {
 		return nil
 	}
@@ -334,7 +351,7 @@ func canonicalToolCallPayload(event *sdksession.Event) *ToolCallPayload {
 		ToolName:       toolName,
 		ArgsText:       argsText,
 		CommandPreview: commandPreview,
-		Status:         status,
+		Status:         canonicalToolCallStatus(rawStatus),
 		Actor:          actorIDFromSessionEvent(event),
 		Scope:          scopeFromSessionEvent(event),
 		ParticipantID:  participantIDFromSessionEvent(event),
@@ -345,7 +362,7 @@ func canonicalToolResultPayload(event *sdksession.Event) *ToolResultPayload {
 	if event == nil || sdksession.EventTypeOf(event) != sdksession.EventTypeToolResult {
 		return nil
 	}
-	callID, toolName, status, _, commandPreview := canonicalToolFields(event)
+	callID, toolName, rawStatus, _, commandPreview := canonicalToolFields(event)
 	outputText, isErr := canonicalToolOutput(event)
 	if callID == "" && toolName == "" && outputText == "" {
 		return nil
@@ -355,7 +372,7 @@ func canonicalToolResultPayload(event *sdksession.Event) *ToolResultPayload {
 		ToolName:       toolName,
 		OutputText:     outputText,
 		CommandPreview: commandPreview,
-		Status:         status,
+		Status:         canonicalToolResultStatus(rawStatus, isErr),
 		Error:          isErr,
 		Actor:          actorIDFromSessionEvent(event),
 		Scope:          scopeFromSessionEvent(event),
@@ -369,6 +386,7 @@ func canonicalApprovalPayload(req *sdkruntime.ApprovalRequest) *ApprovalPayload 
 	}
 	payload := &ApprovalPayload{
 		ToolName: strings.TrimSpace(req.Tool.Name),
+		Status:   ApprovalStatusPending,
 	}
 	if payload.ToolName == "" {
 		payload.ToolName = strings.TrimSpace(req.Call.Name)
@@ -435,7 +453,7 @@ func canonicalParticipantPayload(event *sdksession.Event) *ParticipantPayload {
 	}
 	payload := &ParticipantPayload{
 		ParticipantID: participantIDFromSessionEvent(event),
-		Action:        action,
+		Action:        ParticipantAction(strings.ToLower(action)),
 		Actor:         actorIDFromSessionEvent(event),
 		Scope:         scopeFromSessionEvent(event),
 	}
@@ -459,7 +477,7 @@ func canonicalLifecyclePayload(event *sdksession.Event) *LifecyclePayload {
 		return nil
 	}
 	return &LifecyclePayload{
-		Status:        status,
+		Status:        canonicalLifecycleStatus(status),
 		Reason:        reason,
 		Actor:         actorIDFromSessionEvent(event),
 		Scope:         scopeFromSessionEvent(event),
@@ -616,10 +634,64 @@ func commandPreviewFromJSONString(raw string) string {
 func compactStringValue(s string) string {
 	s = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n"))
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) > 120 {
-		return s[:117] + "..."
+	const maxCompactRunes = 120
+	runes := []rune(s)
+	if len(runes) > maxCompactRunes {
+		return string(runes[:maxCompactRunes-3]) + "..."
 	}
 	return s
+}
+
+func canonicalToolCallStatus(status string) ToolStatus {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", "pending", "started":
+		return ToolStatusStarted
+	case "in_progress", "running":
+		return ToolStatusRunning
+	case "completed":
+		return ToolStatusCompleted
+	case "error", "failed":
+		return ToolStatusFailed
+	default:
+		return ToolStatus(strings.TrimSpace(status))
+	}
+}
+
+func canonicalToolResultStatus(status string, isErr bool) ToolStatus {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pending", "started":
+		return ToolStatusStarted
+	case "in_progress", "running":
+		return ToolStatusRunning
+	case "completed":
+		return ToolStatusCompleted
+	case "error", "failed":
+		return ToolStatusFailed
+	case "":
+		if isErr {
+			return ToolStatusFailed
+		}
+		return ToolStatusCompleted
+	default:
+		return ToolStatus(strings.TrimSpace(status))
+	}
+}
+
+func canonicalLifecycleStatus(status string) LifecycleStatus {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running":
+		return LifecycleStatusRunning
+	case "waiting_approval":
+		return LifecycleStatusWaitingApproval
+	case "interrupted":
+		return LifecycleStatusInterrupted
+	case "failed":
+		return LifecycleStatusFailed
+	case "completed":
+		return LifecycleStatusCompleted
+	default:
+		return LifecycleStatus(strings.TrimSpace(status))
+	}
 }
 
 func intValue(v any) int {

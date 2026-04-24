@@ -238,7 +238,7 @@ func TestRuntimeRunReturnsLiveRunnerBeforeModelCompletion(t *testing.T) {
 	var sawUser bool
 	var sawChunk bool
 	deadline := time.After(2 * time.Second)
-	for !(sawUser && sawChunk) {
+	for !sawUser || !sawChunk {
 		select {
 		case seqErr := <-errCh:
 			t.Fatalf("runner error = %v", seqErr)
@@ -410,7 +410,7 @@ func TestRuntimeACPControllerReturnsLiveRunnerBeforeTurnCompletion(t *testing.T)
 	var sawUser bool
 	var sawChunk bool
 	deadline := time.After(2 * time.Second)
-	for !(sawUser && sawChunk) {
+	for !sawUser || !sawChunk {
 		select {
 		case seqErr := <-errCh:
 			t.Fatalf("runner error = %v", seqErr)

@@ -30,7 +30,7 @@ vet:
 lint:
 	golangci-lint run ./...
 
-quality: fmt-check lint test vet build
+quality: fmt-check lint vet test build
 
 finish: tidy fmt quality
 

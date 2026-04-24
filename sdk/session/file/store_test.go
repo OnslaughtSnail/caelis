@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,49 @@ func TestStoreUpdateStateAndParticipantAnchor(t *testing.T) {
 	text := string(data)
 	if !strings.Contains(text, "\"session_id\": \"child-1\"") {
 		t.Fatal("persisted participant anchor must include child session id")
+	}
+}
+
+func TestStoreWriteDocumentUsesSecurePermissions(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not reliable on windows")
+	}
+
+	root := t.TempDir()
+	at := time.Date(2026, time.April, 19, 11, 22, 33, 0, time.UTC)
+	store := NewStore(Config{
+		RootDir:            root,
+		SessionIDGenerator: func() string { return "sess-1" },
+		Clock:              func() time.Time { return at },
+	})
+	ctx := context.Background()
+	session, err := store.GetOrCreate(ctx, sdksession.StartSessionRequest{
+		AppName: "caelis",
+		UserID:  "user-1",
+		Workspace: sdksession.WorkspaceRef{
+			Key: "ws-1",
+			CWD: "/tmp/ws",
+		},
+	})
+	if err != nil {
+		t.Fatalf("GetOrCreate() error = %v", err)
+	}
+	docPath := rolloutDocumentPath(root, "ws-1", at, session.SessionID)
+	info, err := os.Stat(docPath)
+	if err != nil {
+		t.Fatalf("Stat(docPath) error = %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("document mode = %#o, want %#o", got, os.FileMode(0o600))
+	}
+	dirInfo, err := os.Stat(filepath.Dir(docPath))
+	if err != nil {
+		t.Fatalf("Stat(docDir) error = %v", err)
+	}
+	if got := dirInfo.Mode().Perm() & 0o077; got != 0 {
+		t.Fatalf("document dir mode = %#o, want no group/world bits", dirInfo.Mode().Perm())
 	}
 }
 

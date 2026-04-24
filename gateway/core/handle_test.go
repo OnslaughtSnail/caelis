@@ -151,12 +151,12 @@ func TestTurnHandleSubmitRoutesApprovalAndContinuation(t *testing.T) {
 	wait := handle.setPendingApproval()
 	if err := handle.Submit(context.Background(), SubmitRequest{
 		Kind:     SubmissionKindApproval,
-		Approval: &ApprovalDecision{Approved: true, Outcome: "approved"},
+		Approval: &ApprovalDecision{Approved: true, Outcome: string(ApprovalStatusApproved)},
 	}); err != nil {
 		t.Fatalf("Submit(approval) error = %v", err)
 	}
 	resp := <-wait
-	if !resp.Approved || resp.Outcome != "approved" {
+	if !resp.Approved || resp.Outcome != string(ApprovalStatusApproved) {
 		t.Fatalf("approval response = %+v", resp)
 	}
 }
@@ -240,7 +240,7 @@ func TestTurnHandleApprovalSubmitRejectsWithoutPendingRequest(t *testing.T) {
 
 	err := handle.Submit(context.Background(), SubmitRequest{
 		Kind:     SubmissionKindApproval,
-		Approval: &ApprovalDecision{Approved: true, Outcome: "approved"},
+		Approval: &ApprovalDecision{Approved: true, Outcome: string(ApprovalStatusApproved)},
 	})
 	if err == nil {
 		t.Fatal("Submit(approval) error = nil, want approval-not-pending")
@@ -248,6 +248,30 @@ func TestTurnHandleApprovalSubmitRejectsWithoutPendingRequest(t *testing.T) {
 	var gwErr *Error
 	if !As(err, &gwErr) || gwErr.Code != CodeApprovalNotPending {
 		t.Fatalf("Submit(approval) error = %v, want approval_not_pending", err)
+	}
+}
+
+func TestTurnHandleEventsAfterReturnsCursorNotFound(t *testing.T) {
+	t.Parallel()
+
+	handle := newTurnHandle(turnHandleConfig{
+		handleID: "h1",
+		runID:    "run-1",
+		turnID:   "turn-1",
+		sessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		createdAt: time.Unix(100, 0),
+	})
+	handle.publishSessionEvent(&sdksession.Event{ID: "e1", Type: sdksession.EventTypeUser})
+
+	_, _, err := handle.EventsAfter("missing")
+	if err == nil {
+		t.Fatal("EventsAfter() error = nil, want cursor_not_found")
+	}
+	var gwErr *Error
+	if !As(err, &gwErr) || gwErr.Code != CodeCursorNotFound {
+		t.Fatalf("EventsAfter() error = %v, want cursor_not_found", err)
 	}
 }
 

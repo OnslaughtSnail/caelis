@@ -177,8 +177,23 @@ func (c *codexStyleCompactor) compact(ctx context.Context, req sdkcompact.Reques
 
 func (c *codexStyleCompactor) snapshotUsage(req sdkcompact.Request, promptEvents []*sdksession.Event) sdkcompact.UsageSnapshot {
 	window := resolveContextWindowTokens(req.Model, c.cfg.DefaultContextWindowTokens)
-	reserve := resolveReserveOutputTokens(window, c.cfg.ReserveOutputTokens)
-	safety := resolveSafetyMarginTokens(window, c.cfg.SafetyMarginTokens)
+	return snapshotUsageWithResolvedWindow(promptEvents, window, c.cfg)
+}
+
+// ComputeUsageSnapshot applies the same provider-aware usage snapshot logic
+// used by compaction, but without mutating session history.
+func ComputeUsageSnapshot(events []*sdksession.Event, pendingEvents []*sdksession.Event, contextWindow int, cfg CompactionConfig) sdkcompact.UsageSnapshot {
+	promptEvents := sdkcompact.PromptEventsFromLatestCompact(events)
+	return snapshotUsageWithResolvedWindow(promptEventsWithPending(promptEvents, pendingEvents), contextWindow, cfg)
+}
+
+func snapshotUsageWithResolvedWindow(promptEvents []*sdksession.Event, window int, cfg CompactionConfig) sdkcompact.UsageSnapshot {
+	cfg = normalizeCompactionConfig(cfg)
+	if window <= 0 {
+		window = cfg.DefaultContextWindowTokens
+	}
+	reserve := resolveReserveOutputTokens(window, cfg.ReserveOutputTokens)
+	safety := resolveSafetyMarginTokens(window, cfg.SafetyMarginTokens)
 	effective := resolveEffectiveInputBudget(window, reserve, safety)
 
 	total := 0

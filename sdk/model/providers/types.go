@@ -9,6 +9,7 @@ const (
 	APIOpenAI              APIType = "openai"
 	APIOpenAICompatible    APIType = "openai_compatible"
 	APIOpenRouter          APIType = "openrouter"
+	APICodeFree            APIType = "codefree"
 	APIGemini              APIType = "gemini"
 	APIAnthropic           APIType = "anthropic"
 	APIAnthropicCompatible APIType = "anthropic_compatible"

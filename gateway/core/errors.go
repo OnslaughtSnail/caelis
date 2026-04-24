@@ -17,6 +17,7 @@ const (
 	CodeNotImplemented          = "not_implemented"
 	CodeActiveRunConflict       = "active_run_conflict"
 	CodeInvalidRequest          = "invalid_request"
+	CodeCursorNotFound          = "cursor_not_found"
 	CodeSubmissionUnsupported   = "submission_unsupported"
 	CodeApprovalNotPending      = "approval_not_pending"
 	CodeSessionNotFound         = "session_not_found"

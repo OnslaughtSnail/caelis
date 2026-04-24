@@ -13,7 +13,7 @@
     "url": "https://github.com/OnslaughtSnail/caelis/issues"
   },
   "files": [
-    "runtime",
+    "runtime/caelis",
     "README.md"
   ],
   "os": [

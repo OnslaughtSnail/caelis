@@ -70,10 +70,6 @@ type ollamaChatResponse struct {
 
 // newOllama returns a native Ollama /api/chat client.
 func newOllama(cfg Config, _ string) model.LLM {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
 		baseURL = baseURL[:len(baseURL)-len("/v1")]
@@ -83,7 +79,7 @@ func newOllama(cfg Config, _ string) model.LLM {
 		provider:            cfg.Provider,
 		baseURL:             baseURL,
 		client:              &http.Client{},
-		requestTimeout:      timeout,
+		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 	}

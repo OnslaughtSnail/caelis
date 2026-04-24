@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	"github.com/OnslaughtSnail/caelis/tui/modelcatalog"
@@ -21,6 +22,7 @@ type providerTemplate struct {
 	label               string
 	api                 sdkproviders.APIType
 	provider            string
+	description         string
 	defaultBaseURL      string
 	defaultContextToken int
 	defaultMaxOutputTok int
@@ -49,17 +51,18 @@ type connectWizardPayload struct {
 }
 
 var providerTemplates = []providerTemplate{
-	{label: "openai", api: sdkproviders.APIOpenAI, provider: "openai", defaultBaseURL: "https://api.openai.com/v1", defaultContextToken: 128000, commonModels: []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"}},
-	{label: "openai-compatible", api: sdkproviders.APIOpenAICompatible, provider: "openai-compatible", defaultBaseURL: "https://api.openai.com/v1", defaultContextToken: 128000, commonModels: []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"}},
-	{label: "openrouter", api: sdkproviders.APIOpenRouter, provider: "openrouter", defaultBaseURL: "https://openrouter.ai/api/v1", defaultContextToken: 262144, commonModels: []string{"openai/gpt-4o-mini", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash"}},
-	{label: "gemini", api: sdkproviders.APIGemini, provider: "gemini", defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta", defaultContextToken: 128000, commonModels: []string{"gemini-2.5-flash", "gemini-2.5-pro"}},
-	{label: "anthropic", api: sdkproviders.APIAnthropic, provider: "anthropic", defaultBaseURL: "https://api.anthropic.com", defaultContextToken: 200000, defaultMaxOutputTok: 1024, commonModels: []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514"}},
-	{label: "anthropic-compatible", api: sdkproviders.APIAnthropicCompatible, provider: "anthropic-compatible", defaultBaseURL: "https://api.anthropic.com", defaultContextToken: 200000, defaultMaxOutputTok: 1024},
-	{label: "deepseek", api: sdkproviders.APIDeepSeek, provider: "deepseek", defaultBaseURL: "https://api.deepseek.com/v1", defaultContextToken: 128000, commonModels: []string{"deepseek-chat", "deepseek-reasoner"}},
-	{label: "xiaomi", api: sdkproviders.APIMimo, provider: "xiaomi", defaultBaseURL: "https://api.xiaomimimo.com/v1", defaultContextToken: 128000, commonModels: []string{"mimo-v2-flash", "mimo-v2-reasoner"}},
-	{label: "minimax", api: sdkproviders.APIAnthropicCompatible, provider: "minimax", defaultBaseURL: "https://api.minimaxi.com/anthropic", defaultContextToken: 204800, defaultMaxOutputTok: 8192, commonModels: []string{"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2"}},
-	{label: "volcengine", api: sdkproviders.APIVolcengine, provider: "volcengine", defaultBaseURL: "https://ark.cn-beijing.volces.com/api/v3", defaultContextToken: 128000},
-	{label: "ollama", api: sdkproviders.APIOllama, provider: "ollama", defaultBaseURL: "http://localhost:11434", defaultContextToken: 128000, noAuthRequired: true, commonModels: []string{"qwen2.5:7b", "llama3.1:8b", "deepseek-r1:7b", "gemma3:4b"}},
+	{label: "openai", api: sdkproviders.APIOpenAI, provider: "openai", description: "OpenAI-hosted models", defaultBaseURL: "https://api.openai.com/v1", defaultContextToken: 128000, commonModels: []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"}},
+	{label: "openai-compatible", api: sdkproviders.APIOpenAICompatible, provider: "openai-compatible", description: "OpenAI-compatible proxy or self-hosted endpoint", defaultBaseURL: "https://api.openai.com/v1", defaultContextToken: 128000, commonModels: []string{"gpt-4o", "gpt-4o-mini", "o3", "o4-mini"}},
+	{label: "codefree", api: sdkproviders.APICodeFree, provider: "codefree", description: "China Telecom SRD CodeFree models via browser OAuth", defaultBaseURL: "https://www.srdcloud.cn", defaultContextToken: 88000, defaultMaxOutputTok: 8000, noAuthRequired: true, commonModels: []string{"GLM-4.7", "DeepSeek-V3.1-Terminus", "Qwen3.5-122B-A10B", "GLM-5.1"}},
+	{label: "openrouter", api: sdkproviders.APIOpenRouter, provider: "openrouter", description: "OpenRouter multi-provider routing", defaultBaseURL: "https://openrouter.ai/api/v1", defaultContextToken: 262144, commonModels: []string{"openai/gpt-4o-mini", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash"}},
+	{label: "gemini", api: sdkproviders.APIGemini, provider: "gemini", description: "Google Gemini API", defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta", defaultContextToken: 128000, commonModels: []string{"gemini-2.5-flash", "gemini-2.5-pro"}},
+	{label: "anthropic", api: sdkproviders.APIAnthropic, provider: "anthropic", description: "Anthropic Claude API", defaultBaseURL: "https://api.anthropic.com", defaultContextToken: 200000, defaultMaxOutputTok: 1024, commonModels: []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514"}},
+	{label: "anthropic-compatible", api: sdkproviders.APIAnthropicCompatible, provider: "anthropic-compatible", description: "Anthropic-compatible proxy or self-hosted endpoint", defaultBaseURL: "https://api.anthropic.com", defaultContextToken: 200000, defaultMaxOutputTok: 1024},
+	{label: "deepseek", api: sdkproviders.APIDeepSeek, provider: "deepseek", description: "DeepSeek chat and reasoner models", defaultBaseURL: "https://api.deepseek.com/v1", defaultContextToken: 128000, commonModels: []string{"deepseek-chat", "deepseek-reasoner"}},
+	{label: "xiaomi", api: sdkproviders.APIMimo, provider: "xiaomi", description: "Xiaomi Mimo models", defaultBaseURL: "https://api.xiaomimimo.com/v1", defaultContextToken: 128000, commonModels: []string{"mimo-v2-flash", "mimo-v2-reasoner"}},
+	{label: "minimax", api: sdkproviders.APIAnthropicCompatible, provider: "minimax", description: "MiniMax models over an Anthropic-compatible API", defaultBaseURL: "https://api.minimaxi.com/anthropic", defaultContextToken: 204800, defaultMaxOutputTok: 8192, commonModels: []string{"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2"}},
+	{label: "volcengine", api: sdkproviders.APIVolcengine, provider: "volcengine", description: "Volcengine Ark standard or coding-plan endpoints", defaultBaseURL: "https://ark.cn-beijing.volces.com/api/v3", defaultContextToken: 128000},
+	{label: "ollama", api: sdkproviders.APIOllama, provider: "ollama", description: "Local Ollama runtime", defaultBaseURL: "http://localhost:11434", defaultContextToken: 128000, noAuthRequired: true, commonModels: []string{"qwen2.5:7b", "llama3.1:8b", "deepseek-r1:7b", "gemma3:4b"}},
 }
 
 func completeConnectArgs(ctx context.Context, driver *GatewayDriver, command string, query string, limit int) ([]SlashArgCandidate, error) {
@@ -91,14 +94,18 @@ func completeConnectProviders(query string, limit int) []SlashArgCandidate {
 		if query != "" && !strings.Contains(strings.ToLower(tpl.label+" "+tpl.defaultBaseURL), strings.ToLower(strings.TrimSpace(query))) {
 			continue
 		}
-		detail := strings.TrimSpace(tpl.defaultBaseURL)
-		if tpl.noAuthRequired {
-			detail = strings.TrimSpace(detail + " · no auth")
+		detailParts := []string{strings.TrimSpace(tpl.description), strings.TrimSpace(tpl.defaultBaseURL)}
+		if tpl.provider == "codefree" {
+			detailParts = append(detailParts, "browser oauth")
+		} else if tpl.noAuthRequired {
+			detailParts = append(detailParts, "no auth")
+		} else if env := defaultTokenEnvName(tpl.provider); env != "" {
+			detailParts = append(detailParts, "env:"+env)
 		}
 		out = append(out, SlashArgCandidate{
 			Value:   tpl.label,
 			Display: tpl.label,
-			Detail:  detail,
+			Detail:  strings.Join(compactNonEmpty(detailParts), " · "),
 			NoAuth:  tpl.noAuthRequired,
 		})
 		if len(out) >= limit {
@@ -116,11 +123,11 @@ func completeConnectBaseURL(provider string, query string, limit int) []SlashArg
 	var candidates []SlashArgCandidate
 	if tpl.provider == "volcengine" {
 		candidates = append(candidates,
-			SlashArgCandidate{Value: "https://ark.cn-beijing.volces.com/api/v3", Display: "standard api", Detail: connectVolcengineStandardValue},
-			SlashArgCandidate{Value: "https://ark.cn-beijing.volces.com/api/coding/v3", Display: "coding plan", Detail: connectVolcengineCodingValue},
+			SlashArgCandidate{Value: "https://ark.cn-beijing.volces.com/api/v3", Display: "standard api", Detail: "regular Ark endpoint"},
+			SlashArgCandidate{Value: "https://ark.cn-beijing.volces.com/api/coding/v3", Display: "coding plan", Detail: "Ark coding-plan endpoint"},
 		)
 	} else {
-		candidates = append(candidates, SlashArgCandidate{Value: tpl.defaultBaseURL, Display: tpl.defaultBaseURL, Detail: "default"})
+		candidates = append(candidates, SlashArgCandidate{Value: tpl.defaultBaseURL, Display: tpl.defaultBaseURL, Detail: "default base URL"})
 	}
 	return filterSlashArgCandidates(candidates, query, limit)
 }
@@ -140,7 +147,19 @@ func completeConnectModels(ctx context.Context, driver *GatewayDriver, payload c
 	if !ok {
 		return nil, nil
 	}
-	_ = ctx
+	if tpl.provider == "codefree" {
+		baseURL := strings.TrimSpace(payload.BaseURL)
+		if baseURL == "" {
+			baseURL = tpl.defaultBaseURL
+		}
+		if _, err := sdkproviders.CodeFreeEnsureModelSelectionAuth(ctx, sdkproviders.CodeFreeEnsureAuthOptions{
+			BaseURL:         baseURL,
+			OpenBrowser:     true,
+			CallbackTimeout: 5 * time.Minute,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	fallbackModels := fallbackConnectModels(tpl)
 	if driver != nil && driver.stack != nil {
 		fallbackModels = append(fallbackModels, driver.stack.ListProviderModels(tpl.provider)...)
@@ -341,6 +360,9 @@ func buildConnectModelChoices(provider string, fallbackModels []string) []connec
 			return
 		}
 		seen[key] = struct{}{}
+		if strings.TrimSpace(detail) == "" {
+			detail = describeConnectModel(provider, name)
+		}
 		out = append(out, connectModelChoice{
 			Name:    name,
 			Display: connectDisplayModelRef(provider, name),
@@ -406,6 +428,39 @@ func commonModelsForProvider(provider string) []string {
 		}
 	}
 	return nil
+}
+
+func describeConnectModel(provider, modelName string) string {
+	caps, ok := modelcatalog.LookupDynamicModelCapabilities(provider, modelName)
+	if !ok {
+		caps, ok = modelcatalog.LookupModelCapabilities(provider, modelName)
+	}
+	if !ok {
+		return "suggested model"
+	}
+	parts := []string{"catalog preset"}
+	if caps.ContextWindowTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%dk ctx", caps.ContextWindowTokens/1000))
+	}
+	if caps.SupportsReasoning {
+		parts = append(parts, "reasoning")
+	}
+	if caps.SupportsToolCalls {
+		parts = append(parts, "tools")
+	}
+	return strings.Join(parts, " · ")
+}
+
+func compactNonEmpty(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func connectRemoteCapabilities(remote *sdkproviders.RemoteModel) (supportsToolCalls bool, supportsReasoning bool, supportsImages bool, supportsJSON bool, known bool) {

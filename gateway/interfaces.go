@@ -25,6 +25,8 @@ type TurnService interface {
 type ControlPlaneService interface {
 	ControlPlaneState(context.Context, ControlPlaneStateRequest) (ControlPlaneState, error)
 	HandoffController(context.Context, HandoffControllerRequest) (sdksession.Session, error)
+	AttachParticipant(context.Context, AttachParticipantRequest) (sdksession.Session, error)
+	DetachParticipant(context.Context, DetachParticipantRequest) (sdksession.Session, error)
 }
 
 type CoreService interface {

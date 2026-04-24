@@ -85,5 +85,8 @@
   "volcengine:doubao-seed-code": {
     "reasoning": true,
     "reasoning_mode": "toggle"
+  },
+  "codefree:glm-5.1": {
+    "context_window": 128000
   }
 }

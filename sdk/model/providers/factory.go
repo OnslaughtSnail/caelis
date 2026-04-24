@@ -27,7 +27,7 @@ func (f *Factory) Register(cfg Config) error {
 	if alias == "" {
 		return fmt.Errorf("providers: alias is required")
 	}
-	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIOpenRouter && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIAnthropicCompatible && cfg.API != APIDeepSeek && cfg.API != APIMimo && cfg.API != APIVolcengine && cfg.API != APIVolcengineCoding && cfg.API != APIOllama {
+	if cfg.API != APIOpenAI && cfg.API != APIOpenAICompatible && cfg.API != APIOpenRouter && cfg.API != APICodeFree && cfg.API != APIGemini && cfg.API != APIAnthropic && cfg.API != APIAnthropicCompatible && cfg.API != APIDeepSeek && cfg.API != APIMimo && cfg.API != APIVolcengine && cfg.API != APIVolcengineCoding && cfg.API != APIOllama {
 		return fmt.Errorf("providers: unsupported api type %q", cfg.API)
 	}
 	authType := strings.TrimSpace(string(cfg.Auth.Type))
@@ -35,7 +35,7 @@ func (f *Factory) Register(cfg Config) error {
 		return fmt.Errorf("providers: unsupported auth type %q", cfg.Auth.Type)
 	}
 	if cfg.Auth.Type == "" {
-		if cfg.API == APIOllama {
+		if cfg.API == APIOllama || cfg.API == APICodeFree {
 			cfg.Auth.Type = AuthNone
 		} else {
 			cfg.Auth.Type = AuthAPIKey
@@ -77,6 +77,8 @@ func (f *Factory) NewByAlias(alias string) (model.LLM, error) {
 		return newOpenAICompat(cfg, token), nil
 	case APIOpenRouter:
 		return newOpenRouter(cfg, token), nil
+	case APICodeFree:
+		return newCodeFree(cfg), nil
 	case APIOpenAI:
 		return newOpenAICompat(cfg, token), nil
 	case APIAnthropic, APIAnthropicCompatible:

@@ -31,16 +31,12 @@ type geminiLLM struct {
 }
 
 func newGemini(cfg Config, token string) model.LLM {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	return &geminiLLM{
 		name:                cfg.Model,
 		provider:            cfg.Provider,
 		token:               token,
 		httpOptions:         buildGeminiHTTPOptions(cfg.BaseURL, cfg.Headers),
-		requestTimeout:      timeout,
+		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 	}

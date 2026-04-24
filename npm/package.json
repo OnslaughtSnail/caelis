@@ -15,8 +15,7 @@
     "caelis": "bin/caelis.js"
   },
   "files": [
-    "bin",
-    "scripts",
+    "bin/caelis.js",
     "README.md",
     "LICENSE"
   ],

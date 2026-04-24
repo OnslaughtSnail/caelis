@@ -41,10 +41,6 @@ func defaultOpenAICompatOptions() openAICompatOptions {
 }
 
 func newOpenAICompat(cfg Config, token string) *openAICompatLLM {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	llm := &openAICompatLLM{
 		name:                cfg.Model,
 		provider:            cfg.Provider,
@@ -52,7 +48,7 @@ func newOpenAICompat(cfg Config, token string) *openAICompatLLM {
 		token:               token,
 		headers:             cloneHeaders(cfg.Headers),
 		client:              &http.Client{},
-		requestTimeout:      timeout,
+		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 		options:             defaultOpenAICompatOptions(),

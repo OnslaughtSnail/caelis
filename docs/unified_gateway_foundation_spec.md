@@ -5,6 +5,14 @@
 This document is the authority for the current `sdk`-backed Unified Gateway
 layer.
 
+The current local entry flow is:
+
+`cmd/cli -> app/gatewayapp -> gateway -> adapters -> tui/headless`
+
+For the current package map, see [architecture.md](architecture.md). This
+document stays focused on the gateway contract, layering rules, and deferred
+surface work rather than repeating the full repository layout.
+
 The foundational local gateway now exists in code and is the active reference
 boundary for:
 

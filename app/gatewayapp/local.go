@@ -11,6 +11,7 @@ import (
 	"time"
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
+	sdkcompact "github.com/OnslaughtSnail/caelis/sdk/compact"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdkminimax "github.com/OnslaughtSnail/caelis/sdk/model/providers/minimax"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
@@ -42,13 +43,18 @@ type Config struct {
 }
 
 type ModelConfig struct {
-	Alias                  string
-	Provider               string
-	API                    sdkproviders.APIType
-	Model                  string
-	BaseURL                string
-	Token                  string
-	TokenEnv               string
+	Alias    string
+	Provider string
+	API      sdkproviders.APIType
+	Model    string
+	BaseURL  string
+	// Token is an in-memory secret used for the current process. It is not
+	// persisted unless PersistToken is explicitly enabled.
+	Token    string
+	TokenEnv string
+	// PersistToken explicitly opts into persisting Token in plaintext config.
+	// Prefer TokenEnv instead.
+	PersistToken           bool
 	AuthType               sdkproviders.AuthType
 	HeaderKey              string
 	ContextWindowTokens    int
@@ -68,6 +74,7 @@ type Stack struct {
 	Workspace sdksession.WorkspaceRef
 	lookup    *modelLookup
 	store     *appConfigStore
+	storeDir  string
 	mu        sync.RWMutex
 	runtime   stackRuntimeConfig
 	sandbox   SandboxConfig
@@ -86,6 +93,11 @@ type SandboxStatus struct {
 	Route            string
 	FallbackReason   string
 	SecuritySummary  string
+}
+
+type ACPAgentInfo struct {
+	Name        string
+	Description string
 }
 
 type stackRuntimeConfig struct {
@@ -139,8 +151,9 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 			Key: workspaceKey,
 			CWD: workspaceCWD,
 		},
-		lookup: lookup,
-		store:  configStore,
+		lookup:   lookup,
+		store:    configStore,
+		storeDir: storeDir,
 		runtime: stackRuntimeConfig{
 			PermissionMode: cfg.PermissionMode,
 			ContextWindow:  cfg.ContextWindow,
@@ -187,6 +200,9 @@ func (s *Stack) Connect(cfg ModelConfig) (string, error) {
 	if s == nil || s.Gateway == nil {
 		return "", fmt.Errorf("gatewayapp: stack is unavailable")
 	}
+	if err := s.rejectReconfigureWhileActive("connect model"); err != nil {
+		return "", err
+	}
 	if s.lookup == nil {
 		return "", fmt.Errorf("gatewayapp: model lookup unavailable")
 	}
@@ -209,6 +225,9 @@ func (s *Stack) Connect(cfg ModelConfig) (string, error) {
 func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias string) error {
 	if s == nil || s.Sessions == nil {
 		return fmt.Errorf("gatewayapp: sessions service unavailable")
+	}
+	if err := s.rejectReconfigureWhileActive("switch model"); err != nil {
+		return err
 	}
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
@@ -241,6 +260,9 @@ func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias s
 func (s *Stack) DeleteModel(ctx context.Context, ref sdksession.SessionRef, alias string) error {
 	if s == nil || s.Sessions == nil {
 		return fmt.Errorf("gatewayapp: sessions service unavailable")
+	}
+	if err := s.rejectReconfigureWhileActive("delete model"); err != nil {
+		return err
 	}
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
@@ -276,6 +298,9 @@ func (s *Stack) DeleteModel(ctx context.Context, ref sdksession.SessionRef, alia
 func (s *Stack) SetSessionMode(ctx context.Context, ref sdksession.SessionRef, mode string) (string, error) {
 	if s == nil || s.Sessions == nil {
 		return "", fmt.Errorf("gatewayapp: sessions service unavailable")
+	}
+	if err := s.rejectReconfigureWhileActive("change session mode"); err != nil {
+		return "", err
 	}
 	normalized, err := normalizeSessionMode(mode)
 	if err != nil {
@@ -314,6 +339,9 @@ func (s *Stack) SetSandboxMode(ctx context.Context, ref sdksession.SessionRef, m
 func (s *Stack) SetSandboxBackend(_ context.Context, backend string) (SandboxStatus, error) {
 	if s == nil {
 		return SandboxStatus{}, fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	if err := s.rejectReconfigureWhileActive("change sandbox backend"); err != nil {
+		return SandboxStatus{}, err
 	}
 	normalized, err := normalizeSandboxBackend(backend)
 	if err != nil {
@@ -432,6 +460,33 @@ func (s *Stack) ListProviderModels(provider string) []string {
 		return nil
 	}
 	return s.lookup.ListProviderModels(provider)
+}
+
+func (s *Stack) ListACPAgents() []ACPAgentInfo {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	agents := append([]sdkplugin.AgentConfig(nil), s.runtime.Assembly.Agents...)
+	s.mu.RUnlock()
+	if len(agents) == 0 {
+		return nil
+	}
+	out := make([]ACPAgentInfo, 0, len(agents))
+	for _, agent := range agents {
+		name := strings.TrimSpace(agent.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, ACPAgentInfo{
+			Name:        name,
+			Description: strings.TrimSpace(agent.Description),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
 }
 
 // CompactSession appends a compaction event to the given session. The note is
@@ -562,9 +617,7 @@ func (l *modelLookup) ResolveModel(ctx context.Context, alias string, contextWin
 		return appgateway.ModelResolution{}, fmt.Errorf("gatewayapp: unknown model alias %q", alias)
 	}
 	if cfg.Provider == "minimax" {
-		if alias != l.defaultAlias {
-			// MiniMax aliases are still resolved through one concrete config.
-		}
+		// MiniMax aliases still resolve through one concrete provider config.
 		return appgateway.ModelResolution{
 			Model: sdkminimax.New(sdkminimax.Config{
 				Model:           cfg.Model,
@@ -696,6 +749,47 @@ func (l *modelLookup) SetDefault(alias string) {
 	}
 }
 
+func (s *Stack) SessionUsageSnapshot(ctx context.Context, ref sdksession.SessionRef, modelAlias string) (sdkcompact.UsageSnapshot, error) {
+	if s == nil || s.Sessions == nil {
+		return sdkcompact.UsageSnapshot{}, fmt.Errorf("gatewayapp: sessions service unavailable")
+	}
+	if strings.TrimSpace(ref.SessionID) == "" {
+		return sdkcompact.UsageSnapshot{}, nil
+	}
+	events, err := s.Sessions.Events(ctx, sdksession.EventsRequest{SessionRef: ref})
+	if err != nil {
+		return sdkcompact.UsageSnapshot{}, err
+	}
+	alias := strings.TrimSpace(modelAlias)
+	if alias == "" && s.lookup != nil {
+		alias = strings.TrimSpace(s.lookup.DefaultAlias())
+	}
+	contextWindow := s.currentContextWindowTokensForAlias(alias)
+	return localruntime.ComputeUsageSnapshot(events, nil, contextWindow, localruntime.CompactionConfig{
+		DefaultContextWindowTokens: contextWindow,
+	}), nil
+}
+
+func (s *Stack) currentContextWindowTokensForAlias(alias string) int {
+	alias = strings.TrimSpace(alias)
+	if alias != "" {
+		if cfg, ok := s.modelConfigForAlias(alias); ok && cfg.ContextWindowTokens > 0 {
+			return cfg.ContextWindowTokens
+		}
+	}
+	if s != nil && s.lookup != nil {
+		s.lookup.mu.RLock()
+		defer s.lookup.mu.RUnlock()
+		if s.lookup.contextWindow > 0 {
+			return s.lookup.contextWindow
+		}
+	}
+	if s != nil && s.runtime.ContextWindow > 0 {
+		return s.runtime.ContextWindow
+	}
+	return 0
+}
+
 func (l *modelLookup) Snapshot() persistedModelConfig {
 	if l == nil {
 		return persistedModelConfig{}
@@ -704,7 +798,7 @@ func (l *modelLookup) Snapshot() persistedModelConfig {
 	defer l.mu.RUnlock()
 	configs := make([]ModelConfig, 0, len(l.configs))
 	for _, cfg := range l.configs {
-		configs = append(configs, cfg)
+		configs = append(configs, sanitizePersistedModelConfig(cfg))
 	}
 	sort.Slice(configs, func(i, j int) bool {
 		return strings.ToLower(strings.TrimSpace(configs[i].Alias)) < strings.ToLower(strings.TrimSpace(configs[j].Alias))
@@ -713,6 +807,23 @@ func (l *modelLookup) Snapshot() persistedModelConfig {
 		DefaultAlias: l.defaultAlias,
 		Configs:      configs,
 	}
+}
+
+func (l *modelLookup) Config(alias string) (ModelConfig, bool) {
+	if l == nil {
+		return ModelConfig{}, false
+	}
+	key := strings.ToLower(strings.TrimSpace(alias))
+	if key == "" {
+		return ModelConfig{}, false
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	cfg, ok := l.configs[key]
+	if !ok {
+		return ModelConfig{}, false
+	}
+	return cfg, true
 }
 
 func (s *Stack) saveModelConfigs() error {
@@ -746,9 +857,13 @@ func (s *Stack) rebuildGateway() error {
 		return fmt.Errorf("gatewayapp: stack is unavailable")
 	}
 	s.mu.RLock()
+	oldGateway := s.Gateway
 	sandboxCfg := s.sandbox
 	runtimeCfg := s.runtime
 	s.mu.RUnlock()
+	if err := rejectReconfigureWithActiveTurns(oldGateway, "rebuild gateway"); err != nil {
+		return err
+	}
 	sandboxRuntime, err := sdksandbox.New(sdksandbox.Config{
 		CWD:              s.Workspace.CWD,
 		RequestedBackend: sdksandbox.Backend(sandboxCfg.RequestedType),
@@ -797,6 +912,10 @@ func (s *Stack) rebuildGateway() error {
 		_ = sandboxRuntime.Close()
 		return err
 	}
+	if err := rejectReconfigureWithActiveTurns(oldGateway, "rebuild gateway"); err != nil {
+		_ = sandboxRuntime.Close()
+		return err
+	}
 	s.mu.Lock()
 	oldExec := s.exec
 	s.Gateway = gw
@@ -816,14 +935,11 @@ func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 		cfg.Alias = buildAlias(cfg.Provider, cfg.Model)
 	}
 	if cfg.AuthType == "" {
-		if cfg.Provider == "ollama" {
+		if cfg.Provider == "ollama" || cfg.Provider == "codefree" {
 			cfg.AuthType = sdkproviders.AuthNone
 		} else {
 			cfg.AuthType = sdkproviders.AuthAPIKey
 		}
-	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 60 * time.Second
 	}
 	if cfg.MaxOutputTok <= 0 {
 		cfg.MaxOutputTok = 4096
@@ -836,6 +952,54 @@ func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 		cfg.Token = strings.TrimSpace(os.Getenv(strings.TrimSpace(cfg.TokenEnv)))
 	}
 	return cfg
+}
+
+func sanitizePersistedModelConfig(cfg ModelConfig) ModelConfig {
+	cfg = normalizeModelConfig(cfg)
+	if !cfg.PersistToken {
+		cfg.Token = ""
+	}
+	return cfg
+}
+
+func (s *Stack) rejectReconfigureWhileActive(action string) error {
+	if s == nil {
+		return fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	return rejectReconfigureWithActiveTurns(s.Gateway, action)
+}
+
+func rejectReconfigureWithActiveTurns(gw *appgateway.Gateway, action string) error {
+	if gw == nil {
+		return nil
+	}
+	active := gw.ActiveTurns()
+	if len(active) == 0 {
+		return nil
+	}
+	sessions := make([]string, 0, len(active))
+	for _, item := range active {
+		if sessionID := strings.TrimSpace(item.SessionRef.SessionID); sessionID != "" {
+			sessions = append(sessions, sessionID)
+		}
+	}
+	label := strings.TrimSpace(action)
+	if label == "" {
+		label = "reconfigure runtime"
+	}
+	if len(sessions) > 0 {
+		return fmt.Errorf(
+			"gatewayapp: cannot %s while %d turn(s) are active (session(s): %s); wait for completion or interrupt the running turn first",
+			label,
+			len(active),
+			strings.Join(dedupeNonEmptyStrings(sessions), ", "),
+		)
+	}
+	return fmt.Errorf(
+		"gatewayapp: cannot %s while %d turn(s) are active; wait for completion or interrupt the running turn first",
+		label,
+		len(active),
+	)
 }
 
 func buildAlias(provider string, modelName string) string {

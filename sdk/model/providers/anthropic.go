@@ -31,10 +31,6 @@ type anthropicSDKLLM struct {
 }
 
 func newAnthropic(cfg Config, token string) model.LLM {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	maxTok := cfg.MaxOutputTok
 	if maxTok <= 0 {
 		maxTok = 1024
@@ -60,7 +56,7 @@ func newAnthropic(cfg Config, token string) model.LLM {
 		headers:             cloneHeaders(cfg.Headers),
 		auth:                cfg.Auth,
 		client:              &client,
-		requestTimeout:      timeout,
+		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        maxTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 	}

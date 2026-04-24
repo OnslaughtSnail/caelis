@@ -204,16 +204,16 @@ type fakeBackendFactory struct {
 func (f fakeBackendFactory) Backend() Backend { return f.backend }
 
 func (f fakeBackendFactory) Build(Config) (Runtime, error) {
-	return fakeRuntime{backend: f.backend}, nil
+	return fakeRuntime(f), nil
 }
 
 type fakeRuntime struct {
 	backend Backend
 }
 
-func (r fakeRuntime) Describe() Descriptor                              { return Descriptor{Backend: r.backend} }
-func (r fakeRuntime) FileSystem() FileSystem                            { return nil }
-func (r fakeRuntime) FileSystemFor(Constraints) FileSystem              { return nil }
+func (r fakeRuntime) Describe() Descriptor                 { return Descriptor{Backend: r.backend} }
+func (r fakeRuntime) FileSystem() FileSystem               { return nil }
+func (r fakeRuntime) FileSystemFor(Constraints) FileSystem { return nil }
 func (r fakeRuntime) Run(context.Context, CommandRequest) (CommandResult, error) {
 	return CommandResult{Backend: r.backend}, nil
 }

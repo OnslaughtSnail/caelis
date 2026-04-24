@@ -73,3 +73,47 @@ func TestGenerateStreamingEmitsStartBlockText(t *testing.T) {
 		t.Fatalf("unexpected final response %+v", final)
 	}
 }
+
+func TestGenerateNonStreaming_DefaultDoesNotApplyRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" && r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_nonstream","type":"message","role":"assistant","model":"MiniMax-M2","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":"","usage":{"input_tokens":11,"output_tokens":3}}`)
+	}))
+	defer server.Close()
+
+	llm := New(Config{
+		Model:      "MiniMax-M2",
+		BaseURL:    server.URL,
+		APIKey:     "compat-token",
+		HTTPClient: server.Client(),
+	})
+
+	var (
+		gotErr    error
+		finalText string
+	)
+	for event, err := range llm.Generate(context.Background(), &sdkmodel.Request{
+		Messages: []sdkmodel.Message{sdkmodel.NewTextMessage(sdkmodel.RoleUser, "hello")},
+		Stream:   false,
+	}) {
+		if err != nil {
+			gotErr = err
+			continue
+		}
+		if event != nil && event.Response != nil && event.TurnComplete {
+			finalText = event.Response.Message.TextContent()
+		}
+	}
+	if gotErr != nil {
+		t.Fatalf("expected no timeout error, got %v", gotErr)
+	}
+	if finalText != "ok" {
+		t.Fatalf("unexpected final text %q", finalText)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -112,6 +113,61 @@ func TestStreamHandleWritesAssistantTextAndDeniesApproval(t *testing.T) {
 	}
 	if len(handle.submits) != 1 || handle.submits[0].Approval == nil || handle.submits[0].Approval.Approved {
 		t.Fatalf("submits = %#v", handle.submits)
+	}
+}
+
+func TestRunDoctorJSONDoesNotLeakToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	err := run(context.Background(), []string{
+		"-doctor",
+		"-format", "json",
+		"-store-dir", t.TempDir(),
+		"-workspace-key", "doctor-ws",
+		"-workspace-cwd", t.TempDir(),
+		"-provider", "minimax",
+		"-model", "MiniMax-M1",
+		"-token", "super-secret-token",
+	}, strings.NewReader(""), &out, &errBuf)
+	if err != nil {
+		t.Fatalf("run(-doctor) error = %v", err)
+	}
+	if strings.Contains(out.String(), "super-secret-token") {
+		t.Fatalf("doctor output leaked token: %q", out.String())
+	}
+	var report map[string]any
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("doctor json decode error = %v", err)
+	}
+	if got := report["active_provider"]; got != "minimax" {
+		t.Fatalf("active_provider = %#v, want minimax", got)
+	}
+}
+
+func TestRunDoctorSubcommandTextOutput(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	err := run(context.Background(), []string{
+		"doctor",
+		"-store-dir", t.TempDir(),
+		"-workspace-key", "doctor-ws",
+		"-workspace-cwd", t.TempDir(),
+		"-provider", "deepseek",
+		"-api", "deepseek",
+		"-model", "deepseek-reasoner",
+		"-token-env", "CAELIS_TEST_DOCTOR_TOKEN",
+	}, strings.NewReader(""), &out, &errBuf)
+	if err != nil {
+		t.Fatalf("run(doctor) error = %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "active_provider: deepseek") {
+		t.Fatalf("doctor text = %q, want active provider line", text)
+	}
+	if strings.Contains(text, "super-secret") {
+		t.Fatalf("doctor text leaked secret: %q", text)
 	}
 }
 

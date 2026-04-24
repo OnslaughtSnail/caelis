@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +42,41 @@ func TestSlashHelpListsMinimalCoreCommands(t *testing.T) {
 	if !ok {
 		t.Fatalf("slashHelp() msg = %#v, want LogChunkMsg", msgs[0])
 	}
-	for _, want := range []string{"/connect", "/model use|del <alias>", "/new", "/resume [session-id]"} {
+	for _, want := range []string{"/agent list | /agent status | /agent add <name> | /agent remove <id> | /agent handoff <name|local>", "/connect", "/model use <alias> | /model del <alias>", "/compact [note]", "/resume [session-id]"} {
 		if !strings.Contains(log.Chunk, want) {
 			t.Fatalf("slashHelp() chunk = %q, want substring %q", log.Chunk, want)
+		}
+	}
+}
+
+func TestDefaultCommandsStayInHelpText(t *testing.T) {
+	helpText := defaultHelpText()
+	for _, command := range DefaultCommands() {
+		if !strings.Contains(helpText, "/"+command) {
+			t.Fatalf("defaultHelpText() = %q, want command /%s", helpText, command)
+		}
+	}
+}
+
+func TestDefaultCommandsAreRecognizedByDispatch(t *testing.T) {
+	driver := &bridgeTestDriver{
+		status:     tuiadapterruntime.StatusSnapshot{},
+		newSession: sdksession.Session{SessionRef: sdksession.SessionRef{SessionID: "new-session"}},
+	}
+	for _, command := range DefaultCommands() {
+		var msgs []tea.Msg
+		result := dispatchSlashCommand(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, "/"+command)
+		if command == "exit" || command == "quit" {
+			if !result.ExitNow {
+				t.Fatalf("/%s did not request exit", command)
+			}
+			continue
+		}
+		for _, msg := range msgs {
+			log, ok := msg.(LogChunkMsg)
+			if ok && strings.Contains(log.Chunk, "unknown command") {
+				t.Fatalf("/%s was treated as unknown: %q", command, log.Chunk)
+			}
 		}
 	}
 }
@@ -178,6 +211,83 @@ func TestSlashConnectCallsDriverAndUpdatesStatus(t *testing.T) {
 	}
 }
 
+func TestFormatContextUsageStatus(t *testing.T) {
+	if got := formatContextUsageStatus(12600, 88000); got != "12.6k/88k(14%)" {
+		t.Fatalf("formatContextUsageStatus() = %q, want %q", got, "12.6k/88k(14%)")
+	}
+	if got := formatContextUsageStatus(0, 88000); got != "0/88k(0%)" {
+		t.Fatalf("formatContextUsageStatus() zero = %q, want %q", got, "0/88k(0%)")
+	}
+}
+
+func TestSlashAgentDispatchesPrimarySubcommands(t *testing.T) {
+	driver := &bridgeTestDriver{
+		agentList: []tuiadapterruntime.AgentCandidate{{
+			Name:        "copilot",
+			Description: "ACP sidecar",
+		}},
+		agentStatus: tuiadapterruntime.AgentStatusSnapshot{
+			SessionID:       "sess-1",
+			ControllerKind:  "acp",
+			ControllerLabel: "copilot",
+			Participants: []tuiadapterruntime.AgentParticipantSnapshot{{
+				ID:    "participant-1",
+				Label: "copilot",
+				Role:  "sidecar",
+			}},
+		},
+	}
+	var msgs []tea.Msg
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "list")
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "status")
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "add copilot")
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "remove participant-1")
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "handoff copilot")
+	if driver.listAgentCalls != 1 || driver.agentStatusCalls != 1 || driver.addAgentCalls != 1 || driver.removeAgentCalls != 1 || driver.handoffAgentCalls != 1 {
+		t.Fatalf("agent calls = list:%d status:%d add:%d remove:%d handoff:%d", driver.listAgentCalls, driver.agentStatusCalls, driver.addAgentCalls, driver.removeAgentCalls, driver.handoffAgentCalls)
+	}
+	if driver.lastAddedAgent != "copilot" || driver.lastRemovedAgent != "participant-1" || driver.lastHandoffAgent != "copilot" {
+		t.Fatalf("agent targets = add:%q remove:%q handoff:%q", driver.lastAddedAgent, driver.lastRemovedAgent, driver.lastHandoffAgent)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("slashAgent() emitted no messages")
+	}
+}
+
+func TestSlashAgentHelpAndRecovery(t *testing.T) {
+	driver := &bridgeTestDriver{}
+	var msgs []tea.Msg
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "")
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "remove")
+	if len(msgs) < 2 {
+		t.Fatalf("slashAgent() emitted %d messages, want help and recovery", len(msgs))
+	}
+	joined := ""
+	for _, msg := range msgs {
+		if log, ok := msg.(LogChunkMsg); ok {
+			joined += log.Chunk
+		}
+	}
+	for _, want := range []string{"/agent commands:", "usage: /agent remove <participant-id>"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("slashAgent() output = %q, want substring %q", joined, want)
+		}
+	}
+}
+
+func TestSlashConnectParsesEnvironmentVariableSecret(t *testing.T) {
+	driver := &bridgeTestDriver{
+		connectStatus: tuiadapterruntime.StatusSnapshot{Model: "openai/gpt-4o"},
+	}
+	slashConnect(driver, func(tea.Msg) {}, "openai gpt-4o - 60 env:OPENAI_API_KEY")
+	if got := driver.lastConnect.TokenEnv; got != "OPENAI_API_KEY" {
+		t.Fatalf("lastConnect.TokenEnv = %q, want OPENAI_API_KEY", got)
+	}
+	if got := driver.lastConnect.APIKey; got != "" {
+		t.Fatalf("lastConnect.APIKey = %q, want empty when env:... is used", got)
+	}
+}
+
 func TestSlashModelUseCallsDriverAndUpdatesStatus(t *testing.T) {
 	driver := &bridgeTestDriver{
 		status:         tuiadapterruntime.StatusSnapshot{Model: "minimax/MiniMax-M1", ModeLabel: "default", Workspace: "/tmp/ws"},
@@ -213,19 +323,67 @@ func TestSlashModelDeleteCallsDriverAndRefreshesStatus(t *testing.T) {
 	}
 }
 
+func TestSlashStatusShowsGuidanceAndWarnings(t *testing.T) {
+	driver := &bridgeTestDriver{
+		status: tuiadapterruntime.StatusSnapshot{
+			SessionID:               "sess-1",
+			StoreDir:                "/tmp/.caelis",
+			Workspace:               "/tmp/ws",
+			SandboxRequestedBackend: "seatbelt",
+			SandboxResolvedBackend:  "host",
+			Route:                   "host",
+			FallbackReason:          "seatbelt is unavailable",
+			HostExecution:           true,
+			FullAccessMode:          true,
+			MissingAPIKey:           true,
+		},
+	}
+	var msgs []tea.Msg
+	slashStatus(driver, func(msg tea.Msg) { msgs = append(msgs, msg) })
+	if len(msgs) != 1 {
+		t.Fatalf("slashStatus() emitted %d messages, want 1", len(msgs))
+	}
+	log, ok := msgs[0].(LogChunkMsg)
+	if !ok {
+		t.Fatalf("slashStatus() msg = %#v, want LogChunkMsg", msgs[0])
+	}
+	for _, want := range []string{"/connect", "warning: API key is missing", "warning: commands may run on the host", "/tmp/.caelis"} {
+		if !strings.Contains(log.Chunk, want) {
+			t.Fatalf("slashStatus() chunk = %q, want substring %q", log.Chunk, want)
+		}
+	}
+}
+
+func TestFriendlyCommandErrorMakesResumeActionable(t *testing.T) {
+	err := friendlyCommandError("resume session", fmt.Errorf("gateway: session not found"))
+	if !strings.Contains(err.Error(), "/resume") {
+		t.Fatalf("friendlyCommandError() = %q, want /resume guidance", err)
+	}
+}
+
 type bridgeTestDriver struct {
-	status           tuiadapterruntime.StatusSnapshot
-	connectStatus    tuiadapterruntime.StatusSnapshot
-	useModelStatus   tuiadapterruntime.StatusSnapshot
-	newSession       sdksession.Session
-	resumedSession   sdksession.Session
-	replay           []appgateway.EventEnvelope
-	connectCalls     int
-	useModelCalls    int
-	deleteModelCalls int
-	lastConnect      tuiadapterruntime.ConnectConfig
-	lastModelAlias   string
-	lastDeletedAlias string
+	status            tuiadapterruntime.StatusSnapshot
+	connectStatus     tuiadapterruntime.StatusSnapshot
+	useModelStatus    tuiadapterruntime.StatusSnapshot
+	newSession        sdksession.Session
+	resumedSession    sdksession.Session
+	replay            []appgateway.EventEnvelope
+	connectCalls      int
+	useModelCalls     int
+	deleteModelCalls  int
+	listAgentCalls    int
+	agentStatusCalls  int
+	addAgentCalls     int
+	removeAgentCalls  int
+	handoffAgentCalls int
+	lastConnect       tuiadapterruntime.ConnectConfig
+	lastModelAlias    string
+	lastDeletedAlias  string
+	lastAddedAgent    string
+	lastRemovedAgent  string
+	lastHandoffAgent  string
+	agentList         []tuiadapterruntime.AgentCandidate
+	agentStatus       tuiadapterruntime.AgentStatusSnapshot
 }
 
 type bridgeTestTurn struct {
@@ -286,13 +444,28 @@ func (d *bridgeSubmitDriver) SetSandboxBackend(context.Context, string) (tuiadap
 func (d *bridgeSubmitDriver) SetSandboxMode(context.Context, string) (tuiadapterruntime.StatusSnapshot, error) {
 	return tuiadapterruntime.StatusSnapshot{}, nil
 }
-func (d *bridgeSubmitDriver) CompleteMention(context.Context, string, int) ([]string, error) {
+func (d *bridgeSubmitDriver) ListAgents(context.Context, int) ([]tuiadapterruntime.AgentCandidate, error) {
 	return nil, nil
 }
-func (d *bridgeSubmitDriver) CompleteFile(context.Context, string, int) ([]string, error) {
+func (d *bridgeSubmitDriver) AgentStatus(context.Context) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	return tuiadapterruntime.AgentStatusSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) AddAgent(context.Context, string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	return tuiadapterruntime.AgentStatusSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) RemoveAgent(context.Context, string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	return tuiadapterruntime.AgentStatusSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) HandoffAgent(context.Context, string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	return tuiadapterruntime.AgentStatusSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) CompleteMention(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil
 }
-func (d *bridgeSubmitDriver) CompleteSkill(context.Context, string, int) ([]string, error) {
+func (d *bridgeSubmitDriver) CompleteFile(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
+	return nil, nil
+}
+func (d *bridgeSubmitDriver) CompleteSkill(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil
 }
 func (d *bridgeSubmitDriver) CompleteResume(context.Context, string, int) ([]tuiadapterruntime.ResumeCandidate, error) {
@@ -358,13 +531,36 @@ func (d *bridgeTestDriver) SetSandboxBackend(context.Context, string) (tuiadapte
 func (d *bridgeTestDriver) SetSandboxMode(context.Context, string) (tuiadapterruntime.StatusSnapshot, error) {
 	return d.status, nil
 }
-func (d *bridgeTestDriver) CompleteMention(context.Context, string, int) ([]string, error) {
+func (d *bridgeTestDriver) ListAgents(context.Context, int) ([]tuiadapterruntime.AgentCandidate, error) {
+	d.listAgentCalls++
+	return d.agentList, nil
+}
+func (d *bridgeTestDriver) AgentStatus(context.Context) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	d.agentStatusCalls++
+	return d.agentStatus, nil
+}
+func (d *bridgeTestDriver) AddAgent(_ context.Context, target string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	d.addAgentCalls++
+	d.lastAddedAgent = target
+	return d.agentStatus, nil
+}
+func (d *bridgeTestDriver) RemoveAgent(_ context.Context, target string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	d.removeAgentCalls++
+	d.lastRemovedAgent = target
+	return d.agentStatus, nil
+}
+func (d *bridgeTestDriver) HandoffAgent(_ context.Context, target string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	d.handoffAgentCalls++
+	d.lastHandoffAgent = target
+	return d.agentStatus, nil
+}
+func (d *bridgeTestDriver) CompleteMention(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil
 }
-func (d *bridgeTestDriver) CompleteFile(context.Context, string, int) ([]string, error) {
+func (d *bridgeTestDriver) CompleteFile(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil
 }
-func (d *bridgeTestDriver) CompleteSkill(context.Context, string, int) ([]string, error) {
+func (d *bridgeTestDriver) CompleteSkill(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil
 }
 func (d *bridgeTestDriver) CompleteResume(context.Context, string, int) ([]tuiadapterruntime.ResumeCandidate, error) {

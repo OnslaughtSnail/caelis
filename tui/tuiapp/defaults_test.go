@@ -9,14 +9,16 @@ func TestDefaultCommandsExposeCanonicalCoreCommandsOnly(t *testing.T) {
 	got := DefaultCommands()
 	want := []string{
 		"help",
-		"exit",
-		"quit",
-		"new",
-		"status",
+		"agent",
+		"connect",
 		"model",
 		"sandbox",
-		"connect",
+		"status",
+		"new",
 		"resume",
+		"compact",
+		"exit",
+		"quit",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DefaultCommands() = %#v, want %#v", got, want)
@@ -54,5 +56,13 @@ func TestDefaultConnectWizardMatchesLegacyStepShape(t *testing.T) {
 	want := []string{"provider", "endpoint", "baseurl", "apikey", "model", "context_window_tokens", "max_output_tokens", "reasoning_levels"}
 	if !reflect.DeepEqual(keys, want) {
 		t.Fatalf("connect wizard steps = %#v, want %#v", keys, want)
+	}
+}
+
+func TestDefaultCommandsHideBTWFromDefaultTUI(t *testing.T) {
+	for _, command := range DefaultCommands() {
+		if command == "btw" {
+			t.Fatalf("DefaultCommands() unexpectedly includes hidden command %q", command)
+		}
 	}
 }

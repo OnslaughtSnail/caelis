@@ -7,9 +7,9 @@ import (
 )
 
 type compositeRuntime struct {
-	host    Runtime
-	sandbox Runtime
-	status  Status
+	host     Runtime
+	sandbox  Runtime
+	status   Status
 	backends map[Backend]Runtime
 }
 

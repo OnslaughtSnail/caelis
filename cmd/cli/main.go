@@ -30,6 +30,8 @@ type runResult struct {
 	PromptTokens int    `json:"prompt_tokens,omitempty"`
 }
 
+type doctorResult = gatewayapp.DoctorReport
+
 func main() {
 	if landlock.MaybeRunInternalHelper(os.Args[1:]) {
 		return
@@ -41,6 +43,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	doctorSubcommand := len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "doctor")
+	if doctorSubcommand {
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("caelis", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -73,6 +79,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		contextWindow    = fs.Int("context-window", envInt("CAELIS_CONTEXT_WINDOW", 0), "Context window override")
 		maxOutputTokens  = fs.Int("max-output-tokens", envInt("CAELIS_MAX_OUTPUT_TOKENS", 4096), "Max output tokens")
 		forceInteractive = fs.Bool("interactive", false, "Force interactive local main path")
+		doctor           = fs.Bool("doctor", false, "Print runtime/session/sandbox diagnostics and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -109,6 +116,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	stack, err := gatewayapp.NewLocalStack(cfg)
 	if err != nil {
 		return err
+	}
+	if doctorSubcommand || *doctor {
+		outFmt, err := parseOutputFormat(*format)
+		if err != nil {
+			return err
+		}
+		return runDoctor(ctx, stack, strings.TrimSpace(*sessionID), outFmt, stdout)
 	}
 
 	stdinTTY := isTTY(os.Stdin)
@@ -161,6 +175,16 @@ func runHeadless(ctx context.Context, stack *gatewayapp.Stack, sessionID string,
 	})
 }
 
+func runDoctor(ctx context.Context, stack *gatewayapp.Stack, sessionID string, format outputFormat, stdout io.Writer) error {
+	report, err := stack.Doctor(ctx, gatewayapp.DoctorRequest{
+		SessionID: strings.TrimSpace(sessionID),
+	})
+	if err != nil {
+		return err
+	}
+	return writeDoctorResult(stdout, format, doctorResult(report))
+}
+
 func runInteractive(ctx context.Context, stack *gatewayapp.Stack, sessionID string, cfg gatewayapp.Config, displayModelText string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	_ = stderr
 	_ = cfg
@@ -211,7 +235,7 @@ func streamHandle(ctx context.Context, handle appgateway.TurnHandle, stdout io.W
 			fmt.Fprintln(stderr, "[approval] denied by default")
 			if err := handle.Submit(ctx, appgateway.SubmitRequest{
 				Kind:     appgateway.SubmissionKindApproval,
-				Approval: &appgateway.ApprovalDecision{Approved: false, Outcome: "rejected"},
+				Approval: &appgateway.ApprovalDecision{Approved: false, Outcome: string(appgateway.ApprovalStatusRejected)},
 			}); err != nil {
 				return err
 			}
@@ -221,6 +245,18 @@ func streamHandle(ctx context.Context, handle appgateway.TurnHandle, stdout io.W
 		}
 	}
 	return nil
+}
+
+func writeDoctorResult(w io.Writer, format outputFormat, result doctorResult) error {
+	switch format {
+	case outputJSON:
+		enc := json.NewEncoder(w)
+		enc.SetEscapeHTML(false)
+		return enc.Encode(result)
+	default:
+		_, err := fmt.Fprintln(w, gatewayapp.FormatDoctorText(gatewayapp.DoctorReport(result)))
+		return err
+	}
 }
 
 func writeResult(w io.Writer, format outputFormat, result runResult) error {
@@ -349,6 +385,15 @@ func normalizeConfig(cfg gatewayapp.Config) (gatewayapp.Config, error) {
 		cfg.Model.Provider = "ollama"
 		if cfg.Model.API == "" {
 			cfg.Model.API = sdkproviders.APIOllama
+		}
+		cfg.Model.AuthType = sdkproviders.AuthNone
+	case "codefree":
+		cfg.Model.Provider = "codefree"
+		if cfg.Model.API == "" {
+			cfg.Model.API = sdkproviders.APICodeFree
+		}
+		if strings.TrimSpace(cfg.Model.BaseURL) == "" {
+			cfg.Model.BaseURL = "https://www.srdcloud.cn"
 		}
 		cfg.Model.AuthType = sdkproviders.AuthNone
 	default:

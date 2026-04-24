@@ -96,10 +96,6 @@ type openRouterStreamAccumulator struct {
 }
 
 func newOpenRouter(cfg Config, token string) model.LLM {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	return &openRouterLLM{
 		name:                cfg.Model,
 		provider:            cfg.Provider,
@@ -107,7 +103,7 @@ func newOpenRouter(cfg Config, token string) model.LLM {
 		token:               token,
 		headers:             cloneHeaders(cfg.Headers),
 		client:              &http.Client{},
-		requestTimeout:      timeout,
+		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 		options:             defaultOpenAICompatOptions(),

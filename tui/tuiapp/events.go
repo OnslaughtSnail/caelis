@@ -153,6 +153,10 @@ type ACPProjectionMsg struct {
 	HasPlanUpdate bool
 }
 
+type TranscriptEventsMsg struct {
+	Events []TranscriptEvent
+}
+
 type AssistantStreamMsg struct {
 	Kind  string
 	Actor string

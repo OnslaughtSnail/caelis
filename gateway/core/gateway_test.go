@@ -504,6 +504,103 @@ func TestHandoffControllerRejectsMissingControlPlane(t *testing.T) {
 	}
 }
 
+func TestAttachParticipantDelegatesToRuntimeControlPlaneAndUpdatesBinding(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+		Participants: []sdksession.ParticipantBinding{{
+			ID:    "participant-1",
+			Kind:  sdksession.ParticipantKindACP,
+			Role:  sdksession.ParticipantRoleSidecar,
+			Label: "Copilot",
+		}},
+	}
+	rt := &controlPlaneRuntime{
+		session:    session,
+		attachResp: session,
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := gw.StartSession(context.Background(), StartSessionRequest{
+		AppName:    "caelis",
+		UserID:     "u",
+		Workspace:  sdksession.WorkspaceRef{Key: "ws", CWD: "/tmp/ws"},
+		BindingKey: "surface-agent",
+	}); err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	updated, err := gw.AttachParticipant(context.Background(), AttachParticipantRequest{
+		BindingKey: "surface-agent",
+		Agent:      "copilot",
+		Role:       sdksession.ParticipantRoleSidecar,
+		Source:     "user_attach",
+		Label:      "Copilot",
+	})
+	if err != nil {
+		t.Fatalf("AttachParticipant() error = %v", err)
+	}
+	if len(updated.Participants) != 1 || rt.attachReq.Agent != "copilot" || rt.attachReq.SessionRef.SessionID != "s1" {
+		t.Fatalf("updated=%+v attachReq=%+v", updated, rt.attachReq)
+	}
+	if binding, err := gw.LookupBinding(BindingStateRequest{BindingKey: "surface-agent"}); err != nil {
+		t.Fatalf("LookupBinding() error = %v", err)
+	} else if binding.SessionRef.SessionID != "s1" {
+		t.Fatalf("binding session = %q, want s1", binding.SessionRef.SessionID)
+	}
+}
+
+func TestDetachParticipantDelegatesToRuntimeControlPlaneAndUpdatesBinding(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	rt := &controlPlaneRuntime{
+		session:    session,
+		detachResp: session,
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := gw.StartSession(context.Background(), StartSessionRequest{
+		AppName:    "caelis",
+		UserID:     "u",
+		Workspace:  sdksession.WorkspaceRef{Key: "ws", CWD: "/tmp/ws"},
+		BindingKey: "surface-agent",
+	}); err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+
+	updated, err := gw.DetachParticipant(context.Background(), DetachParticipantRequest{
+		BindingKey:    "surface-agent",
+		ParticipantID: "participant-1",
+		Source:        "user_detach",
+	})
+	if err != nil {
+		t.Fatalf("DetachParticipant() error = %v", err)
+	}
+	if updated.SessionID != "s1" || rt.detachReq.ParticipantID != "participant-1" || rt.detachReq.SessionRef.SessionID != "s1" {
+		t.Fatalf("updated=%+v detachReq=%+v", updated, rt.detachReq)
+	}
+}
+
 func TestBeginTurnRejectsSecondActiveRunForSameSession(t *testing.T) {
 	t.Parallel()
 
@@ -620,6 +717,55 @@ func TestBeginTurnLoadsSessionResolvesIntentRunsRuntimeAndPublishesEvents(t *tes
 	}
 	if rt.lastReq.SessionRef != session.SessionRef || rt.lastReq.Input != "hello" {
 		t.Fatalf("runtime req = %+v", rt.lastReq)
+	}
+}
+
+func TestGatewayActiveTurnsReportsSessionScopedState(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	runner := &blockingRunner{release: make(chan struct{})}
+	rt := &recordingRuntime{
+		session: session,
+		result:  sdkruntime.RunResult{Session: session, Handle: runner},
+	}
+	gw, err := New(Config{
+		Sessions: staticSessionService{session: session},
+		Runtime:  rt,
+		Resolver: staticResolver{resolved: ResolvedTurn{}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := gw.BeginTurn(context.Background(), BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+	defer result.Handle.Close()
+
+	active := gw.ActiveTurns()
+	if len(active) != 1 {
+		t.Fatalf("ActiveTurns() len = %d, want 1", len(active))
+	}
+	if active[0].SessionRef.SessionID != "s1" || active[0].HandleID == "" || active[0].RunID == "" || active[0].TurnID == "" {
+		t.Fatalf("ActiveTurns()[0] = %+v", active[0])
+	}
+	if current, ok := gw.ActiveTurn("s1"); !ok || current.SessionRef.SessionID != "s1" {
+		t.Fatalf("ActiveTurn(s1) = %+v, %v", current, ok)
+	}
+
+	close(runner.release)
+	collectHandleEvents(t, result.Handle)
+	if active := gw.ActiveTurns(); len(active) != 0 {
+		t.Fatalf("ActiveTurns() after completion = %+v, want empty", active)
 	}
 }
 
@@ -1011,6 +1157,50 @@ func TestReplayEventsResolvesBindingAndAppliesCursorLimit(t *testing.T) {
 	}
 }
 
+func TestReplayEventsReturnsCursorNotFoundForStaleCursor(t *testing.T) {
+	t.Parallel()
+
+	session := sdksession.Session{
+		SessionRef: sdksession.SessionRef{
+			AppName: "caelis", UserID: "u", SessionID: "s1", WorkspaceKey: "ws",
+		},
+	}
+	svc := &recordingSessionService{
+		sessionResult: session,
+		eventsResult: []*sdksession.Event{
+			{ID: "e1", Type: sdksession.EventTypeUser, Text: "first"},
+			{ID: "e2", Type: sdksession.EventTypeAssistant, Text: "second"},
+		},
+	}
+	gw, err := New(Config{
+		Sessions: svc,
+		Runtime:  mockRuntime{},
+		Resolver: staticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := gw.BindSession(context.Background(), BindSessionRequest{
+		SessionRef: session.SessionRef,
+		BindingKey: "surface-replay",
+		Binding:    BindingDescriptor{Surface: "cli-tui"},
+	}); err != nil {
+		t.Fatalf("BindSession() error = %v", err)
+	}
+
+	_, err = gw.ReplayEvents(context.Background(), ReplayEventsRequest{
+		BindingKey: "surface-replay",
+		Cursor:     "missing",
+	})
+	if err == nil {
+		t.Fatal("ReplayEvents() error = nil, want cursor_not_found")
+	}
+	var gwErr *Error
+	if !As(err, &gwErr) || gwErr.Code != CodeCursorNotFound {
+		t.Fatalf("ReplayEvents() error = %v, want cursor_not_found", err)
+	}
+}
+
 type mockRuntime struct{}
 
 func (mockRuntime) Run(context.Context, sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
@@ -1114,6 +1304,10 @@ type controlPlaneRuntime struct {
 	runState    sdkruntime.RunState
 	handoffReq  sdkruntime.HandoffControllerRequest
 	handoffResp sdksession.Session
+	attachReq   sdkruntime.AttachACPParticipantRequest
+	attachResp  sdksession.Session
+	detachReq   sdkruntime.DetachACPParticipantRequest
+	detachResp  sdksession.Session
 }
 
 func (r *controlPlaneRuntime) Run(context.Context, sdkruntime.RunRequest) (sdkruntime.RunResult, error) {
@@ -1129,12 +1323,14 @@ func (r *controlPlaneRuntime) HandoffController(_ context.Context, req sdkruntim
 	return r.handoffResp, nil
 }
 
-func (r *controlPlaneRuntime) AttachACPParticipant(context.Context, sdkruntime.AttachACPParticipantRequest) (sdksession.Session, error) {
-	return sdksession.Session{}, nil
+func (r *controlPlaneRuntime) AttachACPParticipant(_ context.Context, req sdkruntime.AttachACPParticipantRequest) (sdksession.Session, error) {
+	r.attachReq = req
+	return r.attachResp, nil
 }
 
-func (r *controlPlaneRuntime) DetachACPParticipant(context.Context, sdkruntime.DetachACPParticipantRequest) (sdksession.Session, error) {
-	return sdksession.Session{}, nil
+func (r *controlPlaneRuntime) DetachACPParticipant(_ context.Context, req sdkruntime.DetachACPParticipantRequest) (sdksession.Session, error) {
+	r.detachReq = req
+	return r.detachResp, nil
 }
 
 type staticSessionService struct {
@@ -1320,6 +1516,22 @@ func (r *recordingRunner) Cancel() bool {
 }
 
 func (r *recordingRunner) Close() error { return nil }
+
+type blockingRunner struct {
+	release chan struct{}
+}
+
+func (blockingRunner) RunID() string { return "run-blocking" }
+
+func (r blockingRunner) Events() iter.Seq2[*sdksession.Event, error] {
+	return func(yield func(*sdksession.Event, error) bool) {
+		<-r.release
+	}
+}
+
+func (blockingRunner) Submit(sdkruntime.Submission) error { return nil }
+func (blockingRunner) Cancel() bool                       { return true }
+func (blockingRunner) Close() error                       { return nil }
 
 func TestSanityTestClock(t *testing.T) {
 	t.Parallel()

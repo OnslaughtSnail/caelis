@@ -39,7 +39,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 			if err != nil {
 				return "not configured", ""
 			}
-			return strings.TrimSpace(status.Model), formatPromptTokenStatus(status.PromptTokens)
+			return strings.TrimSpace(status.Model), formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens)
 		}
 	}
 
@@ -50,20 +50,59 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 	}
 
 	if base.MentionComplete == nil {
-		base.MentionComplete = func(query string, limit int) ([]string, error) {
-			return driver.CompleteMention(context.Background(), query, limit)
+		base.MentionComplete = func(query string, limit int) ([]CompletionCandidate, error) {
+			candidates, err := driver.CompleteMention(context.Background(), query, limit)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]CompletionCandidate, len(candidates))
+			for i, c := range candidates {
+				out[i] = CompletionCandidate{
+					Value:   c.Value,
+					Display: c.Display,
+					Detail:  c.Detail,
+					Path:    c.Path,
+				}
+			}
+			return out, nil
 		}
 	}
 
 	if base.FileComplete == nil {
-		base.FileComplete = func(query string, limit int) ([]string, error) {
-			return driver.CompleteFile(context.Background(), query, limit)
+		base.FileComplete = func(query string, limit int) ([]CompletionCandidate, error) {
+			candidates, err := driver.CompleteFile(context.Background(), query, limit)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]CompletionCandidate, len(candidates))
+			for i, c := range candidates {
+				out[i] = CompletionCandidate{
+					Value:   c.Value,
+					Display: c.Display,
+					Detail:  c.Detail,
+					Path:    c.Path,
+				}
+			}
+			return out, nil
 		}
 	}
 
 	if base.SkillComplete == nil {
-		base.SkillComplete = func(query string, limit int) ([]string, error) {
-			return driver.CompleteSkill(context.Background(), query, limit)
+		base.SkillComplete = func(query string, limit int) ([]CompletionCandidate, error) {
+			candidates, err := driver.CompleteSkill(context.Background(), query, limit)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]CompletionCandidate, len(candidates))
+			for i, c := range candidates {
+				out[i] = CompletionCandidate{
+					Value:   c.Value,
+					Display: c.Display,
+					Detail:  c.Detail,
+					Path:    c.Path,
+				}
+			}
+			return out, nil
 		}
 	}
 
@@ -77,8 +116,12 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 			for i, c := range candidates {
 				out[i] = ResumeCandidate{
 					SessionID: c.SessionID,
+					Title:     c.Title,
 					Prompt:    c.Prompt,
+					Model:     c.Model,
+					Workspace: c.Workspace,
 					Age:       c.Age,
+					UpdatedAt: c.UpdatedAt,
 				}
 			}
 			return out, nil
@@ -160,7 +203,7 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 		Attachments: convertAttachments(sub.Attachments),
 	})
 	if err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("submit: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("submit", err)}
 	}
 	if turn == nil {
 		return TaskResultMsg{SuppressTurnDivider: true}
@@ -192,6 +235,8 @@ func dispatchSlashCommand(driver tuiadapterruntime.Driver, sender *ProgramSender
 	switch cmd {
 	case "help":
 		return slashHelp(send)
+	case "agent":
+		return slashAgent(driver, send, args)
 	case "new":
 		return slashNew(driver, send)
 	case "resume":
@@ -209,32 +254,87 @@ func dispatchSlashCommand(driver tuiadapterruntime.Driver, sender *ProgramSender
 	case "exit", "quit":
 		return TaskResultMsg{ExitNow: true}
 	default:
-		sendNotice(send, fmt.Sprintf("unknown command: /%s", cmd))
+		sendNotice(send, fmt.Sprintf("unknown command: /%s\nrun /help to see supported commands", cmd))
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
 }
 
 func slashHelp(send func(tea.Msg)) TaskResultMsg {
-	lines := []string{
-		"available commands:",
-		"  /connect",
-		"  /model use|del <alias>",
-		"  /new",
-		"  /resume [session-id]",
-		"  /sandbox [auto|seatbelt|bwrap|landlock]",
-		"  /status",
-		"  /exit",
-		"  /quit",
-	}
-	sendNotice(send, strings.Join(lines, "\n"))
+	sendNotice(send, defaultHelpText())
 	return TaskResultMsg{SuppressTurnDivider: true}
+}
+
+func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx := context.Background()
+	sub, rest := splitFirst(strings.TrimSpace(args))
+	switch sub {
+	case "", "help":
+		sendNotice(send, agentHelpText())
+		return TaskResultMsg{SuppressTurnDivider: true}
+	case "list":
+		agents, err := driver.ListAgents(ctx, 20)
+		if err != nil {
+			return TaskResultMsg{Err: friendlyCommandError("agent list", err)}
+		}
+		sendNotice(send, formatAgentCatalog(agents))
+		return TaskResultMsg{SuppressTurnDivider: true}
+	case "status":
+		status, err := driver.AgentStatus(ctx)
+		if err != nil {
+			return TaskResultMsg{Err: friendlyCommandError("agent status", err)}
+		}
+		sendNotice(send, formatAgentStatusSnapshot(status))
+		return TaskResultMsg{SuppressTurnDivider: true}
+	case "add", "connect":
+		target := strings.TrimSpace(rest)
+		if target == "" {
+			sendNotice(send, "usage: /agent add <name>\nrun /agent list to inspect configured agents")
+			return TaskResultMsg{SuppressTurnDivider: true}
+		}
+		status, err := driver.AddAgent(ctx, target)
+		if err != nil {
+			return TaskResultMsg{Err: friendlyCommandError("agent add", err)}
+		}
+		sendNotice(send, fmt.Sprintf("agent attached: %s", target))
+		sendNotice(send, formatAgentStatusSnapshot(status))
+		return TaskResultMsg{SuppressTurnDivider: true}
+	case "remove", "rm":
+		target := strings.TrimSpace(rest)
+		if target == "" {
+			sendNotice(send, "usage: /agent remove <participant-id>\nrun /agent status to inspect attached participants")
+			return TaskResultMsg{SuppressTurnDivider: true}
+		}
+		status, err := driver.RemoveAgent(ctx, target)
+		if err != nil {
+			return TaskResultMsg{Err: friendlyCommandError("agent remove", err)}
+		}
+		sendNotice(send, fmt.Sprintf("agent removed: %s", target))
+		sendNotice(send, formatAgentStatusSnapshot(status))
+		return TaskResultMsg{SuppressTurnDivider: true}
+	case "handoff", "use":
+		target := strings.TrimSpace(rest)
+		if target == "" {
+			sendNotice(send, "usage: /agent handoff <name|local>\nrun /agent list for agents or /agent handoff local to return to the local controller")
+			return TaskResultMsg{SuppressTurnDivider: true}
+		}
+		status, err := driver.HandoffAgent(ctx, target)
+		if err != nil {
+			return TaskResultMsg{Err: friendlyCommandError("agent handoff", err)}
+		}
+		sendNotice(send, fmt.Sprintf("controller handoff: %s", target))
+		sendNotice(send, formatAgentStatusSnapshot(status))
+		return TaskResultMsg{SuppressTurnDivider: true}
+	default:
+		sendNotice(send, "usage: /agent list | status | add <name> | remove <participant-id> | handoff <name|local>")
+		return TaskResultMsg{SuppressTurnDivider: true}
+	}
 }
 
 func slashNew(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg {
 	ctx := context.Background()
 	session, err := driver.NewSession(ctx)
 	if err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("new session: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("new session", err)}
 	}
 	if send != nil {
 		send(ClearHistoryMsg{})
@@ -251,7 +351,7 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 		// List available sessions.
 		candidates, err := driver.ListSessions(ctx, 10)
 		if err != nil {
-			return TaskResultMsg{Err: fmt.Errorf("list sessions: %w", err)}
+			return TaskResultMsg{Err: friendlyCommandError("list sessions", err)}
 		}
 		if len(candidates) == 0 {
 			sendNotice(send, "no sessions available to resume")
@@ -276,7 +376,7 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 	// Resume specific session.
 	session, err := driver.ResumeSession(ctx, sessionID)
 	if err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("resume session: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("resume session", err)}
 	}
 	if send != nil {
 		send(ClearHistoryMsg{})
@@ -304,35 +404,9 @@ func slashStatus(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResult
 	ctx := context.Background()
 	status, err := driver.Status(ctx)
 	if err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("status: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("status", err)}
 	}
-	var lines []string
-	lines = append(lines, "status:")
-	if status.SessionID != "" {
-		lines = append(lines, fmt.Sprintf("  session:   %s", status.SessionID))
-	}
-	if status.Model != "" {
-		lines = append(lines, fmt.Sprintf("  model:     %s", status.Model))
-	}
-	if status.Workspace != "" {
-		lines = append(lines, fmt.Sprintf("  workspace: %s", status.Workspace))
-	}
-	if status.ModeLabel != "" {
-		lines = append(lines, fmt.Sprintf("  mode:      %s", status.ModeLabel))
-	}
-	if status.SandboxType != "" {
-		lines = append(lines, fmt.Sprintf("  sandbox:   %s", status.SandboxType))
-	}
-	if status.Route != "" {
-		lines = append(lines, fmt.Sprintf("  route:     %s", status.Route))
-	}
-	if status.FallbackReason != "" {
-		lines = append(lines, fmt.Sprintf("  fallback:  %s", status.FallbackReason))
-	}
-	if status.Surface != "" {
-		lines = append(lines, fmt.Sprintf("  surface:   %s", status.Surface))
-	}
-	sendNotice(send, strings.Join(lines, "\n"))
+	sendNotice(send, formatStatusSnapshot(status))
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
@@ -340,12 +414,15 @@ func slashConnect(driver tuiadapterruntime.Driver, send func(tea.Msg), args stri
 	ctx := context.Background()
 	cfg := parseConnectArgs(args)
 	if cfg.Provider == "" || cfg.Model == "" {
-		sendNotice(send, "usage: /connect")
+		sendNotice(send, "usage: /connect\nrun /connect to open the guided setup wizard")
 		return TaskResultMsg{SuppressTurnDivider: true}
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), "codefree") {
+		sendNotice(send, "opening CodeFree OAuth in your browser and waiting for authentication...")
 	}
 	status, err := driver.Connect(ctx, cfg)
 	if err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("connect: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("connect", err)}
 	}
 	sendNotice(send, fmt.Sprintf("connected: %s", status.Model))
 	sendStatusUpdate(send, status)
@@ -364,7 +441,7 @@ func slashModel(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		}
 		status, err := driver.UseModel(ctx, alias)
 		if err != nil {
-			return TaskResultMsg{Err: fmt.Errorf("model use: %w", err)}
+			return TaskResultMsg{Err: friendlyCommandError("model use", err)}
 		}
 		sendNotice(send, fmt.Sprintf("model switched to: %s", status.Model))
 		sendStatusUpdate(send, status)
@@ -375,7 +452,7 @@ func slashModel(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 			return TaskResultMsg{SuppressTurnDivider: true}
 		}
 		if err := driver.DeleteModel(ctx, alias); err != nil {
-			return TaskResultMsg{Err: fmt.Errorf("model delete: %w", err)}
+			return TaskResultMsg{Err: friendlyCommandError("model delete", err)}
 		}
 		sendNotice(send, fmt.Sprintf("model deleted: %s", alias))
 		refreshStatusViaSend(driver, send)
@@ -391,22 +468,26 @@ func slashSandbox(driver tuiadapterruntime.Driver, send func(tea.Msg), args stri
 	if backend == "" {
 		status, err := driver.Status(ctx)
 		if err != nil {
-			return TaskResultMsg{Err: fmt.Errorf("sandbox: %w", err)}
+			return TaskResultMsg{Err: friendlyCommandError("sandbox", err)}
 		}
 		lines := []string{
-			fmt.Sprintf("sandbox backend: %s", status.SandboxType),
-			fmt.Sprintf("session mode: %s", status.SessionMode),
-			fmt.Sprintf("route: %s", status.Route),
+			fmt.Sprintf("sandbox requested: %s", firstNonEmpty(strings.TrimSpace(status.SandboxRequestedBackend), "-")),
+			fmt.Sprintf("sandbox resolved: %s", firstNonEmpty(strings.TrimSpace(status.SandboxResolvedBackend), firstNonEmpty(strings.TrimSpace(status.SandboxType), "-"))),
+			fmt.Sprintf("session mode: %s", firstNonEmpty(strings.TrimSpace(status.SessionMode), "default")),
+			fmt.Sprintf("route: %s", firstNonEmpty(strings.TrimSpace(status.Route), "-")),
 		}
 		if status.FallbackReason != "" {
 			lines = append(lines, fmt.Sprintf("fallback: %s", status.FallbackReason))
+		}
+		if status.HostExecution || status.FullAccessMode {
+			lines = append(lines, "warning: commands may execute on the host with reduced isolation")
 		}
 		sendNotice(send, strings.Join(lines, "\n"))
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
 	status, err := driver.SetSandboxBackend(ctx, backend)
 	if err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("sandbox: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("sandbox", err)}
 	}
 	if strings.EqualFold(strings.TrimSpace(status.SessionMode), "full_access") {
 		sendNotice(send, fmt.Sprintf("sandbox backend updated: %s (will apply in default/plan mode)", status.SandboxType))
@@ -421,7 +502,7 @@ func slashCompact(driver tuiadapterruntime.Driver, send func(tea.Msg), args stri
 	ctx := context.Background()
 	note := strings.TrimSpace(args)
 	if err := driver.Compact(ctx, note); err != nil {
-		return TaskResultMsg{Err: fmt.Errorf("compact: %w", err)}
+		return TaskResultMsg{Err: friendlyCommandError("compact", err)}
 	}
 	sendNotice(send, "compaction completed")
 	return TaskResultMsg{SuppressTurnDivider: true}
@@ -442,16 +523,35 @@ func sendStatusUpdate(send func(tea.Msg), status tuiadapterruntime.StatusSnapsho
 		send(SetStatusMsg{
 			Workspace: status.Workspace,
 			Model:     status.Model,
-			Context:   formatPromptTokenStatus(status.PromptTokens),
+			Context:   formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens),
 		})
 	}
 }
 
-func formatPromptTokenStatus(promptTokens int) string {
-	if promptTokens <= 0 {
+func formatContextUsageStatus(totalTokens int, contextWindow int) string {
+	if contextWindow <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d prompt tok", promptTokens)
+	if totalTokens < 0 {
+		totalTokens = 0
+	}
+	percent := 0
+	if contextWindow > 0 {
+		percent = int(float64(totalTokens)*100/float64(contextWindow) + 0.5)
+		if percent < 0 {
+			percent = 0
+		}
+	}
+	return fmt.Sprintf("%s/%s(%d%%)", formatCompactTokenCount(totalTokens), formatCompactTokenCount(contextWindow), percent)
+}
+
+func formatCompactTokenCount(tokens int) string {
+	if tokens < 1000 {
+		return strconv.Itoa(max(tokens, 0))
+	}
+	value := float64(tokens) / 1000.0
+	text := fmt.Sprintf("%.1fk", value)
+	return strings.Replace(text, ".0k", "k", 1)
 }
 
 func refreshStatusViaSend(driver tuiadapterruntime.Driver, send func(tea.Msg)) {
@@ -496,7 +596,7 @@ func approvalDecisionFromPrompt(req *appgateway.ApprovalPayload, response Prompt
 				continue
 			}
 			return appgateway.ApprovalDecision{
-				Outcome:  "selected",
+				Outcome:  string(appgateway.ApprovalStatusSelected),
 				OptionID: selected,
 				Approved: approvalOptionAllows(opt.Kind, opt.Name, opt.ID),
 			}
@@ -504,7 +604,7 @@ func approvalDecisionFromPrompt(req *appgateway.ApprovalPayload, response Prompt
 	}
 	switch strings.ToLower(selected) {
 	case "approve", "allow", "yes", "y":
-		return appgateway.ApprovalDecision{Outcome: "approved", Approved: true}
+		return appgateway.ApprovalDecision{Outcome: string(appgateway.ApprovalStatusApproved), Approved: true}
 	default:
 		return rejectionApprovalDecision(req)
 	}
@@ -517,13 +617,13 @@ func rejectionApprovalDecision(req *appgateway.ApprovalPayload) appgateway.Appro
 				continue
 			}
 			return appgateway.ApprovalDecision{
-				Outcome:  "selected",
+				Outcome:  string(appgateway.ApprovalStatusSelected),
 				OptionID: strings.TrimSpace(opt.ID),
 				Approved: false,
 			}
 		}
 	}
-	return appgateway.ApprovalDecision{Outcome: "rejected", Approved: false}
+	return appgateway.ApprovalDecision{Outcome: string(appgateway.ApprovalStatusRejected), Approved: false}
 }
 
 func approvalOptionAllows(kind string, name string, id string) bool {
@@ -569,7 +669,14 @@ func parseConnectArgs(args string) tuiadapterruntime.ConnectConfig {
 		}
 	}
 	if len(parts) >= 5 {
-		cfg.APIKey = dashAsEmpty(parts[4])
+		secret := dashAsEmpty(parts[4])
+		if strings.HasPrefix(strings.ToLower(secret), "env:") {
+			cfg.TokenEnv = strings.TrimSpace(secret[len("env:"):])
+		} else if strings.HasPrefix(secret, "$") {
+			cfg.TokenEnv = strings.TrimSpace(strings.TrimPrefix(secret, "$"))
+		} else {
+			cfg.APIKey = secret
+		}
 	}
 	if len(parts) >= 6 {
 		if contextWindow, err := strconv.Atoi(dashAsEmpty(parts[5])); err == nil {
@@ -584,10 +691,151 @@ func parseConnectArgs(args string) tuiadapterruntime.ConnectConfig {
 	if len(parts) >= 8 {
 		cfg.ReasoningLevels = parseReasoningLevels(parts[7])
 	}
-	if len(parts) == 4 && cfg.TimeoutSeconds == 0 && cfg.APIKey == "" {
+	if len(parts) == 4 && cfg.TimeoutSeconds == 0 && cfg.APIKey == "" && cfg.TokenEnv == "" {
 		cfg.TokenEnv = dashAsEmpty(parts[3])
 	}
 	return cfg
+}
+
+func formatStatusSnapshot(status tuiadapterruntime.StatusSnapshot) string {
+	lines := []string{"status:"}
+	lines = append(lines, fmt.Sprintf("  session:   %s", firstNonEmpty(strings.TrimSpace(status.SessionID), "-")))
+	lines = append(lines, fmt.Sprintf("  provider:  %s", firstNonEmpty(strings.TrimSpace(status.Provider), deriveProviderFromAlias(status.Model), "not configured")))
+	lines = append(lines, fmt.Sprintf("  model:     %s", firstNonEmpty(strings.TrimSpace(status.ModelName), deriveModelNameFromAlias(status.Model), "not configured")))
+	lines = append(lines, fmt.Sprintf("  alias:     %s", firstNonEmpty(strings.TrimSpace(status.Model), "-")))
+	lines = append(lines, fmt.Sprintf("  mode:      %s", firstNonEmpty(strings.TrimSpace(status.ModeLabel), "default")))
+	lines = append(lines, fmt.Sprintf("  sandbox:   %s", firstNonEmpty(strings.TrimSpace(status.SandboxResolvedBackend), strings.TrimSpace(status.SandboxType), "auto")))
+	lines = append(lines, fmt.Sprintf("  route:     %s", firstNonEmpty(strings.TrimSpace(status.Route), "-")))
+	lines = append(lines, fmt.Sprintf("  workspace: %s", firstNonEmpty(strings.TrimSpace(status.Workspace), "-")))
+	lines = append(lines, fmt.Sprintf("  store:     %s", firstNonEmpty(strings.TrimSpace(status.StoreDir), "-")))
+	if usage := formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens); usage != "" {
+		lines = append(lines, fmt.Sprintf("  context:   %s", usage))
+	}
+	if status.FallbackReason != "" {
+		lines = append(lines, "  fallback:  "+strings.TrimSpace(status.FallbackReason))
+	}
+	if strings.TrimSpace(status.Model) == "" && strings.TrimSpace(status.Provider) == "" && strings.TrimSpace(status.ModelName) == "" {
+		lines = append(lines, "next: run /connect to configure a provider and model")
+	}
+	if status.MissingAPIKey {
+		lines = append(lines, "warning: API key is missing; reconnect with a key or use env:YOUR_API_KEY")
+	}
+	if status.HostExecution || status.FullAccessMode {
+		lines = append(lines, "warning: commands may run on the host with reduced sandbox isolation")
+	}
+	if strings.TrimSpace(status.FallbackReason) != "" {
+		lines = append(lines, "warning: requested sandbox backend is unavailable and a fallback is in effect")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func agentHelpText() string {
+	lines := []string{
+		"/agent commands:",
+		"  /agent list      list configured ACP agents",
+		"  /agent status    show current controller and attached participants",
+		"  /agent add NAME  attach one ACP participant to the current session",
+		"  /agent remove ID detach one attached participant",
+		"  /agent handoff NAME  hand off the main controller to an ACP agent",
+		"  /agent handoff local return the main controller to the local kernel",
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatAgentCatalog(agents []tuiadapterruntime.AgentCandidate) string {
+	if len(agents) == 0 {
+		return "no ACP agents are configured for this app\nnext: add agent assembly config before using /agent add or /agent handoff"
+	}
+	lines := []string{"configured ACP agents:"}
+	for _, agent := range agents {
+		line := "  " + strings.TrimSpace(agent.Name)
+		if desc := strings.TrimSpace(agent.Description); desc != "" {
+			line += "  " + desc
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "next: run /agent add <name> to attach a participant, or /agent handoff <name> to switch the main controller")
+	return strings.Join(lines, "\n")
+}
+
+func formatAgentStatusSnapshot(status tuiadapterruntime.AgentStatusSnapshot) string {
+	lines := []string{"agent status:"}
+	lines = append(lines, fmt.Sprintf("  session:     %s", firstNonEmpty(strings.TrimSpace(status.SessionID), "-")))
+	lines = append(lines, fmt.Sprintf("  controller:  %s", firstNonEmpty(strings.TrimSpace(status.ControllerLabel), strings.TrimSpace(status.ControllerKind), "local kernel")))
+	lines = append(lines, fmt.Sprintf("  kind:        %s", firstNonEmpty(strings.TrimSpace(status.ControllerKind), "kernel")))
+	lines = append(lines, fmt.Sprintf("  active turn: %t", status.HasActiveTurn))
+	if len(status.Participants) == 0 {
+		lines = append(lines, "  participants: none")
+	} else {
+		lines = append(lines, "  participants:")
+		for _, participant := range status.Participants {
+			lines = append(lines, fmt.Sprintf("    %s  %s  %s", firstNonEmpty(strings.TrimSpace(participant.ID), "-"), firstNonEmpty(strings.TrimSpace(participant.Label), "-"), strings.TrimSpace(participant.Role)))
+		}
+	}
+	if len(status.AvailableAgents) == 0 {
+		lines = append(lines, "next: no ACP agents are configured")
+	} else if len(status.Participants) == 0 && strings.TrimSpace(status.ControllerKind) == "" {
+		lines = append(lines, "next: run /agent add <name> to attach a participant or /agent handoff <name> to switch the main controller")
+	} else if len(status.Participants) == 0 {
+		lines = append(lines, "next: run /agent add <name> to attach a participant")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func deriveProviderFromAlias(alias string) string {
+	left, _, ok := strings.Cut(strings.TrimSpace(alias), "/")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(left)
+}
+
+func deriveModelNameFromAlias(alias string) string {
+	_, right, ok := strings.Cut(strings.TrimSpace(alias), "/")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(right)
+}
+
+func friendlyCommandError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(err.Error())
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "api key is missing"):
+		return fmt.Errorf("%s: API key is missing. Use /connect and paste a key, or enter env:YOUR_API_KEY", action)
+	case strings.Contains(lower, "base url is invalid"):
+		return fmt.Errorf("%s: base URL is invalid. Use a full URL such as https://api.openai.com/v1", action)
+	case strings.Contains(lower, "provider is not supported"), strings.Contains(lower, "unknown provider"):
+		return fmt.Errorf("%s: provider is not supported. Run /connect and choose one of the listed providers", action)
+	case strings.Contains(lower, "provider and model are required"), strings.Contains(lower, "model is required"):
+		return fmt.Errorf("%s: provider or model is not configured. Run /connect to add one", action)
+	case strings.Contains(lower, "unknown model alias"):
+		return fmt.Errorf("%s: model alias was not found. Run /model and choose a configured alias, or use /connect first", action)
+	case strings.Contains(lower, "ambiguous model alias"):
+		return fmt.Errorf("%s: model alias is ambiguous. Type more of the alias or pick from /model", action)
+	case strings.Contains(lower, "agent name is required"), strings.Contains(lower, "agent ") && strings.Contains(lower, " is not configured"):
+		return fmt.Errorf("%s: agent was not found. Run /agent list to inspect configured agents", action)
+	case strings.Contains(lower, "agent ") && strings.Contains(lower, " is ambiguous"):
+		return fmt.Errorf("%s: agent name is ambiguous. Type more of the agent name or run /agent list", action)
+	case strings.Contains(lower, "participant id is required"), strings.Contains(lower, "participant ") && strings.Contains(lower, " is not attached"):
+		return fmt.Errorf("%s: participant was not found. Run /agent status to inspect attached participants", action)
+	case strings.Contains(lower, "participant ") && strings.Contains(lower, " is ambiguous"):
+		return fmt.Errorf("%s: participant target is ambiguous. Run /agent status and use the full participant id", action)
+	case strings.Contains(lower, "control plane is not available"), strings.Contains(lower, "acp controller backend is not configured"):
+		return fmt.Errorf("%s: ACP control plane is not configured for this stack. Check app assembly agent config before using /agent", action)
+	case strings.Contains(lower, "unknown sandbox backend"), strings.Contains(lower, "unsupported by"):
+		return fmt.Errorf("%s: sandbox backend is unavailable on this machine. Run /sandbox to inspect available backends", action)
+	case strings.Contains(lower, "session not found"):
+		return fmt.Errorf("%s: session could not be loaded. Run /resume to inspect available sessions", action)
+	case strings.Contains(lower, "active turn"):
+		return fmt.Errorf("%s: another turn is still running. Wait for it to finish or interrupt it before reconfiguring", action)
+	default:
+		return fmt.Errorf("%s: %w", action, err)
+	}
 }
 
 func dashAsEmpty(value string) string {

@@ -38,7 +38,7 @@ type promptFragment struct {
 	Content string
 }
 
-type skillMeta struct {
+type SkillMeta struct {
 	Name        string
 	Description string
 	Path        string
@@ -61,7 +61,7 @@ func buildSystemPrompt(cfg promptConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	skills, err := discoverSkillMeta(cfg.SkillDirs)
+	skills, err := discoverSkillMeta(cfg.SkillDirs, workspaceDir)
 	if err != nil {
 		return "", err
 	}
@@ -225,7 +225,7 @@ func buildUserCustomInstructionsPrompt(sessionPrompt string, workspaceAgents str
 	return strings.Join(lines, "\n\n")
 }
 
-func buildSkillsMetaPrompt(metas []skillMeta) string {
+func buildSkillsMetaPrompt(metas []SkillMeta) string {
 	if len(metas) == 0 {
 		return ""
 	}
@@ -294,15 +294,24 @@ func renderRawFragments(fragments []promptFragment) string {
 	return strings.Join(parts, "\n\n")
 }
 
-func defaultSkillDirs() []string {
-	return []string{"~/.agents/skills"}
+func DefaultSkillDiscoveryDirs(workspaceDir string) []string {
+	out := []string{"~/.agents/skills"}
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" {
+		return out
+	}
+	out = append(out,
+		filepath.Join(workspaceDir, ".agents", "skills"),
+		filepath.Join(workspaceDir, "skills"),
+	)
+	return out
 }
 
-func discoverSkillMeta(dirs []string) ([]skillMeta, error) {
+func DiscoverSkillMeta(dirs []string, workspaceDir string) ([]SkillMeta, error) {
 	if len(dirs) == 0 {
-		dirs = defaultSkillDirs()
+		dirs = DefaultSkillDiscoveryDirs(workspaceDir)
 	}
-	out := make([]skillMeta, 0)
+	out := make([]SkillMeta, 0)
 	seen := map[string]struct{}{}
 	for _, dir := range dirs {
 		resolvedDir, err := resolvePromptPath(dir)
@@ -349,14 +358,18 @@ func discoverSkillMeta(dirs []string) ([]skillMeta, error) {
 	return out, nil
 }
 
-func parseSkillMeta(path string) (skillMeta, error) {
+func discoverSkillMeta(dirs []string, workspaceDir string) ([]SkillMeta, error) {
+	return DiscoverSkillMeta(dirs, workspaceDir)
+}
+
+func parseSkillMeta(path string) (SkillMeta, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return skillMeta{}, err
+		return SkillMeta{}, err
 	}
 	content := normalizePromptText(string(raw))
 	if content == "" {
-		return skillMeta{}, fmt.Errorf("empty SKILL.md: %s", path)
+		return SkillMeta{}, fmt.Errorf("empty SKILL.md: %s", path)
 	}
 	frontMatter, body := parseFrontMatter(content)
 	name := firstNonEmptyPromptString(
@@ -369,9 +382,9 @@ func parseSkillMeta(path string) (skillMeta, error) {
 		firstParagraph(body),
 	)
 	if name == "" || description == "" {
-		return skillMeta{}, fmt.Errorf("invalid skill metadata: %s", path)
+		return SkillMeta{}, fmt.Errorf("invalid skill metadata: %s", path)
 	}
-	return skillMeta{
+	return SkillMeta{
 		Name:        strings.TrimSpace(name),
 		Description: strings.TrimSpace(description),
 		Path:        path,

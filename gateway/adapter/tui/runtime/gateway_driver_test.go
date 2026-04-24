@@ -1,18 +1,60 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OnslaughtSnail/caelis/app/gatewayapp"
+	appgateway "github.com/OnslaughtSnail/caelis/gateway"
+	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
+func encryptCodeFreeAPIKeyForRuntimeTest(t *testing.T, apiKey string) string {
+	t.Helper()
+	block, err := aes.NewCipher([]byte("Xtpa6sS&+D.NAo%CP8LA:7pk"))
+	if err != nil {
+		t.Fatalf("init aes cipher: %v", err)
+	}
+	blockSize := block.BlockSize()
+	pad := blockSize - (len(apiKey) % blockSize)
+	plain := append([]byte(apiKey), bytes.Repeat([]byte{byte(pad)}, pad)...)
+	out := make([]byte, len(plain))
+	cipher.NewCBCEncrypter(block, []byte("%1KJIrl3!XUxr04V")).CryptBlocks(out, plain)
+	return base64.StdEncoding.EncodeToString(out)
+}
+
+func ptrRuntimeMessage(message sdkmodel.Message) *sdkmodel.Message {
+	return &message
+}
+
 func TestGatewayDriverCompleteSlashArgConnectFlowUsesLegacyCommands(t *testing.T) {
 	ctx := context.Background()
+	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")
+	rawCreds, err := json.Marshal(map[string]any{
+		"id_token": "272182",
+		"apikey":   encryptCodeFreeAPIKeyForRuntimeTest(t, "cached-api-key"),
+		"baseUrl":  "https://www.srdcloud.cn",
+	})
+	if err != nil {
+		t.Fatalf("marshal creds: %v", err)
+	}
+	if err := os.WriteFile(credsPath, rawCreds, 0o600); err != nil {
+		t.Fatalf("write creds: %v", err)
+	}
+	t.Setenv("CODEFREE_OAUTH_CREDS_PATH", credsPath)
+
 	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
 		AppName:        "caelis",
 		UserID:         "connect-test",
@@ -66,6 +108,21 @@ func TestGatewayDriverCompleteSlashArgConnectFlowUsesLegacyCommands(t *testing.T
 	}
 	if deepseekModels[0].Value != "deepseek-chat" || deepseekModels[1].Value != "deepseek-reasoner" {
 		t.Fatalf("deepseek connect model candidates = %#v, want deepseek-chat and deepseek-reasoner", deepseekModels)
+	}
+
+	codefreeModels, err := driver.CompleteSlashArg(ctx, "connect-model:codefree|https%3A%2F%2Fwww.srdcloud.cn|60||", "", 20)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(connect-model codefree) error = %v", err)
+	}
+	foundCodeFree := false
+	for _, item := range codefreeModels {
+		if item.Value == "GLM-4.7" {
+			foundCodeFree = true
+			break
+		}
+	}
+	if !foundCodeFree {
+		t.Fatalf("codefree connect model candidates = %#v, want built-in GLM-4.7 without auth side effects", codefreeModels)
 	}
 }
 
@@ -121,6 +178,128 @@ func TestGatewayDriverCompleteSlashArgUsesRealModelAliases(t *testing.T) {
 	}
 	if got := delCandidates[0].Value; got != "ollama/alt-model" {
 		t.Fatalf("first model del candidate = %q, want ollama/alt-model", got)
+	}
+}
+
+func TestGatewayDriverConnectCodeFreeUsesExistingOAuthCache(t *testing.T) {
+	ctx := context.Background()
+	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")
+	raw, err := json.Marshal(map[string]any{
+		"id_token":            "272182",
+		"apikey":              encryptCodeFreeAPIKeyForRuntimeTest(t, "cached-api-key"),
+		"refresh_token":       "refresh-token",
+		"baseUrl":             "https://www.srdcloud.cn",
+		"expires_at_unix_ms":  time.Now().Add(time.Hour).UnixMilli(),
+		"obtained_at_unix_ms": time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("marshal creds: %v", err)
+	}
+	if err := os.WriteFile(credsPath, raw, 0o600); err != nil {
+		t.Fatalf("write creds: %v", err)
+	}
+	t.Setenv("CODEFREE_OAUTH_CREDS_PATH", credsPath)
+
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "codefree-connect-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: gatewayapp.ModelConfig{
+			Provider: "ollama",
+			API:      sdkproviders.APIOllama,
+			Model:    "llama3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "codefree-connect-session", "surface", "ollama/llama3")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+
+	status, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "codefree",
+		Model:    "GLM-4.7",
+	})
+	if err != nil {
+		t.Fatalf("Connect(codefree) error = %v", err)
+	}
+	if status.Provider != "codefree" {
+		t.Fatalf("provider = %q, want codefree", status.Provider)
+	}
+	if status.ModelName != "GLM-4.7" {
+		t.Fatalf("model name = %q, want GLM-4.7", status.ModelName)
+	}
+}
+
+func TestGatewayDriverStatusIncludesContextUsageSnapshot(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "status-usage-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: gatewayapp.ModelConfig{
+			Provider:            "ollama",
+			API:                 sdkproviders.APIOllama,
+			Model:               "llama3",
+			ContextWindowTokens: 88000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "status-usage-session", "surface", "ollama/llama3")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	session, ok := driver.currentSession()
+	if !ok {
+		t.Fatal("expected active session")
+	}
+	if _, err := stack.Sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
+		SessionRef: session.SessionRef,
+		Event: &sdksession.Event{
+			Message: ptrRuntimeMessage(sdkmodel.NewTextMessage(sdkmodel.RoleUser, "hello")),
+			Text:    "hello",
+		},
+	}); err != nil {
+		t.Fatalf("AppendEvent(user) error = %v", err)
+	}
+	if _, err := stack.Sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
+		SessionRef: session.SessionRef,
+		Event: &sdksession.Event{
+			Message: ptrRuntimeMessage(sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, "world")),
+			Text:    "world",
+			Meta: map[string]any{
+				"provider":          "ollama",
+				"model":             "llama3",
+				"prompt_tokens":     12600,
+				"completion_tokens": 200,
+				"total_tokens":      12800,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("AppendEvent(assistant) error = %v", err)
+	}
+
+	status, err := driver.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.TotalTokens <= 12600 {
+		t.Fatalf("status.TotalTokens = %d, want provider baseline plus estimated delta", status.TotalTokens)
+	}
+	if status.ContextWindowTokens != 88000 {
+		t.Fatalf("status.ContextWindowTokens = %d, want 88000", status.ContextWindowTokens)
 	}
 }
 
@@ -210,6 +389,103 @@ func TestGatewayDriverUseModelResolvesCaseInsensitiveAlias(t *testing.T) {
 	}
 	if got := strings.ToLower(strings.TrimSpace(status.Model)); got != "minimax/minimax-m2.7-highspeed" {
 		t.Fatalf("status model = %q, want minimax/minimax-m2.7-highspeed", status.Model)
+	}
+}
+
+func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
+	ctx := context.Background()
+	repo := repoRootForGatewayDriverTest(t)
+	root := t.TempDir()
+	workdir := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "agent-driver-test",
+		StoreDir:       root,
+		WorkspaceKey:   workdir,
+		WorkspaceCWD:   workdir,
+		PermissionMode: "default",
+		Assembly: sdkplugin.ResolvedAssembly{
+			Agents: []sdkplugin.AgentConfig{{
+				Name:        "copilot",
+				Description: "ACP sidecar agent.",
+				Command:     "go",
+				Args:        []string{"run", "./acpbridge/cmd/e2eagent"},
+				WorkDir:     repo,
+				Env: map[string]string{
+					"SDK_ACP_STUB_REPLY":   "driver acp ok",
+					"SDK_ACP_SESSION_ROOT": filepath.Join(root, "agent-sessions"),
+					"SDK_ACP_TASK_ROOT":    filepath.Join(root, "agent-tasks"),
+				},
+			}},
+		},
+		Model: gatewayapp.ModelConfig{
+			Provider: "ollama",
+			API:      sdkproviders.APIOllama,
+			Model:    "llama3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "agent-driver-session", "surface", "ollama/llama3")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+
+	agents, err := driver.ListAgents(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAgents() error = %v", err)
+	}
+	if len(agents) != 1 || agents[0].Name != "copilot" {
+		t.Fatalf("ListAgents() = %#v, want configured copilot agent", agents)
+	}
+	addCandidates, err := driver.CompleteSlashArg(ctx, "agent add", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(agent add) error = %v", err)
+	}
+	if len(addCandidates) != 1 || addCandidates[0].Value != "copilot" {
+		t.Fatalf("agent add candidates = %#v, want copilot", addCandidates)
+	}
+
+	status, err := driver.AddAgent(ctx, "copilot")
+	if err != nil {
+		t.Fatalf("AddAgent() error = %v", err)
+	}
+	if len(status.Participants) != 1 || status.Participants[0].ID == "" {
+		t.Fatalf("AddAgent() status = %#v, want one attached participant", status)
+	}
+	participantID := status.Participants[0].ID
+
+	status, err = driver.HandoffAgent(ctx, "copilot")
+	if err != nil {
+		t.Fatalf("HandoffAgent(copilot) error = %v", err)
+	}
+	if got := strings.ToLower(strings.TrimSpace(status.ControllerKind)); got != "acp" {
+		t.Fatalf("controller kind after ACP handoff = %q, want acp", status.ControllerKind)
+	}
+
+	status, err = driver.HandoffAgent(ctx, "local")
+	if err != nil {
+		t.Fatalf("HandoffAgent(local) error = %v", err)
+	}
+	if got := strings.ToLower(strings.TrimSpace(status.ControllerKind)); got != "kernel" {
+		t.Fatalf("controller kind after local handoff = %q, want kernel", status.ControllerKind)
+	}
+
+	removeCandidates, err := driver.CompleteSlashArg(ctx, "agent remove", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(agent remove) error = %v", err)
+	}
+	if len(removeCandidates) != 1 || removeCandidates[0].Value != participantID {
+		t.Fatalf("agent remove candidates = %#v, want participant id %q", removeCandidates, participantID)
+	}
+
+	status, err = driver.RemoveAgent(ctx, participantID)
+	if err != nil {
+		t.Fatalf("RemoveAgent() error = %v", err)
+	}
+	if len(status.Participants) != 0 {
+		t.Fatalf("RemoveAgent() status = %#v, want zero participants", status)
 	}
 }
 
@@ -498,6 +774,7 @@ func TestGatewayDriverCompleteSlashArgUsesPrefixMatching(t *testing.T) {
 	if _, err := driver.Connect(ctx, ConnectConfig{
 		Provider: "deepseek",
 		Model:    "deepseek-reasoner",
+		TokenEnv: "DEEPSEEK_API_KEY",
 	}); err != nil {
 		t.Fatalf("Connect() error = %v", err)
 	}
@@ -563,6 +840,259 @@ func TestGatewayDriverConnectPersistsMultipleProviders(t *testing.T) {
 	}
 	if !foundMinimax {
 		t.Fatalf("model use candidates = %#v, missing minimax alias", candidates)
+	}
+}
+
+func TestFindProviderTemplateSupportsOpenAICompatible(t *testing.T) {
+	t.Parallel()
+
+	tpl, ok := findProviderTemplate("openai-compatible")
+	if !ok {
+		t.Fatal("findProviderTemplate(openai-compatible) = false, want true")
+	}
+	if tpl.provider != "openai-compatible" {
+		t.Fatalf("provider = %q, want openai-compatible", tpl.provider)
+	}
+	if tpl.defaultBaseURL == "" {
+		t.Fatal("defaultBaseURL = empty, want non-empty")
+	}
+}
+
+func TestConnectDefaultsForConfigOpenAICompatibleCustomBaseURL(t *testing.T) {
+	t.Parallel()
+
+	defaults, err := connectDefaultsForConfig(context.Background(), ConnectConfig{
+		Provider: "openai-compatible",
+		Model:    "gpt-4o-mini",
+		BaseURL:  "https://proxy.example.test/v1",
+	})
+	if err != nil {
+		t.Fatalf("connectDefaultsForConfig() error = %v", err)
+	}
+	if defaults.ContextWindow <= 0 {
+		t.Fatalf("ContextWindow = %d, want > 0", defaults.ContextWindow)
+	}
+	if defaults.MaxOutput <= 0 {
+		t.Fatalf("MaxOutput = %d, want > 0", defaults.MaxOutput)
+	}
+}
+
+func TestGatewayDriverCompleteFileUsesRelativePathsAndSkipsNoise(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "src", "pkg"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(src/pkg) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "node_modules", "leftpad"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(node_modules) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, ".git", "objects"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(.git) error = %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(workspace, "src", "main.go"),
+		filepath.Join(workspace, "src", "pkg", "helper.go"),
+		filepath.Join(workspace, "node_modules", "leftpad", "index.js"),
+	} {
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, err)
+		}
+	}
+
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "file-complete-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   workspace,
+		WorkspaceCWD:   workspace,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "file-complete-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+
+	candidates, err := driver.CompleteFile(ctx, "src/ma", 10)
+	if err != nil {
+		t.Fatalf("CompleteFile() error = %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatal("CompleteFile() returned no candidates, want src/main.go")
+	}
+	if got := candidates[0].Value; got != "src/main.go" {
+		t.Fatalf("first candidate value = %q, want src/main.go", got)
+	}
+
+	all, err := driver.CompleteFile(ctx, "", 20)
+	if err != nil {
+		t.Fatalf("CompleteFile(all) error = %v", err)
+	}
+	for _, item := range all {
+		if strings.Contains(item.Value, "node_modules") || strings.Contains(item.Value, ".git") {
+			t.Fatalf("noise directory leaked into candidates: %#v", all)
+		}
+	}
+}
+
+func TestGatewayDriverCompleteSkillDiscoversGlobalAndWorkspaceSkills(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("HOME", home)
+
+	globalSkill := filepath.Join(home, ".agents", "skills", "echo")
+	workspaceSkill := filepath.Join(workspace, ".agents", "skills", "lint")
+	for _, dir := range []string{globalSkill, workspaceSkill} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(globalSkill, "SKILL.md"), []byte("---\nname: echo\ndescription: Echo text.\n---\n# Echo\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(global SKILL.md) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceSkill, "SKILL.md"), []byte("---\nname: lint\ndescription: Run lint checks.\n---\n# Lint\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(workspace SKILL.md) error = %v", err)
+	}
+
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "skill-complete-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   workspace,
+		WorkspaceCWD:   workspace,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "skill-complete-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+
+	candidates, err := driver.CompleteSkill(ctx, "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSkill() error = %v", err)
+	}
+	if len(candidates) < 2 {
+		t.Fatalf("CompleteSkill() = %#v, want global and workspace skills", candidates)
+	}
+	foundEcho := false
+	foundLint := false
+	for _, item := range candidates {
+		switch item.Value {
+		case "echo":
+			foundEcho = strings.Contains(item.Detail, "Echo text") && strings.TrimSpace(item.Path) != ""
+		case "lint":
+			foundLint = strings.Contains(item.Detail, "Run lint checks") && strings.TrimSpace(item.Path) != ""
+		}
+	}
+	if !foundEcho || !foundLint {
+		t.Fatalf("CompleteSkill() = %#v, want echo and lint metadata", candidates)
+	}
+}
+
+func TestGatewayDriverCompleteMentionReturnsEmptySlice(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "mention-complete-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "mention-complete-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	candidates, err := driver.CompleteMention(ctx, "alp", 8)
+	if err != nil {
+		t.Fatalf("CompleteMention() error = %v", err)
+	}
+	if candidates == nil {
+		t.Fatal("CompleteMention() = nil, want empty slice")
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("CompleteMention() = %#v, want empty slice", candidates)
+	}
+}
+
+func TestGatewayDriverCompleteResumeIncludesMetadataAndRecentFirst(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "resume-complete-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   workspace,
+		WorkspaceCWD:   workspace,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	first, err := stack.Gateway.StartSession(ctx, appgateway.StartSessionRequest{
+		AppName:    stack.AppName,
+		UserID:     stack.UserID,
+		Workspace:  stack.Workspace,
+		Title:      "First Task",
+		BindingKey: "first-binding",
+	})
+	if err != nil {
+		t.Fatalf("StartSession(first) error = %v", err)
+	}
+	if err := stack.Sessions.UpdateState(ctx, first.SessionRef, func(state map[string]any) (map[string]any, error) {
+		next := sdksession.CloneState(state)
+		next[appgateway.StateCurrentModelAlias] = "openai/gpt-4o-mini"
+		return next, nil
+	}); err != nil {
+		t.Fatalf("UpdateState(first) error = %v", err)
+	}
+	second, err := stack.Gateway.StartSession(ctx, appgateway.StartSessionRequest{
+		AppName:    stack.AppName,
+		UserID:     stack.UserID,
+		Workspace:  stack.Workspace,
+		Title:      "Second Task",
+		BindingKey: "second-binding",
+	})
+	if err != nil {
+		t.Fatalf("StartSession(second) error = %v", err)
+	}
+	if err := stack.Sessions.UpdateState(ctx, second.SessionRef, func(state map[string]any) (map[string]any, error) {
+		next := sdksession.CloneState(state)
+		next[appgateway.StateCurrentModelAlias] = "deepseek/deepseek-chat"
+		return next, nil
+	}); err != nil {
+		t.Fatalf("UpdateState(second) error = %v", err)
+	}
+
+	driver, err := NewGatewayDriver(ctx, stack, "resume-complete-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	candidates, err := driver.CompleteResume(ctx, "task", 10)
+	if err != nil {
+		t.Fatalf("CompleteResume() error = %v", err)
+	}
+	if len(candidates) < 2 {
+		t.Fatalf("CompleteResume() = %#v, want at least two sessions", candidates)
+	}
+	if candidates[0].Title != "Second Task" {
+		t.Fatalf("first resume candidate title = %q, want most recent Second Task", candidates[0].Title)
+	}
+	if candidates[0].Model == "" || candidates[0].Workspace == "" {
+		t.Fatalf("first resume candidate = %#v, want model and workspace metadata", candidates[0])
 	}
 }
 
@@ -638,5 +1168,126 @@ func TestGatewayDriverConnectModelCandidatesIncludeConfiguredProviderModels(t *t
 	}
 	if !found {
 		t.Fatalf("connect model candidates = %#v, want configured minimax model", models)
+	}
+}
+
+func TestGatewayDriverConnectRejectsMissingAPIKeyWithActionableError(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "missing-key-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "missing-key-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	if _, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}); err == nil || !strings.Contains(err.Error(), "env:OPENAI_API_KEY") {
+		t.Fatalf("Connect() error = %v, want actionable env hint", err)
+	}
+}
+
+func TestGatewayDriverConnectRejectsInvalidBaseURL(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "invalid-baseurl-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "invalid-baseurl-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	if _, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "openai-compatible",
+		Model:    "gpt-4o",
+		BaseURL:  "not-a-url",
+		APIKey:   "secret",
+	}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "base url is invalid") {
+		t.Fatalf("Connect() error = %v, want invalid base URL guidance", err)
+	}
+}
+
+func TestGatewayDriverStatusIncludesDoctorDiagnostics(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	workdir := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "doctor-status-test",
+		StoreDir:       root,
+		WorkspaceKey:   workdir,
+		WorkspaceCWD:   workdir,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "doctor-status-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	if _, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "minimax",
+		Model:    "MiniMax-M2.7-highspeed",
+		TokenEnv: "MINIMAX_API_KEY",
+	}); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if _, err := driver.SetSandboxMode(ctx, "full_access"); err != nil {
+		t.Fatalf("SetSandboxMode() error = %v", err)
+	}
+	status, err := driver.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.StoreDir != root {
+		t.Fatalf("status.StoreDir = %q, want %q", status.StoreDir, root)
+	}
+	if status.Provider != "minimax" || status.ModelName != "MiniMax-M2.7-highspeed" {
+		t.Fatalf("status provider/model = %q/%q, want minimax/MiniMax-M2.7-highspeed", status.Provider, status.ModelName)
+	}
+	if !status.MissingAPIKey {
+		t.Fatal("status.MissingAPIKey = false, want true when token env is unset")
+	}
+	if !status.HostExecution || !status.FullAccessMode {
+		t.Fatalf("status host/full_access = %v/%v, want true/true", status.HostExecution, status.FullAccessMode)
+	}
+}
+
+func repoRootForGatewayDriverTest(t *testing.T) string {
+	t.Helper()
+
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("repo root not found")
+		}
+		dir = parent
 	}
 }

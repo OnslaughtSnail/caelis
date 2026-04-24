@@ -897,8 +897,8 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 }
 
 func (m *Model) allowsBTWSubmission() bool {
-	if m == nil || len(m.cfg.Commands) == 0 {
-		return true
+	if m == nil {
+		return false
 	}
 	for _, one := range m.cfg.Commands {
 		if strings.EqualFold(strings.TrimSpace(one), "btw") {

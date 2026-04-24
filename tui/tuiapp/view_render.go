@@ -1363,11 +1363,21 @@ func (m *Model) renderMentionList() string {
 	var lines []string
 	for i := range maxItems {
 		prefix := "  "
+		display := m.mentionPrefix + completionCandidateDisplay(m.mentionCandidates[i])
+		detail := completionCandidateDetail(m.mentionCandidates[i])
 		if i == m.mentionIndex {
 			prefix = m.theme.PromptStyle().Render("▸ ")
-			lines = append(lines, prefix+m.theme.CommandActiveStyle().Render("@"+m.mentionCandidates[i]))
+			line := prefix + m.theme.CommandActiveStyle().Render(display)
+			if detail != "" {
+				line += "  " + m.theme.HelpHintTextStyle().Render(detail)
+			}
+			lines = append(lines, line)
 		} else {
-			lines = append(lines, prefix+m.theme.HelpHintTextStyle().Render("@"+m.mentionCandidates[i]))
+			line := prefix + m.theme.HelpHintTextStyle().Render(display)
+			if detail != "" {
+				line += "  " + m.theme.HelpHintTextStyle().Render(detail)
+			}
+			lines = append(lines, line)
 		}
 	}
 	if len(m.mentionCandidates) > maxItems {

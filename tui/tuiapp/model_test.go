@@ -82,6 +82,13 @@ func TestWelcomeCardUpdatesWhenStatusChanges(t *testing.T) {
 	}
 }
 
+func TestBTWCommandIsHiddenByDefault(t *testing.T) {
+	model := NewModel(Config{Commands: DefaultCommands()})
+	if got := model.submissionModeForLine("/btw summarize that"); got != SubmissionModeDefault {
+		t.Fatalf("submissionModeForLine(/btw ...) = %q, want default hidden-command handling", got)
+	}
+}
+
 func TestReasoningAndAnswerBlocksRemainAdjacentAndIndependent(t *testing.T) {
 	model := NewModel(Config{})
 

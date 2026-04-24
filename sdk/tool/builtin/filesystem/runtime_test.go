@@ -57,7 +57,7 @@ type fakeRuntime struct {
 	hostFS    sdksandbox.FileSystem
 }
 
-func (f fakeRuntime) Describe() sdksandbox.Descriptor { return sdksandbox.Descriptor{} }
+func (f fakeRuntime) Describe() sdksandbox.Descriptor   { return sdksandbox.Descriptor{} }
 func (f fakeRuntime) FileSystem() sdksandbox.FileSystem { return f.defaultFS }
 func (f fakeRuntime) FileSystemFor(constraints sdksandbox.Constraints) sdksandbox.FileSystem {
 	if constraints.Route == sdksandbox.RouteHost || constraints.Permission == sdksandbox.PermissionFullAccess {
@@ -75,7 +75,9 @@ func (f fakeRuntime) OpenSession(string) (sdksandbox.Session, error) { return ni
 func (f fakeRuntime) OpenSessionRef(sdksandbox.SessionRef) (sdksandbox.Session, error) {
 	return nil, nil
 }
-func (f fakeRuntime) SupportedBackends() []sdksandbox.Backend { return []sdksandbox.Backend{sdksandbox.BackendHost} }
+func (f fakeRuntime) SupportedBackends() []sdksandbox.Backend {
+	return []sdksandbox.Backend{sdksandbox.BackendHost}
+}
 func (f fakeRuntime) Status() sdksandbox.Status {
 	return sdksandbox.Status{
 		RequestedBackend: sdksandbox.BackendHost,
@@ -88,12 +90,12 @@ type fakeFileSystem struct {
 	cwd string
 }
 
-func (f fakeFileSystem) Getwd() (string, error)                    { return f.cwd, nil }
-func (f fakeFileSystem) UserHomeDir() (string, error)              { return "/home/test", nil }
-func (f fakeFileSystem) Open(string) (*os.File, error)             { return nil, fs.ErrNotExist }
-func (f fakeFileSystem) ReadDir(string) ([]os.DirEntry, error)     { return nil, fs.ErrNotExist }
-func (f fakeFileSystem) Stat(string) (os.FileInfo, error)          { return nil, fs.ErrNotExist }
-func (f fakeFileSystem) ReadFile(string) ([]byte, error)           { return nil, fs.ErrNotExist }
+func (f fakeFileSystem) Getwd() (string, error)                      { return f.cwd, nil }
+func (f fakeFileSystem) UserHomeDir() (string, error)                { return "/home/test", nil }
+func (f fakeFileSystem) Open(string) (*os.File, error)               { return nil, fs.ErrNotExist }
+func (f fakeFileSystem) ReadDir(string) ([]os.DirEntry, error)       { return nil, fs.ErrNotExist }
+func (f fakeFileSystem) Stat(string) (os.FileInfo, error)            { return nil, fs.ErrNotExist }
+func (f fakeFileSystem) ReadFile(string) ([]byte, error)             { return nil, fs.ErrNotExist }
 func (f fakeFileSystem) WriteFile(string, []byte, os.FileMode) error { return nil }
-func (f fakeFileSystem) Glob(string) ([]string, error)             { return nil, nil }
-func (f fakeFileSystem) WalkDir(string, fs.WalkDirFunc) error      { return nil }
+func (f fakeFileSystem) Glob(string) ([]string, error)               { return nil, nil }
+func (f fakeFileSystem) WalkDir(string, fs.WalkDirFunc) error        { return nil }

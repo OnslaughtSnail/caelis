@@ -1,9 +1,11 @@
 package tuiapp
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestModelDeleteSelectionOpensAliasPicker(t *testing.T) {
@@ -252,14 +254,14 @@ func TestResumePrefixTypingResetsSelectionToFirstFilteredCandidate(t *testing.T)
 
 func TestAgentActionPrefixTypingFiltersCandidates(t *testing.T) {
 	model := NewModel(Config{
-		Commands: append(DefaultCommands(), "agent"),
+		Commands: DefaultCommands(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "agent":
 				return []SlashArgCandidate{
 					{Value: "add", Display: "add"},
-					{Value: "rm", Display: "rm"},
-					{Value: "use", Display: "use"},
+					{Value: "remove", Display: "remove"},
+					{Value: "handoff", Display: "handoff"},
 					{Value: "list", Display: "list"},
 				}, nil
 			default:
@@ -268,28 +270,28 @@ func TestAgentActionPrefixTypingFiltersCandidates(t *testing.T) {
 		},
 	})
 
-	model.setInputText("/agent us")
+	model.setInputText("/agent ha")
 	model.syncTextareaFromInput()
 	model.syncSlashInputOverlays()
 
 	if got := model.slashArgCommand; got != "agent" {
 		t.Fatalf("slashArgCommand = %q, want agent", got)
 	}
-	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "use" {
-		t.Fatalf("slashArgCandidates = %#v, want only use candidate", model.slashArgCandidates)
+	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "handoff" {
+		t.Fatalf("slashArgCandidates = %#v, want only handoff candidate", model.slashArgCandidates)
 	}
 }
 
 func TestAgentActionPrefixTypingFiltersCandidatesWhenCursorLags(t *testing.T) {
 	model := NewModel(Config{
-		Commands: append(DefaultCommands(), "agent"),
+		Commands: DefaultCommands(),
 		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
 			switch command {
 			case "agent":
 				return []SlashArgCandidate{
 					{Value: "add", Display: "add"},
-					{Value: "rm", Display: "rm"},
-					{Value: "use", Display: "use"},
+					{Value: "remove", Display: "remove"},
+					{Value: "handoff", Display: "handoff"},
 					{Value: "list", Display: "list"},
 				}, nil
 			default:
@@ -298,7 +300,7 @@ func TestAgentActionPrefixTypingFiltersCandidatesWhenCursorLags(t *testing.T) {
 		},
 	})
 
-	model.setInputText("/agent us")
+	model.setInputText("/agent ha")
 	model.syncTextareaFromInput()
 	model.cursor = len([]rune("/agent "))
 	model.syncSlashInputOverlays()
@@ -306,8 +308,8 @@ func TestAgentActionPrefixTypingFiltersCandidatesWhenCursorLags(t *testing.T) {
 	if got := model.slashArgCommand; got != "agent" {
 		t.Fatalf("slashArgCommand = %q, want agent", got)
 	}
-	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "use" {
-		t.Fatalf("slashArgCandidates with lagging cursor = %#v, want only use candidate", model.slashArgCandidates)
+	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "handoff" {
+		t.Fatalf("slashArgCandidates with lagging cursor = %#v, want only handoff candidate", model.slashArgCandidates)
 	}
 }
 
@@ -398,6 +400,59 @@ func TestResumePrefixTypingUsesTextareaValueAsSourceOfTruth(t *testing.T) {
 	}
 	if len(model.resumeCandidates) != 1 || model.resumeCandidates[0].SessionID != "beta-session" {
 		t.Fatalf("resumeCandidates from textarea source = %#v, want only beta-session", model.resumeCandidates)
+	}
+}
+
+func TestSkillCompletionRendersMetadataAndUsesCandidateValue(t *testing.T) {
+	model := NewModel(Config{
+		Commands: DefaultCommands(),
+		SkillComplete: func(query string, limit int) ([]CompletionCandidate, error) {
+			return []CompletionCandidate{
+				{Value: "lint", Display: "lint", Detail: "Run lint checks · ~/.agents/skills/lint/SKILL.md"},
+			}, nil
+		},
+	})
+
+	model.input = []rune("$li")
+	model.cursor = len(model.input)
+	model.refreshSkill()
+	if len(model.skillCandidates) != 1 {
+		t.Fatalf("skillCandidates = %#v, want one candidate", model.skillCandidates)
+	}
+	if !strings.Contains(model.renderSkillList(), "Run lint checks") {
+		t.Fatalf("renderSkillList() = %q, want detail text", model.renderSkillList())
+	}
+	model.applySkillCompletion()
+	if got := string(model.input); got != "$lint " {
+		t.Fatalf("input after skill completion = %q, want $lint ", got)
+	}
+}
+
+func TestRenderResumeListShowsMetadata(t *testing.T) {
+	model := NewModel(Config{Commands: DefaultCommands()})
+	model.resumeCandidates = []ResumeCandidate{
+		{
+			SessionID: "session-123",
+			Title:     "Gateway cleanup",
+			Model:     "openai/gpt-4o-mini",
+			Workspace: "/tmp/workspace-alpha",
+			Age:       "2m ago",
+		},
+	}
+	model.resumeActive = true
+
+	normalized := strings.Map(func(r rune) rune {
+		switch r {
+		case '\n', ' ', '│', '╭', '╮', '╰', '╯', '─':
+			return -1
+		default:
+			return r
+		}
+	}, ansi.Strip(model.renderResumeList()))
+	for _, want := range []string{"Gateway cleanup", "openai/gpt-4o-mini", "workspace-alpha", "id:session-123"} {
+		if !strings.Contains(normalized, strings.ReplaceAll(want, " ", "")) {
+			t.Fatalf("renderResumeList() = %q, want substring %q", normalized, want)
+		}
 	}
 }
 

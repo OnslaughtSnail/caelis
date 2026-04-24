@@ -560,7 +560,10 @@ func (s *Store) writeDocument(doc persistedDocument) error {
 		return err
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
@@ -577,6 +580,9 @@ func (s *Store) writeDocument(doc persistedDocument) error {
 		return err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
 	s.pathCache[pathCacheKey(doc.Session.SessionID, doc.Session.WorkspaceKey)] = path

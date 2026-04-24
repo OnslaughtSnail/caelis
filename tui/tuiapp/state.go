@@ -89,9 +89,9 @@ type Config struct {
 	ModeLabel            func() string
 	RefreshWorkspace     func() string
 	RefreshStatus        func() (string, string)
-	MentionComplete      func(string, int) ([]string, error)
-	FileComplete         func(string, int) ([]string, error)
-	SkillComplete        func(string, int) ([]string, error)
+	MentionComplete      func(string, int) ([]CompletionCandidate, error)
+	FileComplete         func(string, int) ([]CompletionCandidate, error)
+	SkillComplete        func(string, int) ([]CompletionCandidate, error)
 	ResumeComplete       func(string, int) ([]ResumeCandidate, error)
 	SlashArgComplete     func(command string, query string, limit int) ([]SlashArgCandidate, error)
 	ReadClipboardText    func() (string, error)
@@ -114,10 +114,21 @@ type Config struct {
 	ColorProfile         colorprofile.Profile
 }
 
+type CompletionCandidate struct {
+	Value   string
+	Display string
+	Detail  string
+	Path    string
+}
+
 type ResumeCandidate struct {
 	SessionID string
+	Title     string
 	Prompt    string
+	Model     string
+	Workspace string
 	Age       string
+	UpdatedAt time.Time
 }
 
 type SlashArgCandidate struct {

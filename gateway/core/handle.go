@@ -59,22 +59,15 @@ func (h *turnHandle) Events() <-chan EventEnvelope      { return h.eventsCh }
 func (h *turnHandle) EventsAfter(cursor string) ([]EventEnvelope, string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if cursor == "" {
+	start, err := startIndexAfterCursor(h.events, cursor)
+	if err != nil {
+		return nil, "", err
+	}
+	if start == 0 {
 		out := slices.Clone(h.events)
 		return out, lastCursor(out), nil
 	}
-	index := -1
-	for i, env := range h.events {
-		if env.Cursor == cursor {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		out := slices.Clone(h.events)
-		return out, lastCursor(out), nil
-	}
-	out := slices.Clone(h.events[index+1:])
+	out := slices.Clone(h.events[start:])
 	return out, lastCursor(out), nil
 }
 

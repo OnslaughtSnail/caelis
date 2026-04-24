@@ -38,6 +38,8 @@ func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 	switch cfg.API {
 	case APIOpenAI, APIOpenAICompatible, APIOpenRouter, APIDeepSeek, APIMimo, APIVolcengine, APIVolcengineCoding:
 		return discoverOpenAIModels(ctx, client, cfg, token)
+	case APICodeFree:
+		return discoverCodeFreeModels(ctx, client, cfg)
 	case APIGemini:
 		return discoverGeminiModels(ctx, client, cfg, token)
 	case APIAnthropic, APIAnthropicCompatible:
@@ -240,6 +242,63 @@ func discoverAnthropicModels(ctx context.Context, client *http.Client, cfg Confi
 		})
 	}
 	return normalizeRemoteModels(models), nil
+}
+
+func discoverCodeFreeModels(ctx context.Context, client *http.Client, cfg Config) ([]RemoteModel, error) {
+	creds, err := loadCodeFreeCredentials(ctx)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := codeFreeVersionEndpoint(cfg.BaseURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	applyCodeFreeHeaders(req, creds, strings.TrimSpace(cfg.Model))
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, statusError(resp)
+	}
+	var payload struct {
+		Data []struct {
+			ModelName       string `json:"modelName"`
+			ModelType       string `json:"modelType"`
+			MaxTokens       int    `json:"maxTokens"`
+			MaxOutputTokens int    `json:"maxOutputTokens"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	models := make([]RemoteModel, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		name := strings.TrimSpace(item.ModelName)
+		if name == "" {
+			continue
+		}
+		caps := []string{}
+		if kind := strings.TrimSpace(item.ModelType); kind != "" {
+			caps = append(caps, kind)
+		}
+		models = append(models, RemoteModel{
+			Name:                name,
+			ContextWindowTokens: codeFreeContextWindowTokens(name),
+			MaxOutputTokens:     item.MaxOutputTokens,
+			Capabilities:        caps,
+		})
+	}
+	return normalizeRemoteModels(models), nil
+}
+
+func codeFreeContextWindowTokens(modelName string) int {
+	if strings.EqualFold(strings.TrimSpace(modelName), "GLM-5.1") {
+		return 128000
+	}
+	return 88000
 }
 
 // discoverOllamaModels queries the Ollama /api/tags endpoint to list locally

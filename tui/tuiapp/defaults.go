@@ -7,6 +7,70 @@ import (
 
 // defaults.go provides DefaultCommands and DefaultWizards for the TUI shell.
 
+const defaultConnectTimeoutSeconds = 60
+
+type slashCommandSpec struct {
+	Name        string
+	Usage       string
+	Description string
+	Hidden      bool
+}
+
+func slashCommandSpecs() []slashCommandSpec {
+	return []slashCommandSpec{
+		{Name: "help", Usage: "/help", Description: "Show available slash commands"},
+		{Name: "agent", Usage: "/agent list | /agent status | /agent add <name> | /agent remove <id> | /agent handoff <name|local>", Description: "Manage ACP agents, participants, and main-controller handoff"},
+		{Name: "connect", Usage: "/connect", Description: "Open the guided model/provider setup wizard"},
+		{Name: "model", Usage: "/model use <alias> | /model del <alias>", Description: "Switch or delete a configured model alias"},
+		{Name: "sandbox", Usage: "/sandbox [auto|seatbelt|bwrap|landlock]", Description: "Inspect or change the sandbox backend"},
+		{Name: "status", Usage: "/status", Description: "Show current provider, model, session, sandbox, and store info"},
+		{Name: "new", Usage: "/new", Description: "Start a fresh session"},
+		{Name: "resume", Usage: "/resume [session-id]", Description: "List recent sessions or resume one by id"},
+		{Name: "compact", Usage: "/compact [note]", Description: "Compact the current session transcript"},
+		{Name: "exit", Usage: "/exit", Description: "Exit the TUI"},
+		{Name: "quit", Usage: "/quit", Description: "Exit the TUI"},
+	}
+}
+
+func visibleSlashCommandSpecs() []slashCommandSpec {
+	specs := slashCommandSpecs()
+	out := make([]slashCommandSpec, 0, len(specs))
+	for _, spec := range specs {
+		if spec.Hidden {
+			continue
+		}
+		out = append(out, spec)
+	}
+	return out
+}
+
+func lookupSlashCommandSpec(name string) (slashCommandSpec, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, spec := range slashCommandSpecs() {
+		if spec.Name == name {
+			return spec, true
+		}
+	}
+	return slashCommandSpec{}, false
+}
+
+func defaultHelpText() string {
+	lines := []string{"available commands:"}
+	for _, spec := range visibleSlashCommandSpecs() {
+		usage := strings.TrimSpace(spec.Usage)
+		description := strings.TrimSpace(spec.Description)
+		switch {
+		case usage == "":
+			lines = append(lines, "  /"+spec.Name)
+		case description == "":
+			lines = append(lines, "  "+usage)
+		default:
+			lines = append(lines, "  "+usage+"  "+description)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // joinNonEmpty joins non-empty parts with the given separator.
 func joinNonEmpty(parts []string, sep string) string {
 	out := make([]string, 0, len(parts))
@@ -20,17 +84,12 @@ func joinNonEmpty(parts []string, sep string) string {
 
 // DefaultCommands returns the set of slash commands available in the TUI.
 func DefaultCommands() []string {
-	return []string{
-		"help",
-		"exit",
-		"quit",
-		"new",
-		"status",
-		"model",
-		"sandbox",
-		"connect",
-		"resume",
+	specs := visibleSlashCommandSpecs()
+	out := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		out = append(out, spec.Name)
 	}
+	return out
 }
 
 // DefaultWizards returns the set of multi-step wizard flows for the TUI.
@@ -46,15 +105,17 @@ func connectWizard() WizardDef {
 		DisplayLine: "/connect",
 		Steps: []WizardStepDef{
 			{
-				Key:       "provider",
-				HintLabel: "/connect provider",
+				Key:          "provider",
+				HintLabel:    "/connect provider",
+				FreeformHint: "/connect provider: choose a provider; compatible endpoints may ask for a custom base URL",
 				CompletionCommand: func(state map[string]string) string {
 					return "connect"
 				},
 			},
 			{
-				Key:       "endpoint",
-				HintLabel: "/connect endpoint",
+				Key:          "endpoint",
+				HintLabel:    "/connect volcengine endpoint",
+				FreeformHint: "/connect volcengine endpoint: choose standard or coding-plan, or paste a custom Ark base URL",
 				CompletionCommand: func(state map[string]string) string {
 					return "connect-baseurl:" + state["provider"]
 				},
@@ -63,8 +124,9 @@ func connectWizard() WizardDef {
 				},
 			},
 			{
-				Key:       "baseurl",
-				HintLabel: "/connect base_url",
+				Key:          "baseurl",
+				HintLabel:    "/connect base_url",
+				FreeformHint: "/connect base_url: choose the default compatible API root or paste your own full base URL",
 				CompletionCommand: func(state map[string]string) string {
 					return "connect-baseurl:" + state["provider"]
 				},
@@ -81,7 +143,7 @@ func connectWizard() WizardDef {
 				Key:          "apikey",
 				HintLabel:    "/connect api_key",
 				HideInput:    true,
-				FreeformHint: "/connect api_key: type and press enter",
+				FreeformHint: "/connect api_key: paste a key, or type env:OPENAI_API_KEY to use an environment variable",
 				CompletionCommand: func(state map[string]string) string {
 					return "connect-apikey:" + state["provider"]
 				},
@@ -92,7 +154,7 @@ func connectWizard() WizardDef {
 			{
 				Key:          "model",
 				HintLabel:    "/connect model",
-				FreeformHint: "/connect model: type model name and press enter",
+				FreeformHint: "/connect model: choose a suggested model or type a custom model name and press enter",
 				CompletionCommand: func(state map[string]string) string {
 					return "connect-model:" + buildConnectWizardPayload(state)
 				},
@@ -165,7 +227,7 @@ func connectWizard() WizardDef {
 				state["provider"],
 				state["model"],
 				emptyAsDash(state["baseurl"]),
-				connectWizardTimeout(state),
+				connectWizardTimeout(),
 				apiKey,
 				emptyAsDash(state["context_window_tokens"]),
 				emptyAsDash(state["max_output_tokens"]),
@@ -179,17 +241,13 @@ func connectWizard() WizardDef {
 func buildConnectWizardPayload(state map[string]string) string {
 	return strings.TrimSpace(state["provider"]) +
 		"|" + url.QueryEscape(strings.TrimSpace(state["baseurl"])) +
-		"|" + connectWizardTimeout(state) +
+		"|" + connectWizardTimeout() +
 		"|" + url.QueryEscape(strings.TrimSpace(state["apikey"])) +
 		"|" + url.QueryEscape(strings.TrimSpace(state["model"]))
 }
 
-func connectWizardTimeout(state map[string]string) string {
-	timeout := strings.TrimSpace(state["timeout"])
-	if timeout == "" {
-		return "60"
-	}
-	return timeout
+func connectWizardTimeout() string {
+	return "60"
 }
 
 func emptyAsDash(value string) string {

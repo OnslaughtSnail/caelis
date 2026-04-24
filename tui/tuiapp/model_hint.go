@@ -5,8 +5,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-
-	
 )
 
 type hintOptions struct {

@@ -36,6 +36,8 @@ func renderEventPolicyFor(msg tea.Msg) (renderEventPolicy, bool) {
 	switch typed := msg.(type) {
 	case appgateway.EventEnvelope:
 		return renderEventPolicyForGatewayEnvelope(typed), true
+	case TranscriptEventsMsg:
+		return renderEventPolicyForTranscriptEvents(typed), true
 	case LogChunkMsg:
 		return renderEventPolicy{lane: renderLaneLog, flushSmoothing: true, dismissHints: true}, true
 	case AssistantStreamMsg, RawDeltaMsg, ReasoningStreamMsg:
@@ -97,6 +99,36 @@ func renderEventPolicyForGatewayEnvelope(env appgateway.EventEnvelope) renderEve
 	}
 }
 
+func renderEventPolicyForTranscriptEvents(msg TranscriptEventsMsg) renderEventPolicy {
+	if len(msg.Events) == 0 {
+		return renderEventPolicy{lane: renderLaneLifecycle}
+	}
+	hasParticipant := false
+	hasSubagent := false
+	hasTool := false
+	for _, event := range msg.Events {
+		switch event.Scope {
+		case ACPProjectionSubagent:
+			hasSubagent = true
+		case ACPProjectionParticipant:
+			hasParticipant = true
+		}
+		if event.Kind == TranscriptEventTool || event.Kind == TranscriptEventApproval {
+			hasTool = true
+		}
+	}
+	switch {
+	case hasSubagent:
+		return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+	case hasParticipant:
+		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+	case hasTool:
+		return renderEventPolicy{lane: renderLaneToolStream, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+	default:
+		return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+	}
+}
+
 func renderEventPolicyForFrameTick(msg frameTickMsg) renderEventPolicy {
 	if msg.kind == frameTickDeferredBatch {
 		return renderEventPolicy{lane: renderLaneTick, flushDeferredOnly: true}
@@ -141,6 +173,9 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	switch typed := msg.(type) {
 	case appgateway.EventEnvelope:
 		model, cmd := m.handleGatewayEventEnvelope(typed)
+		return model, tea.Batch(policyCmd, cmd), true
+	case TranscriptEventsMsg:
+		model, cmd := m.handleTranscriptEventsMsg(typed)
 		return model, tea.Batch(policyCmd, cmd), true
 	case LogChunkMsg:
 		if !m.deferredBatchingEnabled() {
@@ -266,6 +301,7 @@ func shouldInvalidateUserDisplayDedup(msg tea.Msg) bool {
 	case AssistantStreamMsg,
 		RawDeltaMsg,
 		ReasoningStreamMsg,
+		TranscriptEventsMsg,
 		ParticipantStatusMsg,
 		ACPProjectionMsg,
 		SubagentStatusMsg,

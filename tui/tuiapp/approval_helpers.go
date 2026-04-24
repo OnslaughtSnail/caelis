@@ -50,8 +50,14 @@ func compactString(s string, maxLen int) string {
 	s = strings.TrimSpace(s)
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\r", "")
-	if maxLen > 0 && len(s) > maxLen {
-		return s[:maxLen-3] + "..."
+	if maxLen > 0 {
+		runes := []rune(s)
+		if len(runes) > maxLen {
+			if maxLen <= 3 {
+				return string(runes[:maxLen])
+			}
+			return string(runes[:maxLen-3]) + "..."
+		}
 	}
 	return s
 }

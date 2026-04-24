@@ -2,88 +2,69 @@
 
 ## Status
 
-This document is the authority for the current refactor phase.
+The SDK foundation is no longer a purely future-facing branch of the design.
 
-The goal of the current phase is:
+The current local product path already runs through:
 
-- make `sdk/` the stable foundation for the next Caelis rebuild
-- keep old `kernel` / `internal/app` / `cmd/cli` code as behavior reference only
-- avoid starting production-path migration until the SDK foundation is stable
+`cmd/cli -> app/gatewayapp -> gateway -> sdk`
 
-The goal of the current phase is not:
+This document now records the boundary rules that still matter while that stack
+continues to evolve.
 
-- switching the production main path to `sdk`
-- incrementally de-kernelizing the current CLI
-- preserving old roadmap branches and intermediate analysis docs
+For the current package map, see [architecture.md](architecture.md). For the
+gateway-layer design target, see
+[unified_gateway_foundation_spec.md](unified_gateway_foundation_spec.md).
 
-## What Must Be True In This Phase
+## What Must Stay True
 
-1. `sdk/` is a real standalone boundary with no dependency on `kernel`, `internal/app`, or `cmd/cli`
-2. current SDK contracts are stable enough for upper-layer rewrite work
-3. internal SDK assembly and ACP wiring do not keep ambiguous or misleading compatibility paths
-4. docs stay small and current; outdated roadmap or investigation notes should be deleted instead of preserved
+1. `sdk/` remains independent of product surfaces such as `tui/`,
+   `app/gatewayapp`, and `cmd/cli`.
+2. Root `sdk` packages stay contract-first; concrete implementations live in
+   subpackages such as `sdk/runtime/local` and `sdk/session/file`.
+3. `gateway/` remains the product-facing orchestration boundary built on the
+   SDK, rather than letting UI code or app-owned composition logic reach
+   directly into SDK internals.
+4. `app/gatewayapp` stays the local composition root for prompt assembly,
+   config/session stores, model lookup, and sandbox/runtime wiring.
+5. Adapters keep consuming the stable root `gateway` contract instead of
+   importing `gateway/core` implementation details.
 
 ## Current Engineering Rules
 
-### 1. Production-path migration is deferred on purpose
+### 1. Keep SDK boundaries clean
 
-The current repo still runs through the old production path.
+The SDK owns reusable contracts and implementations for:
 
-That is expected in this phase.
+- runtime and controller orchestration
+- session models and persistence services
+- tools, plugins, delegation, and terminal abstractions
+- sandbox selection and execution backends
 
-Architecture review should therefore separate:
+It should not gain direct knowledge of TUI presentation code, CLI flag parsing,
+or app-owned configuration persistence.
 
-- whether the SDK foundation is internally sound
-- whether the old production path has already switched
+### 2. Keep gateway as the product seam
 
-Only the first question is in scope right now.
+The gateway layer translates SDK capabilities into product-facing session,
+turn, replay, continuity, and control-plane contracts.
 
-### 2. Old code is reference material, not target architecture
+That means new product surfaces should normally plug into `gateway/` first,
+then adapt into presentation or transport code.
 
-`kernel`, `internal/app`, and `cmd/cli` may still contain the only complete
-product behavior.
+### 3. Keep local assembly in app/gatewayapp
 
-They remain useful as:
+`app/gatewayapp` is the place where the local process decides:
 
-- behavior reference
-- compatibility reference
-- regression oracle
+- which session store to use
+- which runtime implementation to instantiate
+- how prompt fragments are assembled
+- how model lookup and sandbox settings are persisted
 
-They are not the target architecture for the next-stage rebuild.
+That wiring should not leak upward into adapters or downward into the SDK.
 
-### 3. SDK cleanup should prioritize misleading boundaries
+## Related Documents
 
-Current-stage SDK work should prefer:
-
-- removing dead or no-op config surface
-- rejecting ambiguous wiring
-- collapsing duplicated ACP plumbing
-- keeping runtime assembly driven by pure resolved data
-
-Current-stage SDK work should avoid:
-
-- speculative abstraction
-- optional compatibility knobs without active call sites
-- carrying multiple “equivalent” control-plane sources forever
-
-## Active Documents
-
-Only the following documents should remain active in `docs/` for this phase:
-
-1. `docs/current_sdk_foundation_scope.md`
-2. `docs/plugin_agent_assembly_boundary_plan.md`
-3. `docs/session_controller_event_model.md`
-4. `docs/sdk_compaction_chain_audit_and_design.md`
-5. `docs/unified_gateway_foundation_spec.md`
-
-If a new document is added, another outdated document should usually be removed
-so the set stays small and non-conflicting.
-
-## Immediate Next Step
-
-The next useful work in this phase is:
-
-- keep the SDK foundation stable and unchanged in boundary terms
-- define a `sdk`-backed Unified Gateway as the next-layer product boundary
-- treat old `kernel` / `internal/app` / `cmd/cli` orchestration as legacy
-  reference pending future deletion
+- [architecture.md](architecture.md): current codebase layering and entry flow
+- [unified_gateway_foundation_spec.md](unified_gateway_foundation_spec.md):
+  gateway contract intent and deferred work
+- `docs/session_controller_event_model.md`: canonical event and controller model

@@ -199,9 +199,62 @@ func ResolveLLM(cfg Config) (Spec, error) {
 			defaultProvider:   "ollama",
 			defaultContextTok: 128000,
 		})
+	case "codefree":
+		return resolveCodeFree(cfg)
 	default:
 		return Spec{}, fmt.Errorf("SDK_E2E_PROVIDER=%q is not supported", provider)
 	}
+}
+
+func resolveCodeFree(cfg Config) (Spec, error) {
+	modelName := resolveModelName(cfg, "codefree", []string{"CODEFREE_MODEL"}, "GLM-5.1")
+	if modelName == "" {
+		return Spec{}, fmt.Errorf("codefree model is not set")
+	}
+	baseURL := resolveBaseURL([]string{"CODEFREE_BASE_URL"}, "https://www.srdcloud.cn")
+	if baseURL == "" {
+		return Spec{}, fmt.Errorf("codefree base URL is not set")
+	}
+	if _, err := os.Stat(resolveCodeFreeCredentialPathForE2E()); err != nil {
+		if os.IsNotExist(err) {
+			return Spec{}, fmt.Errorf("codefree oauth credentials are not available")
+		}
+		return Spec{}, fmt.Errorf("codefree oauth credentials are not readable: %w", err)
+	}
+
+	factory := modelproviders.NewFactory()
+	cfgRecord := modelproviders.Config{
+		Alias:               buildAlias("codefree", modelName),
+		Provider:            "codefree",
+		API:                 modelproviders.APICodeFree,
+		Model:               modelName,
+		BaseURL:             baseURL,
+		Timeout:             resolveTimeout(cfg),
+		MaxOutputTok:        resolveMaxTokens(cfg),
+		ContextWindowTokens: codeFreeContextWindowTokensForE2E(modelName),
+		Auth: modelproviders.AuthConfig{
+			Type: modelproviders.AuthNone,
+		},
+	}
+	if err := factory.Register(cfgRecord); err != nil {
+		return Spec{}, err
+	}
+	llm, err := factory.NewByAlias(cfgRecord.Alias)
+	if err != nil {
+		return Spec{}, err
+	}
+	return Spec{
+		Provider: cfgRecord.Provider,
+		Model:    modelName,
+		LLM:      llm,
+	}, nil
+}
+
+func codeFreeContextWindowTokensForE2E(modelName string) int {
+	if strings.EqualFold(strings.TrimSpace(modelName), "GLM-5.1") {
+		return 128000
+	}
+	return 88000
 }
 
 func resolveMiniMax(cfg Config) (Spec, error) {
@@ -355,4 +408,15 @@ func firstNonEmptyEnv(keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func resolveCodeFreeCredentialPathForE2E() string {
+	if path := strings.TrimSpace(os.Getenv("CODEFREE_OAUTH_CREDS_PATH")); path != "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home + "/.caelis/providers/codefree/oauth_creds.json")
 }

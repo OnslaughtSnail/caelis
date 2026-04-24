@@ -4,8 +4,6 @@ import (
 	"slices"
 	"strings"
 	"unicode"
-
-	
 )
 
 func cloneInputAttachments(items []inputAttachment) []inputAttachment {

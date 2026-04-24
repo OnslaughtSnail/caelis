@@ -2,6 +2,7 @@ package tuiapp
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -91,7 +92,7 @@ func (m *Model) refreshMention() {
 	}
 	begin := time.Now()
 	var (
-		candidates []string
+		candidates []CompletionCandidate
 		err        error
 	)
 	switch prefix {
@@ -110,7 +111,7 @@ func (m *Model) refreshMention() {
 	}
 	m.mentionQuery = query
 	m.mentionPrefix = prefix
-	m.mentionCandidates = append([]string(nil), candidates...)
+	m.mentionCandidates = append([]CompletionCandidate(nil), candidates...)
 	m.mentionStart = start
 	m.mentionEnd = end
 	m.mentionIndex = 0
@@ -127,7 +128,7 @@ func (m *Model) applyMentionCompletion() {
 	if prefix == "" {
 		prefix = "@"
 	}
-	choice := prefix + m.mentionCandidates[m.mentionIndex]
+	choice := prefix + strings.TrimSpace(m.mentionCandidates[m.mentionIndex].Value)
 	replaced, nextCursor := replaceRuneSpan(m.input, m.mentionStart, m.mentionEnd, choice)
 	m.input = replaced
 	m.cursor = nextCursor
@@ -192,7 +193,7 @@ func (m *Model) refreshSkill() {
 		return
 	}
 	m.skillQuery = query
-	m.skillCandidates = append([]string(nil), candidates...)
+	m.skillCandidates = append([]CompletionCandidate(nil), candidates...)
 	m.skillStart = start
 	m.skillEnd = end
 	m.skillIndex = 0
@@ -205,7 +206,7 @@ func (m *Model) applySkillCompletion() {
 			return
 		}
 	}
-	choice := "$" + m.skillCandidates[m.skillIndex]
+	choice := "$" + strings.TrimSpace(m.skillCandidates[m.skillIndex].Value)
 	replaced, nextCursor := replaceRuneSpan(m.input, m.skillStart, m.skillEnd, choice)
 	m.input = replaced
 	m.cursor = nextCursor
@@ -249,11 +250,21 @@ func (m *Model) renderSkillList() string {
 	var lines []string
 	for i := 0; i < maxItems; i++ {
 		prefix := "  "
+		display := "$" + completionCandidateDisplay(m.skillCandidates[i])
+		detail := completionCandidateDetail(m.skillCandidates[i])
 		if i == m.skillIndex {
 			prefix = m.theme.PromptStyle().Render("▸ ")
-			lines = append(lines, prefix+m.theme.CommandActiveStyle().Render("$"+m.skillCandidates[i]))
+			line := prefix + m.theme.CommandActiveStyle().Render(display)
+			if detail != "" {
+				line += "  " + m.theme.HelpHintTextStyle().Render(detail)
+			}
+			lines = append(lines, line)
 		} else {
-			lines = append(lines, prefix+m.theme.HelpHintTextStyle().Render("$"+m.skillCandidates[i]))
+			line := prefix + m.theme.HelpHintTextStyle().Render(display)
+			if detail != "" {
+				line += "  " + m.theme.HelpHintTextStyle().Render(detail)
+			}
+			lines = append(lines, line)
 		}
 	}
 	if len(m.skillCandidates) > maxItems {
@@ -412,15 +423,21 @@ func (m *Model) renderResumeList() string {
 	}
 	for i := start; i < end; i++ {
 		item := m.resumeCandidates[i]
-		prompt := strings.TrimSpace(item.Prompt)
-		if prompt == "" {
-			prompt = "-"
-		}
+		title := firstNonEmpty(strings.TrimSpace(item.Title), strings.TrimSpace(item.Prompt), strings.TrimSpace(item.SessionID))
 		age := strings.TrimSpace(item.Age)
 		if age == "" {
 			age = "-"
 		}
-		display := fmt.Sprintf("%s  %s", age, prompt)
+		meta := compactNonEmpty([]string{
+			age,
+			strings.TrimSpace(item.Model),
+			shortWorkspaceLabel(item.Workspace),
+			shortSessionLabel(item.SessionID),
+		})
+		display := title
+		if len(meta) > 0 {
+			display += "  " + strings.Join(meta, " · ")
+		}
 		prefix := "  "
 		if i == m.resumeIndex {
 			prefix = m.theme.PromptStyle().Render("▸ ")
@@ -608,13 +625,13 @@ func (m *Model) applySlashArgCompletion() {
 		m.setInputText("/agent " + choice + " ")
 		m.syncTextareaFromInput()
 		switch choice {
-		case "add", "rm", "use":
+		case "add", "connect", "remove", "rm", "handoff", "use":
 			m.activateSlashArgPickerFromInput("agent " + choice)
 		default:
 			m.clearSlashArg()
 		}
 		return
-	case "agent add", "agent rm", "agent use":
+	case "agent add", "agent connect", "agent remove", "agent rm", "agent handoff", "agent use":
 		m.setInputText("/" + command + " " + choice)
 		m.clearSlashArg()
 		return
@@ -674,7 +691,7 @@ func (m *Model) shouldExecuteSlashArgSelection(command string, choice string) bo
 	switch command {
 	case "agent":
 		return false
-	case "agent add", "agent rm", "agent use":
+	case "agent add", "agent connect", "agent remove", "agent rm", "agent handoff", "agent use":
 		return true
 	case "model":
 		return false
@@ -703,7 +720,9 @@ func isExecutableSlashArgInput(line string) bool {
 		switch action {
 		case "list":
 			return len(fields) == 2
-		case "add", "rm", "use":
+		case "status":
+			return len(fields) == 2
+		case "add", "connect", "remove", "rm", "handoff", "use":
 			return len(fields) >= 3
 		default:
 			return false
@@ -1065,10 +1084,41 @@ func filterResumeCandidates(query string, candidates []ResumeCandidate) []Resume
 	return filterByPrefix(query, candidates, func(one ResumeCandidate) []string {
 		return []string{
 			strings.TrimSpace(one.SessionID),
+			strings.TrimSpace(one.Title),
 			strings.TrimSpace(one.Prompt),
+			strings.TrimSpace(one.Model),
+			strings.TrimSpace(one.Workspace),
 			strings.TrimSpace(one.Age),
 		}
 	})
+}
+
+func completionCandidateDisplay(candidate CompletionCandidate) string {
+	display := strings.TrimSpace(candidate.Display)
+	if display != "" {
+		return display
+	}
+	return strings.TrimSpace(candidate.Value)
+}
+
+func completionCandidateDetail(candidate CompletionCandidate) string {
+	return strings.TrimSpace(candidate.Detail)
+}
+
+func shortWorkspaceLabel(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return ""
+	}
+	return filepath.Base(workspace)
+}
+
+func shortSessionLabel(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	return "id:" + sessionID
 }
 
 func (m *Model) setInputText(text string) {

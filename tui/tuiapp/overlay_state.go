@@ -2,8 +2,6 @@ package tuiapp
 
 import (
 	"charm.land/bubbles/v2/list"
-
-	
 )
 
 // OverlayState groups all overlay-related state: BTW drawer, prompt modal,
@@ -28,13 +26,13 @@ type OverlayState struct {
 
 	mentionQuery      string
 	mentionPrefix     string
-	mentionCandidates []string
+	mentionCandidates []CompletionCandidate
 	mentionIndex      int
 	mentionStart      int
 	mentionEnd        int
 
 	skillQuery      string
-	skillCandidates []string
+	skillCandidates []CompletionCandidate
 	skillIndex      int
 	skillStart      int
 	skillEnd        int
