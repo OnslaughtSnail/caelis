@@ -348,8 +348,21 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		sendNotice(send, fmt.Sprintf("controller handoff: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
 		return TaskResultMsg{SuppressTurnDivider: true}
+	case "ask":
+		target, prompt := splitFirst(strings.TrimSpace(rest))
+		if strings.TrimSpace(target) == "" || strings.TrimSpace(prompt) == "" {
+			sendNotice(send, "usage: /agent ask <participant-id> <prompt>\nrun /agent status to inspect attached participants")
+			return TaskResultMsg{SuppressTurnDivider: true}
+		}
+		status, err := driver.AskAgent(ctx, target, prompt)
+		if err != nil {
+			return TaskResultMsg{Err: friendlyCommandError("agent ask", err)}
+		}
+		sendNotice(send, fmt.Sprintf("agent prompted: %s", target))
+		sendNotice(send, formatAgentStatusSnapshot(status))
+		return TaskResultMsg{SuppressTurnDivider: true}
 	default:
-		sendNotice(send, "usage: /agent list | status | add <name> | remove <participant-id> | handoff <name|local>")
+		sendNotice(send, "usage: /agent list | status | add <name> | remove <participant-id> | handoff <name|local> | ask <participant-id> <prompt>")
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
 }
@@ -759,6 +772,7 @@ func agentHelpText() string {
 		"  /agent remove ID detach one attached participant",
 		"  /agent handoff NAME  hand off the main controller to an ACP agent",
 		"  /agent handoff local return the main controller to the local kernel",
+		"  /agent ask ID PROMPT  send one prompt to an attached participant",
 	}
 	return strings.Join(lines, "\n")
 }

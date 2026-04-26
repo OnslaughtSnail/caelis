@@ -666,6 +666,30 @@ func (d *GatewayDriver) HandoffAgent(ctx context.Context, target string) (AgentS
 	return d.AgentStatus(ctx)
 }
 
+func (d *GatewayDriver) AskAgent(ctx context.Context, target string, prompt string) (AgentStatusSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	participantID, err := d.resolveParticipantID(ctx, session.SessionRef, target)
+	if err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return AgentStatusSnapshot{}, fmt.Errorf("agent ask: prompt is required")
+	}
+	if _, err := d.stack.Gateway.PromptParticipant(ctx, appgateway.PromptParticipantRequest{
+		SessionRef:    session.SessionRef,
+		BindingKey:    d.bindingKey,
+		ParticipantID: participantID,
+		Input:         strings.TrimSpace(prompt),
+		Source:        "tui_agent_ask",
+	}); err != nil {
+		return AgentStatusSnapshot{}, err
+	}
+	return d.AgentStatus(ctx)
+}
+
 func (d *GatewayDriver) CompleteMention(context.Context, string, int) ([]CompletionCandidate, error) {
 	// TODO: wire this to a stable agent/participant registry once ACP/subagent
 	// mention targets are modeled outside transient runtime state.

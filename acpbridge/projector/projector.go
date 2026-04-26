@@ -355,7 +355,7 @@ func toolCallUpdateFromProtocol(call sdksession.ProtocolToolCall) (ToolCallUpdat
 	if kind := firstNonEmpty(strings.TrimSpace(call.Kind), toolKindForName(call.Name)); kind != "" {
 		update.Kind = stringPtr(kind)
 	}
-	if status := strings.TrimSpace(call.Status); status != "" {
+	if status := acpToolStatus(call.Status); status != "" {
 		update.Status = stringPtr(status)
 	}
 	if input := cloneAnyMap(call.RawInput); len(input) > 0 {
@@ -365,6 +365,19 @@ func toolCallUpdateFromProtocol(call sdksession.ProtocolToolCall) (ToolCallUpdat
 		update.RawOutput = output
 	}
 	return update, nil
+}
+
+func acpToolStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "", ToolStatusPending, ToolStatusInProgress, ToolStatusCompleted, ToolStatusFailed:
+		return strings.TrimSpace(status)
+	case "running", "waiting_approval":
+		return ToolStatusInProgress
+	case "cancelled", "canceled", "interrupted", "terminated", "timed_out", "timeout":
+		return ToolStatusFailed
+	default:
+		return strings.TrimSpace(status)
+	}
 }
 
 func planUpdateFromProtocol(plan sdksession.ProtocolPlan) PlanUpdate {

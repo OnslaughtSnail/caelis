@@ -12,6 +12,9 @@ import (
 	headlessadapter "github.com/OnslaughtSnail/caelis/gateway/adapter/headless"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
+	spawntool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/spawn"
+	tasktool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/task"
 )
 
 func TestLocalStackGatewayACPMainE2E(t *testing.T) {
@@ -112,6 +115,84 @@ func TestLocalStackGatewayACPMainE2E(t *testing.T) {
 	if !sawACPAssistant {
 		t.Fatalf("loaded events missing ACP-scoped assistant reply: %#v", loaded.Events)
 	}
+}
+
+func TestLocalStackInjectsSpawnOnlyWhenAssemblyAgentsExist(t *testing.T) {
+	ctx := context.Background()
+	withAgents, session := newStackWithAssemblyForToolTest(t, sdkplugin.ResolvedAssembly{
+		Agents: []sdkplugin.AgentConfig{{
+			Name:        "helper",
+			Description: "bounded ACP helper",
+			Command:     "go",
+			Args:        []string{"run", "./acpbridge/cmd/e2eagent"},
+			WorkDir:     repoRootForGatewayAppTest(t),
+		}},
+	})
+	resolved, err := withAgents.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("ResolveTurn(with agents) error = %v", err)
+	}
+	if !toolSetHas(resolved.RunRequest.AgentSpec.Tools, spawntool.ToolName) {
+		t.Fatalf("tools missing %s when assembly agents exist", spawntool.ToolName)
+	}
+	if !toolSetHas(resolved.RunRequest.AgentSpec.Tools, tasktool.ToolName) {
+		t.Fatalf("tools missing %s", tasktool.ToolName)
+	}
+	systemPrompt, _ := resolved.RunRequest.AgentSpec.Metadata["system_prompt"].(string)
+	if !strings.Contains(systemPrompt, "SPAWN for bounded child ACP work") {
+		t.Fatalf("system prompt missing delegation guidance: %q", systemPrompt)
+	}
+
+	withoutAgents, session := newStackWithAssemblyForToolTest(t, sdkplugin.ResolvedAssembly{})
+	resolved, err = withoutAgents.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("ResolveTurn(without agents) error = %v", err)
+	}
+	if toolSetHas(resolved.RunRequest.AgentSpec.Tools, spawntool.ToolName) {
+		t.Fatalf("tools exposed %s without assembly agents", spawntool.ToolName)
+	}
+	systemPrompt, _ = resolved.RunRequest.AgentSpec.Metadata["system_prompt"].(string)
+	if strings.Contains(systemPrompt, "SPAWN for bounded child ACP work") {
+		t.Fatalf("system prompt exposed delegation guidance without agents: %q", systemPrompt)
+	}
+}
+
+func newStackWithAssemblyForToolTest(t *testing.T, assembly sdkplugin.ResolvedAssembly) (*Stack, sdksession.Session) {
+	t.Helper()
+	workdir := t.TempDir()
+	stack, err := NewLocalStack(Config{
+		AppName:        "caelis",
+		UserID:         "tool-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   workdir,
+		WorkspaceCWD:   workdir,
+		PermissionMode: "default",
+		Assembly:       assembly,
+		Model: ModelConfig{
+			Provider: "ollama",
+			Model:    "llama3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	session, err := stack.StartSession(context.Background(), "", "surface-tool-test")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	return stack, session
+}
+
+func toolSetHas(tools []sdktool.Tool, name string) bool {
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(tool.Definition().Name), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 func repoRootForGatewayAppTest(t *testing.T) string {

@@ -86,6 +86,14 @@ type DetachACPParticipantRequest struct {
 	Source        string                `json:"source,omitempty"`
 }
 
+type PromptACPParticipantRequest struct {
+	SessionRef    sdksession.SessionRef  `json:"session_ref"`
+	ParticipantID string                 `json:"participant_id,omitempty"`
+	Input         string                 `json:"input,omitempty"`
+	ContentParts  []sdkmodel.ContentPart `json:"content_parts,omitempty"`
+	Source        string                 `json:"source,omitempty"`
+}
+
 // HandoffControllerRequest switches the active controller for one session. The
 // request is app-owned and not exposed on the LLM-facing tool surface.
 type HandoffControllerRequest struct {
@@ -100,6 +108,7 @@ type HandoffControllerRequest struct {
 // sidecar attachment and controller handoff.
 type ControlPlane interface {
 	AttachACPParticipant(context.Context, AttachACPParticipantRequest) (sdksession.Session, error)
+	PromptACPParticipant(context.Context, PromptACPParticipantRequest) (sdksession.Session, error)
 	DetachACPParticipant(context.Context, DetachACPParticipantRequest) (sdksession.Session, error)
 	HandoffController(context.Context, HandoffControllerRequest) (sdksession.Session, error)
 }

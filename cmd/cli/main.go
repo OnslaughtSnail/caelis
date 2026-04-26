@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/acp"
 	"github.com/OnslaughtSnail/caelis/app/gatewayapp"
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	headlessadapter "github.com/OnslaughtSnail/caelis/gateway/adapter/headless"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
+	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	"github.com/OnslaughtSnail/caelis/sdk/sandbox/landlock"
 )
 
@@ -43,6 +45,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
+	acpSubcommand := len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "acp")
+	if acpSubcommand {
+		args = args[1:]
+	}
 	doctorSubcommand := len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "doctor")
 	if doctorSubcommand {
 		args = args[1:]
@@ -113,9 +119,17 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	if err != nil {
 		return err
 	}
+	cfg.Assembly = assemblyFromEnv()
 	stack, err := gatewayapp.NewLocalStack(cfg)
 	if err != nil {
 		return err
+	}
+	if acpSubcommand {
+		agent, err := stack.NewACPAgent()
+		if err != nil {
+			return err
+		}
+		return acp.ServeStdio(ctx, agent, stdin, stdout)
 	}
 	if doctorSubcommand || *doctor {
 		outFmt, err := parseOutputFormat(*format)
@@ -138,6 +152,26 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 		return runHeadless(ctx, stack, preferredHeadlessSessionID(*sessionID), input, outFmt, stdout)
 	}
 	return runInteractive(ctx, stack, preferredInteractiveSessionID(*sessionID), cfg, renderModelText(cfg), stdin, stdout, stderr)
+}
+
+func assemblyFromEnv() sdkplugin.ResolvedAssembly {
+	cmd := strings.TrimSpace(envOr("CAELIS_ACP_SELF_AGENT_CMD", ""))
+	if cmd == "" {
+		return sdkplugin.ResolvedAssembly{}
+	}
+	name := strings.TrimSpace(envOr("CAELIS_ACP_SELF_AGENT_NAME", "self"))
+	if name == "" {
+		name = "self"
+	}
+	return sdkplugin.ResolvedAssembly{
+		Agents: []sdkplugin.AgentConfig{{
+			Name:        name,
+			Description: strings.TrimSpace(envOr("CAELIS_ACP_SELF_AGENT_DESC", "")),
+			Command:     "bash",
+			Args:        []string{"-lc", cmd},
+			WorkDir:     strings.TrimSpace(envOr("CAELIS_ACP_SELF_AGENT_WORKDIR", "")),
+		}},
+	}
 }
 
 func defaultStoreDir(cwd string) string {

@@ -143,6 +143,25 @@ func TestRunDoctorJSONDoesNotLeakToken(t *testing.T) {
 	}
 }
 
+func TestRunACPSubcommandConstructsStdioServer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+	var errBuf bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := run(ctx, []string{
+		"acp",
+		"-store-dir", t.TempDir(),
+		"-workspace-key", "acp-ws",
+		"-workspace-cwd", t.TempDir(),
+		"-provider", "ollama",
+		"-model", "llama3",
+	}, strings.NewReader(""), &out, &errBuf)
+	if err != nil {
+		t.Fatalf("run(acp) error = %v; stderr=%q", err, errBuf.String())
+	}
+}
+
 func TestRunDoctorSubcommandTextOutput(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var out bytes.Buffer

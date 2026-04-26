@@ -18,7 +18,7 @@ func New() Tool {
 func (Tool) Definition() sdktool.Definition {
 	return sdktool.Definition{
 		Name:        ToolName,
-		Description: "Control a previously yielded async task from BASH or SPAWN. Use wait to check progress, write to send stdin to shell tasks, and cancel to stop the task.",
+		Description: "Control a previously yielded async task from BASH or SPAWN. Use wait to check progress, write to send stdin to BASH or a follow-up prompt to a completed SPAWN child, and cancel to stop a running task.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -33,7 +33,7 @@ func (Tool) Definition() sdktool.Definition {
 				},
 				"input": map[string]any{
 					"type":        "string",
-					"description": "For action=write, send stdin to the running task.",
+					"description": "For action=write: stdin for BASH; follow-up prompt for a completed SPAWN child. Running SPAWN tasks must be checked with wait before write.",
 				},
 				"yield_time_ms": map[string]any{
 					"type":        "integer",

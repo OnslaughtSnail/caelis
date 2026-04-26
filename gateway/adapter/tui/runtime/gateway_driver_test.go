@@ -90,6 +90,8 @@ func TestGatewayDriverDefersBlankSessionUntilFirstSubmission(t *testing.T) {
 	}
 	if turn != nil {
 		defer turn.Close()
+		for range turn.Events() {
+		}
 	}
 	after, err := stack.Gateway.ListSessions(ctx, appgateway.ListSessionsRequest{
 		AppName:      stack.AppName,

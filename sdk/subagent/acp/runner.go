@@ -147,6 +147,31 @@ func (r *Runner) Wait(ctx context.Context, anchor sdkdelegation.Anchor, yieldTim
 	return r.waitRun(ctx, run, yieldTimeMS), nil
 }
 
+func (r *Runner) Continue(ctx context.Context, anchor sdkdelegation.Anchor, req sdkdelegation.Request) (sdkdelegation.Result, error) {
+	run, err := r.lookup(anchor)
+	if err != nil {
+		return sdkdelegation.Result{}, err
+	}
+	prompt := strings.TrimSpace(req.Prompt)
+	if prompt == "" {
+		return sdkdelegation.Result{}, fmt.Errorf("sdk/subagent/acp: continuation prompt is required")
+	}
+	run.mu.Lock()
+	if run.running {
+		run.mu.Unlock()
+		return sdkdelegation.Result{}, fmt.Errorf("sdk/subagent/acp: child session %q is still running; use TASK wait before write", run.anchor.SessionID)
+	}
+	run.state = sdkdelegation.StateRunning
+	run.running = true
+	run.outputPreview = ""
+	run.result = ""
+	run.updatedAt = r.clock()
+	run.done = make(chan struct{})
+	run.mu.Unlock()
+	go r.drivePrompt(ctx, run, prompt)
+	return r.waitRun(ctx, run, req.YieldTimeMS), nil
+}
+
 func (r *Runner) Cancel(ctx context.Context, anchor sdkdelegation.Anchor) error {
 	run, err := r.lookup(anchor)
 	if err != nil {
@@ -200,7 +225,6 @@ func (r *Runner) drivePrompt(ctx context.Context, run *childRun, prompt string) 
 	}
 	run.state = sdkdelegation.StateCompleted
 	run.outputPreview = compactPreview(run.outputPreview)
-	_ = run.client.Close(context.WithoutCancel(ctx))
 }
 
 func (r *Runner) waitRun(ctx context.Context, run *childRun, yieldTimeMS int) sdkdelegation.Result {

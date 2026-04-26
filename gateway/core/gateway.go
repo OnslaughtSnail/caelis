@@ -337,6 +337,33 @@ func (g *Gateway) DetachParticipant(ctx context.Context, req DetachParticipantRe
 	return session, nil
 }
 
+func (g *Gateway) PromptParticipant(ctx context.Context, req PromptParticipantRequest) (sdksession.Session, error) {
+	if g.control == nil {
+		return sdksession.Session{}, &Error{
+			Kind:        KindUnsupported,
+			Code:        CodeControlPlaneUnsupported,
+			UserVisible: true,
+			Message:     "gateway: control plane is not available",
+		}
+	}
+	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	session, err := g.control.PromptACPParticipant(ctx, sdkruntime.PromptACPParticipantRequest{
+		SessionRef:    ref,
+		ParticipantID: strings.TrimSpace(req.ParticipantID),
+		Input:         strings.TrimSpace(req.Input),
+		ContentParts:  append([]sdkmodel.ContentPart(nil), req.ContentParts...),
+		Source:        strings.TrimSpace(req.Source),
+	})
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	g.bind(req.BindingKey, session.SessionRef, BindingDescriptor{})
+	return session, nil
+}
+
 func (g *Gateway) ControlPlaneState(ctx context.Context, req ControlPlaneStateRequest) (ControlPlaneState, error) {
 	ref, err := g.sessionTarget(req.SessionRef, req.BindingKey)
 	if err != nil {

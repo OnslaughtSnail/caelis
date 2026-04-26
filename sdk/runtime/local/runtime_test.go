@@ -659,6 +659,12 @@ func (stubACPController) Attach(context.Context, sdkcontroller.AttachRequest) (s
 	return sdksession.ParticipantBinding{}, nil
 }
 
+func (stubACPController) PromptParticipant(context.Context, sdkcontroller.ParticipantPromptRequest) (sdkcontroller.TurnResult, error) {
+	handle := newTestControllerTurnHandle(nil)
+	handle.finish()
+	return sdkcontroller.TurnResult{Handle: handle}, nil
+}
+
 func (stubACPController) Detach(context.Context, sdkcontroller.DetachRequest) error {
 	return nil
 }

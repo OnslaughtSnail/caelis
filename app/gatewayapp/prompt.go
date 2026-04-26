@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
 )
 
 const (
@@ -16,10 +18,11 @@ const (
 )
 
 type promptConfig struct {
-	AppName      string
-	WorkspaceDir string
-	BasePrompt   string
-	SkillDirs    []string
+	AppName          string
+	WorkspaceDir     string
+	BasePrompt       string
+	SkillDirs        []string
+	DelegationAgents []sdkdelegation.Agent
 }
 
 type promptFragmentKind string
@@ -85,7 +88,7 @@ func buildSystemPrompt(cfg promptConfig) (string, error) {
 			Kind:    promptFragmentSystem,
 			Stage:   "capability_guidance",
 			Source:  "app:capability-guidance",
-			Content: builtInCapabilityGuidancePrompt(),
+			Content: builtInCapabilityGuidancePrompt(cfg.DelegationAgents),
 		},
 		{
 			Kind:    promptFragmentUser,
@@ -136,14 +139,20 @@ func builtInRolePrompt() string {
 	}, "\n")
 }
 
-func builtInCapabilityGuidancePrompt() string {
-	return strings.Join([]string{
+func builtInCapabilityGuidancePrompt(agents []sdkdelegation.Agent) string {
+	lines := []string{
 		"## Capability Guidance",
 		"",
 		"- Tool families: use READ/SEARCH/GLOB/LIST to inspect, WRITE/PATCH for targeted file changes, BASH for shell work, and TASK for async follow-up.",
 		"- Skills: load a skill only when its description clearly matches the current task; read the minimum needed from its `SKILL.md`.",
 		"- Modes: obey active session mode rules and avoid leaking planning-only behavior into execution turns.",
-	}, "\n")
+	}
+	if len(agents) > 0 {
+		lines = append(lines,
+			"- Delegation: use SPAWN for bounded child ACP work that can run independently. Use TASK wait for progress, TASK cancel to stop a running child, and TASK write only for a follow-up prompt after a SPAWN child has completed.",
+		)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func builtInEnvironmentContextPrompt(workspaceDir string) string {

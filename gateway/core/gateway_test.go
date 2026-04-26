@@ -1306,6 +1306,7 @@ type controlPlaneRuntime struct {
 	handoffResp sdksession.Session
 	attachReq   sdkruntime.AttachACPParticipantRequest
 	attachResp  sdksession.Session
+	promptReq   sdkruntime.PromptACPParticipantRequest
 	detachReq   sdkruntime.DetachACPParticipantRequest
 	detachResp  sdksession.Session
 }
@@ -1325,6 +1326,11 @@ func (r *controlPlaneRuntime) HandoffController(_ context.Context, req sdkruntim
 
 func (r *controlPlaneRuntime) AttachACPParticipant(_ context.Context, req sdkruntime.AttachACPParticipantRequest) (sdksession.Session, error) {
 	r.attachReq = req
+	return r.attachResp, nil
+}
+
+func (r *controlPlaneRuntime) PromptACPParticipant(_ context.Context, req sdkruntime.PromptACPParticipantRequest) (sdksession.Session, error) {
+	r.promptReq = req
 	return r.attachResp, nil
 }
 

@@ -279,6 +279,51 @@ func (r *Runtime) DetachACPParticipant(ctx context.Context, req sdkruntime.Detac
 	return r.sessions.Session(ctx, ref)
 }
 
+func (r *Runtime) PromptACPParticipant(ctx context.Context, req sdkruntime.PromptACPParticipantRequest) (sdksession.Session, error) {
+	if r == nil || r.controllers == nil {
+		return sdksession.Session{}, fmt.Errorf("sdk/runtime/local: ACP controller backend is not configured")
+	}
+	ref := sdksession.NormalizeSessionRef(req.SessionRef)
+	session, err := r.sessions.Session(ctx, ref)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	session, err = r.ensureSessionController(ctx, session)
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	turnResult, err := r.controllers.PromptParticipant(ctx, sdkcontroller.ParticipantPromptRequest{
+		SessionRef:    ref,
+		Session:       session,
+		ParticipantID: strings.TrimSpace(req.ParticipantID),
+		Input:         strings.TrimSpace(req.Input),
+		ContentParts:  req.ContentParts,
+	})
+	if err != nil {
+		return sdksession.Session{}, err
+	}
+	if turnResult.Handle != nil {
+		for event, seqErr := range turnResult.Handle.Events() {
+			if seqErr != nil {
+				return sdksession.Session{}, seqErr
+			}
+			normalized := normalizeEvent(session, strings.TrimSpace(req.ParticipantID), event)
+			if normalized == nil {
+				continue
+			}
+			if sdksession.IsCanonicalHistoryEvent(normalized) {
+				if _, err := r.sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
+					SessionRef: ref,
+					Event:      normalized,
+				}); err != nil {
+					return sdksession.Session{}, err
+				}
+			}
+		}
+	}
+	return r.sessions.Session(ctx, ref)
+}
+
 func (r *Runtime) HandoffController(ctx context.Context, req sdkruntime.HandoffControllerRequest) (sdksession.Session, error) {
 	ref := sdksession.NormalizeSessionRef(req.SessionRef)
 	session, err := r.sessions.Session(ctx, ref)

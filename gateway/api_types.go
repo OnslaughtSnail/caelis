@@ -15,6 +15,7 @@ type BindSessionRequest = gatewaycore.BindSessionRequest
 type ReplayEventsRequest = gatewaycore.ReplayEventsRequest
 type HandoffControllerRequest = gatewaycore.HandoffControllerRequest
 type AttachParticipantRequest = gatewaycore.AttachParticipantRequest
+type PromptParticipantRequest = gatewaycore.PromptParticipantRequest
 type DetachParticipantRequest = gatewaycore.DetachParticipantRequest
 type ControlPlaneStateRequest = gatewaycore.ControlPlaneStateRequest
 type BindingStateRequest = gatewaycore.BindingStateRequest

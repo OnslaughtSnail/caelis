@@ -12,6 +12,7 @@ import (
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdkcompact "github.com/OnslaughtSnail/caelis/sdk/compact"
+	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdkminimax "github.com/OnslaughtSnail/caelis/sdk/model/providers/minimax"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
@@ -25,7 +26,9 @@ import (
 	_ "github.com/OnslaughtSnail/caelis/sdk/sandbox/seatbelt"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
+	taskfile "github.com/OnslaughtSnail/caelis/sdk/task/file"
 	sdkbuiltin "github.com/OnslaughtSnail/caelis/sdk/tool/builtin"
+	spawntool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/spawn"
 )
 
 type Config struct {
@@ -79,6 +82,8 @@ type Stack struct {
 	runtime   stackRuntimeConfig
 	sandbox   SandboxConfig
 	exec      sdksandbox.Runtime
+	engine    *localruntime.Runtime
+	taskStore *taskfile.Store
 }
 
 type SessionRuntimeState struct {
@@ -120,15 +125,17 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
 		RootDir: filepath.Join(storeDir, "sessions"),
 	}))
+	taskStore := taskfile.NewStore(taskfile.Config{RootDir: filepath.Join(storeDir, "tasks")})
 	lookup, err := newModelLookup(configStore, cfg.Model, cfg.ContextWindow)
 	if err != nil {
 		return nil, err
 	}
 	baseMetadata := map[string]any{}
 	systemPrompt, err := buildSystemPrompt(promptConfig{
-		AppName:      appName,
-		WorkspaceDir: workspaceCWD,
-		BasePrompt:   cfg.SystemPrompt,
+		AppName:          appName,
+		WorkspaceDir:     workspaceCWD,
+		BasePrompt:       cfg.SystemPrompt,
+		DelegationAgents: delegationAgentsFromAssembly(cfg.Assembly),
 	})
 	if err != nil {
 		return nil, err
@@ -151,9 +158,10 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 			Key: workspaceKey,
 			CWD: workspaceCWD,
 		},
-		lookup:   lookup,
-		store:    configStore,
-		storeDir: storeDir,
+		lookup:    lookup,
+		store:     configStore,
+		storeDir:  storeDir,
+		taskStore: taskStore,
 		runtime: stackRuntimeConfig{
 			PermissionMode: cfg.PermissionMode,
 			ContextWindow:  cfg.ContextWindow,
@@ -166,6 +174,21 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 		return nil, err
 	}
 	return stack, nil
+}
+
+func delegationAgentsFromAssembly(assembly sdkplugin.ResolvedAssembly) []sdkdelegation.Agent {
+	out := make([]sdkdelegation.Agent, 0, len(assembly.Agents))
+	for _, one := range assembly.Agents {
+		agent := sdkdelegation.NormalizeAgent(sdkdelegation.Agent{
+			Name:        one.Name,
+			Description: one.Description,
+		})
+		if agent.Name == "" {
+			continue
+		}
+		out = append(out, agent)
+	}
+	return out
 }
 
 func defaultStoreDir() string {
@@ -880,11 +903,15 @@ func (s *Stack) rebuildGateway() error {
 		_ = sandboxRuntime.Close()
 		return err
 	}
+	if agents := delegationAgentsFromAssembly(runtimeCfg.Assembly); len(agents) > 0 {
+		tools = append(tools, spawntool.New(agents))
+	}
 	rt, err := localruntime.New(localruntime.Config{
 		Sessions:          s.Sessions,
 		AgentFactory:      chat.Factory{},
 		DefaultPolicyMode: policyMode(runtimeCfg.PermissionMode),
 		Assembly:          runtimeCfg.Assembly,
+		TaskStore:         s.taskStore,
 	})
 	if err != nil {
 		_ = sandboxRuntime.Close()
@@ -920,6 +947,7 @@ func (s *Stack) rebuildGateway() error {
 	oldExec := s.exec
 	s.Gateway = gw
 	s.exec = sandboxRuntime
+	s.engine = rt
 	s.mu.Unlock()
 	if oldExec != nil {
 		_ = oldExec.Close()

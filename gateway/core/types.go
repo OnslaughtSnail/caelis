@@ -128,6 +128,15 @@ type DetachParticipantRequest struct {
 	Source        string
 }
 
+type PromptParticipantRequest struct {
+	SessionRef    sdksession.SessionRef
+	BindingKey    string
+	ParticipantID string
+	Input         string
+	ContentParts  []sdkmodel.ContentPart
+	Source        string
+}
+
 type ControlPlaneStateRequest struct {
 	SessionRef sdksession.SessionRef
 	BindingKey string

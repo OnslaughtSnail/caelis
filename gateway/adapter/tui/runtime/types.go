@@ -154,6 +154,7 @@ type Driver interface {
 	AddAgent(context.Context, string) (AgentStatusSnapshot, error)
 	RemoveAgent(context.Context, string) (AgentStatusSnapshot, error)
 	HandoffAgent(context.Context, string) (AgentStatusSnapshot, error)
+	AskAgent(context.Context, string, string) (AgentStatusSnapshot, error)
 
 	CompleteMention(context.Context, string, int) ([]CompletionCandidate, error)
 	CompleteFile(context.Context, string, int) ([]CompletionCandidate, error)

@@ -62,6 +62,12 @@ type participantRun struct {
 	client          *sdkacpclient.Client
 	remoteSessionID string
 	binding         sdksession.ParticipantBinding
+
+	mu        sync.Mutex
+	turnID    string
+	handle    *turnHandle
+	events    []*sdksession.Event
+	updatedAt time.Time
 }
 
 func NewManager(cfg Config) (*Manager, error) {
@@ -191,6 +197,39 @@ func (m *Manager) Attach(ctx context.Context, req sdkcontroller.AttachRequest) (
 	return sdksession.CloneParticipantBinding(run.binding), nil
 }
 
+func (m *Manager) PromptParticipant(ctx context.Context, req sdkcontroller.ParticipantPromptRequest) (sdkcontroller.TurnResult, error) {
+	req = sdkcontroller.NormalizeParticipantPromptRequest(req)
+	if req.ParticipantID == "" {
+		return sdkcontroller.TurnResult{}, fmt.Errorf("sdk/controller/acp: participant id is required")
+	}
+	m.mu.RLock()
+	run := m.participants[req.ParticipantID]
+	m.mu.RUnlock()
+	if run == nil {
+		return sdkcontroller.TurnResult{}, fmt.Errorf("sdk/controller/acp: participant %q not found", req.ParticipantID)
+	}
+	prompt := buildPromptParts(req.Input, req.ContentParts)
+	if len(prompt) == 0 {
+		return sdkcontroller.TurnResult{}, fmt.Errorf("sdk/controller/acp: participant prompt is required")
+	}
+	turnCtx, cancel := context.WithCancel(ctx)
+	handle := newTurnHandle(cancel)
+	run.beginPrompt(req, handle)
+	go func() {
+		defer handle.finish()
+		if _, err := run.client.PromptParts(turnCtx, run.remoteSessionID, prompt, nil); err != nil {
+			run.finishPrompt()
+			handle.publishError(err)
+			return
+		}
+		buffered := run.finishPrompt()
+		for _, event := range buffered {
+			handle.publishEvent(event)
+		}
+	}()
+	return sdkcontroller.TurnResult{Handle: handle, UpdatedAt: m.clock()}, nil
+}
+
 func (m *Manager) Detach(ctx context.Context, req sdkcontroller.DetachRequest) error {
 	req = sdkcontroller.NormalizeDetachRequest(req)
 	if req.ParticipantID == "" {
@@ -212,7 +251,12 @@ func (m *Manager) startParticipant(
 	cfg sdksubagentacp.AgentConfig,
 	req sdkcontroller.AttachRequest,
 ) (*participantRun, error) {
-	client, remoteSessionID, err := m.startClient(ctx, session.CWD, cfg, nil,
+	var run *participantRun
+	client, remoteSessionID, err := m.startClient(ctx, session.CWD, cfg, func(env sdkacpclient.UpdateEnvelope) {
+		if run != nil {
+			run.handleUpdate(m.clock, env)
+		}
+	},
 		m.permissionHandler(sdksession.CloneSession(session), strings.TrimSpace(cfg.Name), "", nil),
 	)
 	if err != nil {
@@ -227,7 +271,7 @@ func (m *Manager) startParticipant(
 	if label == "" {
 		label = strings.TrimSpace(req.Agent)
 	}
-	run := &participantRun{
+	run = &participantRun{
 		id:              id,
 		parentSessionID: strings.TrimSpace(session.SessionID),
 		agent:           strings.TrimSpace(req.Agent),
@@ -432,6 +476,70 @@ func (r *controllerRun) handleUpdate(clock func() time.Time, env sdkacpclient.Up
 	if stream && handle != nil {
 		handle.publishEvent(event)
 	}
+}
+
+func (r *participantRun) beginPrompt(req sdkcontroller.ParticipantPromptRequest, handle *turnHandle) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.turnID = firstNonEmpty(strings.TrimSpace(req.ParticipantID), r.id)
+	r.handle = handle
+	r.events = nil
+}
+
+func (r *participantRun) finishPrompt() []*sdksession.Event {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	buffered := make([]*sdksession.Event, 0, len(r.events))
+	for _, event := range r.events {
+		buffered = append(buffered, sdksession.CloneEvent(event))
+	}
+	r.turnID = ""
+	r.handle = nil
+	r.events = nil
+	return buffered
+}
+
+func (r *participantRun) handleUpdate(clock func() time.Time, env sdkacpclient.UpdateEnvelope) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.turnID == "" {
+		r.mu.Unlock()
+		return
+	}
+	turnID := r.turnID
+	event := normalizeACPUpdateEvent(clock, sdksession.ControllerBinding{
+		Kind:         sdksession.ControllerKindACP,
+		ControllerID: r.agent,
+		Label:        r.binding.Label,
+		EpochID:      r.binding.ControllerRef,
+	}, r.remoteSessionID, turnID, env.Update)
+	if event == nil {
+		r.mu.Unlock()
+		return
+	}
+	event.Actor = sdksession.ActorRef{Kind: sdksession.ActorKindParticipant, ID: r.id, Name: strings.TrimSpace(firstNonEmpty(r.binding.Label, r.agent, r.id))}
+	if event.Scope == nil {
+		event.Scope = &sdksession.EventScope{}
+	}
+	event.Scope.Source = "acp_participant"
+	event.Scope.Controller = sdksession.ControllerRef{}
+	event.Scope.Participant = sdksession.ParticipantRef{
+		ID:           r.id,
+		Kind:         r.binding.Kind,
+		Role:         r.binding.Role,
+		DelegationID: r.binding.DelegationID,
+	}
+	r.updatedAt = clock()
+	r.events = append(r.events, sdksession.CloneEvent(event))
+	r.mu.Unlock()
 }
 
 type turnHandle struct {

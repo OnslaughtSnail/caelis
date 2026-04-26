@@ -317,11 +317,12 @@ func TestSlashAgentDispatchesPrimarySubcommands(t *testing.T) {
 	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "add copilot")
 	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "remove participant-1")
 	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "handoff copilot")
-	if driver.listAgentCalls != 1 || driver.agentStatusCalls != 1 || driver.addAgentCalls != 1 || driver.removeAgentCalls != 1 || driver.handoffAgentCalls != 1 {
-		t.Fatalf("agent calls = list:%d status:%d add:%d remove:%d handoff:%d", driver.listAgentCalls, driver.agentStatusCalls, driver.addAgentCalls, driver.removeAgentCalls, driver.handoffAgentCalls)
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "ask participant-1 summarize status")
+	if driver.listAgentCalls != 1 || driver.agentStatusCalls != 1 || driver.addAgentCalls != 1 || driver.removeAgentCalls != 1 || driver.handoffAgentCalls != 1 || driver.askAgentCalls != 1 {
+		t.Fatalf("agent calls = list:%d status:%d add:%d remove:%d handoff:%d ask:%d", driver.listAgentCalls, driver.agentStatusCalls, driver.addAgentCalls, driver.removeAgentCalls, driver.handoffAgentCalls, driver.askAgentCalls)
 	}
-	if driver.lastAddedAgent != "copilot" || driver.lastRemovedAgent != "participant-1" || driver.lastHandoffAgent != "copilot" {
-		t.Fatalf("agent targets = add:%q remove:%q handoff:%q", driver.lastAddedAgent, driver.lastRemovedAgent, driver.lastHandoffAgent)
+	if driver.lastAddedAgent != "copilot" || driver.lastRemovedAgent != "participant-1" || driver.lastHandoffAgent != "copilot" || driver.lastAskedAgent != "participant-1" || driver.lastAskedPrompt != "summarize status" {
+		t.Fatalf("agent targets = add:%q remove:%q handoff:%q ask:%q prompt:%q", driver.lastAddedAgent, driver.lastRemovedAgent, driver.lastHandoffAgent, driver.lastAskedAgent, driver.lastAskedPrompt)
 	}
 	if len(msgs) == 0 {
 		t.Fatal("slashAgent() emitted no messages")
@@ -450,12 +451,15 @@ type bridgeTestDriver struct {
 	addAgentCalls     int
 	removeAgentCalls  int
 	handoffAgentCalls int
+	askAgentCalls     int
 	lastConnect       tuiadapterruntime.ConnectConfig
 	lastModelAlias    string
 	lastDeletedAlias  string
 	lastAddedAgent    string
 	lastRemovedAgent  string
 	lastHandoffAgent  string
+	lastAskedAgent    string
+	lastAskedPrompt   string
 	agentList         []tuiadapterruntime.AgentCandidate
 	agentStatus       tuiadapterruntime.AgentStatusSnapshot
 }
@@ -540,6 +544,9 @@ func (d *bridgeSubmitDriver) RemoveAgent(context.Context, string) (tuiadapterrun
 	return tuiadapterruntime.AgentStatusSnapshot{}, nil
 }
 func (d *bridgeSubmitDriver) HandoffAgent(context.Context, string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	return tuiadapterruntime.AgentStatusSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) AskAgent(context.Context, string, string) (tuiadapterruntime.AgentStatusSnapshot, error) {
 	return tuiadapterruntime.AgentStatusSnapshot{}, nil
 }
 func (d *bridgeSubmitDriver) CompleteMention(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
@@ -635,6 +642,12 @@ func (d *bridgeTestDriver) RemoveAgent(_ context.Context, target string) (tuiada
 func (d *bridgeTestDriver) HandoffAgent(_ context.Context, target string) (tuiadapterruntime.AgentStatusSnapshot, error) {
 	d.handoffAgentCalls++
 	d.lastHandoffAgent = target
+	return d.agentStatus, nil
+}
+func (d *bridgeTestDriver) AskAgent(_ context.Context, target string, prompt string) (tuiadapterruntime.AgentStatusSnapshot, error) {
+	d.askAgentCalls++
+	d.lastAskedAgent = target
+	d.lastAskedPrompt = prompt
 	return d.agentStatus, nil
 }
 func (d *bridgeTestDriver) CompleteMention(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {

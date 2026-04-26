@@ -143,6 +143,10 @@ func (staticSubagentRunner) Spawn(context.Context, sdksubagent.SpawnContext, sdk
 	}, nil
 }
 
+func (staticSubagentRunner) Continue(context.Context, sdkdelegation.Anchor, sdkdelegation.Request) (sdkdelegation.Result, error) {
+	return sdkdelegation.Result{TaskID: "task-sub-1", State: sdkdelegation.StateRunning, OutputPreview: "helper continued"}, nil
+}
+
 func (staticSubagentRunner) Wait(context.Context, sdkdelegation.Anchor, int) (sdkdelegation.Result, error) {
 	return sdkdelegation.Result{TaskID: "task-sub-1", State: sdkdelegation.StateRunning, OutputPreview: "helper started"}, nil
 }

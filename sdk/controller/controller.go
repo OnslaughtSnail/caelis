@@ -90,6 +90,16 @@ type TurnRequest struct {
 	ApprovalRequester ApprovalRequester      `json:"-"`
 }
 
+// ParticipantPromptRequest sends one bounded prompt to an attached ACP
+// participant without changing the main controller.
+type ParticipantPromptRequest struct {
+	SessionRef    sdksession.SessionRef  `json:"session_ref,omitempty"`
+	Session       sdksession.Session     `json:"session,omitempty"`
+	ParticipantID string                 `json:"participant_id,omitempty"`
+	Input         string                 `json:"input,omitempty"`
+	ContentParts  []sdkmodel.ContentPart `json:"content_parts,omitempty"`
+}
+
 type TurnHandle interface {
 	Events() iter.Seq2[*sdksession.Event, error]
 	Cancel() bool
@@ -109,6 +119,7 @@ type ACP interface {
 	Deactivate(context.Context, sdksession.SessionRef) error
 	RunTurn(context.Context, TurnRequest) (TurnResult, error)
 	Attach(context.Context, AttachRequest) (sdksession.ParticipantBinding, error)
+	PromptParticipant(context.Context, ParticipantPromptRequest) (TurnResult, error)
 	Detach(context.Context, DetachRequest) error
 }
 
@@ -151,5 +162,15 @@ func NormalizeTurnRequest(in TurnRequest) TurnRequest {
 		out.ContentParts = append([]sdkmodel.ContentPart(nil), in.ContentParts...)
 	}
 	out.Mode = strings.TrimSpace(in.Mode)
+	return out
+}
+
+func NormalizeParticipantPromptRequest(in ParticipantPromptRequest) ParticipantPromptRequest {
+	out := in
+	out.SessionRef = sdksession.NormalizeSessionRef(in.SessionRef)
+	out.Session = sdksession.CloneSession(in.Session)
+	out.ParticipantID = strings.TrimSpace(in.ParticipantID)
+	out.Input = strings.TrimSpace(in.Input)
+	out.ContentParts = append([]sdkmodel.ContentPart(nil), in.ContentParts...)
 	return out
 }

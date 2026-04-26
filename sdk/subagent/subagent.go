@@ -73,6 +73,7 @@ type SpawnContext struct {
 // run in its own session and persist its own transcript independently.
 type Runner interface {
 	Spawn(context.Context, SpawnContext, sdkdelegation.Request) (sdkdelegation.Anchor, sdkdelegation.Result, error)
+	Continue(context.Context, sdkdelegation.Anchor, sdkdelegation.Request) (sdkdelegation.Result, error)
 	Wait(context.Context, sdkdelegation.Anchor, int) (sdkdelegation.Result, error)
 	Cancel(context.Context, sdkdelegation.Anchor) error
 }

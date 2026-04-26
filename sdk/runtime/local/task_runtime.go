@@ -521,15 +521,19 @@ func (tm *taskRuntime) Wait(ctx context.Context, ref sdksession.SessionRef, req 
 }
 
 func (tm *taskRuntime) Write(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
-	task, err := tm.lookupBash(ctx, ref, req.TaskID)
-	if err != nil {
-		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: task %q does not support write", req.TaskID)
+	if task, err := tm.lookupBash(ctx, ref, req.TaskID); err == nil {
+		input := normalizeTaskWriteInput(req.Input)
+		if err := task.session.WriteInput(ctx, []byte(input)); err != nil {
+			return sdktask.Snapshot{}, err
+		}
+		return tm.waitBash(ctx, task, req.Yield)
 	}
-	input := normalizeTaskWriteInput(req.Input)
-	if err := task.session.WriteInput(ctx, []byte(input)); err != nil {
+
+	task, err := tm.lookupSubagent(ctx, ref, req.TaskID)
+	if err != nil {
 		return sdktask.Snapshot{}, err
 	}
-	return tm.waitBash(ctx, task, req.Yield)
+	return tm.continueSubagent(ctx, task, strings.TrimSpace(req.Input), req.Yield)
 }
 
 func normalizeTaskWriteInput(input string) string {
@@ -636,6 +640,26 @@ func (tm *taskRuntime) waitSubagent(ctx context.Context, task *subagentTask, yie
 	}
 	result, err := task.runner.Wait(ctx, sdkdelegation.CloneAnchor(task.anchor), int(yield/time.Millisecond))
 	if err != nil {
+		task.mu.Lock()
+		if task.running {
+			task.running = false
+			task.state = sdktask.StateInterrupted
+			if task.result == nil {
+				task.result = map[string]any{}
+			}
+			task.result["state"] = string(sdktask.StateInterrupted)
+			task.result["error"] = "subagent session interrupted during recovery: " + strings.TrimSpace(err.Error())
+			task.result["result"] = "subagent session interrupted during recovery"
+			snapshot := task.snapshot()
+			entry := task.entrySnapshot(tm.runtime.now())
+			task.mu.Unlock()
+			if persistErr := tm.persistTaskEntry(ctx, entry); persistErr != nil {
+				return sdktask.Snapshot{}, persistErr
+			}
+			_ = tm.updateSubagentParticipant(ctx, task, "updated")
+			return snapshot, nil
+		}
+		task.mu.Unlock()
 		return sdktask.Snapshot{}, err
 	}
 	task.mu.Lock()
@@ -652,6 +676,49 @@ func (tm *taskRuntime) waitSubagent(ctx context.Context, task *subagentTask, yie
 		tm.mu.Unlock()
 		_ = tm.updateSubagentParticipant(ctx, task, "updated")
 	}
+	return snapshot, nil
+}
+
+func (tm *taskRuntime) continueSubagent(ctx context.Context, task *subagentTask, prompt string, yield time.Duration) (sdktask.Snapshot, error) {
+	if task == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: task is required")
+	}
+	if prompt == "" {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: TASK write for SPAWN task %q requires a follow-up prompt", task.ref.TaskID)
+	}
+	task.mu.Lock()
+	state := task.state
+	running := task.running
+	task.mu.Unlock()
+	if running || state != sdktask.StateCompleted {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: SPAWN task %q is %s; use TASK wait until completed before TASK write", task.ref.TaskID, state)
+	}
+	if task.runner == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: SPAWN task %q cannot continue because its child session runner is unavailable", task.ref.TaskID)
+	}
+	result, err := task.runner.Continue(ctx, sdkdelegation.CloneAnchor(task.anchor), sdkdelegation.Request{
+		Agent:       task.agent,
+		Prompt:      prompt,
+		YieldTimeMS: int(yield / time.Millisecond),
+	})
+	if err != nil {
+		return sdktask.Snapshot{}, err
+	}
+	task.mu.Lock()
+	task.prompt = prompt
+	task.applyResult(result)
+	snapshot := task.snapshot()
+	entry := task.entrySnapshot(tm.runtime.now())
+	task.mu.Unlock()
+	if err := tm.persistTaskEntry(ctx, entry); err != nil {
+		return sdktask.Snapshot{}, err
+	}
+	if !snapshot.Running {
+		tm.mu.Lock()
+		delete(tm.subagents, task.ref.TaskID)
+		tm.mu.Unlock()
+	}
+	_ = tm.updateSubagentParticipant(ctx, task, "updated")
 	return snapshot, nil
 }
 
@@ -820,8 +887,10 @@ func taskSnapshotToolResult(call sdktool.Call, def sdktool.Definition, snapshot 
 
 func taskToolPayload(snapshot sdktask.Snapshot) map[string]any {
 	payload := map[string]any{
-		"task_id": snapshot.Ref.TaskID,
-		"state":   string(snapshot.State),
+		"task_id":         snapshot.Ref.TaskID,
+		"state":           string(snapshot.State),
+		"running":         snapshot.Running,
+		"supports_cancel": snapshot.SupportsCancel && snapshot.Running,
 	}
 	if terminalID := firstNonEmpty(strings.TrimSpace(snapshot.Terminal.TerminalID), strings.TrimSpace(snapshot.Ref.TerminalID)); terminalID != "" {
 		payload["terminal_id"] = terminalID
@@ -840,7 +909,7 @@ func taskToolPayload(snapshot sdktask.Snapshot) map[string]any {
 			payload["supports_input"] = supportsInput
 		}
 		if supportsCancel, ok := snapshot.Result["supports_cancel"].(bool); ok {
-			payload["supports_cancel"] = supportsCancel
+			payload["supports_cancel"] = supportsCancel && snapshot.Running
 		}
 		return payload
 	}
@@ -1016,9 +1085,13 @@ func (tm *taskRuntime) rehydrateSubagentTask(entry *sdktask.Entry) *subagentTask
 		metadata:  maps.Clone(entry.Metadata),
 	}
 	if task.runner == nil && task.running {
+		if task.result == nil {
+			task.result = map[string]any{}
+		}
 		task.running = false
 		task.state = sdktask.StateInterrupted
 		task.result["output_preview"] = "subagent session requires reconnect"
+		task.result["state"] = string(sdktask.StateInterrupted)
 	}
 	return task
 }
@@ -1191,6 +1264,7 @@ func (t *subagentTask) applyResult(result sdkdelegation.Result) {
 	}
 	t.result["task_id"] = t.ref.TaskID
 	t.result["state"] = string(t.state)
+	t.result["supports_cancel"] = t.running
 }
 
 func (t *subagentTask) snapshot() sdktask.Snapshot {
@@ -1203,7 +1277,7 @@ func (t *subagentTask) snapshot() sdktask.Snapshot {
 		Title:          t.title,
 		State:          t.state,
 		Running:        t.running,
-		SupportsInput:  false,
+		SupportsInput:  !t.running && t.state == sdktask.StateCompleted,
 		SupportsCancel: true,
 		CreatedAt:      t.createdAt,
 		UpdatedAt:      time.Now(),
@@ -1223,7 +1297,7 @@ func (t *subagentTask) entrySnapshot(now time.Time) *sdktask.Entry {
 		Title:          t.title,
 		State:          t.state,
 		Running:        t.running,
-		SupportsInput:  false,
+		SupportsInput:  !t.running && t.state == sdktask.StateCompleted,
 		SupportsCancel: true,
 		CreatedAt:      t.createdAt,
 		UpdatedAt:      now,
