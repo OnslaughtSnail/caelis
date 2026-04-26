@@ -104,6 +104,27 @@ type AgentStatusSnapshot struct {
 	Participants    []AgentParticipantSnapshot
 }
 
+type SubagentSnapshot struct {
+	Handle        string
+	Mention       string
+	Agent         string
+	TaskID        string
+	State         string
+	Running       bool
+	OutputPreview string
+	Result        string
+}
+
+type SubagentStreamFrame struct {
+	TaskID    string
+	Stream    string
+	Text      string
+	State     string
+	Running   bool
+	Closed    bool
+	UpdatedAt time.Time
+}
+
 type ConnectConfig struct {
 	Provider            string
 	Model               string
@@ -155,6 +176,8 @@ type Driver interface {
 	RemoveAgent(context.Context, string) (AgentStatusSnapshot, error)
 	HandoffAgent(context.Context, string) (AgentStatusSnapshot, error)
 	AskAgent(context.Context, string, string) (AgentStatusSnapshot, error)
+	StartAgentSubagent(context.Context, string, string) (SubagentSnapshot, error)
+	ContinueSubagent(context.Context, string, string) (SubagentSnapshot, error)
 
 	CompleteMention(context.Context, string, int) ([]CompletionCandidate, error)
 	CompleteFile(context.Context, string, int) ([]CompletionCandidate, error)

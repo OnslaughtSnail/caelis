@@ -11,8 +11,19 @@ import (
 
 type AppConfig struct {
 	Models         persistedModelConfig  `json:"models,omitempty"`
+	Agents         []AgentConfig         `json:"agents,omitempty"`
 	AgentProviders []AgentProviderConfig `json:"agent_providers,omitempty"`
 	Sandbox        SandboxConfig         `json:"sandbox,omitempty"`
+}
+
+type AgentConfig struct {
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	WorkDir     string            `json:"work_dir,omitempty"`
+	Builtin     bool              `json:"builtin,omitempty"`
 }
 
 type SandboxConfig struct {
@@ -80,6 +91,7 @@ func (s *appConfigStore) loadUnlocked() (AppConfig, error) {
 			return AppConfig{}, fmt.Errorf("gatewayapp: decode app config: %w", err)
 		}
 		doc.Models.Configs = dedupeModelConfigs(doc.Models.Configs)
+		doc.Agents = dedupeAgentConfigs(doc.Agents)
 		doc.Sandbox = normalizeSandboxConfig(doc.Sandbox)
 		return doc, nil
 	}
@@ -96,6 +108,7 @@ func (s *appConfigStore) Save(doc AppConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	doc.Models.Configs = dedupeModelConfigsForSave(doc.Models.Configs)
+	doc.Agents = dedupeAgentConfigs(doc.Agents)
 	doc.Sandbox = normalizeSandboxConfig(doc.Sandbox)
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -115,6 +128,47 @@ func (s *appConfigStore) Save(doc AppConfig) error {
 		return err
 	}
 	return nil
+}
+
+func dedupeAgentConfigs(configs []AgentConfig) []AgentConfig {
+	if len(configs) == 0 {
+		return nil
+	}
+	out := make([]AgentConfig, 0, len(configs))
+	seen := make(map[string]struct{}, len(configs))
+	for _, cfg := range configs {
+		cfg = normalizeAgentConfig(cfg)
+		if cfg.Name == "" {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(cfg.Name))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, cfg)
+	}
+	return out
+}
+
+func normalizeAgentConfig(in AgentConfig) AgentConfig {
+	out := in
+	out.Name = strings.ToLower(strings.TrimSpace(in.Name))
+	out.Description = strings.TrimSpace(in.Description)
+	out.Command = strings.TrimSpace(in.Command)
+	out.WorkDir = strings.TrimSpace(in.WorkDir)
+	if len(in.Args) > 0 {
+		out.Args = append([]string(nil), in.Args...)
+	}
+	if len(in.Env) > 0 {
+		out.Env = map[string]string{}
+		for key, value := range in.Env {
+			if trimmed := strings.TrimSpace(key); trimmed != "" {
+				out.Env[trimmed] = value
+			}
+		}
+	}
+	return out
 }
 
 func dedupeModelConfigs(configs []ModelConfig) []ModelConfig {

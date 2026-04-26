@@ -14,6 +14,7 @@ import (
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
+	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
 )
 
 type GatewayDriver struct {
@@ -107,6 +108,72 @@ func (d *GatewayDriver) SubscribeStream(ctx context.Context, env appgateway.Even
 			env := appgateway.StreamFrameEvent(req, sdkstream.CloneFrame(*frame))
 			select {
 			case out <- env:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, true
+}
+
+func (d *GatewayDriver) SubscribeSubagentStream(ctx context.Context, taskID string) (<-chan SubagentStreamFrame, bool) {
+	if d == nil || d.stack == nil || d.stack.Gateway == nil {
+		return nil, false
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, false
+	}
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return nil, false
+	}
+	streams := d.stack.Gateway.Streams()
+	if streams == nil {
+		return nil, false
+	}
+	ref := sdkstream.Ref{
+		SessionID: strings.TrimSpace(session.SessionRef.SessionID),
+		TaskID:    taskID,
+	}
+	key := strings.Join([]string{"subagent", ref.SessionID, ref.TaskID}, "|")
+	d.mu.Lock()
+	if d.streamSubscriptions == nil {
+		d.streamSubscriptions = map[string]struct{}{}
+	}
+	if _, exists := d.streamSubscriptions[key]; exists {
+		d.mu.Unlock()
+		return nil, false
+	}
+	d.streamSubscriptions[key] = struct{}{}
+	d.mu.Unlock()
+
+	out := make(chan SubagentStreamFrame, 32)
+	go func() {
+		defer close(out)
+		defer func() {
+			d.mu.Lock()
+			delete(d.streamSubscriptions, key)
+			d.mu.Unlock()
+		}()
+		for frame, err := range streams.Subscribe(ctx, sdkstream.SubscribeRequest{Ref: ref}) {
+			if err != nil || frame == nil {
+				return
+			}
+			if strings.TrimSpace(frame.Text) == "" && !frame.Closed {
+				continue
+			}
+			item := SubagentStreamFrame{
+				TaskID:    firstNonEmpty(strings.TrimSpace(frame.Ref.TaskID), taskID),
+				Stream:    strings.TrimSpace(frame.Stream),
+				Text:      frame.Text,
+				State:     strings.TrimSpace(frame.State),
+				Running:   frame.Running,
+				Closed:    frame.Closed,
+				UpdatedAt: frame.UpdatedAt,
+			}
+			select {
+			case out <- item:
 			case <-ctx.Done():
 				return
 			}
@@ -544,24 +611,7 @@ func (d *GatewayDriver) SetSandboxMode(ctx context.Context, mode string) (Status
 
 func (d *GatewayDriver) ListAgents(ctx context.Context, limit int) ([]AgentCandidate, error) {
 	limit = normalizeCompletionLimit(limit)
-	status, err := d.AgentStatus(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(status.Participants) == 0 {
-		return nil, nil
-	}
-	out := make([]AgentCandidate, 0, min(limit, len(status.Participants)))
-	for _, agent := range status.Participants {
-		out = append(out, AgentCandidate{
-			Name:        strings.TrimSpace(firstNonEmpty(agent.AgentName, agent.Label, agent.ID)),
-			Description: strings.TrimSpace("id " + agent.ID),
-		})
-		if len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
+	return d.agentCatalog(limit), nil
 }
 
 func (d *GatewayDriver) AgentStatus(ctx context.Context) (AgentStatusSnapshot, error) {
@@ -580,7 +630,7 @@ func (d *GatewayDriver) AgentStatus(ctx context.Context) (AgentStatusSnapshot, e
 	}
 	status.SessionID = session.SessionID
 	status.ControllerKind = string(state.Controller.Kind)
-	status.ControllerLabel = strings.TrimSpace(firstNonEmpty(state.Controller.Label, state.Controller.ControllerID, string(state.Controller.Kind)))
+	status.ControllerLabel = strings.TrimSpace(firstNonEmpty(state.Controller.AgentName, state.Controller.Label, state.Controller.ControllerID, string(state.Controller.Kind)))
 	status.ControllerEpoch = strings.TrimSpace(state.Controller.EpochID)
 	status.HasActiveTurn = state.HasActiveTurn
 	status.Participants = make([]AgentParticipantSnapshot, 0, len(state.Participants))
@@ -588,7 +638,7 @@ func (d *GatewayDriver) AgentStatus(ctx context.Context) (AgentStatusSnapshot, e
 		status.Participants = append(status.Participants, AgentParticipantSnapshot{
 			ID:        strings.TrimSpace(participant.ID),
 			Label:     strings.TrimSpace(firstNonEmpty(participant.Label, participant.ID)),
-			AgentName: strings.TrimSpace(firstNonEmpty(participant.Label, participant.ID)),
+			AgentName: strings.TrimSpace(firstNonEmpty(participant.AgentName, participant.Label, participant.ID)),
 			Kind:      string(participant.Kind),
 			Role:      string(participant.Role),
 			SessionID: strings.TrimSpace(participant.SessionID),
@@ -598,42 +648,22 @@ func (d *GatewayDriver) AgentStatus(ctx context.Context) (AgentStatusSnapshot, e
 }
 
 func (d *GatewayDriver) AddAgent(ctx context.Context, target string) (AgentStatusSnapshot, error) {
-	session, err := d.ensureSession(ctx)
-	if err != nil {
-		return AgentStatusSnapshot{}, err
-	}
-	agent, err := d.resolveAgentName(target)
-	if err != nil {
-		return AgentStatusSnapshot{}, err
-	}
-	if _, err := d.stack.Gateway.AttachParticipant(ctx, appgateway.AttachParticipantRequest{
-		SessionRef: session.SessionRef,
-		BindingKey: d.bindingKey,
-		Agent:      agent,
-		Role:       sdksession.ParticipantRoleSidecar,
-		Source:     "tui_agent_add",
-		Label:      agent,
-	}); err != nil {
+	if err := d.stack.RegisterBuiltinACPAgent(target); err != nil {
 		return AgentStatusSnapshot{}, err
 	}
 	return d.AgentStatus(ctx)
 }
 
 func (d *GatewayDriver) RemoveAgent(ctx context.Context, target string) (AgentStatusSnapshot, error) {
-	session, err := d.ensureSession(ctx)
+	target = strings.ToLower(strings.TrimSpace(target))
+	status, err := d.AgentStatus(ctx)
 	if err != nil {
 		return AgentStatusSnapshot{}, err
 	}
-	participantID, err := d.resolveParticipantID(ctx, session.SessionRef, target)
-	if err != nil {
-		return AgentStatusSnapshot{}, err
+	if strings.EqualFold(strings.TrimSpace(status.ControllerKind), string(sdksession.ControllerKindACP)) {
+		return AgentStatusSnapshot{}, fmt.Errorf("tui/runtime: an ACP agent is the active controller; run /agent use local before removing registered agents")
 	}
-	if _, err := d.stack.Gateway.DetachParticipant(ctx, appgateway.DetachParticipantRequest{
-		SessionRef:    session.SessionRef,
-		BindingKey:    d.bindingKey,
-		ParticipantID: participantID,
-		Source:        "tui_agent_remove",
-	}); err != nil {
+	if err := d.stack.UnregisterACPAgent(target); err != nil {
 		return AgentStatusSnapshot{}, err
 	}
 	return d.AgentStatus(ctx)
@@ -655,7 +685,7 @@ func (d *GatewayDriver) HandoffAgent(ctx context.Context, target string) (AgentS
 		req.Kind = sdksession.ControllerKindKernel
 		req.Reason = "resume local control"
 	default:
-		agent, resolveErr := d.resolveHandoffAgentName(ctx, session.SessionRef, target)
+		agent, resolveErr := d.resolveAgentName(target)
 		if resolveErr != nil {
 			return AgentStatusSnapshot{}, resolveErr
 		}
@@ -693,10 +723,115 @@ func (d *GatewayDriver) AskAgent(ctx context.Context, target string, prompt stri
 	return d.AgentStatus(ctx)
 }
 
-func (d *GatewayDriver) CompleteMention(context.Context, string, int) ([]CompletionCandidate, error) {
-	// TODO: wire this to a stable agent/participant registry once ACP/subagent
-	// mention targets are modeled outside transient runtime state.
-	return []CompletionCandidate{}, nil
+func (d *GatewayDriver) StartAgentSubagent(ctx context.Context, target string, prompt string) (SubagentSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	agent, err := d.resolveAgentName(target)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	snapshot, err := d.stack.StartSubagent(ctx, session.SessionRef, agent, prompt, "slash_"+agent)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	return subagentSnapshotFromTask(snapshot), nil
+}
+
+func (d *GatewayDriver) ContinueSubagent(ctx context.Context, handle string, prompt string) (SubagentSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	snapshot, err := d.stack.ContinueSubagentByHandle(ctx, session.SessionRef, handle, prompt, 2*time.Second)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	return subagentSnapshotFromTask(snapshot), nil
+}
+
+func (d *GatewayDriver) WaitSubagent(ctx context.Context, taskID string) (SubagentSnapshot, error) {
+	session, err := d.ensureSession(ctx)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	snapshot, err := d.stack.WaitSubagentTask(ctx, session.SessionRef, taskID, 5*time.Second)
+	if err != nil {
+		return SubagentSnapshot{}, err
+	}
+	return subagentSnapshotFromTask(snapshot), nil
+}
+
+func subagentSnapshotFromTask(snapshot sdktask.Snapshot) SubagentSnapshot {
+	handle := stringFromAny(firstNonNil(snapshot.Result["handle"], snapshot.Metadata["handle"]))
+	mention := stringFromAny(firstNonNil(snapshot.Result["mention"], snapshot.Metadata["mention"]))
+	if mention == "" && handle != "" {
+		mention = "@" + strings.TrimPrefix(handle, "@")
+	}
+	return SubagentSnapshot{
+		Handle:        strings.TrimPrefix(strings.TrimSpace(handle), "@"),
+		Mention:       strings.TrimSpace(mention),
+		Agent:         stringFromAny(firstNonNil(snapshot.Result["agent"], snapshot.Metadata["agent"])),
+		TaskID:        strings.TrimSpace(snapshot.Ref.TaskID),
+		State:         string(snapshot.State),
+		Running:       snapshot.Running,
+		OutputPreview: stringFromAny(firstNonNil(snapshot.Result["output_preview"], snapshot.Metadata["output_preview"])),
+		Result:        stringFromAny(snapshot.Result["result"]),
+	}
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func stringFromAny(value any) string {
+	text, _ := value.(string)
+	return strings.TrimSpace(text)
+}
+
+func (d *GatewayDriver) CompleteMention(ctx context.Context, query string, limit int) ([]CompletionCandidate, error) {
+	limit = normalizeCompletionLimit(limit)
+	session, ok := d.currentSession()
+	if !ok {
+		return []CompletionCandidate{}, nil
+	}
+	state, err := d.stack.Gateway.ControlPlaneState(ctx, appgateway.ControlPlaneStateRequest{SessionRef: session.SessionRef})
+	if err != nil {
+		return nil, err
+	}
+	query = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(query), "@"))
+	out := make([]CompletionCandidate, 0, min(limit, len(state.Participants)))
+	for _, participant := range state.Participants {
+		if participant.Kind != sdksession.ParticipantKindSubagent || participant.Role != sdksession.ParticipantRoleDelegated {
+			continue
+		}
+		handle := strings.TrimPrefix(strings.TrimSpace(participant.Label), "@")
+		if handle == "" {
+			continue
+		}
+		agent := strings.TrimSpace(participant.AgentName)
+		if agent == "" {
+			agent = strings.TrimSpace(participant.ID)
+		}
+		if query != "" && !hasSlashArgPrefix(query, handle, agent, participant.SessionID, participant.DelegationID) {
+			continue
+		}
+		out = append(out, CompletionCandidate{
+			Value:   handle,
+			Display: handle,
+			Detail:  strings.Join(compactNonEmpty([]string{agent, string(participant.Role), participant.SessionID}), " · "),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (d *GatewayDriver) CompleteFile(ctx context.Context, query string, limit int) ([]CompletionCandidate, error) {
@@ -764,11 +899,11 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 	query = strings.TrimSpace(strings.ToLower(query))
 	switch strings.TrimSpace(strings.ToLower(command)) {
 	case "agent add":
-		return d.completeAgentCatalog(query, limit), nil
-	case "agent handoff", "agent use":
+		return d.completeBuiltInAgentCatalog(query, limit), nil
+	case "agent use":
 		return d.completeAgentHandoffTargets(ctx, query, limit)
-	case "agent remove", "agent ask":
-		return d.completeAgentParticipants(ctx, query, limit)
+	case "agent remove":
+		return d.completeAgentCatalog(query, limit), nil
 	case "model use", "model del":
 		return d.completeModelAliases(ctx, query, limit)
 	case "connect":
@@ -843,6 +978,28 @@ func (d *GatewayDriver) completeAgentCatalog(query string, limit int) []SlashArg
 	return out
 }
 
+func (d *GatewayDriver) completeBuiltInAgentCatalog(query string, limit int) []SlashArgCandidate {
+	agents := d.stack.ListBuiltinACPAgents()
+	if len(agents) == 0 {
+		return nil
+	}
+	out := make([]SlashArgCandidate, 0, min(limit, len(agents)))
+	for _, agent := range agents {
+		if query != "" && !hasSlashArgPrefix(query, agent.Name, agent.Description) {
+			continue
+		}
+		out = append(out, SlashArgCandidate{
+			Value:   agent.Name,
+			Display: agent.Name,
+			Detail:  firstNonEmpty(agent.Description, "built-in ACP agent"),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
 func (d *GatewayDriver) completeAgentParticipants(ctx context.Context, query string, limit int) ([]SlashArgCandidate, error) {
 	session, ok := d.currentSession()
 	if !ok {
@@ -882,25 +1039,14 @@ func (d *GatewayDriver) completeAgentHandoffTargets(ctx context.Context, query s
 		Display: "local",
 		Detail:  "return to local kernel",
 	}}
-	participants, err := d.completeAgentParticipants(ctx, query, limit)
-	if err != nil {
-		return nil, err
-	}
 	if query != "" && !hasSlashArgPrefix(query, "local", "kernel") {
 		out = nil
 	}
-	for _, participant := range participants {
-		value := strings.TrimSpace(participant.Display)
-		if value == "" {
-			value = strings.TrimSpace(participant.Value)
-		}
-		if value == "" {
-			continue
-		}
+	for _, agent := range d.completeAgentCatalog(query, limit) {
 		out = append(out, SlashArgCandidate{
-			Value:   value,
-			Display: participant.Display,
-			Detail:  firstNonEmpty(participant.Detail, "attached ACP participant"),
+			Value:   agent.Value,
+			Display: agent.Display,
+			Detail:  agent.Detail,
 		})
 		if len(out) >= limit {
 			break
@@ -1169,13 +1315,10 @@ func defaultSlashArgCandidates(command string) []SlashArgCandidate {
 	switch command {
 	case "agent":
 		return []SlashArgCandidate{
-			{Value: "list", Display: "list", Detail: "List attached ACP agents"},
-			{Value: "status", Display: "status", Detail: "Show controller and participant status"},
-			{Value: "add", Display: "add", Detail: "Attach an ACP participant to the current session"},
-			{Value: "remove", Display: "remove", Detail: "Detach an attached participant"},
-			{Value: "handoff", Display: "handoff", Detail: "Hand off the main controller to an ACP agent"},
-			{Value: "use", Display: "use", Detail: "Hand off the main controller to an attached agent"},
-			{Value: "ask", Display: "ask", Detail: "Prompt an attached participant once"},
+			{Value: "list", Display: "list", Detail: "List registered ACP agents"},
+			{Value: "add", Display: "add", Detail: "Register a built-in ACP agent"},
+			{Value: "use", Display: "use", Detail: "Switch the main controller"},
+			{Value: "remove", Display: "remove", Detail: "Unregister an ACP agent"},
 		}
 	case "sandbox":
 		return sandboxCandidates()

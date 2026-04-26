@@ -24,8 +24,9 @@ Current implementation:
 
 What is productized in this phase:
 
-- TUI `/agent handoff <name|local>` on top of the gateway control plane.
-- Gateway-level attach/detach participant methods so adapters do not need runtime internals.
+- TUI `/agent use <name|local>` on top of the gateway control plane.
+- `/agent add <builtin>` and `/agent remove <agent>` update registered ACP agent configuration, not session participants.
+- Dynamic slash commands such as `/codex <prompt>` create ACP child sessions and return `@handle` continuation targets.
 
 ### Participant
 
@@ -38,8 +39,8 @@ Current implementation:
 
 What is productized in this phase:
 
-- TUI `/agent add <name>` and `/agent remove <participant-id>`.
-- TUI `/agent status` to show controller and participant state from the gateway control plane snapshot.
+- Session participants are created by SPAWN or dynamic slash child sessions, not by `/agent add`.
+- `@handle <prompt>` continues an existing delegated child session.
 
 ### Subagent
 
@@ -113,11 +114,9 @@ Keep the current local headless and TUI main path unchanged:
 Primary commands:
 
 - `/agent list`
-- `/agent status`
-- `/agent add <name>`
-- `/agent remove <participant-id>`
-- `/agent handoff <name|local>`
-- `/agent use <name|local>`
+- `/agent add <builtin>`
+- `/agent use <agent|local>`
+- `/agent remove <agent>`
 
 Behavior rules:
 
@@ -128,7 +127,7 @@ Behavior rules:
 Error recovery rules:
 
 - unknown agent -> tell the user to run `/agent list`
-- unknown participant -> tell the user to run `/agent status`
+- unknown handle -> tell the user that `@handle` only targets SPAWN or dynamic slash children
 - ambiguous short id/name -> tell the user to type more or use the full id
 - missing control plane -> report that ACP control plane is unavailable for this stack
 
@@ -184,8 +183,8 @@ Eval-style coverage:
 
 ## Known Limits
 
-- `/agent ask` is not introduced yet. This phase productizes handoff and participant management only.
-- Mention completion still returns an empty list because there is not yet a stable agent or participant mention registry.
-- Participant removal is keyed by attached participant id; label matching is best-effort convenience, not a durable API.
+- `/agent ask`, `/agent status`, and `/agent handoff` are not part of the command surface.
+- Mention completion lists delegated child handles only.
+- `/agent remove` unregisters ACP agent config; it does not remove existing child sessions.
 - Multi-remote session hosting is still host-centric and not yet a full daemon product with discovery, auth, or tenancy policy.
 - ACP agent catalog is assembly-backed static config today; there is no dynamic runtime registration surface yet.

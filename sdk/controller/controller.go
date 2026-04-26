@@ -71,11 +71,13 @@ type DetachRequest struct {
 
 // HandoffRequest activates one ACP controller for a session.
 type HandoffRequest struct {
-	SessionRef sdksession.SessionRef `json:"session_ref,omitempty"`
-	Session    sdksession.Session    `json:"session,omitempty"`
-	Agent      string                `json:"agent,omitempty"`
-	Source     string                `json:"source,omitempty"`
-	Reason     string                `json:"reason,omitempty"`
+	SessionRef     sdksession.SessionRef `json:"session_ref,omitempty"`
+	Session        sdksession.Session    `json:"session,omitempty"`
+	Agent          string                `json:"agent,omitempty"`
+	Source         string                `json:"source,omitempty"`
+	Reason         string                `json:"reason,omitempty"`
+	ContextPrelude string                `json:"context_prelude,omitempty"`
+	ContextSyncSeq int                   `json:"context_sync_seq,omitempty"`
 }
 
 // TurnRequest runs one turn through the active ACP controller.
@@ -149,6 +151,8 @@ func NormalizeHandoffRequest(in HandoffRequest) HandoffRequest {
 	out.Agent = strings.TrimSpace(in.Agent)
 	out.Source = strings.TrimSpace(in.Source)
 	out.Reason = strings.TrimSpace(in.Reason)
+	out.ContextPrelude = strings.TrimSpace(in.ContextPrelude)
+	out.ContextSyncSeq = in.ContextSyncSeq
 	return out
 }
 

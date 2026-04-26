@@ -117,7 +117,7 @@ func TestLocalStackGatewayACPMainE2E(t *testing.T) {
 	}
 }
 
-func TestLocalStackInjectsSpawnForSelfAndAttachedACPAgents(t *testing.T) {
+func TestLocalStackInjectsSpawnForSelfAndRegisteredACPAgents(t *testing.T) {
 	ctx := context.Background()
 	withAgents, session := newStackWithAssemblyForToolTest(t, sdkplugin.ResolvedAssembly{
 		Agents: []sdkplugin.AgentConfig{{
@@ -128,7 +128,6 @@ func TestLocalStackInjectsSpawnForSelfAndAttachedACPAgents(t *testing.T) {
 			WorkDir:     repoRootForGatewayAppTest(t),
 		}},
 	})
-	attachAgentForToolTest(t, withAgents, session.SessionRef, "helper")
 	resolved, err := withAgents.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
 	if err != nil {
 		t.Fatalf("ResolveTurn(with agents) error = %v", err)
@@ -156,18 +155,54 @@ func TestLocalStackInjectsSpawnForSelfAndAttachedACPAgents(t *testing.T) {
 	if !strings.Contains(systemPrompt, "SPAWN for bounded child ACP work") {
 		t.Fatalf("system prompt missing delegation guidance for default self spawn: %q", systemPrompt)
 	}
-	for _, want := range []string{"self", "codex", "copilot", "gemini"} {
-		if !agentConfigSetHas(withoutAgents.runtime.Assembly.Agents, want) {
-			t.Fatalf("built-in agent %q missing from assembly: %#v", want, withoutAgents.runtime.Assembly.Agents)
+	if !agentConfigSetHas(withoutAgents.runtime.Assembly.Agents, "self") {
+		t.Fatalf("self agent missing from assembly: %#v", withoutAgents.runtime.Assembly.Agents)
+	}
+	for _, removed := range []string{"codex", "copilot", "gemini"} {
+		if agentConfigSetHas(withoutAgents.runtime.Assembly.Agents, removed) {
+			t.Fatalf("unregistered built-in agent %q unexpectedly present: %#v", removed, withoutAgents.runtime.Assembly.Agents)
 		}
 	}
-	attachAgentForToolTest(t, withoutAgents, session.SessionRef, "codex")
-	resolved, err = withoutAgents.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
-	if err != nil {
-		t.Fatalf("ResolveTurn(with built-in attached) error = %v", err)
+}
+
+func TestLocalStackAgentRegistryUpdatesWithoutRuntimeRebuild(t *testing.T) {
+	ctx := context.Background()
+	stack, session := newStackWithAssemblyForToolTest(t, sdkplugin.ResolvedAssembly{})
+	oldGateway := stack.Gateway
+	oldEngine := stack.engine
+
+	if err := stack.RegisterBuiltinACPAgent("codex"); err != nil {
+		t.Fatalf("RegisterBuiltinACPAgent(codex) error = %v", err)
 	}
-	if !toolSetHas(resolved.RunRequest.AgentSpec.Tools, spawntool.ToolName) {
-		t.Fatalf("tools missing %s after built-in ACP agent attachment", spawntool.ToolName)
+	if stack.Gateway != oldGateway {
+		t.Fatal("RegisterBuiltinACPAgent rebuilt gateway")
+	}
+	if stack.engine != oldEngine {
+		t.Fatal("RegisterBuiltinACPAgent rebuilt runtime engine")
+	}
+	resolved, err := stack.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("ResolveTurn(after register) error = %v", err)
+	}
+	if !spawnToolHasAgent(resolved.RunRequest.AgentSpec.Tools, "codex") {
+		t.Fatalf("SPAWN agent enum missing codex after registry update")
+	}
+
+	if err := stack.UnregisterACPAgent("codex"); err != nil {
+		t.Fatalf("UnregisterACPAgent(codex) error = %v", err)
+	}
+	if stack.Gateway != oldGateway {
+		t.Fatal("UnregisterACPAgent rebuilt gateway")
+	}
+	if stack.engine != oldEngine {
+		t.Fatal("UnregisterACPAgent rebuilt runtime engine")
+	}
+	resolved, err = stack.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("ResolveTurn(after unregister) error = %v", err)
+	}
+	if spawnToolHasAgent(resolved.RunRequest.AgentSpec.Tools, "codex") {
+		t.Fatalf("SPAWN agent enum still includes codex after unregister")
 	}
 }
 
@@ -204,6 +239,24 @@ func toolSetHas(tools []sdktool.Tool, name string) bool {
 		}
 		if strings.EqualFold(strings.TrimSpace(tool.Definition().Name), strings.TrimSpace(name)) {
 			return true
+		}
+	}
+	return false
+}
+
+func spawnToolHasAgent(tools []sdktool.Tool, name string) bool {
+	for _, tool := range tools {
+		if tool == nil || !strings.EqualFold(strings.TrimSpace(tool.Definition().Name), spawntool.ToolName) {
+			continue
+		}
+		schema := tool.Definition().InputSchema
+		props, _ := schema["properties"].(map[string]any)
+		agentProp, _ := props["agent"].(map[string]any)
+		enum, _ := agentProp["enum"].([]string)
+		for _, item := range enum {
+			if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(name)) {
+				return true
+			}
 		}
 	}
 	return false

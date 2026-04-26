@@ -261,7 +261,7 @@ func TestAgentActionPrefixTypingFiltersCandidates(t *testing.T) {
 				return []SlashArgCandidate{
 					{Value: "add", Display: "add"},
 					{Value: "remove", Display: "remove"},
-					{Value: "handoff", Display: "handoff"},
+					{Value: "use", Display: "use"},
 					{Value: "list", Display: "list"},
 				}, nil
 			default:
@@ -270,15 +270,15 @@ func TestAgentActionPrefixTypingFiltersCandidates(t *testing.T) {
 		},
 	})
 
-	model.setInputText("/agent ha")
+	model.setInputText("/agent us")
 	model.syncTextareaFromInput()
 	model.syncSlashInputOverlays()
 
 	if got := model.slashArgCommand; got != "agent" {
 		t.Fatalf("slashArgCommand = %q, want agent", got)
 	}
-	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "handoff" {
-		t.Fatalf("slashArgCandidates = %#v, want only handoff candidate", model.slashArgCandidates)
+	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "use" {
+		t.Fatalf("slashArgCandidates = %#v, want only use candidate", model.slashArgCandidates)
 	}
 }
 
@@ -291,7 +291,7 @@ func TestAgentActionPrefixTypingFiltersCandidatesWhenCursorLags(t *testing.T) {
 				return []SlashArgCandidate{
 					{Value: "add", Display: "add"},
 					{Value: "remove", Display: "remove"},
-					{Value: "handoff", Display: "handoff"},
+					{Value: "use", Display: "use"},
 					{Value: "list", Display: "list"},
 				}, nil
 			default:
@@ -300,7 +300,7 @@ func TestAgentActionPrefixTypingFiltersCandidatesWhenCursorLags(t *testing.T) {
 		},
 	})
 
-	model.setInputText("/agent ha")
+	model.setInputText("/agent us")
 	model.syncTextareaFromInput()
 	model.cursor = len([]rune("/agent "))
 	model.syncSlashInputOverlays()
@@ -308,8 +308,8 @@ func TestAgentActionPrefixTypingFiltersCandidatesWhenCursorLags(t *testing.T) {
 	if got := model.slashArgCommand; got != "agent" {
 		t.Fatalf("slashArgCommand = %q, want agent", got)
 	}
-	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "handoff" {
-		t.Fatalf("slashArgCandidates with lagging cursor = %#v, want only handoff candidate", model.slashArgCandidates)
+	if len(model.slashArgCandidates) != 1 || model.slashArgCandidates[0].Value != "use" {
+		t.Fatalf("slashArgCandidates with lagging cursor = %#v, want only use candidate", model.slashArgCandidates)
 	}
 }
 

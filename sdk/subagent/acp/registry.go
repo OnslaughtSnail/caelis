@@ -45,6 +45,24 @@ func (r *Registry) Register(cfg AgentConfig) error {
 	return nil
 }
 
+func (r *Registry) Replace(configs []AgentConfig) error {
+	next := make(map[string]AgentConfig, len(configs))
+	for _, cfg := range configs {
+		cfg = normalizeAgentConfig(cfg)
+		if cfg.Name == "" {
+			return fmt.Errorf("sdk/subagent/acp: agent name is required")
+		}
+		if strings.TrimSpace(cfg.Command) == "" {
+			return fmt.Errorf("sdk/subagent/acp: command is required for agent %q", cfg.Name)
+		}
+		next[cfg.Name] = cfg
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agents = next
+	return nil
+}
+
 func (r *Registry) Get(_ context.Context, name string) (sdkdelegation.Agent, error) {
 	cfg, err := r.lookup(name)
 	if err != nil {

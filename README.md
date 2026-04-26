@@ -101,7 +101,8 @@ Interactive sessions are stored under `~/.caelis/sessions` by default. The TUI s
 Current built-in slash commands:
 
 - `/help`
-- `/agent list`, `/agent status`, `/agent add <name>`, `/agent remove <participant-id>`, `/agent handoff <name|local>`, `/agent use <name|local>`
+- `/agent list`, `/agent add <builtin>`, `/agent use <agent|local>`, `/agent remove <agent>`
+- dynamic ACP child commands for registered agents, for example `/codex <prompt>` and follow-up `@handle <prompt>`
 - `/connect`
 - `/model use <alias>` or `/model del <alias>`
 - `/sandbox [auto|seatbelt|bwrap|landlock]`

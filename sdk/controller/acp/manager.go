@@ -38,11 +38,13 @@ type Manager struct {
 }
 
 type controllerRun struct {
-	parentSessionID string
-	agent           string
-	client          *sdkacpclient.Client
-	remoteSessionID string
-	binding         sdksession.ControllerBinding
+	parentSessionID       string
+	agent                 string
+	client                *sdkacpclient.Client
+	remoteSessionID       string
+	binding               sdksession.ControllerBinding
+	contextPrelude        string
+	contextPreludePending bool
 
 	mu                sync.Mutex
 	turnID            string
@@ -99,10 +101,12 @@ func (m *Manager) Activate(ctx context.Context, req sdkcontroller.HandoffRequest
 	}
 
 	run := &controllerRun{
-		parentSessionID: parentSessionID,
-		agent:           strings.TrimSpace(cfg.Name),
-		binding:         controllerBinding(cfg.Name, req.Source, m.nextID("controller"), m.clock()),
-		updatedAt:       m.clock(),
+		parentSessionID:       parentSessionID,
+		agent:                 strings.TrimSpace(cfg.Name),
+		binding:               controllerBinding(cfg.Name, req.Source, m.nextID("controller"), m.clock()),
+		contextPrelude:        strings.TrimSpace(req.ContextPrelude),
+		contextPreludePending: strings.TrimSpace(req.ContextPrelude) != "",
+		updatedAt:             m.clock(),
 	}
 	client, remoteSessionID, err := m.startClient(ctx, req.Session.CWD, cfg,
 		func(env sdkacpclient.UpdateEnvelope) {
@@ -117,6 +121,8 @@ func (m *Manager) Activate(ctx context.Context, req sdkcontroller.HandoffRequest
 	}
 	run.client = client
 	run.remoteSessionID = remoteSessionID
+	run.binding.RemoteSessionID = remoteSessionID
+	run.binding.ContextSyncSeq = req.ContextSyncSeq
 
 	m.mu.Lock()
 	if old := m.controllers[parentSessionID]; old != nil && old.client != nil {
@@ -156,6 +162,7 @@ func (m *Manager) RunTurn(ctx context.Context, req sdkcontroller.TurnRequest) (s
 	}
 
 	prompt := buildPromptParts(req.Input, req.ContentParts)
+	prompt = run.consumeContextPrelude(prompt)
 	turnCtx, cancel := context.WithCancel(ctx)
 	handle := newTurnHandle(cancel)
 	run.beginTurn(req, handle)
@@ -281,6 +288,7 @@ func (m *Manager) startParticipant(
 			ID:            id,
 			Kind:          sdksession.ParticipantKindACP,
 			Role:          role,
+			AgentName:     strings.TrimSpace(req.Agent),
 			Label:         label,
 			SessionID:     remoteSessionID,
 			Source:        firstNonEmpty(req.Source, "user_attach"),
@@ -410,6 +418,7 @@ func controllerBinding(agent string, source string, epochID string, now time.Tim
 	return sdksession.ControllerBinding{
 		Kind:         sdksession.ControllerKindACP,
 		ControllerID: strings.TrimSpace(agent),
+		AgentName:    strings.TrimSpace(agent),
 		Label:        strings.TrimSpace(agent),
 		EpochID:      strings.TrimSpace(epochID),
 		AttachedAt:   now,
@@ -430,6 +439,30 @@ func (r *controllerRun) beginTurn(req sdkcontroller.TurnRequest, handle *turnHan
 	r.approvalRequester = req.ApprovalRequester
 	r.handle = handle
 	r.events = nil
+}
+
+func (r *controllerRun) consumeContextPrelude(prompt []json.RawMessage) []json.RawMessage {
+	if r == nil {
+		return prompt
+	}
+	r.mu.Lock()
+	prelude := strings.TrimSpace(r.contextPrelude)
+	pending := r.contextPreludePending
+	if pending {
+		r.contextPreludePending = false
+	}
+	r.mu.Unlock()
+	if !pending || prelude == "" {
+		return prompt
+	}
+	raw, _ := json.Marshal(sdkacpclient.TextContent{
+		Type: "text",
+		Text: prelude,
+	})
+	out := make([]json.RawMessage, 0, len(prompt)+1)
+	out = append(out, raw)
+	out = append(out, prompt...)
+	return out
 }
 
 func (r *controllerRun) finishTurn() ([]*sdksession.Event, bool) {

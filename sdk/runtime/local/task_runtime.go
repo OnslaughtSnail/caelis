@@ -2,9 +2,11 @@ package local
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +71,7 @@ type subagentTask struct {
 	anchor     sdkdelegation.Anchor
 	runner     sdksubagent.Runner
 	agent      string
+	handle     string
 	title      string
 	prompt     string
 	createdAt  time.Time
@@ -533,11 +536,15 @@ func (tm *taskRuntime) StartSubagent(
 		anchor:     sdkdelegation.CloneAnchor(anchor),
 		runner:     runner,
 		agent:      strings.TrimSpace(anchor.Agent),
+		handle:     allocateSubagentHandle(session),
 		title:      spawntool.ToolName + " " + strings.TrimSpace(anchor.Agent),
 		prompt:     strings.TrimSpace(req.Prompt),
 		createdAt:  now,
 		state:      taskStateFromDelegation(result.State),
 		running:    result.State == sdkdelegation.StateRunning,
+		metadata: map[string]any{
+			"source": firstNonEmpty(strings.TrimSpace(req.Source), "agent_spawn"),
+		},
 	}
 	task.applyResult(result)
 	task.seedStreamFromResult(result)
@@ -597,22 +604,115 @@ func resolveSpawnAgent(session sdksession.Session, requested string) (string, er
 	if requested == "" || strings.EqualFold(requested, "self") {
 		return "self", nil
 	}
-	for _, participant := range session.Participants {
-		if participant.Kind != sdksession.ParticipantKindACP {
-			continue
-		}
-		if participant.Role != "" && participant.Role != sdksession.ParticipantRoleSidecar {
-			continue
-		}
-		name := strings.TrimSpace(participant.Label)
-		if name == "" {
-			continue
-		}
-		if strings.EqualFold(name, requested) {
-			return name, nil
-		}
+	return requested, nil
+}
+
+func (r *Runtime) StartSubagent(
+	ctx context.Context,
+	ref sdksession.SessionRef,
+	agent string,
+	prompt string,
+	source string,
+) (sdktask.Snapshot, error) {
+	if r == nil || r.sessions == nil || r.tasks == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: runtime is unavailable")
 	}
-	return "", fmt.Errorf("sdk/runtime/local: SPAWN agent %q is not self or an attached ACP agent; use /agent add before spawning external agents", requested)
+	if r.subagents == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: subagent runner is unavailable")
+	}
+	ref = sdksession.NormalizeSessionRef(ref)
+	session, err := r.sessions.Session(ctx, ref)
+	if err != nil {
+		return sdktask.Snapshot{}, err
+	}
+	session, err = r.ensureSessionController(ctx, session)
+	if err != nil {
+		return sdktask.Snapshot{}, err
+	}
+	agent, err = resolveSpawnAgent(session, agent)
+	if err != nil {
+		return sdktask.Snapshot{}, err
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: subagent prompt is required")
+	}
+	snapshot, err := r.tasks.StartSubagent(ctx, session, ref, r.subagents, sdktask.SubagentStartRequest{
+		Agent:      strings.TrimSpace(agent),
+		Prompt:     strings.TrimSpace(prompt),
+		ParentTool: "slash",
+		Source:     firstNonEmpty(strings.TrimSpace(source), "slash_agent"),
+		Mode:       strings.TrimSpace(r.defaultPolicyMode),
+	})
+	if err != nil || !snapshot.Running {
+		return snapshot, err
+	}
+	return r.tasks.Wait(ctx, ref, sdktask.ControlRequest{
+		TaskID: snapshot.Ref.TaskID,
+		Yield:  2 * time.Second,
+	})
+}
+
+func (r *Runtime) ContinueSubagentByHandle(
+	ctx context.Context,
+	ref sdksession.SessionRef,
+	handle string,
+	prompt string,
+	yield time.Duration,
+) (sdktask.Snapshot, error) {
+	if r == nil || r.sessions == nil || r.tasks == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: runtime is unavailable")
+	}
+	ref = sdksession.NormalizeSessionRef(ref)
+	session, err := r.sessions.Session(ctx, ref)
+	if err != nil {
+		return sdktask.Snapshot{}, err
+	}
+	taskID, ok := subagentTaskIDForHandle(session, handle)
+	if !ok {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: subagent handle %q not found", strings.TrimSpace(handle))
+	}
+	return r.tasks.Write(ctx, ref, sdktask.ControlRequest{
+		TaskID: taskID,
+		Input:  strings.TrimSpace(prompt),
+		Yield:  yield,
+	})
+}
+
+func (r *Runtime) WaitSubagentTask(
+	ctx context.Context,
+	ref sdksession.SessionRef,
+	taskID string,
+	yield time.Duration,
+) (sdktask.Snapshot, error) {
+	if r == nil || r.tasks == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: runtime is unavailable")
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: subagent task id is required")
+	}
+	return r.tasks.Wait(ctx, sdksession.NormalizeSessionRef(ref), sdktask.ControlRequest{
+		TaskID: taskID,
+		Yield:  yield,
+	})
+}
+
+func subagentTaskIDForHandle(session sdksession.Session, handle string) (string, bool) {
+	handle = normalizeSubagentHandle(handle)
+	if handle == "" {
+		return "", false
+	}
+	for _, participant := range session.Participants {
+		if participant.Kind != sdksession.ParticipantKindSubagent || participant.Role != sdksession.ParticipantRoleDelegated {
+			continue
+		}
+		if normalizeSubagentHandle(participant.Label) != handle {
+			continue
+		}
+		taskID := strings.TrimSpace(participant.DelegationID)
+		return taskID, taskID != ""
+	}
+	return "", false
 }
 
 func (tm *taskRuntime) Cancel(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
@@ -768,17 +868,36 @@ func (tm *taskRuntime) continueSubagent(ctx context.Context, task *subagentTask,
 	if task.runner == nil {
 		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: SPAWN task %q cannot continue because its child session runner is unavailable", task.ref.TaskID)
 	}
+	task.mu.Lock()
+	previousStdout := task.stdout
+	previousStderr := task.stderr
+	previousStdoutCursor := task.stdoutCursor
+	previousStderrCursor := task.stderrCursor
+	task.stdout = ""
+	task.stderr = ""
+	task.stdoutCursor = 0
+	task.stderrCursor = 0
+	task.mu.Unlock()
 	result, err := task.runner.Continue(ctx, sdkdelegation.CloneAnchor(task.anchor), sdkdelegation.ContinueRequest{
 		Agent:       task.agent,
 		Prompt:      prompt,
 		YieldTimeMS: int(yield / time.Millisecond),
 	})
 	if err != nil {
+		task.mu.Lock()
+		if task.stdout == "" && task.stderr == "" {
+			task.stdout = previousStdout
+			task.stderr = previousStderr
+			task.stdoutCursor = previousStdoutCursor
+			task.stderrCursor = previousStderrCursor
+		}
+		task.mu.Unlock()
 		return sdktask.Snapshot{}, err
 	}
 	task.mu.Lock()
 	task.prompt = prompt
 	task.applyResult(result)
+	task.seedStreamFromResult(result)
 	snapshot := task.snapshot()
 	entry := task.entrySnapshot(tm.runtime.now())
 	task.mu.Unlock()
@@ -966,6 +1085,11 @@ func taskToolPayload(snapshot sdktask.Snapshot) map[string]any {
 	}
 	if terminalID := firstNonEmpty(strings.TrimSpace(snapshot.Terminal.TerminalID), strings.TrimSpace(snapshot.Ref.TerminalID)); terminalID != "" {
 		payload["terminal_id"] = terminalID
+	}
+	for _, key := range []string{"handle", "mention", "agent"} {
+		if value := firstNonEmpty(taskStringValue(snapshot.Result[key]), taskStringValue(snapshot.Metadata[key])); value != "" {
+			payload[key] = value
+		}
 	}
 	if snapshot.StdoutCursor > 0 {
 		payload["stdout_cursor"] = snapshot.StdoutCursor
@@ -1180,6 +1304,7 @@ func (tm *taskRuntime) rehydrateSubagentTask(entry *sdktask.Entry) *subagentTask
 		},
 		runner:    tm.runtime.subagents,
 		agent:     agent,
+		handle:    firstNonEmpty(taskSpecString(entry.Spec, "handle"), taskStringValue(entry.Metadata["handle"])),
 		title:     strings.TrimSpace(entry.Title),
 		prompt:    taskSpecString(entry.Spec, "prompt"),
 		createdAt: entry.CreatedAt,
@@ -1204,15 +1329,22 @@ func (tm *taskRuntime) attachSubagentParticipant(ctx context.Context, session sd
 	if tm == nil || tm.runtime == nil || tm.runtime.sessions == nil || task == nil {
 		return nil
 	}
+	handle := strings.TrimSpace(task.handle)
+	if handle == "" {
+		handle = allocateSubagentHandle(session)
+		task.handle = handle
+	}
+	mention := "@" + strings.TrimPrefix(handle, "@")
 	_, err := tm.runtime.sessions.PutParticipant(ctx, sdksession.PutParticipantRequest{
 		SessionRef: task.sessionRef,
 		Binding: sdksession.ParticipantBinding{
 			ID:            strings.TrimSpace(task.anchor.AgentID),
 			Kind:          sdksession.ParticipantKindSubagent,
 			Role:          sdksession.ParticipantRoleDelegated,
-			Label:         strings.TrimSpace(task.agent),
+			AgentName:     strings.TrimSpace(task.agent),
+			Label:         mention,
 			SessionID:     strings.TrimSpace(task.anchor.SessionID),
-			Source:        "agent_spawn",
+			Source:        firstNonEmpty(strings.TrimSpace(taskStringValue(task.metadata["source"])), "agent_spawn"),
 			ParentTurnID:  strings.TrimSpace(parentCall),
 			DelegationID:  strings.TrimSpace(task.ref.TaskID),
 			AttachedAt:    tm.runtime.now(),
@@ -1248,6 +1380,8 @@ func (tm *taskRuntime) attachSubagentParticipant(ctx context.Context, session sd
 				"task_id":    task.ref.TaskID,
 				"agent":      task.agent,
 				"agent_id":   task.anchor.AgentID,
+				"handle":     handle,
+				"mention":    mention,
 				"session_id": task.anchor.SessionID,
 				"state":      string(task.state),
 			},
@@ -1286,6 +1420,8 @@ func (tm *taskRuntime) updateSubagentParticipant(ctx context.Context, task *suba
 				"task_id":        task.ref.TaskID,
 				"agent":          task.agent,
 				"agent_id":       task.anchor.AgentID,
+				"handle":         task.handle,
+				"mention":        "@" + strings.TrimPrefix(task.handle, "@"),
 				"session_id":     task.anchor.SessionID,
 				"state":          string(task.state),
 				"output_preview": strings.TrimSpace(taskStringValue(task.result["output_preview"])),
@@ -1315,6 +1451,49 @@ func subagentTerminalID(taskID string) string {
 		return ""
 	}
 	return "subagent-" + taskID
+}
+
+var subagentHandleNames = []string{
+	"jeff", "amy", "mike", "luna", "leo", "emma", "zoe", "liam",
+	"maya", "nora", "jack", "iris", "kate", "alex", "ella", "owen",
+	"ruby", "evan", "noah", "mia", "lucy", "jude", "cole", "claire",
+}
+
+func allocateSubagentHandle(session sdksession.Session) string {
+	used := map[string]struct{}{}
+	for _, participant := range session.Participants {
+		handle := normalizeSubagentHandle(participant.Label)
+		if handle != "" {
+			used[handle] = struct{}{}
+		}
+	}
+	for attempt := 0; attempt < len(subagentHandleNames)*2; attempt++ {
+		name := subagentHandleNames[randomIndex(len(subagentHandleNames))]
+		if _, exists := used[name]; !exists {
+			return name
+		}
+	}
+	for i := 1; ; i++ {
+		name := fmt.Sprintf("agent%d", i)
+		if _, exists := used[name]; !exists {
+			return name
+		}
+	}
+}
+
+func randomIndex(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	value, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(value.Int64())
+}
+
+func normalizeSubagentHandle(value string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(value), "@"))
 }
 
 func (t *bashTask) entrySnapshot(now time.Time) *sdktask.Entry {
@@ -1362,6 +1541,8 @@ func (t *subagentTask) applyResult(result sdkdelegation.Result) {
 	t.metadata["task_kind"] = string(sdktask.KindSubagent)
 	t.metadata["agent"] = t.agent
 	t.metadata["agent_id"] = t.anchor.AgentID
+	t.metadata["handle"] = t.handle
+	t.metadata["mention"] = "@" + strings.TrimPrefix(t.handle, "@")
 	t.metadata["session_id"] = t.anchor.SessionID
 	t.metadata["terminal_id"] = t.ref.TerminalID
 	t.metadata["state"] = string(t.state)
@@ -1382,6 +1563,9 @@ func (t *subagentTask) applyResult(result sdkdelegation.Result) {
 		delete(t.result, "result")
 	}
 	t.result["task_id"] = t.ref.TaskID
+	t.result["handle"] = t.handle
+	t.result["mention"] = "@" + strings.TrimPrefix(t.handle, "@")
+	t.result["agent"] = t.agent
 	t.result["state"] = string(t.state)
 	t.result["supports_cancel"] = t.running
 }
@@ -1479,6 +1663,7 @@ func (t *subagentTask) entrySnapshot(now time.Time) *sdktask.Entry {
 			"prompt":      t.prompt,
 			"session_id":  t.anchor.SessionID,
 			"agent_id":    t.anchor.AgentID,
+			"handle":      t.handle,
 			"terminal_id": t.ref.TerminalID,
 		},
 		Result:   maps.Clone(t.result),

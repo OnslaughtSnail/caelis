@@ -19,7 +19,7 @@ type slashCommandSpec struct {
 func slashCommandSpecs() []slashCommandSpec {
 	return []slashCommandSpec{
 		{Name: "help", Usage: "/help", Description: "Show available slash commands"},
-		{Name: "agent", Usage: "/agent list | /agent status | /agent add <name> | /agent remove <id> | /agent handoff <name|local> | /agent ask <id> <prompt>", Description: "Manage ACP agents, participants, and main-controller handoff"},
+		{Name: "agent", Usage: "/agent list | /agent add <builtin> | /agent use <agent|local> | /agent remove <agent>", Description: "Manage registered ACP agents and main-controller switching"},
 		{Name: "connect", Usage: "/connect", Description: "Open the guided model/provider setup wizard"},
 		{Name: "model", Usage: "/model use <alias> | /model del <alias>", Description: "Switch or delete a configured model alias"},
 		{Name: "sandbox", Usage: "/sandbox [auto|seatbelt|bwrap|landlock]", Description: "Inspect or change the sandbox backend"},

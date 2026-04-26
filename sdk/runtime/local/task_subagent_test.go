@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
+	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	"github.com/OnslaughtSnail/caelis/sdk/runtime/agents/chat"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	"github.com/OnslaughtSnail/caelis/sdk/session/inmemory"
@@ -54,6 +55,9 @@ func TestTaskWriteContinuesCompletedSpawnChild(t *testing.T) {
 	}
 	if runner.continueAnchor.TaskID != started.Ref.TaskID {
 		t.Fatalf("continue anchor task id = %q, want %q", runner.continueAnchor.TaskID, started.Ref.TaskID)
+	}
+	if continued.StdoutCursor != int64(len("follow-up done")) {
+		t.Fatalf("continued stdout cursor = %d, want only follow-up output length", continued.StdoutCursor)
 	}
 }
 
@@ -198,6 +202,39 @@ func TestStartSubagentKeepsEarlyStreamPublishedBeforeTaskRegistration(t *testing
 	}
 }
 
+func TestUpdateACPAgentsPreservesRunnerAndControllerInstances(t *testing.T) {
+	sessions := inmemory.NewService(inmemory.NewStore(inmemory.Config{}))
+	runtime, err := New(Config{
+		Sessions:     sessions,
+		AgentFactory: chat.Factory{},
+		Assembly: sdkplugin.ResolvedAssembly{Agents: []sdkplugin.AgentConfig{{
+			Name:    "helper",
+			Command: "helper-acp",
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	oldSubagents := runtime.subagents
+	oldControllers := runtime.controllers
+
+	if err := runtime.UpdateACPAgents([]sdkplugin.AgentConfig{
+		{Name: "helper", Command: "helper-acp"},
+		{Name: "copilot", Command: "copilot", Args: []string{"--acp"}},
+	}); err != nil {
+		t.Fatalf("UpdateACPAgents() error = %v", err)
+	}
+	if runtime.subagents != oldSubagents {
+		t.Fatal("UpdateACPAgents replaced subagent runner; existing child runs would be lost")
+	}
+	if runtime.controllers != oldControllers {
+		t.Fatal("UpdateACPAgents replaced controller manager")
+	}
+	if !localAgentConfigSetHas(runtime.assembly.Agents, "copilot") {
+		t.Fatalf("runtime assembly agents = %#v, want copilot", runtime.assembly.Agents)
+	}
+}
+
 func TestRuntimeSpawnToolRejectsYieldTimeMS(t *testing.T) {
 	ctx := context.Background()
 	runner := &recordingSubagentRunner{
@@ -251,6 +288,15 @@ func newSubagentTaskTestRuntime(t *testing.T, runner sdksubagent.Runner) (*Runti
 		t.Fatalf("New() error = %v", err)
 	}
 	return runtime, session
+}
+
+func localAgentConfigSetHas(agents []sdkplugin.AgentConfig, name string) bool {
+	for _, agent := range agents {
+		if strings.EqualFold(strings.TrimSpace(agent.Name), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
 }
 
 type recordingSubagentRunner struct {

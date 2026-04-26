@@ -61,6 +61,7 @@ type Runtime struct {
 	policies          sdkpolicy.Registry
 	defaultPolicyMode string
 	assembly          sdkplugin.ResolvedAssembly
+	acpRegistry       *sdksubagentacp.Registry
 	controllers       sdkcontroller.Backend
 	subagents         sdksubagent.Runner
 	idCounter         atomic.Uint64
@@ -136,6 +137,7 @@ func (r *Runtime) applyAssembly(assembly sdkplugin.ResolvedAssembly, cfg Config)
 	if err != nil {
 		return err
 	}
+	r.acpRegistry = registry
 	runner, err := sdksubagentacp.NewRunner(sdksubagentacp.RunnerConfig{Registry: registry})
 	if err != nil {
 		return err
@@ -155,6 +157,24 @@ func (r *Runtime) applyAssembly(assembly sdkplugin.ResolvedAssembly, cfg Config)
 	} else {
 		r.controllers = manager
 	}
+	return nil
+}
+
+func (r *Runtime) UpdateACPAgents(agents []sdkplugin.AgentConfig) error {
+	if r == nil {
+		return fmt.Errorf("sdk/runtime/local: runtime is unavailable")
+	}
+	assembly := sdkplugin.ResolvedAssembly{Agents: append([]sdkplugin.AgentConfig(nil), agents...)}
+	registry := r.acpRegistry
+	if registry == nil {
+		return fmt.Errorf("sdk/runtime/local: ACP registry is not configured")
+	}
+	if err := registry.Replace(assembly.Agents); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.assembly.Agents = sdkplugin.CloneResolvedAssembly(assembly).Agents
+	r.mu.Unlock()
 	return nil
 }
 

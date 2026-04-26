@@ -512,7 +512,7 @@ func TestGatewayDriverUseModelResolvesCaseInsensitiveAlias(t *testing.T) {
 	}
 }
 
-func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
+func TestGatewayDriverAgentRegistryAndControllerUse(t *testing.T) {
 	ctx := context.Background()
 	repo := repoRootForGatewayDriverTest(t)
 	root := t.TempDir()
@@ -556,8 +556,8 @@ func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAgents() error = %v", err)
 	}
-	if len(agents) != 0 {
-		t.Fatalf("ListAgents() = %#v, want no attached agents before /agent add", agents)
+	if !agentCandidatesHaveName(agents, "copilot") {
+		t.Fatalf("ListAgents() = %#v, want assembly-registered copilot", agents)
 	}
 	addCandidates, err := driver.CompleteSlashArg(ctx, "agent add", "", 10)
 	if err != nil {
@@ -573,23 +573,15 @@ func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddAgent() error = %v", err)
 	}
-	if len(status.Participants) != 1 || status.Participants[0].ID == "" {
-		t.Fatalf("AddAgent() status = %#v, want one attached participant", status)
+	if len(status.Participants) != 0 {
+		t.Fatalf("AddAgent() status = %#v, want no session participants", status)
 	}
-	participantID := status.Participants[0].ID
 	agents, err = driver.ListAgents(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListAgents(after add) error = %v", err)
 	}
 	if !agentCandidatesHaveName(agents, "copilot") {
 		t.Fatalf("ListAgents(after add) = %#v, want attached copilot", agents)
-	}
-	handoffCandidates, err := driver.CompleteSlashArg(ctx, "agent handoff", "", 10)
-	if err != nil {
-		t.Fatalf("CompleteSlashArg(agent handoff) error = %v", err)
-	}
-	if !slashCandidatesHaveValue(handoffCandidates, "local") || !slashCandidatesHaveValue(handoffCandidates, "copilot") {
-		t.Fatalf("agent handoff candidates = %#v, want local and copilot", handoffCandidates)
 	}
 	useCandidates, err := driver.CompleteSlashArg(ctx, "agent use", "", 10)
 	if err != nil {
@@ -607,6 +599,9 @@ func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
 		t.Fatalf("controller kind after ACP handoff = %q, want acp", status.ControllerKind)
 	}
 
+	if _, err := driver.RemoveAgent(ctx, "copilot"); err == nil {
+		t.Fatal("RemoveAgent(active copilot) error = nil, want use local first")
+	}
 	status, err = driver.HandoffAgent(ctx, "local")
 	if err != nil {
 		t.Fatalf("HandoffAgent(local) error = %v", err)
@@ -619,16 +614,23 @@ func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompleteSlashArg(agent remove) error = %v", err)
 	}
-	if len(removeCandidates) != 1 || removeCandidates[0].Value != participantID {
-		t.Fatalf("agent remove candidates = %#v, want participant id %q", removeCandidates, participantID)
+	if len(removeCandidates) != 1 || removeCandidates[0].Value != "copilot" {
+		t.Fatalf("agent remove candidates = %#v, want registered copilot", removeCandidates)
 	}
 
-	status, err = driver.RemoveAgent(ctx, participantID)
+	status, err = driver.RemoveAgent(ctx, "copilot")
 	if err != nil {
-		t.Fatalf("RemoveAgent() error = %v", err)
+		t.Fatalf("RemoveAgent(copilot) error = %v", err)
 	}
 	if len(status.Participants) != 0 {
 		t.Fatalf("RemoveAgent() status = %#v, want zero participants", status)
+	}
+	agents, err = driver.ListAgents(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAgents(after remove) error = %v", err)
+	}
+	if agentCandidatesHaveName(agents, "copilot") {
+		t.Fatalf("ListAgents(after remove) = %#v, want copilot removed", agents)
 	}
 }
 
@@ -1140,7 +1142,7 @@ func TestGatewayDriverCompleteSkillDiscoversGlobalAndWorkspaceSkills(t *testing.
 	}
 }
 
-func TestGatewayDriverCompleteMentionReturnsEmptySlice(t *testing.T) {
+func TestGatewayDriverCompleteMentionReturnsDelegatedParticipants(t *testing.T) {
 	ctx := context.Background()
 	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
 		AppName:        "caelis",
@@ -1158,15 +1160,29 @@ func TestGatewayDriverCompleteMentionReturnsEmptySlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGatewayDriver() error = %v", err)
 	}
-	candidates, err := driver.CompleteMention(ctx, "alp", 8)
+	session, err := driver.ensureSession(ctx)
+	if err != nil {
+		t.Fatalf("ensureSession() error = %v", err)
+	}
+	if _, err := stack.Sessions.PutParticipant(ctx, sdksession.PutParticipantRequest{
+		SessionRef: session.SessionRef,
+		Binding: sdksession.ParticipantBinding{
+			ID:           "task-1",
+			Kind:         sdksession.ParticipantKindSubagent,
+			Role:         sdksession.ParticipantRoleDelegated,
+			Label:        "jeff",
+			SessionID:    "child-1",
+			DelegationID: "task-1",
+		},
+	}); err != nil {
+		t.Fatalf("PutParticipant() error = %v", err)
+	}
+	candidates, err := driver.CompleteMention(ctx, "j", 8)
 	if err != nil {
 		t.Fatalf("CompleteMention() error = %v", err)
 	}
-	if candidates == nil {
-		t.Fatal("CompleteMention() = nil, want empty slice")
-	}
-	if len(candidates) != 0 {
-		t.Fatalf("CompleteMention() = %#v, want empty slice", candidates)
+	if len(candidates) != 1 || candidates[0].Value != "jeff" {
+		t.Fatalf("CompleteMention() = %#v, want jeff delegated target", candidates)
 	}
 }
 

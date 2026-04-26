@@ -42,7 +42,7 @@ func TestSlashHelpListsMinimalCoreCommands(t *testing.T) {
 	if !ok {
 		t.Fatalf("slashHelp() msg = %#v, want LogChunkMsg", msgs[0])
 	}
-	for _, want := range []string{"/agent list | /agent status | /agent add <name> | /agent remove <id> | /agent handoff <name|local>", "/connect", "/model use <alias> | /model del <alias>", "/compact [note]", "/resume [session-id]"} {
+	for _, want := range []string{"/agent list | /agent add <builtin> | /agent use <agent|local> | /agent remove <agent>", "/connect", "/model use <alias> | /model del <alias>", "/compact [note]", "/resume [session-id]"} {
 		if !strings.Contains(log.Chunk, want) {
 			t.Fatalf("slashHelp() chunk = %q, want substring %q", log.Chunk, want)
 		}
@@ -313,15 +313,13 @@ func TestSlashAgentDispatchesPrimarySubcommands(t *testing.T) {
 	}
 	var msgs []tea.Msg
 	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "list")
-	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "status")
 	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "add copilot")
-	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "remove participant-1")
-	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "handoff copilot")
-	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "ask participant-1 summarize status")
-	if driver.listAgentCalls != 1 || driver.agentStatusCalls != 1 || driver.addAgentCalls != 1 || driver.removeAgentCalls != 1 || driver.handoffAgentCalls != 1 || driver.askAgentCalls != 1 {
-		t.Fatalf("agent calls = list:%d status:%d add:%d remove:%d handoff:%d ask:%d", driver.listAgentCalls, driver.agentStatusCalls, driver.addAgentCalls, driver.removeAgentCalls, driver.handoffAgentCalls, driver.askAgentCalls)
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "remove copilot")
+	slashAgent(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "use copilot")
+	if driver.listAgentCalls != 3 || driver.agentStatusCalls != 1 || driver.addAgentCalls != 1 || driver.removeAgentCalls != 1 || driver.handoffAgentCalls != 1 || driver.askAgentCalls != 0 {
+		t.Fatalf("agent calls = list:%d status:%d add:%d remove:%d use:%d ask:%d", driver.listAgentCalls, driver.agentStatusCalls, driver.addAgentCalls, driver.removeAgentCalls, driver.handoffAgentCalls, driver.askAgentCalls)
 	}
-	if driver.lastAddedAgent != "copilot" || driver.lastRemovedAgent != "participant-1" || driver.lastHandoffAgent != "copilot" || driver.lastAskedAgent != "participant-1" || driver.lastAskedPrompt != "summarize status" {
+	if driver.lastAddedAgent != "copilot" || driver.lastRemovedAgent != "copilot" || driver.lastHandoffAgent != "copilot" || driver.lastAskedAgent != "" || driver.lastAskedPrompt != "" {
 		t.Fatalf("agent targets = add:%q remove:%q handoff:%q ask:%q prompt:%q", driver.lastAddedAgent, driver.lastRemovedAgent, driver.lastHandoffAgent, driver.lastAskedAgent, driver.lastAskedPrompt)
 	}
 	if len(msgs) == 0 {
@@ -343,9 +341,102 @@ func TestSlashAgentHelpAndRecovery(t *testing.T) {
 			joined += log.Chunk
 		}
 	}
-	for _, want := range []string{"/agent commands:", "usage: /agent remove <participant-id>"} {
+	for _, want := range []string{"/agent commands:", "usage: /agent remove <agent>"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("slashAgent() output = %q, want substring %q", joined, want)
+		}
+	}
+}
+
+func TestDynamicAgentSlashAndHandleContinuation(t *testing.T) {
+	driver := &bridgeTestDriver{
+		agentList: []tuiadapterruntime.AgentCandidate{{Name: "copilot"}},
+		subagentSnapshot: tuiadapterruntime.SubagentSnapshot{
+			Handle:        "jeff",
+			Mention:       "@jeff",
+			Agent:         "copilot",
+			TaskID:        "task-1",
+			State:         "completed",
+			OutputPreview: "child ok",
+		},
+	}
+	var msgs []tea.Msg
+	result := dispatchSlashCommand(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, "/copilot inspect")
+	if result.Err != nil {
+		t.Fatalf("dynamic slash error = %v", result.Err)
+	}
+	if driver.lastStartedAgent != "copilot" || driver.lastStartedPrompt != "inspect" {
+		t.Fatalf("started agent=%q prompt=%q", driver.lastStartedAgent, driver.lastStartedPrompt)
+	}
+	result = executeLineViaDriver(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, Submission{Text: "@jeff continue"})
+	if result.Err != nil {
+		t.Fatalf("handle continuation error = %v", result.Err)
+	}
+	if driver.lastContinuedHandle != "jeff" || driver.lastContinuedPrompt != "continue" {
+		t.Fatalf("continued handle=%q prompt=%q", driver.lastContinuedHandle, driver.lastContinuedPrompt)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("dynamic slash emitted no messages")
+	}
+}
+
+func TestDynamicAgentSlashWatchesRunningSubagentUntilOutput(t *testing.T) {
+	stream := make(chan tuiadapterruntime.SubagentStreamFrame, 1)
+	stream <- tuiadapterruntime.SubagentStreamFrame{
+		TaskID:  "task-1",
+		Stream:  "stdout",
+		Text:    "我是 copilot 子代理",
+		Running: false,
+		Closed:  true,
+	}
+	close(stream)
+	driver := &bridgeTestDriver{
+		agentList: []tuiadapterruntime.AgentCandidate{{Name: "copilot"}},
+		subagentSnapshot: tuiadapterruntime.SubagentSnapshot{
+			Handle:  "mike",
+			Mention: "@mike",
+			Agent:   "copilot",
+			TaskID:  "task-1",
+			State:   "running",
+			Running: true,
+		},
+		subagentStream: stream,
+		waitSubagentSnapshot: tuiadapterruntime.SubagentSnapshot{
+			Handle:        "mike",
+			Mention:       "@mike",
+			Agent:         "copilot",
+			TaskID:        "task-1",
+			State:         "completed",
+			Running:       false,
+			OutputPreview: "我是 copilot 子代理",
+		},
+	}
+	msgs := make(chan tea.Msg, 16)
+	result := dispatchSlashCommand(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs <- msg }}, "/copilot 介绍一下你自己")
+	if result.Err != nil {
+		t.Fatalf("dynamic slash error = %v", result.Err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case msg := <-msgs:
+			switch typed := msg.(type) {
+			case SubagentStartMsg:
+				t.Fatalf("dynamic slash emitted SPAWN panel start message: %#v", typed)
+			case RawDeltaMsg:
+				if typed.Target == RawDeltaTargetSubagent {
+					t.Fatalf("dynamic slash emitted SPAWN subagent delta: %#v", typed)
+				}
+			case AssistantStreamMsg:
+				if typed.Actor == "@mike" && strings.Contains(typed.Text, "copilot 子代理") {
+					if driver.subagentStreamSubscribeCalls == 0 {
+						t.Fatal("SubscribeSubagentStream was not called for running dynamic slash child")
+					}
+					return
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for watched subagent output; stream subscribe calls=%d wait calls=%d", driver.subagentStreamSubscribeCalls, driver.waitSubagentCalls)
 		}
 	}
 }
@@ -437,31 +528,41 @@ func TestFriendlyCommandErrorMakesResumeActionable(t *testing.T) {
 }
 
 type bridgeTestDriver struct {
-	status            tuiadapterruntime.StatusSnapshot
-	connectStatus     tuiadapterruntime.StatusSnapshot
-	useModelStatus    tuiadapterruntime.StatusSnapshot
-	newSession        sdksession.Session
-	resumedSession    sdksession.Session
-	replay            []appgateway.EventEnvelope
-	connectCalls      int
-	useModelCalls     int
-	deleteModelCalls  int
-	listAgentCalls    int
-	agentStatusCalls  int
-	addAgentCalls     int
-	removeAgentCalls  int
-	handoffAgentCalls int
-	askAgentCalls     int
-	lastConnect       tuiadapterruntime.ConnectConfig
-	lastModelAlias    string
-	lastDeletedAlias  string
-	lastAddedAgent    string
-	lastRemovedAgent  string
-	lastHandoffAgent  string
-	lastAskedAgent    string
-	lastAskedPrompt   string
-	agentList         []tuiadapterruntime.AgentCandidate
-	agentStatus       tuiadapterruntime.AgentStatusSnapshot
+	status                       tuiadapterruntime.StatusSnapshot
+	connectStatus                tuiadapterruntime.StatusSnapshot
+	useModelStatus               tuiadapterruntime.StatusSnapshot
+	newSession                   sdksession.Session
+	resumedSession               sdksession.Session
+	replay                       []appgateway.EventEnvelope
+	connectCalls                 int
+	useModelCalls                int
+	deleteModelCalls             int
+	listAgentCalls               int
+	agentStatusCalls             int
+	addAgentCalls                int
+	removeAgentCalls             int
+	handoffAgentCalls            int
+	askAgentCalls                int
+	lastConnect                  tuiadapterruntime.ConnectConfig
+	lastModelAlias               string
+	lastDeletedAlias             string
+	lastAddedAgent               string
+	lastRemovedAgent             string
+	lastHandoffAgent             string
+	lastAskedAgent               string
+	lastAskedPrompt              string
+	lastStartedAgent             string
+	lastStartedPrompt            string
+	lastContinuedHandle          string
+	lastContinuedPrompt          string
+	subagentSnapshot             tuiadapterruntime.SubagentSnapshot
+	subagentStream               <-chan tuiadapterruntime.SubagentStreamFrame
+	subagentStreamSubscribeCalls int
+	waitSubagentCalls            int
+	lastWaitTaskID               string
+	waitSubagentSnapshot         tuiadapterruntime.SubagentSnapshot
+	agentList                    []tuiadapterruntime.AgentCandidate
+	agentStatus                  tuiadapterruntime.AgentStatusSnapshot
 }
 
 type bridgeTestTurn struct {
@@ -548,6 +649,12 @@ func (d *bridgeSubmitDriver) HandoffAgent(context.Context, string) (tuiadapterru
 }
 func (d *bridgeSubmitDriver) AskAgent(context.Context, string, string) (tuiadapterruntime.AgentStatusSnapshot, error) {
 	return tuiadapterruntime.AgentStatusSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) StartAgentSubagent(context.Context, string, string) (tuiadapterruntime.SubagentSnapshot, error) {
+	return tuiadapterruntime.SubagentSnapshot{}, nil
+}
+func (d *bridgeSubmitDriver) ContinueSubagent(context.Context, string, string) (tuiadapterruntime.SubagentSnapshot, error) {
+	return tuiadapterruntime.SubagentSnapshot{}, nil
 }
 func (d *bridgeSubmitDriver) CompleteMention(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil
@@ -649,6 +756,32 @@ func (d *bridgeTestDriver) AskAgent(_ context.Context, target string, prompt str
 	d.lastAskedAgent = target
 	d.lastAskedPrompt = prompt
 	return d.agentStatus, nil
+}
+func (d *bridgeTestDriver) StartAgentSubagent(_ context.Context, agent string, prompt string) (tuiadapterruntime.SubagentSnapshot, error) {
+	d.lastStartedAgent = agent
+	d.lastStartedPrompt = prompt
+	return d.subagentSnapshot, nil
+}
+func (d *bridgeTestDriver) ContinueSubagent(_ context.Context, handle string, prompt string) (tuiadapterruntime.SubagentSnapshot, error) {
+	d.lastContinuedHandle = handle
+	d.lastContinuedPrompt = prompt
+	return d.subagentSnapshot, nil
+}
+func (d *bridgeTestDriver) SubscribeSubagentStream(_ context.Context, taskID string) (<-chan tuiadapterruntime.SubagentStreamFrame, bool) {
+	d.subagentStreamSubscribeCalls++
+	if d.subagentStream == nil {
+		return nil, false
+	}
+	d.lastWaitTaskID = taskID
+	return d.subagentStream, true
+}
+func (d *bridgeTestDriver) WaitSubagent(_ context.Context, taskID string) (tuiadapterruntime.SubagentSnapshot, error) {
+	d.waitSubagentCalls++
+	d.lastWaitTaskID = taskID
+	if strings.TrimSpace(d.waitSubagentSnapshot.TaskID) == "" {
+		return d.subagentSnapshot, nil
+	}
+	return d.waitSubagentSnapshot, nil
 }
 func (d *bridgeTestDriver) CompleteMention(context.Context, string, int) ([]tuiadapterruntime.CompletionCandidate, error) {
 	return nil, nil

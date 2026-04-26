@@ -26,6 +26,7 @@ import (
 	_ "github.com/OnslaughtSnail/caelis/sdk/sandbox/seatbelt"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
+	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
 	taskfile "github.com/OnslaughtSnail/caelis/sdk/task/file"
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 	sdkbuiltin "github.com/OnslaughtSnail/caelis/sdk/tool/builtin"
@@ -109,6 +110,7 @@ type ACPAgentInfo struct {
 type stackRuntimeConfig struct {
 	PermissionMode string
 	ContextWindow  int
+	BaseAssembly   sdkplugin.ResolvedAssembly
 	Assembly       sdkplugin.ResolvedAssembly
 	BaseMetadata   map[string]any
 }
@@ -122,7 +124,13 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	if storeDir == "" {
 		storeDir = defaultStoreDir()
 	}
-	cfg.Assembly = withDefaultACPAgents(cfg.Assembly, defaultSelfACPAgent(defaultSelfACPAgentConfig{
+	configStore := newAppConfigStore(storeDir)
+	doc, err := configStore.Load()
+	if err != nil {
+		return nil, err
+	}
+	baseAssembly := sdkplugin.CloneResolvedAssembly(cfg.Assembly)
+	cfg.Assembly = withConfiguredACPAgents(cfg.Assembly, doc.Agents, defaultSelfACPAgent(defaultSelfACPAgentConfig{
 		Config:       cfg,
 		AppName:      appName,
 		UserID:       userID,
@@ -130,7 +138,6 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 		WorkspaceKey: workspaceKey,
 		WorkspaceCWD: workspaceCWD,
 	}))
-	configStore := newAppConfigStore(storeDir)
 	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
 		RootDir: filepath.Join(storeDir, "sessions"),
 	}))
@@ -154,10 +161,6 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	if reasoning := strings.TrimSpace(cfg.Model.ReasoningEffort); reasoning != "" {
 		baseMetadata["reasoning_effort"] = reasoning
 	}
-	doc, err := configStore.Load()
-	if err != nil {
-		return nil, err
-	}
 	stack := &Stack{
 		Sessions: sessions,
 		AppName:  appName,
@@ -173,6 +176,7 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 		runtime: stackRuntimeConfig{
 			PermissionMode: cfg.PermissionMode,
 			ContextWindow:  cfg.ContextWindow,
+			BaseAssembly:   baseAssembly,
 			Assembly:       sdkplugin.CloneResolvedAssembly(cfg.Assembly),
 			BaseMetadata:   cloneMap(baseMetadata),
 		},
@@ -199,45 +203,11 @@ func delegationAgentsFromAssembly(assembly sdkplugin.ResolvedAssembly) []sdkdele
 	return out
 }
 
-func delegationAgentsForSpawn(assembly sdkplugin.ResolvedAssembly, participants []sdksession.ParticipantBinding) []sdkdelegation.Agent {
+func delegationAgentsForSpawn(assembly sdkplugin.ResolvedAssembly, _ []sdksession.ParticipantBinding) []sdkdelegation.Agent {
 	if len(assembly.Agents) == 0 {
 		return nil
 	}
-	available := map[string]sdkdelegation.Agent{}
-	for _, agent := range delegationAgentsFromAssembly(assembly) {
-		name := strings.ToLower(strings.TrimSpace(agent.Name))
-		if name != "" {
-			available[name] = agent
-		}
-	}
-	out := make([]sdkdelegation.Agent, 0, len(participants)+1)
-	seen := map[string]struct{}{}
-	if self, ok := available["self"]; ok {
-		out = append(out, self)
-		seen["self"] = struct{}{}
-	}
-	for _, participant := range participants {
-		if participant.Kind != sdksession.ParticipantKindACP {
-			continue
-		}
-		if participant.Role != "" && participant.Role != sdksession.ParticipantRoleSidecar {
-			continue
-		}
-		name := strings.ToLower(strings.TrimSpace(participant.Label))
-		if name == "" {
-			continue
-		}
-		agent, ok := available[name]
-		if !ok {
-			continue
-		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		out = append(out, agent)
-		seen[name] = struct{}{}
-	}
-	return out
+	return delegationAgentsFromAssembly(assembly)
 }
 
 func systemPromptWithDelegationGuidance(systemPrompt string) string {
@@ -252,7 +222,7 @@ func systemPromptWithDelegationGuidance(systemPrompt string) string {
 	return systemPrompt + "\n" + guidance
 }
 
-func withDefaultACPAgents(assembly sdkplugin.ResolvedAssembly, self sdkplugin.AgentConfig) sdkplugin.ResolvedAssembly {
+func withConfiguredACPAgents(assembly sdkplugin.ResolvedAssembly, configured []AgentConfig, self sdkplugin.AgentConfig) sdkplugin.ResolvedAssembly {
 	out := sdkplugin.CloneResolvedAssembly(assembly)
 	seen := map[string]struct{}{}
 	for _, agent := range out.Agents {
@@ -267,18 +237,41 @@ func withDefaultACPAgents(assembly sdkplugin.ResolvedAssembly, self sdkplugin.Ag
 			seen[name] = struct{}{}
 		}
 	}
-	for _, agent := range builtInACPAgents() {
-		name := strings.ToLower(strings.TrimSpace(agent.Name))
-		if name == "" {
-			continue
+	for _, agent := range configured {
+		cfg := agentConfigToPlugin(agent)
+		name := strings.ToLower(strings.TrimSpace(cfg.Name))
+		if name != "" {
+			if _, exists := seen[name]; !exists {
+				out.Agents = append(out.Agents, cfg)
+				seen[name] = struct{}{}
+			}
 		}
-		if _, exists := seen[name]; exists {
-			continue
-		}
-		out.Agents = append(out.Agents, agent)
-		seen[name] = struct{}{}
 	}
 	return out
+}
+
+func agentConfigToPlugin(in AgentConfig) sdkplugin.AgentConfig {
+	in = normalizeAgentConfig(in)
+	return sdkplugin.AgentConfig{
+		Name:        in.Name,
+		Description: in.Description,
+		Command:     in.Command,
+		Args:        append([]string(nil), in.Args...),
+		Env:         cloneStringMap(in.Env),
+		WorkDir:     in.WorkDir,
+	}
+}
+
+func pluginAgentToConfig(in sdkplugin.AgentConfig, builtin bool) AgentConfig {
+	return normalizeAgentConfig(AgentConfig{
+		Name:        in.Name,
+		Description: in.Description,
+		Command:     in.Command,
+		Args:        append([]string(nil), in.Args...),
+		Env:         cloneStringMap(in.Env),
+		WorkDir:     in.WorkDir,
+		Builtin:     builtin,
+	})
 }
 
 type defaultSelfACPAgentConfig struct {
@@ -371,6 +364,201 @@ func builtInACPAgents() []sdkplugin.AgentConfig {
 			Args:        []string{"--acp"},
 		},
 	}
+}
+
+func (s *Stack) RegisterBuiltinACPAgent(name string) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("gatewayapp: app config store unavailable")
+	}
+	if reservedSlashCommandName(name) {
+		return fmt.Errorf("gatewayapp: ACP agent %q conflicts with an existing slash command", strings.TrimSpace(name))
+	}
+	preset, ok := s.lookupRuntimeACPAgent(name)
+	if !ok {
+		preset, ok = lookupBuiltInACPAgent(name)
+	}
+	if !ok {
+		return fmt.Errorf("gatewayapp: unknown builtin ACP agent %q", strings.TrimSpace(name))
+	}
+	doc, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	cfg := pluginAgentToConfig(preset, true)
+	replaced := false
+	next := make([]AgentConfig, 0, len(doc.Agents)+1)
+	for _, existing := range doc.Agents {
+		if strings.EqualFold(strings.TrimSpace(existing.Name), cfg.Name) {
+			next = append(next, cfg)
+			replaced = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	if !replaced {
+		next = append(next, cfg)
+	}
+	doc.Agents = next
+	if err := s.store.Save(doc); err != nil {
+		return err
+	}
+	return s.setConfiguredAgents(doc.Agents)
+}
+
+func (s *Stack) lookupRuntimeACPAgent(name string) (sdkplugin.AgentConfig, bool) {
+	if s == nil {
+		return sdkplugin.AgentConfig{}, false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, agent := range s.runtime.Assembly.Agents {
+		if strings.EqualFold(strings.TrimSpace(agent.Name), name) {
+			return sdkplugin.CloneAgentConfig(agent), true
+		}
+	}
+	return sdkplugin.AgentConfig{}, false
+}
+
+func (s *Stack) UnregisterACPAgent(name string) error {
+	if s == nil || s.store == nil {
+		return fmt.Errorf("gatewayapp: app config store unavailable")
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return fmt.Errorf("gatewayapp: agent name is required")
+	}
+	doc, err := s.store.Load()
+	if err != nil {
+		return err
+	}
+	next := make([]AgentConfig, 0, len(doc.Agents))
+	removed := false
+	for _, existing := range doc.Agents {
+		if strings.EqualFold(strings.TrimSpace(existing.Name), name) {
+			removed = true
+			continue
+		}
+		next = append(next, existing)
+	}
+	s.mu.Lock()
+	runtimeCfg := s.runtime
+	baseAgents := make([]sdkplugin.AgentConfig, 0, len(runtimeCfg.BaseAssembly.Agents))
+	for _, agent := range runtimeCfg.BaseAssembly.Agents {
+		if strings.EqualFold(strings.TrimSpace(agent.Name), name) {
+			removed = true
+			continue
+		}
+		baseAgents = append(baseAgents, agent)
+	}
+	s.mu.Unlock()
+	if !removed {
+		return fmt.Errorf("gatewayapp: ACP agent %q is not registered", name)
+	}
+	doc.Agents = next
+	if err := s.store.Save(doc); err != nil {
+		return err
+	}
+	runtimeCfg.BaseAssembly.Agents = baseAgents
+	return s.setConfiguredAgentsWithBase(runtimeCfg.BaseAssembly, doc.Agents)
+}
+
+func (s *Stack) setConfiguredAgents(configured []AgentConfig) error {
+	if s == nil {
+		return fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	s.mu.RLock()
+	base := sdkplugin.CloneResolvedAssembly(s.runtime.BaseAssembly)
+	s.mu.RUnlock()
+	return s.setConfiguredAgentsWithBase(base, configured)
+}
+
+func (s *Stack) setConfiguredAgentsWithBase(base sdkplugin.ResolvedAssembly, configured []AgentConfig) error {
+	if s == nil {
+		return fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	s.mu.RLock()
+	runtimeCfg := s.runtime
+	engine := s.engine
+	s.mu.RUnlock()
+	runtimeCfg.BaseAssembly = sdkplugin.CloneResolvedAssembly(base)
+	runtimeCfg.Assembly = s.configuredAssembly(runtimeCfg.BaseAssembly, configured, runtimeCfg)
+	if engine == nil {
+		return fmt.Errorf("gatewayapp: runtime is unavailable")
+	}
+	if err := engine.UpdateACPAgents(runtimeCfg.Assembly.Agents); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	current := s.runtime
+	current.BaseAssembly = runtimeCfg.BaseAssembly
+	current.Assembly = runtimeCfg.Assembly
+	s.runtime = current
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Stack) configuredAssembly(base sdkplugin.ResolvedAssembly, configured []AgentConfig, runtimeCfg stackRuntimeConfig) sdkplugin.ResolvedAssembly {
+	return withConfiguredACPAgents(base, configured, defaultSelfACPAgent(defaultSelfACPAgentConfig{
+		Config: Config{
+			AppName:        s.AppName,
+			UserID:         s.UserID,
+			StoreDir:       s.storeDir,
+			WorkspaceKey:   s.Workspace.Key,
+			WorkspaceCWD:   s.Workspace.CWD,
+			PermissionMode: runtimeCfg.PermissionMode,
+			ContextWindow:  runtimeCfg.ContextWindow,
+		},
+		AppName:      s.AppName,
+		UserID:       s.UserID,
+		StoreDir:     s.storeDir,
+		WorkspaceKey: s.Workspace.Key,
+		WorkspaceCWD: s.Workspace.CWD,
+	}))
+}
+
+func (s *Stack) ListBuiltinACPAgents() []ACPAgentInfo {
+	builtins := builtInACPAgents()
+	out := make([]ACPAgentInfo, 0, len(builtins))
+	for _, agent := range builtins {
+		if name := strings.TrimSpace(agent.Name); name != "" {
+			out = append(out, ACPAgentInfo{Name: name, Description: strings.TrimSpace(agent.Description)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
+}
+
+func lookupBuiltInACPAgent(name string) (sdkplugin.AgentConfig, bool) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, agent := range builtInACPAgents() {
+		if strings.EqualFold(strings.TrimSpace(agent.Name), name) {
+			return agent, true
+		}
+	}
+	return sdkplugin.AgentConfig{}, false
+}
+
+func reservedSlashCommandName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "help", "agent", "connect", "model", "sandbox", "status", "new", "resume", "compact", "exit", "quit":
+		return true
+	default:
+		return false
+	}
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func defaultStoreDir() string {
@@ -695,6 +883,62 @@ func (s *Stack) ListACPAgents() []ACPAgentInfo {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	return out
+}
+
+func (s *Stack) StartSubagent(
+	ctx context.Context,
+	ref sdksession.SessionRef,
+	agent string,
+	prompt string,
+	source string,
+) (sdktask.Snapshot, error) {
+	if s == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	s.mu.RLock()
+	engine := s.engine
+	s.mu.RUnlock()
+	if engine == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("gatewayapp: runtime is unavailable")
+	}
+	return engine.StartSubagent(ctx, ref, agent, prompt, source)
+}
+
+func (s *Stack) ContinueSubagentByHandle(
+	ctx context.Context,
+	ref sdksession.SessionRef,
+	handle string,
+	prompt string,
+	yield time.Duration,
+) (sdktask.Snapshot, error) {
+	if s == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	s.mu.RLock()
+	engine := s.engine
+	s.mu.RUnlock()
+	if engine == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("gatewayapp: runtime is unavailable")
+	}
+	return engine.ContinueSubagentByHandle(ctx, ref, handle, prompt, yield)
+}
+
+func (s *Stack) WaitSubagentTask(
+	ctx context.Context,
+	ref sdksession.SessionRef,
+	taskID string,
+	yield time.Duration,
+) (sdktask.Snapshot, error) {
+	if s == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("gatewayapp: stack is unavailable")
+	}
+	s.mu.RLock()
+	engine := s.engine
+	s.mu.RUnlock()
+	if engine == nil {
+		return sdktask.Snapshot{}, fmt.Errorf("gatewayapp: runtime is unavailable")
+	}
+	return engine.WaitSubagentTask(ctx, ref, taskID, yield)
 }
 
 // CompactSession appends a compaction event to the given session. The note is
@@ -1108,6 +1352,9 @@ func (s *Stack) rebuildGateway() error {
 		Tools:             tools,
 		BaseMetadata:      cloneMap(runtimeCfg.BaseMetadata),
 		ToolAugmenter: func(ctx context.Context, req appgateway.ToolAugmentContext) (appgateway.ToolAugmentation, error) {
+			s.mu.RLock()
+			runtimeCfg := s.runtime
+			s.mu.RUnlock()
 			var participants []sdksession.ParticipantBinding
 			if strings.TrimSpace(req.SessionRef.SessionID) != "" {
 				session, err := s.Sessions.Session(ctx, req.SessionRef)

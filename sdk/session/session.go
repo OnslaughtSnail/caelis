@@ -116,12 +116,15 @@ type SessionRef struct {
 
 // ControllerBinding is the durable active-controller binding for one session.
 type ControllerBinding struct {
-	Kind         ControllerKind `json:"kind,omitempty"`
-	ControllerID string         `json:"controller_id,omitempty"`
-	Label        string         `json:"label,omitempty"`
-	EpochID      string         `json:"epoch_id,omitempty"`
-	AttachedAt   time.Time      `json:"attached_at,omitempty"`
-	Source       string         `json:"source,omitempty"`
+	Kind            ControllerKind `json:"kind,omitempty"`
+	ControllerID    string         `json:"controller_id,omitempty"`
+	AgentName       string         `json:"agent_name,omitempty"`
+	Label           string         `json:"label,omitempty"`
+	EpochID         string         `json:"epoch_id,omitempty"`
+	RemoteSessionID string         `json:"remote_session_id,omitempty"`
+	ContextSyncSeq  int            `json:"context_sync_seq,omitempty"`
+	AttachedAt      time.Time      `json:"attached_at,omitempty"`
+	Source          string         `json:"source,omitempty"`
 }
 
 // ParticipantBinding is the durable participant attachment for one session.
@@ -129,6 +132,7 @@ type ParticipantBinding struct {
 	ID            string          `json:"id,omitempty"`
 	Kind          ParticipantKind `json:"kind,omitempty"`
 	Role          ParticipantRole `json:"role,omitempty"`
+	AgentName     string          `json:"agent_name,omitempty"`
 	Label         string          `json:"label,omitempty"`
 	SessionID     string          `json:"session_id,omitempty"`
 	Source        string          `json:"source,omitempty"`
@@ -700,12 +704,15 @@ func CloneState(state map[string]any) map[string]any {
 // CloneControllerBinding returns one normalized controller binding copy.
 func CloneControllerBinding(in ControllerBinding) ControllerBinding {
 	return ControllerBinding{
-		Kind:         in.Kind,
-		ControllerID: strings.TrimSpace(in.ControllerID),
-		Label:        strings.TrimSpace(in.Label),
-		EpochID:      strings.TrimSpace(in.EpochID),
-		AttachedAt:   in.AttachedAt,
-		Source:       strings.TrimSpace(in.Source),
+		Kind:            in.Kind,
+		ControllerID:    strings.TrimSpace(in.ControllerID),
+		AgentName:       strings.TrimSpace(in.AgentName),
+		Label:           strings.TrimSpace(in.Label),
+		EpochID:         strings.TrimSpace(in.EpochID),
+		RemoteSessionID: strings.TrimSpace(in.RemoteSessionID),
+		ContextSyncSeq:  in.ContextSyncSeq,
+		AttachedAt:      in.AttachedAt,
+		Source:          strings.TrimSpace(in.Source),
 	}
 }
 
@@ -715,6 +722,7 @@ func CloneParticipantBinding(in ParticipantBinding) ParticipantBinding {
 		ID:            strings.TrimSpace(in.ID),
 		Kind:          in.Kind,
 		Role:          in.Role,
+		AgentName:     strings.TrimSpace(in.AgentName),
 		Label:         strings.TrimSpace(in.Label),
 		SessionID:     strings.TrimSpace(in.SessionID),
 		Source:        strings.TrimSpace(in.Source),

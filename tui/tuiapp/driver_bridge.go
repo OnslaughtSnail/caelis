@@ -25,11 +25,20 @@ type streamDriver interface {
 	SubscribeStream(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool)
 }
 
+type subagentWaitDriver interface {
+	WaitSubagent(context.Context, string) (tuiadapterruntime.SubagentSnapshot, error)
+}
+
+type subagentStreamDriver interface {
+	SubscribeSubagentStream(context.Context, string) (<-chan tuiadapterruntime.SubagentStreamFrame, bool)
+}
+
 // ConfigFromDriver populates legacy Config callbacks from an adapter runtime.Driver.
 // sender must be non-nil; its Send field is populated after Program creation
 // but before the user can trigger ExecuteLine.
 func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, base Config) Config {
 	base.Driver = driver
+	base.Commands = appendAgentSlashCommands(driver, base.Commands)
 
 	if base.ExecuteLine == nil {
 		base.ExecuteLine = func(sub Submission) TaskResultMsg {
@@ -197,6 +206,9 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 	if strings.HasPrefix(text, "/") {
 		return dispatchSlashCommand(driver, sender, text)
 	}
+	if strings.HasPrefix(text, "@") {
+		return dispatchMentionCommand(driver, sender, text)
+	}
 
 	// Normal submission → Driver.Submit → streaming events.
 	ctx := context.Background()
@@ -278,13 +290,69 @@ func dispatchSlashCommand(driver tuiadapterruntime.Driver, sender *ProgramSender
 	case "exit", "quit":
 		return TaskResultMsg{ExitNow: true}
 	default:
-		sendNotice(send, fmt.Sprintf("unknown command: /%s\nrun /help to see supported commands", cmd))
-		return TaskResultMsg{SuppressTurnDivider: true}
+		return slashDynamicAgent(driver, send, cmd, args)
 	}
 }
 
 func slashHelp(send func(tea.Msg)) TaskResultMsg {
 	sendNotice(send, defaultHelpText())
+	return TaskResultMsg{SuppressTurnDivider: true}
+}
+
+func slashDynamicAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), agent string, prompt string) TaskResultMsg {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		if isRegisteredAgentCommand(driver, agent) {
+			sendNotice(send, fmt.Sprintf("usage: /%s <prompt>", agent))
+		} else {
+			sendNotice(send, fmt.Sprintf("unknown command: /%s\nrun /help to see supported commands", agent))
+		}
+		return TaskResultMsg{SuppressTurnDivider: true}
+	}
+	snapshot, err := driver.StartAgentSubagent(context.Background(), agent, prompt)
+	if err != nil {
+		return TaskResultMsg{Err: friendlyCommandError("/"+agent, err)}
+	}
+	sendDynamicSubagentStarted(send, snapshot, true)
+	startDynamicSubagentOutputBridge(driver, send, snapshot)
+	return TaskResultMsg{SuppressTurnDivider: true}
+}
+
+func isRegisteredAgentCommand(driver tuiadapterruntime.Driver, agent string) bool {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "" {
+		return false
+	}
+	agents, err := driver.ListAgents(context.Background(), 200)
+	if err != nil {
+		return false
+	}
+	for _, item := range agents {
+		if strings.EqualFold(strings.TrimSpace(item.Name), agent) {
+			return true
+		}
+	}
+	return false
+}
+
+func dispatchMentionCommand(driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
+	var send func(tea.Msg)
+	if sender != nil {
+		send = sender.Send
+	}
+	handle, prompt := splitFirst(strings.TrimSpace(text))
+	handle = strings.TrimPrefix(strings.TrimSpace(handle), "@")
+	if handle == "" || strings.TrimSpace(prompt) == "" {
+		sendNotice(send, "usage: @handle <prompt>")
+		return TaskResultMsg{SuppressTurnDivider: true}
+	}
+	snapshot, err := driver.ContinueSubagent(context.Background(), handle, prompt)
+	if err != nil {
+		return TaskResultMsg{Err: friendlyCommandError("@"+handle, err)}
+	}
+	sendDynamicSubagentStarted(send, snapshot, false)
+	startDynamicSubagentOutputBridge(driver, send, snapshot)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
@@ -300,14 +368,11 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		if err != nil {
 			return TaskResultMsg{Err: friendlyCommandError("agent list", err)}
 		}
-		sendNotice(send, formatAgentCatalog(agents))
+		status, _ := driver.AgentStatus(ctx)
+		sendNotice(send, formatAgentList(agents, status))
 		return TaskResultMsg{SuppressTurnDivider: true}
 	case "status":
-		status, err := driver.AgentStatus(ctx)
-		if err != nil {
-			return TaskResultMsg{Err: friendlyCommandError("agent status", err)}
-		}
-		sendNotice(send, formatAgentStatusSnapshot(status))
+		sendNotice(send, "usage: /agent list | add <builtin> | use <agent|local> | remove <agent>")
 		return TaskResultMsg{SuppressTurnDivider: true}
 	case "add":
 		target := strings.TrimSpace(rest)
@@ -319,50 +384,39 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		if err != nil {
 			return TaskResultMsg{Err: friendlyCommandError("agent add", err)}
 		}
-		sendNotice(send, fmt.Sprintf("agent attached: %s", target))
+		sendNotice(send, fmt.Sprintf("agent registered: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
+		refreshAgentSlashCommandsViaSend(driver, send)
 		return TaskResultMsg{SuppressTurnDivider: true}
 	case "remove":
 		target := strings.TrimSpace(rest)
 		if target == "" {
-			sendNotice(send, "usage: /agent remove <participant-id>\nrun /agent status to inspect attached participants")
+			sendNotice(send, "usage: /agent remove <agent>\nrun /agent list to inspect registered agents")
 			return TaskResultMsg{SuppressTurnDivider: true}
 		}
 		status, err := driver.RemoveAgent(ctx, target)
 		if err != nil {
 			return TaskResultMsg{Err: friendlyCommandError("agent remove", err)}
 		}
-		sendNotice(send, fmt.Sprintf("agent removed: %s", target))
+		sendNotice(send, fmt.Sprintf("agent unregistered: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
+		refreshAgentSlashCommandsViaSend(driver, send)
 		return TaskResultMsg{SuppressTurnDivider: true}
-	case "handoff", "use":
+	case "use":
 		target := strings.TrimSpace(rest)
 		if target == "" {
-			sendNotice(send, "usage: /agent handoff <name|local>\nrun /agent list for agents or /agent handoff local to return to the local controller")
+			sendNotice(send, "usage: /agent use <agent|local>\nrun /agent list for registered agents")
 			return TaskResultMsg{SuppressTurnDivider: true}
 		}
 		status, err := driver.HandoffAgent(ctx, target)
 		if err != nil {
-			return TaskResultMsg{Err: friendlyCommandError("agent handoff", err)}
+			return TaskResultMsg{Err: friendlyCommandError("agent use", err)}
 		}
-		sendNotice(send, fmt.Sprintf("controller handoff: %s", target))
-		sendNotice(send, formatAgentStatusSnapshot(status))
-		return TaskResultMsg{SuppressTurnDivider: true}
-	case "ask":
-		target, prompt := splitFirst(strings.TrimSpace(rest))
-		if strings.TrimSpace(target) == "" || strings.TrimSpace(prompt) == "" {
-			sendNotice(send, "usage: /agent ask <participant-id> <prompt>\nrun /agent status to inspect attached participants")
-			return TaskResultMsg{SuppressTurnDivider: true}
-		}
-		status, err := driver.AskAgent(ctx, target, prompt)
-		if err != nil {
-			return TaskResultMsg{Err: friendlyCommandError("agent ask", err)}
-		}
-		sendNotice(send, fmt.Sprintf("agent prompted: %s", target))
+		sendNotice(send, fmt.Sprintf("controller switched: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
 		return TaskResultMsg{SuppressTurnDivider: true}
 	default:
-		sendNotice(send, "usage: /agent list | status | add <name> | remove <participant-id> | handoff <name|local> | ask <participant-id> <prompt>")
+		sendNotice(send, "usage: /agent list | add <builtin> | use <agent|local> | remove <agent>")
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
 }
@@ -550,6 +604,143 @@ func sendNotice(send func(tea.Msg), text string) {
 	if send != nil {
 		send(LogChunkMsg{Chunk: text + "\n"})
 	}
+}
+
+func sendDynamicSubagentStarted(send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot, started bool) {
+	if send == nil {
+		return
+	}
+	mention := subagentMention(snapshot)
+	if mention == "" {
+		return
+	}
+	agent := strings.TrimSpace(snapshot.Agent)
+	if started {
+		sendNotice(send, fmt.Sprintf("subagent %s started: %s", mention, agent))
+		return
+	}
+	sendNotice(send, fmt.Sprintf("subagent %s continued: %s", mention, agent))
+}
+
+func startDynamicSubagentOutputBridge(driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+	if send == nil {
+		return
+	}
+	if !snapshot.Running && sendDynamicSubagentSnapshotOutput(send, snapshot) {
+		return
+	}
+	taskID := strings.TrimSpace(snapshot.TaskID)
+	if taskID == "" {
+		sendDynamicSubagentSnapshotOutput(send, snapshot)
+		return
+	}
+	if streamer, ok := driver.(subagentStreamDriver); ok {
+		if frames, ok := streamer.SubscribeSubagentStream(context.Background(), taskID); ok && frames != nil {
+			actor := subagentMention(snapshot)
+			go func() {
+				for frame := range frames {
+					if strings.TrimSpace(frame.Text) == "" {
+						continue
+					}
+					send(AssistantStreamMsg{
+						Kind:  firstNonEmpty(strings.TrimSpace(frame.Stream), "answer"),
+						Actor: actor,
+						Text:  frame.Text,
+						Final: !frame.Running && frame.Closed,
+					})
+				}
+			}()
+			return
+		}
+	}
+	sendDynamicSubagentSnapshotOutput(send, snapshot)
+	startDynamicSubagentSnapshotWatcher(driver, send, snapshot)
+}
+
+func sendDynamicSubagentSnapshotOutput(send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) bool {
+	if send == nil {
+		return false
+	}
+	output := strings.TrimSpace(firstNonEmpty(snapshot.Result, snapshot.OutputPreview))
+	if output == "" {
+		return false
+	}
+	send(AssistantStreamMsg{
+		Kind:  "answer",
+		Actor: subagentMention(snapshot),
+		Text:  output,
+		Final: !snapshot.Running,
+	})
+	return true
+}
+
+func startDynamicSubagentSnapshotWatcher(driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+	if send == nil || !snapshot.Running || strings.TrimSpace(snapshot.TaskID) == "" {
+		return
+	}
+	waiter, ok := driver.(subagentWaitDriver)
+	if !ok {
+		return
+	}
+	taskID := strings.TrimSpace(snapshot.TaskID)
+	go func() {
+		for {
+			next, err := waiter.WaitSubagent(context.Background(), taskID)
+			if err != nil {
+				sendNotice(send, fmt.Sprintf("subagent %s wait failed: %v", taskID, err))
+				return
+			}
+			sendDynamicSubagentSnapshotOutput(send, next)
+			if !next.Running {
+				return
+			}
+		}
+	}()
+}
+
+func subagentMention(snapshot tuiadapterruntime.SubagentSnapshot) string {
+	mention := strings.TrimSpace(snapshot.Mention)
+	if mention != "" {
+		return mention
+	}
+	if handle := strings.TrimSpace(snapshot.Handle); handle != "" {
+		return "@" + strings.TrimPrefix(handle, "@")
+	}
+	return ""
+}
+
+func appendAgentSlashCommands(driver tuiadapterruntime.Driver, commands []string) []string {
+	if len(commands) == 0 {
+		commands = DefaultCommands()
+	}
+	out := append([]string(nil), commands...)
+	seen := map[string]struct{}{}
+	for _, command := range out {
+		seen[strings.ToLower(strings.TrimSpace(command))] = struct{}{}
+	}
+	agents, err := driver.ListAgents(context.Background(), 200)
+	if err != nil {
+		return out
+	}
+	for _, agent := range agents {
+		name := strings.ToLower(strings.TrimSpace(agent.Name))
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		out = append(out, name)
+		seen[name] = struct{}{}
+	}
+	return out
+}
+
+func refreshAgentSlashCommandsViaSend(driver tuiadapterruntime.Driver, send func(tea.Msg)) {
+	if send == nil {
+		return
+	}
+	send(SetCommandsMsg{Commands: appendAgentSlashCommands(driver, DefaultCommands())})
 }
 
 func sendStatusUpdate(send func(tea.Msg), status tuiadapterruntime.StatusSnapshot) {
@@ -766,23 +957,20 @@ func formatStatusSnapshot(status tuiadapterruntime.StatusSnapshot) string {
 func agentHelpText() string {
 	lines := []string{
 		"/agent commands:",
-		"  /agent list      list attached ACP agents",
-		"  /agent status    show current controller and attached participants",
-		"  /agent add NAME  attach one ACP participant to the current session",
-		"  /agent remove ID detach one attached participant",
-		"  /agent handoff NAME  hand off the main controller to an ACP agent",
-		"  /agent use NAME  hand off the main controller to an attached agent",
-		"  /agent handoff local return the main controller to the local kernel",
-		"  /agent ask ID PROMPT  send one prompt to an attached participant",
+		"  /agent list          list registered ACP agents and current controller",
+		"  /agent add NAME      register a built-in ACP agent",
+		"  /agent use NAME      switch the main controller to a registered ACP agent",
+		"  /agent use local     return the main controller to the local kernel",
+		"  /agent remove NAME   unregister an ACP agent",
 	}
 	return strings.Join(lines, "\n")
 }
 
 func formatAgentCatalog(agents []tuiadapterruntime.AgentCandidate) string {
 	if len(agents) == 0 {
-		return "no ACP agents are attached"
+		return "no ACP agents are registered\nnext: run /agent add <builtin>"
 	}
-	lines := []string{"attached ACP agents:"}
+	lines := []string{"registered ACP agents:"}
 	for _, agent := range agents {
 		line := "  " + strings.TrimSpace(agent.Name)
 		if desc := strings.TrimSpace(agent.Description); desc != "" {
@@ -790,7 +978,27 @@ func formatAgentCatalog(agents []tuiadapterruntime.AgentCandidate) string {
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "next: run /agent handoff <name> to switch the main controller, or /agent remove <id> to detach")
+	lines = append(lines, "next: use /<agent> <prompt> for a child subagent, or /agent use <agent> to switch the main controller")
+	return strings.Join(lines, "\n")
+}
+
+func formatAgentList(agents []tuiadapterruntime.AgentCandidate, status tuiadapterruntime.AgentStatusSnapshot) string {
+	lines := []string{"agent registry:"}
+	lines = append(lines, fmt.Sprintf("  controller: %s", firstNonEmpty(strings.TrimSpace(status.ControllerLabel), strings.TrimSpace(status.ControllerKind), "local")))
+	if len(agents) == 0 {
+		lines = append(lines, "  registered: none")
+		lines = append(lines, "next: run /agent add <builtin>")
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, "  registered:")
+	for _, agent := range agents {
+		line := "    " + strings.TrimSpace(agent.Name)
+		if desc := strings.TrimSpace(agent.Description); desc != "" {
+			line += "  " + desc
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "next: /<agent> <prompt> starts a child; /agent use <agent> switches the main controller")
 	return strings.Join(lines, "\n")
 }
 
@@ -811,9 +1019,9 @@ func formatAgentStatusSnapshot(status tuiadapterruntime.AgentStatusSnapshot) str
 	if len(status.AvailableAgents) == 0 {
 		lines = append(lines, "next: no ACP agents are configured")
 	} else if len(status.Participants) == 0 && strings.TrimSpace(status.ControllerKind) == "" {
-		lines = append(lines, "next: run /agent add <name> to attach a participant or /agent handoff <name> to switch the main controller")
+		lines = append(lines, "next: run /agent add <builtin> to register an ACP agent")
 	} else if len(status.Participants) == 0 {
-		lines = append(lines, "next: run /agent add <name> to attach a participant")
+		lines = append(lines, "next: run /<agent> <prompt> to start a child subagent")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -853,14 +1061,16 @@ func friendlyCommandError(action string, err error) error {
 		return fmt.Errorf("%s: model alias was not found. Run /model and choose a configured alias, or use /connect first", action)
 	case strings.Contains(lower, "ambiguous model alias"):
 		return fmt.Errorf("%s: model alias is ambiguous. Type more of the alias or pick from /model", action)
-	case strings.Contains(lower, "agent name is required"), strings.Contains(lower, "agent ") && strings.Contains(lower, " is not configured"):
-		return fmt.Errorf("%s: agent was not found. Run /agent list to inspect configured agents", action)
+	case strings.Contains(lower, "agent name is required"), strings.Contains(lower, "agent ") && (strings.Contains(lower, " is not configured") || strings.Contains(lower, " not found")):
+		return fmt.Errorf("%s: agent was not found. Run /agent add <builtin> first, then /agent list to inspect registered agents", action)
 	case strings.Contains(lower, "agent ") && strings.Contains(lower, " is ambiguous"):
 		return fmt.Errorf("%s: agent name is ambiguous. Type more of the agent name or run /agent list", action)
+	case strings.Contains(lower, "subagent handle") && strings.Contains(lower, "not found"):
+		return fmt.Errorf("%s: handle was not found. Use @handle only for subagents created by /<agent> or SPAWN", action)
 	case strings.Contains(lower, "participant id is required"), strings.Contains(lower, "participant ") && strings.Contains(lower, " is not attached"):
-		return fmt.Errorf("%s: participant was not found. Run /agent status to inspect attached participants", action)
+		return fmt.Errorf("%s: participant was not found", action)
 	case strings.Contains(lower, "participant ") && strings.Contains(lower, " is ambiguous"):
-		return fmt.Errorf("%s: participant target is ambiguous. Run /agent status and use the full participant id", action)
+		return fmt.Errorf("%s: participant target is ambiguous", action)
 	case strings.Contains(lower, "control plane is not available"), strings.Contains(lower, "acp controller backend is not configured"):
 		return fmt.Errorf("%s: ACP control plane is not configured for this stack. Check app assembly agent config before using /agent", action)
 	case strings.Contains(lower, "unknown sandbox backend"), strings.Contains(lower, "unsupported by"):

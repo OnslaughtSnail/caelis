@@ -87,6 +87,45 @@ func TestRunnerHandleUpdateUsesAgentMessageDeltas(t *testing.T) {
 	}
 }
 
+func TestRunnerHandleUpdateAcceptsStringContentChunks(t *testing.T) {
+	t.Parallel()
+
+	sink := &recordingStreams{}
+	run := &childRun{
+		anchor:  sdkdelegation.Anchor{TaskID: "task-1", SessionID: "child-1", Agent: "copilot", AgentID: "copilot-1"},
+		taskID:  "task-1",
+		sink:    sink,
+		state:   sdkdelegation.StateRunning,
+		running: true,
+	}
+	runner := &Runner{clock: time.Now}
+	raw, err := json.Marshal("string chunk")
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	runner.handleUpdate(run, sdkacpclient.UpdateEnvelope{
+		SessionID: "child-1",
+		Update: sdkacpclient.ContentChunk{
+			SessionUpdate: sdkacpclient.UpdateAgentMessage,
+			Content:       raw,
+		},
+	})
+
+	if got := len(sink.frames); got != 1 {
+		t.Fatalf("stream frames = %#v, want one string-content frame", sink.frames)
+	}
+	if got := sink.frames[0].Text; got != "string chunk" {
+		t.Fatalf("stream frame text = %q, want string chunk", got)
+	}
+	run.mu.RLock()
+	result := run.result
+	run.mu.RUnlock()
+	if result != "string chunk" {
+		t.Fatalf("run.result = %q, want string chunk", result)
+	}
+}
+
 func TestRunnerSpawnChildSurvivesCallerContextCancelAfterYield(t *testing.T) {
 	repo := repoRootForRunnerTest(t)
 	root := t.TempDir()

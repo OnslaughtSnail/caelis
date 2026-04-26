@@ -2675,6 +2675,42 @@ func TestTaskSnapshotToolResultIncludesRunningTerminalCursor(t *testing.T) {
 	}
 }
 
+func TestTaskSnapshotToolResultIncludesSubagentHandleFields(t *testing.T) {
+	t.Parallel()
+
+	result := taskSnapshotToolResult(
+		sdktool.Call{ID: "call-1", Name: spawntool.ToolName},
+		sdktool.Definition{Name: spawntool.ToolName},
+		sdktask.Snapshot{
+			Ref:     sdktask.Ref{TaskID: "task-1", SessionID: "child-session"},
+			Kind:    sdktask.KindSubagent,
+			State:   sdktask.StateCompleted,
+			Running: false,
+			Result: map[string]any{
+				"handle":  "jeff",
+				"mention": "@jeff",
+				"agent":   "codex",
+				"result":  "done",
+			},
+		},
+	)
+	var payload map[string]any
+	if len(result.Content) == 0 || result.Content[0].JSON == nil {
+		t.Fatalf("result.Content = %#v, want JSON payload", result.Content)
+	}
+	if err := json.Unmarshal(result.Content[0].JSON.Value, &payload); err != nil {
+		t.Fatalf("unmarshal result payload: %v", err)
+	}
+	for key, want := range map[string]string{"handle": "jeff", "mention": "@jeff", "agent": "codex"} {
+		if got := payload[key]; got != want {
+			t.Fatalf("payload[%s] = %#v, want %q", key, got, want)
+		}
+		if got := result.Meta[key]; got != want {
+			t.Fatalf("meta[%s] = %#v, want %q", key, got, want)
+		}
+	}
+}
+
 func TestRuntimeBashToolDoesNotFetchResultWhileStillRunning(t *testing.T) {
 	t.Parallel()
 
@@ -4089,7 +4125,7 @@ func testStringValue(raw any) string {
 	return strings.TrimSpace(text)
 }
 
-func TestResolveSpawnAgentAllowsSelfByDefaultAndRequiresAttachedExternal(t *testing.T) {
+func TestResolveSpawnAgentAllowsRegisteredAgentNameWithoutSessionParticipant(t *testing.T) {
 	session := sdksession.Session{}
 	if got, err := resolveSpawnAgent(session, ""); err != nil || got != "self" {
 		t.Fatalf("resolveSpawnAgent(empty) = %q, %v; want self", got, err)
@@ -4097,15 +4133,7 @@ func TestResolveSpawnAgentAllowsSelfByDefaultAndRequiresAttachedExternal(t *test
 	if got, err := resolveSpawnAgent(session, "self"); err != nil || got != "self" {
 		t.Fatalf("resolveSpawnAgent(self) = %q, %v; want self", got, err)
 	}
-	if _, err := resolveSpawnAgent(session, "codex"); err == nil {
-		t.Fatal("resolveSpawnAgent(codex) error = nil, want unattached external rejection")
-	}
-	session.Participants = []sdksession.ParticipantBinding{{
-		Kind:  sdksession.ParticipantKindACP,
-		Role:  sdksession.ParticipantRoleSidecar,
-		Label: "codex",
-	}}
 	if got, err := resolveSpawnAgent(session, "codex"); err != nil || got != "codex" {
-		t.Fatalf("resolveSpawnAgent(attached codex) = %q, %v; want codex", got, err)
+		t.Fatalf("resolveSpawnAgent(codex) = %q, %v; want codex", got, err)
 	}
 }

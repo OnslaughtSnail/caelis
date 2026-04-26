@@ -36,6 +36,7 @@ func (r *Runtime) kernelControllerBinding(source string) sdksession.ControllerBi
 	return sdksession.ControllerBinding{
 		Kind:         sdksession.ControllerKindKernel,
 		ControllerID: "sdk-kernel",
+		AgentName:    "local",
 		Label:        "SDK Kernel",
 		EpochID:      r.nextID("kernel", nil),
 		AttachedAt:   r.now(),
@@ -98,7 +99,7 @@ func (r *Runtime) executeACPControllerTurn(
 		handle.publishEvent(persisted)
 	}
 
-	turnResult, err := r.controllers.RunTurn(ctx, sdkcontroller.TurnRequest{
+	turnReq := sdkcontroller.TurnRequest{
 		SessionRef:        ref,
 		Session:           session,
 		TurnID:            turnID,
@@ -107,7 +108,33 @@ func (r *Runtime) executeACPControllerTurn(
 		Stream:            req.Request.StreamEnabled(false),
 		Mode:              r.policyMode(req.AgentSpec),
 		ApprovalRequester: controllerApprovalRequester{requester: req.ApprovalRequester, sessionRef: ref, session: session, runID: runID, turnID: turnID},
-	})
+	}
+	turnResult, err := r.controllers.RunTurn(ctx, turnReq)
+	if err != nil && isMissingACPControllerRun(err) {
+		agent := firstNonEmpty(strings.TrimSpace(session.Controller.AgentName), strings.TrimSpace(session.Controller.ControllerID), strings.TrimSpace(session.Controller.Label))
+		contextPrelude, contextSeq := r.buildControllerHandoffContext(ctx, session, ref, session.Controller)
+		binding, activateErr := r.controllers.Activate(ctx, sdkcontroller.HandoffRequest{
+			SessionRef:     ref,
+			Session:        session,
+			Agent:          agent,
+			Source:         "controller_rehydrate",
+			Reason:         "controller process rehydrate",
+			ContextPrelude: contextPrelude,
+			ContextSyncSeq: contextSeq,
+		})
+		if activateErr == nil {
+			var bindErr error
+			session, bindErr = r.sessions.BindController(ctx, sdksession.BindControllerRequest{SessionRef: ref, Binding: binding})
+			if bindErr == nil {
+				turnReq.Session = session
+				turnResult, err = r.controllers.RunTurn(ctx, turnReq)
+			} else {
+				err = bindErr
+			}
+		} else {
+			err = activateErr
+		}
+	}
 	if err != nil {
 		r.setRunState(ref.SessionID, sdkruntime.RunState{
 			Status:      interruptedOrFailedStatus(ctx, err),
@@ -345,12 +372,15 @@ func (r *Runtime) HandoffController(ctx context.Context, req sdkruntime.HandoffC
 		if r.controllers == nil {
 			return sdksession.Session{}, fmt.Errorf("sdk/runtime/local: ACP controller backend is not configured")
 		}
+		contextPrelude, contextSeq := r.buildControllerHandoffContext(ctx, session, ref, from)
 		to, err = r.controllers.Activate(ctx, sdkcontroller.HandoffRequest{
-			SessionRef: ref,
-			Session:    session,
-			Agent:      strings.TrimSpace(req.Agent),
-			Source:     strings.TrimSpace(req.Source),
-			Reason:     strings.TrimSpace(req.Reason),
+			SessionRef:     ref,
+			Session:        session,
+			Agent:          strings.TrimSpace(req.Agent),
+			Source:         strings.TrimSpace(req.Source),
+			Reason:         strings.TrimSpace(req.Reason),
+			ContextPrelude: contextPrelude,
+			ContextSyncSeq: contextSeq,
 		})
 		if err != nil {
 			return sdksession.Session{}, err
@@ -378,6 +408,90 @@ func (r *Runtime) HandoffController(ctx context.Context, req sdkruntime.HandoffC
 		return sdksession.Session{}, err
 	}
 	return r.sessions.Session(ctx, ref)
+}
+
+func (r *Runtime) buildControllerHandoffContext(
+	ctx context.Context,
+	session sdksession.Session,
+	ref sdksession.SessionRef,
+	from sdksession.ControllerBinding,
+) (string, int) {
+	seq := from.ContextSyncSeq + 1
+	var b strings.Builder
+	b.WriteString("Caelis controller handoff context. Continue the existing Caelis session; do not treat this as a fresh conversation.\n")
+	b.WriteString("session_id: ")
+	b.WriteString(strings.TrimSpace(session.SessionID))
+	b.WriteString("\nworkspace: ")
+	b.WriteString(strings.TrimSpace(session.CWD))
+	b.WriteString("\nprevious_controller: ")
+	b.WriteString(firstNonEmpty(strings.TrimSpace(from.AgentName), strings.TrimSpace(from.Label), strings.TrimSpace(from.ControllerID), string(from.Kind)))
+	b.WriteString("\ncontext_sync_seq: ")
+	b.WriteString(fmt.Sprintf("%d", seq))
+	if len(session.Participants) > 0 {
+		b.WriteString("\nchild_handles:")
+		for _, participant := range session.Participants {
+			if participant.Kind != sdksession.ParticipantKindSubagent || participant.Role != sdksession.ParticipantRoleDelegated {
+				continue
+			}
+			handle := strings.TrimSpace(participant.Label)
+			if handle == "" {
+				continue
+			}
+			b.WriteString("\n- ")
+			b.WriteString(handle)
+			if agent := strings.TrimSpace(participant.AgentName); agent != "" {
+				b.WriteString(" agent=")
+				b.WriteString(agent)
+			}
+			if taskID := strings.TrimSpace(participant.DelegationID); taskID != "" {
+				b.WriteString(" task_id=")
+				b.WriteString(taskID)
+			}
+		}
+	}
+	if r != nil && r.sessions != nil {
+		if events, err := r.sessions.Events(ctx, sdksession.EventsRequest{SessionRef: ref}); err == nil {
+			tail := canonicalTextTail(events, 24)
+			if len(tail) > 0 {
+				b.WriteString("\ncanonical_tail:")
+				for _, line := range tail {
+					b.WriteString("\n- ")
+					b.WriteString(line)
+				}
+			}
+		}
+	}
+	return b.String(), seq
+}
+
+func canonicalTextTail(events []*sdksession.Event, limit int) []string {
+	if limit <= 0 || len(events) == 0 {
+		return nil
+	}
+	out := make([]string, 0, limit)
+	for i := len(events) - 1; i >= 0 && len(out) < limit; i-- {
+		event := events[i]
+		if event == nil || !sdksession.IsCanonicalHistoryEvent(event) {
+			continue
+		}
+		role := strings.TrimSpace(string(event.Type))
+		text := strings.TrimSpace(event.Text)
+		if text == "" && event.Message != nil {
+			text = strings.TrimSpace(event.Message.TextContent())
+		}
+		if text == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, "\n", " ")
+		if len(text) > 500 {
+			text = text[:500]
+		}
+		out = append(out, role+": "+text)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 func participantBinding(session sdksession.Session, participantID string) (sdksession.ParticipantBinding, bool) {
@@ -427,16 +541,26 @@ func participantLifecycleEvent(session sdksession.Session, binding sdksession.Pa
 	}
 }
 
+func isMissingACPControllerRun(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no active acp controller")
+}
+
 func handoffEvent(from sdksession.ControllerBinding, to sdksession.ControllerBinding, reason string, now time.Time) *sdksession.Event {
 	text := "handoff to " + firstNonEmpty(to.Label, to.ControllerID)
 	meta := map[string]any{
 		"from": map[string]any{
-			"kind": from.Kind,
-			"id":   strings.TrimSpace(from.ControllerID),
+			"kind":              from.Kind,
+			"id":                strings.TrimSpace(from.ControllerID),
+			"agent":             strings.TrimSpace(from.AgentName),
+			"remote_session_id": strings.TrimSpace(from.RemoteSessionID),
+			"context_sync_seq":  from.ContextSyncSeq,
 		},
 		"to": map[string]any{
-			"kind": to.Kind,
-			"id":   strings.TrimSpace(to.ControllerID),
+			"kind":              to.Kind,
+			"id":                strings.TrimSpace(to.ControllerID),
+			"agent":             strings.TrimSpace(to.AgentName),
+			"remote_session_id": strings.TrimSpace(to.RemoteSessionID),
+			"context_sync_seq":  to.ContextSyncSeq,
 		},
 	}
 	if strings.TrimSpace(reason) != "" {

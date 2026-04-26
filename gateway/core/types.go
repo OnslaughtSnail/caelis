@@ -155,18 +155,22 @@ type ActiveTurnState struct {
 }
 
 type ControllerState struct {
-	Kind         sdksession.ControllerKind `json:"kind,omitempty"`
-	ControllerID string                    `json:"controller_id,omitempty"`
-	Label        string                    `json:"label,omitempty"`
-	EpochID      string                    `json:"epoch_id,omitempty"`
-	AttachedAt   time.Time                 `json:"attached_at,omitempty"`
-	Source       string                    `json:"source,omitempty"`
+	Kind            sdksession.ControllerKind `json:"kind,omitempty"`
+	ControllerID    string                    `json:"controller_id,omitempty"`
+	AgentName       string                    `json:"agent_name,omitempty"`
+	Label           string                    `json:"label,omitempty"`
+	EpochID         string                    `json:"epoch_id,omitempty"`
+	RemoteSessionID string                    `json:"remote_session_id,omitempty"`
+	ContextSyncSeq  int                       `json:"context_sync_seq,omitempty"`
+	AttachedAt      time.Time                 `json:"attached_at,omitempty"`
+	Source          string                    `json:"source,omitempty"`
 }
 
 type ParticipantState struct {
 	ID            string                     `json:"id,omitempty"`
 	Kind          sdksession.ParticipantKind `json:"kind,omitempty"`
 	Role          sdksession.ParticipantRole `json:"role,omitempty"`
+	AgentName     string                     `json:"agent_name,omitempty"`
 	Label         string                     `json:"label,omitempty"`
 	SessionID     string                     `json:"session_id,omitempty"`
 	Source        string                     `json:"source,omitempty"`
