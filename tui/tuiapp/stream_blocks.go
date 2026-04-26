@@ -232,7 +232,7 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 		block.Raw = text
 		block.Streaming = !final
 		if final {
-			block.LastFinal = strings.TrimSpace(text)
+			block.LastFinal = text
 		}
 		m.doc.Append(block)
 		m.activeAssistantID = block.BlockID()
@@ -258,7 +258,7 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	ab.Raw = mergeStreamChunk(ab.Raw, text, final)
 	if final {
 		ab.Streaming = false
-		ab.LastFinal = strings.TrimSpace(ab.Raw)
+		ab.LastFinal = ab.Raw
 	}
 	if final {
 		m.activeAssistantID = ""
@@ -312,7 +312,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 				return m, nil
 			}
 			block := NewReasoningBlock(actor)
-			block.Raw = strings.TrimSpace(text)
+			block.Raw = text
 			block.Streaming = false
 			m.doc.Append(block)
 			m.hasCommittedLine = true
@@ -369,7 +369,6 @@ const minReplayLen = 16
 
 func mergeStreamChunk(existing string, incoming string, final bool) string {
 	if final {
-		incoming = strings.TrimSpace(incoming)
 		if incoming == "" {
 			return existing
 		}

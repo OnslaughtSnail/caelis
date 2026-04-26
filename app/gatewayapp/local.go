@@ -48,27 +48,27 @@ type Config struct {
 }
 
 type ModelConfig struct {
-	Alias    string
-	Provider string
-	API      sdkproviders.APIType
-	Model    string
-	BaseURL  string
+	Alias    string               `json:"alias,omitempty"`
+	Provider string               `json:"provider,omitempty"`
+	API      sdkproviders.APIType `json:"api,omitempty"`
+	Model    string               `json:"model,omitempty"`
+	BaseURL  string               `json:"base_url,omitempty"`
 	// Token is an in-memory secret used for the current process. It is not
 	// persisted unless PersistToken is explicitly enabled.
-	Token    string
-	TokenEnv string
+	Token    string `json:"token,omitempty"`
+	TokenEnv string `json:"token_env,omitempty"`
 	// PersistToken explicitly opts into persisting Token in plaintext config.
 	// Prefer TokenEnv instead.
-	PersistToken           bool
-	AuthType               sdkproviders.AuthType
-	HeaderKey              string
-	ContextWindowTokens    int
-	ReasoningEffort        string
-	DefaultReasoningEffort string
-	ReasoningLevels        []string
-	ReasoningMode          string
-	MaxOutputTok           int
-	Timeout                time.Duration
+	PersistToken           bool                  `json:"persist_token,omitempty"`
+	AuthType               sdkproviders.AuthType `json:"auth_type,omitempty"`
+	HeaderKey              string                `json:"header_key,omitempty"`
+	ContextWindowTokens    int                   `json:"context_window_tokens,omitempty"`
+	ReasoningEffort        string                `json:"reasoning_effort,omitempty"`
+	DefaultReasoningEffort string                `json:"default_reasoning_effort,omitempty"`
+	ReasoningLevels        []string              `json:"reasoning_levels,omitempty"`
+	ReasoningMode          string                `json:"reasoning_mode,omitempty"`
+	MaxOutputTok           int                   `json:"max_output_tokens,omitempty"`
+	Timeout                time.Duration         `json:"timeout,omitempty"`
 }
 
 type Stack struct {
@@ -1301,7 +1301,7 @@ func (l *modelLookup) Snapshot() persistedModelConfig {
 	defer l.mu.RUnlock()
 	configs := make([]ModelConfig, 0, len(l.configs))
 	for _, cfg := range l.configs {
-		configs = append(configs, sanitizePersistedModelConfig(cfg))
+		configs = append(configs, cfg)
 	}
 	sort.Slice(configs, func(i, j int) bool {
 		return strings.ToLower(strings.TrimSpace(configs[i].Alias)) < strings.ToLower(strings.TrimSpace(configs[j].Alias))
@@ -1475,6 +1475,9 @@ func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 			cfg.AuthType = sdkproviders.AuthAPIKey
 		}
 	}
+	if cfg.DefaultReasoningEffort == "" && cfg.ReasoningEffort != "" {
+		cfg.DefaultReasoningEffort = cfg.ReasoningEffort
+	}
 	if cfg.MaxOutputTok <= 0 {
 		cfg.MaxOutputTok = 4096
 	}
@@ -1547,7 +1550,30 @@ func sanitizePersistedModelConfig(cfg ModelConfig) ModelConfig {
 	if !cfg.PersistToken {
 		cfg.Token = ""
 	}
+	if cfg.API == defaultModelAPIForProvider(cfg.Provider) {
+		cfg.API = ""
+	}
+	if cfg.AuthType == defaultAuthTypeForProvider(cfg.Provider) {
+		cfg.AuthType = ""
+	}
+	if cfg.DefaultReasoningEffort == cfg.ReasoningEffort {
+		cfg.DefaultReasoningEffort = ""
+	}
+	if cfg.MaxOutputTok == 4096 {
+		cfg.MaxOutputTok = 0
+	}
+	cfg.PersistToken = false
+	cfg.Timeout = 0
 	return cfg
+}
+
+func defaultAuthTypeForProvider(provider string) sdkproviders.AuthType {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "ollama", "codefree":
+		return sdkproviders.AuthNone
+	default:
+		return sdkproviders.AuthAPIKey
+	}
 }
 
 func (s *Stack) rejectReconfigureWhileActive(action string) error {

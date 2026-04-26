@@ -509,6 +509,7 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 	if tpl.noAuthRequired {
 		authType = sdkproviders.AuthNone
 	}
+	persistToken := strings.TrimSpace(cfg.APIKey) != "" && strings.TrimSpace(cfg.TokenEnv) == ""
 	reasoningLevels := normalizeReasoningLevels(cfg.ReasoningLevels)
 	defaultReasoningEffort := strings.TrimSpace(cfg.ReasoningEffort)
 	alias, err := d.stack.Connect(gatewayapp.ModelConfig{
@@ -518,6 +519,7 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 		BaseURL:                baseURL,
 		Token:                  cfg.APIKey,
 		TokenEnv:               cfg.TokenEnv,
+		PersistToken:           persistToken,
 		AuthType:               authType,
 		ContextWindowTokens:    cfg.ContextWindowTokens,
 		DefaultReasoningEffort: defaultReasoningEffort,

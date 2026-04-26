@@ -245,20 +245,20 @@ func chunkEventFromStreamEvent(event *sdkmodel.StreamEvent) *sdksession.Event {
 	delta := event.PartDelta
 	switch delta.Kind {
 	case sdkmodel.PartKindReasoning:
-		if strings.TrimSpace(delta.TextDelta) == "" {
+		if delta.TextDelta == "" {
 			return nil
 		}
 		message := sdkmodel.NewReasoningMessage(sdkmodel.RoleAssistant, delta.TextDelta, sdkmodel.ReasoningVisibilityVisible)
 		return sdksession.MarkUIOnly(&sdksession.Event{
 			Type:    sdksession.EventTypeAssistant,
 			Message: &message,
-			Text:    strings.TrimSpace(delta.TextDelta),
+			Text:    delta.TextDelta,
 			Protocol: &sdksession.EventProtocol{
 				UpdateType: string(sdksession.ProtocolUpdateTypeAgentThought),
 			},
 		})
 	case sdkmodel.PartKindText:
-		if strings.TrimSpace(delta.TextDelta) == "" {
+		if delta.TextDelta == "" {
 			return nil
 		}
 		message := sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, delta.TextDelta)

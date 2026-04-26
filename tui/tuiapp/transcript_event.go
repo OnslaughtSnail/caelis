@@ -114,7 +114,7 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 					})
 				}
 			case appgateway.NarrativeRoleAssistant:
-				if reasoning := strings.TrimSpace(payload.ReasoningText); reasoning != "" {
+				if payloadNarrativeChunkHasContent(payload.ReasoningText, payload.Final) {
 					out = append(out, TranscriptEvent{
 						Kind:          TranscriptEventNarrative,
 						Scope:         scope,
@@ -122,11 +122,11 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 						Actor:         actor,
 						OccurredAt:    occurredAt,
 						NarrativeKind: TranscriptNarrativeReasoning,
-						Text:          reasoning,
+						Text:          payload.ReasoningText,
 						Final:         payload.Final,
 					})
 				}
-				if text := strings.TrimSpace(payload.Text); text != "" {
+				if payloadNarrativeChunkHasContent(payload.Text, payload.Final) {
 					out = append(out, TranscriptEvent{
 						Kind:          TranscriptEventNarrative,
 						Scope:         scope,
@@ -134,7 +134,7 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 						Actor:         actor,
 						OccurredAt:    occurredAt,
 						NarrativeKind: TranscriptNarrativeAssistant,
-						Text:          text,
+						Text:          payload.Text,
 						Final:         payload.Final,
 					})
 				}
@@ -288,6 +288,16 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 
 	appendUsage()
 	return out
+}
+
+func payloadNarrativeChunkHasContent(text string, final bool) bool {
+	if text == "" {
+		return false
+	}
+	if !final {
+		return true
+	}
+	return strings.TrimSpace(text) != ""
 }
 
 func ProjectACPProjectionToTranscriptEvents(msg ACPProjectionMsg) []TranscriptEvent {

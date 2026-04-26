@@ -259,8 +259,7 @@ func (b *MainACPTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk
 	if b == nil {
 		return
 	}
-	chunk = strings.TrimSpace(chunk)
-	if chunk == "" {
+	if strings.TrimSpace(chunk) == "" {
 		return
 	}
 	if idx := latestNarrativeFinalTargetIndex(b.Events, kind); idx >= 0 {
@@ -479,8 +478,7 @@ func (b *ParticipantTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, c
 	if b == nil {
 		return
 	}
-	chunk = strings.TrimSpace(chunk)
-	if chunk == "" {
+	if strings.TrimSpace(chunk) == "" {
 		return
 	}
 	if idx := latestNarrativeFinalTargetIndex(b.Events, kind); idx >= 0 {
@@ -1268,8 +1266,8 @@ func (s *SubagentSessionState) ReplaceFinalStreamChunk(kind SubagentEventKind, c
 	if s == nil {
 		return
 	}
-	chunk = strings.TrimSpace(tuikit.SanitizeLogText(chunk))
-	if chunk == "" {
+	chunk = tuikit.SanitizeLogText(chunk)
+	if strings.TrimSpace(chunk) == "" {
 		return
 	}
 	if idx := latestNarrativeFinalTargetIndex(s.Events, kind); idx >= 0 {

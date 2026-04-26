@@ -179,6 +179,9 @@ func dedupeModelConfigs(configs []ModelConfig) []ModelConfig {
 	seen := make(map[string]struct{}, len(configs))
 	for _, cfg := range configs {
 		cfg = normalizeModelConfig(cfg)
+		if strings.TrimSpace(cfg.Token) != "" {
+			cfg.PersistToken = true
+		}
 		if cfg.Alias == "" {
 			continue
 		}

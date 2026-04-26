@@ -411,6 +411,12 @@ func TestGatewayDriverConnectPersistsDeepSeekModelDefaults(t *testing.T) {
 	if cfg.Alias == "" {
 		t.Fatalf("persisted configs = %#v, want deepseek/deepseek-v4-flash", doc.Models.Configs)
 	}
+	if cfg.Token != "secret" || !cfg.PersistToken {
+		t.Fatalf("persisted token/persist = %q/%v, want pasted API key persisted", cfg.Token, cfg.PersistToken)
+	}
+	if cfg.TokenEnv != "" {
+		t.Fatalf("persisted token_env = %q, want empty for pasted API key", cfg.TokenEnv)
+	}
 	if cfg.ContextWindowTokens != 1048576 {
 		t.Fatalf("persisted context window = %d, want 1048576", cfg.ContextWindowTokens)
 	}
@@ -422,6 +428,96 @@ func TestGatewayDriverConnectPersistsDeepSeekModelDefaults(t *testing.T) {
 	}
 	if !equalStrings(cfg.ReasoningLevels, []string{"none", "high", "max"}) {
 		t.Fatalf("persisted reasoning levels = %#v, want none/high/max", cfg.ReasoningLevels)
+	}
+	rawConfig, err := os.ReadFile(filepath.Join(root, "config.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(config.json) error = %v", err)
+	}
+	raw := string(rawConfig)
+	for _, forbidden := range []string{
+		`"API"`,
+		`"AuthType"`,
+		`"HeaderKey"`,
+		`"TokenEnv"`,
+		`"DefaultReasoningEffort"`,
+		`"ReasoningMode"`,
+		`"Timeout"`,
+		`"PersistToken"`,
+		`"api":`,
+		`"auth_type":`,
+		`"header_key":`,
+		`"token_env":`,
+		`"default_reasoning_effort":`,
+		`"reasoning_mode":`,
+		`"timeout":`,
+		`"persist_token":`,
+	} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("config contains redundant key %s", forbidden)
+		}
+	}
+	for _, required := range []string{
+		`"alias": "deepseek/deepseek-v4-flash"`,
+		`"provider": "deepseek"`,
+		`"model": "deepseek-v4-flash"`,
+		`"base_url": "https://api.deepseek.com/v1"`,
+		`"token": "secret"`,
+		`"context_window_tokens": 1048576`,
+		`"reasoning_effort": "high"`,
+		`"max_output_tokens": 32768`,
+	} {
+		if !strings.Contains(raw, required) {
+			t.Fatalf("config missing compact key %s", required)
+		}
+	}
+}
+
+func TestGatewayDriverConnectWithTokenEnvDoesNotPersistTokenValue(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "connect-token-env-test",
+		StoreDir:       root,
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "connect-token-env-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	if _, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "deepseek",
+		Model:    "deepseek-v4-flash",
+		APIKey:   "env:DEEPSEEK_API_KEY",
+	}); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+
+	doc, err := gatewayapp.LoadAppConfig(root)
+	if err != nil {
+		t.Fatalf("LoadAppConfig() error = %v", err)
+	}
+	var cfg gatewayapp.ModelConfig
+	for _, item := range doc.Models.Configs {
+		if strings.EqualFold(item.Alias, "deepseek/deepseek-v4-flash") {
+			cfg = item
+			break
+		}
+	}
+	if cfg.Alias == "" {
+		t.Fatalf("persisted configs = %#v, want deepseek/deepseek-v4-flash", doc.Models.Configs)
+	}
+	if cfg.Token != "" || cfg.PersistToken {
+		t.Fatalf("persisted token/persist = %q/%v, want no plaintext token for env auth", cfg.Token, cfg.PersistToken)
+	}
+	if cfg.TokenEnv != "DEEPSEEK_API_KEY" {
+		t.Fatalf("persisted token_env = %q, want DEEPSEEK_API_KEY", cfg.TokenEnv)
 	}
 }
 

@@ -315,10 +315,25 @@ func canonicalNarrativePayload(event *sdksession.Event) *NarrativePayload {
 	default:
 		return nil
 	}
-	if strings.TrimSpace(payload.Text) == "" && strings.TrimSpace(payload.ReasoningText) == "" {
+	if !hasNarrativePayloadContent(event, payload) {
 		return nil
 	}
 	return payload
+}
+
+func hasNarrativePayloadContent(event *sdksession.Event, payload *NarrativePayload) bool {
+	if payload == nil {
+		return false
+	}
+	if strings.TrimSpace(payload.Text) != "" || strings.TrimSpace(payload.ReasoningText) != "" {
+		return true
+	}
+	switch updateTypeFromSessionEvent(event) {
+	case string(sdksession.ProtocolUpdateTypeAgentMessage), string(sdksession.ProtocolUpdateTypeAgentThought):
+		return payload.Text != "" || payload.ReasoningText != ""
+	default:
+		return false
+	}
 }
 
 func canonicalToolCallPayload(event *sdksession.Event) *ToolCallPayload {
@@ -476,7 +491,7 @@ func assistantTextFromSessionEvent(event *sdksession.Event) string {
 		return ""
 	}
 	if event.Message != nil {
-		if text := strings.TrimSpace(event.Message.TextContent()); text != "" {
+		if text := event.Message.TextContent(); text != "" {
 			return text
 		}
 		if strings.TrimSpace(event.Message.ReasoningText()) != "" {
@@ -493,7 +508,7 @@ func reasoningTextFromSessionEvent(event *sdksession.Event) string {
 	if event == nil || event.Message == nil {
 		return ""
 	}
-	return strings.TrimSpace(event.Message.ReasoningText())
+	return event.Message.ReasoningText()
 }
 
 func updateTypeFromSessionEvent(event *sdksession.Event) string {

@@ -250,7 +250,6 @@ func inferredToolCallUpdates(event *sdksession.Event) []Update {
 }
 
 func singleContentUpdate(kind string, text string) []Update {
-	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
 	}
@@ -410,11 +409,11 @@ func textForAssistantEvent(event *sdksession.Event) string {
 	if event == nil {
 		return ""
 	}
-	if text := strings.TrimSpace(event.Text); text != "" {
+	if text := event.Text; text != "" {
 		return text
 	}
 	if event.Message != nil {
-		return strings.TrimSpace(event.Message.TextContent())
+		return event.Message.TextContent()
 	}
 	return ""
 }
@@ -423,7 +422,7 @@ func reasoningForAssistantEvent(event *sdksession.Event) string {
 	if event == nil || event.Message == nil {
 		return ""
 	}
-	return strings.TrimSpace(event.Message.ReasoningText())
+	return event.Message.ReasoningText()
 }
 
 func parseObject(raw string) map[string]any {

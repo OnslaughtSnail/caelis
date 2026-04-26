@@ -1092,7 +1092,7 @@ func TestGatewayStreamingNarrativeKeepsReasoningAnswerBoundaries(t *testing.T) {
 		t.Fatalf("len(block.Events) = %d, want 2 active narrative streams; got %#v", got, block.Events)
 	}
 	wantKinds := []SubagentEventKind{SEReasoning, SEAssistant}
-	wantTexts := []string{"think-1think-2", "answer-1answer-2"}
+	wantTexts := []string{"think-1 think-2 ", "answer-1 answer-2"}
 	for i := range wantKinds {
 		if block.Events[i].Kind != wantKinds[i] || block.Events[i].Text != wantTexts[i] {
 			t.Fatalf("block.Events[%d] = %#v, want kind=%v text=%q", i, block.Events[i], wantKinds[i], wantTexts[i])

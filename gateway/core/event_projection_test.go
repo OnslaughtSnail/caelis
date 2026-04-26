@@ -92,6 +92,7 @@ func TestProjectSessionEventsCanonicalPayloadsTableDriven(t *testing.T) {
 	t.Parallel()
 
 	reasoningMessage := sdkmodel.NewReasoningMessage(sdkmodel.RoleAssistant, "think through options", sdkmodel.ReasoningVisibilityVisible)
+	spaceReasoningMessage := sdkmodel.NewReasoningMessage(sdkmodel.RoleAssistant, " ", sdkmodel.ReasoningVisibilityVisible)
 
 	tests := []struct {
 		name string
@@ -141,6 +142,28 @@ func TestProjectSessionEventsCanonicalPayloadsTableDriven(t *testing.T) {
 				}
 				if env.Event.Narrative.ReasoningText != "think through options" {
 					t.Fatalf("event.Narrative.ReasoningText = %q, want %q", env.Event.Narrative.ReasoningText, "think through options")
+				}
+			},
+		},
+		{
+			name: "reasoning preserves boundary whitespace",
+			ev: &sdksession.Event{
+				ID:         "reasoning-space",
+				Type:       sdksession.EventTypeAssistant,
+				Text:       " ",
+				Visibility: sdksession.VisibilityUIOnly,
+				Message:    &spaceReasoningMessage,
+				Protocol: &sdksession.EventProtocol{
+					UpdateType: string(sdksession.ProtocolUpdateTypeAgentThought),
+				},
+			},
+			want: func(t *testing.T, env EventEnvelope) {
+				t.Helper()
+				if env.Event.Narrative == nil {
+					t.Fatal("event.Narrative = nil, want payload")
+				}
+				if env.Event.Narrative.ReasoningText != " " {
+					t.Fatalf("event.Narrative.ReasoningText = %q, want single space", env.Event.Narrative.ReasoningText)
 				}
 			},
 		},

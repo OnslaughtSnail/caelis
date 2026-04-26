@@ -407,6 +407,32 @@ func TestChatAgentDefaultsToNonStreamingRequests(t *testing.T) {
 	}
 }
 
+func TestChunkEventFromStreamEventPreservesBoundaryWhitespace(t *testing.T) {
+	t.Parallel()
+
+	reasoning := chunkEventFromStreamEvent(&sdkmodel.StreamEvent{
+		Type: sdkmodel.StreamEventPartDelta,
+		PartDelta: &sdkmodel.PartDelta{
+			Kind:      sdkmodel.PartKindReasoning,
+			TextDelta: "think ",
+		},
+	})
+	if reasoning == nil || reasoning.Text != "think " || reasoning.Message == nil || reasoning.Message.ReasoningText() != "think " {
+		t.Fatalf("reasoning chunk = %+v, want boundary whitespace preserved", reasoning)
+	}
+
+	space := chunkEventFromStreamEvent(&sdkmodel.StreamEvent{
+		Type: sdkmodel.StreamEventPartDelta,
+		PartDelta: &sdkmodel.PartDelta{
+			Kind:      sdkmodel.PartKindReasoning,
+			TextDelta: " ",
+		},
+	})
+	if space == nil || space.Text != " " || space.Message == nil || space.Message.ReasoningText() != " " {
+		t.Fatalf("space chunk = %+v, want whitespace-only reasoning chunk preserved", space)
+	}
+}
+
 func TestChatAgentDoesNotImposeFixedToolLoopCap(t *testing.T) {
 	t.Parallel()
 
