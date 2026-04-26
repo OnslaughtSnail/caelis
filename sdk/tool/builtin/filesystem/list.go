@@ -33,7 +33,8 @@ func (t *ListTool) Definition() sdktool.Definition {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path": map[string]any{"type": "string", "description": "directory path"},
+				"path":              map[string]any{"type": "string", "description": "directory path"},
+				"respect_gitignore": map[string]any{"type": "boolean", "description": "When true, filter direct entries ignored by .gitignore in the listed directory."},
 			},
 		},
 	}
@@ -54,6 +55,10 @@ func (t *ListTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if pathArg == "" {
 		pathArg = "."
 	}
+	respectGitignore, err := argparse.Bool(args, "respect_gitignore", false)
+	if err != nil {
+		return sdktool.Result{}, err
+	}
 	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
 	target, err := normalizePathWithFS(fsys, pathArg)
 	if err != nil {
@@ -63,9 +68,16 @@ func (t *ListTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if err != nil {
 		return sdktool.Result{}, err
 	}
+	excludeRules := []pathExcludeRule(nil)
+	if respectGitignore {
+		excludeRules = gitignoreExcludePatterns(fsys, target)
+	}
 	out := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		itemPath := filepath.Join(target, item.Name())
+		if shouldExcludePath(target, itemPath, item.IsDir(), excludeRules) {
+			continue
+		}
 		info, infoErr := item.Info()
 		if infoErr != nil {
 			continue

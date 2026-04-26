@@ -288,7 +288,7 @@ func renderToolCallSuffix(toolName string, suffix string, theme Theme) string {
 
 func renderToolResultSuffix(toolName string, suffix string, theme Theme) string {
 	if !strings.EqualFold(toolName, "PATCH") && !strings.EqualFold(toolName, "WRITE") {
-		return LinkifyText(suffix, theme.LinkStyle())
+		return renderToolMetricSuffix(suffix, theme)
 	}
 	fields := strings.Fields(strings.TrimSpace(suffix))
 	if len(fields) != 2 || !strings.HasPrefix(fields[0], "+") || !strings.HasPrefix(fields[1], "-") {
@@ -297,6 +297,45 @@ func renderToolResultSuffix(toolName string, suffix string, theme Theme) string 
 	added := lipgloss.NewStyle().Foreground(theme.DiffAddFg).Render(fields[0])
 	removed := lipgloss.NewStyle().Foreground(theme.DiffRemoveFg).Render(fields[1])
 	return added + " " + removed
+}
+
+func renderToolMetricSuffix(suffix string, theme Theme) string {
+	fields := strings.Fields(strings.TrimSpace(suffix))
+	if len(fields) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(fields))
+	low := lipgloss.NewStyle().Foreground(theme.ReasoningFg)
+	high := theme.TextStyle().Bold(true)
+	for _, field := range fields {
+		if isMetricToken(field) {
+			out = append(out, high.Render(field))
+			continue
+		}
+		out = append(out, low.Render(LinkifyText(field, theme.LinkStyle())))
+	}
+	return strings.Join(out, " ")
+}
+
+func isMetricToken(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range value {
+		if unicode.IsDigit(r) {
+			hasDigit = true
+			continue
+		}
+		switch r {
+		case '+', '-', '~', ':', ',', '.', '/', '%':
+			continue
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func colorizeKeyValueLine(line string, theme Theme) string {

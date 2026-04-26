@@ -12,6 +12,7 @@ import (
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
 )
 
 type Config struct {
@@ -84,6 +85,17 @@ func resolveControlPlane(runtime sdkruntime.Runtime) sdkruntime.ControlPlane {
 		return control
 	}
 	return nil
+}
+
+func (g *Gateway) Terminals() sdkterminal.Service {
+	if g == nil || g.runtime == nil {
+		return nil
+	}
+	provider, ok := g.runtime.(sdkruntime.TerminalProvider)
+	if !ok {
+		return nil
+	}
+	return provider.Terminals()
 }
 
 // Resolver returns the underlying *AssemblyResolver if the gateway's
@@ -529,7 +541,7 @@ func (g *Gateway) runTurn(
 				TurnID:     handle.turnID,
 				SessionRef: handle.sessionRef,
 			},
-			Err: err,
+			Err: EventError(err),
 		})
 		return
 	}
@@ -548,7 +560,7 @@ func (g *Gateway) runTurn(
 					TurnID:     handle.turnID,
 					SessionRef: handle.sessionRef,
 				},
-				Err: seqErr,
+				Err: EventError(seqErr),
 			})
 			return
 		}

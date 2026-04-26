@@ -12,7 +12,6 @@ import (
 	"time"
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
-	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
@@ -84,18 +83,17 @@ func TestStreamHandleWritesAssistantTextAndDeniesApproval(t *testing.T) {
 	handle := newFakeHandle([]appgateway.EventEnvelope{
 		{
 			Event: appgateway.Event{
-				Kind: appgateway.EventKindApprovalRequested,
-				Approval: &sdkruntime.ApprovalRequest{
-					SessionRef: sdksession.SessionRef{SessionID: "s1"},
-				},
+				Kind:            appgateway.EventKindApprovalRequested,
+				ApprovalPayload: &appgateway.ApprovalPayload{Status: appgateway.ApprovalStatusPending},
 			},
 		},
 		{
 			Event: appgateway.Event{
 				Kind: appgateway.EventKindAssistantMessage,
-				SessionEvent: &sdksession.Event{
-					Type: sdksession.EventTypeAssistant,
-					Text: "interactive ok",
+				Narrative: &appgateway.NarrativePayload{
+					Role:  appgateway.NarrativeRoleAssistant,
+					Text:  "interactive ok",
+					Final: true,
 				},
 			},
 		},

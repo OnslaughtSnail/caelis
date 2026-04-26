@@ -174,7 +174,7 @@ func (m *Model) applyTranscriptTool(event TranscriptEvent) (tea.Model, tea.Cmd) 
 		if state := strings.ToLower(strings.TrimSpace(block.Status)); state == "initializing" || state == "prompting" {
 			block.Status = "running"
 		}
-		block.UpdateTool(event.ToolCallID, event.ToolName, event.ToolArgs, event.ToolOutput, event.Final, event.ToolError)
+		block.UpdateToolWithMeta(event.ToolCallID, event.ToolName, event.ToolArgs, event.ToolOutput, event.Final, event.ToolError, ToolUpdateMeta{TaskID: event.ToolTaskID})
 		return m, m.requestStreamViewportSync()
 	case ACPProjectionSubagent:
 		sessionKey, state := m.ensureSubagentSessionState(event.ScopeID, "", "")
@@ -192,7 +192,7 @@ func (m *Model) applyTranscriptTool(event TranscriptEvent) (tea.Model, tea.Cmd) 
 			state.ReviveFromTerminal()
 		}
 		panel.bindSession(state)
-		state.UpdateToolCall(event.ToolCallID, event.ToolName, event.ToolArgs, firstNonEmpty(strings.TrimSpace(event.ToolStream), "stdout"), event.ToolOutput, event.Final)
+		state.UpdateToolCallWithMeta(event.ToolCallID, event.ToolName, event.ToolArgs, firstNonEmpty(strings.TrimSpace(event.ToolStream), "stdout"), event.ToolOutput, event.Final, ToolUpdateMeta{TaskID: event.ToolTaskID})
 		m.reviveSubagentPanel(panel, false)
 		m.syncSubagentSessionPanels(sessionKey)
 		return m, m.requestStreamViewportSync()
@@ -204,7 +204,7 @@ func (m *Model) applyTranscriptTool(event TranscriptEvent) (tea.Model, tea.Cmd) 
 		if !event.OccurredAt.IsZero() && (block.StartedAt.IsZero() || event.OccurredAt.Before(block.StartedAt)) {
 			block.StartedAt = event.OccurredAt
 		}
-		block.UpdateTool(event.ToolCallID, event.ToolName, event.ToolArgs, event.ToolOutput, event.Final, event.ToolError)
+		block.UpdateToolWithMeta(event.ToolCallID, event.ToolName, event.ToolArgs, event.ToolOutput, event.Final, event.ToolError, ToolUpdateMeta{TaskID: event.ToolTaskID})
 		return m, m.requestStreamViewportSync()
 	}
 }

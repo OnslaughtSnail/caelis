@@ -40,6 +40,7 @@ func (t *GlobTool) Definition() sdktool.Definition {
 					"description": "Optional relative path patterns to exclude after filtering.",
 					"items":       map[string]any{"type": "string"},
 				},
+				"respect_gitignore": map[string]any{"type": "boolean", "description": "When true, filter matches ignored by .gitignore at the search root."},
 			},
 			"required": []string{"pattern"},
 		},
@@ -62,6 +63,10 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if err != nil {
 		return sdktool.Result{}, err
 	}
+	respectGitignore, err := argparse.Bool(args, "respect_gitignore", false)
+	if err != nil {
+		return sdktool.Result{}, err
+	}
 	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
 	if !filepath.IsAbs(pattern) {
 		wd, err := fsys.Getwd()
@@ -76,7 +81,11 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if !hasPathGlobMeta(filepath.ToSlash(pattern)) {
 		if info, err := fsys.Stat(pattern); err == nil {
 			root := filepath.Dir(pattern)
-			if !shouldExcludePath(root, pattern, info.IsDir(), exclude) {
+			excludeRules := excludeRulesFromPatterns(exclude)
+			if respectGitignore {
+				excludeRules = append(gitignoreExcludePatterns(fsys, root), excludeRules...)
+			}
+			if !shouldExcludePath(root, pattern, info.IsDir(), excludeRules) {
 				matches = append(matches, pattern)
 			}
 		} else if !errors.Is(err, fs.ErrNotExist) {
@@ -94,6 +103,10 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 	if relPattern == "" {
 		relPattern = filepath.Base(pattern)
 	}
+	excludeRules := excludeRulesFromPatterns(exclude)
+	if respectGitignore {
+		excludeRules = append(gitignoreExcludePatterns(fsys, root), excludeRules...)
+	}
 	if _, err := fsys.Stat(root); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return toolutil.JSONResult(GlobToolName, map[string]any{
@@ -108,7 +121,7 @@ func (t *GlobTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 		if walkErr != nil || d == nil {
 			return nil
 		}
-		if candidate != root && shouldExcludePath(root, candidate, d.IsDir(), exclude) {
+		if candidate != root && shouldExcludePath(root, candidate, d.IsDir(), excludeRules) {
 			if d.IsDir() {
 				return fs.SkipDir
 			}

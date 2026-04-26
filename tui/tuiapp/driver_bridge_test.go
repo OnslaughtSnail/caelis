@@ -87,8 +87,12 @@ func TestSlashResumeClearsHistoryBeforeReplay(t *testing.T) {
 		resumedSession: sdksession.Session{SessionRef: sdksession.SessionRef{SessionID: "resumed-session"}},
 		replay: []appgateway.EventEnvelope{{
 			Event: appgateway.Event{
-				Kind:         appgateway.EventKindAssistantMessage,
-				SessionEvent: &sdksession.Event{Text: "history reply"},
+				Kind: appgateway.EventKindAssistantMessage,
+				Narrative: &appgateway.NarrativePayload{
+					Role:  appgateway.NarrativeRoleAssistant,
+					Text:  "history reply",
+					Final: true,
+				},
 			},
 		}},
 	}
@@ -106,10 +110,7 @@ func TestSlashResumeClearsHistoryBeforeReplay(t *testing.T) {
 	var sawReplay bool
 	for _, msg := range msgs {
 		if env, ok := msg.(appgateway.EventEnvelope); ok {
-			switch {
-			case env.Event.Narrative != nil && env.Event.Narrative.Text == "history reply":
-				sawReplay = true
-			case env.Event.SessionEvent != nil && strings.TrimSpace(env.Event.SessionEvent.Text) == "history reply":
+			if env.Event.Narrative != nil && env.Event.Narrative.Text == "history reply" {
 				sawReplay = true
 			}
 		}
@@ -148,6 +149,79 @@ func TestExecuteLineViaDriverStreamsGatewayEventsDirectly(t *testing.T) {
 	}
 	if _, ok := msgs[0].(appgateway.EventEnvelope); !ok {
 		t.Fatalf("first msg = %#v, want appgateway.EventEnvelope", msgs[0])
+	}
+}
+
+func TestExecuteLineViaDriverForwardsTerminalStreamEvents(t *testing.T) {
+	turn := &bridgeTestTurn{
+		events: make(chan appgateway.EventEnvelope, 1),
+	}
+	turn.events <- appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				RawOutput: map[string]any{
+					"task_id":       "task-1",
+					"terminal_id":   "terminal-1",
+					"running":       true,
+					"state":         "running",
+					"stdout_cursor": int64(4),
+				},
+				Status: appgateway.ToolStatusRunning,
+			},
+		},
+	}
+	close(turn.events)
+	terminalEvents := make(chan appgateway.EventEnvelope, 1)
+	terminalEvents <- appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind: appgateway.EventKindToolResult,
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				RawOutput: map[string]any{
+					"stream": "stdout",
+					"text":   "streamed\n",
+				},
+				Status: appgateway.ToolStatusRunning,
+			},
+		},
+	}
+	close(terminalEvents)
+
+	driver := &bridgeSubmitDriver{turn: turn, terminalEvents: terminalEvents}
+	var msgs []tea.Msg
+	result := executeLineViaDriver(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, Submission{Text: "hello"})
+	if result.Err != nil {
+		t.Fatalf("executeLineViaDriver() err = %v", result.Err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		var sawStream bool
+		for _, msg := range msgs {
+			env, ok := msg.(appgateway.EventEnvelope)
+			if !ok || env.Event.ToolResult == nil {
+				continue
+			}
+			if env.Event.ToolResult.RawOutput["text"] == "streamed\n" {
+				sawStream = true
+			}
+		}
+		if sawStream {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("messages = %#v, want forwarded terminal stream event", msgs)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if driver.terminalSubscribeCalls != 1 {
+		t.Fatalf("terminalSubscribeCalls = %d, want 1", driver.terminalSubscribeCalls)
 	}
 }
 
@@ -404,7 +478,9 @@ func (t *bridgeTestTurn) Cancel() bool { return false }
 func (t *bridgeTestTurn) Close() error { return nil }
 
 type bridgeSubmitDriver struct {
-	turn tuiadapterruntime.Turn
+	turn                   tuiadapterruntime.Turn
+	terminalEvents         <-chan appgateway.EventEnvelope
+	terminalSubscribeCalls int
 }
 
 func (d *bridgeSubmitDriver) Status(context.Context) (tuiadapterruntime.StatusSnapshot, error) {
@@ -413,6 +489,13 @@ func (d *bridgeSubmitDriver) Status(context.Context) (tuiadapterruntime.StatusSn
 func (d *bridgeSubmitDriver) WorkspaceDir() string { return "" }
 func (d *bridgeSubmitDriver) Submit(context.Context, tuiadapterruntime.Submission) (tuiadapterruntime.Turn, error) {
 	return d.turn, nil
+}
+func (d *bridgeSubmitDriver) SubscribeTerminal(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {
+	d.terminalSubscribeCalls++
+	if d.terminalEvents == nil {
+		return nil, false
+	}
+	return d.terminalEvents, true
 }
 func (d *bridgeSubmitDriver) Interrupt(context.Context) error { return nil }
 func (d *bridgeSubmitDriver) NewSession(context.Context) (sdksession.Session, error) {

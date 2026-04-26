@@ -21,6 +21,10 @@ type ProgramSender struct {
 	Send func(tea.Msg)
 }
 
+type terminalStreamDriver interface {
+	SubscribeTerminal(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool)
+}
+
 // ConfigFromDriver populates legacy Config callbacks from an adapter runtime.Driver.
 // sender must be non-nil; its Send field is populated after Program creation
 // but before the user can trigger ExecuteLine.
@@ -216,12 +220,32 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 			continue
 		}
 		send(env)
+		startTerminalStreamForwarder(ctx, driver, env, send)
 		if env.Event.Kind == appgateway.EventKindApprovalRequested {
 			sendApprovalPrompt(turn, env.Event.ApprovalPayload, send)
 		}
 	}
 
 	return TaskResultMsg{}
+}
+
+func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.Driver, env appgateway.EventEnvelope, send func(tea.Msg)) {
+	if send == nil {
+		return
+	}
+	streamer, ok := driver.(terminalStreamDriver)
+	if !ok {
+		return
+	}
+	events, ok := streamer.SubscribeTerminal(ctx, env)
+	if !ok || events == nil {
+		return
+	}
+	go func() {
+		for terminalEnv := range events {
+			send(terminalEnv)
+		}
+	}()
 }
 
 // ---------------------------------------------------------------------------

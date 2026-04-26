@@ -335,6 +335,7 @@ func writeSubagentEvents(builder *blockKeyBuilder, events []SubagentEvent) {
 		builder.addString(event.Name)
 		builder.addString(event.Args)
 		builder.addString(event.Output)
+		builder.addString(event.TaskID)
 		builder.addBool(event.Done)
 		builder.addBool(event.Err)
 		builder.addString(event.ApprovalTool)

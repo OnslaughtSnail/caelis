@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OnslaughtSnail/caelis/app/gatewayapp"
+	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	"github.com/OnslaughtSnail/caelis/sdk/model/providers/e2etest"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
@@ -66,25 +67,25 @@ func TestGatewayDriverProviderLiveTurnE2E(t *testing.T) {
 		if env.Err != nil {
 			t.Fatalf("turn event error = %v", env.Err)
 		}
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil || payload.Role != appgateway.NarrativeRoleAssistant {
 			continue
 		}
 		if firstEventAt.IsZero() {
 			firstEventAt = time.Now()
 		}
-		event := env.Event.SessionEvent
-		if event.Type == sdksession.EventTypeAssistant && event.Visibility == sdksession.VisibilityUIOnly {
+		if payload.Visibility == string(sdksession.VisibilityUIOnly) {
 			sawChunk = true
 		}
-		if event.Type == sdksession.EventTypeAssistant && event.Visibility == sdksession.VisibilityCanonical {
-			finalText = strings.TrimSpace(event.Text)
+		if payload.Visibility == string(sdksession.VisibilityCanonical) {
+			finalText = strings.TrimSpace(payload.Text)
 		}
 	}
 	if firstEventAt.IsZero() {
 		t.Fatal("expected at least one live turn event")
 	}
-	if delay := firstEventAt.Sub(start); delay > 2*time.Second {
-		t.Fatalf("first turn event arrived after %s, want under 2s", delay)
+	if delay, maxDelay := firstEventAt.Sub(start), providerFirstEventMaxDelay(spec.Provider); delay > maxDelay {
+		t.Fatalf("first turn event arrived after %s, want under %s", delay, maxDelay)
 	}
 	if !sawChunk {
 		t.Fatal("expected streaming UI-only assistant chunk on cli-tui surface")
@@ -244,12 +245,12 @@ func TestGatewayDriverProviderMultiTurnNewAndResumeE2E(t *testing.T) {
 	}
 	var replayedFinal string
 	for _, env := range replayed {
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil || payload.Role != appgateway.NarrativeRoleAssistant {
 			continue
 		}
-		event := env.Event.SessionEvent
-		if event.Type == sdksession.EventTypeAssistant && event.Visibility == sdksession.VisibilityCanonical {
-			replayedFinal = strings.TrimSpace(event.Text)
+		if payload.Visibility == string(sdksession.VisibilityCanonical) {
+			replayedFinal = strings.TrimSpace(payload.Text)
 		}
 	}
 	if replayedFinal != "tui runtime turn one ok" {
@@ -264,12 +265,12 @@ func collectFinalAssistantText(t *testing.T, turn Turn) string {
 		if env.Err != nil {
 			t.Fatalf("turn event error = %v", env.Err)
 		}
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil || payload.Role != appgateway.NarrativeRoleAssistant {
 			continue
 		}
-		event := env.Event.SessionEvent
-		if event.Type == sdksession.EventTypeAssistant && event.Visibility == sdksession.VisibilityCanonical {
-			finalText = strings.TrimSpace(event.Text)
+		if payload.Visibility == string(sdksession.VisibilityCanonical) {
+			finalText = strings.TrimSpace(payload.Text)
 		}
 	}
 	return finalText
@@ -299,5 +300,14 @@ func providerTokenEnv(provider string) string {
 		return "VOLCENGINE_API_KEY"
 	default:
 		return ""
+	}
+}
+
+func providerFirstEventMaxDelay(provider string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codefree":
+		return 5 * time.Second
+	default:
+		return 2 * time.Second
 	}
 }

@@ -227,6 +227,10 @@ type MainACPTurnBlock struct {
 	ExpandedTools map[string]bool
 }
 
+type ToolUpdateMeta struct {
+	TaskID string
+}
+
 func NewMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
 	return &MainACPTurnBlock{
 		id:        nextBlockID(),
@@ -266,10 +270,23 @@ func (b *MainACPTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk
 }
 
 func (b *MainACPTurnBlock) UpdateTool(callID, name, args, output string, final bool, err bool) {
+	b.UpdateToolWithMeta(callID, name, args, output, final, err, ToolUpdateMeta{})
+}
+
+func (b *MainACPTurnBlock) UpdateToolWithMeta(callID, name, args, output string, final bool, err bool, meta ToolUpdateMeta) {
 	if b == nil {
 		return
 	}
 	callID = strings.TrimSpace(callID)
+	name = strings.TrimSpace(name)
+	args = strings.TrimSpace(args)
+	if !isTerminalPanelTool(name) || final {
+		output = strings.TrimSpace(output)
+	}
+	taskID := strings.TrimSpace(meta.TaskID)
+	if updateLinkedTerminalEvent(b.Events, name, taskID, output) {
+		output = ""
+	}
 	if !final {
 		for i := len(b.Events) - 1; i >= 0; i-- {
 			ev := &b.Events[i]
@@ -277,29 +294,38 @@ func (b *MainACPTurnBlock) UpdateTool(callID, name, args, output string, final b
 				continue
 			}
 			if strings.TrimSpace(ev.Name) == "" {
-				ev.Name = strings.TrimSpace(name)
+				ev.Name = name
 			}
 			if strings.TrimSpace(ev.Args) == "" {
-				ev.Args = strings.TrimSpace(args)
+				ev.Args = args
+			}
+			if ev.TaskID == "" {
+				ev.TaskID = taskID
+			}
+			if text := output; text != "" {
+				ev.Output = mergeSubagentStreamChunk(ev.Output, text)
 			}
 			return
 		}
 		b.Events = append(b.Events, SubagentEvent{
 			Kind:   SEToolCall,
 			CallID: callID,
-			Name:   strings.TrimSpace(name),
-			Args:   strings.TrimSpace(args),
+			Name:   name,
+			Args:   args,
+			Output: output,
+			TaskID: taskID,
 		})
 		return
 	}
 	finalEvent := SubagentEvent{
 		Kind:   SEToolCall,
 		CallID: callID,
-		Name:   strings.TrimSpace(name),
-		Args:   strings.TrimSpace(args),
-		Output: strings.TrimSpace(output),
+		Name:   name,
+		Args:   args,
+		Output: output,
 		Done:   true,
 		Err:    err,
+		TaskID: taskID,
 	}
 	for i := len(b.Events) - 1; i >= 0; i-- {
 		ev := &b.Events[i]
@@ -318,6 +344,12 @@ func (b *MainACPTurnBlock) UpdateTool(callID, name, args, output string, final b
 			ev.Output = finalEvent.Output
 			ev.Done = true
 			ev.Err = finalEvent.Err
+			if ev.TaskID == "" {
+				ev.TaskID = finalEvent.TaskID
+			}
+			if shouldDefaultCollapseToolPanel(finalEvent.Name) {
+				b.setToolPanelExpanded(callID, false)
+			}
 			return
 		}
 		if strings.TrimSpace(finalEvent.Name) == "" {
@@ -329,6 +361,9 @@ func (b *MainACPTurnBlock) UpdateTool(callID, name, args, output string, final b
 		break
 	}
 	b.Events = append(b.Events, finalEvent)
+	if shouldDefaultCollapseToolPanel(finalEvent.Name) {
+		b.setToolPanelExpanded(callID, false)
+	}
 }
 
 func (b *MainACPTurnBlock) UpdatePlan(entries []planEntryState) {
@@ -453,10 +488,23 @@ func (b *ParticipantTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, c
 }
 
 func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, final bool, err bool) {
+	b.UpdateToolWithMeta(callID, name, args, output, final, err, ToolUpdateMeta{})
+}
+
+func (b *ParticipantTurnBlock) UpdateToolWithMeta(callID, name, args, output string, final bool, err bool, meta ToolUpdateMeta) {
 	if b == nil {
 		return
 	}
 	callID = strings.TrimSpace(callID)
+	name = strings.TrimSpace(name)
+	args = strings.TrimSpace(args)
+	if !isTerminalPanelTool(name) || final {
+		output = strings.TrimSpace(output)
+	}
+	taskID := strings.TrimSpace(meta.TaskID)
+	if updateLinkedTerminalEvent(b.Events, name, taskID, output) {
+		output = ""
+	}
 	if !final {
 		for i := len(b.Events) - 1; i >= 0; i-- {
 			ev := &b.Events[i]
@@ -464,29 +512,38 @@ func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, fin
 				continue
 			}
 			if strings.TrimSpace(ev.Name) == "" {
-				ev.Name = strings.TrimSpace(name)
+				ev.Name = name
 			}
 			if strings.TrimSpace(ev.Args) == "" {
-				ev.Args = strings.TrimSpace(args)
+				ev.Args = args
+			}
+			if ev.TaskID == "" {
+				ev.TaskID = taskID
+			}
+			if text := output; text != "" {
+				ev.Output = mergeSubagentStreamChunk(ev.Output, text)
 			}
 			return
 		}
 		b.Events = append(b.Events, SubagentEvent{
 			Kind:   SEToolCall,
 			CallID: callID,
-			Name:   strings.TrimSpace(name),
-			Args:   strings.TrimSpace(args),
+			Name:   name,
+			Args:   args,
+			Output: output,
+			TaskID: taskID,
 		})
 		return
 	}
 	finalEvent := SubagentEvent{
 		Kind:   SEToolCall,
 		CallID: callID,
-		Name:   strings.TrimSpace(name),
-		Args:   strings.TrimSpace(args),
-		Output: strings.TrimSpace(output),
+		Name:   name,
+		Args:   args,
+		Output: output,
 		Done:   true,
 		Err:    err,
+		TaskID: taskID,
 	}
 	for i := len(b.Events) - 1; i >= 0; i-- {
 		ev := &b.Events[i]
@@ -505,6 +562,12 @@ func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, fin
 			ev.Output = finalEvent.Output
 			ev.Done = true
 			ev.Err = finalEvent.Err
+			if ev.TaskID == "" {
+				ev.TaskID = finalEvent.TaskID
+			}
+			if shouldDefaultCollapseToolPanel(finalEvent.Name) {
+				b.setToolPanelExpanded(callID, false)
+			}
 			return
 		}
 		if strings.TrimSpace(finalEvent.Name) == "" {
@@ -516,6 +579,9 @@ func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, fin
 		break
 	}
 	b.Events = append(b.Events, finalEvent)
+	if shouldDefaultCollapseToolPanel(finalEvent.Name) {
+		b.setToolPanelExpanded(callID, false)
+	}
 }
 
 func (b *ParticipantTurnBlock) UpdatePlan(entries []planEntryState) {
@@ -659,6 +725,16 @@ func (b *MainACPTurnBlock) toggleToolPanelExpanded(callID string) bool {
 	return toggleToolPanelExpanded(&b.ExpandedTools, callID)
 }
 
+func (b *MainACPTurnBlock) setToolPanelExpanded(callID string, expanded bool) {
+	if b == nil || strings.TrimSpace(callID) == "" {
+		return
+	}
+	if b.ExpandedTools == nil {
+		b.ExpandedTools = map[string]bool{}
+	}
+	b.ExpandedTools[strings.TrimSpace(callID)] = expanded
+}
+
 func (b *MainACPTurnBlock) collapseAllToolPanels() {
 	if b == nil {
 		return
@@ -678,6 +754,16 @@ func (b *ParticipantTurnBlock) toggleToolPanelExpanded(callID string) bool {
 		return false
 	}
 	return toggleToolPanelExpanded(&b.ExpandedTools, callID)
+}
+
+func (b *ParticipantTurnBlock) setToolPanelExpanded(callID string, expanded bool) {
+	if b == nil || strings.TrimSpace(callID) == "" {
+		return
+	}
+	if b.ExpandedTools == nil {
+		b.ExpandedTools = map[string]bool{}
+	}
+	b.ExpandedTools[strings.TrimSpace(callID)] = expanded
 }
 
 func (b *ParticipantTurnBlock) collapseAllToolPanels() {
@@ -722,6 +808,15 @@ func collectToolPanelCallIDs(events []SubagentEvent) []string {
 		callIDs = append(callIDs, callID)
 	}
 	return callIDs
+}
+
+func shouldDefaultCollapseToolPanel(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "READ", "RG", "LIST", "GLOB", "SEARCH", "FIND":
+		return true
+	default:
+		return false
+	}
 }
 
 func participantTurnStatusLabel(state string) string {
@@ -941,6 +1036,26 @@ func visibleNarrativeEvents(events []SubagentEvent, status string) []SubagentEve
 	return out
 }
 
+func updateLinkedTerminalEvent(events []SubagentEvent, toolName string, taskID string, output string) bool {
+	if !strings.EqualFold(strings.TrimSpace(toolName), "TASK") {
+		return false
+	}
+	taskID = strings.TrimSpace(taskID)
+	output = strings.TrimSpace(output)
+	if taskID == "" || output == "" {
+		return false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := &events[i]
+		if ev.Kind != SEToolCall || strings.TrimSpace(ev.TaskID) != taskID || !isTerminalPanelTool(ev.Name) {
+			continue
+		}
+		ev.Output = output
+		return true
+	}
+	return false
+}
+
 func hasApprovalEvent(events []SubagentEvent) bool {
 	for _, ev := range events {
 		if ev.Kind == SEApproval {
@@ -1003,6 +1118,7 @@ type SubagentEvent struct {
 	Name   string
 	Args   string
 	Output string
+	TaskID string
 	Done   bool
 	Err    bool
 
@@ -1072,6 +1188,10 @@ func (s *SubagentSessionState) ReplaceFinalStreamChunk(kind SubagentEventKind, c
 }
 
 func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, chunk string, final bool) {
+	s.UpdateToolCallWithMeta(callID, toolName, args, stream, chunk, final, ToolUpdateMeta{})
+}
+
+func (s *SubagentSessionState) UpdateToolCallWithMeta(callID, toolName, args, stream, chunk string, final bool, meta ToolUpdateMeta) {
 	if s == nil {
 		return
 	}
@@ -1080,6 +1200,10 @@ func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, ch
 	args = strings.TrimSpace(args)
 	stream = strings.ToLower(strings.TrimSpace(stream))
 	chunk = normalizeSubagentChunkBoundary("", chunk)
+	taskID := strings.TrimSpace(meta.TaskID)
+	if updateLinkedTerminalEvent(s.Events, toolName, taskID, strings.TrimSpace(chunk)) {
+		chunk = ""
+	}
 	if !final {
 		for i := len(s.Events) - 1; i >= 0; i-- {
 			e := &s.Events[i]
@@ -1091,6 +1215,9 @@ func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, ch
 			}
 			if strings.TrimSpace(e.Args) == "" {
 				e.Args = args
+			}
+			if e.TaskID == "" {
+				e.TaskID = taskID
 			}
 			if chunk != "" {
 				e.Output = mergeSubagentStreamChunk(e.Output, chunk)
@@ -1104,6 +1231,7 @@ func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, ch
 			CallID: callID,
 			Args:   args,
 			Output: chunk,
+			TaskID: taskID,
 		})
 		s.eventsGen++
 		return
@@ -1117,6 +1245,7 @@ func (s *SubagentSessionState) UpdateToolCall(callID, toolName, args, stream, ch
 		Output: chunk,
 		Done:   true,
 		Err:    stream == "stderr",
+		TaskID: taskID,
 	}
 	for i := len(s.Events) - 1; i >= 0; i-- {
 		e := &s.Events[i]
@@ -1403,8 +1532,12 @@ func runeCount(text string) int {
 
 // UpdateToolCall creates or updates a tool call event identified by callID.
 func (b *SubagentPanelBlock) UpdateToolCall(callID, toolName, args, stream, chunk string, final bool) {
+	b.UpdateToolCallWithMeta(callID, toolName, args, stream, chunk, final, ToolUpdateMeta{})
+}
+
+func (b *SubagentPanelBlock) UpdateToolCallWithMeta(callID, toolName, args, stream, chunk string, final bool, meta ToolUpdateMeta) {
 	state := b.sessionState()
-	state.UpdateToolCall(callID, toolName, args, stream, chunk, final)
+	state.UpdateToolCallWithMeta(callID, toolName, args, stream, chunk, final, meta)
 	b.syncSessionMirror()
 }
 

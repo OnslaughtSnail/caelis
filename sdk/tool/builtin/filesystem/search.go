@@ -46,6 +46,7 @@ func (t *SearchTool) Definition() sdktool.Definition {
 					"description": "Optional relative path patterns to exclude after filtering.",
 					"items":       map[string]any{"type": "string"},
 				},
+				"respect_gitignore": map[string]any{"type": "boolean", "description": "When true, filter paths ignored by .gitignore at the search root."},
 			},
 			"required": []string{"path", "query"},
 		},
@@ -86,6 +87,10 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 	if err != nil {
 		return sdktool.Result{}, err
 	}
+	respectGitignore, err := argparse.Bool(args, "respect_gitignore", false)
+	if err != nil {
+		return sdktool.Result{}, err
+	}
 	fsys := fileSystemFromRuntime(t.runtime, call.Metadata)
 
 	target, err := normalizePathWithFS(fsys, pathArg)
@@ -122,12 +127,16 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 	if !info.IsDir() {
 		root = filepath.Dir(target)
 	}
+	excludeRules := excludeRulesFromPatterns(exclude)
+	if respectGitignore {
+		excludeRules = append(gitignoreExcludePatterns(fsys, root), excludeRules...)
+	}
 	if info.IsDir() {
 		walkErr := walkDir(fsys, target, func(path string, d fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return nil
 			}
-			if path != target && shouldExcludePath(root, path, d != nil && d.IsDir(), exclude) {
+			if path != target && shouldExcludePath(root, path, d != nil && d.IsDir(), excludeRules) {
 				if d != nil && d.IsDir() {
 					return fs.SkipDir
 				}
@@ -146,7 +155,7 @@ func (t *SearchTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Resul
 			return sdktool.Result{}, walkErr
 		}
 	} else {
-		if shouldExcludePath(root, target, false, exclude) {
+		if shouldExcludePath(root, target, false, excludeRules) {
 			return toolutil.JSONResult(SearchToolName, map[string]any{
 				"path":       target,
 				"query":      query,

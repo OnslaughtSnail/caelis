@@ -13,6 +13,7 @@ import (
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
 )
 
 type GatewayDriver struct {
@@ -27,6 +28,7 @@ type GatewayDriver struct {
 	sessionMode        string
 	defaultSandboxType string
 	sandboxType        string
+	terminalStreams    map[string]struct{}
 }
 
 func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSessionID string, bindingKey string, modelText string) (*GatewayDriver, error) {
@@ -46,6 +48,7 @@ func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSes
 		sessionMode:        "default",
 		defaultSandboxType: firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
 		sandboxType:        firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
+		terminalStreams:    map[string]struct{}{},
 	}
 	session, err := driver.stack.StartSession(ctx, strings.TrimSpace(preferredSessionID), driver.bindingKey)
 	if err != nil {
@@ -55,6 +58,59 @@ func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSes
 	driver.hasSession = true
 	driver.refreshSessionDisplay(ctx, session)
 	return driver, nil
+}
+
+func (d *GatewayDriver) SubscribeTerminal(ctx context.Context, env appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {
+	if d == nil || d.stack == nil || d.stack.Gateway == nil {
+		return nil, false
+	}
+	req, ok := appgateway.TerminalStreamRequestFromEvent(env)
+	if !ok {
+		return nil, false
+	}
+	terminals := d.stack.Gateway.Terminals()
+	if terminals == nil {
+		return nil, false
+	}
+	key := req.Key()
+	if key == "" {
+		return nil, false
+	}
+	d.mu.Lock()
+	if d.terminalStreams == nil {
+		d.terminalStreams = map[string]struct{}{}
+	}
+	if _, exists := d.terminalStreams[key]; exists {
+		d.mu.Unlock()
+		return nil, false
+	}
+	d.terminalStreams[key] = struct{}{}
+	d.mu.Unlock()
+
+	out := make(chan appgateway.EventEnvelope, 32)
+	go func() {
+		defer close(out)
+		defer func() {
+			d.mu.Lock()
+			delete(d.terminalStreams, key)
+			d.mu.Unlock()
+		}()
+		for frame, err := range terminals.Subscribe(ctx, sdkterminal.SubscribeRequest{Ref: req.Ref, Cursor: req.Cursor}) {
+			if err != nil || frame == nil {
+				return
+			}
+			if strings.TrimSpace(frame.Text) == "" {
+				continue
+			}
+			env := appgateway.TerminalFrameEvent(req, sdkterminal.CloneFrame(*frame))
+			select {
+			case out <- env:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out, true
 }
 
 func (d *GatewayDriver) WorkspaceDir() string {

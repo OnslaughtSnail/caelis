@@ -50,6 +50,7 @@ type TranscriptEvent struct {
 	ToolStream string
 	ToolStatus string
 	ToolError  bool
+	ToolTaskID string
 
 	PlanEntries []PlanEntry
 
@@ -167,6 +168,9 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 		}
 	case appgateway.EventKindToolCall:
 		if payload := ev.ToolCall; payload != nil {
+			if strings.EqualFold(strings.TrimSpace(payload.ToolName), "PLAN") {
+				break
+			}
 			status := strings.TrimSpace(string(payload.Status))
 			if status == "" || payload.Status == appgateway.ToolStatusStarted {
 				status = string(appgateway.ToolStatusRunning)
@@ -179,12 +183,16 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 				OccurredAt: occurredAt,
 				ToolCallID: strings.TrimSpace(payload.CallID),
 				ToolName:   strings.TrimSpace(payload.ToolName),
-				ToolArgs:   acpprojector.FormatToolStart(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, payload.ArgsText)),
+				ToolArgs:   toolDisplayArgs(payload.ToolName, payload.RawInput, acpprojector.FormatToolStart(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, payload.ArgsText))),
 				ToolStatus: status,
+				ToolTaskID: toolDisplayTaskID(payload.RawInput, nil),
 			})
 		}
 	case appgateway.EventKindToolResult:
 		if payload := ev.ToolResult; payload != nil {
+			if strings.EqualFold(strings.TrimSpace(payload.ToolName), "PLAN") {
+				break
+			}
 			status := strings.TrimSpace(string(payload.Status))
 			if status == "" {
 				if payload.Error {
@@ -193,6 +201,14 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 					status = string(appgateway.ToolStatusCompleted)
 				}
 			}
+			toolOutput := toolDisplayOutput(payload.ToolName, payload.RawInput, payload.RawOutput, acpprojector.FormatToolResult(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, ""), gatewayToolResultMap(payload.OutputText, payload.Error), status), status, payload.Error)
+			toolArgs := toolDisplayArgs(payload.ToolName, payload.RawInput, acpprojector.FormatToolStart(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, "")))
+			if len(payload.RawInput) > 0 || len(payload.RawOutput) > 0 {
+				if header := toolDisplayResultHeader(payload.ToolName, toolOutput); header != "" {
+					toolArgs = header
+				}
+			}
+			toolOutput = toolDisplayPanelOutput(payload.ToolName, toolOutput)
 			out = append(out, TranscriptEvent{
 				Kind:       TranscriptEventTool,
 				Scope:      scope,
@@ -201,12 +217,13 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 				OccurredAt: occurredAt,
 				ToolCallID: strings.TrimSpace(payload.CallID),
 				ToolName:   strings.TrimSpace(payload.ToolName),
-				ToolArgs:   acpprojector.FormatToolStart(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, "")),
-				ToolOutput: acpprojector.FormatToolResult(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, ""), gatewayToolResultMap(payload.OutputText, payload.Error), status),
+				ToolArgs:   toolArgs,
+				ToolOutput: toolOutput,
 				ToolStream: transcriptToolStream(status, payload.Error),
 				ToolStatus: status,
 				ToolError:  payload.Error || strings.EqualFold(status, string(appgateway.ToolStatusFailed)),
-				Final:      true,
+				ToolTaskID: toolDisplayTaskID(payload.RawInput, payload.RawOutput),
+				Final:      transcriptToolStatusFinal(status, payload.Error),
 			})
 		}
 	case appgateway.EventKindPlanUpdate:
@@ -226,17 +243,8 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 			}
 		}
 	case appgateway.EventKindApprovalRequested:
-		toolName, command := gatewayApprovalSummary(ev)
-		out = append(out, TranscriptEvent{
-			Kind:            TranscriptEventApproval,
-			Scope:           scope,
-			ScopeID:         scopeID,
-			OccurredAt:      occurredAt,
-			ApprovalTool:    toolName,
-			ApprovalCommand: command,
-			ApprovalStatus:  string(appgateway.ApprovalStatusPending),
-			State:           string(appgateway.LifecycleStatusWaitingApproval),
-		})
+		// Approval requests are transient composer overlays driven by
+		// PromptRequestMsg. They intentionally do not persist into transcript.
 	case appgateway.EventKindParticipant:
 		if payload := ev.Participant; payload != nil {
 			state := strings.TrimSpace(string(payload.Action))
@@ -250,7 +258,7 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 				})
 			}
 		}
-	case appgateway.EventKindLifecycle, appgateway.EventKindSessionLifecycle:
+	case appgateway.EventKindLifecycle:
 		if payload := ev.Lifecycle; payload != nil {
 			state := strings.ToLower(strings.TrimSpace(string(payload.Status)))
 			if state != "" {
@@ -326,11 +334,12 @@ func ProjectACPProjectionToTranscriptEvents(msg ACPProjectionMsg) []TranscriptEv
 				OccurredAt: occurredAt,
 				ToolCallID: strings.TrimSpace(msg.ToolCallID),
 				ToolName:   strings.TrimSpace(msg.ToolName),
-				ToolArgs:   acpprojector.FormatToolStart(msg.ToolName, msg.ToolArgs),
+				ToolArgs:   toolDisplayArgs(msg.ToolName, msg.ToolArgs, acpprojector.FormatToolStart(msg.ToolName, msg.ToolArgs)),
 				ToolOutput: tuikit.SanitizeLogText(chunk),
 				ToolStream: stream,
 				ToolStatus: strings.ToLower(strings.TrimSpace(msg.ToolStatus)),
 				ToolError:  stream == "stderr",
+				ToolTaskID: toolDisplayTaskID(msg.ToolArgs, msg.ToolResult),
 				Final:      final,
 			})
 		}
@@ -350,6 +359,7 @@ func ProjectACPProjectionToTranscriptEvents(msg ACPProjectionMsg) []TranscriptEv
 			ToolStream: transcriptToolStream(strings.ToLower(strings.TrimSpace(msg.ToolStatus)), err),
 			ToolStatus: strings.ToLower(strings.TrimSpace(msg.ToolStatus)),
 			ToolError:  err,
+			ToolTaskID: toolDisplayTaskID(msg.ToolArgs, msg.ToolResult),
 			Final:      final,
 		})
 	}
@@ -361,6 +371,18 @@ func transcriptToolStream(status string, isErr bool) string {
 		return "stderr"
 	}
 	return "stdout"
+}
+
+func transcriptToolStatusFinal(status string, isErr bool) bool {
+	if isErr {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "interrupted", "cancelled", "canceled":
+		return true
+	default:
+		return false
+	}
 }
 
 func acpProjectionStreamPayload(msg ACPProjectionMsg) (SubagentEventKind, string, bool, bool) {
@@ -390,13 +412,20 @@ func acpProjectionToolPayload(msg ACPProjectionMsg) (args string, output string,
 	if callID == "" || toolName == "" {
 		return "", "", false, false, false
 	}
-	args = acpprojector.FormatToolStart(msg.ToolName, msg.ToolArgs)
+	if strings.EqualFold(toolName, "PLAN") {
+		return "", "", false, false, false
+	}
+	args = toolDisplayArgs(msg.ToolName, msg.ToolArgs, acpprojector.FormatToolStart(msg.ToolName, msg.ToolArgs))
 	status := strings.ToLower(strings.TrimSpace(msg.ToolStatus))
 	switch status {
 	case "", "pending", "in_progress", "running":
 		return args, "", false, false, true
 	case "completed", "failed":
-		output = acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus)
+		output = toolDisplayOutput(msg.ToolName, msg.ToolArgs, msg.ToolResult, acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), msg.ToolStatus, status == "failed")
+		if header := toolDisplayResultHeader(msg.ToolName, output); header != "" {
+			args = header
+		}
+		output = toolDisplayPanelOutput(msg.ToolName, output)
 		return args, output, true, status == "failed", true
 	default:
 		return "", "", false, false, false
@@ -412,9 +441,9 @@ func acpProjectionSubagentToolPayload(msg ACPProjectionMsg) (stream string, chun
 	status := strings.ToLower(strings.TrimSpace(msg.ToolStatus))
 	switch status {
 	case "completed":
-		return "stdout", acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), true, true
+		return "stdout", toolDisplayPanelOutput(msg.ToolName, toolDisplayOutput(msg.ToolName, msg.ToolArgs, msg.ToolResult, acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), msg.ToolStatus, false)), true, true
 	case "failed":
-		return "stderr", acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), true, true
+		return "stderr", toolDisplayPanelOutput(msg.ToolName, toolDisplayOutput(msg.ToolName, msg.ToolArgs, msg.ToolResult, acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), msg.ToolStatus, true)), true, true
 	case "", "pending", "in_progress", "running":
 		if msg.ToolResult == nil {
 			return "", "", false, true
@@ -423,7 +452,7 @@ func acpProjectionSubagentToolPayload(msg ACPProjectionMsg) (stream string, chun
 		if stream == "" {
 			stream = "stdout"
 		}
-		return stream, acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), false, true
+		return stream, toolDisplayPanelOutput(msg.ToolName, toolDisplayOutput(msg.ToolName, msg.ToolArgs, msg.ToolResult, acpprojector.FormatToolResult(msg.ToolName, msg.ToolArgs, msg.ToolResult, msg.ToolStatus), msg.ToolStatus, false)), false, true
 	default:
 		return "", "", false, false
 	}

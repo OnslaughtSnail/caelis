@@ -2,9 +2,10 @@ package core
 
 import (
 	"encoding/json"
+	"maps"
+	"path/filepath"
 	"strings"
 
-	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
@@ -21,19 +22,19 @@ func projectSessionEvents(ref sdksession.SessionRef, events []*sdksession.Event)
 		out = append(out, EventEnvelope{
 			Cursor: event.ID,
 			Event: Event{
-				Kind:         sessionEventKind(event),
-				TurnID:       turnIDFromSessionEvent(event),
-				OccurredAt:   event.Time,
-				SessionRef:   ref,
-				Origin:       canonicalOriginFromSessionEvent(ref, event),
-				SessionEvent: event,
-				Usage:        usageSnapshotFromSessionEvent(event),
-				Narrative:    canonicalNarrativePayload(event),
-				ToolCall:     canonicalToolCallPayload(event),
-				ToolResult:   canonicalToolResultPayload(event),
-				Plan:         canonicalPlanPayload(event),
-				Participant:  canonicalParticipantPayload(event),
-				Lifecycle:    canonicalLifecyclePayload(event),
+				Kind:        sessionEventKind(event),
+				TurnID:      turnIDFromSessionEvent(event),
+				OccurredAt:  event.Time,
+				SessionRef:  ref,
+				Origin:      canonicalOriginFromSessionEvent(ref, event),
+				Meta:        canonicalEventMeta(event),
+				Usage:       usageSnapshotFromSessionEvent(event),
+				Narrative:   canonicalNarrativePayload(event),
+				ToolCall:    canonicalToolCallPayload(event),
+				ToolResult:  canonicalToolResultPayload(event),
+				Plan:        canonicalPlanPayload(event),
+				Participant: canonicalParticipantPayload(event),
+				Lifecycle:   canonicalLifecyclePayload(event),
 			},
 		})
 	}
@@ -102,11 +103,11 @@ func sessionEventKind(event *sdksession.Event) EventKind {
 	case sdksession.EventTypeNotice:
 		return EventKindNotice
 	case sdksession.EventTypeLifecycle:
-		return EventKindSessionLifecycle
+		return EventKindLifecycle
 	case sdksession.EventTypeSystem:
 		return EventKindSystemMessage
 	default:
-		return EventKindSessionEvent
+		return EventKindNotice
 	}
 }
 
@@ -267,24 +268,6 @@ func AssistantText(event Event) string {
 	if event.Narrative != nil && event.Narrative.Role == NarrativeRoleAssistant {
 		return strings.TrimSpace(event.Narrative.Text)
 	}
-	sessionEvent := event.SessionEvent
-	if sessionEvent == nil {
-		return ""
-	}
-	if event.Kind != EventKindAssistantMessage && event.Kind != EventKindSessionEvent {
-		return ""
-	}
-	if sessionEvent.Message != nil {
-		if text := assistantTextFromSessionEvent(sessionEvent); text != "" {
-			return text
-		}
-	}
-	if sdksession.EventTypeOf(sessionEvent) == sdksession.EventTypeAssistant {
-		return strings.TrimSpace(sessionEvent.Text)
-	}
-	if sessionEvent.Message != nil && sessionEvent.Message.Role == sdkmodel.RoleAssistant {
-		return assistantTextFromSessionEvent(sessionEvent)
-	}
 	return ""
 }
 
@@ -351,6 +334,7 @@ func canonicalToolCallPayload(event *sdksession.Event) *ToolCallPayload {
 		ToolName:       toolName,
 		ArgsText:       argsText,
 		CommandPreview: commandPreview,
+		RawInput:       canonicalToolRawInput(event),
 		Status:         canonicalToolCallStatus(rawStatus),
 		Actor:          actorIDFromSessionEvent(event),
 		Scope:          scopeFromSessionEvent(event),
@@ -372,6 +356,8 @@ func canonicalToolResultPayload(event *sdksession.Event) *ToolResultPayload {
 		ToolName:       toolName,
 		OutputText:     outputText,
 		CommandPreview: commandPreview,
+		RawInput:       canonicalToolRawInput(event),
+		RawOutput:      canonicalToolRawOutput(event),
 		Status:         canonicalToolResultStatus(rawStatus, isErr),
 		Error:          isErr,
 		Actor:          actorIDFromSessionEvent(event),
@@ -586,6 +572,220 @@ func canonicalToolOutput(event *sdksession.Event) (string, bool) {
 	return strings.TrimSpace(event.Text), false
 }
 
+func canonicalToolRawInput(event *sdksession.Event) map[string]any {
+	if event == nil || event.Protocol == nil || event.Protocol.ToolCall == nil {
+		return nil
+	}
+	return maps.Clone(event.Protocol.ToolCall.RawInput)
+}
+
+func canonicalToolRawOutput(event *sdksession.Event) map[string]any {
+	if event == nil || event.Protocol == nil || event.Protocol.ToolCall == nil {
+		return nil
+	}
+	return maps.Clone(event.Protocol.ToolCall.RawOutput)
+}
+
+func canonicalEventMeta(event *sdksession.Event) map[string]any {
+	if event == nil {
+		return nil
+	}
+	meta := map[string]any{}
+	if existing := mapFromAny(event.Meta["caelis"]); existing != nil {
+		meta["caelis"] = existing
+	}
+	display := caelisDisplayMeta(event)
+	if len(display) > 0 {
+		caelis := mapFromAny(meta["caelis"])
+		if caelis == nil {
+			caelis = map[string]any{}
+		}
+		caelis["display"] = display
+		meta["caelis"] = caelis
+	}
+	if len(meta) == 0 {
+		return nil
+	}
+	return meta
+}
+
+func caelisDisplayMeta(event *sdksession.Event) map[string]any {
+	if event == nil || event.Protocol == nil || event.Protocol.ToolCall == nil {
+		return nil
+	}
+	tool := event.Protocol.ToolCall
+	name := strings.ToUpper(strings.TrimSpace(tool.Name))
+	if name == "" {
+		name = strings.ToUpper(strings.TrimSpace(tool.Kind))
+	}
+	display := map[string]any{
+		"tool": map[string]any{
+			"name":   strings.TrimSpace(tool.Name),
+			"kind":   strings.TrimSpace(tool.Kind),
+			"title":  firstNonEmpty(strings.TrimSpace(tool.Title), commandPreviewFromRaw(tool.RawInput)),
+			"status": canonicalToolCallStatus(tool.Status),
+		},
+	}
+	if file := caelisFileDisplayMeta(name, tool.RawInput, tool.RawOutput); len(file) > 0 {
+		display["file"] = file
+	}
+	if diff := caelisDiffDisplayMeta(name, tool.RawInput, tool.RawOutput); len(diff) > 0 {
+		display["diff"] = diff
+	}
+	if terminal := caelisTerminalDisplayMeta(name, tool.RawInput, tool.RawOutput); len(terminal) > 0 {
+		display["terminal"] = terminal
+	}
+	return display
+}
+
+func caelisFileDisplayMeta(toolName string, input map[string]any, output map[string]any) map[string]any {
+	switch toolName {
+	case "READ":
+		path := firstNonEmpty(stringValue(output["path"]), stringValue(input["path"]))
+		if path == "" {
+			return nil
+		}
+		return compactMap(map[string]any{
+			"path":       path,
+			"short_path": filepath.Base(path),
+			"start_line": intValue(firstNonNil(output["start_line"], input["start_line"])),
+			"end_line":   intValue(firstNonNil(output["end_line"], input["end_line"])),
+			"has_more":   output["has_more"],
+		})
+	case "LIST":
+		path := firstNonEmpty(stringValue(output["path"]), stringValue(input["path"]))
+		if path == "" {
+			return nil
+		}
+		return compactMap(map[string]any{
+			"path":        path,
+			"short_path":  filepath.Base(path),
+			"entry_count": intValue(output["count"]),
+		})
+	case "GLOB":
+		pattern := firstNonEmpty(stringValue(output["pattern"]), stringValue(input["pattern"]))
+		return compactMap(map[string]any{
+			"pattern":     pattern,
+			"match_count": intValue(output["count"]),
+			"matches":     output["matches"],
+		})
+	case "SEARCH", "RG", "FIND":
+		return compactMap(map[string]any{
+			"path":       firstNonEmpty(stringValue(output["path"]), stringValue(input["path"])),
+			"query":      firstNonEmpty(stringValue(output["query"]), stringValue(input["query"]), stringValue(input["pattern"])),
+			"hit_count":  intValue(output["count"]),
+			"file_count": intValue(output["file_count"]),
+			"hits":       output["hits"],
+		})
+	default:
+		return nil
+	}
+}
+
+func caelisDiffDisplayMeta(toolName string, input map[string]any, output map[string]any) map[string]any {
+	switch toolName {
+	case "WRITE", "PATCH":
+	default:
+		return nil
+	}
+	path := firstNonEmpty(stringValue(output["path"]), stringValue(input["path"]))
+	if path == "" {
+		return nil
+	}
+	return compactMap(map[string]any{
+		"path":          path,
+		"short_path":    filepath.Base(path),
+		"created":       output["created"],
+		"hunk":          output["hunk"],
+		"old":           input["old"],
+		"new":           input["new"],
+		"added_lines":   intValue(output["added_lines"]),
+		"removed_lines": intValue(output["removed_lines"]),
+	})
+}
+
+func caelisTerminalDisplayMeta(toolName string, input map[string]any, output map[string]any) map[string]any {
+	switch toolName {
+	case "BASH", "SPAWN", "TASK":
+	default:
+		return nil
+	}
+	return compactMap(map[string]any{
+		"command":        firstNonEmpty(stringValue(input["command"]), stringValue(input["cmd"])),
+		"stdout":         output["stdout"],
+		"stderr":         output["stderr"],
+		"result":         output["result"],
+		"output_preview": output["output_preview"],
+		"text":           output["text"],
+		"stream":         output["stream"],
+		"exit_code":      output["exit_code"],
+		"state":          output["state"],
+		"running":        output["running"],
+		"task_id":        output["task_id"],
+		"terminal_id":    output["terminal_id"],
+		"stdout_cursor":  output["stdout_cursor"],
+		"stderr_cursor":  output["stderr_cursor"],
+	})
+}
+
+func compactMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range in {
+		if emptyMetaValue(value) {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func emptyMetaValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(typed) == ""
+	case int:
+		return typed == 0
+	case int64:
+		return typed == 0
+	case float64:
+		return typed == 0
+	case []any:
+		return len(typed) == 0
+	case map[string]any:
+		return len(typed) == 0
+	default:
+		return false
+	}
+}
+
+func mapFromAny(value any) map[string]any {
+	if typed, ok := value.(map[string]any); ok {
+		return maps.Clone(typed)
+	}
+	return nil
+}
+
+func firstNonNil(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func stringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
 func compactJSONFields(raw map[string]any) string {
 	if len(raw) == 0 {
 		return ""
@@ -648,10 +848,16 @@ func canonicalToolCallStatus(status string) ToolStatus {
 		return ToolStatusStarted
 	case "in_progress", "running":
 		return ToolStatusRunning
+	case "waiting_approval":
+		return ToolStatusWaitingApproval
 	case "completed":
 		return ToolStatusCompleted
 	case "error", "failed":
 		return ToolStatusFailed
+	case "interrupted":
+		return ToolStatusInterrupted
+	case "cancelled", "canceled":
+		return ToolStatusCancelled
 	default:
 		return ToolStatus(strings.TrimSpace(status))
 	}
@@ -663,10 +869,16 @@ func canonicalToolResultStatus(status string, isErr bool) ToolStatus {
 		return ToolStatusStarted
 	case "in_progress", "running":
 		return ToolStatusRunning
+	case "waiting_approval":
+		return ToolStatusWaitingApproval
 	case "completed":
 		return ToolStatusCompleted
 	case "error", "failed":
 		return ToolStatusFailed
+	case "interrupted":
+		return ToolStatusInterrupted
+	case "cancelled", "canceled":
+		return ToolStatusCancelled
 	case "":
 		if isErr {
 			return ToolStatusFailed

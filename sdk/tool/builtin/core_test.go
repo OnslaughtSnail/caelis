@@ -125,6 +125,45 @@ func TestCoreCodingToolsE2E(t *testing.T) {
 		t.Fatalf("list count = %v, want 1", got)
 	}
 
+	if err := os.MkdirAll(filepath.Join(dir, "_sync_mirrors", "large.git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(_sync_mirrors) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "_sync_mirrors", "large.git", "ignored.txt"), []byte("caelis\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(ignored mirror) error = %v", err)
+	}
+	searchResult = runToolJSON(t, searchTool, map[string]any{
+		"path":  dir,
+		"query": "caelis",
+	})
+	if got := searchResult["count"]; got != float64(2) {
+		t.Fatalf("search count with mirror dir = %v, want 2", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("_sync_mirrors/\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.gitignore) error = %v", err)
+	}
+	searchResult = runToolJSON(t, searchTool, map[string]any{
+		"path":              dir,
+		"query":             "caelis",
+		"respect_gitignore": true,
+	})
+	if got := searchResult["count"]; got != float64(1) {
+		t.Fatalf("search count with respect_gitignore = %v, want 1", got)
+	}
+	globResult = runToolJSON(t, globTool, map[string]any{
+		"pattern":           filepath.Join(dir, "**/*.txt"),
+		"respect_gitignore": true,
+	})
+	if got := globResult["count"]; got != float64(1) {
+		t.Fatalf("glob count with respect_gitignore = %v, want 1", got)
+	}
+	listResult = runToolJSON(t, listTool, map[string]any{
+		"path":              dir,
+		"respect_gitignore": true,
+	})
+	if got := listResult["count"]; got != float64(2) {
+		t.Fatalf("list count with respect_gitignore = %v, want 2", got)
+	}
+
 	bashTool := mustLookupTool(t, reg, shell.BashToolName)
 	bashResult := runToolJSON(t, bashTool, map[string]any{
 		"command":       "cat notes.txt",

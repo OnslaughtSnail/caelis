@@ -909,6 +909,9 @@ func (m *Model) allowsBTWSubmission() bool {
 }
 
 func (m *Model) tryToggleACPToolPanelToken(blockID string, token string) bool {
+	if rawIDs, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_exploration_group:"); ok {
+		return m.tryToggleACPExplorationGroupToken(blockID, rawIDs)
+	}
 	callID, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_tool_panel:")
 	if !ok || strings.TrimSpace(callID) == "" {
 		return false
@@ -923,6 +926,38 @@ func (m *Model) tryToggleACPToolPanelToken(blockID string, token string) bool {
 	default:
 		return false
 	}
+}
+
+func (m *Model) tryToggleACPExplorationGroupToken(blockID string, rawIDs string) bool {
+	callIDs := splitNonEmptyCommaList(rawIDs)
+	if len(callIDs) == 0 {
+		return false
+	}
+	switch blk := m.doc.Find(strings.TrimSpace(blockID)).(type) {
+	case *ParticipantTurnBlock:
+		for _, callID := range callIDs {
+			blk.setToolPanelExpanded(callID, true)
+		}
+		return true
+	case *MainACPTurnBlock:
+		for _, callID := range callIDs {
+			blk.setToolPanelExpanded(callID, true)
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func splitNonEmptyCommaList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (m *Model) submissionModeForLine(line string) SubmissionMode {

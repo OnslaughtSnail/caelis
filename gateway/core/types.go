@@ -253,7 +253,6 @@ func ClassifySurface(surface string) SurfaceClass {
 type EventKind string
 
 const (
-	EventKindSessionEvent      EventKind = "session_event"
 	EventKindUserMessage       EventKind = "user_message"
 	EventKindAssistantMessage  EventKind = "assistant_message"
 	EventKindPlanUpdate        EventKind = "plan_update"
@@ -263,7 +262,6 @@ const (
 	EventKindHandoff           EventKind = "handoff"
 	EventKindCompact           EventKind = "compact"
 	EventKindNotice            EventKind = "notice"
-	EventKindSessionLifecycle  EventKind = "session_lifecycle"
 	EventKindSystemMessage     EventKind = "system_message"
 	EventKindApprovalRequested EventKind = "approval_requested"
 	EventKindLifecycle         EventKind = "lifecycle"
@@ -308,33 +306,39 @@ type NarrativePayload struct {
 type ToolStatus string
 
 const (
-	ToolStatusStarted   ToolStatus = "started"
-	ToolStatusRunning   ToolStatus = "running"
-	ToolStatusCompleted ToolStatus = "completed"
-	ToolStatusFailed    ToolStatus = "failed"
+	ToolStatusStarted         ToolStatus = "started"
+	ToolStatusRunning         ToolStatus = "running"
+	ToolStatusWaitingApproval ToolStatus = "waiting_approval"
+	ToolStatusCompleted       ToolStatus = "completed"
+	ToolStatusFailed          ToolStatus = "failed"
+	ToolStatusInterrupted     ToolStatus = "interrupted"
+	ToolStatusCancelled       ToolStatus = "cancelled"
 )
 
 type ToolCallPayload struct {
-	CallID         string     `json:"call_id,omitempty"`
-	ToolName       string     `json:"tool_name,omitempty"`
-	ArgsText       string     `json:"args_text,omitempty"`
-	CommandPreview string     `json:"command_preview,omitempty"`
-	Status         ToolStatus `json:"status,omitempty"`
-	Actor          string     `json:"actor,omitempty"`
-	Scope          EventScope `json:"scope,omitempty"`
-	ParticipantID  string     `json:"participant_id,omitempty"`
+	CallID         string         `json:"call_id,omitempty"`
+	ToolName       string         `json:"tool_name,omitempty"`
+	ArgsText       string         `json:"args_text,omitempty"`
+	CommandPreview string         `json:"command_preview,omitempty"`
+	RawInput       map[string]any `json:"raw_input,omitempty"`
+	Status         ToolStatus     `json:"status,omitempty"`
+	Actor          string         `json:"actor,omitempty"`
+	Scope          EventScope     `json:"scope,omitempty"`
+	ParticipantID  string         `json:"participant_id,omitempty"`
 }
 
 type ToolResultPayload struct {
-	CallID         string     `json:"call_id,omitempty"`
-	ToolName       string     `json:"tool_name,omitempty"`
-	OutputText     string     `json:"output_text,omitempty"`
-	CommandPreview string     `json:"command_preview,omitempty"`
-	Status         ToolStatus `json:"status,omitempty"`
-	Error          bool       `json:"error,omitempty"`
-	Actor          string     `json:"actor,omitempty"`
-	Scope          EventScope `json:"scope,omitempty"`
-	ParticipantID  string     `json:"participant_id,omitempty"`
+	CallID         string         `json:"call_id,omitempty"`
+	ToolName       string         `json:"tool_name,omitempty"`
+	OutputText     string         `json:"output_text,omitempty"`
+	CommandPreview string         `json:"command_preview,omitempty"`
+	RawInput       map[string]any `json:"raw_input,omitempty"`
+	RawOutput      map[string]any `json:"raw_output,omitempty"`
+	Status         ToolStatus     `json:"status,omitempty"`
+	Error          bool           `json:"error,omitempty"`
+	Actor          string         `json:"actor,omitempty"`
+	Scope          EventScope     `json:"scope,omitempty"`
+	ParticipantID  string         `json:"participant_id,omitempty"`
 }
 
 type PlanEntryPayload struct {
@@ -417,50 +421,42 @@ type EventOrigin struct {
 }
 
 type Event struct {
-	Kind       EventKind
-	HandleID   string
-	RunID      string
-	TurnID     string
-	OccurredAt time.Time
-	SessionRef sdksession.SessionRef
-	Origin     *EventOrigin
-	// Deprecated: raw SDK session event kept for short-term compatibility only.
-	// Adapters should consume Narrative, ToolCall, ToolResult, Plan,
-	// Participant, Lifecycle, and Usage instead of depending on raw session
-	// event shape.
-	SessionEvent *sdksession.Event
+	Kind       EventKind             `json:"kind"`
+	HandleID   string                `json:"handle_id,omitempty"`
+	RunID      string                `json:"run_id,omitempty"`
+	TurnID     string                `json:"turn_id,omitempty"`
+	OccurredAt time.Time             `json:"occurred_at,omitempty"`
+	SessionRef sdksession.SessionRef `json:"session_ref,omitempty"`
+	Origin     *EventOrigin          `json:"origin,omitempty"`
+	Meta       map[string]any        `json:"meta,omitempty"`
 	// Usage is the canonical token snapshot projected from one runtime/session
 	// event. It is stable across UI, headless, and adapter boundaries.
-	Usage *UsageSnapshot
-	// Deprecated: raw runtime approval request kept for short-term compatibility
-	// only. Adapters should consume ApprovalPayload and submit ApprovalDecision
-	// without depending on runtime-owned request internals.
-	Approval *sdkruntime.ApprovalRequest
+	Usage *UsageSnapshot `json:"usage,omitempty"`
 	// Narrative carries stable user/assistant/system/notice text. Assistant
 	// reasoning remains separate in ReasoningText so UIs can preserve the answer
 	// boundary without re-parsing raw provider events.
-	Narrative *NarrativePayload
+	Narrative *NarrativePayload `json:"narrative,omitempty"`
 	// ToolCall is the stable canonical tool invocation view with normalized
 	// status, arguments text, and command preview.
-	ToolCall *ToolCallPayload
+	ToolCall *ToolCallPayload `json:"tool_call,omitempty"`
 	// ToolResult is the stable canonical tool result/update view with normalized
 	// status and summarized output.
-	ToolResult *ToolResultPayload
+	ToolResult *ToolResultPayload `json:"tool_result,omitempty"`
 	// Plan is the stable canonical plan snapshot for one event.
-	Plan *PlanPayload
+	Plan *PlanPayload `json:"plan,omitempty"`
 	// ApprovalPayload is the stable canonical approval request summary for one
 	// event.
-	ApprovalPayload *ApprovalPayload
+	ApprovalPayload *ApprovalPayload `json:"approval,omitempty"`
 	// Participant is the stable canonical participant lifecycle payload.
-	Participant *ParticipantPayload
+	Participant *ParticipantPayload `json:"participant,omitempty"`
 	// Lifecycle is the stable canonical run/session lifecycle payload.
-	Lifecycle *LifecyclePayload
+	Lifecycle *LifecyclePayload `json:"lifecycle,omitempty"`
 }
 
 type EventEnvelope struct {
-	Cursor string
-	Event  Event
-	Err    error
+	Cursor string `json:"cursor,omitempty"`
+	Event  Event  `json:"event"`
+	Err    *Error `json:"err,omitempty"`
 }
 
 type SubmissionKind string

@@ -92,7 +92,7 @@ func renderEventPolicyForGatewayEnvelope(env appgateway.EventEnvelope) renderEve
 		return renderEventPolicy{lane: renderLaneUIState, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
 	case appgateway.EventKindParticipant:
 		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
-	case appgateway.EventKindLifecycle, appgateway.EventKindSessionLifecycle:
+	case appgateway.EventKindLifecycle:
 		return renderEventPolicy{lane: renderLaneLifecycle, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
 	default:
 		return renderEventPolicy{lane: renderLaneLifecycle, flushSmoothing: true, flushLogChunks: true, dismissHints: true}

@@ -39,6 +39,25 @@ func TestProjectGatewayEventToTranscriptEvents_AssistantAndUsage(t *testing.T) {
 	}
 }
 
+func TestProjectGatewayEventToTranscriptEvents_DoesNotPersistApproval(t *testing.T) {
+	t.Parallel()
+
+	events := ProjectGatewayEventToTranscriptEvents(appgateway.Event{
+		Kind:       appgateway.EventKindApprovalRequested,
+		SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+		Origin:     &appgateway.EventOrigin{Scope: appgateway.EventScopeMain, ScopeID: "root-session"},
+		ApprovalPayload: &appgateway.ApprovalPayload{
+			ToolName:       "BASH",
+			CommandPreview: "go test ./gateway/...",
+			Status:         appgateway.ApprovalStatusPending,
+		},
+	})
+
+	if len(events) != 0 {
+		t.Fatalf("ProjectGatewayEventToTranscriptEvents() = %#v, want no persisted approval transcript events", events)
+	}
+}
+
 func TestProjectACPProjectionToTranscriptEvents_ToolLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -136,7 +155,7 @@ func TestTranscriptSnapshots(t *testing.T) {
 			want: "Main(session=root-session,status=running)\n  tool(call-1,BASH,done,args=echo \"hi\",output=done)",
 		},
 		{
-			name: "approval prompt",
+			name: "approval overlay is not transcript",
 			run: func(m *Model) *Model {
 				updated, _ := m.Update(appgateway.EventEnvelope{
 					Event: appgateway.Event{
@@ -152,7 +171,7 @@ func TestTranscriptSnapshots(t *testing.T) {
 				})
 				return updated.(*Model)
 			},
-			want: "Main(session=root-session,status=waiting_approval)\n  approval:BASH|rm -rf /tmp/demo",
+			want: "",
 		},
 		{
 			name: "participant and subagent lanes",

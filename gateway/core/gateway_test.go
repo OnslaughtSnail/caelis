@@ -683,7 +683,7 @@ func TestBeginTurnLoadsSessionResolvesIntentRunsRuntimeAndPublishesEvents(t *tes
 		},
 	}
 	runner := &recordingRunner{
-		events: []*sdksession.Event{{ID: "e1", Type: sdksession.EventTypeAssistant}},
+		events: []*sdksession.Event{{ID: "e1", Type: sdksession.EventTypeAssistant, Text: "ok"}},
 	}
 	rt := &recordingRuntime{
 		session: session,
@@ -712,7 +712,7 @@ func TestBeginTurnLoadsSessionResolvesIntentRunsRuntimeAndPublishesEvents(t *tes
 		t.Fatalf("BeginTurn() error = %v", err)
 	}
 	got := collectHandleEvents(t, result.Handle)
-	if len(got) == 0 || got[len(got)-1].Event.SessionEvent == nil || got[len(got)-1].Event.SessionEvent.ID != "e1" {
+	if len(got) == 0 || got[len(got)-1].Cursor != "e1" || got[len(got)-1].Event.Narrative == nil {
 		t.Fatalf("published events = %#v, want assistant event e1", got)
 	}
 	if rt.lastReq.SessionRef != session.SessionRef || rt.lastReq.Input != "hello" {

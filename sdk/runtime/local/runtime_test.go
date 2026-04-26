@@ -2414,6 +2414,45 @@ func TestRuntimeBashYieldThenTaskWaitLoop(t *testing.T) {
 	}
 }
 
+func TestRuntimeTaskWriteAddsLineTerminatorForInteractiveBash(t *testing.T) {
+	t.Parallel()
+
+	_, session, runtime := newRuntimeBashToolTestHarness(t)
+	bashTool := runtimeBashTool{
+		base:       mustRuntimeBashTool(t, hostRuntimeForTest(t, session.CWD)),
+		session:    session,
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+	}
+	bashResult := callRuntimeBashTool(t, bashTool, map[string]any{
+		"command":       "printf 'waiting\\n'; read name; printf 'hello %s\\n' \"$name\"",
+		"workdir":       ".",
+		"yield_time_ms": 5,
+	})
+	taskID, _ := bashResult.Meta["task_id"].(string)
+	if strings.TrimSpace(taskID) == "" {
+		t.Fatalf("bash result meta = %#v, want task_id", bashResult.Meta)
+	}
+
+	taskResult := callRuntimeTaskTool(t, runtimeTaskTool{
+		base:       tasktool.New(),
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+	}, map[string]any{
+		"action":        "write",
+		"task_id":       taskID,
+		"input":         "Codex",
+		"yield_time_ms": 250,
+	})
+	if len(taskResult.Content) == 0 || taskResult.Content[0].JSON == nil {
+		t.Fatalf("task result content = %#v, want json payload", taskResult.Content)
+	}
+	payload := string(taskResult.Content[0].JSON.Value)
+	if !strings.Contains(payload, "hello Codex") {
+		t.Fatalf("task write result = %s, want interactive read to receive input line", payload)
+	}
+}
+
 func TestRuntimeTerminalSubscribeStreamsRunningTask(t *testing.T) {
 	t.Parallel()
 
@@ -2543,6 +2582,91 @@ func TestRuntimeBashToolPassesExplicitYieldThrough(t *testing.T) {
 		t.Fatalf("explicit yield wait = %v, want %v", got, 125*time.Millisecond)
 	}
 	assertRunningTaskSnapshot(t, result)
+}
+
+func TestTaskSnapshotToolResultPreservesTerminalStreamsInMeta(t *testing.T) {
+	t.Parallel()
+
+	result := taskSnapshotToolResult(
+		sdktool.Call{ID: "call-1", Name: shell.BashToolName},
+		sdktool.Definition{Name: shell.BashToolName},
+		sdktask.Snapshot{
+			Ref:     sdktask.Ref{TaskID: "task-1", SessionID: "session-1"},
+			State:   sdktask.StateCompleted,
+			Running: false,
+			Result: map[string]any{
+				"stdout":    "done\n",
+				"stderr":    "",
+				"result":    "done",
+				"exit_code": 0,
+			},
+			Metadata: map[string]any{
+				"session_id":     "session-1",
+				"supports_input": true,
+			},
+		},
+	)
+
+	if got, _ := result.Meta["stdout"].(string); got != "done\n" {
+		t.Fatalf("result.Meta[stdout] = %q, want terminal stdout", got)
+	}
+	if got := result.Meta["exit_code"]; got != 0 {
+		t.Fatalf("result.Meta[exit_code] = %#v, want 0", got)
+	}
+}
+
+func TestTaskSnapshotToolResultIncludesRunningTerminalCursor(t *testing.T) {
+	t.Parallel()
+
+	result := taskSnapshotToolResult(
+		sdktool.Call{ID: "call-1", Name: shell.BashToolName},
+		sdktool.Definition{Name: shell.BashToolName},
+		sdktask.Snapshot{
+			Ref: sdktask.Ref{
+				SessionID:  "session-1",
+				TaskID:     "task-1",
+				TerminalID: "terminal-1",
+			},
+			Terminal:       sdksandbox.TerminalRef{TerminalID: "terminal-1"},
+			State:          sdktask.StateRunning,
+			Running:        true,
+			StdoutCursor:   12,
+			StderrCursor:   3,
+			SupportsInput:  true,
+			SupportsCancel: true,
+			Result: map[string]any{
+				"output_preview":  "already shown\n",
+				"supports_input":  true,
+				"supports_cancel": true,
+			},
+		},
+	)
+
+	if got := result.Meta["terminal_id"]; got != "terminal-1" {
+		t.Fatalf("result.Meta[terminal_id] = %#v, want terminal-1", got)
+	}
+	if got := result.Meta["stdout_cursor"]; got != int64(12) {
+		t.Fatalf("result.Meta[stdout_cursor] = %#v, want 12", got)
+	}
+	if got := result.Meta["stderr_cursor"]; got != int64(3) {
+		t.Fatalf("result.Meta[stderr_cursor] = %#v, want 3", got)
+	}
+	var payload map[string]any
+	if len(result.Content) == 0 || result.Content[0].JSON == nil {
+		t.Fatalf("result.Content = %#v, want JSON payload", result.Content)
+	}
+	if err := json.Unmarshal(result.Content[0].JSON.Value, &payload); err != nil {
+		t.Fatalf("unmarshal result payload: %v", err)
+	}
+	if got := payload["terminal_id"]; got != "terminal-1" {
+		t.Fatalf("payload[terminal_id] = %#v, want terminal-1", got)
+	}
+	if got := payload["stdout_cursor"]; got != float64(12) {
+		t.Fatalf("payload[stdout_cursor] = %#v, want 12", got)
+	}
+	if got := payload["stderr_cursor"]; got != float64(3) {
+		t.Fatalf("payload[stderr_cursor] = %#v, want 3", got)
+	}
 }
 
 func TestRuntimeBashToolDoesNotFetchResultWhileStillRunning(t *testing.T) {
@@ -3909,6 +4033,24 @@ func callRuntimeBashTool(t *testing.T, tool runtimeBashTool, args map[string]any
 	result, err := tool.Call(context.Background(), sdktool.Call{
 		ID:    "bash-yield-test",
 		Name:  shell.BashToolName,
+		Input: raw,
+	})
+	if err != nil {
+		t.Fatalf("tool.Call() error = %v", err)
+	}
+	return result
+}
+
+func callRuntimeTaskTool(t *testing.T, tool runtimeTaskTool, args map[string]any) sdktool.Result {
+	t.Helper()
+
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	result, err := tool.Call(context.Background(), sdktool.Call{
+		ID:    "task-control-test",
+		Name:  tasktool.ToolName,
 		Input: raw,
 	})
 	if err != nil {

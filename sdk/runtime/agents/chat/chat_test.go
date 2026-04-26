@@ -175,6 +175,18 @@ func TestChatAgentRunsMinimalToolLoop(t *testing.T) {
 	if events[1].Protocol == nil || events[1].Protocol.ToolCall == nil || events[1].Protocol.UpdateType != string(sdksession.ProtocolUpdateTypeToolUpdate) {
 		t.Fatalf("events[1].Protocol = %+v, want tool_call_update protocol payload", events[1].Protocol)
 	}
+	caelis, ok := events[1].Meta["caelis"].(map[string]any)
+	if !ok {
+		t.Fatalf("events[1].Meta = %#v, want caelis display extension", events[1].Meta)
+	}
+	display, ok := caelis["display"].(map[string]any)
+	if !ok {
+		t.Fatalf("events[1].Meta[caelis] = %#v, want display extension", caelis)
+	}
+	toolDisplay, ok := display["tool"].(map[string]any)
+	if !ok || toolDisplay["name"] != "ECHO" {
+		t.Fatalf("display.tool = %#v, want ECHO tool display", display["tool"])
+	}
 	if events[2].Type != sdksession.EventTypeAssistant || events[2].Text != "pong" {
 		t.Fatalf("events[2] = %+v, want final assistant pong", events[2])
 	}

@@ -60,12 +60,12 @@ func TestTUILiveGatewayReasoningBoundaryFromLocalConfigE2E(t *testing.T) {
 		if env.Err != nil {
 			t.Fatalf("turn event error = %v", env.Err)
 		}
-		if event := env.Event.SessionEvent; event != nil && event.Type == "assistant" && event.Visibility == "ui_only" && event.Protocol != nil {
-			switch event.Protocol.UpdateType {
+		if payload := env.Event.Narrative; payload != nil && payload.Role == appgateway.NarrativeRoleAssistant && payload.Visibility == "ui_only" {
+			switch payload.UpdateType {
 			case "agent_thought":
-				reasoningChunks = append(reasoningChunks, strings.TrimSpace(event.Text))
+				reasoningChunks = append(reasoningChunks, strings.TrimSpace(payload.ReasoningText))
 			case "agent_message":
-				answerChunks = append(answerChunks, strings.TrimSpace(event.Text))
+				answerChunks = append(answerChunks, strings.TrimSpace(payload.Text))
 			}
 		}
 		updated, _ := model.Update(env)

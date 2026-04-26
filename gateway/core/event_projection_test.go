@@ -2,6 +2,7 @@ package core
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -245,6 +246,62 @@ func TestProjectSessionEventsCanonicalPayloadsTableDriven(t *testing.T) {
 			},
 		},
 		{
+			name: "tool result preserves acp raw payload and caelis display meta",
+			ev: &sdksession.Event{
+				ID:   "tool-result-read-display",
+				Type: sdksession.EventTypeToolResult,
+				Meta: map[string]any{
+					"path":       "/tmp/demo.py",
+					"start_line": 1,
+				},
+				Protocol: &sdksession.EventProtocol{
+					ToolCall: &sdksession.ProtocolToolCall{
+						ID:       "call-read",
+						Name:     "READ",
+						Status:   "completed",
+						RawInput: map[string]any{"path": "/tmp/demo.py", "offset": 0, "limit": 100},
+						RawOutput: map[string]any{
+							"path":       "/tmp/demo.py",
+							"start_line": 1,
+							"end_line":   100,
+							"has_more":   true,
+							"content":    "1: print('hello')",
+						},
+					},
+				},
+			},
+			want: func(t *testing.T, env EventEnvelope) {
+				t.Helper()
+				if env.Event.ToolResult == nil {
+					t.Fatal("event.ToolResult = nil, want payload")
+				}
+				if got := env.Event.ToolResult.RawInput["path"]; got != "/tmp/demo.py" {
+					t.Fatalf("event.ToolResult.RawInput[path] = %#v", got)
+				}
+				if got := env.Event.ToolResult.RawOutput["start_line"]; got != 1 {
+					t.Fatalf("event.ToolResult.RawOutput[start_line] = %#v", got)
+				}
+				caelis, ok := env.Event.Meta["caelis"].(map[string]any)
+				if !ok {
+					t.Fatalf("event.Meta = %#v, want caelis map", env.Event.Meta)
+				}
+				if _, ok := env.Event.Meta["path"]; ok {
+					t.Fatalf("event.Meta = %#v, raw tool fields must stay under meta.caelis", env.Event.Meta)
+				}
+				display, ok := caelis["display"].(map[string]any)
+				if !ok {
+					t.Fatalf("meta.caelis = %#v, want display map", caelis)
+				}
+				file, ok := display["file"].(map[string]any)
+				if !ok {
+					t.Fatalf("meta.caelis.display = %#v, want file display", display)
+				}
+				if file["path"] != "/tmp/demo.py" || file["start_line"] != 1 || file["end_line"] != 100 {
+					t.Fatalf("display.file = %#v", file)
+				}
+			},
+		},
+		{
 			name: "tool result failed",
 			ev: &sdksession.Event{
 				ID:   "tool-result-failed",
@@ -416,6 +473,148 @@ func TestProjectSessionEventsPreservesMessageToolCallID(t *testing.T) {
 	}
 	if payload.Status != ToolStatusStarted {
 		t.Fatalf("payload.Status = %q, want %q", payload.Status, ToolStatusStarted)
+	}
+}
+
+func TestEventPublicContractDoesNotExposeRawCompatibilityFields(t *testing.T) {
+	t.Parallel()
+
+	eventType := reflect.TypeOf(Event{})
+	for _, name := range []string{"SessionEvent", "Approval"} {
+		if _, ok := eventType.FieldByName(name); ok {
+			t.Fatalf("Event exposes raw compatibility field %s; want canonical payloads only", name)
+		}
+	}
+	for _, kind := range []EventKind{
+		EventKindUserMessage,
+		EventKindAssistantMessage,
+		EventKindPlanUpdate,
+		EventKindToolCall,
+		EventKindToolResult,
+		EventKindParticipant,
+		EventKindHandoff,
+		EventKindCompact,
+		EventKindNotice,
+		EventKindSystemMessage,
+		EventKindApprovalRequested,
+		EventKindLifecycle,
+	} {
+		if strings.Contains(string(kind), "session_") {
+			t.Fatalf("EventKind %q exposes raw session compatibility naming", kind)
+		}
+	}
+}
+
+func TestCanonicalToolStatusCoversStandardLifecycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want ToolStatus
+	}{
+		{name: "waiting approval", raw: "waiting_approval", want: ToolStatusWaitingApproval},
+		{name: "interrupted", raw: "interrupted", want: ToolStatusInterrupted},
+		{name: "cancelled", raw: "cancelled", want: ToolStatusCancelled},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := canonicalToolCallStatus(tt.raw); got != tt.want {
+				t.Fatalf("canonicalToolCallStatus(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+			if got := canonicalToolResultStatus(tt.raw, false); got != tt.want {
+				t.Fatalf("canonicalToolResultStatus(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEventEnvelopeJSONUsesStableProtocolNames(t *testing.T) {
+	t.Parallel()
+
+	env := EventEnvelope{
+		Cursor: "cursor-1",
+		Event: Event{
+			Kind:     EventKindToolCall,
+			HandleID: "handle-1",
+			RunID:    "run-1",
+			TurnID:   "turn-1",
+			ToolCall: &ToolCallPayload{
+				CallID:         "call-1",
+				ToolName:       "BASH",
+				CommandPreview: "go test ./gateway/...",
+				Status:         ToolStatusWaitingApproval,
+				Scope:          EventScopeMain,
+			},
+		},
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("json.Marshal(EventEnvelope) error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal(EventEnvelope) error = %v", err)
+	}
+	if _, ok := got["Cursor"]; ok {
+		t.Fatalf("EventEnvelope JSON = %s, leaked Go field Cursor", data)
+	}
+	event, ok := got["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("EventEnvelope JSON = %s, want event object", data)
+	}
+	for _, key := range []string{"kind", "handle_id", "run_id", "turn_id", "tool_call"} {
+		if _, ok := event[key]; !ok {
+			t.Fatalf("EventEnvelope JSON event = %#v, missing %q", event, key)
+		}
+	}
+	tool, ok := event["tool_call"].(map[string]any)
+	if !ok {
+		t.Fatalf("EventEnvelope JSON event = %#v, want tool_call object", event)
+	}
+	if tool["command_preview"] != "go test ./gateway/..." || tool["status"] != string(ToolStatusWaitingApproval) {
+		t.Fatalf("tool_call JSON = %#v", tool)
+	}
+}
+
+func TestEventEnvelopeJSONUsesStableErrorPayload(t *testing.T) {
+	t.Parallel()
+
+	env := EventEnvelope{
+		Event: Event{Kind: EventKindLifecycle},
+		Err: &Error{
+			Kind:        KindValidation,
+			Code:        CodeInvalidRequest,
+			Message:     "input is required",
+			Detail:      "empty prompt",
+			Retryable:   false,
+			UserVisible: true,
+		},
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("json.Marshal(EventEnvelope) error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal(EventEnvelope) error = %v", err)
+	}
+	payload, ok := got["err"].(map[string]any)
+	if !ok {
+		t.Fatalf("EventEnvelope JSON = %s, want err object", data)
+	}
+	for _, key := range []string{"kind", "code", "message", "detail", "user_visible"} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("err JSON = %#v, missing %q", payload, key)
+		}
+	}
+	if _, ok := payload["Cause"]; ok {
+		t.Fatalf("err JSON = %#v, leaked Cause", payload)
+	}
+	if _, ok := payload["Message"]; ok {
+		t.Fatalf("err JSON = %#v, leaked Go field Message", payload)
 	}
 }
 

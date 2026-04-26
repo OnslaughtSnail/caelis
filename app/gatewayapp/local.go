@@ -934,6 +934,9 @@ func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 	if cfg.Alias == "" {
 		cfg.Alias = buildAlias(cfg.Provider, cfg.Model)
 	}
+	if cfg.API == "" {
+		cfg.API = defaultModelAPIForProvider(cfg.Provider)
+	}
 	if cfg.AuthType == "" {
 		if cfg.Provider == "ollama" || cfg.Provider == "codefree" {
 			cfg.AuthType = sdkproviders.AuthNone
@@ -952,6 +955,37 @@ func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 		cfg.Token = strings.TrimSpace(os.Getenv(strings.TrimSpace(cfg.TokenEnv)))
 	}
 	return cfg
+}
+
+func defaultModelAPIForProvider(provider string) sdkproviders.APIType {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai":
+		return sdkproviders.APIOpenAI
+	case "openai-compatible":
+		return sdkproviders.APIOpenAICompatible
+	case "openrouter":
+		return sdkproviders.APIOpenRouter
+	case "codefree":
+		return sdkproviders.APICodeFree
+	case "gemini":
+		return sdkproviders.APIGemini
+	case "anthropic":
+		return sdkproviders.APIAnthropic
+	case "anthropic-compatible":
+		return sdkproviders.APIAnthropicCompatible
+	case "deepseek":
+		return sdkproviders.APIDeepSeek
+	case "xiaomi", "mimo":
+		return sdkproviders.APIMimo
+	case "volcengine":
+		return sdkproviders.APIVolcengine
+	case "volcengine-coding-plan", "volcengine_coding_plan":
+		return sdkproviders.APIVolcengineCoding
+	case "ollama":
+		return sdkproviders.APIOllama
+	default:
+		return ""
+	}
 }
 
 func sanitizePersistedModelConfig(cfg ModelConfig) ModelConfig {

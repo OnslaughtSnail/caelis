@@ -49,6 +49,7 @@ type LifecyclePayload = gatewaycore.LifecyclePayload
 type EventOrigin = gatewaycore.EventOrigin
 type Event = gatewaycore.Event
 type EventEnvelope = gatewaycore.EventEnvelope
+type TerminalStreamRequest = gatewaycore.TerminalStreamRequest
 type SubmissionKind = gatewaycore.SubmissionKind
 type ApprovalDecision = gatewaycore.ApprovalDecision
 type SubmitRequest = gatewaycore.SubmitRequest
@@ -58,6 +59,9 @@ type ErrorKind = gatewaycore.ErrorKind
 type Error = gatewaycore.Error
 type ModelLookup = gatewaycore.ModelLookup
 type ModelResolution = gatewaycore.ModelResolution
+
+var TerminalStreamRequestFromEvent = gatewaycore.TerminalStreamRequestFromEvent
+var TerminalFrameEvent = gatewaycore.TerminalFrameEvent
 
 const (
 	StateCurrentModelAlias  = gatewaycore.StateCurrentModelAlias
@@ -80,14 +84,16 @@ const (
 )
 
 const (
-	ToolStatusStarted   = gatewaycore.ToolStatusStarted
-	ToolStatusRunning   = gatewaycore.ToolStatusRunning
-	ToolStatusCompleted = gatewaycore.ToolStatusCompleted
-	ToolStatusFailed    = gatewaycore.ToolStatusFailed
+	ToolStatusStarted         = gatewaycore.ToolStatusStarted
+	ToolStatusRunning         = gatewaycore.ToolStatusRunning
+	ToolStatusWaitingApproval = gatewaycore.ToolStatusWaitingApproval
+	ToolStatusCompleted       = gatewaycore.ToolStatusCompleted
+	ToolStatusFailed          = gatewaycore.ToolStatusFailed
+	ToolStatusInterrupted     = gatewaycore.ToolStatusInterrupted
+	ToolStatusCancelled       = gatewaycore.ToolStatusCancelled
 )
 
 const (
-	EventKindSessionEvent      = gatewaycore.EventKindSessionEvent
 	EventKindUserMessage       = gatewaycore.EventKindUserMessage
 	EventKindAssistantMessage  = gatewaycore.EventKindAssistantMessage
 	EventKindPlanUpdate        = gatewaycore.EventKindPlanUpdate
@@ -97,7 +103,6 @@ const (
 	EventKindHandoff           = gatewaycore.EventKindHandoff
 	EventKindCompact           = gatewaycore.EventKindCompact
 	EventKindNotice            = gatewaycore.EventKindNotice
-	EventKindSessionLifecycle  = gatewaycore.EventKindSessionLifecycle
 	EventKindSystemMessage     = gatewaycore.EventKindSystemMessage
 	EventKindApprovalRequested = gatewaycore.EventKindApprovalRequested
 	EventKindLifecycle         = gatewaycore.EventKindLifecycle

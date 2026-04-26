@@ -15,6 +15,7 @@ const (
 
 const (
 	CodeNotImplemented          = "not_implemented"
+	CodeInternal                = "internal_error"
 	CodeActiveRunConflict       = "active_run_conflict"
 	CodeInvalidRequest          = "invalid_request"
 	CodeCursorNotFound          = "cursor_not_found"
@@ -30,13 +31,13 @@ const (
 )
 
 type Error struct {
-	Kind        ErrorKind
-	Code        string
-	Retryable   bool
-	UserVisible bool
-	Message     string
-	Detail      string
-	Cause       error
+	Kind        ErrorKind `json:"kind"`
+	Code        string    `json:"code,omitempty"`
+	Retryable   bool      `json:"retryable,omitempty"`
+	UserVisible bool      `json:"user_visible,omitempty"`
+	Message     string    `json:"message,omitempty"`
+	Detail      string    `json:"detail,omitempty"`
+	Cause       error     `json:"-"`
 }
 
 func (e *Error) Error() string {
@@ -53,5 +54,21 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Unwrap() error { return e.Cause }
+
+func EventError(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	var gatewayErr *Error
+	if errors.As(err, &gatewayErr) {
+		return gatewayErr
+	}
+	return &Error{
+		Kind:    KindInternal,
+		Code:    CodeInternal,
+		Message: err.Error(),
+		Cause:   err,
+	}
+}
 
 func As(err error, target any) bool { return errors.As(err, target) }

@@ -123,8 +123,30 @@ func parseStringSliceArg(args map[string]any, key string) ([]string, error) {
 	}
 }
 
-func shouldExcludePath(root, candidate string, isDir bool, patterns []string) bool {
+type pathExcludeRule struct {
+	pattern   string
+	negated   bool
+	recursive bool
+	dirOnly   bool
+}
+
+func excludeRulesFromPatterns(patterns []string) []pathExcludeRule {
 	if len(patterns) == 0 {
+		return nil
+	}
+	rules := make([]pathExcludeRule, 0, len(patterns))
+	for _, pattern := range patterns {
+		pattern = normalizeRelativeMatchPath(pattern)
+		if pattern == "" {
+			continue
+		}
+		rules = append(rules, pathExcludeRule{pattern: pattern})
+	}
+	return rules
+}
+
+func shouldExcludePath(root, candidate string, isDir bool, rules []pathExcludeRule) bool {
+	if len(rules) == 0 {
 		return false
 	}
 	rel := candidate
@@ -134,19 +156,90 @@ func shouldExcludePath(root, candidate string, isDir bool, patterns []string) bo
 		}
 	}
 	rel = normalizeRelativeMatchPath(rel)
-	for _, pattern := range patterns {
-		pattern = normalizeRelativeMatchPath(pattern)
-		if pattern == "" {
-			continue
+	excluded := false
+	for _, rule := range rules {
+		if rule.matches(rel, isDir) {
+			excluded = !rule.negated
 		}
-		if pathGlobMatch(pattern, rel) {
+	}
+	return excluded
+}
+
+func (r pathExcludeRule) matches(rel string, isDir bool) bool {
+	pattern := normalizeRelativeMatchPath(r.pattern)
+	if pattern == "" {
+		return false
+	}
+	if r.dirOnly {
+		if pathGlobMatch(pattern, rel) || (r.recursive && pathGlobMatch("**/"+pattern, rel)) {
 			return true
 		}
-		if isDir && strings.TrimSuffix(pattern, "/") == rel {
+		if strings.HasPrefix(rel, pattern+"/") || (r.recursive && pathHasMatchingDirSegment(rel, pattern)) {
+			return true
+		}
+		return isDir && rel == pattern
+	}
+	if pathGlobMatch(pattern, rel) {
+		return true
+	}
+	if r.recursive && pathGlobMatch("**/"+pattern, rel) {
+		return true
+	}
+	return false
+}
+
+func pathHasMatchingDirSegment(rel string, pattern string) bool {
+	parts := splitPathSegments(rel)
+	if len(parts) < 2 {
+		return false
+	}
+	for i := 0; i < len(parts)-1; i++ {
+		if matched, err := path.Match(pattern, parts[i]); err == nil && matched {
 			return true
 		}
 	}
 	return false
+}
+
+func gitignoreExcludePatterns(fsys sdksandbox.FileSystem, root string) []pathExcludeRule {
+	if fsys == nil || strings.TrimSpace(root) == "" {
+		return nil
+	}
+	raw, err := fsys.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\r", "\n"), "\n")
+	rules := make([]pathExcludeRule, 0, len(lines))
+	for _, line := range lines {
+		pattern := strings.TrimSpace(line)
+		if pattern == "" || strings.HasPrefix(pattern, "#") {
+			continue
+		}
+		negated := strings.HasPrefix(pattern, "!")
+		if negated {
+			pattern = strings.TrimSpace(strings.TrimPrefix(pattern, "!"))
+		}
+		anchored := strings.HasPrefix(pattern, "/")
+		if anchored {
+			pattern = strings.TrimPrefix(pattern, "/")
+		}
+		dirOnly := strings.HasSuffix(pattern, "/")
+		if dirOnly {
+			pattern = strings.TrimSuffix(pattern, "/")
+		}
+		pattern = normalizeRelativeMatchPath(pattern)
+		if pattern == "" {
+			continue
+		}
+		rules = append(rules, pathExcludeRule{
+			pattern:   pattern,
+			negated:   negated,
+			recursive: !anchored && !strings.Contains(pattern, "/"),
+			dirOnly:   dirOnly,
+		})
+	}
+	return rules
 }
 
 func normalizeRelativeMatchPath(value string) string {

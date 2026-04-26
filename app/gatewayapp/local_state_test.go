@@ -280,6 +280,32 @@ func TestNewLocalStackAllowsEmptyInitialModelConfig(t *testing.T) {
 	}
 }
 
+func TestNewLocalStackInfersCodeFreeAPIFromProvider(t *testing.T) {
+	stack, err := NewLocalStack(Config{
+		AppName:        "caelis",
+		UserID:         "codefree-api-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: ModelConfig{
+			Provider: "codefree",
+			Model:    "GLM-5.1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	cfg, ok := stack.lookup.Config("codefree/glm-5.1")
+	if !ok {
+		t.Fatal("missing codefree model config")
+	}
+	if cfg.API != sdkproviders.APICodeFree {
+		t.Fatalf("codefree API = %q, want %q", cfg.API, sdkproviders.APICodeFree)
+	}
+}
+
 func TestDefaultStoreDirUsesHomeDirectory(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {

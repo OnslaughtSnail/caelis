@@ -525,10 +525,18 @@ func (tm *taskRuntime) Write(ctx context.Context, ref sdksession.SessionRef, req
 	if err != nil {
 		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: task %q does not support write", req.TaskID)
 	}
-	if err := task.session.WriteInput(ctx, []byte(req.Input)); err != nil {
+	input := normalizeTaskWriteInput(req.Input)
+	if err := task.session.WriteInput(ctx, []byte(input)); err != nil {
 		return sdktask.Snapshot{}, err
 	}
 	return tm.waitBash(ctx, task, req.Yield)
+}
+
+func normalizeTaskWriteInput(input string) string {
+	if input == "" || strings.HasSuffix(input, "\n") || strings.HasSuffix(input, "\r") {
+		return input
+	}
+	return input + "\n"
 }
 
 func (tm *taskRuntime) Cancel(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
@@ -775,13 +783,29 @@ func taskSnapshotToolResult(call sdktool.Call, def sdktool.Definition, snapshot 
 	if meta == nil {
 		meta = map[string]any{}
 	}
+	for key, value := range snapshot.Result {
+		if _, exists := meta[key]; !exists {
+			meta[key] = value
+		}
+	}
+	for key, value := range payload {
+		if _, exists := meta[key]; !exists {
+			meta[key] = value
+		}
+	}
 	meta["tool_name"] = strings.TrimSpace(def.Name)
 	meta["tool_call_id"] = strings.TrimSpace(call.ID)
 	meta["state"] = string(snapshot.State)
 	meta["running"] = snapshot.Running
 	meta["task_id"] = snapshot.Ref.TaskID
-	if snapshot.Terminal.TerminalID != "" {
-		meta["terminal_id"] = snapshot.Terminal.TerminalID
+	if snapshot.StdoutCursor > 0 {
+		meta["stdout_cursor"] = snapshot.StdoutCursor
+	}
+	if snapshot.StderrCursor > 0 {
+		meta["stderr_cursor"] = snapshot.StderrCursor
+	}
+	if terminalID := firstNonEmpty(strings.TrimSpace(snapshot.Terminal.TerminalID), strings.TrimSpace(snapshot.Ref.TerminalID)); terminalID != "" {
+		meta["terminal_id"] = terminalID
 	}
 	raw, _ := json.Marshal(payload)
 	isError := !snapshot.Running && snapshot.State != sdktask.StateCompleted
@@ -798,6 +822,15 @@ func taskToolPayload(snapshot sdktask.Snapshot) map[string]any {
 	payload := map[string]any{
 		"task_id": snapshot.Ref.TaskID,
 		"state":   string(snapshot.State),
+	}
+	if terminalID := firstNonEmpty(strings.TrimSpace(snapshot.Terminal.TerminalID), strings.TrimSpace(snapshot.Ref.TerminalID)); terminalID != "" {
+		payload["terminal_id"] = terminalID
+	}
+	if snapshot.StdoutCursor > 0 {
+		payload["stdout_cursor"] = snapshot.StdoutCursor
+	}
+	if snapshot.StderrCursor > 0 {
+		payload["stderr_cursor"] = snapshot.StderrCursor
 	}
 	if snapshot.Running {
 		if preview, _ := snapshot.Result["output_preview"].(string); strings.TrimSpace(preview) != "" {

@@ -56,25 +56,24 @@ func TestGatewayProviderLiveTurnAndReplayE2E(t *testing.T) {
 		if env.Err != nil {
 			t.Fatalf("handle event error = %v", env.Err)
 		}
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil {
 			continue
 		}
 		if firstEventAt.IsZero() {
 			firstEventAt = time.Now()
 		}
-		event := env.Event.SessionEvent
 		switch {
-		case event.Type == sdksession.EventTypeUser:
+		case payload.Role == appgateway.NarrativeRoleUser:
 			sawUser = true
-		case event.Type == sdksession.EventTypeAssistant &&
-			event.Visibility == sdksession.VisibilityUIOnly &&
-			event.Protocol != nil &&
-			(event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentMessage) ||
-				event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentThought)):
+		case payload.Role == appgateway.NarrativeRoleAssistant &&
+			payload.Visibility == string(sdksession.VisibilityUIOnly) &&
+			(payload.UpdateType == string(sdksession.ProtocolUpdateTypeAgentMessage) ||
+				payload.UpdateType == string(sdksession.ProtocolUpdateTypeAgentThought)):
 			sawChunk = true
-		case event.Type == sdksession.EventTypeAssistant &&
-			event.Visibility == sdksession.VisibilityCanonical:
-			finalText = strings.TrimSpace(event.Text)
+		case payload.Role == appgateway.NarrativeRoleAssistant &&
+			payload.Visibility == string(sdksession.VisibilityCanonical):
+			finalText = strings.TrimSpace(payload.Text)
 		}
 	}
 	if firstEventAt.IsZero() {
@@ -107,17 +106,18 @@ func TestGatewayProviderLiveTurnAndReplayE2E(t *testing.T) {
 		replayFinal string
 	)
 	for _, env := range replayed.Events {
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil {
 			continue
 		}
-		switch env.Event.SessionEvent.Type {
-		case sdksession.EventTypeUser:
+		switch payload.Role {
+		case appgateway.NarrativeRoleUser:
 			replayUser = true
-		case sdksession.EventTypeAssistant:
-			if env.Event.SessionEvent.Visibility == sdksession.VisibilityUIOnly {
-				t.Fatalf("ReplayEvents() included transient UI-only event: %+v", env.Event.SessionEvent)
+		case appgateway.NarrativeRoleAssistant:
+			if payload.Visibility == string(sdksession.VisibilityUIOnly) {
+				t.Fatalf("ReplayEvents() included transient UI-only event: %+v", payload)
 			}
-			replayFinal = strings.TrimSpace(env.Event.SessionEvent.Text)
+			replayFinal = strings.TrimSpace(payload.Text)
 		}
 	}
 	if !replayUser {
@@ -161,17 +161,15 @@ func TestGatewayProviderNonStreamingOverrideE2E(t *testing.T) {
 		if env.Err != nil {
 			t.Fatalf("handle event error = %v", env.Err)
 		}
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil || payload.Role != appgateway.NarrativeRoleAssistant {
 			continue
 		}
-		event := env.Event.SessionEvent
-		if event.Type == sdksession.EventTypeAssistant &&
-			event.Visibility == sdksession.VisibilityUIOnly {
+		if payload.Visibility == string(sdksession.VisibilityUIOnly) {
 			sawChunk = true
 		}
-		if event.Type == sdksession.EventTypeAssistant &&
-			event.Visibility == sdksession.VisibilityCanonical {
-			finalText = strings.TrimSpace(event.Text)
+		if payload.Visibility == string(sdksession.VisibilityCanonical) {
+			finalText = strings.TrimSpace(payload.Text)
 		}
 	}
 	if sawChunk {
@@ -212,17 +210,15 @@ func TestGatewayProviderHeadlessDefaultNonStreamingE2E(t *testing.T) {
 		if env.Err != nil {
 			t.Fatalf("handle event error = %v", env.Err)
 		}
-		if env.Event.SessionEvent == nil {
+		payload := env.Event.Narrative
+		if payload == nil || payload.Role != appgateway.NarrativeRoleAssistant {
 			continue
 		}
-		event := env.Event.SessionEvent
-		if event.Type == sdksession.EventTypeAssistant &&
-			event.Visibility == sdksession.VisibilityUIOnly {
+		if payload.Visibility == string(sdksession.VisibilityUIOnly) {
 			sawChunk = true
 		}
-		if event.Type == sdksession.EventTypeAssistant &&
-			event.Visibility == sdksession.VisibilityCanonical {
-			finalText = strings.TrimSpace(event.Text)
+		if payload.Visibility == string(sdksession.VisibilityCanonical) {
+			finalText = strings.TrimSpace(payload.Text)
 		}
 	}
 	if sawChunk {
@@ -381,33 +377,29 @@ type liveReasoningTrace struct {
 }
 
 func (t *liveReasoningTrace) capture(env appgateway.EventEnvelope) {
-	if t == nil || env.Event.SessionEvent == nil {
+	if t == nil || env.Event.Narrative == nil {
 		return
 	}
-	event := env.Event.SessionEvent
-	if event.Type != sdksession.EventTypeAssistant {
+	payload := env.Event.Narrative
+	if payload.Role != appgateway.NarrativeRoleAssistant {
 		return
 	}
-	if event.Visibility == sdksession.VisibilityUIOnly {
-		switch {
-		case event.Protocol != nil && event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentThought):
-			t.reasoningChunks = append(t.reasoningChunks, strings.TrimSpace(event.Text))
-		case event.Protocol != nil && event.Protocol.UpdateType == string(sdksession.ProtocolUpdateTypeAgentMessage):
-			t.answerChunks = append(t.answerChunks, strings.TrimSpace(event.Text))
+	if payload.Visibility == string(sdksession.VisibilityUIOnly) {
+		switch payload.UpdateType {
+		case string(sdksession.ProtocolUpdateTypeAgentThought):
+			t.reasoningChunks = append(t.reasoningChunks, strings.TrimSpace(payload.ReasoningText))
+		case string(sdksession.ProtocolUpdateTypeAgentMessage):
+			t.answerChunks = append(t.answerChunks, strings.TrimSpace(payload.Text))
 		}
 		return
 	}
-	if event.Visibility != sdksession.VisibilityCanonical {
+	if payload.Visibility != string(sdksession.VisibilityCanonical) {
 		return
 	}
-	if event.Message != nil {
-		t.finalRawReasoning = strings.TrimSpace(event.Message.ReasoningText())
-		t.finalRawText = strings.TrimSpace(event.Message.TextContent())
-	}
-	t.finalEventText = strings.TrimSpace(event.Text)
-	if payload := env.Event.Narrative; payload != nil {
-		t.finalPayloadText = strings.TrimSpace(payload.Text)
-	}
+	t.finalRawReasoning = strings.TrimSpace(payload.ReasoningText)
+	t.finalRawText = strings.TrimSpace(payload.Text)
+	t.finalEventText = strings.TrimSpace(payload.Text)
+	t.finalPayloadText = strings.TrimSpace(payload.Text)
 	t.classify()
 }
 

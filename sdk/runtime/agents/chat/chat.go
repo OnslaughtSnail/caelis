@@ -250,6 +250,7 @@ func modelToolCallEvents(message sdkmodel.Message, resp *sdkmodel.Response) []*s
 		baseMeta["total_tokens"] = resp.Usage.TotalTokens
 	}
 	for i, call := range calls {
+		rawInput := mustObject(call.Args)
 		event := &sdksession.Event{
 			Type: sdksession.EventTypeToolCall,
 			Protocol: &sdksession.EventProtocol{
@@ -260,10 +261,10 @@ func modelToolCallEvents(message sdkmodel.Message, resp *sdkmodel.Response) []*s
 					Kind:     toolKindForName(call.Name),
 					Title:    toolCallTitle(call),
 					Status:   "pending",
-					RawInput: mustObject(call.Args),
+					RawInput: rawInput,
 				},
 			},
-			Meta: maps.Clone(baseMeta),
+			Meta: mergeEventMeta(baseMeta, caelisToolDisplayMeta(call.Name, "pending", rawInput, nil)),
 		}
 		if i == 0 {
 			event.Message = &message
@@ -275,13 +276,15 @@ func modelToolCallEvents(message sdkmodel.Message, resp *sdkmodel.Response) []*s
 }
 
 func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sdkmodel.Message, *sdksession.Event, error) {
+	rawInput := mustObject(call.Args)
 	tool, ok := a.lookupTool(call.Name)
 	if !ok {
+		rawOutput := map[string]any{"error": fmt.Sprintf("tool %q not found", call.Name)}
 		message := toolResultMessage(call, sdktool.Result{
 			ID:      call.ID,
 			Name:    call.Name,
 			IsError: true,
-			Content: []sdkmodel.Part{sdkmodel.NewJSONPart(mustJSON(map[string]any{"error": fmt.Sprintf("tool %q not found", call.Name)}))},
+			Content: []sdkmodel.Part{sdkmodel.NewJSONPart(mustJSON(rawOutput))},
 		})
 		return message, &sdksession.Event{
 			Type:    sdksession.EventTypeToolResult,
@@ -295,15 +298,15 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 					Kind:      toolKindForName(call.Name),
 					Title:     toolCallTitle(call),
 					Status:    "failed",
-					RawInput:  mustObject(call.Args),
-					RawOutput: map[string]any{"error": fmt.Sprintf("tool %q not found", call.Name)},
+					RawInput:  rawInput,
+					RawOutput: rawOutput,
 				},
 			},
-			Meta: map[string]any{
+			Meta: mergeEventMeta(map[string]any{
 				"tool_name":    strings.TrimSpace(call.Name),
 				"tool_call_id": strings.TrimSpace(call.ID),
 				"is_error":     true,
-			},
+			}, caelisToolDisplayMeta(call.Name, "failed", rawInput, rawOutput)),
 		}, nil
 	}
 
@@ -321,6 +324,7 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 		}
 	}
 	message := toolResultMessage(call, result)
+	rawOutput := maps.Clone(result.Meta)
 	event := &sdksession.Event{
 		Type:    sdksession.EventTypeToolResult,
 		Message: &message,
@@ -333,8 +337,8 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 				Kind:      toolKindForName(call.Name),
 				Title:     toolCallTitle(call),
 				Status:    toolCallStatus(result),
-				RawInput:  mustObject(call.Args),
-				RawOutput: maps.Clone(result.Meta),
+				RawInput:  rawInput,
+				RawOutput: rawOutput,
 			},
 		},
 		Meta: mergeEventMeta(
@@ -344,6 +348,7 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 				"is_error":     result.IsError,
 			},
 			result.Meta,
+			caelisToolDisplayMeta(call.Name, toolCallStatus(result), rawInput, rawOutput),
 		),
 	}
 	return message, event, nil
@@ -476,6 +481,85 @@ func mergeEventMeta(parts ...map[string]any) map[string]any {
 		return nil
 	}
 	return out
+}
+
+func caelisToolDisplayMeta(name string, status string, rawInput map[string]any, rawOutput map[string]any) map[string]any {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	display := map[string]any{
+		"tool": map[string]any{
+			"name":   name,
+			"family": toolKindForName(name),
+			"status": strings.TrimSpace(status),
+		},
+	}
+	switch strings.ToUpper(name) {
+	case "READ", "LIST", "GLOB", "SEARCH", "RG", "FIND":
+		display["file"] = compactMetaMap(map[string]any{
+			"path":       firstNonEmpty(metaString(rawOutput, "path"), metaString(rawInput, "path")),
+			"pattern":    firstNonEmpty(metaString(rawOutput, "pattern"), metaString(rawInput, "pattern")),
+			"query":      firstNonEmpty(metaString(rawOutput, "query"), metaString(rawInput, "query"), metaString(rawInput, "pattern")),
+			"start_line": rawOutput["start_line"],
+			"end_line":   rawOutput["end_line"],
+			"count":      rawOutput["count"],
+			"file_count": rawOutput["file_count"],
+		})
+	case "WRITE", "PATCH":
+		display["diff"] = compactMetaMap(map[string]any{
+			"path":          firstNonEmpty(metaString(rawOutput, "path"), metaString(rawInput, "path")),
+			"hunk":          rawOutput["hunk"],
+			"old":           rawInput["old"],
+			"new":           rawInput["new"],
+			"added_lines":   rawOutput["added_lines"],
+			"removed_lines": rawOutput["removed_lines"],
+			"created":       rawOutput["created"],
+		})
+	case "BASH", "SPAWN", "TASK":
+		display["terminal"] = compactMetaMap(map[string]any{
+			"command":        firstNonEmpty(metaString(rawInput, "command"), metaString(rawInput, "cmd")),
+			"stdout":         rawOutput["stdout"],
+			"stderr":         rawOutput["stderr"],
+			"result":         rawOutput["result"],
+			"output_preview": rawOutput["output_preview"],
+			"exit_code":      rawOutput["exit_code"],
+			"state":          rawOutput["state"],
+			"running":        rawOutput["running"],
+			"task_id":        rawOutput["task_id"],
+		})
+	}
+	return map[string]any{"caelis": map[string]any{"display": display}}
+}
+
+func compactMetaMap(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range in {
+		switch typed := value.(type) {
+		case nil:
+			continue
+		case string:
+			if strings.TrimSpace(typed) == "" {
+				continue
+			}
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func metaString(values map[string]any, key string) string {
+	if values == nil {
+		return ""
+	}
+	value, ok := values[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func messagesFromContext(ctx sdkruntime.Context) []sdkmodel.Message {
