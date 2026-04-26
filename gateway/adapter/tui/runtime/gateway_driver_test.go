@@ -39,6 +39,124 @@ func ptrRuntimeMessage(message sdkmodel.Message) *sdkmodel.Message {
 	return &message
 }
 
+func TestGatewayDriverDefersBlankSessionUntilFirstSubmission(t *testing.T) {
+	ctx := context.Background()
+	storeDir := t.TempDir()
+	workspace := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "lazy-session-test",
+		StoreDir:       storeDir,
+		WorkspaceKey:   workspace,
+		WorkspaceCWD:   workspace,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: gatewayapp.ModelConfig{
+			Provider: "ollama",
+			API:      sdkproviders.APIOllama,
+			Model:    "llama3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "", "surface", "ollama/llama3")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	status, err := driver.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.SessionID != "" {
+		t.Fatalf("Status().SessionID = %q, want empty before first submission", status.SessionID)
+	}
+	before, err := stack.Gateway.ListSessions(ctx, appgateway.ListSessionsRequest{
+		AppName:      stack.AppName,
+		UserID:       stack.UserID,
+		WorkspaceKey: stack.Workspace.Key,
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions(before) error = %v", err)
+	}
+	if len(before.Sessions) != 0 {
+		t.Fatalf("ListSessions(before) = %d sessions, want none", len(before.Sessions))
+	}
+
+	turn, err := driver.Submit(ctx, Submission{Text: "hello"})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if turn != nil {
+		defer turn.Close()
+	}
+	after, err := stack.Gateway.ListSessions(ctx, appgateway.ListSessionsRequest{
+		AppName:      stack.AppName,
+		UserID:       stack.UserID,
+		WorkspaceKey: stack.Workspace.Key,
+		Limit:        10,
+	})
+	if err != nil {
+		t.Fatalf("ListSessions(after) error = %v", err)
+	}
+	if len(after.Sessions) != 1 {
+		t.Fatalf("ListSessions(after) = %d sessions, want one after first submission", len(after.Sessions))
+	}
+}
+
+func TestGatewayDriverListSessionsSkipsUntitledSessions(t *testing.T) {
+	ctx := context.Background()
+	workspace := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "resume-filter-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   workspace,
+		WorkspaceCWD:   workspace,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: gatewayapp.ModelConfig{
+			Provider: "ollama",
+			API:      sdkproviders.APIOllama,
+			Model:    "llama3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	if _, err := stack.Gateway.StartSession(ctx, appgateway.StartSessionRequest{
+		AppName:   stack.AppName,
+		UserID:    stack.UserID,
+		Workspace: stack.Workspace,
+	}); err != nil {
+		t.Fatalf("StartSession(blank) error = %v", err)
+	}
+	titled, err := stack.Gateway.StartSession(ctx, appgateway.StartSessionRequest{
+		AppName:   stack.AppName,
+		UserID:    stack.UserID,
+		Workspace: stack.Workspace,
+		Title:     "visible prompt",
+	})
+	if err != nil {
+		t.Fatalf("StartSession(titled) error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "", "surface", "ollama/llama3")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	candidates, err := driver.ListSessions(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListSessions() error = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("ListSessions() = %#v, want one titled candidate", candidates)
+	}
+	if candidates[0].SessionID != titled.SessionID || candidates[0].Prompt != "visible prompt" {
+		t.Fatalf("ListSessions()[0] = %#v, want titled session", candidates[0])
+	}
+}
+
 func TestGatewayDriverCompleteSlashArgConnectFlowUsesLegacyCommands(t *testing.T) {
 	ctx := context.Background()
 	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")

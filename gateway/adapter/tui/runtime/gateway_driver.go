@@ -50,13 +50,15 @@ func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSes
 		sandboxType:        firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
 		terminalStreams:    map[string]struct{}{},
 	}
-	session, err := driver.stack.StartSession(ctx, strings.TrimSpace(preferredSessionID), driver.bindingKey)
-	if err != nil {
-		return nil, err
+	if preferredSessionID = strings.TrimSpace(preferredSessionID); preferredSessionID != "" {
+		session, err := driver.stack.StartSession(ctx, preferredSessionID, driver.bindingKey)
+		if err != nil {
+			return nil, err
+		}
+		driver.session = session
+		driver.hasSession = true
+		driver.refreshSessionDisplay(ctx, session)
 	}
-	driver.session = session
-	driver.hasSession = true
-	driver.refreshSessionDisplay(ctx, session)
 	return driver, nil
 }
 
@@ -342,7 +344,11 @@ func (d *GatewayDriver) ListSessions(ctx context.Context, limit int) ([]ResumeCa
 	}
 	out := make([]ResumeCandidate, 0, len(result.Sessions))
 	for _, session := range result.Sessions {
-		out = append(out, enrichResumeCandidate(ctx, d.stack, session))
+		candidate := enrichResumeCandidate(ctx, d.stack, session)
+		if strings.TrimSpace(candidate.Prompt) == "" && strings.TrimSpace(candidate.Title) == "" {
+			continue
+		}
+		out = append(out, candidate)
 	}
 	return out, nil
 }

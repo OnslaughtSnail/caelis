@@ -76,6 +76,7 @@ func NewModel(cfg Config) *Model {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = 5
+	vp.SetHorizontalStep(0)
 	vp.KeyMap.Up.SetEnabled(false)
 	vp.KeyMap.Down.SetEnabled(false)
 	vp.KeyMap.HalfPageUp = key.NewBinding(key.WithKeys("shift+pgup"))

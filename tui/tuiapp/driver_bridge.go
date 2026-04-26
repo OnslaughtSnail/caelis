@@ -398,14 +398,12 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 	}
 
 	// Resume specific session.
-	session, err := driver.ResumeSession(ctx, sessionID)
-	if err != nil {
+	if _, err := driver.ResumeSession(ctx, sessionID); err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("resume session", err)}
 	}
 	if send != nil {
 		send(ClearHistoryMsg{})
 	}
-	sendNotice(send, fmt.Sprintf("resumed session: %s", session.SessionID))
 
 	// Replay historical events into transcript.
 	events, err := driver.ReplayEvents(ctx)
@@ -417,7 +415,6 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 				send(env)
 			}
 		}
-		sendNotice(send, fmt.Sprintf("replayed %d events", len(events)))
 	}
 
 	refreshStatusViaSend(driver, send)

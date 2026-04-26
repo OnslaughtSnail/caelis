@@ -99,6 +99,25 @@ func TestViewportMouseWheelUsesReadableScrollStep(t *testing.T) {
 	}
 }
 
+func TestViewportIgnoresHorizontalWheelScrolling(t *testing.T) {
+	m := NewModel(Config{})
+	m.viewport.SetWidth(20)
+	m.viewport.SetHeight(6)
+	m.viewport.SetContentLines([]string{"this is a deliberately long line that must not pan horizontally"})
+
+	updated, _ := m.handleMouse(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelRight}))
+	m = updated.(*Model)
+	if got := m.viewport.XOffset(); got != 0 {
+		t.Fatalf("horizontal wheel changed viewport XOffset to %d, want 0", got)
+	}
+
+	updated, _ = m.handleMouse(tea.MouseWheelMsg(tea.Mouse{Button: tea.MouseWheelDown, Mod: tea.ModShift}))
+	m = updated.(*Model)
+	if got := m.viewport.XOffset(); got != 0 {
+		t.Fatalf("shift+wheel changed viewport XOffset to %d, want 0", got)
+	}
+}
+
 func TestShiftPageKeysHalfPageViewport(t *testing.T) {
 	m := NewModel(Config{})
 	m.viewport.SetWidth(40)

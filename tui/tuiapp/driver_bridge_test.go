@@ -98,17 +98,17 @@ func TestSlashResumeClearsHistoryBeforeReplay(t *testing.T) {
 	}
 	var msgs []tea.Msg
 	slashResume(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "resumed-session")
-	if len(msgs) < 3 {
-		t.Fatalf("slashResume() emitted %d messages, want at least 3", len(msgs))
+	if len(msgs) < 2 {
+		t.Fatalf("slashResume() emitted %d messages, want at least 2", len(msgs))
 	}
 	if _, ok := msgs[0].(ClearHistoryMsg); !ok {
 		t.Fatalf("first msg = %#v, want ClearHistoryMsg", msgs[0])
 	}
-	if log, ok := msgs[1].(LogChunkMsg); !ok || !strings.Contains(log.Chunk, "resumed session") {
-		t.Fatalf("second msg = %#v, want resumed session notice", msgs[1])
-	}
 	var sawReplay bool
 	for _, msg := range msgs {
+		if log, ok := msg.(LogChunkMsg); ok && (strings.Contains(log.Chunk, "resumed session") || strings.Contains(log.Chunk, "replayed")) {
+			t.Fatalf("slashResume() emitted noisy resume notice: %#v", log)
+		}
 		if env, ok := msg.(appgateway.EventEnvelope); ok {
 			if env.Event.Narrative != nil && env.Event.Narrative.Text == "history reply" {
 				sawReplay = true
