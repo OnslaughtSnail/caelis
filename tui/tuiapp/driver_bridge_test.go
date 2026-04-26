@@ -467,8 +467,28 @@ func TestSlashModelUseCallsDriverAndUpdatesStatus(t *testing.T) {
 	if got := driver.lastModelAlias; got != "minimax/MiniMax-M2" {
 		t.Fatalf("lastModelAlias = %q, want minimax/MiniMax-M2", got)
 	}
+	if got := driver.lastReasoningEffort; got != "" {
+		t.Fatalf("lastReasoningEffort = %q, want empty", got)
+	}
 	if len(msgs) == 0 {
 		t.Fatal("slashModel(use) emitted no messages")
+	}
+}
+
+func TestSlashModelUsePassesReasoningLevel(t *testing.T) {
+	driver := &bridgeTestDriver{
+		status:         tuiadapterruntime.StatusSnapshot{Model: "deepseek/deepseek-v4-pro", ModeLabel: "default", Workspace: "/tmp/ws"},
+		useModelStatus: tuiadapterruntime.StatusSnapshot{Model: "deepseek/deepseek-v4-pro [high]", ModeLabel: "default", Workspace: "/tmp/ws"},
+	}
+	slashModel(driver, func(tea.Msg) {}, "use deepseek/deepseek-v4-pro high")
+	if driver.useModelCalls != 1 {
+		t.Fatalf("useModelCalls = %d, want 1", driver.useModelCalls)
+	}
+	if got := driver.lastModelAlias; got != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("lastModelAlias = %q, want deepseek/deepseek-v4-pro", got)
+	}
+	if got := driver.lastReasoningEffort; got != "high" {
+		t.Fatalf("lastReasoningEffort = %q, want high", got)
 	}
 }
 
@@ -487,6 +507,25 @@ func TestSlashModelDeleteCallsDriverAndRefreshesStatus(t *testing.T) {
 	if len(msgs) == 0 {
 		t.Fatal("slashModel(del) emitted no messages")
 	}
+}
+
+func TestSlashModelDeleteClearsStatusWhenNoModelRemains(t *testing.T) {
+	driver := &bridgeTestDriver{
+		status: tuiadapterruntime.StatusSnapshot{Workspace: "/tmp/ws"},
+	}
+	var msgs []tea.Msg
+	slashModel(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "del codefree/glm-5.1")
+	for _, msg := range msgs {
+		status, ok := msg.(SetStatusMsg)
+		if !ok {
+			continue
+		}
+		if status.Model != "not configured (/connect)" {
+			t.Fatalf("status model = %q, want not configured placeholder", status.Model)
+		}
+		return
+	}
+	t.Fatalf("slashModel(del) messages = %#v, want SetStatusMsg", msgs)
 }
 
 func TestSlashStatusShowsGuidanceAndWarnings(t *testing.T) {
@@ -545,6 +584,7 @@ type bridgeTestDriver struct {
 	askAgentCalls                int
 	lastConnect                  tuiadapterruntime.ConnectConfig
 	lastModelAlias               string
+	lastReasoningEffort          string
 	lastDeletedAlias             string
 	lastAddedAgent               string
 	lastRemovedAgent             string
@@ -619,7 +659,7 @@ func (d *bridgeSubmitDriver) Compact(context.Context, string) error { return nil
 func (d *bridgeSubmitDriver) Connect(context.Context, tuiadapterruntime.ConnectConfig) (tuiadapterruntime.StatusSnapshot, error) {
 	return tuiadapterruntime.StatusSnapshot{}, nil
 }
-func (d *bridgeSubmitDriver) UseModel(context.Context, string) (tuiadapterruntime.StatusSnapshot, error) {
+func (d *bridgeSubmitDriver) UseModel(context.Context, string, ...string) (tuiadapterruntime.StatusSnapshot, error) {
 	return tuiadapterruntime.StatusSnapshot{}, nil
 }
 func (d *bridgeSubmitDriver) DeleteModel(context.Context, string) error { return nil }
@@ -706,9 +746,12 @@ func (d *bridgeTestDriver) Connect(_ context.Context, cfg tuiadapterruntime.Conn
 	}
 	return d.status, nil
 }
-func (d *bridgeTestDriver) UseModel(_ context.Context, alias string) (tuiadapterruntime.StatusSnapshot, error) {
+func (d *bridgeTestDriver) UseModel(_ context.Context, alias string, reasoningEffort ...string) (tuiadapterruntime.StatusSnapshot, error) {
 	d.useModelCalls++
 	d.lastModelAlias = alias
+	if len(reasoningEffort) > 0 {
+		d.lastReasoningEffort = reasoningEffort[0]
+	}
 	if d.useModelStatus.Model != "" || d.useModelStatus.Workspace != "" || d.useModelStatus.ModeLabel != "" {
 		return d.useModelStatus, nil
 	}

@@ -68,9 +68,10 @@ var StreamRequestFromEvent = gatewaycore.StreamRequestFromEvent
 var StreamFrameEvent = gatewaycore.StreamFrameEvent
 
 const (
-	StateCurrentModelAlias  = gatewaycore.StateCurrentModelAlias
-	StateCurrentSandboxMode = gatewaycore.StateCurrentSandboxMode
-	StateCurrentSessionMode = gatewaycore.StateCurrentSessionMode
+	StateCurrentModelAlias      = gatewaycore.StateCurrentModelAlias
+	StateCurrentSandboxMode     = gatewaycore.StateCurrentSandboxMode
+	StateCurrentSessionMode     = gatewaycore.StateCurrentSessionMode
+	StateCurrentReasoningEffort = gatewaycore.StateCurrentReasoningEffort
 )
 
 const (
@@ -168,6 +169,9 @@ func PromptTokens(event Event) int     { return gatewaycore.PromptTokens(event) 
 func As(err error, target any) bool    { return gatewaycore.As(err, target) }
 func CurrentModelAlias(state map[string]any) string {
 	return gatewaycore.CurrentModelAlias(state)
+}
+func CurrentReasoningEffort(state map[string]any) string {
+	return gatewaycore.CurrentReasoningEffort(state)
 }
 func CurrentSandboxMode(state map[string]any) string {
 	return gatewaycore.CurrentSandboxMode(state)

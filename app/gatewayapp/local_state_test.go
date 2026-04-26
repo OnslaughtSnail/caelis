@@ -147,6 +147,59 @@ func TestStackDeleteModelRemovesConfiguredAlias(t *testing.T) {
 	}
 }
 
+func TestStackDeleteOnlyModelClearsRuntimeModelState(t *testing.T) {
+	ctx := context.Background()
+	workdir := t.TempDir()
+	stack, err := NewLocalStack(Config{
+		AppName:        "caelis",
+		UserID:         "delete-only-model-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   workdir,
+		WorkspaceCWD:   workdir,
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	session, err := stack.StartSession(ctx, "delete-only-model-session", "surface")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	alias, err := stack.Connect(ModelConfig{
+		Provider:        "deepseek",
+		API:             sdkproviders.APIDeepSeek,
+		Model:           "deepseek-v4-pro",
+		ReasoningLevels: []string{"none", "high", "max"},
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := stack.UseModel(ctx, session.SessionRef, alias, "high"); err != nil {
+		t.Fatalf("UseModel() error = %v", err)
+	}
+	if err := stack.DeleteModel(ctx, session.SessionRef, alias); err != nil {
+		t.Fatalf("DeleteModel() error = %v", err)
+	}
+	if got := stack.DefaultModelAlias(); got != "" {
+		t.Fatalf("DefaultModelAlias() = %q, want empty", got)
+	}
+	aliases, err := stack.ListModelAliases(ctx, session.SessionRef)
+	if err != nil {
+		t.Fatalf("ListModelAliases() error = %v", err)
+	}
+	if len(aliases) != 0 {
+		t.Fatalf("ListModelAliases() = %#v, want empty", aliases)
+	}
+	state, err := stack.SessionRuntimeState(ctx, session.SessionRef)
+	if err != nil {
+		t.Fatalf("SessionRuntimeState() error = %v", err)
+	}
+	if state.ModelAlias != "" || state.ReasoningEffort != "" {
+		t.Fatalf("runtime state = %#v, want model and reasoning cleared", state)
+	}
+}
+
 func TestSessionRuntimeStateIgnoresStaleModelAliasOutsideConfig(t *testing.T) {
 	ctx := context.Background()
 	stack, session := newLocalStateTestStack(t)
@@ -202,7 +255,7 @@ func TestLocalStackPersistsMultipleProviderModelsAcrossRestart(t *testing.T) {
 	deepseekAlias, err := stack.Connect(ModelConfig{
 		Provider: "deepseek",
 		API:      sdkproviders.APIDeepSeek,
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		Token:    "deepseek-secret",
 	})
 	if err != nil {

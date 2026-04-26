@@ -96,6 +96,47 @@ func TestAssemblyResolverAppliesAssemblyStateAndModelDefaults(t *testing.T) {
 	}
 }
 
+func TestAssemblyResolverSessionReasoningOverridesModeAndModelDefault(t *testing.T) {
+	t.Parallel()
+
+	resolver, err := NewAssemblyResolver(AssemblyResolverConfig{
+		Sessions: snapshotStateFunc(func(context.Context, sdksession.SessionRef) (map[string]any, error) {
+			return map[string]any{
+				StateCurrentReasoningEffort:  "none",
+				sdkplugin.StateCurrentModeID: "plan",
+			}, nil
+		}),
+		Assembly: sdkplugin.ResolvedAssembly{
+			Modes: []sdkplugin.ModeConfig{{
+				ID: "plan",
+				Runtime: sdkplugin.RuntimeOverrides{
+					Reasoning: sdkmodel.ReasoningConfig{Effort: "high"},
+				},
+			}},
+		},
+		DefaultModelAlias: "mini",
+		ModelLookup: modelLookupFunc(func(context.Context, string, int) (ModelResolution, error) {
+			return ModelResolution{
+				Model:                  fakeLLM{name: "mini"},
+				DefaultReasoningEffort: "medium",
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("NewAssemblyResolver() error = %v", err)
+	}
+	turn, err := resolver.ResolveTurn(context.Background(), TurnIntent{
+		SessionRef: sdksession.SessionRef{SessionID: "s1"},
+		Input:      "hello",
+	})
+	if err != nil {
+		t.Fatalf("ResolveTurn() error = %v", err)
+	}
+	if got := turn.RunRequest.AgentSpec.Metadata["reasoning_effort"]; got != "none" {
+		t.Fatalf("reasoning_effort = %#v, want session override none", got)
+	}
+}
+
 func TestAssemblyResolverIntentModeOverridesState(t *testing.T) {
 	t.Parallel()
 

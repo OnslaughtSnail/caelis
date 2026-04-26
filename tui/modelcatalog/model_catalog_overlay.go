@@ -163,7 +163,7 @@ func ListCatalogModels(provider string) []string {
 	if provider == "" {
 		return nil
 	}
-	seen := map[string]struct{}{}
+	seen := map[string]string{}
 	add := func(model string) {
 		model = strings.TrimSpace(model)
 		if model == "" || model == "*" {
@@ -173,23 +173,19 @@ func ListCatalogModels(provider string) []string {
 		if _, ok := seen[key]; ok {
 			return
 		}
-		seen[key] = struct{}{}
+		seen[key] = model
 	}
 
 	dynamicMu.RLock()
 	local := localOverrides
-	remote := remoteCatalog
-	embedded := embeddedCatalog
 	dynamicMu.RUnlock()
 
-	for _, snap := range []capSnapshot{local, remote, embedded} {
-		for key := range snap {
-			p, model, ok := splitCatalogKey(key)
-			if !ok || !providerMatches(provider, p) {
-				continue
-			}
-			add(model)
+	for key := range local {
+		p, model, ok := splitCatalogKey(key)
+		if !ok || !providerMatches(provider, p) {
+			continue
 		}
+		add(model)
 	}
 	for _, entry := range builtinCatalog {
 		if strings.EqualFold(strings.TrimSpace(entry.provider), provider) {
@@ -204,9 +200,11 @@ func ListCatalogModels(provider string) []string {
 		add(model)
 	}
 	out := make([]string, 0, len(seen))
-	for model := range seen {
+	for _, model := range seen {
 		out = append(out, model)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i]) < strings.ToLower(out[j])
+	})
 	return out
 }

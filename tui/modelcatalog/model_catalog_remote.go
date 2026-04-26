@@ -3,15 +3,12 @@ package modelcatalog
 // model_catalog_remote.go
 //
 // Dynamic model capability catalog:
-//   Priority (highest to lowest):
-//     1. Local override file  (~/.agents/model_capabilities.json, user-editable)
-//     2. Remote live data     (https://models.dev/api.json, fetched on demand by the app layer)
-//     3. Embedded snapshot    (models_dev_snapshot.json, shipped in binary)
-//     4. Hard-coded catalog   (builtinCatalog in model_catalog.go, final fallback)
+//   - Local override file (~/.agents/model_capabilities.json) may override known models.
+//   - Remote live data and the embedded snapshot are fallback capability sources
+//     for custom model names that are not maintained in builtinCatalog.
 //
 // Call InitModelCatalog when you need to refresh dynamic catalog data
-// (for example from /connect). All subsequent LookupModelCapabilities
-// calls automatically use the loaded data.
+// (for example from /connect). Static model lists do not use this data.
 
 import (
 	"context"
@@ -154,8 +151,7 @@ func InitModelCatalogWithStatus(ctx context.Context, client *http.Client, overri
 // Internal lookup used by LookupModelCapabilities
 // ---------------------------------------------------------------------------
 
-// lookupDynamic searches local/remote/embedded catalogs in priority order:
-// local overrides -> remote models.dev -> embedded snapshot.
+// lookupDynamic searches local/remote/embedded catalogs in priority order.
 // Returns (caps, true) if found, otherwise (zero, false).
 func lookupDynamic(provider, modelName string) (ModelCapabilities, bool) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
@@ -183,6 +179,38 @@ func lookupDynamic(provider, modelName string) (ModelCapabilities, bool) {
 		return caps, true
 	}
 	return ModelCapabilities{}, false
+}
+
+func lookupLocalOverride(provider, modelName string) (ModelCapabilities, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if provider == "" || modelName == "" {
+		return ModelCapabilities{}, false
+	}
+
+	dynamicMu.RLock()
+	local := localOverrides
+	dynamicMu.RUnlock()
+
+	return searchCapSnapshot(local, provider, modelName)
+}
+
+func lookupRemoteOrEmbedded(provider, modelName string) (ModelCapabilities, bool) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if provider == "" || modelName == "" {
+		return ModelCapabilities{}, false
+	}
+
+	dynamicMu.RLock()
+	remote := remoteCatalog
+	embedded := embeddedCatalog
+	dynamicMu.RUnlock()
+
+	if caps, ok := searchCapSnapshot(remote, provider, modelName); ok {
+		return caps, true
+	}
+	return searchCapSnapshot(embedded, provider, modelName)
 }
 
 // LookupDynamicModelCapabilities searches only local/remote/embedded catalogs.

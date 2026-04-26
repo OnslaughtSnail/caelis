@@ -35,15 +35,15 @@ func TestListModelsRequiresRegistration(t *testing.T) {
 	if got := factory.ListModels(); len(got) != 0 {
 		t.Fatalf("expected empty model list, got %v", got)
 	}
-	if _, err := factory.NewByAlias("deepseek/deepseek-chat"); err == nil {
+	if _, err := factory.NewByAlias("deepseek/deepseek-v4-flash"); err == nil {
 		t.Fatalf("expected unknown alias error without registration")
 	}
 
 	cfg := Config{
-		Alias:               "deepseek/deepseek-chat",
+		Alias:               "deepseek/deepseek-v4-flash",
 		Provider:            "deepseek",
 		API:                 APIDeepSeek,
-		Model:               "deepseek-chat",
+		Model:               "deepseek-v4-flash",
 		BaseURL:             "https://api.deepseek.com/v1",
 		ContextWindowTokens: 64000,
 		Auth: AuthConfig{
@@ -1714,7 +1714,7 @@ func TestToKernelMessage_OpenAICompatKeepsRawToolArgsOnDecodeFailure(t *testing.
 func TestDeepSeekThinkingPayload(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider: "deepseek",
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		BaseURL:  "https://api.deepseek.com/v1",
 		Timeout:  time.Second,
 	}, "token").(*openAICompatLLM)
@@ -1729,12 +1729,15 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 		Reasoning: model.ReasoningConfig{Effort: "high"},
 	}
 	payload := openAICompatRequest{
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		Messages: llm.fromKernelMessages(nil, req.Messages),
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
 	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
 		t.Fatalf("expected deepseek thinking config, got %#v", payload.Thinking)
+	}
+	if payload.ReasoningEffort != "high" {
+		t.Fatalf("expected deepseek reasoning_effort=high, got %q", payload.ReasoningEffort)
 	}
 	if payload.Reasoning != nil {
 		t.Fatalf("did not expect OpenAI reasoning block for deepseek payload")
@@ -1756,7 +1759,7 @@ func TestDeepSeekThinkingPayload(t *testing.T) {
 func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider:     "deepseek",
-		Model:        "deepseek-reasoner",
+		Model:        "deepseek-v4-pro",
 		BaseURL:      "https://api.deepseek.com/v1",
 		Timeout:      time.Second,
 		MaxOutputTok: 8192, // smaller than thinking min – must be bumped
@@ -1766,7 +1769,7 @@ func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
 		Reasoning: model.ReasoningConfig{Effort: "medium"},
 	}
 	payload := openAICompatRequest{
-		Model:     "deepseek-reasoner",
+		Model:     "deepseek-v4-pro",
 		Messages:  llm.fromKernelMessages(nil, req.Messages),
 		MaxTokens: llm.maxOutputTok, // 8192 from config
 	}
@@ -1774,52 +1777,78 @@ func TestDeepSeekThinkingPayload_SmallMaxTokensBumped(t *testing.T) {
 	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
 		t.Fatalf("expected thinking enabled")
 	}
+	if payload.ReasoningEffort != "high" {
+		t.Fatalf("expected medium to map to reasoning_effort=high, got %q", payload.ReasoningEffort)
+	}
 	if payload.MaxTokens < thinkingModeMinTokens {
 		t.Fatalf("expected MaxTokens bumped to >= %d, got %d",
 			thinkingModeMinTokens, payload.MaxTokens)
 	}
 }
 
-func TestDeepSeekThinkingPayload_AdaptiveUsesReasonerRange(t *testing.T) {
+func TestDeepSeekThinkingPayload_DefaultUsesHighEffort(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider:     "deepseek",
-		Model:        "deepseek-reasoner",
+		Model:        "deepseek-v4-pro",
 		BaseURL:      "https://api.deepseek.com/v1",
 		Timeout:      time.Second,
-		MaxOutputTok: 70000,
+		MaxOutputTok: 400000,
 	}, "token").(*openAICompatLLM)
 	req := &model.Request{
 		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Reasoning: model.ReasoningConfig{},
 	}
 	payload := openAICompatRequest{
-		Model:     "deepseek-reasoner",
+		Model:     "deepseek-v4-pro",
 		Messages:  llm.fromKernelMessages(nil, req.Messages),
 		MaxTokens: llm.maxOutputTok,
 	}
 	llm.options.ApplyReasoning(&payload, req.Reasoning)
-	if payload.Thinking == nil || payload.Thinking.Type != deepSeekAdaptiveThinkingType {
-		t.Fatalf("expected thinking adaptive")
+	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
+		t.Fatalf("expected thinking enabled")
 	}
-	if payload.MaxTokens != deepSeekReasonerMaxTokens {
-		t.Fatalf("expected MaxTokens capped to %d for adaptive thinking, got %d", deepSeekReasonerMaxTokens, payload.MaxTokens)
+	if payload.ReasoningEffort != "high" {
+		t.Fatalf("expected default reasoning_effort=high, got %q", payload.ReasoningEffort)
+	}
+	if payload.MaxTokens != deepSeekMaxTokens {
+		t.Fatalf("expected MaxTokens capped to %d for default thinking, got %d", deepSeekMaxTokens, payload.MaxTokens)
+	}
+}
+
+func TestDeepSeekThinkingPayload_MaxEffort(t *testing.T) {
+	llm := newDeepSeek(Config{
+		Provider: "deepseek",
+		Model:    "deepseek-v4-pro",
+		BaseURL:  "https://api.deepseek.com/v1",
+		Timeout:  time.Second,
+	}, "token").(*openAICompatLLM)
+	payload := openAICompatRequest{
+		Model:    "deepseek-v4-pro",
+		Messages: llm.fromKernelMessages(nil, []model.Message{model.NewTextMessage(model.RoleUser, "hi")}),
+	}
+	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "xhigh"})
+	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
+		t.Fatalf("expected thinking enabled")
+	}
+	if payload.ReasoningEffort != "max" {
+		t.Fatalf("expected xhigh to map to reasoning_effort=max, got %q", payload.ReasoningEffort)
 	}
 }
 
 func TestDeepSeekThinkingPayload_DisabledCapsToChatRange(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider:     "deepseek",
-		Model:        "deepseek-reasoner",
+		Model:        "deepseek-v4-pro",
 		BaseURL:      "https://api.deepseek.com/v1",
 		Timeout:      time.Second,
-		MaxOutputTok: 32768,
+		MaxOutputTok: 400000,
 	}, "token").(*openAICompatLLM)
 	req := &model.Request{
 		Messages:  []model.Message{model.NewTextMessage(model.RoleUser, "hi")},
 		Reasoning: model.ReasoningConfig{Effort: "none"},
 	}
 	payload := openAICompatRequest{
-		Model:     "deepseek-reasoner",
+		Model:     "deepseek-v4-pro",
 		Messages:  llm.fromKernelMessages(nil, req.Messages),
 		MaxTokens: llm.maxOutputTok,
 	}
@@ -1827,30 +1856,45 @@ func TestDeepSeekThinkingPayload_DisabledCapsToChatRange(t *testing.T) {
 	if payload.Thinking == nil || payload.Thinking.Type != "disabled" {
 		t.Fatalf("expected thinking disabled")
 	}
-	if payload.MaxTokens != deepSeekChatMaxTokens {
-		t.Fatalf("expected MaxTokens capped to %d when thinking is disabled, got %d", deepSeekChatMaxTokens, payload.MaxTokens)
+	if payload.MaxTokens != deepSeekMaxTokens {
+		t.Fatalf("expected MaxTokens capped to %d when thinking is disabled, got %d", deepSeekMaxTokens, payload.MaxTokens)
 	}
 }
 
-func TestDeepSeekChatIgnoresReasoningAndCapsTokens(t *testing.T) {
+func TestDeepSeekV4FlashSupportsReasoningAndCapsTokens(t *testing.T) {
 	llm := newDeepSeek(Config{
 		Provider:     "deepseek",
-		Model:        "deepseek-chat",
+		Model:        "deepseek-v4-flash",
 		BaseURL:      "https://api.deepseek.com/v1",
 		Timeout:      time.Second,
-		MaxOutputTok: 64000,
+		MaxOutputTok: 400000,
 	}, "token").(*openAICompatLLM)
 	payload := openAICompatRequest{
-		Model:     "deepseek-chat",
+		Model:     "deepseek-v4-flash",
 		Messages:  llm.fromKernelMessages(nil, []model.Message{model.NewTextMessage(model.RoleUser, "hi")}),
 		MaxTokens: llm.maxOutputTok,
 	}
 	llm.options.ApplyReasoning(&payload, model.ReasoningConfig{Effort: "high"})
-	if payload.Thinking != nil {
-		t.Fatalf("did not expect thinking payload for deepseek-chat, got %#v", payload.Thinking)
+	if payload.Thinking == nil || payload.Thinking.Type != "enabled" {
+		t.Fatalf("expected thinking payload for deepseek-v4-flash, got %#v", payload.Thinking)
 	}
-	if payload.MaxTokens != deepSeekChatMaxTokens {
-		t.Fatalf("expected MaxTokens capped to %d for deepseek-chat, got %d", deepSeekChatMaxTokens, payload.MaxTokens)
+	if payload.ReasoningEffort != "high" {
+		t.Fatalf("expected deepseek-v4-flash reasoning_effort=high, got %q", payload.ReasoningEffort)
+	}
+	if payload.MaxTokens != deepSeekMaxTokens {
+		t.Fatalf("expected MaxTokens capped to %d for deepseek-v4-flash, got %d", deepSeekMaxTokens, payload.MaxTokens)
+	}
+}
+
+func TestCodeFreeDoesNotApplyReasoningPayload(t *testing.T) {
+	llm := newCodeFree(Config{
+		Provider: "codefree",
+		Model:    "GLM-5.1",
+		BaseURL:  "https://www.srdcloud.cn",
+		Timeout:  time.Second,
+	}).(*codeFreeLLM)
+	if llm.options.ApplyReasoning != nil {
+		t.Fatal("CodeFree ApplyReasoning is configured, want nil")
 	}
 }
 

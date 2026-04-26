@@ -102,7 +102,7 @@ func TestDoctorReportTableDrivenTokenSourceAndLeakSafety(t *testing.T) {
 			cfg: ModelConfig{
 				Provider: "deepseek",
 				API:      sdkproviders.APIDeepSeek,
-				Model:    "deepseek-reasoner",
+				Model:    "deepseek-v4-pro",
 				TokenEnv: "CAELIS_DOCTOR_TOKEN",
 			},
 			envValue:   "env-secret",
@@ -114,7 +114,7 @@ func TestDoctorReportTableDrivenTokenSourceAndLeakSafety(t *testing.T) {
 			cfg: ModelConfig{
 				Provider: "deepseek",
 				API:      sdkproviders.APIDeepSeek,
-				Model:    "deepseek-reasoner",
+				Model:    "deepseek-v4-pro",
 				Token:    "memory-secret",
 			},
 			wantSource: "memory",
@@ -125,7 +125,7 @@ func TestDoctorReportTableDrivenTokenSourceAndLeakSafety(t *testing.T) {
 			cfg: ModelConfig{
 				Provider: "deepseek",
 				API:      sdkproviders.APIDeepSeek,
-				Model:    "deepseek-reasoner",
+				Model:    "deepseek-v4-pro",
 				TokenEnv: "CAELIS_DOCTOR_TOKEN_MISSING",
 			},
 			wantSource: "env:CAELIS_DOCTOR_TOKEN_MISSING",

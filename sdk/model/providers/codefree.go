@@ -112,6 +112,8 @@ type codeFreeStoredCredentials struct {
 var codeFreeCredentialMu sync.Mutex
 
 func newCodeFree(cfg Config) model.LLM {
+	options := defaultOpenAICompatOptions()
+	options.ApplyReasoning = nil
 	return &codeFreeLLM{
 		name:                strings.TrimSpace(cfg.Model),
 		provider:            cfg.Provider,
@@ -120,7 +122,7 @@ func newCodeFree(cfg Config) model.LLM {
 		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
-		options:             defaultOpenAICompatOptions(),
+		options:             options,
 	}
 }
 

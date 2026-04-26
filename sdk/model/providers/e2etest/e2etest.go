@@ -145,7 +145,7 @@ func ResolveLLM(cfg Config) (Spec, error) {
 			tokenEnvKeys:      []string{"DEEPSEEK_API_KEY"},
 			modelEnvKeys:      []string{"DEEPSEEK_MODEL"},
 			baseURLEnvKeys:    []string{"DEEPSEEK_BASE_URL"},
-			defaultModel:      "deepseek-chat",
+			defaultModel:      "deepseek-v4-flash",
 			defaultBaseURL:    "https://api.deepseek.com/v1",
 			defaultProvider:   "deepseek",
 			defaultContextTok: 128000,

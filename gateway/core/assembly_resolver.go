@@ -22,6 +22,9 @@ const (
 	// StateCurrentSessionMode is the durable session-state key for a per-session
 	// policy mode override selected by the TUI.
 	StateCurrentSessionMode = "gateway.current_session_mode"
+	// StateCurrentReasoningEffort is the durable session-state key for a
+	// per-session reasoning effort override selected by the TUI.
+	StateCurrentReasoningEffort = "gateway.current_reasoning_effort"
 )
 
 type ModelResolution struct {
@@ -110,9 +113,7 @@ func (r *AssemblyResolver) SetModelLookup(lookup ModelLookup, defaultAlias strin
 		return
 	}
 	r.modelLookup = lookup
-	if alias := strings.TrimSpace(defaultAlias); alias != "" {
-		r.defaultModelAlias = alias
-	}
+	r.defaultModelAlias = strings.TrimSpace(defaultAlias)
 }
 
 func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (ResolvedTurn, error) {
@@ -219,6 +220,7 @@ func (r *AssemblyResolver) resolveMetadata(intent TurnIntent, state map[string]a
 		}
 	}
 	if reasoning := firstNonEmptyString(
+		CurrentReasoningEffort(state),
 		stringMetadata(metadata, "reasoning_effort"),
 		model.ReasoningEffort,
 		model.DefaultReasoningEffort,
@@ -238,6 +240,16 @@ func CurrentModelAlias(state map[string]any) string {
 		return ""
 	}
 	value, _ := state[StateCurrentModelAlias].(string)
+	return strings.TrimSpace(value)
+}
+
+// CurrentReasoningEffort returns the selected per-session reasoning override
+// from one session state snapshot.
+func CurrentReasoningEffort(state map[string]any) string {
+	if state == nil {
+		return ""
+	}
+	value, _ := state[StateCurrentReasoningEffort].(string)
 	return strings.TrimSpace(value)
 }
 

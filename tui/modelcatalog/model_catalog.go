@@ -89,7 +89,7 @@ func RecommendedFallbackMaxOutputTokens(contextWindow int, suggested int, reason
 // catalogEntry maps a provider+model pattern to capabilities.
 type catalogEntry struct {
 	provider string // provider name (e.g. "deepseek", "openai")
-	pattern  string // model name prefix or exact match (e.g. "deepseek-chat", "gpt-4o")
+	pattern  string // model name prefix or exact match (e.g. "deepseek-v4-flash", "gpt-4o")
 	caps     ModelCapabilities
 }
 
@@ -99,27 +99,32 @@ var builtinCatalog = []catalogEntry{
 	// ── DeepSeek ──────────────────────────────────────────────────────────
 	{
 		provider: "deepseek",
-		pattern:  "deepseek-chat",
+		pattern:  "deepseek-v4-flash",
 		caps: ModelCapabilities{
-			ContextWindowTokens:    128000,
-			MaxOutputTokens:        8192,
-			DefaultMaxOutputTokens: 4096,
+			ContextWindowTokens:    1048576,
+			MaxOutputTokens:        393216,
+			DefaultMaxOutputTokens: 32768,
 			SupportsToolCalls:      true,
-			SupportsReasoning:      false,
+			SupportsReasoning:      true,
+			ReasoningMode:          ReasoningModeToggle,
+			ReasoningEfforts:       []string{"high", "max"},
+			DefaultReasoningEffort: "high",
 			SupportsJSONOutput:     true,
 			SupportsImages:         false,
 		},
 	},
 	{
 		provider: "deepseek",
-		pattern:  "deepseek-reasoner",
+		pattern:  "deepseek-v4-pro",
 		caps: ModelCapabilities{
-			ContextWindowTokens:    128000,
-			MaxOutputTokens:        64000,
+			ContextWindowTokens:    1048576,
+			MaxOutputTokens:        393216,
 			DefaultMaxOutputTokens: 32768,
 			SupportsToolCalls:      true,
 			SupportsReasoning:      true,
-			ReasoningMode:          ReasoningModeFixed,
+			ReasoningMode:          ReasoningModeToggle,
+			ReasoningEfforts:       []string{"high", "max"},
+			DefaultReasoningEffort: "high",
 			SupportsJSONOutput:     true,
 			SupportsImages:         false,
 		},
@@ -428,6 +433,59 @@ var builtinCatalog = []catalogEntry{
 			SupportsImages:         false,
 		},
 	},
+	// ── CodeFree ─────────────────────────────────────────────────────────
+	{
+		provider: "codefree",
+		pattern:  "GLM-4.7",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    88000,
+			MaxOutputTokens:        8000,
+			DefaultMaxOutputTokens: 8000,
+			SupportsToolCalls:      true,
+			ReasoningMode:          ReasoningModeNone,
+			SupportsJSONOutput:     true,
+			SupportsImages:         false,
+		},
+	},
+	{
+		provider: "codefree",
+		pattern:  "DeepSeek-V3.1-Terminus",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    88000,
+			MaxOutputTokens:        8000,
+			DefaultMaxOutputTokens: 8000,
+			SupportsToolCalls:      true,
+			ReasoningMode:          ReasoningModeNone,
+			SupportsJSONOutput:     true,
+			SupportsImages:         false,
+		},
+	},
+	{
+		provider: "codefree",
+		pattern:  "Qwen3.5-122B-A10B",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    88000,
+			MaxOutputTokens:        8000,
+			DefaultMaxOutputTokens: 8000,
+			SupportsToolCalls:      true,
+			ReasoningMode:          ReasoningModeNone,
+			SupportsJSONOutput:     true,
+			SupportsImages:         false,
+		},
+	},
+	{
+		provider: "codefree",
+		pattern:  "GLM-5.1",
+		caps: ModelCapabilities{
+			ContextWindowTokens:    128000,
+			MaxOutputTokens:        8000,
+			DefaultMaxOutputTokens: 8000,
+			SupportsToolCalls:      true,
+			ReasoningMode:          ReasoningModeNone,
+			SupportsJSONOutput:     true,
+			SupportsImages:         false,
+		},
+	},
 	// ── Gemini ────────────────────────────────────────────────────────────
 	{
 		provider: "gemini",
@@ -629,8 +687,8 @@ var builtinCatalog = []catalogEntry{
 //
 // Lookup priority (highest to lowest):
 //  1. Local user override file  (loaded by InitModelCatalog)
-//  2. Remote models.dev data / embedded snapshot  (loaded by InitModelCatalog)
-//  3. Hard-coded builtinCatalog below
+//  2. Hard-coded builtinCatalog below
+//  3. Remote models.dev data / embedded snapshot fallback for custom models
 //
 // Returns the matched capabilities and true, or DefaultModelCapabilities()
 // and false if no match is found.
@@ -641,14 +699,18 @@ func LookupBaseCatalogCapabilities(provider, modelName string) (ModelCapabilitie
 		return DefaultModelCapabilities(), false
 	}
 
-	// 1 & 2 – dynamic catalog (local overrides → remote/snapshot).
-	if caps, ok := lookupDynamic(provider, modelName); ok {
-		// If the dynamic source didn't include DefaultMaxOutputTokens,
-		// prefer the tuned value from the builtin catalog if one exists.
+	if caps, ok := lookupLocalOverride(provider, modelName); ok {
 		if caps.DefaultMaxOutputTokens <= 0 {
-			if builtin, found := lookupBuiltin(provider, modelName); found {
-				caps.DefaultMaxOutputTokens = builtin.DefaultMaxOutputTokens
-			}
+			caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.ContextWindowTokens, caps.SupportsReasoning)
+		}
+		return caps, true
+	}
+	if caps, ok := lookupBuiltin(provider, modelName); ok {
+		return caps, true
+	}
+	if caps, ok := lookupRemoteOrEmbedded(provider, modelName); ok {
+		if caps.DefaultMaxOutputTokens <= 0 {
+			caps.DefaultMaxOutputTokens = defaultMaxOutputHeuristic(caps.MaxOutputTokens, caps.ContextWindowTokens, caps.SupportsReasoning)
 		}
 		return caps, true
 	}
@@ -656,7 +718,7 @@ func LookupBaseCatalogCapabilities(provider, modelName string) (ModelCapabilitie
 }
 
 // LookupModelCapabilities resolves model capabilities from the layered catalog:
-// local override -> remote -> embedded -> provider overlay -> builtin.
+// local override -> builtin -> remote/embedded custom fallback -> provider overlay.
 func LookupModelCapabilities(provider, modelName string) (ModelCapabilities, bool) {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	modelName = strings.ToLower(strings.TrimSpace(modelName))
@@ -664,12 +726,6 @@ func LookupModelCapabilities(provider, modelName string) (ModelCapabilities, boo
 		return DefaultModelCapabilities(), false
 	}
 	if caps, ok := LookupBaseCatalogCapabilities(provider, modelName); ok {
-		if overlay, overlayOK := searchOverlay(provider, modelName); overlayOK {
-			caps = mergeCapabilities(caps, overlay)
-		}
-		return caps, true
-	}
-	if caps, ok := lookupBuiltin(provider, modelName); ok {
 		if overlay, overlayOK := searchOverlay(provider, modelName); overlayOK {
 			caps = mergeCapabilities(caps, overlay)
 		}
@@ -793,7 +849,8 @@ func NormalizeReasoningEffort(input string) string {
 func SupportedReasoningEfforts(provider, modelName string) []string {
 	caps, found := LookupModelCapabilities(provider, modelName)
 	if found {
-		if !caps.SupportsReasoning || NormalizeReasoningMode(caps.ReasoningMode) != ReasoningModeEffort {
+		mode := NormalizeReasoningMode(caps.ReasoningMode)
+		if !caps.SupportsReasoning || (mode != ReasoningModeEffort && mode != ReasoningModeToggle) {
 			return nil
 		}
 		if normalized := normalizeReasoningEffortList(caps.ReasoningEfforts); len(normalized) > 0 {
@@ -819,6 +876,19 @@ func SupportsReasoningEffort(provider, modelName, effort string) bool {
 		}
 	}
 	return false
+}
+
+// ReasoningLevelsForModel returns user-selectable reasoning levels for a model.
+// Empty means the model does not expose a reasoning choice.
+func ReasoningLevelsForModel(provider, modelName string) []string {
+	caps, found := LookupModelCapabilities(provider, modelName)
+	if !found {
+		caps, found = LookupSuggestedModelCapabilities(provider, modelName)
+	}
+	if !found {
+		return nil
+	}
+	return reasoningLevelsFromCapabilities(caps)
 }
 
 func ReasoningModeForModel(provider, modelName string) string {
@@ -848,7 +918,8 @@ func DefaultReasoningEffortForModel(provider, modelName string) string {
 		return defaultReasoningEffortFromList(inferReasoningEfforts(provider, modelName))
 	}
 	normalizeModelCapabilitiesReasoning(&caps)
-	if NormalizeReasoningMode(caps.ReasoningMode) != ReasoningModeEffort {
+	mode := NormalizeReasoningMode(caps.ReasoningMode)
+	if mode != ReasoningModeEffort && mode != ReasoningModeToggle {
 		return defaultReasoningEffortFromList(inferReasoningEfforts(provider, modelName))
 	}
 	if normalized := NormalizeReasoningEffort(caps.DefaultReasoningEffort); normalized != "" {
@@ -925,8 +996,12 @@ func normalizeModelCapabilitiesReasoning(caps *ModelCapabilities) {
 	default:
 		caps.ReasoningMode = ReasoningModeToggle
 	}
-	if caps.ReasoningMode != ReasoningModeEffort {
+	if caps.ReasoningMode != ReasoningModeEffort && caps.ReasoningMode != ReasoningModeToggle {
 		caps.ReasoningEfforts = nil
+		caps.DefaultReasoningEffort = ""
+		return
+	}
+	if len(caps.ReasoningEfforts) == 0 {
 		caps.DefaultReasoningEffort = ""
 		return
 	}
@@ -967,7 +1042,15 @@ func reasoningLevelsFromCapabilities(caps ModelCapabilities) []string {
 	case ReasoningModeEffort:
 		return append([]string(nil), caps.ReasoningEfforts...)
 	case ReasoningModeToggle:
-		return []string{"none"}
+		if len(caps.ReasoningEfforts) > 0 {
+			out := make([]string, 0, len(caps.ReasoningEfforts)+1)
+			out = append(out, "none")
+			out = append(out, caps.ReasoningEfforts...)
+			return out
+		}
+		return []string{"none", "high"}
+	case ReasoningModeFixed:
+		return []string{"low", "medium", "high"}
 	default:
 		return nil
 	}

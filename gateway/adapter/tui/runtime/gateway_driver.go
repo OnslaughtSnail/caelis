@@ -15,6 +15,7 @@ import (
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
+	"github.com/OnslaughtSnail/caelis/tui/modelcatalog"
 )
 
 type GatewayDriver struct {
@@ -219,6 +220,7 @@ func (d *GatewayDriver) currentSession() (sdksession.Session, bool) {
 
 func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 	modelText, sessionMode, sandboxType := d.defaultDisplays()
+	reasoningEffort := ""
 	if d.stack != nil {
 		if alias := strings.TrimSpace(d.stack.DefaultModelAlias()); alias != "" {
 			modelText = alias
@@ -233,6 +235,9 @@ func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 		if state, err := d.stack.SessionRuntimeState(context.Background(), session.SessionRef); err == nil {
 			if strings.TrimSpace(state.ModelAlias) != "" {
 				modelText = strings.TrimSpace(state.ModelAlias)
+			}
+			if strings.TrimSpace(state.ReasoningEffort) != "" {
+				reasoningEffort = strings.TrimSpace(state.ReasoningEffort)
 			}
 			if strings.TrimSpace(state.SessionMode) != "" {
 				sessionMode = strings.TrimSpace(state.SessionMode)
@@ -256,11 +261,13 @@ func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 	liveSandboxType := d.sandboxType
 	bindingKey := d.bindingKey
 	d.mu.Unlock()
+	rawModelText := firstNonEmpty(modelText, liveModelText)
 
 	status := StatusSnapshot{
 		SessionID:               sessionID,
 		Workspace:               strings.TrimSpace(d.stack.Workspace.CWD),
-		Model:                   firstNonEmpty(modelText, liveModelText),
+		Model:                   formatReasoningModelDisplay(rawModelText, reasoningEffort),
+		ReasoningEffort:         reasoningEffort,
 		ModeLabel:               firstNonEmpty(sessionMode, liveSessionMode),
 		SessionMode:             firstNonEmpty(sessionMode, liveSessionMode),
 		SandboxType:             firstNonEmpty(sandboxType, liveSandboxType),
@@ -291,7 +298,8 @@ func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 			status.FallbackReason = firstNonEmpty(strings.TrimSpace(report.SandboxFallbackReason), status.FallbackReason)
 			status.SecuritySummary = firstNonEmpty(strings.TrimSpace(report.SandboxSecuritySummary), status.SecuritySummary)
 			if alias := strings.TrimSpace(report.ActiveModelAlias); alias != "" {
-				status.Model = alias
+				rawModelText = alias
+				status.Model = formatReasoningModelDisplay(alias, status.ReasoningEffort)
 			}
 			if mode := strings.TrimSpace(report.SessionMode); mode != "" {
 				status.ModeLabel = mode
@@ -302,7 +310,7 @@ func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 			}
 		}
 		if ok {
-			if usage, err := d.stack.SessionUsageSnapshot(context.Background(), session.SessionRef, status.Model); err == nil {
+			if usage, err := d.stack.SessionUsageSnapshot(context.Background(), session.SessionRef, rawModelText); err == nil {
 				status.TotalTokens = usage.TotalTokens
 				status.ContextWindowTokens = usage.ContextWindowTokens
 			}
@@ -528,7 +536,7 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 	return d.Status(ctx)
 }
 
-func (d *GatewayDriver) UseModel(ctx context.Context, model string) (StatusSnapshot, error) {
+func (d *GatewayDriver) UseModel(ctx context.Context, model string, reasoningEffort ...string) (StatusSnapshot, error) {
 	session, err := d.ensureSession(ctx)
 	if err != nil {
 		return StatusSnapshot{}, err
@@ -540,7 +548,14 @@ func (d *GatewayDriver) UseModel(ctx context.Context, model string) (StatusSnaps
 	if alias == "" {
 		return StatusSnapshot{}, fmt.Errorf("tui/runtime: model alias is required")
 	}
-	if err := d.stack.UseModel(ctx, session.SessionRef, alias); err != nil {
+	reasoning := ""
+	if len(reasoningEffort) > 0 {
+		reasoning = strings.TrimSpace(reasoningEffort[0])
+		if reasoning != "" && !d.modelAliasSupportsReasoningLevel(alias, reasoning) {
+			return StatusSnapshot{}, fmt.Errorf("tui/runtime: model %q does not support reasoning level %q", alias, reasoning)
+		}
+	}
+	if err := d.stack.UseModel(ctx, session.SessionRef, alias, reasoning); err != nil {
 		return StatusSnapshot{}, err
 	}
 	d.mu.Lock()
@@ -912,6 +927,9 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 	if strings.HasPrefix(strings.TrimSpace(strings.ToLower(command)), "connect-") {
 		return completeConnectArgs(ctx, d, strings.TrimSpace(strings.ToLower(command)), query, limit)
 	}
+	if alias, ok := strings.CutPrefix(strings.TrimSpace(strings.ToLower(command)), "model use "); ok {
+		return d.completeModelReasoningLevels(ctx, alias, query, limit)
+	}
 	candidates := defaultSlashArgCandidates(strings.TrimSpace(strings.ToLower(command)))
 	out := make([]SlashArgCandidate, 0, min(limit, len(candidates)))
 	for _, candidate := range candidates {
@@ -924,6 +942,74 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 		}
 	}
 	return out, nil
+}
+
+func (d *GatewayDriver) completeModelReasoningLevels(ctx context.Context, aliasQuery string, query string, limit int) ([]SlashArgCandidate, error) {
+	alias, err := d.resolveStoredModelAlias(ctx, aliasQuery)
+	if err != nil {
+		return nil, nil
+	}
+	cfg, ok := d.stack.ModelConfig(alias)
+	if !ok {
+		return nil, nil
+	}
+	levels := configuredModelReasoningLevels(cfg)
+	out := make([]SlashArgCandidate, 0, min(limit, len(levels)))
+	for _, level := range levels {
+		if query != "" && !hasSlashArgPrefix(query, level) {
+			continue
+		}
+		out = append(out, SlashArgCandidate{
+			Value:   level,
+			Display: level,
+			Detail:  modelReasoningLevelDetail(level),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (d *GatewayDriver) modelAliasSupportsReasoningLevel(alias string, level string) bool {
+	cfg, ok := d.stack.ModelConfig(alias)
+	if !ok {
+		return false
+	}
+	for _, one := range configuredModelReasoningLevels(cfg) {
+		if strings.EqualFold(strings.TrimSpace(one), strings.TrimSpace(level)) {
+			return true
+		}
+	}
+	return false
+}
+
+func configuredModelReasoningLevels(cfg gatewayapp.ModelConfig) []string {
+	levels := normalizeReasoningLevels(cfg.ReasoningLevels)
+	for _, level := range normalizeReasoningLevels(modelcatalog.ReasoningLevelsForModel(cfg.Provider, cfg.Model)) {
+		seen := false
+		for _, existing := range levels {
+			if strings.EqualFold(existing, level) {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			levels = append(levels, level)
+		}
+	}
+	return levels
+}
+
+func modelReasoningLevelDetail(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "none":
+		return "reasoning disabled"
+	case "high", "medium", "low", "minimal", "xhigh":
+		return "reasoning level"
+	default:
+		return "reasoning option"
+	}
 }
 
 func (d *GatewayDriver) completeModelAliases(ctx context.Context, query string, limit int) ([]SlashArgCandidate, error) {
@@ -1357,6 +1443,18 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func formatReasoningModelDisplay(alias string, effort string) string {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return ""
+	}
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" || effort == "none" {
+		return alias
+	}
+	return alias + " [" + effort + "]"
 }
 
 func dedupeNonEmptyStrings(values []string) []string {

@@ -52,7 +52,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 			if err != nil {
 				return "not configured", ""
 			}
-			return strings.TrimSpace(status.Model), formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens)
+			return statusModelDisplay(status.Model), formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens)
 		}
 	}
 
@@ -522,16 +522,20 @@ func slashModel(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 	sub, rest := splitFirst(strings.TrimSpace(args))
 	switch sub {
 	case "use":
-		alias := strings.TrimSpace(rest)
+		alias, reasoning := parseModelUseArgs(rest)
 		if alias == "" {
 			sendNotice(send, "usage: /model use <alias>")
 			return TaskResultMsg{SuppressTurnDivider: true}
 		}
-		status, err := driver.UseModel(ctx, alias)
+		status, err := driver.UseModel(ctx, alias, reasoning)
 		if err != nil {
 			return TaskResultMsg{Err: friendlyCommandError("model use", err)}
 		}
-		sendNotice(send, fmt.Sprintf("model switched to: %s", status.Model))
+		if strings.TrimSpace(reasoning) != "" {
+			sendNotice(send, fmt.Sprintf("model switched to: %s (reasoning: %s)", status.Model, reasoning))
+		} else {
+			sendNotice(send, fmt.Sprintf("model switched to: %s", status.Model))
+		}
 		sendStatusUpdate(send, status)
 	case "del", "delete", "rm":
 		alias := strings.TrimSpace(rest)
@@ -548,6 +552,11 @@ func slashModel(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		sendNotice(send, "usage: /model use|del <alias>")
 	}
 	return TaskResultMsg{SuppressTurnDivider: true}
+}
+
+func parseModelUseArgs(args string) (alias string, reasoning string) {
+	alias, rest := splitFirst(strings.TrimSpace(args))
+	return strings.TrimSpace(alias), strings.TrimSpace(rest)
 }
 
 func slashSandbox(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
@@ -747,10 +756,17 @@ func sendStatusUpdate(send func(tea.Msg), status tuiadapterruntime.StatusSnapsho
 	if send != nil {
 		send(SetStatusMsg{
 			Workspace: status.Workspace,
-			Model:     status.Model,
+			Model:     statusModelDisplay(status.Model),
 			Context:   formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens),
 		})
 	}
+}
+
+func statusModelDisplay(model string) string {
+	if model = strings.TrimSpace(model); model != "" {
+		return model
+	}
+	return "not configured (/connect)"
 }
 
 func formatContextUsageStatus(totalTokens int, contextWindow int) string {

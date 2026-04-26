@@ -42,13 +42,13 @@ func TestWelcomeCardPrefersDynamicStatusModel(t *testing.T) {
 		Commands:        DefaultCommands(),
 		Wizards:         DefaultWizards(),
 		RefreshStatus: func() (string, string) {
-			return "deepseek/deepseek-chat", ""
+			return "deepseek/deepseek-v4-flash", ""
 		},
 	})
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	view := updated.View().Content
-	if !strings.Contains(view, "deepseek/deepseek-chat") {
+	if !strings.Contains(view, "deepseek/deepseek-v4-flash") {
 		t.Fatalf("expected dynamic model in welcome card, got %q", view)
 	}
 	if strings.Contains(view, "not configured (/connect)") {
@@ -70,11 +70,11 @@ func TestWelcomeCardUpdatesWhenStatusChanges(t *testing.T) {
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m := updated.(*Model)
 	m.handleSetStatusMsg(SetStatusMsg{
-		Model:     "deepseek/deepseek-chat",
+		Model:     "deepseek/deepseek-v4-flash",
 		Workspace: "/tmp/workspace",
 	})
 	view := m.View().Content
-	if !strings.Contains(view, "deepseek/deepseek-chat") {
+	if !strings.Contains(view, "deepseek/deepseek-v4-flash") {
 		t.Fatalf("expected updated model in welcome card, got %q", view)
 	}
 	if strings.Contains(view, "not configured (/connect)") {

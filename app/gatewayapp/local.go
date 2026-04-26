@@ -89,9 +89,10 @@ type Stack struct {
 }
 
 type SessionRuntimeState struct {
-	ModelAlias  string
-	SessionMode string
-	SandboxMode string
+	ModelAlias      string
+	ReasoningEffort string
+	SessionMode     string
+	SandboxMode     string
 }
 
 type SandboxStatus struct {
@@ -615,7 +616,7 @@ func (s *Stack) Connect(cfg ModelConfig) (string, error) {
 }
 
 // UseModel persists one per-session model alias override for subsequent turns.
-func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias string) error {
+func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias string, reasoningEffort ...string) error {
 	if s == nil || s.Sessions == nil {
 		return fmt.Errorf("gatewayapp: sessions service unavailable")
 	}
@@ -628,6 +629,22 @@ func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias s
 	}
 	if s.lookup != nil && !s.lookup.HasAlias(alias) {
 		return fmt.Errorf("gatewayapp: unknown model alias %q", alias)
+	}
+	reasoning := ""
+	if len(reasoningEffort) > 0 {
+		reasoning = strings.TrimSpace(reasoningEffort[0])
+		if reasoning != "" {
+			if s.lookup == nil {
+				return fmt.Errorf("gatewayapp: model lookup unavailable")
+			}
+			cfg, ok := s.lookup.Config(alias)
+			if !ok {
+				return fmt.Errorf("gatewayapp: unknown model alias %q", alias)
+			}
+			if !modelConfigSupportsReasoningEffort(cfg, reasoning) {
+				return fmt.Errorf("gatewayapp: model %q does not support reasoning level %q", alias, reasoning)
+			}
+		}
 	}
 	if s.lookup != nil {
 		s.lookup.SetDefault(alias)
@@ -644,6 +661,11 @@ func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias s
 			next = map[string]any{}
 		}
 		next[appgateway.StateCurrentModelAlias] = alias
+		if reasoning != "" {
+			next[appgateway.StateCurrentReasoningEffort] = reasoning
+		} else {
+			delete(next, appgateway.StateCurrentReasoningEffort)
+		}
 		return next, nil
 	})
 }
@@ -667,6 +689,7 @@ func (s *Stack) DeleteModel(ctx context.Context, ref sdksession.SessionRef, alia
 	if err := s.lookup.Delete(alias); err != nil {
 		return err
 	}
+	hasDefault := strings.TrimSpace(s.lookup.DefaultAlias()) != ""
 	if resolver := s.Gateway.Resolver(); resolver != nil {
 		resolver.SetModelLookup(s.lookup, s.lookup.DefaultAlias())
 	}
@@ -679,8 +702,9 @@ func (s *Stack) DeleteModel(ctx context.Context, ref sdksession.SessionRef, alia
 			next = map[string]any{}
 		}
 		current, _ := next[appgateway.StateCurrentModelAlias].(string)
-		if alias == "" || strings.EqualFold(strings.TrimSpace(current), alias) {
+		if alias == "" || strings.EqualFold(strings.TrimSpace(current), alias) || !hasDefault {
 			delete(next, appgateway.StateCurrentModelAlias)
+			delete(next, appgateway.StateCurrentReasoningEffort)
 		}
 		return next, nil
 	})
@@ -771,9 +795,10 @@ func (s *Stack) SessionRuntimeState(ctx context.Context, ref sdksession.SessionR
 		modelAlias = ""
 	}
 	return SessionRuntimeState{
-		ModelAlias:  modelAlias,
-		SessionMode: appgateway.CurrentSessionMode(state),
-		SandboxMode: appgateway.CurrentSandboxMode(state),
+		ModelAlias:      modelAlias,
+		ReasoningEffort: appgateway.CurrentReasoningEffort(state),
+		SessionMode:     appgateway.CurrentSessionMode(state),
+		SandboxMode:     appgateway.CurrentSandboxMode(state),
 	}, nil
 }
 
@@ -838,6 +863,13 @@ func (s *Stack) DefaultModelAlias() string {
 		return ""
 	}
 	return s.lookup.DefaultAlias()
+}
+
+func (s *Stack) ModelConfig(alias string) (ModelConfig, bool) {
+	if s == nil || s.lookup == nil {
+		return ModelConfig{}, false
+	}
+	return s.lookup.Config(alias)
 }
 
 func (s *Stack) HasModelAlias(alias string) bool {
@@ -1434,6 +1466,29 @@ func normalizeModelConfig(cfg ModelConfig) ModelConfig {
 		cfg.Token = strings.TrimSpace(os.Getenv(strings.TrimSpace(cfg.TokenEnv)))
 	}
 	return cfg
+}
+
+func modelConfigSupportsReasoningEffort(cfg ModelConfig, effort string) bool {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		return true
+	}
+	for _, level := range cfg.ReasoningLevels {
+		if strings.EqualFold(strings.TrimSpace(level), effort) {
+			return true
+		}
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.ReasoningMode))
+	switch mode {
+	case "toggle":
+		return effort == "none" || effort == "high" || effort == "max" || effort == "enabled"
+	case "fixed":
+		return effort == "low" || effort == "medium" || effort == "high"
+	case "":
+		return true
+	default:
+		return false
+	}
 }
 
 func defaultModelAPIForProvider(provider string) sdkproviders.APIType {

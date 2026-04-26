@@ -226,8 +226,8 @@ func TestGatewayDriverCompleteSlashArgConnectFlowUsesLegacyCommands(t *testing.T
 	if len(deepseekModels) != 2 {
 		t.Fatalf("deepseek connect model candidates = %#v, want exactly 2 built-ins", deepseekModels)
 	}
-	if deepseekModels[0].Value != "deepseek-chat" || deepseekModels[1].Value != "deepseek-reasoner" {
-		t.Fatalf("deepseek connect model candidates = %#v, want deepseek-chat and deepseek-reasoner", deepseekModels)
+	if deepseekModels[0].Value != "deepseek-v4-flash" || deepseekModels[1].Value != "deepseek-v4-pro" {
+		t.Fatalf("deepseek connect model candidates = %#v, want deepseek-v4-flash and deepseek-v4-pro", deepseekModels)
 	}
 
 	codefreeModels, err := driver.CompleteSlashArg(ctx, "connect-model:codefree|https%3A%2F%2Fwww.srdcloud.cn|60||", "", 20)
@@ -298,6 +298,92 @@ func TestGatewayDriverCompleteSlashArgUsesRealModelAliases(t *testing.T) {
 	}
 	if got := delCandidates[0].Value; got != "ollama/alt-model" {
 		t.Fatalf("first model del candidate = %q, want ollama/alt-model", got)
+	}
+}
+
+func TestGatewayDriverCompletesAndPersistsModelReasoningLevel(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "model-reasoning-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: gatewayapp.ModelConfig{
+			Provider: "deepseek",
+			API:      sdkproviders.APIDeepSeek,
+			Model:    "deepseek-v4-pro",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "model-reasoning-session", "surface", "deepseek/deepseek-v4-pro")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+
+	levels, err := driver.CompleteSlashArg(ctx, "model use deepseek/deepseek-v4-pro", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(model use alias) error = %v", err)
+	}
+	if got := candidateValues(levels); !equalStrings(got, []string{"none", "high", "max"}) {
+		t.Fatalf("reasoning candidates = %#v, want none/high/max", levels)
+	}
+	if _, err := driver.UseModel(ctx, "deepseek/deepseek-v4-pro", "high"); err != nil {
+		t.Fatalf("UseModel(reasoning) error = %v", err)
+	}
+	status, err := driver.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if got := strings.TrimSpace(status.Model); got != "deepseek/deepseek-v4-pro [high]" {
+		t.Fatalf("status model = %q, want deepseek/deepseek-v4-pro [high]", got)
+	}
+	session, ok := driver.currentSession()
+	if !ok {
+		t.Fatal("driver has no current session")
+	}
+	state, err := stack.Sessions.SnapshotState(ctx, session.SessionRef)
+	if err != nil {
+		t.Fatalf("SnapshotState() error = %v", err)
+	}
+	if got := strings.TrimSpace(state[appgateway.StateCurrentReasoningEffort].(string)); got != "high" {
+		t.Fatalf("reasoning state = %q, want high", got)
+	}
+}
+
+func TestGatewayDriverCodeFreeModelHasNoReasoningLevels(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "codefree-no-reasoning-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: gatewayapp.ModelConfig{
+			Provider: "codefree",
+			API:      sdkproviders.APICodeFree,
+			Model:    "GLM-5.1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "codefree-no-reasoning-session", "surface", "codefree/glm-5.1")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	levels, err := driver.CompleteSlashArg(ctx, "model use codefree/glm-5.1", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(model use codefree alias) error = %v", err)
+	}
+	if len(levels) != 0 {
+		t.Fatalf("codefree reasoning candidates = %#v, want empty", levels)
 	}
 }
 
@@ -470,6 +556,49 @@ func TestGatewayDriverDeleteModelRemovesConfiguredAlias(t *testing.T) {
 	}
 	if status.Model == "ollama/alt-model" {
 		t.Fatalf("status model = %q, want deleted alias removed", status.Model)
+	}
+}
+
+func TestGatewayDriverDeleteOnlyModelClearsAliasCandidatesAndStatus(t *testing.T) {
+	ctx := context.Background()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "delete-only-model-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "delete-only-model-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+	if _, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "ollama",
+		Model:    "llama3",
+	}); err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := driver.DeleteModel(ctx, "ollama/llama3"); err != nil {
+		t.Fatalf("DeleteModel() error = %v", err)
+	}
+	candidates, err := driver.CompleteSlashArg(ctx, "model use", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(model use) error = %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("model use candidates = %#v, want empty after deleting only model", candidates)
+	}
+	status, err := driver.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if strings.TrimSpace(status.Model) != "" {
+		t.Fatalf("status model = %q, want empty after deleting only model", status.Model)
 	}
 }
 
@@ -653,7 +782,7 @@ func TestGatewayDriverStatusUsesPersistedDefaultAliasOnStartup(t *testing.T) {
 	if _, err := stack.Connect(gatewayapp.ModelConfig{
 		Provider: "deepseek",
 		API:      sdkproviders.APIDeepSeek,
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		Token:    "secret",
 	}); err != nil {
 		t.Fatalf("Connect() error = %v", err)
@@ -679,8 +808,8 @@ func TestGatewayDriverStatusUsesPersistedDefaultAliasOnStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status() error = %v", err)
 	}
-	if got := strings.TrimSpace(status.Model); got != "deepseek/deepseek-reasoner" {
-		t.Fatalf("status model = %q, want deepseek/deepseek-reasoner", status.Model)
+	if got := strings.TrimSpace(status.Model); got != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("status model = %q, want deepseek/deepseek-v4-pro", status.Model)
 	}
 }
 
@@ -918,7 +1047,7 @@ func TestGatewayDriverCompleteSlashArgUsesPrefixMatching(t *testing.T) {
 
 	if _, err := driver.Connect(ctx, ConnectConfig{
 		Provider: "deepseek",
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		TokenEnv: "DEEPSEEK_API_KEY",
 	}); err != nil {
 		t.Fatalf("Connect() error = %v", err)
@@ -927,8 +1056,15 @@ func TestGatewayDriverCompleteSlashArgUsesPrefixMatching(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompleteSlashArg(model use, dee) error = %v", err)
 	}
-	if len(modelAliases) == 0 || modelAliases[0].Value != "deepseek/deepseek-reasoner" {
-		t.Fatalf("model alias candidates = %#v, want deepseek/deepseek-reasoner first", modelAliases)
+	if len(modelAliases) == 0 || modelAliases[0].Value != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("model alias candidates = %#v, want deepseek/deepseek-v4-pro first", modelAliases)
+	}
+	deepseekLevels, err := driver.CompleteSlashArg(ctx, "model use deepseek/deepseek-v4-pro", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(model use deepseek alias) error = %v", err)
+	}
+	if got := candidateValues(deepseekLevels); !equalStrings(got, []string{"none", "high", "max"}) {
+		t.Fatalf("deepseek reasoning candidates = %#v, want none/high/max", deepseekLevels)
 	}
 }
 
@@ -961,7 +1097,7 @@ func TestGatewayDriverConnectPersistsMultipleProviders(t *testing.T) {
 	}
 	if _, err := driver.Connect(ctx, ConnectConfig{
 		Provider: "deepseek",
-		Model:    "deepseek-reasoner",
+		Model:    "deepseek-v4-pro",
 		APIKey:   "deepseek-secret",
 	}); err != nil {
 		t.Fatalf("Connect(deepseek) error = %v", err)
@@ -973,8 +1109,8 @@ func TestGatewayDriverConnectPersistsMultipleProviders(t *testing.T) {
 	if len(candidates) < 2 {
 		t.Fatalf("model use candidates = %#v, want both providers", candidates)
 	}
-	if candidates[0].Value != "deepseek/deepseek-reasoner" {
-		t.Fatalf("first candidate = %q, want deepseek/deepseek-reasoner", candidates[0].Value)
+	if candidates[0].Value != "deepseek/deepseek-v4-pro" {
+		t.Fatalf("first candidate = %q, want deepseek/deepseek-v4-pro", candidates[0].Value)
 	}
 	foundMinimax := false
 	for _, candidate := range candidates {
@@ -1230,7 +1366,7 @@ func TestGatewayDriverCompleteResumeIncludesMetadataAndRecentFirst(t *testing.T)
 	}
 	if err := stack.Sessions.UpdateState(ctx, second.SessionRef, func(state map[string]any) (map[string]any, error) {
 		next := sdksession.CloneState(state)
-		next[appgateway.StateCurrentModelAlias] = "deepseek/deepseek-chat"
+		next[appgateway.StateCurrentModelAlias] = "deepseek/deepseek-v4-flash"
 		return next, nil
 	}); err != nil {
 		t.Fatalf("UpdateState(second) error = %v", err)
@@ -1467,4 +1603,24 @@ func slashCandidatesHaveValue(candidates []SlashArgCandidate, value string) bool
 		}
 	}
 	return false
+}
+
+func candidateValues(candidates []SlashArgCandidate) []string {
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		out = append(out, strings.TrimSpace(candidate.Value))
+	}
+	return out
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

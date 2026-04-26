@@ -35,6 +35,7 @@ type StatusSnapshot struct {
 	Workspace               string
 	StoreDir                string
 	Model                   string
+	ReasoningEffort         string
 	Provider                string
 	ModelName               string
 	ModeLabel               string
@@ -165,7 +166,7 @@ type Driver interface {
 	Compact(context.Context, string) error
 
 	Connect(context.Context, ConnectConfig) (StatusSnapshot, error)
-	UseModel(context.Context, string) (StatusSnapshot, error)
+	UseModel(context.Context, string, ...string) (StatusSnapshot, error)
 	DeleteModel(context.Context, string) error
 	CycleSessionMode(context.Context) (StatusSnapshot, error)
 	SetSandboxBackend(context.Context, string) (StatusSnapshot, error)

@@ -15,16 +15,13 @@ func newDeepSeek(cfg Config, token string) model.LLM {
 }
 
 // thinkingModeMinTokens is the minimum max_tokens value required for DeepSeek
-// thinking mode. The API defaults to 32K and allows up to 64K; sending a lower
-// limit truncates the reasoning chain.
+// thinking mode. The API defaults to 32K; sending a lower limit truncates the
+// reasoning chain.
 const thinkingModeMinTokens = 32768
 
 const (
-	deepSeekChatDefaultMaxTokens = 4096
-	deepSeekChatMaxTokens        = 8192
-	deepSeekReasonerMaxTokens    = 65536
-	deepSeekAdaptiveThinkingType = "adaptive"
-	deepSeekReasonerModel        = "deepseek-reasoner"
+	deepSeekDefaultMaxTokens = 32768
+	deepSeekMaxTokens        = 393216
 )
 
 func applyThinkingReasoning(payload *openAICompatRequest, cfg model.ReasoningConfig) {
@@ -33,24 +30,36 @@ func applyThinkingReasoning(payload *openAICompatRequest, cfg model.ReasoningCon
 	}
 	if !deepSeekModelSupportsThinking(payload.Model) {
 		clearDeepSeekReasoningFields(payload)
-		payload.MaxTokens = clampDeepSeekChatMaxTokens(payload.MaxTokens)
+		payload.MaxTokens = clampDeepSeekMaxTokens(payload.MaxTokens)
 		return
 	}
-	effort := strings.ToLower(strings.TrimSpace(cfg.Effort))
+	effort := normalizeDeepSeekReasoningEffort(cfg.Effort)
 	switch effort {
-	case "":
-		payload.Thinking = &openAIThinking{Type: deepSeekAdaptiveThinkingType}
-		clearDeepSeekReasoningFields(payload)
-		payload.MaxTokens = clampDeepSeekReasonerMaxTokens(payload.MaxTokens)
 	case "none":
-		applyToggleThinkingReasoning(payload, cfg)
-		payload.MaxTokens = clampDeepSeekChatMaxTokens(payload.MaxTokens)
+		payload.Thinking = &openAIThinking{Type: "disabled"}
+		clearDeepSeekReasoningFields(payload)
+		payload.MaxTokens = clampDeepSeekMaxTokens(payload.MaxTokens)
 	default:
-		applyToggleThinkingReasoning(payload, cfg)
+		payload.Thinking = &openAIThinking{Type: "enabled"}
+		payload.Reasoning = nil
+		payload.ReasoningEffort = effort
 		// Thinking mode needs a larger token budget. If the current limit is
 		// absent or below the API's default (32K), bump it up so the reasoning
 		// chain is not prematurely truncated.
 		payload.MaxTokens = clampDeepSeekReasonerMaxTokens(payload.MaxTokens)
+	}
+}
+
+func normalizeDeepSeekReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "none":
+		return "none"
+	case "max", "xhigh", "very_high", "veryhigh":
+		return "max"
+	case "", "minimal", "low", "medium", "high":
+		return "high"
+	default:
+		return "high"
 	}
 }
 
@@ -63,15 +72,20 @@ func clearDeepSeekReasoningFields(payload *openAICompatRequest) {
 }
 
 func deepSeekModelSupportsThinking(modelName string) bool {
-	return strings.EqualFold(strings.TrimSpace(modelName), deepSeekReasonerModel)
+	switch strings.ToLower(strings.TrimSpace(modelName)) {
+	case "deepseek-v4-flash", "deepseek-v4-pro":
+		return true
+	default:
+		return false
+	}
 }
 
-func clampDeepSeekChatMaxTokens(current int) int {
+func clampDeepSeekMaxTokens(current int) int {
 	switch {
 	case current <= 0:
-		return deepSeekChatDefaultMaxTokens
-	case current > deepSeekChatMaxTokens:
-		return deepSeekChatMaxTokens
+		return deepSeekDefaultMaxTokens
+	case current > deepSeekMaxTokens:
+		return deepSeekMaxTokens
 	default:
 		return current
 	}
@@ -83,8 +97,8 @@ func clampDeepSeekReasonerMaxTokens(current int) int {
 		return thinkingModeMinTokens
 	case current < thinkingModeMinTokens:
 		return thinkingModeMinTokens
-	case current > deepSeekReasonerMaxTokens:
-		return deepSeekReasonerMaxTokens
+	case current > deepSeekMaxTokens:
+		return deepSeekMaxTokens
 	default:
 		return current
 	}

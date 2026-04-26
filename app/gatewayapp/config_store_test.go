@@ -76,7 +76,7 @@ func TestAppConfigStoreCanPersistTokenOnlyWhenExplicitlyEnabled(t *testing.T) {
 				Alias:        "deepseek/reasoner",
 				Provider:     "deepseek",
 				API:          sdkproviders.APIDeepSeek,
-				Model:        "deepseek-reasoner",
+				Model:        "deepseek-v4-pro",
 				Token:        "persist-me",
 				PersistToken: true,
 			}},

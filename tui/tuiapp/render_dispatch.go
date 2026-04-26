@@ -362,8 +362,9 @@ func (m *Model) handleSetStatusMsg(msg SetStatusMsg) tea.Model {
 	if workspace := strings.TrimSpace(msg.Workspace); workspace != "" {
 		m.cfg.Workspace = workspace
 	}
-	if strings.TrimSpace(msg.Model) != "" {
-		m.statusModel = msg.Model
+	m.statusModel = strings.TrimSpace(msg.Model)
+	if m.statusModel == "" {
+		m.statusModel = "not configured (/connect)"
 	}
 	m.statusContext = strings.TrimSpace(msg.Context)
 	m.syncWelcomeCardBlock()
@@ -414,8 +415,9 @@ func (m *Model) handleStatusTickMsg() (tea.Model, tea.Cmd) {
 	}
 	if m.cfg.RefreshStatus != nil {
 		modelText, contextText := m.cfg.RefreshStatus()
-		if strings.TrimSpace(modelText) != "" {
-			m.statusModel = modelText
+		m.statusModel = strings.TrimSpace(modelText)
+		if m.statusModel == "" {
+			m.statusModel = "not configured (/connect)"
 		}
 		m.statusContext = strings.TrimSpace(contextText)
 	}

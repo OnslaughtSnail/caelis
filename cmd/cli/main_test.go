@@ -173,7 +173,7 @@ func TestRunDoctorSubcommandTextOutput(t *testing.T) {
 		"-workspace-cwd", t.TempDir(),
 		"-provider", "deepseek",
 		"-api", "deepseek",
-		"-model", "deepseek-reasoner",
+		"-model", "deepseek-v4-pro",
 		"-token-env", "CAELIS_TEST_DOCTOR_TOKEN",
 	}, strings.NewReader(""), &out, &errBuf)
 	if err != nil {

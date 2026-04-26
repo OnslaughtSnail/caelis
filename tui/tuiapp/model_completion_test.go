@@ -47,6 +47,45 @@ func TestModelDeleteSelectionOpensAliasPicker(t *testing.T) {
 	}
 }
 
+func TestModelUseSelectionOpensReasoningPicker(t *testing.T) {
+	model := NewModel(Config{
+		Commands: DefaultCommands(),
+		SlashArgComplete: func(command string, query string, limit int) ([]SlashArgCandidate, error) {
+			switch command {
+			case "model":
+				return []SlashArgCandidate{{Value: "use", Display: "use"}}, nil
+			case "model use":
+				return []SlashArgCandidate{{Value: "deepseek/deepseek-v4-pro", Display: "deepseek/deepseek-v4-pro"}}, nil
+			case "model use deepseek/deepseek-v4-pro":
+				return []SlashArgCandidate{{Value: "none", Display: "none"}, {Value: "high", Display: "high"}}, nil
+			default:
+				return nil, nil
+			}
+		},
+	})
+
+	model.openSlashArgPicker("model")
+	model.applySlashArgCompletion()
+	if got := string(model.input); got != "/model use " {
+		t.Fatalf("input after model action = %q, want /model use ", got)
+	}
+	model.applySlashArgCompletion()
+	if got := string(model.input); got != "/model use deepseek/deepseek-v4-pro " {
+		t.Fatalf("input after model alias = %q, want alias plus trailing space", got)
+	}
+	if got := model.slashArgCommand; got != "model use deepseek/deepseek-v4-pro" {
+		t.Fatalf("slashArgCommand = %q, want reasoning picker command", got)
+	}
+	if len(model.slashArgCandidates) != 2 || model.slashArgCandidates[1].Value != "high" {
+		t.Fatalf("reasoning candidates = %#v, want none/high", model.slashArgCandidates)
+	}
+	model.slashArgIndex = 1
+	model.applySlashArgCompletion()
+	if got := string(model.input); got != "/model use deepseek/deepseek-v4-pro high" {
+		t.Fatalf("input after reasoning selection = %q, want high reasoning", got)
+	}
+}
+
 func TestSlashCommandSelectionMovesWithArrowKeys(t *testing.T) {
 	model := NewModel(Config{
 		Commands: DefaultCommands(),

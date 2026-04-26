@@ -58,7 +58,7 @@ var providerTemplates = []providerTemplate{
 	{label: "gemini", api: sdkproviders.APIGemini, provider: "gemini", description: "Google Gemini API", defaultBaseURL: "https://generativelanguage.googleapis.com/v1beta", defaultContextToken: 128000, commonModels: []string{"gemini-2.5-flash", "gemini-2.5-pro"}},
 	{label: "anthropic", api: sdkproviders.APIAnthropic, provider: "anthropic", description: "Anthropic Claude API", defaultBaseURL: "https://api.anthropic.com", defaultContextToken: 200000, defaultMaxOutputTok: 1024, commonModels: []string{"claude-sonnet-4-20250514", "claude-opus-4-20250514"}},
 	{label: "anthropic-compatible", api: sdkproviders.APIAnthropicCompatible, provider: "anthropic-compatible", description: "Anthropic-compatible proxy or self-hosted endpoint", defaultBaseURL: "https://api.anthropic.com", defaultContextToken: 200000, defaultMaxOutputTok: 1024},
-	{label: "deepseek", api: sdkproviders.APIDeepSeek, provider: "deepseek", description: "DeepSeek chat and reasoner models", defaultBaseURL: "https://api.deepseek.com/v1", defaultContextToken: 128000, commonModels: []string{"deepseek-chat", "deepseek-reasoner"}},
+	{label: "deepseek", api: sdkproviders.APIDeepSeek, provider: "deepseek", description: "DeepSeek V4 models", defaultBaseURL: "https://api.deepseek.com/v1", defaultContextToken: 1048576, commonModels: []string{"deepseek-v4-flash", "deepseek-v4-pro"}},
 	{label: "xiaomi", api: sdkproviders.APIMimo, provider: "xiaomi", description: "Xiaomi Mimo models", defaultBaseURL: "https://api.xiaomimimo.com/v1", defaultContextToken: 128000, commonModels: []string{"mimo-v2-flash", "mimo-v2-reasoner"}},
 	{label: "minimax", api: sdkproviders.APIAnthropicCompatible, provider: "minimax", description: "MiniMax models over an Anthropic-compatible API", defaultBaseURL: "https://api.minimaxi.com/anthropic", defaultContextToken: 204800, defaultMaxOutputTok: 8192, commonModels: []string{"MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2"}},
 	{label: "volcengine", api: sdkproviders.APIVolcengine, provider: "volcengine", description: "Volcengine Ark standard or coding-plan endpoints", defaultBaseURL: "https://ark.cn-beijing.volces.com/api/v3", defaultContextToken: 128000},
@@ -239,10 +239,7 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 		return connectModelDefaults{}, nil
 	}
 	_ = ctx
-	baseCaps, baseKnown := modelcatalog.LookupDynamicModelCapabilities(tpl.provider, payload.Model)
-	if !baseKnown {
-		baseCaps, baseKnown = modelcatalog.LookupModelCapabilities(tpl.provider, payload.Model)
-	}
+	baseCaps, baseKnown := modelcatalog.LookupModelCapabilities(tpl.provider, payload.Model)
 	if !baseKnown {
 		baseCaps = modelcatalog.DefaultModelCapabilities()
 	}
@@ -266,6 +263,10 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 			baseCaps.ReasoningEfforts = normalizeReasoningLevels(overlayCaps.ReasoningEfforts)
 		}
 	}
+	reasoningLevels := normalizeReasoningLevels(modelcatalog.ReasoningLevelsForModel(tpl.provider, payload.Model))
+	if len(reasoningLevels) == 0 {
+		reasoningLevels = normalizeReasoningLevels(baseCaps.ReasoningEfforts)
+	}
 	contextWindow := baseCaps.ContextWindowTokens
 	if contextWindow <= 0 {
 		contextWindow = defaultContextWindowForTemplate(tpl)
@@ -280,7 +281,7 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 	return connectModelDefaults{
 		ContextWindow:   contextWindow,
 		MaxOutput:       maxOutput,
-		ReasoningLevels: normalizeReasoningLevels(baseCaps.ReasoningEfforts),
+		ReasoningLevels: reasoningLevels,
 	}, nil
 }
 
@@ -431,10 +432,7 @@ func commonModelsForProvider(provider string) []string {
 }
 
 func describeConnectModel(provider, modelName string) string {
-	caps, ok := modelcatalog.LookupDynamicModelCapabilities(provider, modelName)
-	if !ok {
-		caps, ok = modelcatalog.LookupModelCapabilities(provider, modelName)
-	}
+	caps, ok := modelcatalog.LookupModelCapabilities(provider, modelName)
 	if !ok {
 		return "suggested model"
 	}
