@@ -147,6 +147,7 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	if err != nil {
 		return nil, err
 	}
+	sandboxCfg := mergeSandboxConfig(doc.Sandbox, cfg.Sandbox)
 	baseMetadata := map[string]any{}
 	systemPrompt, err := buildSystemPrompt(promptConfig{
 		AppName:      appName,
@@ -162,6 +163,7 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	if reasoning := strings.TrimSpace(cfg.Model.ReasoningEffort); reasoning != "" {
 		baseMetadata["reasoning_effort"] = reasoning
 	}
+	baseMetadata = withSandboxPolicyRootMetadata(baseMetadata, sandboxCfg, workspaceCWD)
 	stack := &Stack{
 		Sessions: sessions,
 		AppName:  appName,
@@ -181,7 +183,7 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 			Assembly:       sdkplugin.CloneResolvedAssembly(cfg.Assembly),
 			BaseMetadata:   cloneMap(baseMetadata),
 		},
-		sandbox: mergeSandboxConfig(doc.Sandbox, cfg.Sandbox),
+		sandbox: sandboxCfg,
 	}
 	if err := stack.rebuildGateway(); err != nil {
 		return nil, err
@@ -1361,7 +1363,7 @@ func (s *Stack) rebuildGateway() error {
 	}
 	s.mu.RLock()
 	oldGateway := s.Gateway
-	sandboxCfg := s.sandbox
+	sandboxCfg := effectiveSandboxConfig(s.sandbox, s.Workspace.CWD)
 	runtimeCfg := s.runtime
 	s.mu.RUnlock()
 	if err := rejectReconfigureWithActiveTurns(oldGateway, "rebuild gateway"); err != nil {
@@ -1697,6 +1699,71 @@ func mergeSandboxConfig(stored SandboxConfig, override SandboxConfig) SandboxCon
 		stored.RequestedType = "auto"
 	}
 	return stored
+}
+
+func effectiveSandboxConfig(cfg SandboxConfig, workspaceDir string) SandboxConfig {
+	cfg = normalizeSandboxConfig(cfg)
+	cfg.WritableRoots = dedupeStrings(append(cfg.WritableRoots, defaultSkillSandboxRoots(workspaceDir)...))
+	return cfg
+}
+
+func withSandboxPolicyRootMetadata(metadata map[string]any, cfg SandboxConfig, workspaceDir string) map[string]any {
+	out := cloneMap(metadata)
+	if out == nil {
+		out = map[string]any{}
+	}
+	effective := effectiveSandboxConfig(cfg, workspaceDir)
+	if len(effective.ReadableRoots) > 0 {
+		out["policy_extra_read_roots"] = mergePolicyRootMetadata(out["policy_extra_read_roots"], effective.ReadableRoots)
+	}
+	if len(effective.WritableRoots) > 0 {
+		out["policy_extra_write_roots"] = mergePolicyRootMetadata(out["policy_extra_write_roots"], effective.WritableRoots)
+	}
+	return out
+}
+
+func mergePolicyRootMetadata(existing any, values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	appendOne := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	switch typed := existing.(type) {
+	case []string:
+		for _, one := range typed {
+			appendOne(one)
+		}
+	case []any:
+		for _, one := range typed {
+			text, _ := one.(string)
+			appendOne(text)
+		}
+	}
+	for _, one := range values {
+		appendOne(one)
+	}
+	return out
+}
+
+func defaultSkillSandboxRoots(workspaceDir string) []string {
+	dirs := DefaultSkillDiscoveryDirs(workspaceDir)
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		resolved, err := resolvePromptPath(dir)
+		if err != nil {
+			continue
+		}
+		out = append(out, resolved)
+	}
+	return dedupeStrings(out)
 }
 
 func dedupeNonEmptyStrings(values []string) []string {
