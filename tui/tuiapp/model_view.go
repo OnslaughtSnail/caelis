@@ -114,7 +114,7 @@ func (m *Model) View() tea.View {
 	m.observeRender(duration, len(view), "fullscreen")
 	frame := tea.NewView(view)
 	frame.AltScreen = true
-	frame.MouseMode = tea.MouseModeCellMotion
+	frame.MouseMode = tea.MouseModeAllMotion
 	frame.ReportFocus = true
 	frame.KeyboardEnhancements.ReportEventTypes = true
 	frame.WindowTitle = m.windowTitle()

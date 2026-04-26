@@ -29,6 +29,8 @@ type appKeyMap struct {
 	OverlayClose  key.Binding
 	PageUp        key.Binding
 	PageDown      key.Binding
+	HalfPageUp    key.Binding
+	HalfPageDown  key.Binding
 	Quit          key.Binding
 }
 
@@ -76,6 +78,8 @@ func defaultKeyMap(isWSL bool) appKeyMap {
 		OverlayClose:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close")),
 		PageUp:        key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll")),
 		PageDown:      key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll")),
+		HalfPageUp:    key.NewBinding(key.WithKeys("shift+pgup"), key.WithHelp("shift+pgup", "½ scroll")),
+		HalfPageDown:  key.NewBinding(key.WithKeys("shift+pgdown"), key.WithHelp("shift+pgdn", "½ scroll")),
 		Quit:          key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
 	}
 }

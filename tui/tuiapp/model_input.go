@@ -475,6 +475,22 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
+	case key.Matches(msg, m.keys.HalfPageUp):
+		m.viewport.HalfPageUp()
+		m.userScrolledUp = !m.viewport.AtBottom()
+		return m, m.touchViewportScrollbar()
+	case key.Matches(msg, m.keys.HalfPageDown):
+		wasScrolledUp := m.userScrolledUp
+		m.viewport.HalfPageDown()
+		m.userScrolledUp = !m.viewport.AtBottom()
+		var resumeCmd tea.Cmd
+		if !m.userScrolledUp && m.offscreenViewportDirty {
+			m.syncViewportContent()
+			resumeCmd = m.resumeRunningAnimationIfNeeded()
+		} else if wasScrolledUp && !m.userScrolledUp {
+			resumeCmd = m.resumeRunningAnimationIfNeeded()
+		}
+		return m, tea.Batch(m.touchViewportScrollbar(), resumeCmd)
 	case key.Matches(msg, m.keys.PageUp):
 		m.viewport.PageUp()
 		m.userScrolledUp = !m.viewport.AtBottom()

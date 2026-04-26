@@ -16,10 +16,22 @@ import (
 type viewportRenderEntry struct {
 	blockID     string
 	cacheKey    string
+	rhythm      viewportRhythmClass
 	styledLines []string
 	plainLines  []string
 	clickTokens []string
 }
+
+type viewportRhythmClass string
+
+const (
+	viewportRhythmNone      viewportRhythmClass = ""
+	viewportRhythmUser      viewportRhythmClass = "user"
+	viewportRhythmAssistant viewportRhythmClass = "assistant"
+	viewportRhythmReasoning viewportRhythmClass = "reasoning"
+	viewportRhythmOperation viewportRhythmClass = "operation"
+	viewportRhythmPanel     viewportRhythmClass = "panel"
+)
 
 func (m *Model) rebuildViewportRenderCache(ctx BlockRenderContext) {
 	oldEntries := make(map[string]viewportRenderEntry, len(m.viewportRenderEntries))
@@ -44,6 +56,7 @@ func (m *Model) renderViewportEntry(block Block, cacheKey string, ctx BlockRende
 	return viewportRenderEntry{
 		blockID:     block.BlockID(),
 		cacheKey:    cacheKey,
+		rhythm:      viewportRhythmForBlock(block),
 		styledLines: styledLines,
 		plainLines:  plainLines,
 		clickTokens: clickTokens,
@@ -114,12 +127,23 @@ func (m *Model) rebuildViewportLineCaches(ctx BlockRenderContext) {
 	blockIDs := make([]string, 0, 64)
 	clickTokens := make([]string, 0, 64)
 
-	for _, entry := range m.viewportRenderEntries {
+	var prevEntry *viewportRenderEntry
+	for i := range m.viewportRenderEntries {
+		entry := m.viewportRenderEntries[i]
+		if shouldInsertViewportRhythmGap(prevEntry, &entry) {
+			styledLines = append(styledLines, "")
+			plainLines = append(plainLines, "")
+			blockIDs = append(blockIDs, "")
+			clickTokens = append(clickTokens, "")
+		}
 		styledLines = append(styledLines, entry.styledLines...)
 		plainLines = append(plainLines, entry.plainLines...)
 		clickTokens = append(clickTokens, entry.clickTokens...)
 		for range entry.styledLines {
 			blockIDs = append(blockIDs, entry.blockID)
+		}
+		if viewportEntryHasVisibleContent(entry) {
+			prevEntry = &entry
 		}
 	}
 
@@ -127,11 +151,68 @@ func (m *Model) rebuildViewportLineCaches(ctx BlockRenderContext) {
 	styledLines = append(styledLines, streamStyled...)
 	plainLines = append(plainLines, streamPlain...)
 	blockIDs = append(blockIDs, streamBlockIDs...)
+	for range streamStyled {
+		clickTokens = append(clickTokens, "")
+	}
 
 	m.viewportStyledLines = append(m.viewportStyledLines[:0], styledLines...)
 	m.viewportPlainLines = append(m.viewportPlainLines[:0], plainLines...)
 	m.viewportBlockIDs = append(m.viewportBlockIDs[:0], blockIDs...)
 	m.viewportClickTokens = append(m.viewportClickTokens[:0], clickTokens...)
+}
+
+func viewportRhythmForBlock(block Block) viewportRhythmClass {
+	switch b := block.(type) {
+	case *UserNarrativeBlock:
+		return viewportRhythmUser
+	case *AssistantBlock:
+		return viewportRhythmAssistant
+	case *ReasoningBlock:
+		return viewportRhythmReasoning
+	case *MainACPTurnBlock, *ParticipantTurnBlock, *SubagentPanelBlock:
+		return viewportRhythmPanel
+	case *TranscriptBlock:
+		if strings.TrimSpace(b.Raw) == "" {
+			return viewportRhythmNone
+		}
+		switch b.Style {
+		case tuikit.LineStyleUser:
+			return viewportRhythmUser
+		case tuikit.LineStyleTool, tuikit.LineStyleWarn, tuikit.LineStyleError, tuikit.LineStyleNote:
+			return viewportRhythmOperation
+		default:
+			return viewportRhythmOperation
+		}
+	default:
+		return viewportRhythmNone
+	}
+}
+
+func shouldInsertViewportRhythmGap(prev, current *viewportRenderEntry) bool {
+	if prev == nil || current == nil {
+		return false
+	}
+	if !viewportEntryHasVisibleContent(*current) {
+		return false
+	}
+	prevClass := prev.rhythm
+	currentClass := current.rhythm
+	if prevClass == viewportRhythmNone || currentClass == viewportRhythmNone {
+		return false
+	}
+	if prevClass == viewportRhythmOperation && currentClass == viewportRhythmOperation {
+		return false
+	}
+	return prevClass != currentClass
+}
+
+func viewportEntryHasVisibleContent(entry viewportRenderEntry) bool {
+	for _, line := range entry.plainLines {
+		if strings.TrimSpace(line) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) renderStreamViewportLines(ctx BlockRenderContext) ([]string, []string, []string) {

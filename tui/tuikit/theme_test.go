@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"testing"
 
+	"github.com/charmbracelet/colorprofile"
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
@@ -93,6 +94,22 @@ func TestResolveThemeFromOptions_NoColor(t *testing.T) {
 	}
 	if theme.TextPrimary != nil || theme.Accent != nil || theme.StatusBg != nil {
 		t.Fatalf("expected no-color theme to strip palette, got primary=%v accent=%v status=%v", theme.TextPrimary, theme.Accent, theme.StatusBg)
+	}
+}
+
+func TestDefaultThemeSoftensTranscriptSupportingColors(t *testing.T) {
+	theme := ResolveThemeWithState(true, false, colorprofile.TrueColor)
+	if got := stringifyColor(theme.ReasoningFg); got != "#747e8f" {
+		t.Fatalf("expected softer reasoning color, got %q", got)
+	}
+	if got := stringifyColor(theme.ToolFg); got != "#cbd5e1" {
+		t.Fatalf("expected quieter tool meta color, got %q", got)
+	}
+	if got := stringifyColor(theme.TranscriptRail); got != "#465163" {
+		t.Fatalf("expected quieter transcript rail, got %q", got)
+	}
+	if got := stringifyColor(theme.SeparatorFg); got != "#303846" {
+		t.Fatalf("expected subtler separator, got %q", got)
 	}
 }
 
