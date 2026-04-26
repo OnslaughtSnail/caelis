@@ -114,8 +114,8 @@ func resolveLLM() (sdkmodel.LLM, error) {
 		return staticLLM{text: reply, delay: delay}, nil
 	}
 	spec, err := e2etest.ResolveLLM(e2etest.Config{
-		DefaultProvider: "minimax",
-		DefaultModel:    "MiniMax-M2",
+		DefaultProvider: "codefree",
+		DefaultModel:    "GLM-5.1",
 		Timeout:         90 * time.Second,
 		MaxTokens:       1024,
 	})
@@ -343,9 +343,8 @@ func (m *scriptedSpawnLLM) Generate(_ context.Context, req *sdkmodel.Request) it
 						ID:   "spawn-1",
 						Name: spawntool.ToolName,
 						Args: string(mustJSON(map[string]any{
-							"agent":         "self",
-							"prompt":        "Reply with exactly: spawn child ok",
-							"yield_time_ms": 5,
+							"agent":  "self",
+							"prompt": "Reply with exactly: spawn child ok",
 						})),
 					}}, ""),
 					TurnComplete: true,
@@ -564,9 +563,8 @@ func (m *scriptedSpawnPassthroughLLM) Generate(_ context.Context, req *sdkmodel.
 						ID:   "spawn-pass-1",
 						Name: spawntool.ToolName,
 						Args: string(mustJSON(map[string]any{
-							"agent":         "self",
-							"prompt":        "Check whether SPAWN is available and reply with exactly the result.",
-							"yield_time_ms": 5,
+							"agent":  "self",
+							"prompt": "Check whether SPAWN is available and reply with exactly the result.",
 						})),
 					}}, ""),
 					TurnComplete: true,

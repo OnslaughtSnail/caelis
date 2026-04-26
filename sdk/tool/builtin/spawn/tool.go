@@ -37,17 +37,13 @@ func (t Tool) Definition() sdktool.Definition {
 			"type":        "string",
 			"description": "The sub-task for the selected agent. Keep it specific and self-contained.",
 		},
-		"yield_time_ms": map[string]any{
-			"type":        "integer",
-			"description": "Optional wait window before control returns while the spawned task continues in the background.",
-		},
 	}
 	if enum := agentNames(t.agents); len(enum) > 0 {
 		props["agent"].(map[string]any)["enum"] = enum
 	}
 	return sdktool.Definition{
 		Name:        ToolName,
-		Description: "Delegate a sub-task to one available ACP agent. Use TASK wait or cancel with the returned task_id after it yields.",
+		Description: "Delegate a sub-task to self or one attached ACP agent. SPAWN starts the task and returns a task_id; use TASK wait, cancel, or write for follow-up control.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"properties":           props,
@@ -73,7 +69,7 @@ func agentNames(agents []sdkdelegation.Agent) []string {
 
 func agentDescription(agents []sdkdelegation.Agent) string {
 	if len(agents) == 0 {
-		return "Optional ACP agent name. Omit to use the default self agent."
+		return "Optional ACP agent name. Omit to use self."
 	}
 	parts := make([]string, 0, len(agents))
 	for _, one := range agents {
@@ -88,9 +84,9 @@ func agentDescription(agents []sdkdelegation.Agent) string {
 		parts = append(parts, name)
 	}
 	if len(parts) == 0 {
-		return "Optional ACP agent name. Omit to use the default self agent."
+		return "Optional ACP agent name. Omit to use self."
 	}
-	return "Optional ACP agent name. Available agents: " + strings.Join(parts, "; ") + ". Omit to use the default self agent."
+	return "Optional ACP agent name. Available agents include self plus attached external ACP agents: " + strings.Join(parts, "; ") + ". Omit to use self."
 }
 
 var _ sdktool.Tool = Tool{}

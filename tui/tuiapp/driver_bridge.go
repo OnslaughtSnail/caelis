@@ -21,8 +21,8 @@ type ProgramSender struct {
 	Send func(tea.Msg)
 }
 
-type terminalStreamDriver interface {
-	SubscribeTerminal(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool)
+type streamDriver interface {
+	SubscribeStream(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool)
 }
 
 // ConfigFromDriver populates legacy Config callbacks from an adapter runtime.Driver.
@@ -233,11 +233,11 @@ func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.
 	if send == nil {
 		return
 	}
-	streamer, ok := driver.(terminalStreamDriver)
+	streamer, ok := driver.(streamDriver)
 	if !ok {
 		return
 	}
-	events, ok := streamer.SubscribeTerminal(ctx, env)
+	events, ok := streamer.SubscribeStream(ctx, env)
 	if !ok || events == nil {
 		return
 	}
@@ -309,10 +309,10 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		}
 		sendNotice(send, formatAgentStatusSnapshot(status))
 		return TaskResultMsg{SuppressTurnDivider: true}
-	case "add", "connect":
+	case "add":
 		target := strings.TrimSpace(rest)
 		if target == "" {
-			sendNotice(send, "usage: /agent add <name>\nrun /agent list to inspect configured agents")
+			sendNotice(send, "usage: /agent add <name>")
 			return TaskResultMsg{SuppressTurnDivider: true}
 		}
 		status, err := driver.AddAgent(ctx, target)
@@ -322,7 +322,7 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		sendNotice(send, fmt.Sprintf("agent attached: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
 		return TaskResultMsg{SuppressTurnDivider: true}
-	case "remove", "rm":
+	case "remove":
 		target := strings.TrimSpace(rest)
 		if target == "" {
 			sendNotice(send, "usage: /agent remove <participant-id>\nrun /agent status to inspect attached participants")
@@ -766,11 +766,12 @@ func formatStatusSnapshot(status tuiadapterruntime.StatusSnapshot) string {
 func agentHelpText() string {
 	lines := []string{
 		"/agent commands:",
-		"  /agent list      list configured ACP agents",
+		"  /agent list      list attached ACP agents",
 		"  /agent status    show current controller and attached participants",
 		"  /agent add NAME  attach one ACP participant to the current session",
 		"  /agent remove ID detach one attached participant",
 		"  /agent handoff NAME  hand off the main controller to an ACP agent",
+		"  /agent use NAME  hand off the main controller to an attached agent",
 		"  /agent handoff local return the main controller to the local kernel",
 		"  /agent ask ID PROMPT  send one prompt to an attached participant",
 	}
@@ -779,9 +780,9 @@ func agentHelpText() string {
 
 func formatAgentCatalog(agents []tuiadapterruntime.AgentCandidate) string {
 	if len(agents) == 0 {
-		return "no ACP agents are configured for this app\nnext: add agent assembly config before using /agent add or /agent handoff"
+		return "no ACP agents are attached"
 	}
-	lines := []string{"configured ACP agents:"}
+	lines := []string{"attached ACP agents:"}
 	for _, agent := range agents {
 		line := "  " + strings.TrimSpace(agent.Name)
 		if desc := strings.TrimSpace(agent.Description); desc != "" {
@@ -789,7 +790,7 @@ func formatAgentCatalog(agents []tuiadapterruntime.AgentCandidate) string {
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "next: run /agent add <name> to attach a participant, or /agent handoff <name> to switch the main controller")
+	lines = append(lines, "next: run /agent handoff <name> to switch the main controller, or /agent remove <id> to detach")
 	return strings.Join(lines, "\n")
 }
 

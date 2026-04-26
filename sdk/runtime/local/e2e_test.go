@@ -25,8 +25,8 @@ import (
 	"github.com/OnslaughtSnail/caelis/sdk/sandbox/host"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	taskfile "github.com/OnslaughtSnail/caelis/sdk/task/file"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 	"github.com/OnslaughtSnail/caelis/sdk/tool/builtin/filesystem"
 	sdkplan "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/plan"
@@ -1439,8 +1439,8 @@ func TestRuntimeAsyncBashFileE2E(t *testing.T) {
 		t.Fatalf("persisted events missing task_id metadata: %#v", events)
 	}
 	taskID := mustDocumentTaskID(t, events)
-	terminalSnap, err := runtime.Terminals().Read(context.Background(), sdkterminal.ReadRequest{
-		Ref: sdkterminal.Ref{
+	terminalSnap, err := runtime.Streams().Read(context.Background(), sdkstream.ReadRequest{
+		Ref: sdkstream.Ref{
 			SessionID: session.SessionID,
 			TaskID:    taskID,
 		},
@@ -1475,6 +1475,7 @@ func TestRuntimeSpawnACPSubagentFileE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession() error = %v", err)
 	}
+	attachSpawnParticipant(t, sessions, session.SessionRef, "self")
 	assembly, agents := testACPAssembly(sdkplugin.AgentConfig{
 		Name:        "self",
 		Description: "Spawn a sibling ACP child session.",
@@ -1530,10 +1531,7 @@ func TestRuntimeSpawnACPSubagentFileE2E(t *testing.T) {
 	assertPersistedDocumentShape(t, doc, session.SessionID)
 	sessionDoc, _ := doc["session"].(map[string]any)
 	participants, _ := sessionDoc["participants"].([]any)
-	if len(participants) != 1 {
-		t.Fatalf("participants = %#v, want exactly 1 delegated subagent anchor", participants)
-	}
-	participant, _ := participants[0].(map[string]any)
+	participant := findDocumentParticipant(t, participants, string(sdksession.ParticipantKindSubagent), string(sdksession.ParticipantRoleDelegated))
 	childSessionID, _ := participant["session_id"].(string)
 	if strings.TrimSpace(childSessionID) == "" {
 		t.Fatalf("participant missing child session_id: %#v", participant)
@@ -1601,6 +1599,7 @@ func TestRuntimeSpawnACPSubagentApprovalPassthroughE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession() error = %v", err)
 	}
+	attachSpawnParticipant(t, sessions, session.SessionRef, "codex")
 	assembly, agents := testACPAssembly(sdkplugin.AgentConfig{
 		Name:        "codex",
 		Description: "External ACP coding agent.",
@@ -1683,6 +1682,7 @@ func TestRuntimeSpawnACPSubagentFullAccessAutoApprovesE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession() error = %v", err)
 	}
+	attachSpawnParticipant(t, sessions, session.SessionRef, "codex")
 	assembly, agents := testACPAssembly(sdkplugin.AgentConfig{
 		Name:        "codex",
 		Description: "External ACP coding agent.",
@@ -1757,6 +1757,7 @@ func TestRuntimeSpawnSelfDisablesNestedSpawnE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartSession() error = %v", err)
 	}
+	attachSpawnParticipant(t, sessions, session.SessionRef, "self")
 	assembly, agents := testACPAssembly(sdkplugin.AgentConfig{
 		Name:        "self",
 		Description: "Spawn a sibling ACP child session.",
@@ -2139,6 +2140,45 @@ func mustDocumentTaskID(t *testing.T, events []any) string {
 func documentEvents(doc map[string]any) []any {
 	events, _ := doc["events"].([]any)
 	return events
+}
+
+func attachSpawnParticipant(t *testing.T, sessions sdksession.Service, ref sdksession.SessionRef, agent string) {
+	t.Helper()
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		t.Fatal("attachSpawnParticipant requires agent")
+	}
+	_, err := sessions.PutParticipant(context.Background(), sdksession.PutParticipantRequest{
+		SessionRef: ref,
+		Binding: sdksession.ParticipantBinding{
+			ID:        "sidecar-" + strings.ToLower(agent),
+			Kind:      sdksession.ParticipantKindACP,
+			Role:      sdksession.ParticipantRoleSidecar,
+			Label:     agent,
+			SessionID: "remote-" + strings.ToLower(agent),
+			Source:    "test_attach",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutParticipant(%q) error = %v", agent, err)
+	}
+}
+
+func findDocumentParticipant(t *testing.T, participants []any, kind string, role string) map[string]any {
+	t.Helper()
+	for _, item := range participants {
+		participant, _ := item.(map[string]any)
+		if participant == nil {
+			continue
+		}
+		gotKind, _ := participant["kind"].(string)
+		gotRole, _ := participant["role"].(string)
+		if gotKind == kind && gotRole == role {
+			return participant
+		}
+	}
+	t.Fatalf("participants = %#v, want kind=%q role=%q", participants, kind, role)
+	return nil
 }
 
 func repoRootForE2E(t *testing.T) string {

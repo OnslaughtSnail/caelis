@@ -117,12 +117,7 @@ Primary commands:
 - `/agent add <name>`
 - `/agent remove <participant-id>`
 - `/agent handoff <name|local>`
-
-Compatibility aliases kept for now:
-
-- `/agent connect <name>` -> alias for `add`
-- `/agent rm <participant-id>` -> alias for `remove`
-- `/agent use <name|local>` -> alias for `handoff`
+- `/agent use <name|local>`
 
 Behavior rules:
 

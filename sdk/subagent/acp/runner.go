@@ -15,6 +15,7 @@ import (
 	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
 	"github.com/OnslaughtSnail/caelis/sdk/internal/acputil"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdksubagent "github.com/OnslaughtSnail/caelis/sdk/subagent"
 )
 
@@ -54,11 +55,16 @@ type Runner struct {
 type childRun struct {
 	anchor sdkdelegation.Anchor
 	client *sdkacpclient.Client
+	taskID string
+	sink   sdkstream.Sink
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu            sync.RWMutex
 	state         sdkdelegation.State
 	outputPreview string
 	result        string
+	agentText     string
 	updatedAt     time.Time
 	running       bool
 	done          chan struct{}
@@ -90,9 +96,14 @@ func (r *Runner) Spawn(ctx context.Context, spawn sdksubagent.SpawnContext, req 
 	run := &childRun{
 		state:     sdkdelegation.StateRunning,
 		running:   true,
+		taskID:    strings.TrimSpace(spawn.TaskID),
+		sink:      spawn.Streams,
 		updatedAt: r.clock(),
 		done:      make(chan struct{}),
 	}
+	childCtx, childCancel := context.WithCancel(context.WithoutCancel(ctx))
+	run.ctx = childCtx
+	run.cancel = childCancel
 	agentID := r.nextAgentID(cfg.Name)
 	launchEnv := maps.Clone(cfg.Env)
 	if strings.EqualFold(strings.TrimSpace(cfg.Name), "self") {
@@ -102,7 +113,7 @@ func (r *Runner) Spawn(ctx context.Context, spawn sdksubagent.SpawnContext, req 
 		launchEnv["SDK_ACP_ENABLE_SPAWN"] = "0"
 		launchEnv["SDK_ACP_CHILD_NO_SPAWN"] = "1"
 	}
-	client, err := sdkacpclient.Start(ctx, sdkacpclient.Config{
+	client, err := sdkacpclient.Start(childCtx, sdkacpclient.Config{
 		Command:    cfg.Command,
 		Args:       append([]string(nil), cfg.Args...),
 		Env:        launchEnv,
@@ -114,18 +125,22 @@ func (r *Runner) Spawn(ctx context.Context, spawn sdksubagent.SpawnContext, req 
 		},
 	})
 	if err != nil {
+		childCancel()
 		return sdkdelegation.Anchor{}, sdkdelegation.Result{}, err
 	}
 	if _, err := client.Initialize(ctx); err != nil {
+		childCancel()
 		_ = client.Close(ctx)
 		return sdkdelegation.Anchor{}, sdkdelegation.Result{}, err
 	}
 	sessionResp, err := client.NewSession(ctx, strings.TrimSpace(spawn.CWD), nil)
 	if err != nil {
+		childCancel()
 		_ = client.Close(ctx)
 		return sdkdelegation.Anchor{}, sdkdelegation.Result{}, err
 	}
 	anchor := sdkdelegation.Anchor{
+		TaskID:    strings.TrimSpace(spawn.TaskID),
 		SessionID: strings.TrimSpace(sessionResp.SessionID),
 		Agent:     cfg.Name,
 		AgentID:   agentID,
@@ -135,8 +150,8 @@ func (r *Runner) Spawn(ctx context.Context, spawn sdksubagent.SpawnContext, req 
 	r.mu.Lock()
 	r.runs[anchor.SessionID] = run
 	r.mu.Unlock()
-	go r.drivePrompt(ctx, run, strings.TrimSpace(req.Prompt))
-	return anchor, r.waitRun(ctx, run, req.YieldTimeMS), nil
+	go r.drivePrompt(childCtx, run, strings.TrimSpace(req.Prompt))
+	return anchor, r.waitRun(ctx, run, 0), nil
 }
 
 func (r *Runner) Wait(ctx context.Context, anchor sdkdelegation.Anchor, yieldTimeMS int) (sdkdelegation.Result, error) {
@@ -147,7 +162,7 @@ func (r *Runner) Wait(ctx context.Context, anchor sdkdelegation.Anchor, yieldTim
 	return r.waitRun(ctx, run, yieldTimeMS), nil
 }
 
-func (r *Runner) Continue(ctx context.Context, anchor sdkdelegation.Anchor, req sdkdelegation.Request) (sdkdelegation.Result, error) {
+func (r *Runner) Continue(ctx context.Context, anchor sdkdelegation.Anchor, req sdkdelegation.ContinueRequest) (sdkdelegation.Result, error) {
 	run, err := r.lookup(anchor)
 	if err != nil {
 		return sdkdelegation.Result{}, err
@@ -167,8 +182,12 @@ func (r *Runner) Continue(ctx context.Context, anchor sdkdelegation.Anchor, req 
 	run.result = ""
 	run.updatedAt = r.clock()
 	run.done = make(chan struct{})
+	runCtx := run.ctx
+	if runCtx == nil {
+		runCtx = context.WithoutCancel(ctx)
+	}
 	run.mu.Unlock()
-	go r.drivePrompt(ctx, run, prompt)
+	go r.drivePrompt(runCtx, run, prompt)
 	return r.waitRun(ctx, run, req.YieldTimeMS), nil
 }
 
@@ -183,6 +202,9 @@ func (r *Runner) Cancel(ctx context.Context, anchor sdkdelegation.Anchor) error 
 	run.mu.RUnlock()
 	if client != nil {
 		_ = client.Cancel(ctx, sessionID)
+	}
+	if run.cancel != nil {
+		run.cancel()
 	}
 	run.mu.Lock()
 	run.running = false
@@ -202,14 +224,20 @@ func (r *Runner) drivePrompt(ctx context.Context, run *childRun, prompt string) 
 	run.updatedAt = r.clock()
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			run.state = sdkdelegation.StateInterrupted
-			run.outputPreview = "interrupted"
+			if run.state != sdkdelegation.StateCancelled {
+				run.state = sdkdelegation.StateInterrupted
+				run.outputPreview = "interrupted"
+			}
 			run.result = ""
 			_ = run.client.Close(context.WithoutCancel(ctx))
 			return
 		}
+		errText := err.Error()
+		if stderr := run.client.StderrTail(4096); strings.TrimSpace(stderr) != "" {
+			errText += "\nstderr:\n" + stderr
+		}
 		run.state = sdkdelegation.StateFailed
-		run.outputPreview = compactPreview(err.Error())
+		run.outputPreview = compactPreview(errText)
 		run.result = ""
 		_ = run.client.Close(context.WithoutCancel(ctx))
 		return
@@ -395,34 +423,109 @@ func (r *Runner) handleUpdate(run *childRun, env sdkacpclient.UpdateEnvelope) {
 	if run == nil {
 		return
 	}
+	var streamText string
+	streamName := "stdout"
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	run.updatedAt = r.clock()
 	switch update := env.Update.(type) {
 	case sdkacpclient.ContentChunk:
 		if text := chunkText(update); text != "" {
-			run.outputPreview = compactPreview(text)
-			if strings.TrimSpace(update.SessionUpdate) == sdkacpclient.UpdateAgentMessage {
-				if run.result == "" {
-					run.result = text
-				} else {
-					run.result = strings.TrimSpace(run.result + text)
-				}
+			if strings.TrimSpace(update.SessionUpdate) != sdkacpclient.UpdateAgentMessage {
+				break
 			}
+			streamText = run.appendAgentMessageLocked(text)
+			run.outputPreview = compactPreview(run.agentText)
 		}
 	case sdkacpclient.ToolCall:
-		run.outputPreview = compactPreview(toolActivity(update.Title, update.Kind, update.Status))
+		streamText = toolActivity(update.Title, update.Kind, update.Status) + "\n"
+		run.outputPreview = compactPreview(streamText)
 	case sdkacpclient.ToolCallUpdate:
-		run.outputPreview = compactPreview(toolActivity(derefString(update.Title), derefString(update.Kind), derefString(update.Status)))
+		streamText = toolActivity(derefString(update.Title), derefString(update.Kind), derefString(update.Status)) + "\n"
+		run.outputPreview = compactPreview(streamText)
 	case sdkacpclient.PlanUpdate:
-		run.outputPreview = "updating plan"
+		streamText = "updating plan\n"
+		run.outputPreview = streamText
 	}
+	if strings.TrimSpace(streamText) != "" {
+		run.emitLocked(sdkstream.Frame{
+			Ref: sdkstream.Ref{
+				TaskID:    firstNonEmpty(run.taskID, run.anchor.TaskID),
+				SessionID: firstNonEmpty(strings.TrimSpace(env.SessionID), run.anchor.SessionID),
+			},
+			Stream:    streamName,
+			Text:      streamText,
+			State:     string(run.state),
+			Running:   run.running,
+			UpdatedAt: run.updatedAt,
+		})
+	}
+}
+
+func (run *childRun) emitLocked(frame sdkstream.Frame) {
+	if run == nil || run.sink == nil {
+		return
+	}
+	run.sink.PublishStream(frame)
+}
+
+func (run *childRun) appendAgentMessageLocked(text string) string {
+	if run == nil {
+		return ""
+	}
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	if run.agentText == "" {
+		run.agentText = text
+		run.result = run.agentText
+		return text
+	}
+	if strings.HasPrefix(text, run.agentText) {
+		delta := text[len(run.agentText):]
+		run.agentText = text
+		run.result = run.agentText
+		return delta
+	}
+	if strings.HasPrefix(run.agentText, text) {
+		return ""
+	}
+	overlap := longestSuffixPrefixOverlap(run.agentText, text)
+	delta := text
+	if overlap > 0 {
+		delta = text[overlap:]
+	}
+	run.agentText += delta
+	run.result = run.agentText
+	return delta
+}
+
+func longestSuffixPrefixOverlap(left string, right string) int {
+	if left == "" || right == "" {
+		return 0
+	}
+	best := 0
+	for idx := range right {
+		if idx == 0 || idx > len(left) {
+			continue
+		}
+		if strings.HasSuffix(left, right[:idx]) {
+			best = idx
+		}
+	}
+	if len(right) <= len(left) && strings.HasSuffix(left, right) {
+		best = len(right)
+	}
+	return best
 }
 
 func chunkText(chunk sdkacpclient.ContentChunk) string {
 	var text sdkacpclient.TextChunk
 	if err := json.Unmarshal(chunk.Content, &text); err == nil {
-		return strings.TrimSpace(text.Text)
+		if strings.TrimSpace(text.Text) == "" {
+			return ""
+		}
+		return text.Text
 	}
 	return ""
 }

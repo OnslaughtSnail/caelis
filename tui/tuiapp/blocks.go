@@ -218,13 +218,14 @@ func renderNarrativeGlamourRows(blockID, raw, rolePrefix string, lineStyle tuiki
 // ---------------------------------------------------------------------------
 
 type MainACPTurnBlock struct {
-	id            string
-	SessionID     string
-	Status        string
-	StartedAt     time.Time
-	EndedAt       time.Time
-	Events        []SubagentEvent
-	ExpandedTools map[string]bool
+	id              string
+	SessionID       string
+	Status          string
+	StartedAt       time.Time
+	EndedAt         time.Time
+	Events          []SubagentEvent
+	ExpandedTools   map[string]bool
+	ToolPanelScroll map[string]toolPanelScrollState
 }
 
 type ToolUpdateMeta struct {
@@ -428,6 +429,7 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		HideCompletedRow:       true,
 		ToolOutputPanels:       true,
 		ToolPanelExpanded:      b.toolPanelExpanded,
+		ToolPanelScrollState:   b.toolPanelScrollState,
 	})
 }
 
@@ -436,15 +438,16 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 // ---------------------------------------------------------------------------
 
 type ParticipantTurnBlock struct {
-	id            string
-	SessionID     string
-	Actor         string
-	Status        string
-	Expanded      bool
-	StartedAt     time.Time
-	EndedAt       time.Time
-	Events        []SubagentEvent
-	ExpandedTools map[string]bool
+	id              string
+	SessionID       string
+	Actor           string
+	Status          string
+	Expanded        bool
+	StartedAt       time.Time
+	EndedAt         time.Time
+	Events          []SubagentEvent
+	ExpandedTools   map[string]bool
+	ToolPanelScroll map[string]toolPanelScrollState
 }
 
 func NewParticipantTurnBlock(sessionID, actor string) *ParticipantTurnBlock {
@@ -650,6 +653,7 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		HideCompletedRow:       true,
 		ToolOutputPanels:       true,
 		ToolPanelExpanded:      b.toolPanelExpanded,
+		ToolPanelScrollState:   b.toolPanelScrollState,
 	})...)
 	if b.Expanded && participantTurnIsTerminal(b.Status) {
 		rows = append(rows, StyledRow(b.id, renderParticipantTurnFooter(b, ctx)))
@@ -711,6 +715,48 @@ func toggleToolPanelExpanded(state *map[string]bool, callID string) bool {
 	return next
 }
 
+type toolPanelScrollState struct {
+	Offset                int
+	FollowTail            bool
+	ScrollbarVisibleUntil time.Time
+}
+
+func defaultToolPanelScrollState() toolPanelScrollState {
+	return toolPanelScrollState{FollowTail: true}
+}
+
+func toolPanelScrollStateFromMap(state map[string]toolPanelScrollState, callID string) toolPanelScrollState {
+	callID = strings.TrimSpace(callID)
+	if callID == "" || state == nil {
+		return defaultToolPanelScrollState()
+	}
+	value, ok := state[callID]
+	if !ok {
+		return defaultToolPanelScrollState()
+	}
+	return value
+}
+
+func scrollToolPanelState(state *map[string]toolPanelScrollState, callID string, total int, delta int) bool {
+	callID = strings.TrimSpace(callID)
+	if state == nil || callID == "" {
+		return false
+	}
+	value := defaultToolPanelScrollState()
+	if *state != nil {
+		value = toolPanelScrollStateFromMap(*state, callID)
+	}
+	if !scrollPanelState(&value.Offset, &value.FollowTail, total, acpTerminalPanelMaxLines, delta) {
+		return false
+	}
+	value.ScrollbarVisibleUntil = time.Now().Add(scrollbarVisibleDuration)
+	if *state == nil {
+		*state = map[string]toolPanelScrollState{}
+	}
+	(*state)[callID] = value
+	return true
+}
+
 func (b *MainACPTurnBlock) toolPanelExpanded(callID string) bool {
 	if b == nil {
 		return true
@@ -733,6 +779,30 @@ func (b *MainACPTurnBlock) setToolPanelExpanded(callID string, expanded bool) {
 		b.ExpandedTools = map[string]bool{}
 	}
 	b.ExpandedTools[strings.TrimSpace(callID)] = expanded
+}
+
+func (b *MainACPTurnBlock) toolPanelScrollState(callID string) toolPanelScrollState {
+	if b == nil {
+		return defaultToolPanelScrollState()
+	}
+	return toolPanelScrollStateFromMap(b.ToolPanelScroll, callID)
+}
+
+func (b *MainACPTurnBlock) ScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
+	if b == nil {
+		return false
+	}
+	total := terminalToolPanelLineCount(b.Events, callID, ctx)
+	return scrollToolPanelState(&b.ToolPanelScroll, callID, total, delta)
+}
+
+func (b *MainACPTurnBlock) CanScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
+	if b == nil {
+		return false
+	}
+	state := b.toolPanelScrollState(callID)
+	total := terminalToolPanelLineCount(b.Events, callID, ctx)
+	return canScrollPanelState(state.Offset, state.FollowTail, total, acpTerminalPanelMaxLines, delta)
 }
 
 func (b *MainACPTurnBlock) collapseAllToolPanels() {
@@ -764,6 +834,30 @@ func (b *ParticipantTurnBlock) setToolPanelExpanded(callID string, expanded bool
 		b.ExpandedTools = map[string]bool{}
 	}
 	b.ExpandedTools[strings.TrimSpace(callID)] = expanded
+}
+
+func (b *ParticipantTurnBlock) toolPanelScrollState(callID string) toolPanelScrollState {
+	if b == nil {
+		return defaultToolPanelScrollState()
+	}
+	return toolPanelScrollStateFromMap(b.ToolPanelScroll, callID)
+}
+
+func (b *ParticipantTurnBlock) ScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
+	if b == nil {
+		return false
+	}
+	total := terminalToolPanelLineCount(b.Events, callID, ctx)
+	return scrollToolPanelState(&b.ToolPanelScroll, callID, total, delta)
+}
+
+func (b *ParticipantTurnBlock) CanScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
+	if b == nil {
+		return false
+	}
+	state := b.toolPanelScrollState(callID)
+	total := terminalToolPanelLineCount(b.Events, callID, ctx)
+	return canScrollPanelState(state.Offset, state.FollowTail, total, acpTerminalPanelMaxLines, delta)
 }
 
 func (b *ParticipantTurnBlock) collapseAllToolPanels() {

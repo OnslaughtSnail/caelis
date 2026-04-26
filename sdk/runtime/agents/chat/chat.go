@@ -116,7 +116,9 @@ func (a *Agent) Run(ctx sdkruntime.Context) iter.Seq2[*sdksession.Event, error] 
 			}
 			messages = append(messages, assistantMessage)
 			for _, call := range calls {
-				toolMessage, toolEvent, err := a.executeToolCall(ctx, call)
+				toolMessage, toolEvent, err := a.executeToolCallWithProgress(ctx, call, func(event *sdksession.Event) bool {
+					return yield(event, nil)
+				})
 				if err != nil {
 					yield(nil, err)
 					return
@@ -126,6 +128,68 @@ func (a *Agent) Run(ctx sdkruntime.Context) iter.Seq2[*sdksession.Event, error] 
 				}
 				messages = append(messages, toolMessage)
 			}
+		}
+	}
+}
+
+type toolObserver struct {
+	results chan<- sdktool.Result
+}
+
+func (r toolObserver) ObserveToolResult(result sdktool.Result) {
+	if r.results == nil {
+		return
+	}
+	cloned, _ := sdktool.CloneResult(result, nil)
+	select {
+	case r.results <- cloned:
+	default:
+	}
+}
+
+type toolExecutionResult struct {
+	message sdkmodel.Message
+	event   *sdksession.Event
+	err     error
+}
+
+func (a *Agent) executeToolCallWithProgress(
+	ctx context.Context,
+	call sdkmodel.ToolCall,
+	yieldProgress func(*sdksession.Event) bool,
+) (sdkmodel.Message, *sdksession.Event, error) {
+	progressCh := make(chan sdktool.Result, 16)
+	doneCh := make(chan toolExecutionResult, 1)
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	go func() {
+		message, event, err := a.executeToolCall(callCtx, call, toolObserver{results: progressCh})
+		doneCh <- toolExecutionResult{message: message, event: event, err: err}
+	}()
+
+	for {
+		select {
+		case progress := <-progressCh:
+			if yieldProgress == nil {
+				continue
+			}
+			if !yieldProgress(sdksession.MarkUIOnly(toolResultEvent(call, progress, nil))) {
+				return sdkmodel.Message{}, nil, context.Canceled
+			}
+		case done := <-doneCh:
+			for {
+				select {
+				case progress := <-progressCh:
+					if yieldProgress != nil && !yieldProgress(sdksession.MarkUIOnly(toolResultEvent(call, progress, nil))) {
+						return sdkmodel.Message{}, nil, context.Canceled
+					}
+				default:
+					return done.message, done.event, done.err
+				}
+			}
+		case <-ctx.Done():
+			return sdkmodel.Message{}, nil, ctx.Err()
 		}
 	}
 }
@@ -275,7 +339,7 @@ func modelToolCallEvents(message sdkmodel.Message, resp *sdkmodel.Response) []*s
 	return out
 }
 
-func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sdkmodel.Message, *sdksession.Event, error) {
+func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall, observer sdktool.Observer) (sdkmodel.Message, *sdksession.Event, error) {
 	rawInput := mustObject(call.Args)
 	tool, ok := a.lookupTool(call.Name)
 	if !ok {
@@ -311,9 +375,10 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 	}
 
 	result, err := tool.Call(ctx, sdktool.Call{
-		ID:    strings.TrimSpace(call.ID),
-		Name:  strings.TrimSpace(call.Name),
-		Input: json.RawMessage(strings.TrimSpace(call.Args)),
+		ID:       strings.TrimSpace(call.ID),
+		Name:     strings.TrimSpace(call.Name),
+		Input:    json.RawMessage(strings.TrimSpace(call.Args)),
+		Observer: observer,
 	})
 	if err != nil {
 		result = sdktool.Result{
@@ -324,11 +389,15 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 		}
 	}
 	message := toolResultMessage(call, result)
+	event := toolResultEvent(call, result, &message)
+	return message, event, nil
+}
+
+func toolResultEvent(call sdkmodel.ToolCall, result sdktool.Result, message *sdkmodel.Message) *sdksession.Event {
+	rawInput := mustObject(call.Args)
 	rawOutput := maps.Clone(result.Meta)
 	event := &sdksession.Event{
-		Type:    sdksession.EventTypeToolResult,
-		Message: &message,
-		Text:    message.TextContent(),
+		Type: sdksession.EventTypeToolResult,
 		Protocol: &sdksession.EventProtocol{
 			UpdateType: string(sdksession.ProtocolUpdateTypeToolUpdate),
 			ToolCall: &sdksession.ProtocolToolCall{
@@ -351,7 +420,11 @@ func (a *Agent) executeToolCall(ctx context.Context, call sdkmodel.ToolCall) (sd
 			caelisToolDisplayMeta(call.Name, toolCallStatus(result), rawInput, rawOutput),
 		),
 	}
-	return message, event, nil
+	if message != nil {
+		event.Message = message
+		event.Text = message.TextContent()
+	}
+	return event
 }
 
 func (a *Agent) lookupTool(name string) (sdktool.Tool, bool) {

@@ -14,6 +14,7 @@ import (
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksandbox "github.com/OnslaughtSnail/caelis/sdk/sandbox"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdksubagent "github.com/OnslaughtSnail/caelis/sdk/subagent"
 	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
@@ -31,6 +32,7 @@ type taskRuntime struct {
 	mu        sync.RWMutex
 	tasks     map[string]*bashTask
 	subagents map[string]*subagentTask
+	pending   map[string][]sdkstream.Frame
 	order     map[string][]string
 	backends  map[sdksandbox.Backend]sdksandbox.Runtime
 }
@@ -76,6 +78,11 @@ type subagentTask struct {
 	running  bool
 	result   map[string]any
 	metadata map[string]any
+
+	stdout       string
+	stderr       string
+	stdoutCursor int64
+	stderrCursor int64
 }
 
 func newTaskRuntime(runtime *Runtime, store sdktask.Store) *taskRuntime {
@@ -84,6 +91,7 @@ func newTaskRuntime(runtime *Runtime, store sdktask.Store) *taskRuntime {
 		store:     store,
 		tasks:     map[string]*bashTask{},
 		subagents: map[string]*subagentTask{},
+		pending:   map[string][]sdkstream.Frame{},
 		order:     map[string][]string{},
 		backends:  map[sdksandbox.Backend]sdksandbox.Runtime{},
 	}
@@ -215,6 +223,11 @@ func (t runtimeBashTool) Call(ctx context.Context, call sdktool.Call) (sdktool.R
 		ParentCall:  strings.TrimSpace(call.ID),
 		ParentTool:  strings.TrimSpace(call.Name),
 		Constraints: constraintsFromMetadata(call.Metadata),
+		Observer: taskToolObserver{
+			call:     call,
+			def:      t.base.Definition(),
+			observer: call.Observer,
+		},
 	}
 	snapshot, err := t.tasks.StartBash(ctx, t.session, t.sessionRef, runtime, req)
 	if err != nil {
@@ -249,19 +262,21 @@ func (t runtimeSpawnTool) Call(ctx context.Context, call sdktool.Call) (sdktool.
 	if !ok || strings.TrimSpace(prompt) == "" {
 		return sdktool.Result{}, fmt.Errorf("tool: arg %q is required", "prompt")
 	}
+	if err := rejectUnknownArgs(args, "agent", "prompt"); err != nil {
+		return sdktool.Result{}, err
+	}
 	agent, _ := stringArg(args, "agent")
-	yieldMS, _ := intArg(args, "yield_time_ms")
-	if yieldMS < 0 {
-		yieldMS = 0
+	agent, err = resolveSpawnAgent(t.session, agent)
+	if err != nil {
+		return sdktool.Result{}, err
 	}
 	snapshot, err := t.tasks.StartSubagent(ctx, t.session, t.sessionRef, t.runner, sdktask.SubagentStartRequest{
-		Agent:       strings.TrimSpace(agent),
-		Prompt:      strings.TrimSpace(prompt),
-		YieldTimeMS: yieldMS,
-		ParentCall:  strings.TrimSpace(call.ID),
-		ParentTool:  strings.TrimSpace(call.Name),
-		Mode:        strings.TrimSpace(t.mode),
-		Approval:    newSubagentApprovalRequester(t.approval, t.session, t.sessionRef),
+		Agent:      strings.TrimSpace(agent),
+		Prompt:     strings.TrimSpace(prompt),
+		ParentCall: strings.TrimSpace(call.ID),
+		ParentTool: strings.TrimSpace(call.Name),
+		Mode:       strings.TrimSpace(t.mode),
+		Approval:   newSubagentApprovalRequester(t.approval, t.session, t.sessionRef),
 	})
 	if err != nil {
 		return sdktool.Result{}, err
@@ -444,7 +459,36 @@ func (tm *taskRuntime) StartBash(
 	if err := tm.persistTaskEntry(ctx, task.entrySnapshot(tm.runtime.now())); err != nil {
 		return sdktask.Snapshot{}, err
 	}
+	if req.Observer != nil {
+		status, statusErr := sessionHandle.Status(ctx)
+		if statusErr != nil {
+			status = sdksandbox.SessionStatus{
+				SessionRef:    sessionHandle.Ref(),
+				Terminal:      sessionHandle.Terminal(),
+				Running:       true,
+				SupportsInput: true,
+				UpdatedAt:     now,
+			}
+		}
+		task.mu.Lock()
+		snapshot := task.snapshotLocked(status)
+		task.mu.Unlock()
+		req.Observer.ObserveTaskSnapshot(snapshot)
+	}
 	return tm.waitBash(ctx, task, req.Yield)
+}
+
+type taskToolObserver struct {
+	call     sdktool.Call
+	def      sdktool.Definition
+	observer sdktool.Observer
+}
+
+func (o taskToolObserver) ObserveTaskSnapshot(snapshot sdktask.Snapshot) {
+	if o.observer == nil {
+		return
+	}
+	o.observer.ObserveToolResult(taskSnapshotToolResult(o.call, o.def, snapshot))
 }
 
 func (tm *taskRuntime) StartSubagent(
@@ -469,10 +513,10 @@ func (tm *taskRuntime) StartSubagent(
 		TaskID:            taskID,
 		Mode:              mode,
 		ApprovalRequester: req.Approval,
+		Streams:           tm,
 	}, sdkdelegation.Request{
-		Agent:       strings.TrimSpace(req.Agent),
-		Prompt:      strings.TrimSpace(req.Prompt),
-		YieldTimeMS: req.YieldTimeMS,
+		Agent:  strings.TrimSpace(req.Agent),
+		Prompt: strings.TrimSpace(req.Prompt),
 	})
 	if err != nil {
 		return sdktask.Snapshot{}, err
@@ -481,8 +525,9 @@ func (tm *taskRuntime) StartSubagent(
 	now := tm.runtime.now()
 	task := &subagentTask{
 		ref: sdktask.Ref{
-			TaskID:    taskID,
-			SessionID: strings.TrimSpace(anchor.SessionID),
+			TaskID:     taskID,
+			SessionID:  strings.TrimSpace(anchor.SessionID),
+			TerminalID: subagentTerminalID(taskID),
 		},
 		sessionRef: sdksession.NormalizeSessionRef(ref),
 		anchor:     sdkdelegation.CloneAnchor(anchor),
@@ -495,11 +540,15 @@ func (tm *taskRuntime) StartSubagent(
 		running:    result.State == sdkdelegation.StateRunning,
 	}
 	task.applyResult(result)
+	task.seedStreamFromResult(result)
 	tm.mu.Lock()
 	tm.subagents[taskID] = task
+	pending := append([]sdkstream.Frame(nil), tm.pending[taskID]...)
+	delete(tm.pending, taskID)
 	sessionID := strings.TrimSpace(ref.SessionID)
 	tm.order[sessionID] = append(tm.order[sessionID], taskID)
 	tm.mu.Unlock()
+	task.applyStreamFrames(pending)
 	if err := tm.persistTaskEntry(ctx, task.entrySnapshot(tm.runtime.now())); err != nil {
 		return sdktask.Snapshot{}, err
 	}
@@ -541,6 +590,29 @@ func normalizeTaskWriteInput(input string) string {
 		return input
 	}
 	return input + "\n"
+}
+
+func resolveSpawnAgent(session sdksession.Session, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || strings.EqualFold(requested, "self") {
+		return "self", nil
+	}
+	for _, participant := range session.Participants {
+		if participant.Kind != sdksession.ParticipantKindACP {
+			continue
+		}
+		if participant.Role != "" && participant.Role != sdksession.ParticipantRoleSidecar {
+			continue
+		}
+		name := strings.TrimSpace(participant.Label)
+		if name == "" {
+			continue
+		}
+		if strings.EqualFold(name, requested) {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("sdk/runtime/local: SPAWN agent %q is not self or an attached ACP agent; use /agent add before spawning external agents", requested)
 }
 
 func (tm *taskRuntime) Cancel(ctx context.Context, ref sdksession.SessionRef, req sdktask.ControlRequest) (sdktask.Snapshot, error) {
@@ -696,7 +768,7 @@ func (tm *taskRuntime) continueSubagent(ctx context.Context, task *subagentTask,
 	if task.runner == nil {
 		return sdktask.Snapshot{}, fmt.Errorf("sdk/runtime/local: SPAWN task %q cannot continue because its child session runner is unavailable", task.ref.TaskID)
 	}
-	result, err := task.runner.Continue(ctx, sdkdelegation.CloneAnchor(task.anchor), sdkdelegation.Request{
+	result, err := task.runner.Continue(ctx, sdkdelegation.CloneAnchor(task.anchor), sdkdelegation.ContinueRequest{
 		Agent:       task.agent,
 		Prompt:      prompt,
 		YieldTimeMS: int(yield / time.Millisecond),
@@ -945,6 +1017,37 @@ func (tm *taskRuntime) persistTaskEntry(ctx context.Context, entry *sdktask.Entr
 	return tm.store.Upsert(ctx, entry)
 }
 
+func (tm *taskRuntime) PublishStream(frame sdkstream.Frame) {
+	if tm == nil {
+		return
+	}
+	taskID := strings.TrimSpace(frame.Ref.TaskID)
+	sessionID := strings.TrimSpace(frame.Ref.SessionID)
+	tm.mu.RLock()
+	task := tm.subagents[taskID]
+	if task == nil && sessionID != "" {
+		for _, candidate := range tm.subagents {
+			if candidate == nil {
+				continue
+			}
+			if strings.TrimSpace(candidate.anchor.SessionID) == sessionID {
+				task = candidate
+				break
+			}
+		}
+	}
+	tm.mu.RUnlock()
+	if task == nil {
+		if taskID != "" {
+			tm.mu.Lock()
+			tm.pending[taskID] = append(tm.pending[taskID], sdkstream.CloneFrame(frame))
+			tm.mu.Unlock()
+		}
+		return
+	}
+	task.applyStreamFrames([]sdkstream.Frame{frame})
+}
+
 func (tm *taskRuntime) listSessionEntries(ctx context.Context, ref sdksession.SessionRef) []*sdktask.Entry {
 	if tm == nil {
 		return nil
@@ -1064,8 +1167,9 @@ func (tm *taskRuntime) rehydrateSubagentTask(entry *sdktask.Entry) *subagentTask
 	agent := taskSpecString(entry.Spec, "agent")
 	task := &subagentTask{
 		ref: sdktask.Ref{
-			TaskID:    strings.TrimSpace(entry.TaskID),
-			SessionID: taskSpecString(entry.Spec, "session_id"),
+			TaskID:     strings.TrimSpace(entry.TaskID),
+			SessionID:  taskSpecString(entry.Spec, "session_id"),
+			TerminalID: firstNonEmpty(taskSpecString(entry.Spec, "terminal_id"), subagentTerminalID(entry.TaskID)),
 		},
 		sessionRef: sdksession.NormalizeSessionRef(entry.Session),
 		anchor: sdkdelegation.Anchor{
@@ -1205,6 +1309,14 @@ func taskStringValue(raw any) string {
 	return strings.TrimSpace(text)
 }
 
+func subagentTerminalID(taskID string) string {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return ""
+	}
+	return "subagent-" + taskID
+}
+
 func (t *bashTask) entrySnapshot(now time.Time) *sdktask.Entry {
 	if t == nil {
 		return nil
@@ -1251,6 +1363,7 @@ func (t *subagentTask) applyResult(result sdkdelegation.Result) {
 	t.metadata["agent"] = t.agent
 	t.metadata["agent_id"] = t.anchor.AgentID
 	t.metadata["session_id"] = t.anchor.SessionID
+	t.metadata["terminal_id"] = t.ref.TerminalID
 	t.metadata["state"] = string(t.state)
 	if preview := strings.TrimSpace(result.OutputPreview); preview != "" {
 		t.result["output_preview"] = preview
@@ -1259,12 +1372,69 @@ func (t *subagentTask) applyResult(result sdkdelegation.Result) {
 	}
 	if text := strings.TrimSpace(result.Result); text != "" {
 		t.result["result"] = text
+	} else if !t.running {
+		if preview := strings.TrimSpace(result.OutputPreview); preview != "" {
+			t.result["result"] = preview
+		} else {
+			delete(t.result, "result")
+		}
 	} else if t.result != nil {
 		delete(t.result, "result")
 	}
 	t.result["task_id"] = t.ref.TaskID
 	t.result["state"] = string(t.state)
 	t.result["supports_cancel"] = t.running
+}
+
+func (t *subagentTask) seedStreamFromResult(result sdkdelegation.Result) {
+	if t == nil {
+		return
+	}
+	if strings.TrimSpace(t.stdout) != "" || strings.TrimSpace(t.stderr) != "" {
+		return
+	}
+	text := strings.TrimSpace(firstNonEmpty(result.OutputPreview, result.Result))
+	if text == "" {
+		return
+	}
+	t.appendStreamLocked("stdout", text)
+}
+
+func (t *subagentTask) applyStreamFrames(frames []sdkstream.Frame) {
+	if t == nil || len(frames) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, frame := range frames {
+		text := frame.Text
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		t.appendStreamLocked(frame.Stream, text)
+		if t.result == nil {
+			t.result = map[string]any{}
+		}
+		t.result["output_preview"] = compactFinalOutput(t.stdout, t.stderr)
+		if frame.State != "" {
+			t.state = taskStateFromDelegation(sdkdelegation.State(frame.State))
+		}
+		t.running = frame.Running
+	}
+}
+
+func (t *subagentTask) appendStreamLocked(stream string, text string) {
+	if t == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(stream)) {
+	case "stderr":
+		t.stderr += text
+		t.stderrCursor = int64(len([]byte(t.stderr)))
+	default:
+		t.stdout += text
+		t.stdoutCursor = int64(len([]byte(t.stdout)))
+	}
 }
 
 func (t *subagentTask) snapshot() sdktask.Snapshot {
@@ -1281,6 +1451,8 @@ func (t *subagentTask) snapshot() sdktask.Snapshot {
 		SupportsCancel: true,
 		CreatedAt:      t.createdAt,
 		UpdatedAt:      time.Now(),
+		StdoutCursor:   t.stdoutCursor,
+		StderrCursor:   t.stderrCursor,
 		Result:         maps.Clone(t.result),
 		Metadata:       maps.Clone(t.metadata),
 	})
@@ -1303,10 +1475,11 @@ func (t *subagentTask) entrySnapshot(now time.Time) *sdktask.Entry {
 		UpdatedAt:      now,
 		HeartbeatAt:    now,
 		Spec: map[string]any{
-			"agent":      t.agent,
-			"prompt":     t.prompt,
-			"session_id": t.anchor.SessionID,
-			"agent_id":   t.anchor.AgentID,
+			"agent":       t.agent,
+			"prompt":      t.prompt,
+			"session_id":  t.anchor.SessionID,
+			"agent_id":    t.anchor.AgentID,
+			"terminal_id": t.ref.TerminalID,
 		},
 		Result:   maps.Clone(t.result),
 		Metadata: maps.Clone(t.metadata),
@@ -1457,6 +1630,23 @@ func decodeJSONMap(raw []byte) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func rejectUnknownArgs(values map[string]any, allowed ...string) error {
+	allowedSet := map[string]struct{}{}
+	for _, key := range allowed {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		allowedSet[key] = struct{}{}
+	}
+	for key := range values {
+		if _, ok := allowedSet[key]; !ok {
+			return fmt.Errorf("tool: arg %q is not supported", key)
+		}
+	}
+	return nil
 }
 
 func stringArg(values map[string]any, key string) (string, bool) {

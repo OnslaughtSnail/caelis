@@ -64,10 +64,6 @@ func requireCLIACPXE2EPrereqs(t *testing.T) {
 	if _, err := exec.LookPath("acpx"); err != nil {
 		t.Skip("acpx is not installed")
 	}
-	repo := repoRootForCLIACPX(t)
-	if _, err := os.Stat(filepath.Join(repo, ".env")); err != nil {
-		t.Skip(".env is not present")
-	}
 }
 
 func repoRootForCLIACPX(t *testing.T) string {
@@ -94,11 +90,10 @@ func runCLIACPXCommand(t *testing.T, repo string, workdir string, body string) s
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	script := strings.Join([]string{
-		`set -a`,
-		`source "` + filepath.Join(repo, ".env") + `"`,
-		`set +a`,
+		`if [ -f "` + filepath.Join(repo, ".env") + `" ]; then set -a; source "` + filepath.Join(repo, ".env") + `"; set +a; fi`,
 		`export WORKDIR="` + workdir + `"`,
-		`export ACP_AGENT_CMD="bash -lc 'cd ` + repo + ` && go run ./cmd/cli acp -store-dir \"$WORKDIR/caelis\" -workspace-key acpx-cli -workspace-cwd \"$WORKDIR\" -provider minimax -model MiniMax-M2'"`,
+		`export CODEFREE_E2E_MODEL="${CODEFREE_MODEL:-GLM-5.1}"`,
+		`export ACP_AGENT_CMD="bash -lc 'cd ` + repo + ` && go run ./cmd/cli acp -store-dir \"$WORKDIR/caelis\" -workspace-key acpx-cli -workspace-cwd \"$WORKDIR\" -provider codefree -model \"$CODEFREE_E2E_MODEL\"'"`,
 		body,
 	}, "\n")
 	cmd := exec.CommandContext(ctx, "bash", "-lc", script)

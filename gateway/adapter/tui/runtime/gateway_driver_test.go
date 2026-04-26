@@ -556,15 +556,17 @@ func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAgents() error = %v", err)
 	}
-	if len(agents) != 1 || agents[0].Name != "copilot" {
-		t.Fatalf("ListAgents() = %#v, want configured copilot agent", agents)
+	if len(agents) != 0 {
+		t.Fatalf("ListAgents() = %#v, want no attached agents before /agent add", agents)
 	}
 	addCandidates, err := driver.CompleteSlashArg(ctx, "agent add", "", 10)
 	if err != nil {
 		t.Fatalf("CompleteSlashArg(agent add) error = %v", err)
 	}
-	if len(addCandidates) != 1 || addCandidates[0].Value != "copilot" {
-		t.Fatalf("agent add candidates = %#v, want copilot", addCandidates)
+	for _, want := range []string{"codex", "copilot", "gemini"} {
+		if !slashCandidatesHaveValue(addCandidates, want) {
+			t.Fatalf("agent add candidates = %#v, want %q", addCandidates, want)
+		}
 	}
 
 	status, err := driver.AddAgent(ctx, "copilot")
@@ -575,6 +577,27 @@ func TestGatewayDriverAgentControlPlaneIntegration(t *testing.T) {
 		t.Fatalf("AddAgent() status = %#v, want one attached participant", status)
 	}
 	participantID := status.Participants[0].ID
+	agents, err = driver.ListAgents(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListAgents(after add) error = %v", err)
+	}
+	if !agentCandidatesHaveName(agents, "copilot") {
+		t.Fatalf("ListAgents(after add) = %#v, want attached copilot", agents)
+	}
+	handoffCandidates, err := driver.CompleteSlashArg(ctx, "agent handoff", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(agent handoff) error = %v", err)
+	}
+	if !slashCandidatesHaveValue(handoffCandidates, "local") || !slashCandidatesHaveValue(handoffCandidates, "copilot") {
+		t.Fatalf("agent handoff candidates = %#v, want local and copilot", handoffCandidates)
+	}
+	useCandidates, err := driver.CompleteSlashArg(ctx, "agent use", "", 10)
+	if err != nil {
+		t.Fatalf("CompleteSlashArg(agent use) error = %v", err)
+	}
+	if !slashCandidatesHaveValue(useCandidates, "local") || !slashCandidatesHaveValue(useCandidates, "copilot") {
+		t.Fatalf("agent use candidates = %#v, want local and copilot", useCandidates)
+	}
 
 	status, err = driver.HandoffAgent(ctx, "copilot")
 	if err != nil {
@@ -1410,4 +1433,22 @@ func repoRootForGatewayDriverTest(t *testing.T) string {
 		}
 		dir = parent
 	}
+}
+
+func agentCandidatesHaveName(candidates []AgentCandidate, name string) bool {
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate.Name), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func slashCandidatesHaveValue(candidates []SlashArgCandidate, value string) bool {
+	for _, candidate := range candidates {
+		if strings.EqualFold(strings.TrimSpace(candidate.Value), strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
 }

@@ -99,7 +99,7 @@ func (c *Client) NewSession(ctx context.Context, cwd string, meta map[string]any
 	var resp NewSessionResponse
 	err := c.conn.Call(ctx, MethodSessionNew, NewSessionRequest{
 		CWD:        cwd,
-		MCPServers: nil,
+		MCPServers: []json.RawMessage{},
 	}, &resp)
 	_ = meta
 	return resp, err
@@ -110,7 +110,7 @@ func (c *Client) LoadSession(ctx context.Context, sessionID string, cwd string, 
 	err := c.conn.Call(ctx, MethodSessionLoad, LoadSessionRequest{
 		SessionID:  sessionID,
 		CWD:        cwd,
-		MCPServers: nil,
+		MCPServers: []json.RawMessage{},
 	}, &resp)
 	_ = meta
 	return resp, err

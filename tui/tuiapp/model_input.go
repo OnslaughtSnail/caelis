@@ -125,6 +125,10 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 		TermWidth: m.width,
 		Theme:     m.theme,
 	}
+	token := ""
+	if contentLine >= 0 && contentLine < len(m.viewportClickTokens) {
+		token = strings.TrimSpace(m.viewportClickTokens[contentLine])
+	}
 	switch block := m.doc.Find(blockID).(type) {
 	case *SubagentPanelBlock:
 		if !block.CanScroll(delta, ctx) {
@@ -135,6 +139,18 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 			touchScrollbarDeadline(block.scrollbarVisibleUntilPtr(), time.Now())
 		}
 		return true, changed
+	case *MainACPTurnBlock:
+		callID, ok := strings.CutPrefix(token, "acp_tool_panel_scroll:")
+		if !ok || !block.CanScrollToolPanel(callID, delta, ctx) {
+			return false, false
+		}
+		return true, block.ScrollToolPanel(callID, delta, ctx)
+	case *ParticipantTurnBlock:
+		callID, ok := strings.CutPrefix(token, "acp_tool_panel_scroll:")
+		if !ok || !block.CanScrollToolPanel(callID, delta, ctx) {
+			return false, false
+		}
+		return true, block.ScrollToolPanel(callID, delta, ctx)
 	default:
 		return false, false
 	}

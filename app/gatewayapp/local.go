@@ -27,6 +27,7 @@ import (
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
 	taskfile "github.com/OnslaughtSnail/caelis/sdk/task/file"
+	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 	sdkbuiltin "github.com/OnslaughtSnail/caelis/sdk/tool/builtin"
 	spawntool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/spawn"
 )
@@ -121,6 +122,14 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	if storeDir == "" {
 		storeDir = defaultStoreDir()
 	}
+	cfg.Assembly = withDefaultACPAgents(cfg.Assembly, defaultSelfACPAgent(defaultSelfACPAgentConfig{
+		Config:       cfg,
+		AppName:      appName,
+		UserID:       userID,
+		StoreDir:     storeDir,
+		WorkspaceKey: workspaceKey,
+		WorkspaceCWD: workspaceCWD,
+	}))
 	configStore := newAppConfigStore(storeDir)
 	sessions := sessionfile.NewService(sessionfile.NewStore(sessionfile.Config{
 		RootDir: filepath.Join(storeDir, "sessions"),
@@ -132,10 +141,9 @@ func NewLocalStack(cfg Config) (*Stack, error) {
 	}
 	baseMetadata := map[string]any{}
 	systemPrompt, err := buildSystemPrompt(promptConfig{
-		AppName:          appName,
-		WorkspaceDir:     workspaceCWD,
-		BasePrompt:       cfg.SystemPrompt,
-		DelegationAgents: delegationAgentsFromAssembly(cfg.Assembly),
+		AppName:      appName,
+		WorkspaceDir: workspaceCWD,
+		BasePrompt:   cfg.SystemPrompt,
 	})
 	if err != nil {
 		return nil, err
@@ -189,6 +197,180 @@ func delegationAgentsFromAssembly(assembly sdkplugin.ResolvedAssembly) []sdkdele
 		out = append(out, agent)
 	}
 	return out
+}
+
+func delegationAgentsForSpawn(assembly sdkplugin.ResolvedAssembly, participants []sdksession.ParticipantBinding) []sdkdelegation.Agent {
+	if len(assembly.Agents) == 0 {
+		return nil
+	}
+	available := map[string]sdkdelegation.Agent{}
+	for _, agent := range delegationAgentsFromAssembly(assembly) {
+		name := strings.ToLower(strings.TrimSpace(agent.Name))
+		if name != "" {
+			available[name] = agent
+		}
+	}
+	out := make([]sdkdelegation.Agent, 0, len(participants)+1)
+	seen := map[string]struct{}{}
+	if self, ok := available["self"]; ok {
+		out = append(out, self)
+		seen["self"] = struct{}{}
+	}
+	for _, participant := range participants {
+		if participant.Kind != sdksession.ParticipantKindACP {
+			continue
+		}
+		if participant.Role != "" && participant.Role != sdksession.ParticipantRoleSidecar {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(participant.Label))
+		if name == "" {
+			continue
+		}
+		agent, ok := available[name]
+		if !ok {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		out = append(out, agent)
+		seen[name] = struct{}{}
+	}
+	return out
+}
+
+func systemPromptWithDelegationGuidance(systemPrompt string) string {
+	systemPrompt = strings.TrimRight(strings.TrimSpace(systemPrompt), "\n")
+	guidance := "- Delegation: use SPAWN for bounded child ACP work that can run independently. Use TASK wait for progress, TASK cancel to stop a running child, and TASK write only for a follow-up prompt after a SPAWN child has completed."
+	if strings.Contains(systemPrompt, "SPAWN for bounded child ACP work") {
+		return systemPrompt
+	}
+	if systemPrompt == "" {
+		return guidance
+	}
+	return systemPrompt + "\n" + guidance
+}
+
+func withDefaultACPAgents(assembly sdkplugin.ResolvedAssembly, self sdkplugin.AgentConfig) sdkplugin.ResolvedAssembly {
+	out := sdkplugin.CloneResolvedAssembly(assembly)
+	seen := map[string]struct{}{}
+	for _, agent := range out.Agents {
+		name := strings.ToLower(strings.TrimSpace(agent.Name))
+		if name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	if name := strings.ToLower(strings.TrimSpace(self.Name)); name != "" {
+		if _, exists := seen[name]; !exists {
+			out.Agents = append(out.Agents, self)
+			seen[name] = struct{}{}
+		}
+	}
+	for _, agent := range builtInACPAgents() {
+		name := strings.ToLower(strings.TrimSpace(agent.Name))
+		if name == "" {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		out.Agents = append(out.Agents, agent)
+		seen[name] = struct{}{}
+	}
+	return out
+}
+
+type defaultSelfACPAgentConfig struct {
+	Config       Config
+	AppName      string
+	UserID       string
+	StoreDir     string
+	WorkspaceKey string
+	WorkspaceCWD string
+}
+
+func defaultSelfACPAgent(cfg defaultSelfACPAgentConfig) sdkplugin.AgentConfig {
+	if cmd := strings.TrimSpace(os.Getenv("CAELIS_ACP_SELF_AGENT_CMD")); cmd != "" {
+		name := strings.TrimSpace(os.Getenv("CAELIS_ACP_SELF_AGENT_NAME"))
+		if name == "" {
+			name = "self"
+		}
+		return sdkplugin.AgentConfig{
+			Name:        name,
+			Description: firstNonEmpty(strings.TrimSpace(os.Getenv("CAELIS_ACP_SELF_AGENT_DESC")), "Caelis self ACP agent"),
+			Command:     "bash",
+			Args:        []string{"-lc", cmd},
+			WorkDir:     strings.TrimSpace(os.Getenv("CAELIS_ACP_SELF_AGENT_WORKDIR")),
+		}
+	}
+	executable, err := os.Executable()
+	if err != nil || strings.TrimSpace(executable) == "" {
+		executable = os.Args[0]
+	}
+	return sdkplugin.AgentConfig{
+		Name:        "self",
+		Description: "Caelis self ACP agent",
+		Command:     executable,
+		Args: append([]string{
+			"acp",
+			"-app", strings.TrimSpace(cfg.AppName),
+			"-user", strings.TrimSpace(cfg.UserID),
+			"-store-dir", strings.TrimSpace(cfg.StoreDir),
+			"-workspace-key", strings.TrimSpace(cfg.WorkspaceKey),
+			"-workspace-cwd", strings.TrimSpace(cfg.WorkspaceCWD),
+			"-permission-mode", strings.TrimSpace(cfg.Config.PermissionMode),
+		}, selfRuntimeArgs(cfg.Config)...),
+	}
+}
+
+func selfRuntimeArgs(cfg Config) []string {
+	args := []string{}
+	appendFlag := func(name string, value string) {
+		if strings.TrimSpace(value) != "" {
+			args = append(args, name, strings.TrimSpace(value))
+		}
+	}
+	model := cfg.Model
+	appendFlag("-model-alias", model.Alias)
+	appendFlag("-provider", model.Provider)
+	appendFlag("-api", string(model.API))
+	appendFlag("-model", model.Model)
+	appendFlag("-base-url", model.BaseURL)
+	appendFlag("-token", model.Token)
+	appendFlag("-token-env", model.TokenEnv)
+	appendFlag("-auth-type", string(model.AuthType))
+	appendFlag("-header-key", model.HeaderKey)
+	if cfg.ContextWindow > 0 {
+		args = append(args, "-context-window", fmt.Sprintf("%d", cfg.ContextWindow))
+	}
+	if model.MaxOutputTok > 0 {
+		args = append(args, "-max-output-tokens", fmt.Sprintf("%d", model.MaxOutputTok))
+	}
+	return args
+}
+
+func builtInACPAgents() []sdkplugin.AgentConfig {
+	return []sdkplugin.AgentConfig{
+		{
+			Name:        "codex",
+			Description: "OpenAI Codex ACP agent",
+			Command:     "npx",
+			Args:        []string{"-y", "@zed-industries/codex-acp"},
+		},
+		{
+			Name:        "copilot",
+			Description: "GitHub Copilot ACP agent",
+			Command:     "copilot",
+			Args:        []string{"--acp", "--stdio"},
+		},
+		{
+			Name:        "gemini",
+			Description: "Gemini ACP agent",
+			Command:     "gemini",
+			Args:        []string{"--acp"},
+		},
+	}
 }
 
 func defaultStoreDir() string {
@@ -499,6 +681,9 @@ func (s *Stack) ListACPAgents() []ACPAgentInfo {
 	for _, agent := range agents {
 		name := strings.TrimSpace(agent.Name)
 		if name == "" {
+			continue
+		}
+		if strings.EqualFold(name, "self") {
 			continue
 		}
 		out = append(out, ACPAgentInfo{
@@ -903,9 +1088,6 @@ func (s *Stack) rebuildGateway() error {
 		_ = sandboxRuntime.Close()
 		return err
 	}
-	if agents := delegationAgentsFromAssembly(runtimeCfg.Assembly); len(agents) > 0 {
-		tools = append(tools, spawntool.New(agents))
-	}
 	rt, err := localruntime.New(localruntime.Config{
 		Sessions:          s.Sessions,
 		AgentFactory:      chat.Factory{},
@@ -925,6 +1107,28 @@ func (s *Stack) rebuildGateway() error {
 		ModelLookup:       s.lookup,
 		Tools:             tools,
 		BaseMetadata:      cloneMap(runtimeCfg.BaseMetadata),
+		ToolAugmenter: func(ctx context.Context, req appgateway.ToolAugmentContext) (appgateway.ToolAugmentation, error) {
+			var participants []sdksession.ParticipantBinding
+			if strings.TrimSpace(req.SessionRef.SessionID) != "" {
+				session, err := s.Sessions.Session(ctx, req.SessionRef)
+				if err != nil {
+					return appgateway.ToolAugmentation{}, err
+				}
+				participants = session.Participants
+			}
+			agents := delegationAgentsForSpawn(runtimeCfg.Assembly, participants)
+			if len(agents) == 0 {
+				return appgateway.ToolAugmentation{}, nil
+			}
+			metadata := map[string]any{}
+			if systemPrompt := stringFromMap(runtimeCfg.BaseMetadata, "system_prompt"); systemPrompt != "" {
+				metadata["system_prompt"] = systemPromptWithDelegationGuidance(systemPrompt)
+			}
+			return appgateway.ToolAugmentation{
+				Tools:    []sdktool.Tool{spawntool.New(agents)},
+				Metadata: metadata,
+			}, nil
+		},
 	})
 	if err != nil {
 		_ = sandboxRuntime.Close()
@@ -1193,6 +1397,14 @@ func cloneMap(values map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+func stringFromMap(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	value, _ := values[key].(string)
+	return strings.TrimSpace(value)
 }
 
 func mustGetwd() string {

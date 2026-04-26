@@ -21,10 +21,10 @@ import (
 	policypresets "github.com/OnslaughtSnail/caelis/sdk/policy/presets"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdksubagent "github.com/OnslaughtSnail/caelis/sdk/subagent"
 	sdksubagentacp "github.com/OnslaughtSnail/caelis/sdk/subagent/acp"
 	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
 	sdkplan "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/plan"
 )
 
@@ -43,7 +43,7 @@ type Config struct {
 	PolicyRegistry    sdkpolicy.Registry
 	DefaultPolicyMode string
 	Assembly          sdkplugin.ResolvedAssembly
-	Controllers       sdkcontroller.ACP
+	Controllers       sdkcontroller.Backend
 	TaskStore         sdktask.Store
 	Subagents         sdksubagent.Runner
 }
@@ -61,13 +61,13 @@ type Runtime struct {
 	policies          sdkpolicy.Registry
 	defaultPolicyMode string
 	assembly          sdkplugin.ResolvedAssembly
-	controllers       sdkcontroller.ACP
+	controllers       sdkcontroller.Backend
 	subagents         sdksubagent.Runner
 	idCounter         atomic.Uint64
 	mu                sync.RWMutex
 	runStates         map[string]sdkruntime.RunState
 	tasks             *taskRuntime
-	terminals         *terminalService
+	terminals         *streamService
 }
 
 // New returns one baseline local runtime.
@@ -120,7 +120,7 @@ func New(cfg Config) (*Runtime, error) {
 		r.compactor = newCodexStyleCompactor(r.compaction)
 	}
 	r.tasks = newTaskRuntime(r, cfg.TaskStore)
-	r.terminals = newTerminalService(r.tasks)
+	r.terminals = newStreamService(r.tasks)
 	return r, nil
 }
 
@@ -170,7 +170,7 @@ func validateControlPlaneConfig(cfg Config) error {
 
 // Terminals returns the unified terminal read/subscribe surface for this
 // runtime. Task control remains on the TASK tool plane.
-func (r *Runtime) Terminals() sdkterminal.Service {
+func (r *Runtime) Streams() sdkstream.Service {
 	if r == nil {
 		return nil
 	}

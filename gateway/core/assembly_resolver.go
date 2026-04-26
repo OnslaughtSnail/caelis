@@ -45,6 +45,7 @@ type AssemblyResolverConfig struct {
 	Tools             []sdktool.Tool
 	AgentName         string
 	BaseMetadata      map[string]any
+	ToolAugmenter     ToolAugmenter
 }
 
 type AssemblyResolver struct {
@@ -58,6 +59,19 @@ type AssemblyResolver struct {
 	tools             []sdktool.Tool
 	agentName         string
 	baseMetadata      map[string]any
+	toolAugmenter     ToolAugmenter
+}
+
+type ToolAugmenter func(context.Context, ToolAugmentContext) (ToolAugmentation, error)
+
+type ToolAugmentContext struct {
+	SessionRef sdksession.SessionRef
+	State      map[string]any
+}
+
+type ToolAugmentation struct {
+	Tools    []sdktool.Tool
+	Metadata map[string]any
 }
 
 type modelAliasLister interface {
@@ -85,6 +99,7 @@ func NewAssemblyResolver(cfg AssemblyResolverConfig) (*AssemblyResolver, error) 
 		tools:             append([]sdktool.Tool(nil), cfg.Tools...),
 		agentName:         agentName,
 		baseMetadata:      cloneMap(cfg.BaseMetadata),
+		toolAugmenter:     cfg.ToolAugmenter,
 	}, nil
 }
 
@@ -123,6 +138,23 @@ func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (
 	if err != nil {
 		return ResolvedTurn{}, err
 	}
+	tools := append([]sdktool.Tool(nil), r.tools...)
+	if r.toolAugmenter != nil {
+		augmentation, err := r.toolAugmenter(ctx, ToolAugmentContext{
+			SessionRef: intent.SessionRef,
+			State:      cloneMap(state),
+		})
+		if err != nil {
+			return ResolvedTurn{}, err
+		}
+		tools = append(tools, augmentation.Tools...)
+		for key, value := range augmentation.Metadata {
+			if strings.TrimSpace(key) == "" {
+				continue
+			}
+			metadata[key] = value
+		}
+	}
 
 	return ResolvedTurn{
 		RunRequest: sdkruntime.RunRequest{
@@ -132,7 +164,7 @@ func (r *AssemblyResolver) ResolveTurn(ctx context.Context, intent TurnIntent) (
 			AgentSpec: sdkruntime.AgentSpec{
 				Name:     r.agentName,
 				Model:    model.Model,
-				Tools:    append([]sdktool.Tool(nil), r.tools...),
+				Tools:    tools,
 				Metadata: metadata,
 			},
 		},

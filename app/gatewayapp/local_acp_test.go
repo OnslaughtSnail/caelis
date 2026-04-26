@@ -117,7 +117,7 @@ func TestLocalStackGatewayACPMainE2E(t *testing.T) {
 	}
 }
 
-func TestLocalStackInjectsSpawnOnlyWhenAssemblyAgentsExist(t *testing.T) {
+func TestLocalStackInjectsSpawnForSelfAndAttachedACPAgents(t *testing.T) {
 	ctx := context.Background()
 	withAgents, session := newStackWithAssemblyForToolTest(t, sdkplugin.ResolvedAssembly{
 		Agents: []sdkplugin.AgentConfig{{
@@ -128,6 +128,7 @@ func TestLocalStackInjectsSpawnOnlyWhenAssemblyAgentsExist(t *testing.T) {
 			WorkDir:     repoRootForGatewayAppTest(t),
 		}},
 	})
+	attachAgentForToolTest(t, withAgents, session.SessionRef, "helper")
 	resolved, err := withAgents.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
 	if err != nil {
 		t.Fatalf("ResolveTurn(with agents) error = %v", err)
@@ -148,12 +149,25 @@ func TestLocalStackInjectsSpawnOnlyWhenAssemblyAgentsExist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveTurn(without agents) error = %v", err)
 	}
-	if toolSetHas(resolved.RunRequest.AgentSpec.Tools, spawntool.ToolName) {
-		t.Fatalf("tools exposed %s without assembly agents", spawntool.ToolName)
+	if !toolSetHas(resolved.RunRequest.AgentSpec.Tools, spawntool.ToolName) {
+		t.Fatalf("tools missing %s for default self spawn", spawntool.ToolName)
 	}
 	systemPrompt, _ = resolved.RunRequest.AgentSpec.Metadata["system_prompt"].(string)
-	if strings.Contains(systemPrompt, "SPAWN for bounded child ACP work") {
-		t.Fatalf("system prompt exposed delegation guidance without agents: %q", systemPrompt)
+	if !strings.Contains(systemPrompt, "SPAWN for bounded child ACP work") {
+		t.Fatalf("system prompt missing delegation guidance for default self spawn: %q", systemPrompt)
+	}
+	for _, want := range []string{"self", "codex", "copilot", "gemini"} {
+		if !agentConfigSetHas(withoutAgents.runtime.Assembly.Agents, want) {
+			t.Fatalf("built-in agent %q missing from assembly: %#v", want, withoutAgents.runtime.Assembly.Agents)
+		}
+	}
+	attachAgentForToolTest(t, withoutAgents, session.SessionRef, "codex")
+	resolved, err = withoutAgents.Gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("ResolveTurn(with built-in attached) error = %v", err)
+	}
+	if !toolSetHas(resolved.RunRequest.AgentSpec.Tools, spawntool.ToolName) {
+		t.Fatalf("tools missing %s after built-in ACP agent attachment", spawntool.ToolName)
 	}
 }
 
@@ -189,6 +203,33 @@ func toolSetHas(tools []sdktool.Tool, name string) bool {
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(tool.Definition().Name), strings.TrimSpace(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func attachAgentForToolTest(t *testing.T, stack *Stack, ref sdksession.SessionRef, agent string) {
+	t.Helper()
+	_, err := stack.Sessions.PutParticipant(context.Background(), sdksession.PutParticipantRequest{
+		SessionRef: ref,
+		Binding: sdksession.ParticipantBinding{
+			ID:        "sidecar-" + strings.ToLower(strings.TrimSpace(agent)),
+			Kind:      sdksession.ParticipantKindACP,
+			Role:      sdksession.ParticipantRoleSidecar,
+			Label:     strings.TrimSpace(agent),
+			SessionID: "remote-" + strings.ToLower(strings.TrimSpace(agent)),
+			Source:    "test_attach",
+		},
+	})
+	if err != nil {
+		t.Fatalf("PutParticipant(%q) error = %v", agent, err)
+	}
+}
+
+func agentConfigSetHas(agents []sdkplugin.AgentConfig, name string) bool {
+	for _, agent := range agents {
+		if strings.EqualFold(strings.TrimSpace(agent.Name), strings.TrimSpace(name)) {
 			return true
 		}
 	}

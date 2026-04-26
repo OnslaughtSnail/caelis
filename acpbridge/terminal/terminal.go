@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/acp"
 	schema "github.com/OnslaughtSnail/caelis/acp/schema"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
 type TerminalOutputRequest = schema.TerminalOutputRequest
@@ -19,25 +20,16 @@ type TerminalKillRequest = schema.TerminalKillRequest
 type TerminalReleaseRequest = schema.TerminalReleaseRequest
 type ToolCallContent = schema.ToolCallContent
 
-// TerminalAdapter projects one sdk/terminal service into ACP-compatible
-// terminal method payloads.
-type TerminalAdapter interface {
-	Output(context.Context, TerminalOutputRequest) (TerminalOutputResponse, error)
-	WaitForExit(context.Context, TerminalWaitForExitRequest) (TerminalWaitForExitResponse, error)
-	Kill(context.Context, TerminalKillRequest) error
-	Release(context.Context, TerminalReleaseRequest) error
-}
-
 type LocalTerminalAdapter struct {
-	Terminals sdkterminal.Service
+	Streams sdkstream.Service
 }
 
 func (a LocalTerminalAdapter) Output(ctx context.Context, req TerminalOutputRequest) (TerminalOutputResponse, error) {
-	if a.Terminals == nil {
-		return TerminalOutputResponse{}, fmt.Errorf("acpbridge/terminal: terminal service is required")
+	if a.Streams == nil {
+		return TerminalOutputResponse{}, fmt.Errorf("acpbridge/terminal: stream service is required")
 	}
-	snap, err := a.Terminals.Read(ctx, sdkterminal.ReadRequest{
-		Ref: sdkterminal.Ref{
+	snap, err := a.Streams.Read(ctx, sdkstream.ReadRequest{
+		Ref: sdkstream.Ref{
 			SessionID:  strings.TrimSpace(req.SessionID),
 			TerminalID: strings.TrimSpace(req.TerminalID),
 		},
@@ -57,11 +49,11 @@ func (a LocalTerminalAdapter) Output(ctx context.Context, req TerminalOutputRequ
 }
 
 func (a LocalTerminalAdapter) WaitForExit(ctx context.Context, req TerminalWaitForExitRequest) (TerminalWaitForExitResponse, error) {
-	controller, ok := a.Terminals.(sdkterminal.Controller)
+	controller, ok := a.Streams.(sdkstream.Controller)
 	if !ok || controller == nil {
 		return TerminalWaitForExitResponse{}, fmt.Errorf("acpbridge/terminal: terminal wait is unsupported")
 	}
-	snap, err := controller.Wait(ctx, sdkterminal.Ref{
+	snap, err := controller.Wait(ctx, sdkstream.Ref{
 		SessionID:  strings.TrimSpace(req.SessionID),
 		TerminalID: strings.TrimSpace(req.TerminalID),
 	})
@@ -77,28 +69,28 @@ func (a LocalTerminalAdapter) WaitForExit(ctx context.Context, req TerminalWaitF
 }
 
 func (a LocalTerminalAdapter) Kill(ctx context.Context, req TerminalKillRequest) error {
-	controller, ok := a.Terminals.(sdkterminal.Controller)
+	controller, ok := a.Streams.(sdkstream.Controller)
 	if !ok || controller == nil {
 		return fmt.Errorf("acpbridge/terminal: terminal kill is unsupported")
 	}
-	return controller.Kill(ctx, sdkterminal.Ref{
+	return controller.Kill(ctx, sdkstream.Ref{
 		SessionID:  strings.TrimSpace(req.SessionID),
 		TerminalID: strings.TrimSpace(req.TerminalID),
 	})
 }
 
 func (a LocalTerminalAdapter) Release(ctx context.Context, req TerminalReleaseRequest) error {
-	controller, ok := a.Terminals.(sdkterminal.Controller)
+	controller, ok := a.Streams.(sdkstream.Controller)
 	if !ok || controller == nil {
 		return fmt.Errorf("acpbridge/terminal: terminal release is unsupported")
 	}
-	return controller.Release(ctx, sdkterminal.Ref{
+	return controller.Release(ctx, sdkstream.Ref{
 		SessionID:  strings.TrimSpace(req.SessionID),
 		TerminalID: strings.TrimSpace(req.TerminalID),
 	})
 }
 
-func terminalSnapshotOutput(snap sdkterminal.Snapshot) string {
+func terminalSnapshotOutput(snap sdkstream.Snapshot) string {
 	var out strings.Builder
 	for _, frame := range snap.Frames {
 		out.WriteString(frame.Text)
@@ -106,11 +98,11 @@ func terminalSnapshotOutput(snap sdkterminal.Snapshot) string {
 	return out.String()
 }
 
-func RefFromEvent(event *sdksession.Event) (sdkterminal.Ref, bool) {
+func RefFromEvent(event *sdksession.Event) (sdkstream.Ref, bool) {
 	if event == nil {
-		return sdkterminal.Ref{}, false
+		return sdkstream.Ref{}, false
 	}
-	ref := sdkterminal.Ref{
+	ref := sdkstream.Ref{
 		SessionID: strings.TrimSpace(event.SessionID),
 	}
 	if event.Meta != nil {
@@ -127,7 +119,7 @@ func RefFromEvent(event *sdksession.Event) (sdkterminal.Ref, bool) {
 		}
 	}
 	if ref.TerminalID == "" {
-		return sdkterminal.Ref{}, false
+		return sdkstream.Ref{}, false
 	}
 	return ref, true
 }
@@ -143,4 +135,4 @@ func ContentFromEvent(event *sdksession.Event) []ToolCallContent {
 	}}
 }
 
-var _ TerminalAdapter = LocalTerminalAdapter{}
+var _ acp.TerminalAdapter = LocalTerminalAdapter{}

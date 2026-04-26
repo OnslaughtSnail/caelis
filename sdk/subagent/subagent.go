@@ -5,6 +5,7 @@ import (
 
 	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
 // Registry exposes the spawnable ACP agents available to the runtime.
@@ -67,13 +68,14 @@ type SpawnContext struct {
 	TaskID            string                `json:"task_id,omitempty"`
 	Mode              string                `json:"mode,omitempty"`
 	ApprovalRequester ApprovalRequester     `json:"-"`
+	Streams           sdkstream.Sink        `json:"-"`
 }
 
 // Runner drives one spawned ACP child instance. The child itself is expected to
 // run in its own session and persist its own transcript independently.
 type Runner interface {
 	Spawn(context.Context, SpawnContext, sdkdelegation.Request) (sdkdelegation.Anchor, sdkdelegation.Result, error)
-	Continue(context.Context, sdkdelegation.Anchor, sdkdelegation.Request) (sdkdelegation.Result, error)
+	Continue(context.Context, sdkdelegation.Anchor, sdkdelegation.ContinueRequest) (sdkdelegation.Result, error)
 	Wait(context.Context, sdkdelegation.Anchor, int) (sdkdelegation.Result, error)
 	Cancel(context.Context, sdkdelegation.Anchor) error
 }

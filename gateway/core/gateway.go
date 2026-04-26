@@ -12,7 +12,7 @@ import (
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkruntime "github.com/OnslaughtSnail/caelis/sdk/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
 type Config struct {
@@ -26,7 +26,7 @@ type Config struct {
 type Gateway struct {
 	sessions sdksession.Service
 	runtime  sdkruntime.Runtime
-	control  sdkruntime.ControlPlane
+	control  sdkruntime.SessionControlPlane
 	resolver TurnResolver
 	request  RequestPolicy
 	clock    func() time.Time
@@ -80,22 +80,22 @@ func New(cfg Config) (*Gateway, error) {
 	}, nil
 }
 
-func resolveControlPlane(runtime sdkruntime.Runtime) sdkruntime.ControlPlane {
-	if control, ok := runtime.(sdkruntime.ControlPlane); ok {
+func resolveControlPlane(runtime sdkruntime.Runtime) sdkruntime.SessionControlPlane {
+	if control, ok := runtime.(sdkruntime.SessionControlPlane); ok {
 		return control
 	}
 	return nil
 }
 
-func (g *Gateway) Terminals() sdkterminal.Service {
+func (g *Gateway) Streams() sdkstream.Service {
 	if g == nil || g.runtime == nil {
 		return nil
 	}
-	provider, ok := g.runtime.(sdkruntime.TerminalProvider)
+	provider, ok := g.runtime.(sdkruntime.StreamProvider)
 	if !ok {
 		return nil
 	}
-	return provider.Terminals()
+	return provider.Streams()
 }
 
 // Resolver returns the underlying *AssemblyResolver if the gateway's

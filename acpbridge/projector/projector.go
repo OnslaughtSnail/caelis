@@ -50,12 +50,6 @@ const (
 	ToolKindOther   = schema.ToolKindOther
 )
 
-type Projector interface {
-	ProjectEvent(*sdksession.Event) ([]Update, error)
-	ProjectNotifications(*sdksession.Event) ([]SessionNotification, error)
-	ProjectPermissionRequest(*sdksession.Event) (*RequestPermissionRequest, bool, error)
-}
-
 // EventProjector is the baseline ACP projection implementation for canonical
 // SDK session events.
 type EventProjector struct{}

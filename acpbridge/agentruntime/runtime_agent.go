@@ -25,7 +25,7 @@ type Config struct {
 	Runtime        sdkruntime.Runtime
 	Sessions       sdksession.Service
 	BuildAgentSpec BuildAgentSpecFunc
-	Projector      bridgeprojector.Projector
+	Projector      acp.Projector
 	Loader         acp.SessionLoader
 	Modes          acp.ModeProvider
 	Config         acp.ConfigProvider
@@ -40,7 +40,7 @@ type RuntimeAgent struct {
 	runtime        sdkruntime.Runtime
 	sessions       sdksession.Service
 	buildAgentSpec BuildAgentSpecFunc
-	projector      bridgeprojector.Projector
+	projector      acp.Projector
 	loader         acp.SessionLoader
 	modes          acp.ModeProvider
 	config         acp.ConfigProvider
@@ -417,30 +417,18 @@ func (l defaultSessionLoader) LoadSession(
 	if l.inner == nil {
 		return acp.LoadSessionResponse{}, acp.ErrCapabilityUnsupported
 	}
-	return l.inner.LoadSession(ctx, req, sessionUpdateCallbacks{callbacks: cb})
-}
-
-type sessionUpdateCallbacks struct {
-	callbacks acp.PromptCallbacks
-}
-
-func (c sessionUpdateCallbacks) SessionUpdate(ctx context.Context, notification acp.SessionNotification) error {
-	if c.callbacks == nil {
-		return nil
-	}
-	return c.callbacks.SessionUpdate(ctx, notification)
+	return l.inner.LoadSession(ctx, req, cb)
 }
 
 func (a *RuntimeAgent) terminalAdapter() (acp.TerminalAdapter, bool) {
-	provider, ok := a.runtime.(sdkruntime.TerminalProvider)
-	if !ok || provider.Terminals() == nil {
+	provider, ok := a.runtime.(sdkruntime.StreamProvider)
+	if !ok || provider.Streams() == nil {
 		return nil, false
 	}
-	return bridgeterminal.LocalTerminalAdapter{Terminals: provider.Terminals()}, true
+	return bridgeterminal.LocalTerminalAdapter{Streams: provider.Streams()}, true
 }
 
 var (
-	_ acp.Agent                    = (*RuntimeAgent)(nil)
-	_ acp.TerminalAdapter          = (*RuntimeAgent)(nil)
-	_ bridgeloader.PromptCallbacks = (acp.PromptCallbacks)(nil)
+	_ acp.Agent           = (*RuntimeAgent)(nil)
+	_ acp.TerminalAdapter = (*RuntimeAgent)(nil)
 )

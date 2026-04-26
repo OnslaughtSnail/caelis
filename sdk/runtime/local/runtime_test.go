@@ -25,9 +25,9 @@ import (
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sessionfile "github.com/OnslaughtSnail/caelis/sdk/session/file"
 	"github.com/OnslaughtSnail/caelis/sdk/session/inmemory"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
 	taskfile "github.com/OnslaughtSnail/caelis/sdk/task/file"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 	"github.com/OnslaughtSnail/caelis/sdk/tool/builtin/filesystem"
 	sdkplan "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/plan"
@@ -2398,12 +2398,12 @@ func TestRuntimeBashYieldThenTaskWaitLoop(t *testing.T) {
 	if !strings.Contains(resultPayload, "async bash done") {
 		t.Fatalf("rehydrated task stdout = %q, want async bash done", resultPayload)
 	}
-	terminals := runtime.Terminals()
+	terminals := runtime.Streams()
 	if terminals == nil {
-		t.Fatal("Terminals() = nil")
+		t.Fatal("Streams() = nil")
 	}
-	snap, err := terminals.Read(context.Background(), sdkterminal.ReadRequest{
-		Ref: sdkterminal.Ref{
+	snap, err := terminals.Read(context.Background(), sdkstream.ReadRequest{
+		Ref: sdkstream.Ref{
 			SessionID: session.SessionID,
 			TaskID:    mustSessionTaskID(t, loaded.Events),
 		},
@@ -2433,7 +2433,7 @@ func TestRuntimeTaskWriteAddsLineTerminatorForInteractiveBash(t *testing.T) {
 	bashResult := callRuntimeBashTool(t, bashTool, map[string]any{
 		"command":       "printf 'waiting\\n'; read name; printf 'hello %s\\n' \"$name\"",
 		"workdir":       ".",
-		"yield_time_ms": 5,
+		"yield_time_ms": 0,
 	})
 	taskID, _ := bashResult.Meta["task_id"].(string)
 	if strings.TrimSpace(taskID) == "" {
@@ -2482,9 +2482,9 @@ func TestRuntimeTerminalSubscribeStreamsRunningTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartBash() error = %v", err)
 	}
-	terminals := runtime.Terminals()
+	terminals := runtime.Streams()
 	if terminals == nil {
-		t.Fatal("Terminals() = nil")
+		t.Fatal("Streams() = nil")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -2493,8 +2493,8 @@ func TestRuntimeTerminalSubscribeStreamsRunningTask(t *testing.T) {
 		text   strings.Builder
 		closed bool
 	)
-	for frame, seqErr := range terminals.Subscribe(ctx, sdkterminal.SubscribeRequest{
-		Ref: sdkterminal.Ref{
+	for frame, seqErr := range terminals.Subscribe(ctx, sdkstream.SubscribeRequest{
+		Ref: sdkstream.Ref{
 			SessionID: session.SessionID,
 			TaskID:    snapshot.Ref.TaskID,
 		},
@@ -3544,9 +3544,8 @@ func (m *spawnTaskLoopRuntimeModel) Generate(_ context.Context, req *sdkmodel.Re
 						ID:   "spawn-1",
 						Name: spawntool.ToolName,
 						Args: string(mustJSONRaw(map[string]any{
-							"agent":         "self",
-							"prompt":        "Reply with exactly: spawn child ok",
-							"yield_time_ms": 5,
+							"agent":  "self",
+							"prompt": "Reply with exactly: spawn child ok",
 						})),
 					}}, ""),
 					TurnComplete: true,
@@ -3609,9 +3608,8 @@ func (m *spawnApprovalTaskLoopRuntimeModel) Generate(_ context.Context, req *sdk
 						ID:   "spawn-approval-1",
 						Name: spawntool.ToolName,
 						Args: string(mustJSONRaw(map[string]any{
-							"agent":         agent,
-							"prompt":        "Run the approval flow and reply with exactly: child approval ok",
-							"yield_time_ms": 5,
+							"agent":  agent,
+							"prompt": "Run the approval flow and reply with exactly: child approval ok",
 						})),
 					}}, ""),
 					TurnComplete: true,
@@ -3670,9 +3668,8 @@ func (m *spawnProbeTaskLoopRuntimeModel) Generate(_ context.Context, req *sdkmod
 						ID:   "spawn-probe-1",
 						Name: spawntool.ToolName,
 						Args: string(mustJSONRaw(map[string]any{
-							"agent":         "self",
-							"prompt":        "Check whether SPAWN is available and reply with exactly the result.",
-							"yield_time_ms": 5,
+							"agent":  "self",
+							"prompt": "Check whether SPAWN is available and reply with exactly the result.",
 						})),
 					}}, ""),
 					TurnComplete: true,
@@ -3729,7 +3726,7 @@ func mustSessionTaskID(t *testing.T, events []*sdksession.Event) string {
 	return ""
 }
 
-func terminalFramesText(frames []sdkterminal.Frame) string {
+func terminalFramesText(frames []sdkstream.Frame) string {
 	var out strings.Builder
 	for _, frame := range frames {
 		out.WriteString(frame.Text)
@@ -4090,4 +4087,25 @@ func assertRunningTaskSnapshot(t *testing.T, result sdktool.Result) {
 func testStringValue(raw any) string {
 	text, _ := raw.(string)
 	return strings.TrimSpace(text)
+}
+
+func TestResolveSpawnAgentAllowsSelfByDefaultAndRequiresAttachedExternal(t *testing.T) {
+	session := sdksession.Session{}
+	if got, err := resolveSpawnAgent(session, ""); err != nil || got != "self" {
+		t.Fatalf("resolveSpawnAgent(empty) = %q, %v; want self", got, err)
+	}
+	if got, err := resolveSpawnAgent(session, "self"); err != nil || got != "self" {
+		t.Fatalf("resolveSpawnAgent(self) = %q, %v; want self", got, err)
+	}
+	if _, err := resolveSpawnAgent(session, "codex"); err == nil {
+		t.Fatal("resolveSpawnAgent(codex) error = nil, want unattached external rejection")
+	}
+	session.Participants = []sdksession.ParticipantBinding{{
+		Kind:  sdksession.ParticipantKindACP,
+		Role:  sdksession.ParticipantRoleSidecar,
+		Label: "codex",
+	}}
+	if got, err := resolveSpawnAgent(session, "codex"); err != nil || got != "codex" {
+		t.Fatalf("resolveSpawnAgent(attached codex) = %q, %v; want codex", got, err)
+	}
 }

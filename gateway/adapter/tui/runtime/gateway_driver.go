@@ -13,22 +13,22 @@ import (
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
 type GatewayDriver struct {
-	mu                 sync.Mutex
-	stack              *gatewayapp.Stack
-	session            sdksession.Session
-	hasSession         bool
-	bindingKey         string
-	defaultModelText   string
-	modelText          string
-	defaultSessionMode string
-	sessionMode        string
-	defaultSandboxType string
-	sandboxType        string
-	terminalStreams    map[string]struct{}
+	mu                  sync.Mutex
+	stack               *gatewayapp.Stack
+	session             sdksession.Session
+	hasSession          bool
+	bindingKey          string
+	defaultModelText    string
+	modelText           string
+	defaultSessionMode  string
+	sessionMode         string
+	defaultSandboxType  string
+	sandboxType         string
+	streamSubscriptions map[string]struct{}
 }
 
 func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSessionID string, bindingKey string, modelText string) (*GatewayDriver, error) {
@@ -40,15 +40,15 @@ func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSes
 		ctx = context.Background()
 	}
 	driver := &GatewayDriver{
-		stack:              stack,
-		bindingKey:         key,
-		defaultModelText:   strings.TrimSpace(modelText),
-		modelText:          strings.TrimSpace(modelText),
-		defaultSessionMode: "default",
-		sessionMode:        "default",
-		defaultSandboxType: firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
-		sandboxType:        firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
-		terminalStreams:    map[string]struct{}{},
+		stack:               stack,
+		bindingKey:          key,
+		defaultModelText:    strings.TrimSpace(modelText),
+		modelText:           strings.TrimSpace(modelText),
+		defaultSessionMode:  "default",
+		sessionMode:         "default",
+		defaultSandboxType:  firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
+		sandboxType:         firstNonEmpty(stack.SandboxStatus().ResolvedBackend, stack.SandboxStatus().RequestedBackend, "auto"),
+		streamSubscriptions: map[string]struct{}{},
 	}
 	if preferredSessionID = strings.TrimSpace(preferredSessionID); preferredSessionID != "" {
 		session, err := driver.stack.StartSession(ctx, preferredSessionID, driver.bindingKey)
@@ -62,16 +62,16 @@ func NewGatewayDriver(ctx context.Context, stack *gatewayapp.Stack, preferredSes
 	return driver, nil
 }
 
-func (d *GatewayDriver) SubscribeTerminal(ctx context.Context, env appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {
+func (d *GatewayDriver) SubscribeStream(ctx context.Context, env appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {
 	if d == nil || d.stack == nil || d.stack.Gateway == nil {
 		return nil, false
 	}
-	req, ok := appgateway.TerminalStreamRequestFromEvent(env)
+	req, ok := appgateway.StreamRequestFromEvent(env)
 	if !ok {
 		return nil, false
 	}
-	terminals := d.stack.Gateway.Terminals()
-	if terminals == nil {
+	streams := d.stack.Gateway.Streams()
+	if streams == nil {
 		return nil, false
 	}
 	key := req.Key()
@@ -79,14 +79,14 @@ func (d *GatewayDriver) SubscribeTerminal(ctx context.Context, env appgateway.Ev
 		return nil, false
 	}
 	d.mu.Lock()
-	if d.terminalStreams == nil {
-		d.terminalStreams = map[string]struct{}{}
+	if d.streamSubscriptions == nil {
+		d.streamSubscriptions = map[string]struct{}{}
 	}
-	if _, exists := d.terminalStreams[key]; exists {
+	if _, exists := d.streamSubscriptions[key]; exists {
 		d.mu.Unlock()
 		return nil, false
 	}
-	d.terminalStreams[key] = struct{}{}
+	d.streamSubscriptions[key] = struct{}{}
 	d.mu.Unlock()
 
 	out := make(chan appgateway.EventEnvelope, 32)
@@ -94,17 +94,17 @@ func (d *GatewayDriver) SubscribeTerminal(ctx context.Context, env appgateway.Ev
 		defer close(out)
 		defer func() {
 			d.mu.Lock()
-			delete(d.terminalStreams, key)
+			delete(d.streamSubscriptions, key)
 			d.mu.Unlock()
 		}()
-		for frame, err := range terminals.Subscribe(ctx, sdkterminal.SubscribeRequest{Ref: req.Ref, Cursor: req.Cursor}) {
+		for frame, err := range streams.Subscribe(ctx, sdkstream.SubscribeRequest{Ref: req.Ref, Cursor: req.Cursor}) {
 			if err != nil || frame == nil {
 				return
 			}
 			if strings.TrimSpace(frame.Text) == "" {
 				continue
 			}
-			env := appgateway.TerminalFrameEvent(req, sdkterminal.CloneFrame(*frame))
+			env := appgateway.StreamFrameEvent(req, sdkstream.CloneFrame(*frame))
 			select {
 			case out <- env:
 			case <-ctx.Done():
@@ -542,17 +542,20 @@ func (d *GatewayDriver) SetSandboxMode(ctx context.Context, mode string) (Status
 	return d.Status(ctx)
 }
 
-func (d *GatewayDriver) ListAgents(_ context.Context, limit int) ([]AgentCandidate, error) {
+func (d *GatewayDriver) ListAgents(ctx context.Context, limit int) ([]AgentCandidate, error) {
 	limit = normalizeCompletionLimit(limit)
-	available := d.stack.ListACPAgents()
-	if len(available) == 0 {
+	status, err := d.AgentStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(status.Participants) == 0 {
 		return nil, nil
 	}
-	out := make([]AgentCandidate, 0, min(limit, len(available)))
-	for _, agent := range available {
+	out := make([]AgentCandidate, 0, min(limit, len(status.Participants)))
+	for _, agent := range status.Participants {
 		out = append(out, AgentCandidate{
-			Name:        strings.TrimSpace(agent.Name),
-			Description: strings.TrimSpace(agent.Description),
+			Name:        strings.TrimSpace(firstNonEmpty(agent.AgentName, agent.Label, agent.ID)),
+			Description: strings.TrimSpace("id " + agent.ID),
 		})
 		if len(out) >= limit {
 			break
@@ -652,7 +655,7 @@ func (d *GatewayDriver) HandoffAgent(ctx context.Context, target string) (AgentS
 		req.Kind = sdksession.ControllerKindKernel
 		req.Reason = "resume local control"
 	default:
-		agent, resolveErr := d.resolveAgentName(target)
+		agent, resolveErr := d.resolveHandoffAgentName(ctx, session.SessionRef, target)
 		if resolveErr != nil {
 			return AgentStatusSnapshot{}, resolveErr
 		}
@@ -760,9 +763,11 @@ func (d *GatewayDriver) CompleteSlashArg(ctx context.Context, command string, qu
 	}
 	query = strings.TrimSpace(strings.ToLower(query))
 	switch strings.TrimSpace(strings.ToLower(command)) {
-	case "agent add", "agent connect", "agent handoff", "agent use":
+	case "agent add":
 		return d.completeAgentCatalog(query, limit), nil
-	case "agent remove", "agent rm":
+	case "agent handoff", "agent use":
+		return d.completeAgentHandoffTargets(ctx, query, limit)
+	case "agent remove", "agent ask":
 		return d.completeAgentParticipants(ctx, query, limit)
 	case "model use", "model del":
 		return d.completeModelAliases(ctx, query, limit)
@@ -871,6 +876,42 @@ func (d *GatewayDriver) completeAgentParticipants(ctx context.Context, query str
 	return out, nil
 }
 
+func (d *GatewayDriver) completeAgentHandoffTargets(ctx context.Context, query string, limit int) ([]SlashArgCandidate, error) {
+	out := []SlashArgCandidate{{
+		Value:   "local",
+		Display: "local",
+		Detail:  "return to local kernel",
+	}}
+	participants, err := d.completeAgentParticipants(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	if query != "" && !hasSlashArgPrefix(query, "local", "kernel") {
+		out = nil
+	}
+	for _, participant := range participants {
+		value := strings.TrimSpace(participant.Display)
+		if value == "" {
+			value = strings.TrimSpace(participant.Value)
+		}
+		if value == "" {
+			continue
+		}
+		out = append(out, SlashArgCandidate{
+			Value:   value,
+			Display: participant.Display,
+			Detail:  firstNonEmpty(participant.Detail, "attached ACP participant"),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (d *GatewayDriver) agentCatalog(limit int) []AgentCandidate {
 	available := d.stack.ListACPAgents()
 	if len(available) == 0 {
@@ -890,6 +931,26 @@ func (d *GatewayDriver) agentCatalog(limit int) []AgentCandidate {
 		}
 	}
 	return out
+}
+
+func (d *GatewayDriver) resolveHandoffAgentName(ctx context.Context, ref sdksession.SessionRef, input string) (string, error) {
+	if agent, err := d.resolveAgentName(input); err == nil {
+		return agent, nil
+	}
+	participantID, err := d.resolveParticipantID(ctx, ref, input)
+	if err != nil {
+		return "", err
+	}
+	state, err := d.stack.Gateway.ControlPlaneState(ctx, appgateway.ControlPlaneStateRequest{SessionRef: ref})
+	if err != nil {
+		return "", err
+	}
+	for _, participant := range state.Participants {
+		if strings.EqualFold(strings.TrimSpace(participant.ID), participantID) {
+			return strings.TrimSpace(firstNonEmpty(participant.Label, participant.ID)), nil
+		}
+	}
+	return "", fmt.Errorf("tui/runtime: participant %q is not attached", input)
 }
 
 func (d *GatewayDriver) resolveAgentName(input string) (string, error) {
@@ -1108,14 +1169,13 @@ func defaultSlashArgCandidates(command string) []SlashArgCandidate {
 	switch command {
 	case "agent":
 		return []SlashArgCandidate{
-			{Value: "list", Display: "list", Detail: "List configured ACP agents"},
+			{Value: "list", Display: "list", Detail: "List attached ACP agents"},
 			{Value: "status", Display: "status", Detail: "Show controller and participant status"},
 			{Value: "add", Display: "add", Detail: "Attach an ACP participant to the current session"},
-			{Value: "connect", Display: "connect", Detail: "Alias for add"},
 			{Value: "remove", Display: "remove", Detail: "Detach an attached participant"},
-			{Value: "rm", Display: "rm", Detail: "Alias for remove"},
 			{Value: "handoff", Display: "handoff", Detail: "Hand off the main controller to an ACP agent"},
-			{Value: "use", Display: "use", Detail: "Alias for handoff"},
+			{Value: "use", Display: "use", Detail: "Hand off the main controller to an attached agent"},
+			{Value: "ask", Display: "ask", Detail: "Prompt an attached participant once"},
 		}
 	case "sandbox":
 		return sandboxCandidates()

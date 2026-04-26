@@ -345,6 +345,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addTime(b.StartedAt)
 		builder.addTime(b.EndedAt)
 		writeExpandedTools(builder, b.ExpandedTools)
+		writeToolPanelScrollStates(builder, b.ToolPanelScroll)
 		writeSubagentEvents(builder, b.Events)
 	case *DividerBlock:
 		builder.addString(b.Label)
@@ -371,6 +372,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addTime(b.StartedAt)
 		builder.addTime(b.EndedAt)
 		writeExpandedTools(builder, b.ExpandedTools)
+		writeToolPanelScrollStates(builder, b.ToolPanelScroll)
 		writeSubagentEvents(builder, b.Events)
 	case *WelcomeBlock:
 		builder.addString(b.Version)
@@ -395,6 +397,26 @@ func writeExpandedTools(builder *blockKeyBuilder, values map[string]bool) {
 	for _, key := range keys {
 		builder.addString(key)
 		builder.addBool(values[key])
+	}
+}
+
+func writeToolPanelScrollStates(builder *blockKeyBuilder, values map[string]toolPanelScrollState) {
+	if len(values) == 0 {
+		builder.addInt(0)
+		return
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	builder.addInt(len(keys))
+	for _, key := range keys {
+		value := values[key]
+		builder.addString(key)
+		builder.addInt(value.Offset)
+		builder.addBool(value.FollowTail)
+		builder.addTime(value.ScrollbarVisibleUntil)
 	}
 }
 

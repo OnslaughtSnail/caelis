@@ -12,7 +12,7 @@ import (
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 )
 
-func (r *Runtime) Controllers() sdkcontroller.ACP {
+func (r *Runtime) Controllers() sdkcontroller.Backend {
 	if r == nil {
 		return nil
 	}

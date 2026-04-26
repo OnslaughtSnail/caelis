@@ -7,13 +7,13 @@ import (
 	"time"
 
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
-// TerminalStreamRequest is one non-durable terminal subscription derived from
-// a standard running tool update. It is adapter-facing: callers render frames
-// live and persist only the final tool result already emitted by the runtime.
-type TerminalStreamRequest struct {
+// StreamRequest is one non-durable output subscription derived from a standard
+// running tool update. It is adapter-facing: callers render frames live and
+// persist only the final tool result already emitted by the runtime.
+type StreamRequest struct {
 	HandleID      string
 	RunID         string
 	TurnID        string
@@ -21,17 +21,17 @@ type TerminalStreamRequest struct {
 	CallID        string
 	ToolName      string
 	RawInput      map[string]any
-	Ref           sdkterminal.Ref
-	Cursor        sdkterminal.Cursor
+	Ref           sdkstream.Ref
+	Cursor        sdkstream.Cursor
 	Origin        *EventOrigin
 	Actor         string
 	Scope         EventScope
 	ParticipantID string
 }
 
-// Key returns one stable subscription identity for deduplicating live terminal
+// Key returns one stable subscription identity for deduplicating live output
 // streams across repeated running snapshots.
-func (r TerminalStreamRequest) Key() string {
+func (r StreamRequest) Key() string {
 	return strings.Join([]string{
 		strings.TrimSpace(r.SessionRef.SessionID),
 		strings.TrimSpace(r.Ref.TaskID),
@@ -40,27 +40,27 @@ func (r TerminalStreamRequest) Key() string {
 	}, "|")
 }
 
-// TerminalStreamRequestFromEvent extracts a terminal subscription request from
-// a Gateway event without relying on Caelis-only display metadata.
-func TerminalStreamRequestFromEvent(env EventEnvelope) (TerminalStreamRequest, bool) {
+// StreamRequestFromEvent extracts a stream subscription request from a Gateway
+// event without relying on Caelis-only display metadata.
+func StreamRequestFromEvent(env EventEnvelope) (StreamRequest, bool) {
 	ev := env.Event
 	payload := ev.ToolResult
 	if ev.Kind != EventKindToolResult || payload == nil {
-		return TerminalStreamRequest{}, false
+		return StreamRequest{}, false
 	}
 	toolName := strings.ToUpper(strings.TrimSpace(payload.ToolName))
 	if toolName != "BASH" && toolName != "SPAWN" {
-		return TerminalStreamRequest{}, false
+		return StreamRequest{}, false
 	}
 	if payload.Status != ToolStatusRunning && !boolValue(payload.RawOutput["running"]) && !strings.EqualFold(strings.TrimSpace(stringValue(payload.RawOutput["state"])), "running") {
-		return TerminalStreamRequest{}, false
+		return StreamRequest{}, false
 	}
 	taskID := firstNonEmpty(stringValue(payload.RawOutput["task_id"]), stringValue(payload.RawInput["task_id"]))
 	terminalID := firstNonEmpty(stringValue(payload.RawOutput["terminal_id"]), stringValue(payload.RawInput["terminal_id"]))
 	if taskID == "" && terminalID == "" {
-		return TerminalStreamRequest{}, false
+		return StreamRequest{}, false
 	}
-	req := TerminalStreamRequest{
+	req := StreamRequest{
 		HandleID:   strings.TrimSpace(ev.HandleID),
 		RunID:      strings.TrimSpace(ev.RunID),
 		TurnID:     strings.TrimSpace(ev.TurnID),
@@ -68,12 +68,12 @@ func TerminalStreamRequestFromEvent(env EventEnvelope) (TerminalStreamRequest, b
 		CallID:     strings.TrimSpace(payload.CallID),
 		ToolName:   strings.TrimSpace(payload.ToolName),
 		RawInput:   maps.Clone(payload.RawInput),
-		Ref: sdkterminal.Ref{
+		Ref: sdkstream.Ref{
 			SessionID:  firstNonEmpty(strings.TrimSpace(ev.SessionRef.SessionID), stringValue(payload.RawOutput["session_id"]), stringValue(payload.RawInput["session_id"])),
 			TaskID:     taskID,
 			TerminalID: terminalID,
 		},
-		Cursor: sdkterminal.Cursor{
+		Cursor: sdkstream.Cursor{
 			Stdout: int64FromAny(payload.RawOutput["stdout_cursor"]),
 			Stderr: int64FromAny(payload.RawOutput["stderr_cursor"]),
 		},
@@ -92,22 +92,22 @@ func TerminalStreamRequestFromEvent(env EventEnvelope) (TerminalStreamRequest, b
 		req.ParticipantID = req.Origin.ParticipantID
 	}
 	if req.CallID == "" || req.ToolName == "" || strings.TrimSpace(req.Ref.SessionID) == "" {
-		return TerminalStreamRequest{}, false
+		return StreamRequest{}, false
 	}
 	return req, true
 }
 
-// TerminalFrameEvent projects one terminal frame into the same ACP-native tool
+// StreamFrameEvent projects one stream frame into the same ACP-native tool
 // update shape used by normal Gateway output. The event is intentionally
 // transient; adapters should not append it to durable session history.
-func TerminalFrameEvent(req TerminalStreamRequest, frame sdkterminal.Frame) EventEnvelope {
+func StreamFrameEvent(req StreamRequest, frame sdkstream.Frame) EventEnvelope {
 	output := map[string]any{
 		"task_id":       firstNonEmpty(frame.Ref.TaskID, req.Ref.TaskID),
 		"terminal_id":   firstNonEmpty(frame.Ref.TerminalID, req.Ref.TerminalID),
 		"stream":        strings.TrimSpace(frame.Stream),
 		"text":          frame.Text,
 		"running":       frame.Running,
-		"state":         terminalFrameState(frame),
+		"state":         streamFrameState(frame),
 		"stdout_cursor": frame.Cursor.Stdout,
 		"stderr_cursor": frame.Cursor.Stderr,
 	}
@@ -158,7 +158,7 @@ func TerminalFrameEvent(req TerminalStreamRequest, frame sdkterminal.Frame) Even
 	}
 }
 
-func terminalFrameState(frame sdkterminal.Frame) string {
+func streamFrameState(frame sdkstream.Frame) string {
 	if frame.Running {
 		return "running"
 	}

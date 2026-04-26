@@ -143,7 +143,7 @@ func (staticSubagentRunner) Spawn(context.Context, sdksubagent.SpawnContext, sdk
 	}, nil
 }
 
-func (staticSubagentRunner) Continue(context.Context, sdkdelegation.Anchor, sdkdelegation.Request) (sdkdelegation.Result, error) {
+func (staticSubagentRunner) Continue(context.Context, sdkdelegation.Anchor, sdkdelegation.ContinueRequest) (sdkdelegation.Result, error) {
 	return sdkdelegation.Result{TaskID: "task-sub-1", State: sdkdelegation.StateRunning, OutputPreview: "helper continued"}, nil
 }
 

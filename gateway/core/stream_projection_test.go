@@ -5,10 +5,10 @@ import (
 	"time"
 
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
-func TestTerminalStreamRequestFromEventUsesRunningToolCursor(t *testing.T) {
+func TestStreamRequestFromEventUsesRunningToolCursor(t *testing.T) {
 	t.Parallel()
 
 	env := EventEnvelope{
@@ -45,9 +45,9 @@ func TestTerminalStreamRequestFromEventUsesRunningToolCursor(t *testing.T) {
 		},
 	}
 
-	req, ok := TerminalStreamRequestFromEvent(env)
+	req, ok := StreamRequestFromEvent(env)
 	if !ok {
-		t.Fatal("TerminalStreamRequestFromEvent() ok = false, want true")
+		t.Fatal("StreamRequestFromEvent() ok = false, want true")
 	}
 	if req.Ref.SessionID != "session-1" || req.Ref.TaskID != "task-1" || req.Ref.TerminalID != "terminal-1" {
 		t.Fatalf("terminal ref = %+v", req.Ref)
@@ -60,10 +60,10 @@ func TestTerminalStreamRequestFromEventUsesRunningToolCursor(t *testing.T) {
 	}
 }
 
-func TestTerminalFrameEventPreservesStandardToolUpdateShape(t *testing.T) {
+func TestStreamFrameEventPreservesStandardToolUpdateShape(t *testing.T) {
 	t.Parallel()
 
-	req := TerminalStreamRequest{
+	req := StreamRequest{
 		HandleID:   "handle-1",
 		RunID:      "run-1",
 		TurnID:     "turn-1",
@@ -71,7 +71,7 @@ func TestTerminalFrameEventPreservesStandardToolUpdateShape(t *testing.T) {
 		CallID:     "call-1",
 		ToolName:   "BASH",
 		RawInput:   map[string]any{"command": "echo ok"},
-		Ref: sdkterminal.Ref{
+		Ref: sdkstream.Ref{
 			SessionID:  "session-1",
 			TaskID:     "task-1",
 			TerminalID: "terminal-1",
@@ -79,11 +79,11 @@ func TestTerminalFrameEventPreservesStandardToolUpdateShape(t *testing.T) {
 		Origin: &EventOrigin{Scope: EventScopeMain, Actor: "assistant"},
 	}
 
-	env := TerminalFrameEvent(req, sdkterminal.Frame{
+	env := StreamFrameEvent(req, sdkstream.Frame{
 		Ref:       req.Ref,
 		Stream:    "stdout",
 		Text:      "next line\n",
-		Cursor:    sdkterminal.Cursor{Stdout: 22, Stderr: 3},
+		Cursor:    sdkstream.Cursor{Stdout: 22, Stderr: 3},
 		Running:   true,
 		UpdatedAt: time.Unix(100, 0),
 	})

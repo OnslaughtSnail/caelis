@@ -33,10 +33,17 @@ type Anchor struct {
 	AgentID   string `json:"agent_id,omitempty"`
 }
 
-// Request describes one SPAWN invocation. System-controlled execution details
-// such as workspace, timeout, model, and prompt scaffolding are deliberately
-// excluded from the LLM-visible surface.
+// Request describes one delegated child prompt. System-controlled execution
+// details such as workspace, timeout, model, and prompt scaffolding are
+// deliberately excluded from the LLM-visible SPAWN surface.
 type Request struct {
+	Agent  string `json:"agent,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+// ContinueRequest describes a prompt appended to an existing child session.
+// YieldTimeMS belongs to the TASK control plane, not the SPAWN tool surface.
+type ContinueRequest struct {
 	Agent       string `json:"agent,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
 	YieldTimeMS int    `json:"yield_time_ms,omitempty"`
@@ -71,6 +78,13 @@ func CloneAnchor(in Anchor) Anchor {
 }
 
 func CloneRequest(in Request) Request {
+	out := in
+	out.Agent = strings.TrimSpace(in.Agent)
+	out.Prompt = strings.TrimSpace(in.Prompt)
+	return out
+}
+
+func CloneContinueRequest(in ContinueRequest) ContinueRequest {
 	out := in
 	out.Agent = strings.TrimSpace(in.Agent)
 	out.Prompt = strings.TrimSpace(in.Prompt)

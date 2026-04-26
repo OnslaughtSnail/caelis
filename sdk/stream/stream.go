@@ -1,4 +1,4 @@
-package terminal
+package stream
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// Ref identifies one terminal stream owned by one task in one session.
+// Ref identifies one output stream owned by one task in one session.
 type Ref struct {
 	SessionID  string `json:"session_id,omitempty"`
 	TaskID     string `json:"task_id,omitempty"`
@@ -20,11 +20,12 @@ type Cursor struct {
 	Stderr int64 `json:"stderr,omitempty"`
 }
 
-// Frame is one terminal output fragment delivered to one UI or adapter.
+// Frame is one output fragment delivered to one UI or adapter.
 type Frame struct {
 	Ref       Ref       `json:"ref,omitempty"`
 	Stream    string    `json:"stream,omitempty"`
 	Text      string    `json:"text,omitempty"`
+	State     string    `json:"state,omitempty"`
 	Cursor    Cursor    `json:"cursor,omitempty"`
 	Running   bool      `json:"running,omitempty"`
 	Closed    bool      `json:"closed,omitempty"`
@@ -32,7 +33,7 @@ type Frame struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
-// Snapshot is one point-in-time terminal read result.
+// Snapshot is one point-in-time stream read result.
 type Snapshot struct {
 	Ref           Ref       `json:"ref,omitempty"`
 	Cursor        Cursor    `json:"cursor,omitempty"`
@@ -44,24 +45,30 @@ type Snapshot struct {
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
-// ReadRequest asks for one incremental terminal read from one cursor.
+// ReadRequest asks for one incremental stream read from one cursor.
 type ReadRequest struct {
 	Ref    Ref    `json:"ref,omitempty"`
 	Cursor Cursor `json:"cursor,omitempty"`
 }
 
-// SubscribeRequest asks for one polling terminal subscription.
+// SubscribeRequest asks for one polling stream subscription.
 type SubscribeRequest struct {
 	Ref          Ref           `json:"ref,omitempty"`
 	Cursor       Cursor        `json:"cursor,omitempty"`
 	PollInterval time.Duration `json:"poll_interval,omitempty"`
 }
 
-// Service is the unified terminal read/subscribe surface used by app-layer
+// Service is the unified output read/subscribe surface used by app-layer
 // renderers and protocol adapters. Control actions remain on the task plane.
 type Service interface {
 	Read(context.Context, ReadRequest) (Snapshot, error)
 	Subscribe(context.Context, SubscribeRequest) iter.Seq2[*Frame, error]
+}
+
+// Sink receives output frames produced by a runtime component and writes them
+// into the owning task stream.
+type Sink interface {
+	PublishStream(Frame)
 }
 
 // Controller is one optional terminal control surface used by app adapters.

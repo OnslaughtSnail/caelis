@@ -5,19 +5,19 @@ import (
 	"iter"
 	"testing"
 
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
 func TestLocalTerminalAdapterOutputUsesCumulativeRead(t *testing.T) {
 	t.Parallel()
 
 	service := &recordingTerminalService{
-		snapshot: sdkterminal.Snapshot{
-			Frames: []sdkterminal.Frame{{Stream: "stdout", Text: "one\ntwo\n"}},
-			Cursor: sdkterminal.Cursor{Stdout: 8},
+		snapshot: sdkstream.Snapshot{
+			Frames: []sdkstream.Frame{{Stream: "stdout", Text: "one\ntwo\n"}},
+			Cursor: sdkstream.Cursor{Stdout: 8},
 		},
 	}
-	adapter := LocalTerminalAdapter{Terminals: service}
+	adapter := LocalTerminalAdapter{Streams: service}
 
 	resp, err := adapter.Output(context.Background(), TerminalOutputRequest{
 		SessionID:  "session-1",
@@ -35,15 +35,15 @@ func TestLocalTerminalAdapterOutputUsesCumulativeRead(t *testing.T) {
 }
 
 type recordingTerminalService struct {
-	readReq  sdkterminal.ReadRequest
-	snapshot sdkterminal.Snapshot
+	readReq  sdkstream.ReadRequest
+	snapshot sdkstream.Snapshot
 }
 
-func (s *recordingTerminalService) Read(_ context.Context, req sdkterminal.ReadRequest) (sdkterminal.Snapshot, error) {
+func (s *recordingTerminalService) Read(_ context.Context, req sdkstream.ReadRequest) (sdkstream.Snapshot, error) {
 	s.readReq = req
 	return s.snapshot, nil
 }
 
-func (s *recordingTerminalService) Subscribe(context.Context, sdkterminal.SubscribeRequest) iter.Seq2[*sdkterminal.Frame, error] {
-	return func(func(*sdkterminal.Frame, error) bool) {}
+func (s *recordingTerminalService) Subscribe(context.Context, sdkstream.SubscribeRequest) iter.Seq2[*sdkstream.Frame, error] {
+	return func(func(*sdkstream.Frame, error) bool) {}
 }

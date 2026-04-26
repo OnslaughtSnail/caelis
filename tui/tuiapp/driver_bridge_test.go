@@ -494,7 +494,7 @@ func (d *bridgeSubmitDriver) WorkspaceDir() string { return "" }
 func (d *bridgeSubmitDriver) Submit(context.Context, tuiadapterruntime.Submission) (tuiadapterruntime.Turn, error) {
 	return d.turn, nil
 }
-func (d *bridgeSubmitDriver) SubscribeTerminal(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {
+func (d *bridgeSubmitDriver) SubscribeStream(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {
 	d.terminalSubscribeCalls++
 	if d.terminalEvents == nil {
 		return nil, false

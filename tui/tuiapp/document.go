@@ -37,6 +37,10 @@ func StyledPlainClickableRow(blockID, plain, styled, clickToken string) Rendered
 	return RenderedRow{Styled: styled, Plain: plain, BlockID: blockID, ClickToken: clickToken}
 }
 
+func StyledPlainClickablePreWrappedRow(blockID, plain, styled, clickToken string) RenderedRow {
+	return RenderedRow{Styled: styled, Plain: plain, BlockID: blockID, ClickToken: clickToken, PreWrapped: true}
+}
+
 // PlainRow creates a RenderedRow from a plain text line (no ANSI).
 func PlainRow(blockID, text string) RenderedRow {
 	return RenderedRow{Styled: text, Plain: text, BlockID: blockID}

@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -9,8 +10,11 @@ import (
 	"github.com/OnslaughtSnail/caelis/sdk/runtime/agents/chat"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	"github.com/OnslaughtSnail/caelis/sdk/session/inmemory"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdksubagent "github.com/OnslaughtSnail/caelis/sdk/subagent"
 	sdktask "github.com/OnslaughtSnail/caelis/sdk/task"
+	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
+	spawntool "github.com/OnslaughtSnail/caelis/sdk/tool/builtin/spawn"
 )
 
 func TestTaskWriteContinuesCompletedSpawnChild(t *testing.T) {
@@ -25,9 +29,8 @@ func TestTaskWriteContinuesCompletedSpawnChild(t *testing.T) {
 	runtime, session := newSubagentTaskTestRuntime(t, runner)
 
 	started, err := runtime.tasks.StartSubagent(ctx, session, session.SessionRef, runner, sdktask.SubagentStartRequest{
-		Agent:       "helper",
-		Prompt:      "first",
-		YieldTimeMS: 1,
+		Agent:  "helper",
+		Prompt: "first",
 	})
 	if err != nil {
 		t.Fatalf("StartSubagent() error = %v", err)
@@ -62,9 +65,8 @@ func TestTaskWriteRejectsRunningSpawnChildWithWaitHint(t *testing.T) {
 	runtime, session := newSubagentTaskTestRuntime(t, runner)
 
 	started, err := runtime.tasks.StartSubagent(ctx, session, session.SessionRef, runner, sdktask.SubagentStartRequest{
-		Agent:       "helper",
-		Prompt:      "first",
-		YieldTimeMS: 1,
+		Agent:  "helper",
+		Prompt: "first",
 	})
 	if err != nil {
 		t.Fatalf("StartSubagent() error = %v", err)
@@ -82,6 +84,147 @@ func TestTaskWriteRejectsRunningSpawnChildWithWaitHint(t *testing.T) {
 	}
 	if runner.continuePrompt != "" {
 		t.Fatalf("Continue was called for running task with prompt %q", runner.continuePrompt)
+	}
+}
+
+func TestTerminalServiceReadsRunningSubagentStreamByTaskID(t *testing.T) {
+	ctx := context.Background()
+	runner := &recordingSubagentRunner{
+		spawnResult: sdkdelegation.Result{State: sdkdelegation.StateRunning, OutputPreview: "starting", Running: true},
+		waitResult:  sdkdelegation.Result{State: sdkdelegation.StateRunning, OutputPreview: "starting", Running: true},
+	}
+	runtime, session := newSubagentTaskTestRuntime(t, runner)
+
+	started, err := runtime.tasks.StartSubagent(ctx, session, session.SessionRef, runner, sdktask.SubagentStartRequest{
+		Agent:  "helper",
+		Prompt: "first",
+	})
+	if err != nil {
+		t.Fatalf("StartSubagent() error = %v", err)
+	}
+	if started.Ref.TerminalID == "" {
+		t.Fatalf("subagent terminal id is empty")
+	}
+	snap, err := runtime.Streams().Read(ctx, sdkstream.ReadRequest{
+		Ref: sdkstream.Ref{SessionID: session.SessionID, TaskID: started.Ref.TaskID},
+	})
+	if err != nil {
+		t.Fatalf("Read(subagent terminal) error = %v", err)
+	}
+	if !snap.Running {
+		t.Fatalf("subagent terminal running = false, want true")
+	}
+	if len(snap.Frames) != 1 || !strings.Contains(snap.Frames[0].Text, "starting") {
+		t.Fatalf("subagent terminal frames = %#v, want starting preview", snap.Frames)
+	}
+}
+
+func TestSubagentStreamsAppendsIncrementalTerminalFrames(t *testing.T) {
+	ctx := context.Background()
+	runner := &recordingSubagentRunner{
+		spawnResult: sdkdelegation.Result{State: sdkdelegation.StateRunning, Running: true},
+		waitResult:  sdkdelegation.Result{State: sdkdelegation.StateRunning, Running: true},
+	}
+	runtime, session := newSubagentTaskTestRuntime(t, runner)
+
+	started, err := runtime.tasks.StartSubagent(ctx, session, session.SessionRef, runner, sdktask.SubagentStartRequest{
+		Agent:  "helper",
+		Prompt: "first",
+	})
+	if err != nil {
+		t.Fatalf("StartSubagent() error = %v", err)
+	}
+	runtime.tasks.PublishStream(sdkstream.Frame{
+		Ref:     sdkstream.Ref{TaskID: started.Ref.TaskID},
+		Stream:  "stdout",
+		Text:    "line one\n",
+		State:   string(sdkdelegation.StateRunning),
+		Running: true,
+	})
+	first, err := runtime.Streams().Read(ctx, sdkstream.ReadRequest{
+		Ref: sdkstream.Ref{SessionID: session.SessionID, TaskID: started.Ref.TaskID},
+	})
+	if err != nil {
+		t.Fatalf("Read(first subagent frame) error = %v", err)
+	}
+	if len(first.Frames) != 1 || first.Frames[0].Text != "line one\n" {
+		t.Fatalf("first frames = %#v, want line one", first.Frames)
+	}
+
+	runtime.tasks.PublishStream(sdkstream.Frame{
+		Ref:     sdkstream.Ref{TaskID: started.Ref.TaskID},
+		Stream:  "stdout",
+		Text:    "line two\n",
+		State:   string(sdkdelegation.StateRunning),
+		Running: true,
+	})
+	second, err := runtime.Streams().Read(ctx, sdkstream.ReadRequest{
+		Ref:    sdkstream.Ref{SessionID: session.SessionID, TaskID: started.Ref.TaskID},
+		Cursor: first.Cursor,
+	})
+	if err != nil {
+		t.Fatalf("Read(second subagent frame) error = %v", err)
+	}
+	if len(second.Frames) != 1 || second.Frames[0].Text != "line two\n" {
+		t.Fatalf("second frames = %#v, want line two", second.Frames)
+	}
+}
+
+func TestStartSubagentKeepsEarlyStreamPublishedBeforeTaskRegistration(t *testing.T) {
+	ctx := context.Background()
+	runner := &recordingSubagentRunner{
+		spawnResult:     sdkdelegation.Result{State: sdkdelegation.StateRunning, Running: true},
+		waitResult:      sdkdelegation.Result{State: sdkdelegation.StateRunning, Running: true},
+		publishOnSpawn:  true,
+		spawnStreamText: "early child output\n",
+	}
+	runtime, session := newSubagentTaskTestRuntime(t, runner)
+
+	started, err := runtime.tasks.StartSubagent(ctx, session, session.SessionRef, runner, sdktask.SubagentStartRequest{
+		Agent:  "helper",
+		Prompt: "first",
+	})
+	if err != nil {
+		t.Fatalf("StartSubagent() error = %v", err)
+	}
+	snap, err := runtime.Streams().Read(ctx, sdkstream.ReadRequest{
+		Ref: sdkstream.Ref{SessionID: session.SessionID, TaskID: started.Ref.TaskID},
+	})
+	if err != nil {
+		t.Fatalf("Read(subagent terminal) error = %v", err)
+	}
+	if len(snap.Frames) != 1 || snap.Frames[0].Text != "early child output\n" {
+		t.Fatalf("subagent frames = %#v, want early child output", snap.Frames)
+	}
+}
+
+func TestRuntimeSpawnToolRejectsYieldTimeMS(t *testing.T) {
+	ctx := context.Background()
+	runner := &recordingSubagentRunner{
+		spawnResult: sdkdelegation.Result{State: sdkdelegation.StateRunning, Running: true},
+	}
+	runtime, session := newSubagentTaskTestRuntime(t, runner)
+	tool := runtimeSpawnTool{
+		base:       spawntool.New([]sdkdelegation.Agent{{Name: "self"}}),
+		session:    session,
+		sessionRef: session.SessionRef,
+		tasks:      runtime.tasks,
+		runner:     runner,
+	}
+	raw, err := json.Marshal(map[string]any{
+		"prompt":        "long child task",
+		"yield_time_ms": 15000,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	_, err = tool.Call(ctx, sdktool.Call{ID: "spawn-1", Name: spawntool.ToolName, Input: raw})
+	if err == nil {
+		t.Fatal("SPAWN Call() error = nil, want yield_time_ms rejection")
+	}
+	if !strings.Contains(err.Error(), "yield_time_ms") {
+		t.Fatalf("SPAWN Call() error = %v, want yield_time_ms mention", err)
 	}
 }
 
@@ -111,18 +254,31 @@ func newSubagentTaskTestRuntime(t *testing.T, runner sdksubagent.Runner) (*Runti
 }
 
 type recordingSubagentRunner struct {
-	spawnResult    sdkdelegation.Result
-	waitResult     sdkdelegation.Result
-	continueResult sdkdelegation.Result
-	continueAnchor sdkdelegation.Anchor
-	continuePrompt string
+	spawnResult     sdkdelegation.Result
+	waitResult      sdkdelegation.Result
+	continueResult  sdkdelegation.Result
+	spawnRequest    sdkdelegation.Request
+	continueAnchor  sdkdelegation.Anchor
+	continuePrompt  string
+	publishOnSpawn  bool
+	spawnStreamText string
 }
 
-func (r *recordingSubagentRunner) Spawn(context.Context, sdksubagent.SpawnContext, sdkdelegation.Request) (sdkdelegation.Anchor, sdkdelegation.Result, error) {
+func (r *recordingSubagentRunner) Spawn(_ context.Context, spawn sdksubagent.SpawnContext, req sdkdelegation.Request) (sdkdelegation.Anchor, sdkdelegation.Result, error) {
+	r.spawnRequest = sdkdelegation.CloneRequest(req)
+	if r.publishOnSpawn && spawn.Streams != nil {
+		spawn.Streams.PublishStream(sdkstream.Frame{
+			Ref:     sdkstream.Ref{TaskID: strings.TrimSpace(spawn.TaskID)},
+			Stream:  "stdout",
+			Text:    r.spawnStreamText,
+			State:   string(sdkdelegation.StateRunning),
+			Running: true,
+		})
+	}
 	return sdkdelegation.Anchor{SessionID: "child-1", Agent: "helper", AgentID: "helper-1"}, sdkdelegation.CloneResult(r.spawnResult), nil
 }
 
-func (r *recordingSubagentRunner) Continue(_ context.Context, anchor sdkdelegation.Anchor, req sdkdelegation.Request) (sdkdelegation.Result, error) {
+func (r *recordingSubagentRunner) Continue(_ context.Context, anchor sdkdelegation.Anchor, req sdkdelegation.ContinueRequest) (sdkdelegation.Result, error) {
 	r.continueAnchor = sdkdelegation.CloneAnchor(anchor)
 	r.continuePrompt = strings.TrimSpace(req.Prompt)
 	return sdkdelegation.CloneResult(r.continueResult), nil

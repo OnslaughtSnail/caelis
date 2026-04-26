@@ -6,7 +6,7 @@ import (
 	sdkcontroller "github.com/OnslaughtSnail/caelis/sdk/controller"
 	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
-	sdkterminal "github.com/OnslaughtSnail/caelis/sdk/terminal"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdktool "github.com/OnslaughtSnail/caelis/sdk/tool"
 )
 
@@ -104,24 +104,24 @@ type HandoffControllerRequest struct {
 	Reason     string                    `json:"reason,omitempty"`
 }
 
-// ControlPlane exposes optional session orchestration capabilities such as ACP
-// sidecar attachment and controller handoff.
-type ControlPlane interface {
+// SessionControlPlane exposes optional session orchestration capabilities such
+// as ACP sidecar attachment and controller handoff.
+type SessionControlPlane interface {
 	AttachACPParticipant(context.Context, AttachACPParticipantRequest) (sdksession.Session, error)
 	PromptACPParticipant(context.Context, PromptACPParticipantRequest) (sdksession.Session, error)
 	DetachACPParticipant(context.Context, DetachACPParticipantRequest) (sdksession.Session, error)
 	HandoffController(context.Context, HandoffControllerRequest) (sdksession.Session, error)
 }
 
-// TerminalProvider is one optional runtime capability for unified terminal
-// output reads and subscriptions.
-type TerminalProvider interface {
-	Terminals() sdkterminal.Service
+// StreamProvider is one optional runtime capability for unified task output
+// reads and subscriptions.
+type StreamProvider interface {
+	Streams() sdkstream.Service
 }
 
 // ControllerProvider exposes the optional controller-orchestration backend used
 // by one runtime implementation. It is intended for advanced app wiring and
 // tests rather than the LLM-facing execution surface.
 type ControllerProvider interface {
-	Controllers() sdkcontroller.ACP
+	Controllers() sdkcontroller.Backend
 }

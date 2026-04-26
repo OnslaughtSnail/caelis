@@ -195,6 +195,120 @@ func TestChatAgentRunsMinimalToolLoop(t *testing.T) {
 	}
 }
 
+func TestChatAgentEmitsToolProgressWhileCallIsRunning(t *testing.T) {
+	t.Parallel()
+
+	model := &toolLoopModel{}
+	release := make(chan struct{})
+	progressReported := make(chan struct{})
+	tool := sdktool.NamedTool{
+		Def: sdktool.Definition{
+			Name:        "ECHO",
+			Description: "fake tool with progress",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Invoke: func(ctx context.Context, call sdktool.Call) (sdktool.Result, error) {
+			if call.Observer == nil {
+				t.Fatal("tool observer missing from call")
+			}
+			call.Observer.ObserveToolResult(sdktool.Result{
+				ID:   call.ID,
+				Name: call.Name,
+				Meta: map[string]any{
+					"task_id": "task-1",
+					"state":   "running",
+					"running": true,
+				},
+				Content: []sdkmodel.Part{sdkmodel.NewJSONPart([]byte(`{"task_id":"task-1","state":"running","running":true}`))},
+			})
+			close(progressReported)
+			<-release
+			return sdktool.Result{
+				ID:      call.ID,
+				Name:    call.Name,
+				Content: []sdkmodel.Part{sdkmodel.NewJSONPart([]byte(`{"result":"done","state":"completed"}`))},
+				Meta: map[string]any{
+					"result": "done",
+					"state":  "completed",
+				},
+			}, nil
+		},
+	}
+	agent, err := NewWithTools("chat", model, []sdktool.Tool{tool}, "Use tools when needed.")
+	if err != nil {
+		t.Fatalf("NewWithTools() error = %v", err)
+	}
+
+	ctx := sdkruntime.NewContext(sdkruntime.ContextSpec{
+		Context: context.Background(),
+		Session: sdksession.Session{
+			SessionRef: sdksession.SessionRef{SessionID: "sess-progress"},
+		},
+		Events: []*sdksession.Event{{
+			Type:    sdksession.EventTypeUser,
+			Message: ptrMessage(sdkmodel.NewTextMessage(sdkmodel.RoleUser, "run bash")),
+			Text:    "run bash",
+		}},
+	})
+
+	eventsCh := make(chan *sdksession.Event, 8)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(eventsCh)
+		for event, runErr := range agent.Run(ctx) {
+			if runErr != nil {
+				errCh <- runErr
+				return
+			}
+			eventsCh <- event
+		}
+	}()
+
+	var progress *sdksession.Event
+	deadline := time.After(2 * time.Second)
+	for progress == nil {
+		select {
+		case err := <-errCh:
+			t.Fatalf("Run() error before progress = %v", err)
+		case <-progressReported:
+		case event := <-eventsCh:
+			if event == nil {
+				t.Fatal("Run() ended before tool progress")
+			}
+			if event.Type == sdksession.EventTypeToolResult && event.Protocol != nil && event.Protocol.ToolCall != nil && event.Protocol.ToolCall.Status == "running" {
+				progress = event
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for running tool progress")
+		}
+	}
+	if progress.Visibility != sdksession.VisibilityUIOnly {
+		t.Fatalf("progress visibility = %q, want ui_only", progress.Visibility)
+	}
+	if progress.Message != nil {
+		t.Fatalf("progress message = %+v, want nil so it is not appended to model history", progress.Message)
+	}
+	if got, _ := progress.Meta["task_id"].(string); got != "task-1" {
+		t.Fatalf("progress task_id = %q, want task-1", got)
+	}
+
+	close(release)
+	var finalText string
+	for event := range eventsCh {
+		if event != nil && event.Type == sdksession.EventTypeAssistant {
+			finalText = strings.TrimSpace(event.Text)
+		}
+	}
+	select {
+	case err := <-errCh:
+		t.Fatalf("Run() error = %v", err)
+	default:
+	}
+	if finalText != "pong" {
+		t.Fatalf("finalText = %q, want pong", finalText)
+	}
+}
+
 func TestChatAgentStreamsAssistantChunksBeforeFinalMessage(t *testing.T) {
 	t.Parallel()
 

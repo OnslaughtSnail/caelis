@@ -112,9 +112,9 @@ type TurnResult struct {
 	UpdatedAt time.Time  `json:"updated_at,omitempty"`
 }
 
-// ACP is the runtime-facing control-plane contract for ACP-backed main
+// Backend is the runtime-facing control-plane contract for ACP-backed main
 // controllers and sidecar participants.
-type ACP interface {
+type Backend interface {
 	Activate(context.Context, HandoffRequest) (sdksession.ControllerBinding, error)
 	Deactivate(context.Context, sdksession.SessionRef) error
 	RunTurn(context.Context, TurnRequest) (TurnResult, error)

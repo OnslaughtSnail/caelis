@@ -50,7 +50,7 @@ type LifecyclePayload = gatewaycore.LifecyclePayload
 type EventOrigin = gatewaycore.EventOrigin
 type Event = gatewaycore.Event
 type EventEnvelope = gatewaycore.EventEnvelope
-type TerminalStreamRequest = gatewaycore.TerminalStreamRequest
+type StreamRequest = gatewaycore.StreamRequest
 type SubmissionKind = gatewaycore.SubmissionKind
 type ApprovalDecision = gatewaycore.ApprovalDecision
 type SubmitRequest = gatewaycore.SubmitRequest
@@ -60,9 +60,12 @@ type ErrorKind = gatewaycore.ErrorKind
 type Error = gatewaycore.Error
 type ModelLookup = gatewaycore.ModelLookup
 type ModelResolution = gatewaycore.ModelResolution
+type ToolAugmenter = gatewaycore.ToolAugmenter
+type ToolAugmentContext = gatewaycore.ToolAugmentContext
+type ToolAugmentation = gatewaycore.ToolAugmentation
 
-var TerminalStreamRequestFromEvent = gatewaycore.TerminalStreamRequestFromEvent
-var TerminalFrameEvent = gatewaycore.TerminalFrameEvent
+var StreamRequestFromEvent = gatewaycore.StreamRequestFromEvent
+var StreamFrameEvent = gatewaycore.StreamFrameEvent
 
 const (
 	StateCurrentModelAlias  = gatewaycore.StateCurrentModelAlias

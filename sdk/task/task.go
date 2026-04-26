@@ -59,6 +59,13 @@ type Snapshot struct {
 	Terminal       sdksandbox.TerminalRef `json:"terminal,omitempty"`
 }
 
+// Observer receives transient task lifecycle snapshots while a tool call is
+// still running. Observed snapshots are adapter-facing and are not appended to
+// model-visible tool history.
+type Observer interface {
+	ObserveTaskSnapshot(Snapshot)
+}
+
 // BashStartRequest defines one yielded BASH launch request.
 type BashStartRequest struct {
 	Command     string        `json:"command,omitempty"`
@@ -68,17 +75,17 @@ type BashStartRequest struct {
 	ParentCall  string        `json:"parent_call,omitempty"`
 	ParentTool  string        `json:"parent_tool,omitempty"`
 	Constraints any           `json:"-"`
+	Observer    Observer      `json:"-"`
 }
 
 // SubagentStartRequest defines one yielded SPAWN launch request.
 type SubagentStartRequest struct {
-	Agent       string                        `json:"agent,omitempty"`
-	Prompt      string                        `json:"prompt,omitempty"`
-	YieldTimeMS int                           `json:"yield_time_ms,omitempty"`
-	ParentCall  string                        `json:"parent_call,omitempty"`
-	ParentTool  string                        `json:"parent_tool,omitempty"`
-	Mode        string                        `json:"mode,omitempty"`
-	Approval    sdksubagent.ApprovalRequester `json:"-"`
+	Agent      string                        `json:"agent,omitempty"`
+	Prompt     string                        `json:"prompt,omitempty"`
+	ParentCall string                        `json:"parent_call,omitempty"`
+	ParentTool string                        `json:"parent_tool,omitempty"`
+	Mode       string                        `json:"mode,omitempty"`
+	Approval   sdksubagent.ApprovalRequester `json:"-"`
 }
 
 // ControlRequest defines one task control request.
@@ -123,7 +130,6 @@ type Manager interface {
 	Wait(context.Context, ControlRequest) (Snapshot, error)
 	Write(context.Context, ControlRequest) (Snapshot, error)
 	Cancel(context.Context, ControlRequest) (Snapshot, error)
-	List(context.Context) ([]Snapshot, error)
 }
 
 // CloneRef returns one normalized task ref copy.

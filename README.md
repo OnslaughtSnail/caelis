@@ -13,7 +13,7 @@
 ## Current Layout
 
 - `cmd/cli`: flat-flag CLI entrypoint. Chooses TUI or headless mode; there are no `console` or `acp` subcommands.
-- `sdk/`: reusable foundation for runtime, session, model/provider, tool, sandbox, delegation, plugin, and terminal contracts. Root packages stay contract-first; concrete implementations live in subpackages such as `sdk/runtime/local`, `sdk/session/file`, and `sdk/tool/builtin`.
+- `sdk/`: reusable foundation for runtime, session, model/provider, tool, sandbox, delegation, plugin, and stream contracts. Root packages stay contract-first; concrete implementations live in subpackages such as `sdk/runtime/local`, `sdk/session/file`, and `sdk/tool/builtin`.
 - `gateway/`: product-facing API surface. `gateway/core` owns session/turn/control-plane orchestration and `gateway/host` owns host and remote-session lifecycle.
 - `app/gatewayapp`: local composition root that assembles the SDK-backed runtime, gateway resolver, prompt assembly, config store, and session store.
 - `gateway/adapter/headless`: one-shot headless adapter over the root `gateway` contract.
@@ -101,7 +101,7 @@ Interactive sessions are stored under `~/.caelis/sessions` by default. The TUI s
 Current built-in slash commands:
 
 - `/help`
-- `/agent list`, `/agent status`, `/agent add <name>`, `/agent remove <participant-id>`, `/agent handoff <name|local>`
+- `/agent list`, `/agent status`, `/agent add <name>`, `/agent remove <participant-id>`, `/agent handoff <name|local>`, `/agent use <name|local>`
 - `/connect`
 - `/model use <alias>` or `/model del <alias>`
 - `/sandbox [auto|seatbelt|bwrap|landlock]`
@@ -114,12 +114,12 @@ Current built-in slash commands:
 
 Notes:
 
-- `/agent` manages ACP-backed participants and main-controller handoff without bypassing the gateway control plane. Compatibility aliases `/agent connect`, `/agent rm`, and `/agent use` are supported but not advertised as the primary syntax.
+- `/agent` manages ACP-backed participants and main-controller handoff without bypassing the gateway control plane. `/agent list` shows attached participants, while `/agent add` completion shows available ACP agents.
 - `/connect` is the recommended entrypoint for configuring providers and models inside the TUI.
 - `/status` shows the current provider, model alias, session, sandbox route, workspace, and store directory without printing API keys or auth headers.
 - `/btw` is intentionally hidden in the default TUI until that overlay flow is fully supported.
 - Input completion is available for:
-  - `/agent`: configured ACP agent names for `add` and `handoff`, plus attached participant ids for `remove`.
+  - `/agent`: available ACP agent names for `add`, attached agent names for `handoff`/`use`, and attached participant ids for `remove`.
   - `#path`: workspace-relative file and directory paths, with shallow recursive search, fuzzy/prefix matching, common noise directories skipped, and a hard result limit.
   - `$skill`: discovered skills from `~/.agents/skills`, `<workspace>/.agents/skills`, and `<workspace>/skills`, showing skill name plus summary/path metadata.
   - `/resume`: recent sessions, ordered by most recently updated first, showing title, model, workspace, and session id.

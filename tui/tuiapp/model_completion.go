@@ -625,14 +625,18 @@ func (m *Model) applySlashArgCompletion() {
 		m.setInputText("/agent " + choice + " ")
 		m.syncTextareaFromInput()
 		switch choice {
-		case "add", "connect", "remove", "rm", "handoff", "use":
+		case "add", "remove", "handoff", "use", "ask":
 			m.activateSlashArgPickerFromInput("agent " + choice)
 		default:
 			m.clearSlashArg()
 		}
 		return
-	case "agent add", "agent connect", "agent remove", "agent rm", "agent handoff", "agent use":
+	case "agent add", "agent remove", "agent handoff", "agent use":
 		m.setInputText("/" + command + " " + choice)
+		m.clearSlashArg()
+		return
+	case "agent ask":
+		m.setInputText("/agent ask " + choice + " ")
 		m.clearSlashArg()
 		return
 	case "model":
@@ -691,8 +695,10 @@ func (m *Model) shouldExecuteSlashArgSelection(command string, choice string) bo
 	switch command {
 	case "agent":
 		return false
-	case "agent add", "agent connect", "agent remove", "agent rm", "agent handoff", "agent use":
+	case "agent add", "agent remove", "agent handoff", "agent use":
 		return true
+	case "agent ask":
+		return false
 	case "model":
 		return false
 	case "model use":
@@ -722,8 +728,10 @@ func isExecutableSlashArgInput(line string) bool {
 			return len(fields) == 2
 		case "status":
 			return len(fields) == 2
-		case "add", "connect", "remove", "rm", "handoff", "use":
+		case "add", "remove", "handoff", "use":
 			return len(fields) >= 3
+		case "ask":
+			return len(fields) >= 4
 		default:
 			return false
 		}

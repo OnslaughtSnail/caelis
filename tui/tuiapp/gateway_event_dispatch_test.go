@@ -355,6 +355,32 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 			expandPanel: true,
 		},
 		{
+			name: "spawn terminal panel",
+			call: &appgateway.ToolCallPayload{
+				CallID:   "spawn-1",
+				ToolName: "SPAWN",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"prompt": "write fibonacci"},
+			},
+			result: &appgateway.ToolResultPayload{
+				CallID:   "spawn-1",
+				ToolName: "SPAWN",
+				Status:   appgateway.ToolStatusCompleted,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"prompt": "write fibonacci"},
+				RawOutput: map[string]any{
+					"running": false,
+					"state":   "completed",
+					"task_id": "spawn-task-1",
+					"result":  "child line 1\nchild line 2\n",
+				},
+			},
+			want:        []string{"SPAWN", "child line 1", "child line 2"},
+			forbidden:   []string{"task / running", "state completed", "spawn-task-1"},
+			expandPanel: true,
+		},
+		{
 			name: "bash task snapshot does not expose raw session json",
 			call: &appgateway.ToolCallPayload{
 				CallID:   "bash-task-1",

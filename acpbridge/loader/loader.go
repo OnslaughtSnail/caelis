@@ -4,43 +4,32 @@ import (
 	"context"
 	"strings"
 
+	"github.com/OnslaughtSnail/caelis/acp"
 	"github.com/OnslaughtSnail/caelis/acp/schema"
 	bridgeprojector "github.com/OnslaughtSnail/caelis/acpbridge/projector"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
-type PromptCallbacks interface {
-	SessionUpdate(context.Context, schema.SessionNotification) error
-}
-
-type SessionModesProvider interface {
-	SessionModes(context.Context, sdksession.Session) (*schema.SessionModeState, error)
-}
-
-type SessionConfigProvider interface {
-	SessionConfigOptions(context.Context, sdksession.Session) ([]schema.SessionConfigOption, error)
-}
-
 // SessionServiceLoaderConfig configures one default ACP session/load adapter
 // backed by the SDK session service.
 type SessionServiceLoaderConfig struct {
 	Sessions  sdksession.Service
-	Projector bridgeprojector.Projector
+	Projector acp.Projector
 	AppName   string
 	UserID    string
-	Modes     SessionModesProvider
-	Config    SessionConfigProvider
+	Modes     acp.ModeProvider
+	Config    acp.ConfigProvider
 }
 
 // SessionServiceLoader replays one durable SDK session through ACP
 // session/update notifications.
 type SessionServiceLoader struct {
 	sessions  sdksession.Service
-	projector bridgeprojector.Projector
+	projector acp.Projector
 	appName   string
 	userID    string
-	modes     SessionModesProvider
-	config    SessionConfigProvider
+	modes     acp.ModeProvider
+	config    acp.ConfigProvider
 }
 
 // NewSessionServiceLoader constructs one default session/load adapter.
@@ -64,7 +53,7 @@ func NewSessionServiceLoader(cfg SessionServiceLoaderConfig) *SessionServiceLoad
 func (l *SessionServiceLoader) LoadSession(
 	ctx context.Context,
 	req schema.LoadSessionRequest,
-	cb PromptCallbacks,
+	cb acp.PromptCallbacks,
 ) (schema.LoadSessionResponse, error) {
 	ref := sdksession.SessionRef{
 		AppName:   l.appName,

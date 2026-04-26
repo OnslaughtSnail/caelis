@@ -25,6 +25,7 @@ type Call struct {
 	Name     string          `json:"name,omitempty"`
 	Input    json.RawMessage `json:"input,omitempty"`
 	Metadata map[string]any  `json:"metadata,omitempty"`
+	Observer Observer        `json:"-"`
 }
 
 // Result is one provider-neutral tool execution result.
@@ -41,6 +42,13 @@ type Result struct {
 type Tool interface {
 	Definition() Definition
 	Call(context.Context, Call) (Result, error)
+}
+
+// Observer receives transient tool updates emitted before the model-visible
+// final result is available. Observed results are UI-only and must not be
+// appended to model-visible tool history.
+type Observer interface {
+	ObserveToolResult(Result)
 }
 
 // Registry is the minimal tool lookup boundary used by future runtimes.

@@ -153,10 +153,6 @@ func requireACPXE2EPrereqs(t *testing.T) {
 	if _, err := exec.LookPath("acpx"); err != nil {
 		t.Skip("acpx is not installed")
 	}
-	repo := repoRoot(t)
-	if _, err := os.Stat(filepath.Join(repo, ".env")); err != nil {
-		t.Skip(".env is not present")
-	}
 }
 
 func repoRoot(t *testing.T) string {
@@ -183,9 +179,9 @@ func runACPXCommand(t *testing.T, repo string, workdir string, body string) stri
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	script := strings.Join([]string{
-		`set -a`,
-		`source "` + filepath.Join(repo, ".env") + `"`,
-		`set +a`,
+		`if [ -f "` + filepath.Join(repo, ".env") + `" ]; then set -a; source "` + filepath.Join(repo, ".env") + `"; set +a; fi`,
+		`export SDK_E2E_PROVIDER=codefree`,
+		`export CODEFREE_MODEL="${CODEFREE_MODEL:-GLM-5.1}"`,
 		`export WORKDIR="` + workdir + `"`,
 		`export ACP_AGENT_CMD="bash -lc 'cd ` + repo + ` && go run ./acpbridge/cmd/e2eagent'"`,
 		body,
