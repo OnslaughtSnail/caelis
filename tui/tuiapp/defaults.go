@@ -26,7 +26,7 @@ func slashCommandSpecs() []slashCommandSpec {
 		{Name: "status", Usage: "/status", Description: "Show current provider, model, session, sandbox, and store info"},
 		{Name: "new", Usage: "/new", Description: "Start a fresh session"},
 		{Name: "resume", Usage: "/resume [session-id]", Description: "List recent sessions or resume one by id"},
-		{Name: "compact", Usage: "/compact [note]", Description: "Compact the current session transcript"},
+		{Name: "compact", Usage: "/compact", Description: "Compact the current session transcript"},
 		{Name: "exit", Usage: "/exit", Description: "Exit the TUI"},
 		{Name: "quit", Usage: "/quit", Description: "Exit the TUI"},
 	}

@@ -1,6 +1,7 @@
 package tuiapp
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -45,6 +46,65 @@ func TestModelUpdateConsumesGatewayAssistantEventIntoMainTurnBlock(t *testing.T)
 	}
 	if len(block.Events) != 1 || block.Events[0].Kind != SEAssistant || block.Events[0].Text != "gateway answer" {
 		t.Fatalf("main turn events = %#v, want assistant narrative event", block.Events)
+	}
+}
+
+func TestGatewayContextCanceledRendersUserInterrupt(t *testing.T) {
+	model := newGatewayEventTestModel()
+
+	updated, _ := model.Update(appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:  appgateway.NarrativeRoleAssistant,
+				Text:  "partial answer",
+				Final: false,
+				Scope: appgateway.EventScopeMain,
+			},
+		},
+	})
+	m := updated.(*Model)
+	updated, _ = m.Update(appgateway.EventEnvelope{
+		Err: &appgateway.Error{
+			Message: "providers: sse scanner: context canceled",
+			Cause:   context.Canceled,
+		},
+	})
+	m = updated.(*Model)
+
+	var sawInterruptNote bool
+	var sawErrorText bool
+	var renderedMain string
+	for _, item := range m.doc.Blocks() {
+		switch block := item.(type) {
+		case *MainACPTurnBlock:
+			rows := block.Render(BlockRenderContext{Width: 80, TermWidth: 80, Theme: m.theme})
+			plain := make([]string, 0, len(rows))
+			for _, row := range rows {
+				plain = append(plain, row.Plain)
+			}
+			renderedMain = strings.Join(plain, "\n")
+		case *TranscriptBlock:
+			if strings.Contains(block.Raw, "User interrupt") {
+				sawInterruptNote = true
+			}
+			if strings.Contains(block.Raw, "context canceled") || strings.HasPrefix(strings.TrimSpace(block.Raw), "error:") {
+				sawErrorText = true
+			}
+		}
+	}
+	if !strings.Contains(renderedMain, "⊘ interrupted") {
+		t.Fatalf("main turn render = %q, want interrupted status", renderedMain)
+	}
+	if strings.Contains(renderedMain, "✗ failed") {
+		t.Fatalf("main turn render = %q, should not show failed", renderedMain)
+	}
+	if !sawInterruptNote {
+		t.Fatalf("doc blocks = %#v, want non-persistent User interrupt note", m.doc.Blocks())
+	}
+	if sawErrorText {
+		t.Fatalf("doc blocks = %#v, should not render context canceled as error", m.doc.Blocks())
 	}
 }
 

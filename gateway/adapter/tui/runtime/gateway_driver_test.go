@@ -353,6 +353,76 @@ func TestGatewayDriverCompletesAndPersistsModelReasoningLevel(t *testing.T) {
 	if got := strings.TrimSpace(state[appgateway.StateCurrentReasoningEffort].(string)); got != "high" {
 		t.Fatalf("reasoning state = %q, want high", got)
 	}
+	cfg, ok := stack.ModelConfig("deepseek/deepseek-v4-pro")
+	if !ok {
+		t.Fatal("expected deepseek model config")
+	}
+	if got := strings.TrimSpace(cfg.ReasoningEffort); got != "high" {
+		t.Fatalf("config reasoning effort = %q, want high", got)
+	}
+}
+
+func TestGatewayDriverConnectPersistsDeepSeekModelDefaults(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	stack, err := gatewayapp.NewLocalStack(gatewayapp.Config{
+		AppName:        "caelis",
+		UserID:         "connect-defaults-test",
+		StoreDir:       root,
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		Assembly:       sdkplugin.ResolvedAssembly{},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	driver, err := NewGatewayDriver(ctx, stack, "connect-defaults-session", "surface", "")
+	if err != nil {
+		t.Fatalf("NewGatewayDriver() error = %v", err)
+	}
+
+	status, err := driver.Connect(ctx, ConnectConfig{
+		Provider: "deepseek",
+		Model:    "deepseek-v4-flash",
+		APIKey:   "secret",
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if got := status.ContextWindowTokens; got != 1048576 {
+		t.Fatalf("status.ContextWindowTokens = %d, want 1048576", got)
+	}
+	if got := strings.TrimSpace(status.ReasoningEffort); got != "high" {
+		t.Fatalf("status.ReasoningEffort = %q, want high", got)
+	}
+
+	doc, err := gatewayapp.LoadAppConfig(root)
+	if err != nil {
+		t.Fatalf("LoadAppConfig() error = %v", err)
+	}
+	var cfg gatewayapp.ModelConfig
+	for _, item := range doc.Models.Configs {
+		if strings.EqualFold(item.Alias, "deepseek/deepseek-v4-flash") {
+			cfg = item
+			break
+		}
+	}
+	if cfg.Alias == "" {
+		t.Fatalf("persisted configs = %#v, want deepseek/deepseek-v4-flash", doc.Models.Configs)
+	}
+	if cfg.ContextWindowTokens != 1048576 {
+		t.Fatalf("persisted context window = %d, want 1048576", cfg.ContextWindowTokens)
+	}
+	if cfg.MaxOutputTok != 32768 {
+		t.Fatalf("persisted max output = %d, want 32768", cfg.MaxOutputTok)
+	}
+	if cfg.ReasoningEffort != "high" || cfg.DefaultReasoningEffort != "high" {
+		t.Fatalf("persisted reasoning effort/default = %q/%q, want high/high", cfg.ReasoningEffort, cfg.DefaultReasoningEffort)
+	}
+	if !equalStrings(cfg.ReasoningLevels, []string{"none", "high", "max"}) {
+		t.Fatalf("persisted reasoning levels = %#v, want none/high/max", cfg.ReasoningLevels)
+	}
 }
 
 func TestGatewayDriverCodeFreeModelHasNoReasoningLevels(t *testing.T) {

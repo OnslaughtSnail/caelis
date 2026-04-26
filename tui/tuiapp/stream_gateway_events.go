@@ -1,6 +1,8 @@
 package tuiapp
 
 import (
+	"context"
+	"errors"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -11,10 +13,25 @@ import (
 
 func (m *Model) handleGatewayEventEnvelope(env appgateway.EventEnvelope) (tea.Model, tea.Cmd) {
 	if env.Err != nil {
+		if isUserInterruptError(env.Err) {
+			model, cmd := m.handleTaskResultMsg(TaskResultMsg{Err: env.Err, Interrupted: true})
+			return model, cmd
+		}
 		model, cmd := m.handleTaskResultMsg(TaskResultMsg{Err: env.Err})
 		return model, cmd
 	}
 	return m.handleTranscriptEventsMsg(TranscriptEventsMsg{Events: ProjectGatewayEventToTranscriptEvents(env.Event)})
+}
+
+func isUserInterruptError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	return text == "context canceled" || strings.Contains(text, "context canceled")
 }
 
 func (m *Model) appendGatewayTranscript(text string) (tea.Model, tea.Cmd) {

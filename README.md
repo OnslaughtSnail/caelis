@@ -109,7 +109,7 @@ Current built-in slash commands:
 - `/status`
 - `/new`
 - `/resume`
-- `/compact [note]`
+- `/compact`
 - `/exit`
 - `/quit`
 

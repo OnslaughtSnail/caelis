@@ -647,6 +647,16 @@ func (s *Stack) UseModel(ctx context.Context, ref sdksession.SessionRef, alias s
 		}
 	}
 	if s.lookup != nil {
+		if reasoning != "" {
+			cfg, ok := s.lookup.Config(alias)
+			if !ok {
+				return fmt.Errorf("gatewayapp: unknown model alias %q", alias)
+			}
+			cfg.ReasoningEffort = reasoning
+			if _, err := s.lookup.Upsert(cfg); err != nil {
+				return err
+			}
+		}
 		s.lookup.SetDefault(alias)
 		if resolver := s.Gateway.Resolver(); resolver != nil {
 			resolver.SetModelLookup(s.lookup, s.lookup.DefaultAlias())
@@ -973,30 +983,39 @@ func (s *Stack) WaitSubagentTask(
 	return engine.WaitSubagentTask(ctx, ref, taskID, yield)
 }
 
-// CompactSession appends a compaction event to the given session. The note is
-// stored as the compact summary text.
-func (s *Stack) CompactSession(ctx context.Context, ref sdksession.SessionRef, note string) error {
-	if s == nil || s.Sessions == nil {
-		return fmt.Errorf("gatewayapp: sessions service unavailable")
+// CompactSession forces a model-backed checkpoint compaction for the given
+// session.
+func (s *Stack) CompactSession(ctx context.Context, ref sdksession.SessionRef) error {
+	if s == nil {
+		return fmt.Errorf("gatewayapp: stack is unavailable")
 	}
-	note = strings.TrimSpace(note)
-	if note == "" {
-		note = "manual compaction"
+	s.mu.RLock()
+	engine := s.engine
+	gateway := s.Gateway
+	s.mu.RUnlock()
+	if engine == nil {
+		return fmt.Errorf("gatewayapp: runtime is unavailable")
 	}
-	compactEvent := &sdksession.Event{
-		Type:       sdksession.EventTypeCompact,
-		Visibility: sdksession.VisibilityCanonical,
-		Time:       time.Now(),
-		Text:       note,
-		Meta: map[string]any{
-			"trigger": "manual",
-		},
+	if gateway == nil || gateway.Resolver() == nil {
+		return fmt.Errorf("gatewayapp: resolver is unavailable")
 	}
-	_, err := s.Sessions.AppendEvent(ctx, sdksession.AppendEventRequest{
+	resolved, err := gateway.Resolver().ResolveTurn(ctx, appgateway.TurnIntent{SessionRef: ref})
+	if err != nil {
+		return err
+	}
+	_, err = engine.Compact(ctx, localruntime.CompactRequest{
 		SessionRef: ref,
-		Event:      compactEvent,
+		Model:      resolved.RunRequest.AgentSpec.Model,
+		Trigger:    "manual",
 	})
 	return err
+}
+
+func defaultCompactionConfig(contextWindow int) localruntime.CompactionConfig {
+	return localruntime.CompactionConfig{
+		Enabled:                    true,
+		DefaultContextWindowTokens: contextWindow,
+	}
 }
 
 type modelLookup struct {
@@ -1368,6 +1387,7 @@ func (s *Stack) rebuildGateway() error {
 		Sessions:          s.Sessions,
 		AgentFactory:      chat.Factory{},
 		DefaultPolicyMode: policyMode(runtimeCfg.PermissionMode),
+		Compaction:        defaultCompactionConfig(runtimeCfg.ContextWindow),
 		Assembly:          runtimeCfg.Assembly,
 		TaskStore:         s.taskStore,
 	})

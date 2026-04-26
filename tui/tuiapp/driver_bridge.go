@@ -596,9 +596,12 @@ func slashSandbox(driver tuiadapterruntime.Driver, send func(tea.Msg), args stri
 }
 
 func slashCompact(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	if strings.TrimSpace(args) != "" {
+		sendNotice(send, "usage: /compact")
+		return TaskResultMsg{SuppressTurnDivider: true}
+	}
 	ctx := context.Background()
-	note := strings.TrimSpace(args)
-	if err := driver.Compact(ctx, note); err != nil {
+	if err := driver.Compact(ctx); err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("compact", err)}
 	}
 	sendNotice(send, "compaction completed")

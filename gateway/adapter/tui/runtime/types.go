@@ -136,6 +136,7 @@ type ConnectConfig struct {
 	AuthType            string
 	ContextWindowTokens int
 	MaxOutputTokens     int
+	ReasoningEffort     string
 	ReasoningLevels     []string
 }
 
@@ -163,7 +164,7 @@ type Driver interface {
 	ResumeSession(context.Context, string) (sdksession.Session, error)
 	ListSessions(context.Context, int) ([]ResumeCandidate, error)
 	ReplayEvents(context.Context) ([]appgateway.EventEnvelope, error)
-	Compact(context.Context, string) error
+	Compact(context.Context) error
 
 	Connect(context.Context, ConnectConfig) (StatusSnapshot, error)
 	UseModel(context.Context, string, ...string) (StatusSnapshot, error)

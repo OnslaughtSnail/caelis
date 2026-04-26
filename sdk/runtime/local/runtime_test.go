@@ -1082,6 +1082,92 @@ func TestRuntimeCompactionUsesModelGeneratedCheckpoint(t *testing.T) {
 	}
 }
 
+func TestRuntimeManualCompactUsesStructuredReplacementHistory(t *testing.T) {
+	t.Parallel()
+
+	sessions, session := newTestSessionService(t, "sess-compact-manual")
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Project objective: make manual compact preserve context instead of truncating history."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack objective"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Current blocker: bare compact events cause prompt replay to drop all prior context."))
+	appendTestEvent(t, sessions, session.SessionRef, assistantEvent("ack blocker"))
+	appendTestEvent(t, sessions, session.SessionRef, userTextEvent("Next action: route manual compact through the model-backed compactor."))
+
+	model := &contextProbeModel{
+		t: t,
+		wantCompactionInputContains: []string{
+			"make manual compact preserve context",
+		},
+		compactBody: `CONTEXT CHECKPOINT
+Objective: make manual compact preserve context instead of truncating history
+Blocker: bare compact events cause prompt replay to drop all prior context
+Next action: route manual compact through the model-backed compactor
+
+## Current Progress
+- manual compact is being aligned with auto compact
+
+## Open Questions / Risks
+- compact events without replacement history must not be emitted`,
+	}
+	runtime, err := New(Config{
+		Sessions: sessions,
+		AgentFactory: chat.Factory{
+			SystemPrompt: "Be terse.",
+		},
+		Compaction: CompactionConfig{
+			RetainedUserTokenLimit: 24,
+			SegmentTokenBudget:     80,
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	result, err := runtime.Compact(context.Background(), CompactRequest{
+		SessionRef: session.SessionRef,
+		Model:      model,
+		Trigger:    "manual",
+	})
+	if err != nil {
+		t.Fatalf("Compact() error = %v", err)
+	}
+	if !result.Compacted {
+		t.Fatal("Compact() did not compact")
+	}
+	if model.compactionCalls != 1 {
+		t.Fatalf("compactionCalls = %d, want 1", model.compactionCalls)
+	}
+	if model.normalCalls != 0 {
+		t.Fatalf("normalCalls = %d, want 0", model.normalCalls)
+	}
+	loaded, err := sessions.LoadSession(context.Background(), sdksession.LoadSessionRequest{
+		SessionRef: session.SessionRef,
+	})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	compactEvent, ok := latestCompactEventForTest(loaded.Events)
+	if !ok {
+		t.Fatal("expected compact event")
+	}
+	data, ok := sdkcompact.CompactEventDataFromEvent(compactEvent)
+	if !ok {
+		t.Fatalf("compact event missing structured metadata: %+v", compactEvent.Meta)
+	}
+	if data.Trigger != "manual" {
+		t.Fatalf("compact trigger = %q, want manual", data.Trigger)
+	}
+	if len(data.ReplacementHistory) == 0 {
+		t.Fatal("manual compact replacement history is empty")
+	}
+	promptEvents := sdkcompact.PromptEventsFromLatestCompact(loaded.Events)
+	if len(promptEvents) == 0 {
+		t.Fatal("prompt events empty after manual compact")
+	}
+	if strings.Contains(strings.Join(eventTextsForTest(promptEvents), "\n"), "Project objective: make manual compact preserve context instead of truncating history.") {
+		t.Fatalf("prompt events still replay raw pre-compact history: %+v", promptEvents)
+	}
+}
+
 func TestRuntimeCompactionReplaysFromEventsAfterReload(t *testing.T) {
 	t.Parallel()
 
@@ -3313,6 +3399,25 @@ func latestCompactEventForTest(events []*sdksession.Event) (*sdksession.Event, b
 		}
 	}
 	return nil, false
+}
+
+func eventTextsForTest(events []*sdksession.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, event := range events {
+		if event == nil {
+			continue
+		}
+		if text := strings.TrimSpace(event.Text); text != "" {
+			out = append(out, text)
+			continue
+		}
+		if event.Message != nil {
+			if text := strings.TrimSpace(event.Message.TextContent()); text != "" {
+				out = append(out, text)
+			}
+		}
+	}
+	return out
 }
 
 type denyWriteRuntimeModel struct{ calls int }

@@ -42,7 +42,7 @@ func TestSlashHelpListsMinimalCoreCommands(t *testing.T) {
 	if !ok {
 		t.Fatalf("slashHelp() msg = %#v, want LogChunkMsg", msgs[0])
 	}
-	for _, want := range []string{"/agent list | /agent add <builtin> | /agent use <agent|local> | /agent remove <agent>", "/connect", "/model use <alias> | /model del <alias>", "/compact [note]", "/resume [session-id]"} {
+	for _, want := range []string{"/agent list | /agent add <builtin> | /agent use <agent|local> | /agent remove <agent>", "/connect", "/model use <alias> | /model del <alias>", "/compact", "/resume [session-id]"} {
 		if !strings.Contains(log.Chunk, want) {
 			t.Fatalf("slashHelp() chunk = %q, want substring %q", log.Chunk, want)
 		}
@@ -566,6 +566,25 @@ func TestFriendlyCommandErrorMakesResumeActionable(t *testing.T) {
 	}
 }
 
+func TestSlashCompactRejectsArguments(t *testing.T) {
+	driver := &bridgeTestDriver{}
+	var msgs []tea.Msg
+	result := slashCompact(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "note")
+	if result.Err != nil {
+		t.Fatalf("slashCompact() error = %v", result.Err)
+	}
+	if driver.compactCalls != 0 {
+		t.Fatalf("compactCalls = %d, want 0", driver.compactCalls)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("slashCompact() emitted %d messages, want 1", len(msgs))
+	}
+	log, ok := msgs[0].(LogChunkMsg)
+	if !ok || !strings.Contains(log.Chunk, "usage: /compact") {
+		t.Fatalf("slashCompact() msg = %#v, want usage", msgs[0])
+	}
+}
+
 type bridgeTestDriver struct {
 	status                       tuiadapterruntime.StatusSnapshot
 	connectStatus                tuiadapterruntime.StatusSnapshot
@@ -582,6 +601,7 @@ type bridgeTestDriver struct {
 	removeAgentCalls             int
 	handoffAgentCalls            int
 	askAgentCalls                int
+	compactCalls                 int
 	lastConnect                  tuiadapterruntime.ConnectConfig
 	lastModelAlias               string
 	lastReasoningEffort          string
@@ -655,7 +675,7 @@ func (d *bridgeSubmitDriver) ListSessions(context.Context, int) ([]tuiadapterrun
 func (d *bridgeSubmitDriver) ReplayEvents(context.Context) ([]appgateway.EventEnvelope, error) {
 	return nil, nil
 }
-func (d *bridgeSubmitDriver) Compact(context.Context, string) error { return nil }
+func (d *bridgeSubmitDriver) Compact(context.Context) error { return nil }
 func (d *bridgeSubmitDriver) Connect(context.Context, tuiadapterruntime.ConnectConfig) (tuiadapterruntime.StatusSnapshot, error) {
 	return tuiadapterruntime.StatusSnapshot{}, nil
 }
@@ -737,7 +757,10 @@ func (d *bridgeTestDriver) ListSessions(context.Context, int) ([]tuiadapterrunti
 func (d *bridgeTestDriver) ReplayEvents(context.Context) ([]appgateway.EventEnvelope, error) {
 	return d.replay, nil
 }
-func (d *bridgeTestDriver) Compact(context.Context, string) error { return nil }
+func (d *bridgeTestDriver) Compact(context.Context) error {
+	d.compactCalls++
+	return nil
+}
 func (d *bridgeTestDriver) Connect(_ context.Context, cfg tuiadapterruntime.ConnectConfig) (tuiadapterruntime.StatusSnapshot, error) {
 	d.connectCalls++
 	d.lastConnect = cfg

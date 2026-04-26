@@ -90,6 +90,25 @@ func (c *codexStyleCompactor) Prepare(ctx context.Context, req sdkcompact.Reques
 	return compacted, nil
 }
 
+func (c *codexStyleCompactor) Force(ctx context.Context, req sdkcompact.Request, trigger string) (sdkcompact.Result, error) {
+	promptEvents := sdkcompact.PromptEventsFromLatestCompact(req.Events)
+	result := sdkcompact.Result{
+		PromptEvents: promptEvents,
+		Usage:        c.snapshotUsage(req, promptEventsWithPending(promptEvents, req.PendingEvents)),
+	}
+	if compactableEventCount(req.Events) == 0 {
+		return result, nil
+	}
+	if req.Model == nil {
+		return sdkcompact.Result{}, errors.New("sdk/runtime/local: compact model is required")
+	}
+	trigger = strings.TrimSpace(trigger)
+	if trigger == "" {
+		trigger = "manual"
+	}
+	return c.compact(ctx, req, trigger)
+}
+
 func (c *codexStyleCompactor) CompactOnOverflow(ctx context.Context, req sdkcompact.Request, cause error) (sdkcompact.Result, error) {
 	if !c.cfg.Enabled || req.Model == nil {
 		promptEvents := sdkcompact.PromptEventsFromLatestCompact(req.Events)
@@ -352,6 +371,63 @@ func (r *Runtime) prepareInvocationContext(
 		return sdkcompact.PromptEventsFromLatestCompact(append(events, persisted)), state, nil
 	}
 	return result.PromptEvents, state, nil
+}
+
+type CompactRequest struct {
+	SessionRef sdksession.SessionRef
+	Model      sdkmodel.LLM
+	Trigger    string
+}
+
+type CompactResult struct {
+	Session   sdksession.Session
+	Compacted bool
+	Event     *sdksession.Event
+	Usage     sdkcompact.UsageSnapshot
+}
+
+func (r *Runtime) Compact(ctx context.Context, req CompactRequest) (CompactResult, error) {
+	if r == nil {
+		return CompactResult{}, errors.New("sdk/runtime/local: runtime is unavailable")
+	}
+	ref := sdksession.NormalizeSessionRef(req.SessionRef)
+	session, err := r.sessions.Session(ctx, ref)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	if err := r.recoverRuntimeState(ctx, ref); err != nil {
+		return CompactResult{}, err
+	}
+	events, err := r.sessions.Events(ctx, sdksession.EventsRequest{SessionRef: ref})
+	if err != nil {
+		return CompactResult{}, err
+	}
+	forceCompactor, ok := r.compactor.(sdkcompact.ForceEngine)
+	if !ok {
+		return CompactResult{}, errors.New("sdk/runtime/local: compactor does not support forced compaction")
+	}
+	result, err := forceCompactor.Force(ctx, sdkcompact.Request{
+		Session:    session,
+		SessionRef: ref,
+		Events:     events,
+		Model:      req.Model,
+	}, req.Trigger)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	out := CompactResult{
+		Session:   session,
+		Compacted: result.Compacted,
+		Usage:     result.Usage,
+	}
+	if result.Compacted && result.CompactEvent != nil {
+		persisted, appendErr := r.persistCompactionArtifacts(ctx, session, ref, result)
+		if appendErr != nil {
+			return CompactResult{}, appendErr
+		}
+		out.Event = persisted
+	}
+	return out, nil
 }
 
 func (r *Runtime) updateCompactionUsageFromBatch(_ context.Context, _ sdksession.SessionRef, _ []*sdksession.Event) error {

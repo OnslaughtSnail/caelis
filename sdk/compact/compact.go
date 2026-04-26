@@ -77,6 +77,10 @@ type Engine interface {
 	CompactOnOverflow(context.Context, Request, error) (Result, error)
 }
 
+type ForceEngine interface {
+	Force(context.Context, Request, string) (Result, error)
+}
+
 type CompactEventData struct {
 	Revision            int                 `json:"revision,omitempty"`
 	SummarizedThroughID string              `json:"summarized_through_id,omitempty"`

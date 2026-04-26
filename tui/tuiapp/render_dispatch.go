@@ -460,6 +460,9 @@ func (m *Model) handleTaskResultMsg(msg TaskResultMsg) (tea.Model, tea.Cmd) {
 	m.clearInputAttachments()
 	m.syncTextareaChrome()
 	m.clearInputOverlays()
+	if msg.Interrupted {
+		m.commitLine("note: User interrupt")
+	}
 	if msg.Err != nil && !msg.Interrupted {
 		errText := strings.TrimSpace(msg.Err.Error())
 		isPromptCancel := errText == "cli: input interrupted" ||

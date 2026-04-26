@@ -2,11 +2,20 @@ package gatewayapp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	appgateway "github.com/OnslaughtSnail/caelis/gateway"
+	headlessadapter "github.com/OnslaughtSnail/caelis/gateway/adapter/headless"
+	sdkcompact "github.com/OnslaughtSnail/caelis/sdk/compact"
+	sdkmodel "github.com/OnslaughtSnail/caelis/sdk/model"
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
@@ -333,6 +342,120 @@ func TestNewLocalStackAllowsEmptyInitialModelConfig(t *testing.T) {
 	}
 }
 
+func TestLocalStackDefaultRuntimeAutoCompactionEnabled(t *testing.T) {
+	ctx := context.Background()
+	server := newGatewayAppCompactionOllamaServer(t)
+	stack, err := NewLocalStack(Config{
+		AppName:        "caelis",
+		UserID:         "auto-compact-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		ContextWindow:  64,
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: ModelConfig{
+			Provider: "ollama",
+			API:      sdkproviders.APIOllama,
+			Model:    "compact-test",
+			BaseURL:  server.URL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	session, err := stack.StartSession(ctx, "auto compact session", "surface-auto-compact")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppUserEvent("Project objective: app default auto compact should be enabled in the upper app assembly."))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppAssistantEvent("ack"))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppUserEvent("Current blocker: app assembly previously left compaction disabled unless tests opted in explicitly."))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppAssistantEvent("ack"))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppUserEvent("Next action: verify the default app runtime invokes model-backed compact before the turn."))
+
+	if _, err := headlessadapter.RunOnce(ctx, stack.Gateway, appgateway.BeginTurnRequest{
+		SessionRef: session.SessionRef,
+		Input:      "continue after app auto compact",
+		Surface:    "headless-auto-compact-test",
+	}, headlessadapter.Options{}); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if got := server.compactionCalls.Load(); got == 0 {
+		t.Fatal("expected app default runtime to invoke compaction")
+	}
+	loaded, err := stack.Sessions.LoadSession(ctx, sdksession.LoadSessionRequest{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	compactEvent, ok := latestGatewayAppCompactEvent(loaded.Events)
+	if !ok {
+		t.Fatal("missing compact event after auto compact")
+	}
+	data, ok := sdkcompact.CompactEventDataFromEvent(compactEvent)
+	if !ok || len(data.ReplacementHistory) == 0 {
+		t.Fatalf("auto compact event missing replacement history: meta=%+v", compactEvent.Meta)
+	}
+}
+
+func TestLocalStackManualCompactUsesStructuredRuntimeCompaction(t *testing.T) {
+	ctx := context.Background()
+	server := newGatewayAppCompactionOllamaServer(t)
+	stack, err := NewLocalStack(Config{
+		AppName:        "caelis",
+		UserID:         "manual-compact-test",
+		StoreDir:       t.TempDir(),
+		WorkspaceKey:   t.TempDir(),
+		WorkspaceCWD:   t.TempDir(),
+		PermissionMode: "default",
+		ContextWindow:  4096,
+		Assembly:       sdkplugin.ResolvedAssembly{},
+		Model: ModelConfig{
+			Provider: "ollama",
+			API:      sdkproviders.APIOllama,
+			Model:    "compact-test",
+			BaseURL:  server.URL,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewLocalStack() error = %v", err)
+	}
+	session, err := stack.StartSession(ctx, "manual compact session", "surface-manual-compact")
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppUserEvent("Project objective: manual compact must preserve context with replacement history."))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppAssistantEvent("ack"))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppUserEvent("Current blocker: a bare manual compact event truncates all prior prompt-visible history."))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppAssistantEvent("ack"))
+	appendGatewayAppEvent(t, stack, session.SessionRef, gatewayAppUserEvent("Next action: force the runtime compactor with trigger manual."))
+
+	if err := stack.CompactSession(ctx, session.SessionRef); err != nil {
+		t.Fatalf("CompactSession() error = %v", err)
+	}
+	if got := server.compactionCalls.Load(); got != 1 {
+		t.Fatalf("compactionCalls = %d, want 1", got)
+	}
+	loaded, err := stack.Sessions.LoadSession(ctx, sdksession.LoadSessionRequest{SessionRef: session.SessionRef})
+	if err != nil {
+		t.Fatalf("LoadSession() error = %v", err)
+	}
+	compactEvent, ok := latestGatewayAppCompactEvent(loaded.Events)
+	if !ok {
+		t.Fatal("missing compact event after manual compact")
+	}
+	data, ok := sdkcompact.CompactEventDataFromEvent(compactEvent)
+	if !ok {
+		t.Fatalf("manual compact event missing structured metadata: meta=%+v", compactEvent.Meta)
+	}
+	if data.Trigger != "manual" {
+		t.Fatalf("compact trigger = %q, want manual", data.Trigger)
+	}
+	if len(data.ReplacementHistory) == 0 {
+		t.Fatal("manual compact replacement history is empty")
+	}
+}
+
 func TestNewLocalStackInfersCodeFreeAPIFromProvider(t *testing.T) {
 	stack, err := NewLocalStack(Config{
 		AppName:        "caelis",
@@ -396,6 +519,94 @@ func newLocalStateTestStack(t *testing.T) (*Stack, sdksession.Session) {
 		t.Fatalf("StartSession() error = %v", err)
 	}
 	return stack, session
+}
+
+type gatewayAppCompactionOllamaServer struct {
+	*httptest.Server
+	compactionCalls atomic.Int64
+	normalCalls     atomic.Int64
+}
+
+func newGatewayAppCompactionOllamaServer(t *testing.T) *gatewayAppCompactionOllamaServer {
+	t.Helper()
+	out := &gatewayAppCompactionOllamaServer{}
+	out.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		joined := gatewayAppOllamaMessages(payload.Messages)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(joined, "CONTEXT CHECKPOINT COMPACTION") {
+			out.compactionCalls.Add(1)
+			fmt.Fprint(w, `{"model":"compact-test","message":{"role":"assistant","content":"CONTEXT CHECKPOINT\nObjective: app compact preserves context\nBlocker: bare compact events truncate prompt-visible history\nNext action: continue from structured replacement history\n\n## Current Progress\n- app runtime used model-backed compaction"},"done":true,"prompt_eval_count":64,"eval_count":12}`)
+			return
+		}
+		out.normalCalls.Add(1)
+		fmt.Fprint(w, `{"model":"compact-test","message":{"role":"assistant","content":"app turn ok"},"done":true,"prompt_eval_count":32,"eval_count":8}`)
+	}))
+	t.Cleanup(out.Close)
+	return out
+}
+
+func gatewayAppOllamaMessages(messages []struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}) string {
+	parts := make([]string, 0, len(messages))
+	for _, message := range messages {
+		parts = append(parts, strings.TrimSpace(message.Role)+": "+strings.TrimSpace(message.Content))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func appendGatewayAppEvent(t *testing.T, stack *Stack, ref sdksession.SessionRef, event *sdksession.Event) {
+	t.Helper()
+	if _, err := stack.Sessions.AppendEvent(context.Background(), sdksession.AppendEventRequest{
+		SessionRef: ref,
+		Event:      event,
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+}
+
+func gatewayAppUserEvent(text string) *sdksession.Event {
+	message := sdkmodel.NewTextMessage(sdkmodel.RoleUser, text)
+	return &sdksession.Event{
+		Type:       sdksession.EventTypeUser,
+		Visibility: sdksession.VisibilityCanonical,
+		Message:    &message,
+		Text:       strings.TrimSpace(text),
+	}
+}
+
+func gatewayAppAssistantEvent(text string) *sdksession.Event {
+	message := sdkmodel.NewTextMessage(sdkmodel.RoleAssistant, text)
+	return &sdksession.Event{
+		Type:       sdksession.EventTypeAssistant,
+		Visibility: sdksession.VisibilityCanonical,
+		Message:    &message,
+		Text:       strings.TrimSpace(text),
+	}
+}
+
+func latestGatewayAppCompactEvent(events []*sdksession.Event) (*sdksession.Event, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i] != nil && events[i].Type == sdksession.EventTypeCompact {
+			return events[i], true
+		}
+	}
+	return nil, false
 }
 
 func containsStringFold(values []string, want string) bool {

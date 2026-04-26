@@ -37,9 +37,10 @@ type connectModelChoice struct {
 }
 
 type connectModelDefaults struct {
-	ContextWindow   int
-	MaxOutput       int
-	ReasoningLevels []string
+	ContextWindow          int
+	MaxOutput              int
+	ReasoningLevels        []string
+	DefaultReasoningEffort string
 }
 
 type connectWizardPayload struct {
@@ -252,21 +253,11 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 	if baseCaps.MaxOutputTokens <= 0 {
 		baseCaps.MaxOutputTokens = baseCaps.DefaultMaxOutputTokens
 	}
-	if overlayCaps, ok := modelcatalog.LookupOverlayModelCapabilities(tpl.provider, payload.Model); ok {
-		if overlayCaps.ContextWindowTokens > 0 {
-			baseCaps.ContextWindowTokens = overlayCaps.ContextWindowTokens
-		}
-		if overlayCaps.DefaultMaxOutputTokens > 0 {
-			baseCaps.DefaultMaxOutputTokens = overlayCaps.DefaultMaxOutputTokens
-		}
-		if len(normalizeReasoningLevels(overlayCaps.ReasoningEfforts)) > 0 {
-			baseCaps.ReasoningEfforts = normalizeReasoningLevels(overlayCaps.ReasoningEfforts)
-		}
-	}
 	reasoningLevels := normalizeReasoningLevels(modelcatalog.ReasoningLevelsForModel(tpl.provider, payload.Model))
 	if len(reasoningLevels) == 0 {
 		reasoningLevels = normalizeReasoningLevels(baseCaps.ReasoningEfforts)
 	}
+	defaultReasoningEffort := strings.ToLower(strings.TrimSpace(baseCaps.DefaultReasoningEffort))
 	contextWindow := baseCaps.ContextWindowTokens
 	if contextWindow <= 0 {
 		contextWindow = defaultContextWindowForTemplate(tpl)
@@ -279,9 +270,10 @@ func connectDefaultsForPayload(ctx context.Context, payload connectWizardPayload
 		maxOutput = defaultMaxOutputForTemplate(tpl)
 	}
 	return connectModelDefaults{
-		ContextWindow:   contextWindow,
-		MaxOutput:       maxOutput,
-		ReasoningLevels: reasoningLevels,
+		ContextWindow:          contextWindow,
+		MaxOutput:              maxOutput,
+		ReasoningLevels:        reasoningLevels,
+		DefaultReasoningEffort: defaultReasoningEffort,
 	}, nil
 }
 

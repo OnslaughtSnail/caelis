@@ -309,6 +309,12 @@ func (d *GatewayDriver) Status(_ context.Context) (StatusSnapshot, error) {
 				status.SessionID = id
 			}
 		}
+		if status.ReasoningEffort == "" {
+			if cfg, ok := d.stack.ModelConfig(rawModelText); ok {
+				status.ReasoningEffort = firstNonEmpty(cfg.ReasoningEffort, cfg.DefaultReasoningEffort)
+				status.Model = formatReasoningModelDisplay(rawModelText, status.ReasoningEffort)
+			}
+		}
 		if ok {
 			if usage, err := d.stack.SessionUsageSnapshot(context.Background(), session.SessionRef, rawModelText); err == nil {
 				status.TotalTokens = usage.TotalTokens
@@ -443,12 +449,12 @@ func (d *GatewayDriver) ReplayEvents(ctx context.Context) ([]appgateway.EventEnv
 	return result.Events, nil
 }
 
-func (d *GatewayDriver) Compact(ctx context.Context, note string) error {
+func (d *GatewayDriver) Compact(ctx context.Context) error {
 	session, ok := d.currentSession()
 	if !ok {
 		return fmt.Errorf("tui/runtime: no active session")
 	}
-	return d.stack.CompactSession(ctx, session.SessionRef, note)
+	return d.stack.CompactSession(ctx, session.SessionRef)
 }
 
 func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusSnapshot, error) {
@@ -478,6 +484,9 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 		if len(cfg.ReasoningLevels) == 0 {
 			cfg.ReasoningLevels = defaults.ReasoningLevels
 		}
+		if cfg.ReasoningEffort == "" {
+			cfg.ReasoningEffort = defaults.DefaultReasoningEffort
+		}
 	}
 	baseURL := strings.TrimSpace(cfg.BaseURL)
 	if baseURL == "" {
@@ -501,10 +510,7 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 		authType = sdkproviders.AuthNone
 	}
 	reasoningLevels := normalizeReasoningLevels(cfg.ReasoningLevels)
-	defaultReasoningEffort := ""
-	if len(reasoningLevels) > 0 {
-		defaultReasoningEffort = reasoningLevels[0]
-	}
+	defaultReasoningEffort := strings.TrimSpace(cfg.ReasoningEffort)
 	alias, err := d.stack.Connect(gatewayapp.ModelConfig{
 		Provider:               strings.TrimSpace(cfg.Provider),
 		API:                    tpl.api,
@@ -515,6 +521,7 @@ func (d *GatewayDriver) Connect(ctx context.Context, cfg ConnectConfig) (StatusS
 		AuthType:               authType,
 		ContextWindowTokens:    cfg.ContextWindowTokens,
 		DefaultReasoningEffort: defaultReasoningEffort,
+		ReasoningEffort:        defaultReasoningEffort,
 		ReasoningLevels:        reasoningLevels,
 		MaxOutputTok:           cfg.MaxOutputTokens,
 		Timeout:                timeout,
