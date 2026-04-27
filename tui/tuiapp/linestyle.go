@@ -16,6 +16,12 @@ type inlineStyleState struct {
 }
 
 func renderInlineMarkdown(text string, base lipgloss.Style, theme tuikit.Theme) string {
+	if text == "" {
+		return ""
+	}
+	if !hasInlineMarkdownMarkers(text) {
+		return renderInlineText(text, inlineStyleState{}, base, theme)
+	}
 	return renderInlineMarkdownWithState(text, base, theme, inlineStyleState{})
 }
 
@@ -102,6 +108,10 @@ func renderInlineMarkdownWithState(text string, base lipgloss.Style, theme tuiki
 		}
 	}
 	return out.String()
+}
+
+func hasInlineMarkdownMarkers(text string) bool {
+	return strings.ContainsAny(text, "`*_~")
 }
 
 func stripInlineMarkdown(text string) string {

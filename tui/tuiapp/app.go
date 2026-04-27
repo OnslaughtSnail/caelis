@@ -123,6 +123,7 @@ func NewModel(cfg Config) *Model {
 	}
 
 	if cfg.RefreshStatus != nil {
+		m.observeDriverStatusCall()
 		modelText, contextText := cfg.RefreshStatus()
 		m.statusModel = normalizeStatusModel(modelText)
 		m.statusContext = strings.TrimSpace(contextText)
@@ -360,6 +361,9 @@ func (m *Model) applyTheme(theme tuikit.Theme) {
 		return
 	}
 	m.theme = theme
+	m.themeCacheKey = themeRenderCacheKey(theme)
+	m.runningTickerStyles = nil
+	m.runningTickerThemeKey = ""
 	clearGlamourCache()
 	configureHelpStyles(&m.help, theme)
 	m.applyPaletteTheme(theme)

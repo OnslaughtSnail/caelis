@@ -335,6 +335,15 @@ func (m *Model) shouldThrottleRunningAnimation() bool {
 	return m.shouldDeferStreamViewportSync()
 }
 
+func (m *Model) shouldRenderStaticRunningHint() bool {
+	if m == nil {
+		return true
+	}
+	return m.noAnimation ||
+		m.shouldThrottleRunningAnimation() ||
+		m.streamPlayback.LastFrameRenderCost >= runningTickerStaticFrameCostThreshold
+}
+
 func (m *Model) scheduleSpinnerTick() tea.Cmd {
 	if m == nil || !m.running || m.spinnerTickScheduled {
 		return nil
@@ -356,11 +365,38 @@ func (m *Model) buildRunningHintText() string {
 		frame = "⠋"
 	}
 	if len(runningCarouselLines) > 0 {
-		text := m.renderRunningTickerText(runningCarouselLines[m.runningTip%len(runningCarouselLines)])
+		rawText := runningCarouselLines[m.runningTip%len(runningCarouselLines)]
+		text := ""
+		if m.shouldRenderStaticRunningHint() {
+			m.diag.RunningTickerStaticRenders++
+			text = m.theme.HelpHintTextStyle().Render(strings.TrimSpace(rawText))
+		} else {
+			text = m.renderRunningTickerText(rawText)
+		}
 		prefix := m.theme.SpinnerStyle().Render(frame)
 		return prefix + " " + text
 	}
 	return m.theme.SpinnerStyle().Render(frame)
+}
+
+func (m *Model) runningTickerStyleSet() []lipgloss.Style {
+	if m == nil {
+		return nil
+	}
+	themeKey := m.cachedThemeRenderKey()
+	if len(m.runningTickerStyles) == 5 && m.runningTickerThemeKey == themeKey {
+		return m.runningTickerStyles
+	}
+	m.diag.RunningTickerStyleCacheMisses++
+	m.runningTickerThemeKey = themeKey
+	m.runningTickerStyles = []lipgloss.Style{
+		m.theme.HelpHintTextStyle(),
+		lipgloss.NewStyle().Foreground(m.theme.TextSecondary),
+		lipgloss.NewStyle().Foreground(m.theme.Info),
+		lipgloss.NewStyle().Foreground(m.theme.SpinnerFg),
+		lipgloss.NewStyle().Foreground(m.theme.Focus),
+	}
+	return m.runningTickerStyles
 }
 
 func (m *Model) renderRunningTickerText(text string) string {
@@ -375,13 +411,11 @@ func (m *Model) renderRunningTickerText(text string) string {
 	totalWidth := maxInt(1, displayColumns(text))
 	pathWidth := float64(totalWidth) + (runningLightLead * 2)
 	head := math.Mod(float64(m.runningTick)*runningLightSpeed, pathWidth) - runningLightLead
-	styles := []lipgloss.Style{
-		m.theme.HelpHintTextStyle(),
-		lipgloss.NewStyle().Foreground(m.theme.TextSecondary),
-		lipgloss.NewStyle().Foreground(m.theme.Info),
-		lipgloss.NewStyle().Foreground(m.theme.SpinnerFg),
-		lipgloss.NewStyle().Foreground(m.theme.Focus),
+	styles := m.runningTickerStyleSet()
+	if len(styles) < 5 {
+		return text
 	}
+	m.diag.RunningTickerAnimatedRenders++
 
 	var out strings.Builder
 	column := 0
@@ -685,7 +719,7 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 	if !m.shouldShowViewportScrollbar(time.Now()) {
 		return vpView
 	}
-	total := m.viewport.TotalLineCount()
+	total := len(m.viewportStyledLines)
 	visible := maxInt(1, m.viewport.Height())
 	if total <= visible {
 		return vpView
@@ -694,7 +728,7 @@ func (m *Model) renderViewportScrollbar(vpView string) string {
 	if len(lines) == 0 {
 		return vpView
 	}
-	return strings.Join(addScrollbar(lines, m.viewport.Width(), visible, m.viewport.YOffset(), total, m.theme, true), "\n")
+	return strings.Join(addScrollbar(lines, m.viewport.Width(), visible, m.viewportVisibleOffset(), total, m.theme, true), "\n")
 }
 
 func (m *Model) viewportViewCacheKey(showScrollbar bool) string {
@@ -707,7 +741,8 @@ func (m *Model) viewportViewCacheKey(showScrollbar bool) string {
 		strconv.Itoa(m.viewport.Width()),
 		strconv.Itoa(m.viewport.Height()),
 		strconv.Itoa(m.viewport.YOffset()),
-		strconv.Itoa(m.viewport.TotalLineCount()),
+		strconv.Itoa(len(m.viewportStyledLines)),
+		strconv.FormatBool(m.viewportContentStale),
 		strconv.FormatBool(showScrollbar),
 	}, "|")
 }
@@ -723,8 +758,10 @@ func (m *Model) renderViewportView() string {
 	}
 	var vpView string
 	if m.hasSelectionRange() {
-		vpView = strings.TrimRight(m.renderViewportSelectionView(), "\n")
+		vpView = strings.TrimRight(m.renderViewportLinesView(true), "\n")
 		m.diag.SelectionVisibleRenders++
+	} else if m.viewportContentStale {
+		vpView = strings.TrimRight(m.renderViewportLinesView(false), "\n")
 	} else {
 		vpView = strings.TrimRight(m.viewport.View(), "\n")
 	}
@@ -737,10 +774,14 @@ func (m *Model) renderViewportView() string {
 }
 
 func (m *Model) renderViewportSelectionView() string {
+	return m.renderViewportLinesView(true)
+}
+
+func (m *Model) renderViewportLinesView(applySelection bool) string {
 	if m == nil || len(m.viewportStyledLines) == 0 || m.viewport.Height() <= 0 {
 		return m.viewport.View()
 	}
-	offset := maxInt(0, m.viewport.YOffset())
+	offset := m.viewportVisibleOffset()
 	if offset >= len(m.viewportStyledLines) {
 		offset = maxInt(0, len(m.viewportStyledLines)-1)
 	}
@@ -750,22 +791,51 @@ func (m *Model) renderViewportSelectionView() string {
 	}
 	styled := append([]string(nil), m.viewportStyledLines[offset:end]...)
 	plain := m.viewportPlainLines[offset:end]
-	start, finish, ok := normalizedSelectionRange(m.selectionStart, m.selectionEnd, len(m.viewportPlainLines))
-	if ok && len(styled) > 0 && finish.line >= offset && start.line < end {
-		localStart := textSelectionPoint{line: maxInt(start.line, offset) - offset, col: start.col}
-		localFinish := textSelectionPoint{line: minInt(finish.line, end-1) - offset, col: finish.col}
-		if start.line < offset {
-			localStart.col = 0
+	if applySelection {
+		start, finish, ok := normalizedSelectionRange(m.selectionStart, m.selectionEnd, len(m.viewportPlainLines))
+		if ok && len(styled) > 0 && finish.line >= offset && start.line < end {
+			localStart := textSelectionPoint{line: maxInt(start.line, offset) - offset, col: start.col}
+			localFinish := textSelectionPoint{line: minInt(finish.line, end-1) - offset, col: finish.col}
+			if start.line < offset {
+				localStart.col = 0
+			}
+			if finish.line >= end {
+				localFinish.col = displayColumns(plain[len(plain)-1])
+			}
+			styled = renderSelectionOnStyledLines(styled, plain, localStart, localFinish)
 		}
-		if finish.line >= end {
-			localFinish.col = displayColumns(plain[len(plain)-1])
-		}
-		styled = renderSelectionOnStyledLines(styled, plain, localStart, localFinish)
 	}
 	vp := m.viewport
 	vp.SetContentLines(styled)
 	vp.SetYOffset(0)
 	return vp.View()
+}
+
+func (m *Model) viewportVisibleOffset() int {
+	if m == nil {
+		return 0
+	}
+	if m.viewportContentStale && m.isViewportFollowTail() {
+		return m.viewportMaxOffset()
+	}
+	return maxInt(0, m.viewport.YOffset())
+}
+
+func (m *Model) viewportLineCount() int {
+	if m == nil {
+		return 0
+	}
+	if len(m.viewportStyledLines) > 0 || m.viewportContentStale {
+		return len(m.viewportStyledLines)
+	}
+	return m.viewport.TotalLineCount()
+}
+
+func (m *Model) viewportMaxOffset() int {
+	if m == nil {
+		return 0
+	}
+	return maxInt(0, m.viewportLineCount()-maxInt(1, m.viewport.Height()))
 }
 
 func (m *Model) footerRowText() string {

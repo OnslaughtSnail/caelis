@@ -68,10 +68,13 @@ const (
 // ---------------------------------------------------------------------------
 
 type BlockRenderContext struct {
-	Width       int          // viewport content width
-	TermWidth   int          // full terminal width
-	Theme       tuikit.Theme // current theme
-	SpinnerView string       // current spinner frame for animated blocks
+	Width                 int          // viewport content width
+	TermWidth             int          // full terminal width
+	Theme                 tuikit.Theme // current theme
+	ThemeKey              string       // cached theme render key for hot render paths
+	SpinnerView           string       // current spinner frame for animated blocks
+	ObserveGlamourRender  func()
+	ObserveInlineMarkdown func()
 }
 
 // ---------------------------------------------------------------------------

@@ -250,7 +250,7 @@ func (m *Model) syncDirtyViewportRenderEntries(ctx BlockRenderContext) bool {
 }
 
 func viewportRenderContextKey(ctx BlockRenderContext) string {
-	return strconv.Itoa(ctx.Width) + "|" + strconv.Itoa(ctx.TermWidth) + "|" + themeRenderCacheKey(ctx.Theme)
+	return strconv.Itoa(ctx.Width) + "|" + strconv.Itoa(ctx.TermWidth) + "|" + ctx.renderThemeKey()
 }
 
 func (m *Model) viewportRenderEntryIndex(blockID string) int {
@@ -369,7 +369,7 @@ func (m *Model) renderStreamViewportLines(ctx BlockRenderContext) ([]string, []s
 				baseStyle := narrativeBodyStyle(style, m.theme)
 				styledSegs := make([]string, len(segments))
 				for j, seg := range segments {
-					styledSegs[j] = renderInlineMarkdown(seg, baseStyle, m.theme)
+					styledSegs[j] = m.renderInlineMarkdown(seg, baseStyle)
 				}
 				wrappedStyled = strings.Join(styledSegs, "\n")
 				plainParts = normalizeWrappedPlainSegments(segments)
@@ -412,7 +412,7 @@ func newBlockKeyBuilder(kind BlockKind, ctx BlockRenderContext) *blockKeyBuilder
 	b.addString(string(kind))
 	b.addInt(ctx.Width)
 	b.addInt(ctx.TermWidth)
-	b.addString(themeRenderCacheKey(ctx.Theme))
+	b.addString(ctx.renderThemeKey())
 	return b
 }
 

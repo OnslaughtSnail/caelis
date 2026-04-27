@@ -44,6 +44,7 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		wasFollowTail := m.isViewportFollowTail()
+		m.materializeViewportContentIfStale()
 		m.viewport, cmd = m.viewport.Update(msg)
 		m.refreshViewportFollowStateFromOffset()
 		var resumeCmd tea.Cmd
@@ -120,11 +121,7 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 	default:
 		return false, false
 	}
-	ctx := BlockRenderContext{
-		Width:     maxInt(1, m.viewport.Width()),
-		TermWidth: m.width,
-		Theme:     m.theme,
-	}
+	ctx := m.blockRenderContext(maxInt(1, m.viewport.Width()))
 	token := ""
 	if contentLine >= 0 && contentLine < len(m.viewportClickTokens) {
 		token = strings.TrimSpace(m.viewportClickTokens[contentLine])
@@ -507,14 +504,17 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.offscreenViewportDirty || m.viewportSyncPending {
 			m.syncViewportContent()
 		}
+		m.materializeViewportContentIfStale()
 		m.viewport.GotoBottom()
 		return m, tea.Batch(m.touchViewportScrollbar(), m.resumeRunningAnimationIfNeeded())
 	case key.Matches(msg, m.keys.HalfPageUp):
+		m.materializeViewportContentIfStale()
 		m.viewport.HalfPageUp()
 		m.refreshViewportFollowStateFromOffset()
 		return m, m.touchViewportScrollbar()
 	case key.Matches(msg, m.keys.HalfPageDown):
 		wasFollowTail := m.isViewportFollowTail()
+		m.materializeViewportContentIfStale()
 		m.viewport.HalfPageDown()
 		m.refreshViewportFollowStateFromOffset()
 		var resumeCmd tea.Cmd
@@ -526,11 +526,13 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.touchViewportScrollbar(), resumeCmd)
 	case key.Matches(msg, m.keys.PageUp):
+		m.materializeViewportContentIfStale()
 		m.viewport.PageUp()
 		m.refreshViewportFollowStateFromOffset()
 		return m, m.touchViewportScrollbar()
 	case key.Matches(msg, m.keys.PageDown):
 		wasFollowTail := m.isViewportFollowTail()
+		m.materializeViewportContentIfStale()
 		m.viewport.PageDown()
 		m.refreshViewportFollowStateFromOffset()
 		var resumeCmd tea.Cmd

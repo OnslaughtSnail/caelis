@@ -66,11 +66,7 @@ func (m *Model) promptModalReservedHeight() int {
 // blocks. This replaces the old historyLines cache with an on-demand
 // computation directly from the document model.
 func (m *Model) renderedStyledLines() []string {
-	ctx := BlockRenderContext{
-		Width:     maxInt(1, m.viewport.Width()),
-		TermWidth: m.width,
-		Theme:     m.theme,
-	}
+	ctx := m.blockRenderContext(maxInt(1, m.viewport.Width()))
 	var lines []string
 	for _, block := range m.doc.Blocks() {
 		for _, row := range block.Render(ctx) {
@@ -96,12 +92,9 @@ func (m *Model) syncViewportContent() {
 	m.offscreenViewportTickScheduled = false
 	m.offscreenViewportSyncAt = time.Time{}
 	wrapWidth := maxInt(1, m.viewport.Width())
-	ctx := BlockRenderContext{
-		Width:     wrapWidth,
-		TermWidth: m.width,
-		Theme:     m.theme,
-	}
+	ctx := m.blockRenderContext(wrapWidth)
 	contextKey := viewportRenderContextKey(ctx)
+	activeTailOnly := m.dirtyViewportBlocksOnlyActiveNarrative()
 	incremental := false
 	if len(m.dirtyViewportBlocks) == 0 &&
 		!m.viewportStructureDirty &&
@@ -132,7 +125,31 @@ func (m *Model) syncViewportContent() {
 	m.viewportContentVersion++
 	m.lastViewportStreamLine = m.streamLine
 
-	m.renderViewportContent(syncReason)
+	m.renderViewportContent(syncReason, activeTailOnly)
+}
+
+func (m *Model) dirtyViewportBlocksOnlyActiveNarrative() bool {
+	if m == nil || len(m.dirtyViewportBlocks) == 0 || m.viewportStructureDirty {
+		return false
+	}
+	if m.streamLine != m.lastViewportStreamLine {
+		return false
+	}
+	for blockID := range m.dirtyViewportBlocks {
+		switch block := m.doc.Find(blockID).(type) {
+		case *AssistantBlock:
+			if !block.Streaming || block.activeBuffer == nil || block.activeBuffer.Empty() {
+				return false
+			}
+		case *ReasoningBlock:
+			if !block.Streaming || block.activeBuffer == nil || block.activeBuffer.Empty() {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Model) beginDeferredViewportSync() {
@@ -186,7 +203,7 @@ func (m *Model) wrapNarrativeRowStyled(row RenderedRow, width int) string {
 	baseStyle := narrativeBodyStyle(roleStyle, m.theme)
 	styled := make([]string, 0, len(segments))
 	for _, segment := range segments {
-		styled = append(styled, renderInlineMarkdown(segment, baseStyle, m.theme))
+		styled = append(styled, m.renderInlineMarkdown(segment, baseStyle))
 	}
 	return strings.Join(styled, "\n")
 }
@@ -290,15 +307,20 @@ func truncateMiddleDisplay(text string, width int) string {
 	return prefix + ellipsis + suffix
 }
 
-func (m *Model) renderViewportContent(reason string) {
+func (m *Model) renderViewportContent(reason string, activeTailOnly bool) {
 	start := time.Now()
 	lines := m.viewportStyledLines
 	if m.lastViewportContentVersion != m.viewportContentVersion {
 		fingerprint := viewportLinesFingerprint(lines)
 		if fingerprint != m.lastViewportContent {
-			m.observeViewportSetContent(lines, reason)
-			m.viewport.SetContentLines(append([]string(nil), lines...))
-			m.lastViewportContent = fingerprint
+			if activeTailOnly && m.isViewportFollowTail() {
+				m.viewportContentStale = true
+			} else {
+				m.observeViewportSetContent(lines, reason)
+				m.viewport.SetContentLines(append([]string(nil), lines...))
+				m.lastViewportContent = fingerprint
+				m.viewportContentStale = false
+			}
 			m.lastViewportViewKey = ""
 		}
 		m.lastViewportContentVersion = m.viewportContentVersion
@@ -309,9 +331,28 @@ func (m *Model) renderViewportContent(reason string) {
 	// previous approach sampled AtBottom() before SetContent, which
 	// could produce the wrong decision when content/height changed.
 	if m.isViewportFollowTail() {
-		m.viewport.GotoBottom()
+		if !m.viewportContentStale {
+			m.viewport.GotoBottom()
+		}
 	}
 	m.streamPlayback.LastFrameRenderCost = time.Since(start)
+}
+
+func (m *Model) materializeViewportContentIfStale() {
+	if m == nil || !m.viewportContentStale {
+		return
+	}
+	offset := m.viewportVisibleOffset()
+	lines := append([]string(nil), m.viewportStyledLines...)
+	m.observeViewportSetContent(lines, "stale_materialize")
+	m.viewport.SetContentLines(lines)
+	if maxOffset := m.viewportMaxOffset(); offset > maxOffset {
+		offset = maxOffset
+	}
+	m.viewport.SetYOffset(offset)
+	m.lastViewportContent = viewportLinesFingerprint(lines)
+	m.viewportContentStale = false
+	m.lastViewportViewKey = ""
 }
 
 func (m *Model) offscreenViewportSyncInterval() time.Duration {
@@ -508,7 +549,7 @@ func (m *Model) mousePointToContentPoint(x int, y int, clamp bool) (textSelectio
 		return textSelectionPoint{}, false
 	}
 
-	line := max(m.viewport.YOffset()+vy, 0)
+	line := max(m.viewportVisibleOffset()+vy, 0)
 	if line >= len(m.viewportPlainLines) {
 		line = len(m.viewportPlainLines) - 1
 	}

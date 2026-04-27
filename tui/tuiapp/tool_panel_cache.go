@@ -48,7 +48,7 @@ func toolPanelRenderCacheKey(request toolPanelRenderRequest, scroll toolPanelScr
 	b.WriteByte(0)
 	b.WriteString(strconv.Itoa(request.Width))
 	b.WriteByte(0)
-	b.WriteString(themeRenderCacheKey(request.Ctx.Theme))
+	b.WriteString(request.Ctx.renderThemeKey())
 	b.WriteByte(0)
 	b.WriteString(strconv.FormatBool(request.Err))
 	b.WriteByte(0)

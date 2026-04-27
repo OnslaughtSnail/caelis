@@ -77,12 +77,14 @@ type narrativeBlockRenderCache struct {
 }
 
 func (c *narrativeBlockRenderCache) renderNarrativeRows(blockID, raw, rolePrefix string, lineStyle tuikit.LineStyle, ctx BlockRenderContext, streaming bool) []RenderedRow {
-	if cached := c.cachedRows(raw, rolePrefix, ctx.Width, ctx.Theme, streaming); cached != nil {
+	themeKey := ctx.renderThemeKey()
+	if cached := c.cachedRows(raw, rolePrefix, ctx.Width, themeKey, streaming); cached != nil {
 		return cached
 	}
+	ctx.observeGlamourRender()
 	rows := renderNarrativeRows(blockID, raw, rolePrefix, lineStyle, ctx.Width, ctx.Theme, streaming)
 	c.width = ctx.Width
-	c.themeKey = themeRenderCacheKey(ctx.Theme)
+	c.themeKey = themeKey
 	c.raw = raw
 	c.rolePrefix = rolePrefix
 	c.streaming = streaming
@@ -90,11 +92,11 @@ func (c *narrativeBlockRenderCache) renderNarrativeRows(blockID, raw, rolePrefix
 	return rows
 }
 
-func (c *narrativeBlockRenderCache) cachedRows(raw, rolePrefix string, width int, theme tuikit.Theme, streaming bool) []RenderedRow {
+func (c *narrativeBlockRenderCache) cachedRows(raw, rolePrefix string, width int, themeKey string, streaming bool) []RenderedRow {
 	if c == nil || len(c.rows) == 0 {
 		return nil
 	}
-	if c.width != width || c.themeKey != themeRenderCacheKey(theme) {
+	if c.width != width || c.themeKey != themeKey {
 		return nil
 	}
 	if c.raw != raw || c.rolePrefix != rolePrefix || c.streaming != streaming {
@@ -130,7 +132,7 @@ func (b *AssistantBlock) Kind() BlockKind { return BlockAssistant }
 func (b *AssistantBlock) Render(ctx BlockRenderContext) []RenderedRow {
 	rolePrefix := "* " + assistantActorPrefix(b.Actor)
 	if b.Streaming && b.activeBuffer != nil && !b.activeBuffer.Empty() {
-		return b.activeBuffer.RenderRows(b.id, rolePrefix, tuikit.LineStyleAssistant, ctx.Width, ctx.Theme)
+		return b.activeBuffer.RenderRows(b.id, rolePrefix, tuikit.LineStyleAssistant, ctx)
 	}
 	return b.renderCache.renderNarrativeRows(
 		b.id,
@@ -178,7 +180,7 @@ func (b *ReasoningBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		prefix += actor + ": "
 	}
 	if b.Streaming && b.activeBuffer != nil && !b.activeBuffer.Empty() {
-		return b.activeBuffer.RenderRows(b.id, prefix, tuikit.LineStyleReasoning, ctx.Width, ctx.Theme)
+		return b.activeBuffer.RenderRows(b.id, prefix, tuikit.LineStyleReasoning, ctx)
 	}
 	return b.renderCache.renderNarrativeRows(b.id, b.Raw, prefix, tuikit.LineStyleReasoning, ctx, b.Streaming)
 }

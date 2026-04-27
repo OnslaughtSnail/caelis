@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/OnslaughtSnail/caelis/tui/tuikit"
 )
 
 func TestActiveAssistantBufferDoesNotMutateRawUntilFinal(t *testing.T) {
@@ -89,5 +91,60 @@ func TestActiveNarrativeBufferDoesNotRerenderCompletedHistory(t *testing.T) {
 	}
 	if got := m.diag.ViewportFullSyncs; got != beforeFullSyncs {
 		t.Fatalf("active stream full syncs = %d, want %d", got, beforeFullSyncs)
+	}
+}
+
+func TestActiveTailViewportSyncDoesNotReplaceFullViewportContent(t *testing.T) {
+	m := newPerfTestModel()
+	seedLongTranscript(m, 120)
+	m.viewport.SetHeight(5)
+	m.syncViewportContent()
+
+	_, _ = m.handleStreamBlock("answer", "assistant", "hello", false)
+	_, _ = m.Update(frameTickMsg{kind: frameTickViewportSync, at: time.Now()})
+	setContentLines := m.diag.ViewportSetContentLines
+
+	_, _ = m.handleStreamBlock("answer", "assistant", " world"+strings.Repeat("\nnext line", 8), false)
+	_, _ = m.Update(frameTickMsg{kind: frameTickViewportSync, at: time.Now()})
+
+	if got := m.diag.ViewportSetContentLines; got != setContentLines {
+		t.Fatalf("active tail SetContentLines calls = %d, want %d", got, setContentLines)
+	}
+	if view := m.renderViewportView(); !strings.Contains(view, "next line") {
+		t.Fatalf("active tail was not rendered in visible viewport: %q", view)
+	}
+}
+
+func TestActiveTailHitTestingUsesVisibleTailOffset(t *testing.T) {
+	m := newPerfTestModel()
+	seedLongTranscript(m, 120)
+	m.viewport.SetHeight(5)
+	m.syncViewportContent()
+
+	_, _ = m.handleStreamBlock("answer", "assistant", "hello", false)
+	_, _ = m.Update(frameTickMsg{kind: frameTickViewportSync, at: time.Now()})
+	_, _ = m.handleStreamBlock("answer", "assistant", " world"+strings.Repeat("\nnext line", 8), false)
+	_, _ = m.Update(frameTickMsg{kind: frameTickViewportSync, at: time.Now()})
+
+	if !m.viewportContentStale {
+		t.Fatal("test setup did not enter stale-tail rendering")
+	}
+	y := m.viewport.Height() - 1
+	wantLine := m.viewportVisibleOffset() + y
+
+	contentLine, ok := m.contentLineAtViewportY(y)
+	if !ok {
+		t.Fatal("content line hit test failed")
+	}
+	if contentLine != wantLine {
+		t.Fatalf("content line = %d, want visible tail line %d", contentLine, wantLine)
+	}
+
+	point, ok := m.mousePointToContentPoint(m.mainColumnX()+tuikit.GutterNarrative, y, false)
+	if !ok {
+		t.Fatal("mouse point hit test failed")
+	}
+	if point.line != wantLine {
+		t.Fatalf("mouse point line = %d, want visible tail line %d", point.line, wantLine)
 	}
 }

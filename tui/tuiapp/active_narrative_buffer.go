@@ -58,14 +58,15 @@ func (b *activeNarrativeBuffer) CacheKey() string {
 		strconv.Itoa(len(b.tailRaw))
 }
 
-func (b *activeNarrativeBuffer) RenderRows(blockID, rolePrefix string, roleStyle tuikit.LineStyle, width int, theme tuikit.Theme) []RenderedRow {
+func (b *activeNarrativeBuffer) RenderRows(blockID, rolePrefix string, roleStyle tuikit.LineStyle, ctx BlockRenderContext) []RenderedRow {
 	if b == nil || strings.TrimSpace(b.Text()) == "" {
 		return nil
 	}
+	width := ctx.Width
 	if width <= 0 {
 		width = 1
 	}
-	themeKey := themeRenderCacheKey(theme)
+	themeKey := ctx.renderThemeKey()
 	if b.cachedRows != nil &&
 		b.cachedVersion == b.version &&
 		b.cachedWidth == width &&
@@ -75,7 +76,8 @@ func (b *activeNarrativeBuffer) RenderRows(blockID, rolePrefix string, roleStyle
 		return b.cachedRows
 	}
 
-	rows := b.renderRows(blockID, rolePrefix, roleStyle, width, theme)
+	ctx.observeGlamourRender()
+	rows := b.renderRows(blockID, rolePrefix, roleStyle, width, ctx.Theme)
 	b.cachedVersion = b.version
 	b.cachedWidth = width
 	b.cachedThemeKey = themeKey

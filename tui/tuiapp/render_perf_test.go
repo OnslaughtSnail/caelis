@@ -209,6 +209,43 @@ func BenchmarkRenderSchedulerMixedStreams(b *testing.B) {
 	}
 }
 
+func BenchmarkRenderInlineMarkdownPlainText(b *testing.B) {
+	m := newPerfTestModel()
+	text := strings.Repeat("plain text with a link https://example.test/path ", 16)
+	base := m.theme.TextStyle()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = m.renderInlineMarkdown(text, base)
+	}
+}
+
+func BenchmarkWrapNarrativeRowStyled(b *testing.B) {
+	m := newPerfTestModel()
+	row := RenderedRow{
+		Styled:  strings.Repeat("assistant response with enough text to wrap cleanly ", 12),
+		Plain:   strings.Repeat("assistant response with enough text to wrap cleanly ", 12),
+		BlockID: "bench-block",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = m.wrapNarrativeRowStyled(row, 64)
+	}
+}
+
+func BenchmarkRunningTickerText(b *testing.B) {
+	m := newPerfTestModel()
+	m.running = true
+	text := "Review the latest tool output before sending follow-up guidance."
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.runningTick = uint64(i)
+		_ = m.renderRunningTickerText(text)
+	}
+}
+
 func newPerfTestModel() *Model {
 	m := NewModel(Config{NoColor: true})
 	m.theme = tuikit.ResolveThemeFromOptions(true, colorprofile.NoTTY)

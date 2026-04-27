@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
 
 	tuiruntime "github.com/OnslaughtSnail/caelis/gateway/adapter/tui/runtime"
@@ -19,6 +20,7 @@ const runningHintRotateEveryTicks = 60
 const runningLightSpeed = 0.55
 const runningLightBandRadius = 5.5
 const runningLightLead = 4.0
+const runningTickerStaticFrameCostThreshold = 40 * time.Millisecond
 const copyHintDuration = 1600 * time.Millisecond
 const subagentOutputPreviewLines = 12
 const inputHorizontalInset = tuikit.InputInset
@@ -56,36 +58,43 @@ var runningCarouselLines = []string{
 }
 
 type Diagnostics struct {
-	Frames                      uint64
-	IncrementalFrames           uint64
-	FullRepaints                uint64
-	SlowFrames                  uint64
-	LastFrameDuration           time.Duration
-	AvgFrameDuration            time.Duration
-	MaxFrameDuration            time.Duration
-	RenderBytes                 uint64
-	PeakFrameBytes              uint64
-	ViewportFullSyncs           uint64
-	ViewportIncrementalSyncs    uint64
-	ViewportQueuedSyncs         uint64
-	ViewportSkippedSyncs        uint64
-	ViewportSetContentLines     uint64
-	ViewportSetContentLineCount uint64
-	ViewportSetContentBytes     uint64
-	SelectionVisibleRenders     uint64
-	UpdateMessagesByLane        map[renderEventLane]uint64
-	UpdateMessagesByType        map[string]uint64
-	ViewportSetContentReason    map[string]uint64
-	BlockRenderCallsByKind      map[BlockKind]uint64
-	StreamSmoothingFlushReason  map[string]uint64
-	ProgramSendsAfterClose      uint64
-	LastRenderAt                time.Time
-	LastInputAt                 time.Time
-	LastInputLatency            time.Duration
-	AvgInputLatency             time.Duration
-	P95InputLatency             time.Duration
-	LastMentionLatency          time.Duration
-	RedrawMode                  string
+	Frames                        uint64
+	IncrementalFrames             uint64
+	FullRepaints                  uint64
+	SlowFrames                    uint64
+	LastFrameDuration             time.Duration
+	AvgFrameDuration              time.Duration
+	MaxFrameDuration              time.Duration
+	RenderBytes                   uint64
+	PeakFrameBytes                uint64
+	ViewportFullSyncs             uint64
+	ViewportIncrementalSyncs      uint64
+	ViewportQueuedSyncs           uint64
+	ViewportSkippedSyncs          uint64
+	ViewportSetContentLines       uint64
+	ViewportSetContentLineCount   uint64
+	ViewportSetContentBytes       uint64
+	SelectionVisibleRenders       uint64
+	UpdateMessagesByLane          map[renderEventLane]uint64
+	UpdateMessagesByType          map[string]uint64
+	ViewportSetContentReason      map[string]uint64
+	BlockRenderCallsByKind        map[BlockKind]uint64
+	StreamSmoothingFlushReason    map[string]uint64
+	GlamourRenderCalls            uint64
+	InlineMarkdownCalls           uint64
+	DriverStatusCalls             uint64
+	RunningTickerAnimatedRenders  uint64
+	RunningTickerStaticRenders    uint64
+	RunningTickerStyleCacheMisses uint64
+	DiagnosticsDebugWriteErrors   uint64
+	ProgramSendsAfterClose        uint64
+	LastRenderAt                  time.Time
+	LastInputAt                   time.Time
+	LastInputLatency              time.Duration
+	AvgInputLatency               time.Duration
+	P95InputLatency               time.Duration
+	LastMentionLatency            time.Duration
+	RedrawMode                    string
 }
 
 type viewportFollowState int
@@ -125,6 +134,7 @@ type Config struct {
 	ClearAttachments     func() []string
 	SetAttachments       func([]string) []string
 	OnDiagnostics        func(Diagnostics)
+	DiagnosticsDebugFile string
 	StreamTickInterval   time.Duration
 	StreamWarmDelay      time.Duration
 	StreamNormalCPS      float64
@@ -135,7 +145,10 @@ type Config struct {
 	StreamCatchupMaxTick int
 	NoColor              bool
 	NoAnimation          bool
-	ColorProfile         colorprofile.Profile
+	// RenderFPS is a Bubble Tea renderer cap only. Stream coalescing remains
+	// owned by the TUI frame scheduler.
+	RenderFPS    int
+	ColorProfile colorprofile.Profile
 }
 
 type CompletionCandidate struct {
@@ -267,14 +280,15 @@ type toolAnchor struct {
 }
 
 type Model struct {
-	cfg          Config
-	theme        tuikit.Theme
-	themeAuto    bool
-	noColor      bool
-	noAnimation  bool
-	colorProfile colorprofile.Profile
-	keys         appKeyMap
-	help         help.Model
+	cfg           Config
+	theme         tuikit.Theme
+	themeCacheKey string
+	themeAuto     bool
+	noColor       bool
+	noAnimation   bool
+	colorProfile  colorprofile.Profile
+	keys          appKeyMap
+	help          help.Model
 
 	width   int
 	height  int
@@ -364,8 +378,10 @@ type Model struct {
 	spinner spinner.Model
 	quit    bool
 
-	runningTick uint64
-	runningTip  int
+	runningTick           uint64
+	runningTip            int
+	runningTickerStyles   []lipgloss.Style
+	runningTickerThemeKey string
 
 	statusModel     string
 	statusContext   string
@@ -405,6 +421,7 @@ type Model struct {
 	lastViewportContentVersion     uint64
 	viewportSelectionVersion       uint64
 	lastViewportContent            string
+	viewportContentStale           bool
 	lastViewportStreamLine         string
 	lastViewportViewKey            string
 	lastViewportViewRendered       string

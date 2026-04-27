@@ -2,7 +2,9 @@ package tuiapp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -95,6 +97,27 @@ func (m *Model) observeStreamSmoothingFlush(reason string) {
 	m.diag.StreamSmoothingFlushReason[reason]++
 }
 
+func (m *Model) observeGlamourRender() {
+	if m == nil {
+		return
+	}
+	m.diag.GlamourRenderCalls++
+}
+
+func (m *Model) observeInlineMarkdownRender() {
+	if m == nil {
+		return
+	}
+	m.diag.InlineMarkdownCalls++
+}
+
+func (m *Model) observeDriverStatusCall() {
+	if m == nil {
+		return
+	}
+	m.diag.DriverStatusCalls++
+}
+
 func (m *Model) observeRender(duration time.Duration, bytes int, redrawMode string) {
 	if m.cfg.ProgramSender != nil {
 		m.diag.ProgramSendsAfterClose = m.cfg.ProgramSender.DroppedAfterClose()
@@ -132,6 +155,28 @@ func (m *Model) observeRender(duration time.Duration, bytes int, redrawMode stri
 	m.diag.LastRenderAt = time.Now()
 	if m.cfg.OnDiagnostics != nil {
 		m.cfg.OnDiagnostics(m.diag)
+	}
+	m.writeDiagnosticsDebugFile()
+}
+
+func (m *Model) writeDiagnosticsDebugFile() {
+	if m == nil {
+		return
+	}
+	path := strings.TrimSpace(m.cfg.DiagnosticsDebugFile)
+	if path == "" {
+		path = strings.TrimSpace(os.Getenv("CAELIS_TUI_RENDER_DEBUG_FILE"))
+	}
+	if path == "" {
+		return
+	}
+	payload, err := json.MarshalIndent(m.diag, "", "  ")
+	if err != nil {
+		m.diag.DiagnosticsDebugWriteErrors++
+		return
+	}
+	if err := os.WriteFile(path, append(payload, '\n'), 0o600); err != nil {
+		m.diag.DiagnosticsDebugWriteErrors++
 	}
 }
 
@@ -174,6 +219,55 @@ func contextOrBackground(ctx context.Context) context.Context {
 		return ctx
 	}
 	return context.Background()
+}
+
+func (m *Model) cachedThemeRenderKey() string {
+	if m == nil {
+		return ""
+	}
+	if m.themeCacheKey == "" {
+		m.themeCacheKey = themeRenderCacheKey(m.theme)
+	}
+	return m.themeCacheKey
+}
+
+func (m *Model) blockRenderContext(width int) BlockRenderContext {
+	if width <= 0 {
+		width = 1
+	}
+	return BlockRenderContext{
+		Width:                 width,
+		TermWidth:             m.width,
+		Theme:                 m.theme,
+		ThemeKey:              m.cachedThemeRenderKey(),
+		SpinnerView:           m.spinner.View(),
+		ObserveGlamourRender:  m.observeGlamourRender,
+		ObserveInlineMarkdown: m.observeInlineMarkdownRender,
+	}
+}
+
+func (m *Model) renderInlineMarkdown(text string, base lipgloss.Style) string {
+	m.observeInlineMarkdownRender()
+	return renderInlineMarkdown(text, base, m.theme)
+}
+
+func (ctx BlockRenderContext) renderThemeKey() string {
+	if key := strings.TrimSpace(ctx.ThemeKey); key != "" {
+		return key
+	}
+	return themeRenderCacheKey(ctx.Theme)
+}
+
+func (ctx BlockRenderContext) observeGlamourRender() {
+	if ctx.ObserveGlamourRender != nil {
+		ctx.ObserveGlamourRender()
+	}
+}
+
+func (ctx BlockRenderContext) observeInlineMarkdownRender() {
+	if ctx.ObserveInlineMarkdown != nil {
+		ctx.ObserveInlineMarkdown()
+	}
 }
 
 func (m *Model) refreshModeLabelFromConfig() bool {

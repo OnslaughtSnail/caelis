@@ -29,11 +29,24 @@ func runTUI(ctx context.Context, stack *gatewayapp.Stack, sessionID string, mode
 		ShowWelcomeCard: true,
 		Commands:        tuiapp.DefaultCommands(),
 		Wizards:         tuiapp.DefaultWizards(),
+		RenderFPS:       envInt("CAELIS_TUI_RENDER_FPS", 0),
 	})
 	model := tuiapp.NewModel(cfg)
-	program := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout), tea.WithContext(programCtx))
+	program := tea.NewProgram(model, tuiProgramOptions(stdin, stdout, programCtx, cfg.RenderFPS)...)
 	sender.Send = program.Send
 	defer sender.Close()
 	_, err = program.Run()
 	return err
+}
+
+func tuiProgramOptions(stdin io.Reader, stdout io.Writer, ctx context.Context, fps int) []tea.ProgramOption {
+	options := []tea.ProgramOption{
+		tea.WithInput(stdin),
+		tea.WithOutput(stdout),
+		tea.WithContext(ctx),
+	}
+	if fps > 0 {
+		options = append(options, tea.WithFPS(fps))
+	}
+	return options
 }

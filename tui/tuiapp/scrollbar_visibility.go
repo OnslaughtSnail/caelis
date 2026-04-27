@@ -193,6 +193,7 @@ func (m *Model) applyScrollbarDrag(mouse tea.Mouse) bool {
 }
 
 func (m *Model) dragViewportScrollbarTo(y int) bool {
+	m.materializeViewportContentIfStale()
 	total := m.viewport.TotalLineCount()
 	visible := maxInt(1, m.viewport.Height())
 	maxOffset := maxInt(0, total-visible)
@@ -221,11 +222,7 @@ func (m *Model) dragPanelScrollbarTo(target scrollbarHitTarget, y int) bool {
 	if !ok {
 		return false
 	}
-	ctx := BlockRenderContext{
-		Width:     maxInt(1, m.viewport.Width()),
-		TermWidth: m.width,
-		Theme:     m.theme,
-	}
+	ctx := m.blockRenderContext(maxInt(1, m.viewport.Width()))
 	localY := m.screenYToFrameY(y)
 	if localY < 0 {
 		localY = 0
@@ -290,7 +287,7 @@ func (m *Model) viewportScrollbarTargetAtMouse(x, y int) (scrollbarHitTarget, bo
 	if m.viewportScrollbarWidth() == 0 {
 		return scrollbarHitTarget{}, false
 	}
-	total := m.viewport.TotalLineCount()
+	total := m.viewportLineCount()
 	visible := maxInt(1, m.viewport.Height())
 	y = m.screenYToFrameY(y)
 	if total <= visible || y < 0 || y >= visible {
@@ -348,7 +345,7 @@ func (m *Model) contentLineAtViewportY(y int) (int, bool) {
 	if y < 0 || y >= m.viewport.Height() {
 		return 0, false
 	}
-	contentLine := m.viewport.YOffset() + y
+	contentLine := m.viewportVisibleOffset() + y
 	if contentLine < 0 || contentLine >= len(m.viewportBlockIDs) {
 		return 0, false
 	}
@@ -381,7 +378,7 @@ func (m *Model) panelScrollbarHitAtContentLine(contentLine int) (panelScrollbarB
 	if kind == 0 {
 		return nil, scrollbarHitTarget{}, 0, false
 	}
-	ctx := BlockRenderContext{Width: maxInt(1, m.viewport.Width()), TermWidth: m.width, Theme: m.theme}
+	ctx := m.blockRenderContext(maxInt(1, m.viewport.Width()))
 	if panel.scrollableLineCount(ctx) <= panel.previewLines() {
 		return nil, scrollbarHitTarget{}, 0, false
 	}
@@ -393,7 +390,7 @@ func (m *Model) panelScrollbarHitAtContentLine(contentLine int) (panelScrollbarB
 	return panel, scrollbarHitTarget{
 		kind:      kind,
 		blockID:   blockID,
-		lineStart: start - m.viewport.YOffset(),
+		lineStart: start - m.viewportVisibleOffset(),
 	}, lineWidth, true
 }
 

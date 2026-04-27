@@ -482,6 +482,7 @@ func (m *Model) handleStatusTickMsg() (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.cfg.RefreshStatus != nil {
+		m.observeDriverStatusCall()
 		modelText, contextText := m.cfg.RefreshStatus()
 		nextModel := normalizeStatusModel(modelText)
 		if nextModel != m.statusModel {
