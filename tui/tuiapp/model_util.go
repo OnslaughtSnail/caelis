@@ -96,6 +96,9 @@ func (m *Model) observeStreamSmoothingFlush(reason string) {
 }
 
 func (m *Model) observeRender(duration time.Duration, bytes int, redrawMode string) {
+	if m.cfg.ProgramSender != nil {
+		m.diag.ProgramSendsAfterClose = m.cfg.ProgramSender.DroppedAfterClose()
+	}
 	m.diag.Frames++
 	m.diag.LastFrameDuration = duration
 	if strings.TrimSpace(redrawMode) == "" {

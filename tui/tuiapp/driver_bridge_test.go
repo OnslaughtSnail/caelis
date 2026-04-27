@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,112 @@ import (
 	tuiadapterruntime "github.com/OnslaughtSnail/caelis/gateway/adapter/tui/runtime"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
+
+func TestProgramSenderDropsAfterClose(t *testing.T) {
+	sender := &ProgramSender{}
+	var sent atomic.Int64
+	sender.Send = func(tea.Msg) { sent.Add(1) }
+
+	sender.Close()
+	sender.SendMsg(LogChunkMsg{Chunk: "late\n"})
+
+	if got := sent.Load(); got != 0 {
+		t.Fatalf("sent after close = %d, want 0", got)
+	}
+	if got := sender.DroppedAfterClose(); got != 1 {
+		t.Fatalf("DroppedAfterClose = %d, want 1", got)
+	}
+}
+
+func TestProgramSenderCloseCancelsSubagentForwarder(t *testing.T) {
+	ctx := context.Background()
+	frames := make(chan tuiadapterruntime.SubagentStreamFrame)
+	driver := &bridgeTestDriver{subagentStream: frames}
+	sender := &ProgramSender{}
+	var sent atomic.Int64
+	sender.Send = func(tea.Msg) { sent.Add(1) }
+
+	startDynamicSubagentOutputBridge(ctx, driver, sender, tuiadapterruntime.SubagentSnapshot{
+		TaskID:  "task-1",
+		Running: true,
+		Mention: "@worker",
+	})
+	deadline := time.After(2 * time.Second)
+	for driver.subagentStreamSubscribeCalls == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("SubscribeSubagentStream was not called")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	sender.Close()
+	select {
+	case frames <- tuiadapterruntime.SubagentStreamFrame{Text: "late", Running: true}:
+		t.Fatal("subagent forwarder still received after sender.Close")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if got := sent.Load(); got != 0 {
+		t.Fatalf("late sends after close = %d, want 0", got)
+	}
+}
+
+func TestSubagentForwarderExitsOnContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	frames := make(chan tuiadapterruntime.SubagentStreamFrame)
+	driver := &bridgeTestDriver{subagentStream: frames}
+	sender := &ProgramSender{}
+	var sent atomic.Int64
+	sender.Send = func(tea.Msg) { sent.Add(1) }
+
+	startDynamicSubagentOutputBridge(ctx, driver, sender, tuiadapterruntime.SubagentSnapshot{
+		TaskID:  "task-1",
+		Running: true,
+		Mention: "@worker",
+	})
+	deadline := time.After(2 * time.Second)
+	for driver.subagentStreamSubscribeCalls == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("SubscribeSubagentStream was not called")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	cancel()
+	if !sender.waitForwarders(time.Second) {
+		t.Fatal("subagent forwarder did not exit after context cancellation")
+	}
+	select {
+	case frames <- tuiadapterruntime.SubagentStreamFrame{Text: "late", Running: true}:
+		t.Fatal("subagent forwarder still received after context cancellation")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if got := sent.Load(); got != 0 {
+		t.Fatalf("late sends after cancel = %d, want 0", got)
+	}
+}
+
+func TestDiagnosticsReportsProgramSenderDropsAfterClose(t *testing.T) {
+	sender := &ProgramSender{}
+	sender.Close()
+	sender.SendMsg(LogChunkMsg{Chunk: "late\n"})
+
+	var observed Diagnostics
+	m := NewModel(Config{
+		ProgramSender: sender,
+		OnDiagnostics: func(diag Diagnostics) {
+			observed = diag
+		},
+	})
+	m.observeRender(time.Millisecond, 1, "incremental")
+
+	if got := observed.ProgramSendsAfterClose; got != 1 {
+		t.Fatalf("ProgramSendsAfterClose = %d, want 1", got)
+	}
+}
 
 func TestSlashNewClearsHistoryBeforeNotice(t *testing.T) {
 	driver := &bridgeTestDriver{

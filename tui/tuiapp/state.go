@@ -107,6 +107,7 @@ type Config struct {
 	Commands             []string
 	Wizards              []WizardDef
 	Driver               tuiruntime.Driver
+	ProgramSender        *ProgramSender
 	ExecuteLine          func(Submission) TaskResultMsg
 	CancelRunning        func() bool
 	ToggleMode           func() (string, error)

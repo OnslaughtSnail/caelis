@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,9 +22,15 @@ import (
 // ExecuteLine goroutine can send intermediate TUI messages.
 type ProgramSender struct {
 	Send              func(tea.Msg)
+	mu                sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
+	forwarders        sync.WaitGroup
 	closed            atomic.Bool
 	droppedAfterClose atomic.Uint64
 }
+
+const programSenderCloseTimeout = 250 * time.Millisecond
 
 func (s *ProgramSender) sendFunc() func(tea.Msg) {
 	if s == nil {
@@ -48,9 +55,19 @@ func (s *ProgramSender) SendMsg(msg tea.Msg) {
 }
 
 func (s *ProgramSender) Close() {
-	if s != nil {
-		s.closed.Store(true)
+	if s == nil {
+		return
 	}
+	if s.closed.Swap(true) {
+		return
+	}
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.waitForwarders(programSenderCloseTimeout)
 }
 
 func (s *ProgramSender) DroppedAfterClose() uint64 {
@@ -58,6 +75,63 @@ func (s *ProgramSender) DroppedAfterClose() uint64 {
 		return 0
 	}
 	return s.droppedAfterClose.Load()
+}
+
+func (s *ProgramSender) bindContext(parent context.Context) context.Context {
+	parent = contextOrBackground(parent)
+	if s == nil {
+		return parent
+	}
+	if s.closed.Load() {
+		ctx, cancel := context.WithCancel(parent)
+		cancel()
+		return ctx
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ctx == nil {
+		s.ctx, s.cancel = context.WithCancel(parent)
+	}
+	return s.ctx
+}
+
+func (s *ProgramSender) startForwarder(fn func()) bool {
+	if s == nil || fn == nil {
+		return false
+	}
+	s.mu.Lock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		return false
+	}
+	s.forwarders.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.forwarders.Done()
+		fn()
+	}()
+	return true
+}
+
+func (s *ProgramSender) waitForwarders(timeout time.Duration) bool {
+	if s == nil {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		s.forwarders.Wait()
+		close(done)
+	}()
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 type streamDriver interface {
@@ -81,6 +155,11 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 		base.StreamTickInterval = streamSmoothingTickIntervalDefault
 	}
 	ctx := contextOrBackground(base.Context)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+		base.Context = ctx
+		base.ProgramSender = sender
+	}
 	base.Commands = appendAgentSlashCommandsWithContext(ctx, driver, base.Commands)
 	var cachedModeLabel string
 
@@ -256,6 +335,9 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 
 func executeLineViaDriverWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, sub Submission) TaskResultMsg {
 	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
 	text := strings.TrimSpace(sub.Text)
 
 	// Slash command dispatch.
@@ -283,7 +365,7 @@ func executeLineViaDriverWithContext(ctx context.Context, driver tuiadapterrunti
 
 	send := sender.sendFunc()
 	if send != nil {
-		forwardGatewayTurnEvents(ctx, driver, turn, send)
+		forwardGatewayTurnEvents(ctx, driver, turn, sender)
 	} else {
 		for range turn.Events() {
 		}
@@ -299,7 +381,12 @@ type gatewayNarrativeBatcher struct {
 	key     string
 }
 
-func forwardGatewayTurnEvents(ctx context.Context, driver tuiadapterruntime.Driver, turn tuiadapterruntime.Turn, send func(tea.Msg)) {
+func forwardGatewayTurnEvents(ctx context.Context, driver tuiadapterruntime.Driver, turn tuiadapterruntime.Turn, sender *ProgramSender) {
+	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
+	send := sender.sendFunc()
 	if turn == nil || send == nil {
 		return
 	}
@@ -327,7 +414,7 @@ func forwardGatewayTurnEvents(ctx context.Context, driver tuiadapterruntime.Driv
 				continue
 			}
 			send(env)
-			startTerminalStreamForwarder(ctx, driver, env, send)
+			startTerminalStreamForwarder(ctx, driver, env, sender)
 			if env.Event.Kind == appgateway.EventKindApprovalRequested {
 				sendApprovalPrompt(ctx, turn, env.Event.ApprovalPayload, send)
 			}
@@ -425,7 +512,12 @@ func mergeGatewayNarrativeEnvelope(dst *appgateway.EventEnvelope, src appgateway
 	dst.Event.Narrative.ReasoningText += src.Event.Narrative.ReasoningText
 }
 
-func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.Driver, env appgateway.EventEnvelope, send func(tea.Msg)) {
+func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.Driver, env appgateway.EventEnvelope, sender *ProgramSender) {
+	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
+	send := sender.sendFunc()
 	if send == nil {
 		return
 	}
@@ -437,7 +529,7 @@ func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.
 	if !ok || events == nil {
 		return
 	}
-	go func() {
+	start := func() {
 		ticker := time.NewTicker(gatewayNarrativeBatchInterval)
 		defer ticker.Stop()
 		var batcher gatewayTerminalBatcher
@@ -460,7 +552,12 @@ func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.
 			}
 		}
 		batcher.flush(send)
-	}()
+	}
+	if sender != nil {
+		sender.startForwarder(start)
+		return
+	}
+	go start()
 }
 
 type gatewayTerminalBatcher struct {
@@ -609,6 +706,9 @@ func dispatchSlashCommand(driver tuiadapterruntime.Driver, sender *ProgramSender
 
 func dispatchSlashCommandWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
 	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
 	cmd, args := splitSlash(text)
 	send := sender.sendFunc()
 
@@ -634,7 +734,7 @@ func dispatchSlashCommandWithContext(ctx context.Context, driver tuiadapterrunti
 	case "exit", "quit":
 		return TaskResultMsg{ExitNow: true}
 	default:
-		return slashDynamicAgentWithContext(ctx, driver, send, cmd, args)
+		return slashDynamicAgentWithContext(ctx, driver, sender, cmd, args)
 	}
 }
 
@@ -659,11 +759,15 @@ func slashHelp(send func(tea.Msg)) TaskResultMsg {
 }
 
 func slashDynamicAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), agent string, prompt string) TaskResultMsg {
-	return slashDynamicAgentWithContext(context.Background(), driver, send, agent, prompt)
+	return slashDynamicAgentWithContext(context.Background(), driver, &ProgramSender{Send: send}, agent, prompt)
 }
 
-func slashDynamicAgentWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), agent string, prompt string) TaskResultMsg {
+func slashDynamicAgentWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, agent string, prompt string) TaskResultMsg {
 	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
+	send := sender.sendFunc()
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -679,7 +783,7 @@ func slashDynamicAgentWithContext(ctx context.Context, driver tuiadapterruntime.
 		return TaskResultMsg{Err: friendlyCommandError("/"+agent, err)}
 	}
 	sendDynamicSubagentStarted(send, snapshot, true)
-	startDynamicSubagentOutputBridge(ctx, driver, send, snapshot)
+	startDynamicSubagentOutputBridge(ctx, driver, sender, snapshot)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
@@ -711,6 +815,9 @@ func dispatchMentionCommand(driver tuiadapterruntime.Driver, sender *ProgramSend
 
 func dispatchMentionCommandWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
 	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
 	send := sender.sendFunc()
 	handle, prompt := splitFirst(strings.TrimSpace(text))
 	handle = strings.TrimPrefix(strings.TrimSpace(handle), "@")
@@ -723,7 +830,7 @@ func dispatchMentionCommandWithContext(ctx context.Context, driver tuiadapterrun
 		return TaskResultMsg{Err: friendlyCommandError("@"+handle, err)}
 	}
 	sendDynamicSubagentStarted(send, snapshot, false)
-	startDynamicSubagentOutputBridge(ctx, driver, send, snapshot)
+	startDynamicSubagentOutputBridge(ctx, driver, sender, snapshot)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
@@ -1082,8 +1189,12 @@ func sendDynamicSubagentStarted(send func(tea.Msg), snapshot tuiadapterruntime.S
 	sendNotice(send, fmt.Sprintf("subagent %s continued: %s", mention, agent))
 }
 
-func startDynamicSubagentOutputBridge(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+func startDynamicSubagentOutputBridge(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, snapshot tuiadapterruntime.SubagentSnapshot) {
 	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
+	send := sender.sendFunc()
 	if send == nil {
 		return
 	}
@@ -1098,7 +1209,7 @@ func startDynamicSubagentOutputBridge(ctx context.Context, driver tuiadapterrunt
 	if streamer, ok := driver.(subagentStreamDriver); ok {
 		if frames, ok := streamer.SubscribeSubagentStream(ctx, taskID); ok && frames != nil {
 			actor := subagentMention(snapshot)
-			go func() {
+			start := func() {
 				for {
 					select {
 					case <-ctx.Done():
@@ -1122,12 +1233,17 @@ func startDynamicSubagentOutputBridge(ctx context.Context, driver tuiadapterrunt
 						})
 					}
 				}
-			}()
+			}
+			if sender != nil {
+				sender.startForwarder(start)
+			} else {
+				go start()
+			}
 			return
 		}
 	}
 	sendDynamicSubagentSnapshotOutput(send, snapshot)
-	startDynamicSubagentSnapshotWatcher(ctx, driver, send, snapshot)
+	startDynamicSubagentSnapshotWatcher(ctx, driver, sender, snapshot)
 }
 
 func gatewayEnvelopeHasRenderableTranscript(env appgateway.EventEnvelope) bool {
@@ -1159,8 +1275,12 @@ func sendDynamicSubagentSnapshotOutput(send func(tea.Msg), snapshot tuiadapterru
 	return true
 }
 
-func startDynamicSubagentSnapshotWatcher(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+func startDynamicSubagentSnapshotWatcher(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, snapshot tuiadapterruntime.SubagentSnapshot) {
 	ctx = contextOrBackground(ctx)
+	if sender != nil {
+		ctx = sender.bindContext(ctx)
+	}
+	send := sender.sendFunc()
 	if send == nil || !snapshot.Running || strings.TrimSpace(snapshot.TaskID) == "" {
 		return
 	}
@@ -1169,7 +1289,7 @@ func startDynamicSubagentSnapshotWatcher(ctx context.Context, driver tuiadapterr
 		return
 	}
 	taskID := strings.TrimSpace(snapshot.TaskID)
-	go func() {
+	start := func() {
 		for {
 			if ctx.Err() != nil {
 				return
@@ -1187,7 +1307,12 @@ func startDynamicSubagentSnapshotWatcher(ctx context.Context, driver tuiadapterr
 				return
 			}
 		}
-	}()
+	}
+	if sender != nil {
+		sender.startForwarder(start)
+		return
+	}
+	go start()
 }
 
 func subagentMention(snapshot tuiadapterruntime.SubagentSnapshot) string {
