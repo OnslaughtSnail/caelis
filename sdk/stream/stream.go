@@ -5,6 +5,8 @@ import (
 	"iter"
 	"strings"
 	"time"
+
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 )
 
 // Ref identifies one output stream owned by one task in one session.
@@ -22,15 +24,16 @@ type Cursor struct {
 
 // Frame is one output fragment delivered to one UI or adapter.
 type Frame struct {
-	Ref       Ref       `json:"ref,omitempty"`
-	Stream    string    `json:"stream,omitempty"`
-	Text      string    `json:"text,omitempty"`
-	State     string    `json:"state,omitempty"`
-	Cursor    Cursor    `json:"cursor,omitempty"`
-	Running   bool      `json:"running,omitempty"`
-	Closed    bool      `json:"closed,omitempty"`
-	ExitCode  *int      `json:"exit_code,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Ref       Ref               `json:"ref,omitempty"`
+	Stream    string            `json:"stream,omitempty"`
+	Text      string            `json:"text,omitempty"`
+	State     string            `json:"state,omitempty"`
+	Cursor    Cursor            `json:"cursor,omitempty"`
+	Running   bool              `json:"running,omitempty"`
+	Closed    bool              `json:"closed,omitempty"`
+	ExitCode  *int              `json:"exit_code,omitempty"`
+	Event     *sdksession.Event `json:"event,omitempty"`
+	UpdatedAt time.Time         `json:"updated_at,omitempty"`
 }
 
 // Snapshot is one point-in-time stream read result.
@@ -109,6 +112,7 @@ func CloneFrame(in Frame) Frame {
 		code := *in.ExitCode
 		out.ExitCode = &code
 	}
+	out.Event = sdksession.CloneEvent(in.Event)
 	return out
 }
 

@@ -425,17 +425,23 @@ func (r *Runner) handleUpdate(run *childRun, env sdkacpclient.UpdateEnvelope) {
 	}
 	var streamText string
 	streamName := "stdout"
+	var event *sdksession.Event
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	run.updatedAt = r.clock()
 	switch update := env.Update.(type) {
 	case sdkacpclient.ContentChunk:
 		if text := chunkText(update); text != "" {
-			if strings.TrimSpace(update.SessionUpdate) != sdkacpclient.UpdateAgentMessage {
+			switch strings.TrimSpace(update.SessionUpdate) {
+			case sdkacpclient.UpdateAgentMessage:
+				streamText = run.appendAgentMessageLocked(text)
+				run.outputPreview = compactPreview(run.agentText)
+			case sdkacpclient.UpdateAgentThought:
+				streamName = "reasoning"
+				streamText = text
+			default:
 				break
 			}
-			streamText = run.appendAgentMessageLocked(text)
-			run.outputPreview = compactPreview(run.agentText)
 		}
 	case sdkacpclient.ToolCall:
 		streamText = toolActivity(update.Title, update.Kind, update.Status) + "\n"
@@ -447,7 +453,8 @@ func (r *Runner) handleUpdate(run *childRun, env sdkacpclient.UpdateEnvelope) {
 		streamText = "updating plan\n"
 		run.outputPreview = streamText
 	}
-	if strings.TrimSpace(streamText) != "" {
+	event = run.acpUpdateEvent(env, run.updatedAt)
+	if strings.TrimSpace(streamText) != "" || event != nil {
 		run.emitLocked(sdkstream.Frame{
 			Ref: sdkstream.Ref{
 				TaskID:    firstNonEmpty(run.taskID, run.anchor.TaskID),
@@ -457,9 +464,215 @@ func (r *Runner) handleUpdate(run *childRun, env sdkacpclient.UpdateEnvelope) {
 			Text:      streamText,
 			State:     string(run.state),
 			Running:   run.running,
+			Event:     event,
 			UpdatedAt: run.updatedAt,
 		})
 	}
+}
+
+func (run *childRun) acpUpdateEvent(env sdkacpclient.UpdateEnvelope, at time.Time) *sdksession.Event {
+	if run == nil {
+		return nil
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	scope := &sdksession.EventScope{
+		Source: "acp_subagent",
+		Controller: sdksession.ControllerRef{
+			Kind: sdksession.ControllerKindACP,
+			ID:   strings.TrimSpace(firstNonEmpty(run.anchor.Agent, run.anchor.AgentID)),
+		},
+		Participant: sdksession.ParticipantRef{
+			ID:           strings.TrimSpace(firstNonEmpty(run.anchor.AgentID, run.taskID, run.anchor.TaskID)),
+			Kind:         sdksession.ParticipantKindSubagent,
+			Role:         sdksession.ParticipantRoleDelegated,
+			DelegationID: strings.TrimSpace(firstNonEmpty(run.taskID, run.anchor.TaskID)),
+		},
+		ACP: sdksession.ACPRef{
+			SessionID: strings.TrimSpace(firstNonEmpty(env.SessionID, run.anchor.SessionID)),
+		},
+	}
+	actor := sdksession.ActorRef{
+		Kind: sdksession.ActorKindParticipant,
+		ID:   strings.TrimSpace(firstNonEmpty(run.anchor.AgentID, run.taskID, run.anchor.TaskID)),
+		Name: strings.TrimSpace(firstNonEmpty(run.anchor.Agent, run.anchor.AgentID)),
+	}
+	base := func(updateType string, eventType sdksession.EventType, text string) *sdksession.Event {
+		scopeCopy := sdksession.CloneEventScope(*scope)
+		scopeCopy.ACP.EventType = strings.TrimSpace(updateType)
+		return &sdksession.Event{
+			Type:       eventType,
+			Visibility: sdksession.VisibilityCanonical,
+			Time:       at,
+			Actor:      actor,
+			Scope:      &scopeCopy,
+			Text:       text,
+			Protocol:   &sdksession.EventProtocol{UpdateType: strings.TrimSpace(updateType)},
+			Meta: map[string]any{
+				"task_id":    strings.TrimSpace(firstNonEmpty(run.taskID, run.anchor.TaskID)),
+				"agent":      strings.TrimSpace(run.anchor.Agent),
+				"agent_id":   strings.TrimSpace(run.anchor.AgentID),
+				"session_id": strings.TrimSpace(firstNonEmpty(env.SessionID, run.anchor.SessionID)),
+			},
+		}
+	}
+	switch update := env.Update.(type) {
+	case sdkacpclient.ContentChunk:
+		text := chunkText(update)
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		switch strings.TrimSpace(update.SessionUpdate) {
+		case sdkacpclient.UpdateAgentMessage, sdkacpclient.UpdateAgentThought:
+			return base(update.SessionUpdate, sdksession.EventTypeAssistant, text)
+		default:
+			return nil
+		}
+	case sdkacpclient.ToolCall:
+		event := base(update.SessionUpdate, sdksession.EventTypeToolCall, firstNonEmpty(strings.TrimSpace(update.Title), strings.TrimSpace(update.Kind), "tool call"))
+		event.Protocol.ToolCall = &sdksession.ProtocolToolCall{
+			ID:       strings.TrimSpace(update.ToolCallID),
+			Name:     acpToolDisplayName(update.Kind, update.Title),
+			Kind:     strings.TrimSpace(update.Kind),
+			Title:    strings.TrimSpace(update.Title),
+			Status:   firstNonEmpty(strings.TrimSpace(update.Status), "pending"),
+			RawInput: acpToolRawInput(update.Kind, update.Title, update.RawInput),
+		}
+		return event
+	case sdkacpclient.ToolCallUpdate:
+		status := derefString(update.Status)
+		event := base(update.SessionUpdate, acpToolEventType(status), firstNonEmpty(derefString(update.Title), derefString(update.Kind), "tool update"))
+		event.Protocol.ToolCall = &sdksession.ProtocolToolCall{
+			ID:        strings.TrimSpace(update.ToolCallID),
+			Name:      acpToolDisplayName(derefString(update.Kind), derefString(update.Title)),
+			Kind:      derefString(update.Kind),
+			Title:     derefString(update.Title),
+			Status:    status,
+			RawInput:  acpToolRawInput(derefString(update.Kind), derefString(update.Title), update.RawInput),
+			RawOutput: acpToolRawOutput(update.RawOutput, update.Content),
+		}
+		return event
+	case sdkacpclient.PlanUpdate:
+		event := base(update.SessionUpdate, sdksession.EventTypePlan, "plan updated")
+		event.Protocol.Plan = &sdksession.ProtocolPlan{Entries: acpPlanEntries(update.Entries)}
+		return event
+	default:
+		return nil
+	}
+}
+
+func acpToolEventType(status string) sdksession.EventType {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "failed", "cancelled", "canceled":
+		return sdksession.EventTypeToolResult
+	default:
+		return sdksession.EventTypeToolCall
+	}
+}
+
+func acpToolDisplayName(kind string, title string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "read":
+		return "READ"
+	case "edit", "delete", "move":
+		return "PATCH"
+	case "search":
+		return "SEARCH"
+	case "execute":
+		return "BASH"
+	case "fetch":
+		return "FETCH"
+	case "think":
+		return "THINK"
+	case "switch_mode":
+		return "TASK"
+	}
+	if title = strings.TrimSpace(title); title != "" {
+		return strings.ToUpper(strings.Fields(title)[0])
+	}
+	return strings.ToUpper(strings.TrimSpace(kind))
+}
+
+func acpToolRawInput(kind string, title string, raw any) map[string]any {
+	out := acpRawMap(raw)
+	if out == nil {
+		out = map[string]any{}
+	}
+	if strings.TrimSpace(kind) != "" {
+		out["_acp_kind"] = strings.TrimSpace(kind)
+	}
+	if strings.TrimSpace(title) != "" {
+		out["_acp_title"] = strings.TrimSpace(title)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func acpToolRawOutput(raw any, content []sdkacpclient.ToolCallContent) map[string]any {
+	out := acpRawMap(raw)
+	if out == nil {
+		out = map[string]any{}
+	}
+	if text := strings.TrimSpace(acpToolContentText(content)); text != "" {
+		if _, exists := out["text"]; !exists {
+			out["text"] = text
+		}
+	}
+	for _, item := range content {
+		if terminalID := strings.TrimSpace(item.TerminalID); terminalID != "" {
+			out["terminal_id"] = terminalID
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func acpRawMap(raw any) map[string]any {
+	switch typed := raw.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		return maps.Clone(typed)
+	default:
+		if text := strings.TrimSpace(textFromContentValue(typed)); text != "" {
+			return map[string]any{"text": text}
+		}
+		if text := strings.TrimSpace(fmt.Sprint(typed)); text != "" && text != "<nil>" {
+			return map[string]any{"text": text}
+		}
+		return nil
+	}
+}
+
+func acpToolContentText(content []sdkacpclient.ToolCallContent) string {
+	if len(content) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(content))
+	for _, item := range content {
+		if text := strings.TrimSpace(textFromContentValue(item.Content)); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func acpPlanEntries(in []sdkacpclient.PlanEntry) []sdksession.ProtocolPlanEntry {
+	out := make([]sdksession.ProtocolPlanEntry, 0, len(in))
+	for _, item := range in {
+		out = append(out, sdksession.ProtocolPlanEntry{
+			Content:  strings.TrimSpace(item.Content),
+			Status:   strings.TrimSpace(item.Status),
+			Priority: strings.TrimSpace(item.Priority),
+		})
+	}
+	return out
 }
 
 func (run *childRun) emitLocked(frame sdkstream.Frame) {

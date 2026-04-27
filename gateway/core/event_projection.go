@@ -41,6 +41,16 @@ func projectSessionEvents(ref sdksession.SessionRef, events []*sdksession.Event)
 	return out
 }
 
+// ProjectSessionEvent converts one canonical session event into the stable
+// gateway event envelope shape used by adapters.
+func ProjectSessionEvent(ref sdksession.SessionRef, event *sdksession.Event) (EventEnvelope, bool) {
+	projected := projectSessionEvents(ref, []*sdksession.Event{event})
+	if len(projected) == 0 {
+		return EventEnvelope{}, false
+	}
+	return projected[0], true
+}
+
 func replayAfterCursor(events []EventEnvelope, cursor string, limit int) ([]EventEnvelope, error) {
 	if len(events) == 0 {
 		return nil, nil
@@ -505,7 +515,15 @@ func assistantTextFromSessionEvent(event *sdksession.Event) string {
 }
 
 func reasoningTextFromSessionEvent(event *sdksession.Event) string {
-	if event == nil || event.Message == nil {
+	if event == nil {
+		return ""
+	}
+	if updateTypeFromSessionEvent(event) == string(sdksession.ProtocolUpdateTypeAgentThought) {
+		if strings.TrimSpace(event.Text) != "" {
+			return event.Text
+		}
+	}
+	if event.Message == nil {
 		return ""
 	}
 	return event.Message.ReasoningText()

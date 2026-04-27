@@ -499,6 +499,126 @@ func TestDynamicAgentSlashWatchesRunningSubagentUntilOutput(t *testing.T) {
 	}
 }
 
+func TestDynamicAgentSlashPrefersStructuredSubagentEvents(t *testing.T) {
+	env := appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolCall,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Origin: &appgateway.EventOrigin{
+				Scope:   appgateway.EventScopeSubagent,
+				ScopeID: "child-1",
+				Actor:   "copilot",
+			},
+			ToolCall: &appgateway.ToolCallPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				RawInput: map[string]any{"command": "go test ./tui/tuiapp/..."},
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeSubagent,
+			},
+		},
+	}
+	stream := make(chan tuiadapterruntime.SubagentStreamFrame, 1)
+	stream <- tuiadapterruntime.SubagentStreamFrame{
+		TaskID:  "task-1",
+		Stream:  "stdout",
+		Text:    "working",
+		Running: true,
+		Event:   &env,
+	}
+	close(stream)
+	driver := &bridgeTestDriver{
+		agentList: []tuiadapterruntime.AgentCandidate{{Name: "copilot"}},
+		subagentSnapshot: tuiadapterruntime.SubagentSnapshot{
+			Handle:  "mike",
+			Mention: "@mike",
+			Agent:   "copilot",
+			TaskID:  "task-1",
+			State:   "running",
+			Running: true,
+		},
+		subagentStream: stream,
+	}
+	msgs := make(chan tea.Msg, 16)
+	result := dispatchSlashCommand(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs <- msg }}, "/copilot run tests")
+	if result.Err != nil {
+		t.Fatalf("dynamic slash error = %v", result.Err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case msg := <-msgs:
+			if assistant, ok := msg.(AssistantStreamMsg); ok && strings.Contains(assistant.Text, "working") {
+				t.Fatalf("structured frame emitted plain assistant stream: %#v", assistant)
+			}
+			envMsg, ok := msg.(appgateway.EventEnvelope)
+			if !ok {
+				continue
+			}
+			if envMsg.Event.ToolCall == nil || envMsg.Event.ToolCall.ToolName != "BASH" {
+				t.Fatalf("event envelope = %#v, want BASH tool call", envMsg)
+			}
+			if driver.subagentStreamSubscribeCalls == 0 {
+				t.Fatal("SubscribeSubagentStream was not called")
+			}
+			return
+		case <-deadline:
+			t.Fatalf("timed out waiting for structured subagent event; stream subscribe calls=%d", driver.subagentStreamSubscribeCalls)
+		}
+	}
+}
+
+func TestDynamicAgentSlashFallsBackWhenStructuredEventIsNotRenderable(t *testing.T) {
+	env := appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+		},
+	}
+	stream := make(chan tuiadapterruntime.SubagentStreamFrame, 1)
+	stream <- tuiadapterruntime.SubagentStreamFrame{
+		TaskID:  "task-1",
+		Stream:  "stdout",
+		Text:    "fallback side output",
+		Running: false,
+		Closed:  true,
+		Event:   &env,
+	}
+	close(stream)
+	driver := &bridgeTestDriver{
+		agentList: []tuiadapterruntime.AgentCandidate{{Name: "copilot"}},
+		subagentSnapshot: tuiadapterruntime.SubagentSnapshot{
+			Handle:  "mike",
+			Mention: "@mike",
+			Agent:   "copilot",
+			TaskID:  "task-1",
+			State:   "running",
+			Running: true,
+		},
+		subagentStream: stream,
+	}
+	msgs := make(chan tea.Msg, 16)
+	result := dispatchSlashCommand(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs <- msg }}, "/copilot run tests")
+	if result.Err != nil {
+		t.Fatalf("dynamic slash error = %v", result.Err)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case msg := <-msgs:
+			if _, ok := msg.(appgateway.EventEnvelope); ok {
+				t.Fatalf("non-renderable structured event should not be emitted: %#v", msg)
+			}
+			assistant, ok := msg.(AssistantStreamMsg)
+			if ok && assistant.Actor == "@mike" && strings.Contains(assistant.Text, "fallback side output") {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for fallback side output; stream subscribe calls=%d", driver.subagentStreamSubscribeCalls)
+		}
+	}
+}
+
 func TestSlashConnectParsesEnvironmentVariableSecret(t *testing.T) {
 	driver := &bridgeTestDriver{
 		connectStatus: tuiadapterruntime.StatusSnapshot{Model: "openai/gpt-4o"},

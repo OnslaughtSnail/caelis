@@ -11,6 +11,7 @@ import (
 
 	sdkacpclient "github.com/OnslaughtSnail/caelis/acp/client"
 	sdkdelegation "github.com/OnslaughtSnail/caelis/sdk/delegation"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 	sdksubagent "github.com/OnslaughtSnail/caelis/sdk/subagent"
 )
@@ -49,6 +50,82 @@ func TestRunnerHandleUpdatePublishesChildStream(t *testing.T) {
 	if got.Ref.TaskID != "task-1" || got.Ref.SessionID != "child-1" || got.Text != "child output" || !got.Running {
 		t.Fatalf("stream frame = %#v", got)
 	}
+	if got.Event == nil || got.Event.Type != sdksession.EventTypeAssistant || got.Event.Text != "child output" {
+		t.Fatalf("stream event = %#v, want assistant child output", got.Event)
+	}
+	if got.Event.Scope == nil || got.Event.Scope.Participant.Kind != sdksession.ParticipantKindSubagent || got.Event.Scope.Participant.DelegationID != "task-1" {
+		t.Fatalf("stream event scope = %#v, want subagent task scope", got.Event.Scope)
+	}
+}
+
+func TestRunnerHandleUpdatePublishesStructuredToolAndPlanEvents(t *testing.T) {
+	t.Parallel()
+
+	sink := &recordingStreams{}
+	run := &childRun{
+		anchor:  sdkdelegation.Anchor{TaskID: "task-1", SessionID: "child-1", Agent: "copilot", AgentID: "agent-1"},
+		taskID:  "task-1",
+		sink:    sink,
+		state:   sdkdelegation.StateRunning,
+		running: true,
+	}
+	runner := &Runner{clock: time.Now}
+
+	runner.handleUpdate(run, sdkacpclient.UpdateEnvelope{
+		SessionID: "child-1",
+		Update: sdkacpclient.ToolCall{
+			SessionUpdate: sdkacpclient.UpdateToolCall,
+			ToolCallID:    "call-1",
+			Kind:          "execute",
+			Title:         "run go test",
+			Status:        "pending",
+			RawInput:      map[string]any{"command": "go test ./tui/tuiapp/..."},
+		},
+	})
+	runner.handleUpdate(run, sdkacpclient.UpdateEnvelope{
+		SessionID: "child-1",
+		Update: sdkacpclient.ToolCallUpdate{
+			SessionUpdate: sdkacpclient.UpdateToolCallState,
+			ToolCallID:    "call-1",
+			Kind:          stringPtr("execute"),
+			Title:         stringPtr("run go test"),
+			Status:        stringPtr("completed"),
+			RawInput:      map[string]any{"command": "go test ./tui/tuiapp/..."},
+			RawOutput:     map[string]any{"stdout": "ok\n", "exit_code": 0},
+		},
+	})
+	runner.handleUpdate(run, sdkacpclient.UpdateEnvelope{
+		SessionID: "child-1",
+		Update: sdkacpclient.PlanUpdate{
+			SessionUpdate: sdkacpclient.UpdatePlan,
+			Entries:       []sdkacpclient.PlanEntry{{Content: "Run tests", Status: "completed"}},
+		},
+	})
+
+	if got := len(sink.frames); got != 3 {
+		t.Fatalf("stream frames = %#v, want three structured updates", sink.frames)
+	}
+	callEvent := sink.frames[0].Event
+	if callEvent == nil || callEvent.Type != sdksession.EventTypeToolCall || callEvent.Protocol == nil || callEvent.Protocol.ToolCall == nil {
+		t.Fatalf("tool call event = %#v", callEvent)
+	}
+	if callEvent.Protocol.ToolCall.Name != "BASH" || callEvent.Protocol.ToolCall.RawInput["command"] != "go test ./tui/tuiapp/..." {
+		t.Fatalf("tool call payload = %#v", callEvent.Protocol.ToolCall)
+	}
+	resultEvent := sink.frames[1].Event
+	if resultEvent == nil || resultEvent.Type != sdksession.EventTypeToolResult || resultEvent.Protocol == nil || resultEvent.Protocol.ToolCall == nil {
+		t.Fatalf("tool result event = %#v", resultEvent)
+	}
+	if resultEvent.Protocol.ToolCall.RawOutput["stdout"] != "ok\n" {
+		t.Fatalf("tool result payload = %#v", resultEvent.Protocol.ToolCall)
+	}
+	planEvent := sink.frames[2].Event
+	if planEvent == nil || planEvent.Type != sdksession.EventTypePlan || planEvent.Protocol == nil || planEvent.Protocol.Plan == nil {
+		t.Fatalf("plan event = %#v", planEvent)
+	}
+	if len(planEvent.Protocol.Plan.Entries) != 1 || planEvent.Protocol.Plan.Entries[0].Content != "Run tests" {
+		t.Fatalf("plan entries = %#v", planEvent.Protocol.Plan.Entries)
+	}
 }
 
 func TestRunnerHandleUpdateUsesAgentMessageDeltas(t *testing.T) {
@@ -84,6 +161,33 @@ func TestRunnerHandleUpdateUsesAgentMessageDeltas(t *testing.T) {
 	run.mu.RUnlock()
 	if result != "我来按步骤执行这个任务。" {
 		t.Fatalf("run.result = %q, want deduped final text", result)
+	}
+}
+
+func TestRunnerHandleUpdatePublishesStructuredThoughtEvent(t *testing.T) {
+	t.Parallel()
+
+	sink := &recordingStreams{}
+	run := &childRun{
+		anchor:  sdkdelegation.Anchor{TaskID: "task-1", SessionID: "child-1", Agent: "copilot", AgentID: "agent-1"},
+		taskID:  "task-1",
+		sink:    sink,
+		state:   sdkdelegation.StateRunning,
+		running: true,
+	}
+	runner := &Runner{clock: time.Now}
+
+	runner.handleUpdate(run, contentUpdate(t, sdkacpclient.UpdateAgentThought, "thinking about the command"))
+
+	if len(sink.frames) != 1 {
+		t.Fatalf("stream frames = %#v, want one thought frame", sink.frames)
+	}
+	got := sink.frames[0]
+	if got.Stream != "reasoning" || got.Text != "thinking about the command" {
+		t.Fatalf("stream frame = %#v, want reasoning thought text", got)
+	}
+	if got.Event == nil || got.Event.Protocol == nil || got.Event.Protocol.UpdateType != sdkacpclient.UpdateAgentThought || got.Event.Text != "thinking about the command" {
+		t.Fatalf("stream event = %#v, want structured thought event", got.Event)
 	}
 }
 
@@ -197,6 +301,10 @@ func contentUpdate(t *testing.T, kind string, text string) sdkacpclient.UpdateEn
 			Content:       raw,
 		},
 	}
+}
+
+func stringPtr(value string) *string {
+	return &value
 }
 
 type recordingStreams struct {

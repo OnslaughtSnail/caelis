@@ -499,6 +499,53 @@ func TestProjectSessionEventsPreservesMessageToolCallID(t *testing.T) {
 	}
 }
 
+func TestProjectSessionEventExportsSingleCanonicalEnvelope(t *testing.T) {
+	t.Parallel()
+
+	env, ok := ProjectSessionEvent(sdksession.SessionRef{SessionID: "root-session"}, &sdksession.Event{
+		ID:         "evt-1",
+		Type:       sdksession.EventTypeAssistant,
+		Visibility: sdksession.VisibilityCanonical,
+		Text:       "structured side output",
+		Scope: &sdksession.EventScope{
+			Participant: sdksession.ParticipantRef{
+				ID:           "agent-1",
+				Kind:         sdksession.ParticipantKindSubagent,
+				Role:         sdksession.ParticipantRoleDelegated,
+				DelegationID: "task-1",
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("ProjectSessionEvent() ok = false, want true")
+	}
+	if env.Cursor != "evt-1" || env.Event.Kind != EventKindAssistantMessage {
+		t.Fatalf("env = %#v, want assistant envelope with cursor", env)
+	}
+	if env.Event.Origin == nil || env.Event.Origin.Scope != EventScopeSubagent || env.Event.Narrative == nil || env.Event.Narrative.Text != "structured side output" {
+		t.Fatalf("env.Event = %#v, want subagent assistant narrative", env.Event)
+	}
+}
+
+func TestProjectSessionEventProjectsThoughtTextWithoutMessage(t *testing.T) {
+	t.Parallel()
+
+	env, ok := ProjectSessionEvent(sdksession.SessionRef{SessionID: "root-session"}, &sdksession.Event{
+		Type:       sdksession.EventTypeAssistant,
+		Visibility: sdksession.VisibilityCanonical,
+		Text:       "thinking through side output",
+		Protocol: &sdksession.EventProtocol{
+			UpdateType: string(sdksession.ProtocolUpdateTypeAgentThought),
+		},
+	})
+	if !ok {
+		t.Fatal("ProjectSessionEvent() ok = false, want true")
+	}
+	if env.Event.Narrative == nil || env.Event.Narrative.ReasoningText != "thinking through side output" || env.Event.Narrative.Text != "" {
+		t.Fatalf("narrative = %#v, want reasoning-only thought text", env.Event.Narrative)
+	}
+}
+
 func TestEventPublicContractDoesNotExposeRawCompatibilityFields(t *testing.T) {
 	t.Parallel()
 

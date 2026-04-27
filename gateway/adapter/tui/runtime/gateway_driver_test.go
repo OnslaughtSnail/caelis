@@ -19,6 +19,7 @@ import (
 	sdkproviders "github.com/OnslaughtSnail/caelis/sdk/model/providers"
 	sdkplugin "github.com/OnslaughtSnail/caelis/sdk/plugin"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	sdkstream "github.com/OnslaughtSnail/caelis/sdk/stream"
 )
 
 func encryptCodeFreeAPIKeyForRuntimeTest(t *testing.T, apiKey string) string {
@@ -37,6 +38,47 @@ func encryptCodeFreeAPIKeyForRuntimeTest(t *testing.T, apiKey string) string {
 
 func ptrRuntimeMessage(message sdkmodel.Message) *sdkmodel.Message {
 	return &message
+}
+
+func TestSubagentStreamFrameProjectsStructuredSessionEvent(t *testing.T) {
+	t.Parallel()
+
+	frame := subagentStreamFrameFromStreamFrame(sdksession.SessionRef{SessionID: "root-session"}, "task-1", sdkstream.Frame{
+		Ref:     sdkstream.Ref{TaskID: "task-1", SessionID: "child-1"},
+		Stream:  "stdout",
+		Text:    "fallback text",
+		Running: true,
+		Event: &sdksession.Event{
+			Type:       sdksession.EventTypeToolCall,
+			Visibility: sdksession.VisibilityCanonical,
+			Text:       "run tests",
+			Scope: &sdksession.EventScope{
+				Participant: sdksession.ParticipantRef{ID: "child-1", Kind: sdksession.ParticipantKindSubagent, DelegationID: "task-1"},
+			},
+			Protocol: &sdksession.EventProtocol{
+				UpdateType: string(sdksession.ProtocolUpdateTypeToolCall),
+				ToolCall: &sdksession.ProtocolToolCall{
+					ID:       "call-1",
+					Name:     "BASH",
+					Status:   "pending",
+					RawInput: map[string]any{"command": "go test ./gateway/adapter/tui/runtime/..."},
+				},
+			},
+		},
+	})
+
+	if frame.Event == nil {
+		t.Fatal("frame.Event = nil, want projected gateway event")
+	}
+	if frame.Event.Event.Origin == nil || frame.Event.Event.Origin.Scope != appgateway.EventScopeSubagent {
+		t.Fatalf("projected origin = %#v, want subagent scope", frame.Event.Event.Origin)
+	}
+	if frame.Event.Event.ToolCall == nil || frame.Event.Event.ToolCall.ToolName != "BASH" {
+		t.Fatalf("projected event = %#v, want BASH tool call", frame.Event.Event)
+	}
+	if frame.Text != "fallback text" || frame.TaskID != "task-1" {
+		t.Fatalf("frame = %#v, want fallback text and task id preserved", frame)
+	}
 }
 
 func TestGatewayDriverDefersBlankSessionUntilFirstSubmission(t *testing.T) {

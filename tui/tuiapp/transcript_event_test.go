@@ -329,6 +329,51 @@ func TestTranscriptSnapshots(t *testing.T) {
 	}
 }
 
+func TestStructuredSubagentGatewayToolRendersThroughTranscriptModel(t *testing.T) {
+	t.Parallel()
+
+	model := newGatewayEventTestModel()
+	for _, env := range []appgateway.EventEnvelope{
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolCall,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Origin:     &appgateway.EventOrigin{Scope: appgateway.EventScopeSubagent, ScopeID: "child-1", Actor: "copilot"},
+			ToolCall: &appgateway.ToolCallPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeSubagent,
+				RawInput: map[string]any{"command": "go test ./tui/tuiapp/..."},
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Origin:     &appgateway.EventOrigin{Scope: appgateway.EventScopeSubagent, ScopeID: "child-1", Actor: "copilot"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusCompleted,
+				Scope:    appgateway.EventScopeSubagent,
+				RawInput: map[string]any{"command": "go test ./tui/tuiapp/..."},
+				RawOutput: map[string]any{
+					"stdout":    "ok\n",
+					"exit_code": 0,
+				},
+			},
+		}},
+	} {
+		updated, _ := model.Update(env)
+		model = updated.(*Model)
+	}
+
+	got := snapshotTranscriptModel(model)
+	want := "Subagent(spawn=child-1,status=running)\n  tool(call-1,BASH,done,args=go test ./tui/tuiapp/...,output=ok)"
+	if got != want {
+		t.Fatalf("snapshot mismatch\nwant:\n%s\n\ngot:\n%s", want, got)
+	}
+}
+
 func snapshotTranscriptModel(m *Model) string {
 	lines := make([]string, 0, len(m.doc.Blocks())*2)
 	for _, block := range m.doc.Blocks() {

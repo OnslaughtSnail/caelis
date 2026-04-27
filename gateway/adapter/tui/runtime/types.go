@@ -123,6 +123,7 @@ type SubagentStreamFrame struct {
 	State     string
 	Running   bool
 	Closed    bool
+	Event     *appgateway.EventEnvelope
 	UpdatedAt time.Time
 }
 

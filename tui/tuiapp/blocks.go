@@ -1495,6 +1495,24 @@ func (s *SubagentSessionState) UpdateToolCallWithMeta(callID, toolName, args, st
 		if e.Kind != SEToolCall || e.CallID != callID {
 			continue
 		}
+		if !e.Done {
+			if strings.TrimSpace(finalEvent.Name) == "" {
+				finalEvent.Name = e.Name
+			}
+			if strings.TrimSpace(finalEvent.Args) == "" {
+				finalEvent.Args = e.Args
+			}
+			e.Name = finalEvent.Name
+			e.Args = finalEvent.Args
+			e.Output = finalEvent.Output
+			e.Done = true
+			e.Err = finalEvent.Err
+			if e.TaskID == "" {
+				e.TaskID = finalEvent.TaskID
+			}
+			s.eventsGen++
+			return
+		}
 		if strings.TrimSpace(finalEvent.Name) == "" {
 			finalEvent.Name = e.Name
 		}

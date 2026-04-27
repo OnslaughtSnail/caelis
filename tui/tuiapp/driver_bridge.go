@@ -707,6 +707,10 @@ func startDynamicSubagentOutputBridge(driver tuiadapterruntime.Driver, send func
 			actor := subagentMention(snapshot)
 			go func() {
 				for frame := range frames {
+					if frame.Event != nil && gatewayEnvelopeHasRenderableTranscript(*frame.Event) {
+						send(*frame.Event)
+						continue
+					}
 					if strings.TrimSpace(frame.Text) == "" {
 						continue
 					}
@@ -723,6 +727,18 @@ func startDynamicSubagentOutputBridge(driver tuiadapterruntime.Driver, send func
 	}
 	sendDynamicSubagentSnapshotOutput(send, snapshot)
 	startDynamicSubagentSnapshotWatcher(driver, send, snapshot)
+}
+
+func gatewayEnvelopeHasRenderableTranscript(env appgateway.EventEnvelope) bool {
+	if env.Err != nil {
+		return true
+	}
+	for _, event := range ProjectGatewayEventToTranscriptEvents(env.Event) {
+		if event.Kind != TranscriptEventUsage {
+			return true
+		}
+	}
+	return false
 }
 
 func sendDynamicSubagentSnapshotOutput(send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) bool {

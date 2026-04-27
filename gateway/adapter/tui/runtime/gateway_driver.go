@@ -161,18 +161,10 @@ func (d *GatewayDriver) SubscribeSubagentStream(ctx context.Context, taskID stri
 			if err != nil || frame == nil {
 				return
 			}
-			if strings.TrimSpace(frame.Text) == "" && !frame.Closed {
+			if strings.TrimSpace(frame.Text) == "" && frame.Event == nil && !frame.Closed {
 				continue
 			}
-			item := SubagentStreamFrame{
-				TaskID:    firstNonEmpty(strings.TrimSpace(frame.Ref.TaskID), taskID),
-				Stream:    strings.TrimSpace(frame.Stream),
-				Text:      frame.Text,
-				State:     strings.TrimSpace(frame.State),
-				Running:   frame.Running,
-				Closed:    frame.Closed,
-				UpdatedAt: frame.UpdatedAt,
-			}
+			item := subagentStreamFrameFromStreamFrame(session.SessionRef, taskID, sdkstream.CloneFrame(*frame))
 			select {
 			case out <- item:
 			case <-ctx.Done():
@@ -181,6 +173,25 @@ func (d *GatewayDriver) SubscribeSubagentStream(ctx context.Context, taskID stri
 		}
 	}()
 	return out, true
+}
+
+func subagentStreamFrameFromStreamFrame(sessionRef sdksession.SessionRef, taskID string, frame sdkstream.Frame) SubagentStreamFrame {
+	var event *appgateway.EventEnvelope
+	if frame.Event != nil {
+		if projected, ok := appgateway.ProjectSessionEvent(sessionRef, frame.Event); ok {
+			event = &projected
+		}
+	}
+	return SubagentStreamFrame{
+		TaskID:    firstNonEmpty(strings.TrimSpace(frame.Ref.TaskID), strings.TrimSpace(taskID)),
+		Stream:    strings.TrimSpace(frame.Stream),
+		Text:      frame.Text,
+		State:     strings.TrimSpace(frame.State),
+		Running:   frame.Running,
+		Closed:    frame.Closed,
+		Event:     event,
+		UpdatedAt: frame.UpdatedAt,
+	}
 }
 
 func (d *GatewayDriver) WorkspaceDir() string {

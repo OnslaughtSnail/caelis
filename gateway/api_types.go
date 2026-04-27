@@ -66,6 +66,7 @@ type ToolAugmentation = gatewaycore.ToolAugmentation
 
 var StreamRequestFromEvent = gatewaycore.StreamRequestFromEvent
 var StreamFrameEvent = gatewaycore.StreamFrameEvent
+var ProjectSessionEvent = gatewaycore.ProjectSessionEvent
 
 const (
 	StateCurrentModelAlias      = gatewaycore.StateCurrentModelAlias
