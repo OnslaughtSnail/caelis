@@ -483,7 +483,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		writeExpandedTools(builder, b.ExpandedThought)
 		writeExpandedTools(builder, b.ExpandedExplore)
 		writeToolPanelScrollStates(builder, b.ToolPanelScroll)
-		writeSubagentEvents(builder, b.Events)
+		writeSubagentEvents(builder, b.Events, ctx)
 	case *DividerBlock:
 		builder.addString(b.Label)
 		builder.addString(b.Text)
@@ -502,7 +502,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addTime(b.ScrollbarVisibleUntil)
 		builder.addTime(b.StartedAt)
 		builder.addInt(int(b.localEvtGen))
-		writeSubagentEvents(builder, b.Events)
+		writeSubagentEvents(builder, b.Events, ctx)
 	case *MainACPTurnBlock:
 		builder.addString(b.SessionID)
 		builder.addString(b.Status)
@@ -512,7 +512,7 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		writeExpandedTools(builder, b.ExpandedThought)
 		writeExpandedTools(builder, b.ExpandedExplore)
 		writeToolPanelScrollStates(builder, b.ToolPanelScroll)
-		writeSubagentEvents(builder, b.Events)
+		writeSubagentEvents(builder, b.Events, ctx)
 	case *WelcomeBlock:
 		builder.addString(b.Version)
 		builder.addString(b.Workspace)
@@ -568,7 +568,7 @@ func writeRenderedRows(builder *blockKeyBuilder, rows []RenderedRow) {
 	}
 }
 
-func writeSubagentEvents(builder *blockKeyBuilder, events []SubagentEvent) {
+func writeSubagentEvents(builder *blockKeyBuilder, events []SubagentEvent, ctx BlockRenderContext) {
 	builder.addInt(len(events))
 	for _, event := range events {
 		builder.addInt(int(event.Kind))
@@ -578,7 +578,11 @@ func writeSubagentEvents(builder *blockKeyBuilder, events []SubagentEvent) {
 		builder.addString(event.CallID)
 		builder.addString(event.Name)
 		builder.addString(event.Args)
-		builder.addString(event.Output)
+		if event.Kind == SEToolCall && isTerminalPanelTool(event.Name) {
+			builder.addString(toolOutputRenderKey(event.Name, event.Output, ctx.Width))
+		} else {
+			builder.addString(event.Output)
+		}
 		builder.addString(event.TaskID)
 		builder.addBool(event.Done)
 		builder.addBool(event.Err)

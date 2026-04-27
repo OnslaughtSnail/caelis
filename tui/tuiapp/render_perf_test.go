@@ -155,6 +155,17 @@ func BenchmarkAssistantActiveBufferLongStream(b *testing.B) {
 	}
 }
 
+func BenchmarkToolOutputStream10kChunks(b *testing.B) {
+	m := newPerfTestModel()
+	block := m.ensureMainACPTurnBlock("session-1")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		block.UpdateToolWithMeta("call-1", "BASH", "go test", "line\n", false, false, ToolUpdateMeta{TaskID: "task-1"})
+		m.markViewportBlockDirty(block.BlockID())
+		m.syncViewportContent()
+	}
+}
+
 func BenchmarkVisibleSelectionRenderLongTranscript(b *testing.B) {
 	m := newPerfTestModel()
 	seedLongTranscript(m, 2000)

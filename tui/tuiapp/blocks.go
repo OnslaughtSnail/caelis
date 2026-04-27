@@ -227,16 +227,17 @@ func renderNarrativeGlamourRows(blockID, raw, rolePrefix string, lineStyle tuiki
 // ---------------------------------------------------------------------------
 
 type MainACPTurnBlock struct {
-	id              string
-	SessionID       string
-	Status          string
-	StartedAt       time.Time
-	EndedAt         time.Time
-	Events          []SubagentEvent
-	ExpandedTools   map[string]bool
-	ToolPanelScroll map[string]toolPanelScrollState
-	ExpandedThought map[string]bool
-	ExpandedExplore map[string]bool
+	id                   string
+	SessionID            string
+	Status               string
+	StartedAt            time.Time
+	EndedAt              time.Time
+	Events               []SubagentEvent
+	ExpandedTools        map[string]bool
+	ToolPanelScroll      map[string]toolPanelScrollState
+	ExpandedThought      map[string]bool
+	ExpandedExplore      map[string]bool
+	toolPanelRenderCache map[string]toolOutputRenderCache
 }
 
 type ToolUpdateMeta struct {
@@ -447,6 +448,7 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		HideCompletedRow:       true,
 		ToolOutputPanels:       true,
 		ToolPanelExpanded:      b.toolPanelExpanded,
+		ToolPanelRows:          b.renderToolPanelRows,
 		ExplorationExpanded:    b.explorationExpanded,
 		ToolPanelScrollState:   b.toolPanelScrollState,
 		ReasoningExpanded:      b.reasoningExpanded,
@@ -458,18 +460,19 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 // ---------------------------------------------------------------------------
 
 type ParticipantTurnBlock struct {
-	id              string
-	SessionID       string
-	Actor           string
-	Status          string
-	Expanded        bool
-	StartedAt       time.Time
-	EndedAt         time.Time
-	Events          []SubagentEvent
-	ExpandedTools   map[string]bool
-	ToolPanelScroll map[string]toolPanelScrollState
-	ExpandedThought map[string]bool
-	ExpandedExplore map[string]bool
+	id                   string
+	SessionID            string
+	Actor                string
+	Status               string
+	Expanded             bool
+	StartedAt            time.Time
+	EndedAt              time.Time
+	Events               []SubagentEvent
+	ExpandedTools        map[string]bool
+	ToolPanelScroll      map[string]toolPanelScrollState
+	ExpandedThought      map[string]bool
+	ExpandedExplore      map[string]bool
+	toolPanelRenderCache map[string]toolOutputRenderCache
 }
 
 func NewParticipantTurnBlock(sessionID, actor string) *ParticipantTurnBlock {
@@ -682,6 +685,7 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		HideCompletedRow:       true,
 		ToolOutputPanels:       true,
 		ToolPanelExpanded:      b.toolPanelExpanded,
+		ToolPanelRows:          b.renderToolPanelRows,
 		ExplorationExpanded:    b.explorationExpanded,
 		ToolPanelScrollState:   b.toolPanelScrollState,
 		ReasoningExpanded:      b.reasoningExpanded,
@@ -795,6 +799,13 @@ func (b *MainACPTurnBlock) toolPanelExpanded(callID string) bool {
 	return toolPanelExpanded(b.ExpandedTools, callID)
 }
 
+func (b *MainACPTurnBlock) renderToolPanelRows(request toolPanelRenderRequest) []RenderedRow {
+	if b == nil {
+		return request.renderUncached()
+	}
+	return renderCachedToolPanelRows(&b.toolPanelRenderCache, request, b.toolPanelScrollState(request.CallID))
+}
+
 func (b *MainACPTurnBlock) toggleToolPanelExpanded(callID string) bool {
 	if b == nil {
 		return false
@@ -878,6 +889,13 @@ func (b *ParticipantTurnBlock) toolPanelExpanded(callID string) bool {
 		return true
 	}
 	return toolPanelExpanded(b.ExpandedTools, callID)
+}
+
+func (b *ParticipantTurnBlock) renderToolPanelRows(request toolPanelRenderRequest) []RenderedRow {
+	if b == nil {
+		return request.renderUncached()
+	}
+	return renderCachedToolPanelRows(&b.toolPanelRenderCache, request, b.toolPanelScrollState(request.CallID))
 }
 
 func (b *ParticipantTurnBlock) toggleToolPanelExpanded(callID string) bool {
@@ -1629,6 +1647,8 @@ type SubagentPanelBlock struct {
 
 	// Events is the chronological stream of child session events.
 	Events []SubagentEvent
+
+	toolPanelRenderCache map[string]toolOutputRenderCache
 }
 
 func NewSubagentPanelBlock(spawnID, attachID, agent, callID string) *SubagentPanelBlock {
@@ -1885,7 +1905,15 @@ func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext,
 	return renderACPTranscriptLines(panel.id, events, status, contentWidth, ctx, acpTranscriptRenderOptions{
 		EmptyPlaceholder: "waiting for subagent output",
 		HideCompletedRow: true,
+		ToolPanelRows:    panel.renderToolPanelRows,
 	})
+}
+
+func (b *SubagentPanelBlock) renderToolPanelRows(request toolPanelRenderRequest) []RenderedRow {
+	if b == nil {
+		return request.renderUncached()
+	}
+	return renderCachedToolPanelRows(&b.toolPanelRenderCache, request, defaultToolPanelScrollState())
 }
 
 func subagentPanelDisplayEvents(panel *SubagentPanelBlock) ([]SubagentEvent, string) {

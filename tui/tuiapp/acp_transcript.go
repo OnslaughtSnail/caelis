@@ -21,9 +21,20 @@ type acpTranscriptRenderOptions struct {
 	HideCompletedRow       bool
 	ToolOutputPanels       bool
 	ToolPanelExpanded      func(callID string) bool
+	ToolPanelRows          func(toolPanelRenderRequest) []RenderedRow
 	ExplorationExpanded    func(key string) bool
 	ToolPanelScrollState   func(callID string) toolPanelScrollState
 	ReasoningExpanded      func(key string) bool
+}
+
+type toolPanelRenderRequest struct {
+	BlockID  string
+	CallID   string
+	ToolName string
+	Text     string
+	Width    int
+	Ctx      BlockRenderContext
+	Err      bool
 }
 
 const (
@@ -926,12 +937,35 @@ func finalPanelToolName(start SubagentEvent, final SubagentEvent, hasFinal bool)
 }
 
 func renderACPToolPanelRows(blockID string, callID string, toolName string, text string, width int, ctx BlockRenderContext, err bool, opts acpTranscriptRenderOptions) []RenderedRow {
+	request := toolPanelRenderRequest{
+		BlockID:  blockID,
+		CallID:   callID,
+		ToolName: toolName,
+		Text:     text,
+		Width:    width,
+		Ctx:      ctx,
+		Err:      err,
+	}
+	if opts.ToolPanelRows != nil {
+		return opts.ToolPanelRows(request)
+	}
+	return request.renderUncached()
+}
+
+func (r toolPanelRenderRequest) renderUncached() []RenderedRow {
+	blockID := r.BlockID
+	callID := r.CallID
+	toolName := r.ToolName
+	text := r.Text
+	width := r.Width
+	ctx := r.Ctx
+	err := r.Err
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	if isDiffPanelText(text) && !err {
 		return renderACPDiffPanelRows(blockID, text, width, ctx)
 	}
 	if isTerminalPanelTool(toolName) {
-		return renderACPTerminalPanelRows(blockID, callID, text, width, ctx, err, opts)
+		return renderACPTerminalPanelRows(blockID, callID, text, width, ctx, err)
 	}
 	boxWidth := maxInt(20, width)
 	bodyWidth := maxInt(1, boxWidth-6)
@@ -984,7 +1018,7 @@ func renderACPTerminalLifecycleRows(blockID string, ev SubagentEvent, callID str
 	if !expanded || !shouldRenderACPToolPanel(text, err) {
 		return rows
 	}
-	rows = append(rows, renderACPTerminalPanelRows(blockID, callID, text, width, ctx, err, opts)...)
+	rows = append(rows, renderACPToolPanelRows(blockID, callID, ev.Name, text, width, ctx, err, opts)...)
 	return rows
 }
 
@@ -1088,7 +1122,7 @@ func toolActionStyle(ctx BlockRenderContext, action string) lipgloss.Style {
 	}
 }
 
-func renderACPTerminalPanelRows(blockID string, callID string, text string, width int, ctx BlockRenderContext, err bool, opts acpTranscriptRenderOptions) []RenderedRow {
+func renderACPTerminalPanelRows(blockID string, callID string, text string, width int, ctx BlockRenderContext, err bool) []RenderedRow {
 	bodyWidth := maxInt(1, width)
 	lines := renderACPTerminalPanelBody(text, bodyWidth, ctx, err)
 	rows := make([]RenderedRow, 0, len(lines))
@@ -1116,27 +1150,34 @@ func renderACPTerminalPanelBody(text string, width int, ctx BlockRenderContext, 
 }
 
 func tailWrappedTerminalSegments(text string, width int, limit int) []string {
+	return tailWrappedTerminalSegmentsFromEnd(text, width, limit)
+}
+
+func tailWrappedTerminalSegmentsFromEnd(text string, width int, limit int) []string {
 	if limit <= 0 {
 		return nil
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
 	parts := strings.Split(text, "\n")
-	segments := make([]string, 0, minInt(len(parts), limit))
+	reversed := make([]string, 0, minInt(len(parts), limit))
 	bodyWidth := maxInt(1, width-displayColumns("  └ "))
-	for _, part := range parts {
+	for i := len(parts) - 1; i >= 0 && len(reversed) < limit; i-- {
+		part := parts[i]
 		if strings.TrimSpace(part) == "" {
 			continue
 		}
-		for _, segment := range strings.Split(hardWrapDisplayLine(part, bodyWidth), "\n") {
+		wrapped := strings.Split(hardWrapDisplayLine(part, bodyWidth), "\n")
+		for j := len(wrapped) - 1; j >= 0 && len(reversed) < limit; j-- {
+			segment := wrapped[j]
 			if strings.TrimSpace(segment) == "" {
 				continue
 			}
-			segments = append(segments, segment)
-			if len(segments) > limit {
-				copy(segments, segments[len(segments)-limit:])
-				segments = segments[:limit]
-			}
+			reversed = append(reversed, segment)
 		}
+	}
+	segments := make([]string, len(reversed))
+	for i := range reversed {
+		segments[len(reversed)-1-i] = reversed[i]
 	}
 	return segments
 }
