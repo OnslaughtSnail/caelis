@@ -2,16 +2,98 @@ package tuiapp
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
 // ---------------------------------------------------------------------------
 // Diagnostics
 // ---------------------------------------------------------------------------
+
+func newDiagnostics() Diagnostics {
+	return Diagnostics{
+		RedrawMode:                 "fullscreen",
+		UpdateMessagesByLane:       make(map[renderEventLane]uint64),
+		UpdateMessagesByType:       make(map[string]uint64),
+		ViewportSetContentReason:   make(map[string]uint64),
+		BlockRenderCallsByKind:     make(map[BlockKind]uint64),
+		StreamSmoothingFlushReason: make(map[string]uint64),
+	}
+}
+
+func (m *Model) ensureDiagnosticsMaps() {
+	if m == nil {
+		return
+	}
+	if m.diag.UpdateMessagesByLane == nil {
+		m.diag.UpdateMessagesByLane = make(map[renderEventLane]uint64)
+	}
+	if m.diag.UpdateMessagesByType == nil {
+		m.diag.UpdateMessagesByType = make(map[string]uint64)
+	}
+	if m.diag.ViewportSetContentReason == nil {
+		m.diag.ViewportSetContentReason = make(map[string]uint64)
+	}
+	if m.diag.BlockRenderCallsByKind == nil {
+		m.diag.BlockRenderCallsByKind = make(map[BlockKind]uint64)
+	}
+	if m.diag.StreamSmoothingFlushReason == nil {
+		m.diag.StreamSmoothingFlushReason = make(map[string]uint64)
+	}
+}
+
+func (m *Model) observeRenderMessage(msg tea.Msg, policy renderEventPolicy) {
+	if m == nil {
+		return
+	}
+	m.ensureDiagnosticsMaps()
+	m.diag.UpdateMessagesByLane[policy.lane]++
+	m.diag.UpdateMessagesByType[fmt.Sprintf("%T", msg)]++
+}
+
+func (m *Model) observeViewportSetContent(lines []string, reason string) {
+	if m == nil {
+		return
+	}
+	m.ensureDiagnosticsMaps()
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	m.diag.ViewportSetContentLines++
+	m.diag.ViewportSetContentLineCount += uint64(len(lines))
+	var bytes uint64
+	for _, line := range lines {
+		bytes += uint64(len(line))
+	}
+	m.diag.ViewportSetContentBytes += bytes
+	m.diag.ViewportSetContentReason[reason]++
+}
+
+func (m *Model) observeBlockRender(kind BlockKind) {
+	if m == nil {
+		return
+	}
+	m.ensureDiagnosticsMaps()
+	m.diag.BlockRenderCallsByKind[kind]++
+}
+
+func (m *Model) observeStreamSmoothingFlush(reason string) {
+	if m == nil {
+		return
+	}
+	m.ensureDiagnosticsMaps()
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown"
+	}
+	m.diag.StreamSmoothingFlushReason[reason]++
+}
 
 func (m *Model) observeRender(duration time.Duration, bytes int, redrawMode string) {
 	m.diag.Frames++

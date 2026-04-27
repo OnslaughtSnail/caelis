@@ -56,27 +56,36 @@ var runningCarouselLines = []string{
 }
 
 type Diagnostics struct {
-	Frames                   uint64
-	IncrementalFrames        uint64
-	FullRepaints             uint64
-	SlowFrames               uint64
-	LastFrameDuration        time.Duration
-	AvgFrameDuration         time.Duration
-	MaxFrameDuration         time.Duration
-	RenderBytes              uint64
-	PeakFrameBytes           uint64
-	ViewportFullSyncs        uint64
-	ViewportIncrementalSyncs uint64
-	ViewportQueuedSyncs      uint64
-	ViewportSkippedSyncs     uint64
-	SelectionVisibleRenders  uint64
-	LastRenderAt             time.Time
-	LastInputAt              time.Time
-	LastInputLatency         time.Duration
-	AvgInputLatency          time.Duration
-	P95InputLatency          time.Duration
-	LastMentionLatency       time.Duration
-	RedrawMode               string
+	Frames                      uint64
+	IncrementalFrames           uint64
+	FullRepaints                uint64
+	SlowFrames                  uint64
+	LastFrameDuration           time.Duration
+	AvgFrameDuration            time.Duration
+	MaxFrameDuration            time.Duration
+	RenderBytes                 uint64
+	PeakFrameBytes              uint64
+	ViewportFullSyncs           uint64
+	ViewportIncrementalSyncs    uint64
+	ViewportQueuedSyncs         uint64
+	ViewportSkippedSyncs        uint64
+	ViewportSetContentLines     uint64
+	ViewportSetContentLineCount uint64
+	ViewportSetContentBytes     uint64
+	SelectionVisibleRenders     uint64
+	UpdateMessagesByLane        map[renderEventLane]uint64
+	UpdateMessagesByType        map[string]uint64
+	ViewportSetContentReason    map[string]uint64
+	BlockRenderCallsByKind      map[BlockKind]uint64
+	StreamSmoothingFlushReason  map[string]uint64
+	ProgramSendsAfterClose      uint64
+	LastRenderAt                time.Time
+	LastInputAt                 time.Time
+	LastInputLatency            time.Duration
+	AvgInputLatency             time.Duration
+	P95InputLatency             time.Duration
+	LastMentionLatency          time.Duration
+	RedrawMode                  string
 }
 
 type Config struct {

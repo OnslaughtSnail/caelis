@@ -722,9 +722,14 @@ func (m *Model) applyPendingSmoothChunk(state *streamSmoothingState, chunk strin
 }
 
 func (m *Model) flushAllPendingStreamSmoothing() {
+	m.flushAllPendingStreamSmoothingWithReason("manual")
+}
+
+func (m *Model) flushAllPendingStreamSmoothingWithReason(reason string) {
 	if m == nil || len(m.streamSmoothing) == 0 {
 		return
 	}
+	m.observeStreamSmoothingFlush(reason)
 	keys := make([]string, 0, len(m.streamSmoothing))
 	for key := range m.streamSmoothing {
 		keys = append(keys, key)

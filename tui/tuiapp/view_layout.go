@@ -123,12 +123,16 @@ func (m *Model) syncViewportContent() {
 	} else {
 		m.diag.ViewportIncrementalSyncs++
 	}
+	syncReason := "incremental_sync"
+	if !incremental {
+		syncReason = "full_sync"
+	}
 	m.lastViewportRenderContextKey = contextKey
 	clear(m.dirtyViewportBlocks)
 	m.viewportContentVersion++
 	m.lastViewportStreamLine = m.streamLine
 
-	m.renderViewportContent()
+	m.renderViewportContent(syncReason)
 }
 
 func (m *Model) beginDeferredViewportSync() {
@@ -286,12 +290,13 @@ func truncateMiddleDisplay(text string, width int) string {
 	return prefix + ellipsis + suffix
 }
 
-func (m *Model) renderViewportContent() {
+func (m *Model) renderViewportContent(reason string) {
 	start := time.Now()
 	lines := m.viewportStyledLines
 	if m.lastViewportContentVersion != m.viewportContentVersion {
 		fingerprint := viewportLinesFingerprint(lines)
 		if fingerprint != m.lastViewportContent {
+			m.observeViewportSetContent(lines, reason)
 			m.viewport.SetContentLines(append([]string(nil), lines...))
 			m.lastViewportContent = fingerprint
 			m.lastViewportViewKey = ""

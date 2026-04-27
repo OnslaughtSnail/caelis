@@ -77,6 +77,7 @@ func (m *Model) viewportRenderCacheMatchesDocument(ctx BlockRenderContext) bool 
 }
 
 func (m *Model) renderViewportEntry(block Block, cacheKey string, ctx BlockRenderContext) viewportRenderEntry {
+	m.observeBlockRender(block.Kind())
 	styledLines, plainLines, clickTokens := m.wrapRenderedRowsForViewport(block, block.Render(ctx), ctx.Width)
 	return viewportRenderEntry{
 		blockID:     block.BlockID(),

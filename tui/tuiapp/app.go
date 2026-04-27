@@ -112,11 +112,9 @@ func NewModel(cfg Config) *Model {
 		fixedSelectionStart: textSelectionPoint{line: -1, col: -1},
 		fixedSelectionEnd:   textSelectionPoint{line: -1, col: -1},
 		inputLatencyWindow:  make([]time.Duration, 0, 128),
-		diag: Diagnostics{
-			RedrawMode: "fullscreen",
-		},
-		focused:            true,
-		welcomeCardPending: cfg.ShowWelcomeCard,
+		diag:                newDiagnostics(),
+		focused:             true,
+		welcomeCardPending:  cfg.ShowWelcomeCard,
 	}
 	m.help = help.New()
 	m.applyTheme(theme)

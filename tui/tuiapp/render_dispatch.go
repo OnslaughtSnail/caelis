@@ -175,7 +175,7 @@ func (m *Model) applyRenderEventPolicy(policy renderEventPolicy) tea.Cmd {
 		return m.flushPendingDeferredBatches()
 	}
 	if policy.flushSmoothing {
-		m.flushAllPendingStreamSmoothing()
+		m.flushAllPendingStreamSmoothingWithReason("policy_" + string(policy.lane))
 	}
 	if policy.dismissHints {
 		m.dismissMessageHints()
@@ -195,6 +195,7 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	if !ok {
 		return m, nil, false
 	}
+	m.observeRenderMessage(msg, policy)
 	if shouldInvalidateUserDisplayDedup(msg) {
 		m.invalidateUserDisplayDedup()
 	}
