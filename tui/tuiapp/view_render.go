@@ -702,7 +702,8 @@ func (m *Model) viewportViewCacheKey(showScrollbar bool) string {
 		return ""
 	}
 	return strings.Join([]string{
-		m.lastViewportContent,
+		strconv.FormatUint(m.viewportContentVersion, 10),
+		strconv.FormatUint(m.viewportSelectionVersion, 10),
 		strconv.Itoa(m.viewport.Width()),
 		strconv.Itoa(m.viewport.Height()),
 		strconv.Itoa(m.viewport.YOffset()),
@@ -720,13 +721,51 @@ func (m *Model) renderViewportView() string {
 	if key != "" && key == m.lastViewportViewKey {
 		return m.lastViewportViewRendered
 	}
-	vpView := strings.TrimRight(m.viewport.View(), "\n")
+	var vpView string
+	if m.hasSelectionRange() {
+		vpView = strings.TrimRight(m.renderViewportSelectionView(), "\n")
+		m.diag.SelectionVisibleRenders++
+	} else {
+		vpView = strings.TrimRight(m.viewport.View(), "\n")
+	}
 	if showScrollbar {
 		vpView = m.renderViewportScrollbar(vpView)
 	}
 	m.lastViewportViewKey = key
 	m.lastViewportViewRendered = vpView
 	return vpView
+}
+
+func (m *Model) renderViewportSelectionView() string {
+	if m == nil || len(m.viewportStyledLines) == 0 || m.viewport.Height() <= 0 {
+		return m.viewport.View()
+	}
+	offset := maxInt(0, m.viewport.YOffset())
+	if offset >= len(m.viewportStyledLines) {
+		offset = maxInt(0, len(m.viewportStyledLines)-1)
+	}
+	end := minInt(len(m.viewportStyledLines), offset+maxInt(1, m.viewport.Height()))
+	if end < offset {
+		end = offset
+	}
+	styled := append([]string(nil), m.viewportStyledLines[offset:end]...)
+	plain := m.viewportPlainLines[offset:end]
+	start, finish, ok := normalizedSelectionRange(m.selectionStart, m.selectionEnd, len(m.viewportPlainLines))
+	if ok && len(styled) > 0 && finish.line >= offset && start.line < end {
+		localStart := textSelectionPoint{line: maxInt(start.line, offset) - offset, col: start.col}
+		localFinish := textSelectionPoint{line: minInt(finish.line, end-1) - offset, col: finish.col}
+		if start.line < offset {
+			localStart.col = 0
+		}
+		if finish.line >= end {
+			localFinish.col = displayColumns(plain[len(plain)-1])
+		}
+		styled = renderSelectionOnStyledLines(styled, plain, localStart, localFinish)
+	}
+	vp := m.viewport
+	vp.SetContentLines(styled)
+	vp.SetYOffset(0)
+	return vp.View()
 }
 
 func (m *Model) footerRowText() string {

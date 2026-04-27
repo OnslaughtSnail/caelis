@@ -28,6 +28,7 @@ type frameTickKind string
 const (
 	frameTickDeferredBatch    frameTickKind = "deferred_batch"
 	frameTickOffscreen        frameTickKind = "offscreen"
+	frameTickViewportSync     frameTickKind = "viewport_sync"
 	frameTickStreamSmoothing  frameTickKind = "stream_smoothing"
 	frameTickPanelAnimation   frameTickKind = "panel_animation"
 	frameTickScrollbarVisible frameTickKind = "scrollbar_visibility"

@@ -137,6 +137,7 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 		changed = block.Scroll(delta, ctx)
 		if changed {
 			touchScrollbarDeadline(block.scrollbarVisibleUntilPtr(), time.Now())
+			m.markViewportBlockDirty(block.BlockID())
 		}
 		return true, changed
 	case *MainACPTurnBlock:
@@ -144,13 +145,21 @@ func (m *Model) tryScrollPanelAtMouse(mouse tea.Mouse) (handled bool, changed bo
 		if !ok || !block.CanScrollToolPanel(callID, delta, ctx) {
 			return false, false
 		}
-		return true, block.ScrollToolPanel(callID, delta, ctx)
+		changed = block.ScrollToolPanel(callID, delta, ctx)
+		if changed {
+			m.markViewportBlockDirty(block.BlockID())
+		}
+		return true, changed
 	case *ParticipantTurnBlock:
 		callID, ok := strings.CutPrefix(token, "acp_tool_panel_scroll:")
 		if !ok || !block.CanScrollToolPanel(callID, delta, ctx) {
 			return false, false
 		}
-		return true, block.ScrollToolPanel(callID, delta, ctx)
+		changed = block.ScrollToolPanel(callID, delta, ctx)
+		if changed {
+			m.markViewportBlockDirty(block.BlockID())
+		}
+		return true, changed
 	default:
 		return false, false
 	}
@@ -177,7 +186,7 @@ func (m *Model) handleViewportMousePress(mouse tea.Mouse) tea.Cmd {
 	m.selecting = true
 	m.selectionStart = point
 	m.selectionEnd = point
-	m.renderViewportContent()
+	m.bumpViewportSelectionVersion()
 	return nil
 }
 
@@ -190,7 +199,7 @@ func (m *Model) handleViewportMouseMotion(mouse tea.Mouse) tea.Cmd {
 		return nil
 	}
 	m.selectionEnd = point
-	m.renderViewportContent()
+	m.bumpViewportSelectionVersion()
 	return nil
 }
 
@@ -210,7 +219,6 @@ func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
 			m.syncViewportContent()
 		}
 		m.clearSelection()
-		m.renderViewportContent()
 		return nil
 	}
 	// Copy selected text, then immediately clear selection so the viewport
@@ -219,7 +227,6 @@ func (m *Model) handleViewportMouseRelease(mouse tea.Mouse) tea.Cmd {
 	// diff-based renderer when the styled↔plain content transition is large.
 	cmd := m.copySelectionToClipboard(text)
 	m.clearSelection()
-	m.renderViewportContent()
 	return cmd
 }
 

@@ -130,6 +130,7 @@ func (m *Model) touchScrollbarTarget(target scrollbarHitTarget) tea.Cmd {
 	case scrollbarTargetSubagentPanel:
 		if block := m.doc.Find(target.blockID); block != nil {
 			cmd := m.touchPanelScrollbar(block)
+			m.markViewportBlockDirty(block.BlockID())
 			m.syncViewportContent()
 			return cmd
 		}
@@ -233,7 +234,11 @@ func (m *Model) dragPanelScrollbarTo(target scrollbarHitTarget, y int) bool {
 	if offset == nil || followTail == nil {
 		return false
 	}
-	return setPanelScrollFromPointer(offset, followTail, panel.scrollableLineCount(ctx), panel.previewLines(), localY-target.lineStart)
+	changed := setPanelScrollFromPointer(offset, followTail, panel.scrollableLineCount(ctx), panel.previewLines(), localY-target.lineStart)
+	if changed {
+		m.markViewportBlockDirty(target.blockID)
+	}
+	return changed
 }
 
 func scrollbarOffsetForPosition(pos, visible, maxOffset int) int {

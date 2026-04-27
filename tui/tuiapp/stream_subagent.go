@@ -194,6 +194,7 @@ func (m *Model) syncSubagentSessionPanels(sessionKey string) {
 	}
 	for _, panel := range m.subagentPanelsForSession(sessionKey) {
 		panel.bindSession(state)
+		m.markViewportBlockDirty(panel.BlockID())
 	}
 }
 
@@ -209,6 +210,7 @@ func (m *Model) ensureSubagentPanelBlock(spawnID, attachID, agent, callID, ancho
 			m.attachSubagentPanelToCall(panel, callID, anchorTool, claimAnchor)
 			m.rememberSubagentPanelRef(sessionKey, panel.BlockID())
 			m.syncInlineSubagentAnchorState(panel)
+			m.markViewportBlockDirty(panel.BlockID())
 			return panel
 		}
 	}
@@ -220,6 +222,7 @@ func (m *Model) ensureSubagentPanelBlock(spawnID, attachID, agent, callID, ancho
 			m.attachSubagentPanelToCall(panel, callID, anchorTool, claimAnchor)
 			m.rememberSubagentPanelRef(sessionKey, panel.BlockID())
 			m.syncInlineSubagentAnchorState(panel)
+			m.markViewportBlockDirty(panel.BlockID())
 			return panel
 		}
 	}
@@ -230,6 +233,7 @@ func (m *Model) ensureSubagentPanelBlock(spawnID, attachID, agent, callID, ancho
 	m.attachSubagentPanelToCall(sp, callID, anchorTool, claimAnchor)
 	m.rememberSubagentPanelRef(sessionKey, sp.BlockID())
 	m.syncInlineSubagentAnchorState(sp)
+	m.markViewportStructureDirty()
 	return sp
 }
 
@@ -314,7 +318,9 @@ func (m *Model) attachSubagentPanelToCall(panel *SubagentPanelBlock, callID, anc
 		anchorID = m.resolveRecentTranscriptAnchor(panel.CallID, anchorTool)
 	}
 	if anchorID != "" {
-		_, _ = m.doc.MoveAfter(panel.BlockID(), anchorID)
+		if _, moved := m.doc.MoveAfter(panel.BlockID(), anchorID); moved {
+			m.markViewportStructureDirty()
+		}
 	}
 }
 
@@ -532,7 +538,11 @@ func (m *Model) syncInlineSubagentAnchorLabel(callID string, expanded bool) {
 	if tb == nil {
 		return
 	}
-	tb.Raw = inlineBashAnchorLabel(tb.Raw, expanded)
+	next := inlineBashAnchorLabel(tb.Raw, expanded)
+	if next != tb.Raw {
+		tb.Raw = next
+		m.markViewportBlockDirty(tb.BlockID())
+	}
 }
 
 func subagentHasInlineAnchor(m *Model, panel *SubagentPanelBlock) bool {

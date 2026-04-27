@@ -108,6 +108,7 @@ func (m *Model) applyTranscriptMainNarrative(event TranscriptEvent) (tea.Model, 
 			block.AppendStreamChunk(SEAssistant, text, event.OccurredAt)
 		}
 	}
+	m.markViewportBlockDirty(block.BlockID())
 	return m, m.requestStreamViewportSync()
 }
 
@@ -130,6 +131,7 @@ func (m *Model) applyTranscriptPlan(event TranscriptEvent) (tea.Model, tea.Cmd) 
 			block.Status = "running"
 		}
 		block.UpdatePlan(entries)
+		m.markViewportBlockDirty(block.BlockID())
 		return m, m.requestStreamViewportSync()
 	case ACPProjectionSubagent:
 		sessionKey, state := m.ensureSubagentSessionState(event.ScopeID, "", "")
@@ -149,6 +151,7 @@ func (m *Model) applyTranscriptPlan(event TranscriptEvent) (tea.Model, tea.Cmd) 
 		state.UpdatePlan(entries)
 		m.reviveSubagentPanel(panel, false)
 		m.syncSubagentSessionPanels(sessionKey)
+		m.markViewportBlockDirty(panel.BlockID())
 		return m, m.requestStreamViewportSync()
 	default:
 		block := m.ensureMainACPTurnBlock(strings.TrimSpace(event.ScopeID))
@@ -159,6 +162,7 @@ func (m *Model) applyTranscriptPlan(event TranscriptEvent) (tea.Model, tea.Cmd) 
 			block.StartedAt = event.OccurredAt
 		}
 		block.UpdatePlan(entries)
+		m.markViewportBlockDirty(block.BlockID())
 		return m, m.requestStreamViewportSync()
 	}
 }
@@ -178,6 +182,7 @@ func (m *Model) applyTranscriptTool(event TranscriptEvent) (tea.Model, tea.Cmd) 
 			block.Status = "running"
 		}
 		block.UpdateToolWithMeta(event.ToolCallID, event.ToolName, event.ToolArgs, event.ToolOutput, event.Final, event.ToolError, ToolUpdateMeta{TaskID: event.ToolTaskID})
+		m.markViewportBlockDirty(block.BlockID())
 		return m, m.requestStreamViewportSync()
 	case ACPProjectionSubagent:
 		sessionKey, state := m.ensureSubagentSessionState(event.ScopeID, "", "")
@@ -198,6 +203,7 @@ func (m *Model) applyTranscriptTool(event TranscriptEvent) (tea.Model, tea.Cmd) 
 		state.UpdateToolCallWithMeta(event.ToolCallID, event.ToolName, event.ToolArgs, firstNonEmpty(strings.TrimSpace(event.ToolStream), "stdout"), event.ToolOutput, event.Final, ToolUpdateMeta{TaskID: event.ToolTaskID})
 		m.reviveSubagentPanel(panel, false)
 		m.syncSubagentSessionPanels(sessionKey)
+		m.markViewportBlockDirty(panel.BlockID())
 		return m, m.requestStreamViewportSync()
 	default:
 		block := m.ensureMainACPTurnBlock(strings.TrimSpace(event.ScopeID))
@@ -208,6 +214,7 @@ func (m *Model) applyTranscriptTool(event TranscriptEvent) (tea.Model, tea.Cmd) 
 			block.StartedAt = event.OccurredAt
 		}
 		block.UpdateToolWithMeta(event.ToolCallID, event.ToolName, event.ToolArgs, event.ToolOutput, event.Final, event.ToolError, ToolUpdateMeta{TaskID: event.ToolTaskID})
+		m.markViewportBlockDirty(block.BlockID())
 		return m, m.requestStreamViewportSync()
 	}
 }
@@ -237,6 +244,7 @@ func (m *Model) applyTranscriptApproval(event TranscriptEvent) (tea.Model, tea.C
 			return m, nil
 		}
 		block.SetStatus(firstNonEmpty(strings.TrimSpace(event.State), "waiting_approval"), event.ApprovalTool, event.ApprovalCommand, event.OccurredAt)
+		m.markViewportBlockDirty(block.BlockID())
 		return m, m.requestStreamViewportSync()
 	}
 }
@@ -280,6 +288,7 @@ func (m *Model) applyTranscriptLifecycle(event TranscriptEvent) (tea.Model, tea.
 			return m, nil
 		}
 		block.SetStatus(event.State, "", "", event.OccurredAt)
+		m.markViewportBlockDirty(block.BlockID())
 		return m, m.requestStreamViewportSync()
 	}
 }
@@ -320,5 +329,6 @@ func (m *Model) applyTranscriptSubagentNarrative(event TranscriptEvent) (tea.Mod
 	}
 	m.reviveSubagentPanel(panel, false)
 	m.syncSubagentSessionPanels(sessionKey)
+	m.markViewportBlockDirty(panel.BlockID())
 	return m, m.requestStreamViewportSync()
 }

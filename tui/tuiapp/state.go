@@ -55,22 +55,27 @@ var runningCarouselLines = []string{
 }
 
 type Diagnostics struct {
-	Frames             uint64
-	IncrementalFrames  uint64
-	FullRepaints       uint64
-	SlowFrames         uint64
-	LastFrameDuration  time.Duration
-	AvgFrameDuration   time.Duration
-	MaxFrameDuration   time.Duration
-	RenderBytes        uint64
-	PeakFrameBytes     uint64
-	LastRenderAt       time.Time
-	LastInputAt        time.Time
-	LastInputLatency   time.Duration
-	AvgInputLatency    time.Duration
-	P95InputLatency    time.Duration
-	LastMentionLatency time.Duration
-	RedrawMode         string
+	Frames                   uint64
+	IncrementalFrames        uint64
+	FullRepaints             uint64
+	SlowFrames               uint64
+	LastFrameDuration        time.Duration
+	AvgFrameDuration         time.Duration
+	MaxFrameDuration         time.Duration
+	RenderBytes              uint64
+	PeakFrameBytes           uint64
+	ViewportFullSyncs        uint64
+	ViewportIncrementalSyncs uint64
+	ViewportQueuedSyncs      uint64
+	ViewportSkippedSyncs     uint64
+	SelectionVisibleRenders  uint64
+	LastRenderAt             time.Time
+	LastInputAt              time.Time
+	LastInputLatency         time.Duration
+	AvgInputLatency          time.Duration
+	P95InputLatency          time.Duration
+	LastMentionLatency       time.Duration
+	RedrawMode               string
 }
 
 type Config struct {
@@ -363,10 +368,18 @@ type Model struct {
 	offscreenViewportDirty         bool
 	offscreenViewportTickScheduled bool
 	offscreenViewportSyncAt        time.Time
+	viewportSyncPending            bool
+	viewportSyncTickScheduled      bool
 	panelAnimationTickScheduled    bool
 	scrollbarTickScheduled         bool
 	streamPlayback                 streamPlaybackMetrics
 	viewportRenderEntries          []viewportRenderEntry
+	lastViewportRenderContextKey   string
+	dirtyViewportBlocks            map[string]struct{}
+	viewportStructureDirty         bool
+	viewportContentVersion         uint64
+	lastViewportContentVersion     uint64
+	viewportSelectionVersion       uint64
 	lastViewportContent            string
 	lastViewportViewKey            string
 	lastViewportViewRendered       string

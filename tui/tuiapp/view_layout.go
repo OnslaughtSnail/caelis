@@ -91,6 +91,7 @@ func (m *Model) syncViewportContent() {
 		m.viewportDirty = true
 		return
 	}
+	m.viewportSyncPending = false
 	m.offscreenViewportDirty = false
 	m.offscreenViewportTickScheduled = false
 	m.offscreenViewportSyncAt = time.Time{}
@@ -100,8 +101,18 @@ func (m *Model) syncViewportContent() {
 		TermWidth: m.width,
 		Theme:     m.theme,
 	}
-	m.rebuildViewportRenderCache(ctx)
-	m.rebuildViewportLineCaches(ctx)
+	incremental := m.syncDirtyViewportRenderEntries(ctx)
+	if !incremental {
+		m.rebuildViewportRenderCache(ctx)
+		m.rebuildViewportLineCaches(ctx)
+		m.viewportStructureDirty = false
+		m.diag.ViewportFullSyncs++
+	} else {
+		m.diag.ViewportIncrementalSyncs++
+	}
+	m.lastViewportRenderContextKey = viewportRenderContextKey(ctx)
+	clear(m.dirtyViewportBlocks)
+	m.viewportContentVersion++
 
 	m.renderViewportContent()
 }
@@ -264,13 +275,11 @@ func truncateMiddleDisplay(text string, width int) string {
 func (m *Model) renderViewportContent() {
 	start := time.Now()
 	lines := m.viewportStyledLines
-	if m.hasSelectionRange() {
-		lines = m.renderSelectionLines()
-	}
-	fingerprint := viewportLinesFingerprint(lines)
-	if fingerprint != m.lastViewportContent {
+	if m.lastViewportContentVersion != m.viewportContentVersion {
 		m.viewport.SetContentLines(append([]string(nil), lines...))
-		m.lastViewportContent = fingerprint
+		m.lastViewportContentVersion = m.viewportContentVersion
+		m.lastViewportContent = strconv.FormatUint(m.viewportContentVersion, 10)
+		m.lastViewportViewKey = ""
 	}
 
 	// Auto-scroll: decide based on current state AFTER SetContent so
@@ -295,13 +304,25 @@ func (m *Model) offscreenViewportSyncInterval() time.Duration {
 }
 
 func (m *Model) shouldDeferStreamViewportSync() bool {
-	if m == nil || !m.userScrolledUp {
+	if m == nil {
 		return false
 	}
 	if m.selecting || m.inputSelecting || m.fixedSelecting {
-		return false
+		return true
 	}
-	return !m.hasSelectionRange()
+	if m.hasSelectionRange() {
+		return true
+	}
+	return m.userScrolledUp
+}
+
+func (m *Model) ensureViewportSyncTick() tea.Cmd {
+	if m == nil || !m.viewportSyncPending || m.viewportSyncTickScheduled {
+		return nil
+	}
+	m.viewportSyncTickScheduled = true
+	m.diag.ViewportQueuedSyncs++
+	return frameTickCmd(frameTickViewportSync, m.streamTickInterval())
 }
 
 func (m *Model) ensureOffscreenViewportTick() tea.Cmd {
@@ -321,14 +342,30 @@ func (m *Model) requestStreamViewportSync() tea.Cmd {
 		return nil
 	}
 	if !m.shouldDeferStreamViewportSync() {
-		m.syncViewportContent()
-		return nil
+		m.viewportSyncPending = true
+		return m.ensureViewportSyncTick()
 	}
 	m.offscreenViewportDirty = true
 	if m.offscreenViewportSyncAt.IsZero() {
 		m.offscreenViewportSyncAt = time.Now().Add(m.offscreenViewportSyncInterval())
 	}
 	return m.ensureOffscreenViewportTick()
+}
+
+func (m *Model) flushPendingViewportSync() tea.Cmd {
+	if m == nil || !m.viewportSyncPending {
+		return nil
+	}
+	m.viewportSyncPending = false
+	if m.shouldDeferStreamViewportSync() {
+		m.offscreenViewportDirty = true
+		if m.offscreenViewportSyncAt.IsZero() {
+			m.offscreenViewportSyncAt = time.Now().Add(m.offscreenViewportSyncInterval())
+		}
+		return m.ensureOffscreenViewportTick()
+	}
+	m.syncViewportContent()
+	return nil
 }
 
 func (m *Model) flushPendingOffscreenViewportSync(now time.Time) tea.Cmd {
@@ -342,6 +379,7 @@ func (m *Model) flushPendingOffscreenViewportSync(now time.Time) tea.Cmd {
 	if m.shouldDeferStreamViewportSync() {
 		m.flushDeferredMainStreamSmoothing()
 		m.offscreenViewportSyncAt = now.Add(m.offscreenViewportSyncInterval())
+		m.diag.ViewportSkippedSyncs++
 		return m.ensureOffscreenViewportTick()
 	}
 	m.flushDeferredMainStreamSmoothing()
@@ -365,9 +403,39 @@ func (m *Model) ensureViewportLayout() {
 }
 
 func (m *Model) clearSelection() {
+	changed := m.selecting || m.selectionStart.line >= 0 || m.selectionEnd.line >= 0
 	m.selecting = false
 	m.selectionStart = textSelectionPoint{line: -1, col: -1}
 	m.selectionEnd = textSelectionPoint{line: -1, col: -1}
+	if changed {
+		m.bumpViewportSelectionVersion()
+	}
+}
+
+func (m *Model) bumpViewportSelectionVersion() {
+	if m == nil {
+		return
+	}
+	m.viewportSelectionVersion++
+	m.lastViewportViewKey = ""
+}
+
+func (m *Model) markViewportBlockDirty(blockID string) {
+	blockID = strings.TrimSpace(blockID)
+	if m == nil || blockID == "" {
+		return
+	}
+	if m.dirtyViewportBlocks == nil {
+		m.dirtyViewportBlocks = make(map[string]struct{})
+	}
+	m.dirtyViewportBlocks[blockID] = struct{}{}
+}
+
+func (m *Model) markViewportStructureDirty() {
+	if m == nil {
+		return
+	}
+	m.viewportStructureDirty = true
 }
 
 func (m *Model) clearInputSelection() {

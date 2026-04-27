@@ -244,6 +244,7 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 			m.activeAssistantID = ""
 			m.activeAssistantActor = ""
 		}
+		m.markViewportStructureDirty()
 		return m, m.requestStreamViewportSync()
 	}
 
@@ -266,6 +267,7 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	}
 	m.lastCommittedStyle = tuikit.LineStyleAssistant
 	m.lastCommittedRaw = "* "
+	m.markViewportBlockDirty(ab.BlockID())
 	return m, m.requestStreamViewportSync()
 }
 
@@ -318,6 +320,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 			m.hasCommittedLine = true
 			m.lastCommittedStyle = tuikit.LineStyleReasoning
 			m.lastCommittedRaw = "│ "
+			m.markViewportStructureDirty()
 			return m, m.requestStreamViewportSync()
 		}
 		block := m.doc.Find(m.activeReasoningID)
@@ -336,6 +339,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 		m.activeReasoningActor = ""
 		m.lastCommittedStyle = tuikit.LineStyleReasoning
 		m.lastCommittedRaw = "│ "
+		m.markViewportBlockDirty(rb.BlockID())
 		return m, m.requestStreamViewportSync()
 	}
 
@@ -348,6 +352,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 		m.hasCommittedLine = true
 		m.lastCommittedStyle = tuikit.LineStyleReasoning
 		m.lastCommittedRaw = "│ "
+		m.markViewportStructureDirty()
 		return m, m.requestStreamViewportSync()
 	}
 
@@ -362,6 +367,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 	rb.Raw = mergeStreamChunk(rb.Raw, text, final)
 	m.lastCommittedStyle = tuikit.LineStyleReasoning
 	m.lastCommittedRaw = "│ "
+	m.markViewportBlockDirty(rb.BlockID())
 	return m, m.requestStreamViewportSync()
 }
 
@@ -1133,6 +1139,7 @@ func (m *Model) ensureParticipantTurnBlock(sessionID string, actor string) *Part
 		if block, _ := m.doc.Find(blockID).(*ParticipantTurnBlock); block != nil {
 			if strings.TrimSpace(actor) != "" {
 				block.Actor = strings.TrimSpace(actor)
+				m.markViewportBlockDirty(block.BlockID())
 			}
 			return block
 		}
@@ -1140,6 +1147,7 @@ func (m *Model) ensureParticipantTurnBlock(sessionID string, actor string) *Part
 	block := NewParticipantTurnBlock(sessionID, actor)
 	m.doc.Append(block)
 	m.participantTurnIDs[sessionID] = block.BlockID()
+	m.markViewportStructureDirty()
 	return block
 }
 
@@ -1158,6 +1166,7 @@ func (m *Model) ensureMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
 		if block, _ := m.doc.Find(blockID).(*MainACPTurnBlock); block != nil {
 			if strings.TrimSpace(block.SessionID) == "" {
 				block.SessionID = sessionID
+				m.markViewportBlockDirty(block.BlockID())
 			}
 			return block
 		}
@@ -1170,6 +1179,7 @@ func (m *Model) ensureMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
 	m.activeMainACPTurnID = block.BlockID()
 	m.pendingMainACPSessionID = ""
 	m.pendingMainACPStartedAt = time.Time{}
+	m.markViewportStructureDirty()
 	return block
 }
 
@@ -1209,6 +1219,7 @@ func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string,
 	} else if state := strings.ToLower(strings.TrimSpace(block.Status)); state == "initializing" || state == "prompting" {
 		block.Status = "running"
 	}
+	m.markViewportBlockDirty(block.BlockID())
 	m.hasCommittedLine = true
 	m.lastCommittedStyle = tuikit.LineStyleAssistant
 	m.lastCommittedRaw = strings.TrimSpace(block.Actor) + ":"
@@ -1221,6 +1232,7 @@ func (m *Model) handleParticipantStatusMsg(msg ParticipantStatusMsg) (tea.Model,
 		return m, nil
 	}
 	block.SetStatus(msg.State, msg.ApprovalTool, msg.ApprovalCommand, msg.OccurredAt)
+	m.markViewportBlockDirty(block.BlockID())
 	if participantTurnIsTerminal(msg.State) {
 		m.activeParticipantTurnSessionID = strings.TrimSpace(msg.SessionID)
 	}

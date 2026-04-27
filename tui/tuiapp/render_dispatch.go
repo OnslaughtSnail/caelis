@@ -173,7 +173,7 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	switch typed := msg.(type) {
 	case appgateway.EventEnvelope:
 		model, cmd := m.handleGatewayEventEnvelope(typed)
-		return model, tea.Batch(policyCmd, cmd), true
+		return model, tea.Batch(policyCmd, cmd, m.flushImmediateViewportSyncForMsg(typed)), true
 	case TranscriptEventsMsg:
 		model, cmd := m.handleTranscriptEventsMsg(typed)
 		return model, tea.Batch(policyCmd, cmd), true
@@ -271,6 +271,13 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 				cmds = append(cmds, m.flushPendingOffscreenViewportSync(typed.at))
 			}
 		}
+		if legacyBroadcast || typed.kind == frameTickViewportSync {
+			hadViewportSyncTick := m.viewportSyncTickScheduled
+			m.viewportSyncTickScheduled = false
+			if hadViewportSyncTick {
+				cmds = append(cmds, m.flushPendingViewportSync())
+			}
+		}
 		if legacyBroadcast || typed.kind == frameTickStreamSmoothing {
 			cmds = append(cmds, m.drainPendingStreamSmoothing(typed.at))
 		}
@@ -287,6 +294,20 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	default:
 		return m, nil, false
 	}
+}
+
+func (m *Model) flushImmediateViewportSyncForMsg(msg tea.Msg) tea.Cmd {
+	if m == nil || !m.viewportSyncPending || m.shouldDeferStreamViewportSync() {
+		return nil
+	}
+	switch typed := msg.(type) {
+	case appgateway.EventEnvelope:
+		switch typed.Event.Kind {
+		case appgateway.EventKindToolCall, appgateway.EventKindApprovalRequested, appgateway.EventKindPlanUpdate:
+			return m.flushPendingViewportSync()
+		}
+	}
+	return nil
 }
 
 func (m *Model) invalidateUserDisplayDedup() {

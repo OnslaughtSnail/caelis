@@ -17,6 +17,8 @@ type viewportRenderEntry struct {
 	blockID     string
 	cacheKey    string
 	rhythm      viewportRhythmClass
+	lineStart   int
+	lineCount   int
 	styledLines []string
 	plainLines  []string
 	clickTokens []string
@@ -129,21 +131,23 @@ func (m *Model) rebuildViewportLineCaches(ctx BlockRenderContext) {
 
 	var prevEntry *viewportRenderEntry
 	for i := range m.viewportRenderEntries {
-		entry := m.viewportRenderEntries[i]
-		if shouldInsertViewportRhythmGap(prevEntry, &entry) {
+		entry := &m.viewportRenderEntries[i]
+		if shouldInsertViewportRhythmGap(prevEntry, entry) {
 			styledLines = append(styledLines, "")
 			plainLines = append(plainLines, "")
 			blockIDs = append(blockIDs, "")
 			clickTokens = append(clickTokens, "")
 		}
+		entry.lineStart = len(styledLines)
+		entry.lineCount = len(entry.styledLines)
 		styledLines = append(styledLines, entry.styledLines...)
 		plainLines = append(plainLines, entry.plainLines...)
 		clickTokens = append(clickTokens, entry.clickTokens...)
 		for range entry.styledLines {
 			blockIDs = append(blockIDs, entry.blockID)
 		}
-		if viewportEntryHasVisibleContent(entry) {
-			prevEntry = &entry
+		if viewportEntryHasVisibleContent(*entry) {
+			prevEntry = entry
 		}
 	}
 
@@ -159,6 +163,103 @@ func (m *Model) rebuildViewportLineCaches(ctx BlockRenderContext) {
 	m.viewportPlainLines = append(m.viewportPlainLines[:0], plainLines...)
 	m.viewportBlockIDs = append(m.viewportBlockIDs[:0], blockIDs...)
 	m.viewportClickTokens = append(m.viewportClickTokens[:0], clickTokens...)
+}
+
+func (m *Model) syncDirtyViewportRenderEntries(ctx BlockRenderContext) bool {
+	if m == nil ||
+		len(m.dirtyViewportBlocks) == 0 ||
+		m.viewportStructureDirty ||
+		strings.TrimSpace(m.streamLine) != "" ||
+		m.lastViewportRenderContextKey != viewportRenderContextKey(ctx) {
+		return false
+	}
+	entryIndexes := make([]int, 0, len(m.dirtyViewportBlocks))
+	seen := make(map[int]struct{}, len(m.dirtyViewportBlocks))
+	for blockID := range m.dirtyViewportBlocks {
+		idx := m.viewportRenderEntryIndex(blockID)
+		if idx < 0 {
+			return false
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		entryIndexes = append(entryIndexes, idx)
+	}
+	slices.SortFunc(entryIndexes, func(a, b int) int {
+		return m.viewportRenderEntries[b].lineStart - m.viewportRenderEntries[a].lineStart
+	})
+	for _, idx := range entryIndexes {
+		old := m.viewportRenderEntries[idx]
+		block := m.doc.Find(old.blockID)
+		if block == nil {
+			return false
+		}
+		key := viewportBlockRenderKey(block, ctx)
+		next := m.renderViewportEntry(block, key, ctx)
+		if next.rhythm != old.rhythm || viewportEntryHasVisibleContent(next) != viewportEntryHasVisibleContent(old) {
+			return false
+		}
+		start := old.lineStart
+		count := old.lineCount
+		if start < 0 || count < 0 || start+count > len(m.viewportStyledLines) {
+			return false
+		}
+		m.viewportStyledLines = spliceStrings(m.viewportStyledLines, start, count, next.styledLines)
+		m.viewportPlainLines = spliceStrings(m.viewportPlainLines, start, count, next.plainLines)
+		m.viewportClickTokens = spliceStrings(m.viewportClickTokens, start, count, next.clickTokens)
+		blockIDs := make([]string, len(next.styledLines))
+		for i := range blockIDs {
+			blockIDs[i] = next.blockID
+		}
+		m.viewportBlockIDs = spliceStrings(m.viewportBlockIDs, start, count, blockIDs)
+		next.lineStart = start
+		next.lineCount = len(next.styledLines)
+		m.viewportRenderEntries[idx] = next
+		if delta := next.lineCount - count; delta != 0 {
+			m.shiftViewportEntryLineStartsAfter(start, idx, delta)
+		}
+	}
+	return true
+}
+
+func viewportRenderContextKey(ctx BlockRenderContext) string {
+	return strconv.Itoa(ctx.Width) + "|" + strconv.Itoa(ctx.TermWidth) + "|" + themeRenderCacheKey(ctx.Theme)
+}
+
+func (m *Model) viewportRenderEntryIndex(blockID string) int {
+	blockID = strings.TrimSpace(blockID)
+	if m == nil || blockID == "" {
+		return -1
+	}
+	for i := range m.viewportRenderEntries {
+		if m.viewportRenderEntries[i].blockID == blockID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Model) shiftViewportEntryLineStartsAfter(start int, changedIndex int, delta int) {
+	if m == nil {
+		return
+	}
+	for i := range m.viewportRenderEntries {
+		if i == changedIndex {
+			continue
+		}
+		if m.viewportRenderEntries[i].lineStart > start {
+			m.viewportRenderEntries[i].lineStart += delta
+		}
+	}
+}
+
+func spliceStrings(base []string, start int, count int, repl []string) []string {
+	out := make([]string, 0, len(base)-count+len(repl))
+	out = append(out, base[:start]...)
+	out = append(out, repl...)
+	out = append(out, base[start+count:]...)
+	return out
 }
 
 func viewportRhythmForBlock(block Block) viewportRhythmClass {
