@@ -85,16 +85,49 @@ func TestSlashResumeClearsHistoryBeforeReplay(t *testing.T) {
 	driver := &bridgeTestDriver{
 		status:         tuiadapterruntime.StatusSnapshot{Model: "gpt-4o", ModeLabel: "default"},
 		resumedSession: sdksession.Session{SessionRef: sdksession.SessionRef{SessionID: "resumed-session"}},
-		replay: []appgateway.EventEnvelope{{
-			Event: appgateway.Event{
-				Kind: appgateway.EventKindAssistantMessage,
-				Narrative: &appgateway.NarrativePayload{
-					Role:  appgateway.NarrativeRoleAssistant,
-					Text:  "history reply",
-					Final: true,
+		replay: []appgateway.EventEnvelope{
+			{
+				Event: appgateway.Event{
+					Kind: appgateway.EventKindUserMessage,
+					Narrative: &appgateway.NarrativePayload{
+						Role: appgateway.NarrativeRoleUser,
+						Text: "history prompt",
+					},
 				},
 			},
-		}},
+			{
+				Event: appgateway.Event{
+					Kind: appgateway.EventKindToolCall,
+					ToolCall: &appgateway.ToolCallPayload{
+						CallID:   "bash-1",
+						ToolName: "BASH",
+						Status:   appgateway.ToolStatusRunning,
+					},
+				},
+			},
+			{
+				Event: appgateway.Event{
+					Kind: appgateway.EventKindAssistantMessage,
+					Narrative: &appgateway.NarrativePayload{
+						Role:       appgateway.NarrativeRoleAssistant,
+						Text:       "stream chunk",
+						Final:      false,
+						Visibility: string(sdksession.VisibilityUIOnly),
+					},
+				},
+			},
+			{
+				Event: appgateway.Event{
+					Kind: appgateway.EventKindAssistantMessage,
+					Narrative: &appgateway.NarrativePayload{
+						Role:  appgateway.NarrativeRoleAssistant,
+						Text:  "history reply",
+						Final: true,
+						Scope: appgateway.EventScopeMain,
+					},
+				},
+			},
+		},
 	}
 	var msgs []tea.Msg
 	slashResume(driver, func(msg tea.Msg) { msgs = append(msgs, msg) }, "resumed-session")
@@ -104,19 +137,29 @@ func TestSlashResumeClearsHistoryBeforeReplay(t *testing.T) {
 	if _, ok := msgs[0].(ClearHistoryMsg); !ok {
 		t.Fatalf("first msg = %#v, want ClearHistoryMsg", msgs[0])
 	}
-	var sawReplay bool
+	var sawUserReplay bool
+	var sawAssistantReplay bool
 	for _, msg := range msgs {
 		if log, ok := msg.(LogChunkMsg); ok && (strings.Contains(log.Chunk, "resumed session") || strings.Contains(log.Chunk, "replayed")) {
 			t.Fatalf("slashResume() emitted noisy resume notice: %#v", log)
 		}
 		if env, ok := msg.(appgateway.EventEnvelope); ok {
+			if env.Event.ToolCall != nil || env.Event.ToolResult != nil {
+				t.Fatalf("slashResume() replayed tool process event: %#v", env)
+			}
+			if env.Event.Narrative != nil && env.Event.Narrative.Text == "stream chunk" {
+				t.Fatalf("slashResume() replayed transient assistant chunk: %#v", env)
+			}
+			if env.Event.Narrative != nil && env.Event.Narrative.Text == "history prompt" {
+				sawUserReplay = true
+			}
 			if env.Event.Narrative != nil && env.Event.Narrative.Text == "history reply" {
-				sawReplay = true
+				sawAssistantReplay = true
 			}
 		}
 	}
-	if !sawReplay {
-		t.Fatalf("slashResume() messages = %#v, want replayed gateway history", msgs)
+	if !sawUserReplay || !sawAssistantReplay {
+		t.Fatalf("slashResume() messages = %#v, want user and final assistant replay", msgs)
 	}
 }
 
@@ -149,6 +192,21 @@ func TestExecuteLineViaDriverStreamsGatewayEventsDirectly(t *testing.T) {
 	}
 	if _, ok := msgs[0].(appgateway.EventEnvelope); !ok {
 		t.Fatalf("first msg = %#v, want appgateway.EventEnvelope", msgs[0])
+	}
+}
+
+func TestExecuteLineViaDriverTreatsUnknownSlashAsUserMessage(t *testing.T) {
+	driver := &bridgeSubmitDriver{}
+	text := "/rbac/inner/workflow/switch Query 参数"
+	result := executeLineViaDriver(driver, &ProgramSender{Send: func(tea.Msg) {}}, Submission{Text: text})
+	if result.Err != nil {
+		t.Fatalf("executeLineViaDriver() err = %v", result.Err)
+	}
+	if driver.submitCalls != 1 {
+		t.Fatalf("Submit() calls = %d, want 1", driver.submitCalls)
+	}
+	if driver.lastSubmission.Text != text {
+		t.Fatalf("submitted text = %q, want %q", driver.lastSubmission.Text, text)
 	}
 }
 
@@ -646,13 +704,17 @@ type bridgeSubmitDriver struct {
 	turn                   tuiadapterruntime.Turn
 	terminalEvents         <-chan appgateway.EventEnvelope
 	terminalSubscribeCalls int
+	submitCalls            int
+	lastSubmission         tuiadapterruntime.Submission
 }
 
 func (d *bridgeSubmitDriver) Status(context.Context) (tuiadapterruntime.StatusSnapshot, error) {
 	return tuiadapterruntime.StatusSnapshot{}, nil
 }
 func (d *bridgeSubmitDriver) WorkspaceDir() string { return "" }
-func (d *bridgeSubmitDriver) Submit(context.Context, tuiadapterruntime.Submission) (tuiadapterruntime.Turn, error) {
+func (d *bridgeSubmitDriver) Submit(_ context.Context, sub tuiadapterruntime.Submission) (tuiadapterruntime.Turn, error) {
+	d.submitCalls++
+	d.lastSubmission = sub
 	return d.turn, nil
 }
 func (d *bridgeSubmitDriver) SubscribeStream(context.Context, appgateway.EventEnvelope) (<-chan appgateway.EventEnvelope, bool) {

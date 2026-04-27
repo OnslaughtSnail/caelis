@@ -2707,6 +2707,43 @@ func TestTaskSnapshotToolResultPreservesTerminalStreamsInMeta(t *testing.T) {
 	}
 }
 
+func TestTaskSnapshotToolResultIncludesSandboxPermissionDetailInPayload(t *testing.T) {
+	t.Parallel()
+
+	result := taskSnapshotToolResult(
+		sdktool.Call{ID: "call-1", Name: shell.BashToolName},
+		sdktool.Definition{Name: shell.BashToolName},
+		sdktask.Snapshot{
+			Ref:     sdktask.Ref{TaskID: "task-1", SessionID: "session-1"},
+			State:   sdktask.StateFailed,
+			Running: false,
+			Result: map[string]any{
+				"result":                    "touch: cannot touch /home/test/go/pkg/mod/cache: Read-only file system",
+				"exit_code":                 1,
+				"error":                     "Sandbox permission denied. Use a writable workspace path or request elevated permissions.\ntouch: cannot touch /home/test/go/pkg/mod/cache: Read-only file system",
+				"sandbox_permission_denied": true,
+			},
+		},
+	)
+	var payload map[string]any
+	if len(result.Content) == 0 || result.Content[0].JSON == nil {
+		t.Fatalf("result.Content = %#v, want JSON payload", result.Content)
+	}
+	if err := json.Unmarshal(result.Content[0].JSON.Value, &payload); err != nil {
+		t.Fatalf("unmarshal result payload: %v", err)
+	}
+	if denied, _ := payload["sandbox_permission_denied"].(bool); !denied {
+		t.Fatalf("payload[sandbox_permission_denied] = %#v, want true", payload["sandbox_permission_denied"])
+	}
+	if message, _ := payload["error"].(string); !strings.Contains(message, "Sandbox permission denied") ||
+		!strings.Contains(message, "/home/test/go/pkg/mod/cache") {
+		t.Fatalf("payload[error] = %q, want sandbox prefix plus original denied path", message)
+	}
+	if _, ok := payload["sandbox_diagnostic"]; ok {
+		t.Fatalf("payload[sandbox_diagnostic] = %#v, want omitted", payload["sandbox_diagnostic"])
+	}
+}
+
 func TestTaskSnapshotToolResultIncludesRunningTerminalCursor(t *testing.T) {
 	t.Parallel()
 

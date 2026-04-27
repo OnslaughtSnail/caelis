@@ -226,6 +226,8 @@ type MainACPTurnBlock struct {
 	Events          []SubagentEvent
 	ExpandedTools   map[string]bool
 	ToolPanelScroll map[string]toolPanelScrollState
+	ExpandedThought map[string]bool
+	ExpandedExplore map[string]bool
 }
 
 type ToolUpdateMeta struct {
@@ -244,29 +246,37 @@ func NewMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
 func (b *MainACPTurnBlock) BlockID() string { return b.id }
 func (b *MainACPTurnBlock) Kind() BlockKind { return BlockMainACPTurn }
 
-func (b *MainACPTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+func (b *MainACPTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	if b == nil {
 		return
 	}
+	at := narrativeEventTime(occurredAt...)
 	if idx := latestNarrativeAppendTargetIndex(b.Events, kind); idx >= 0 {
 		b.Events[idx].Text = collapseRepeatedNarrativeText(appendDeltaStreamChunk(b.Events[idx].Text, chunk))
+		markNarrativeTiming(&b.Events[idx], at)
 		return
 	}
-	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	ev := SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)}
+	markNarrativeTiming(&ev, at)
+	b.Events = append(b.Events, ev)
 }
 
-func (b *MainACPTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+func (b *MainACPTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	if b == nil {
 		return
 	}
 	if strings.TrimSpace(chunk) == "" {
 		return
 	}
+	at := narrativeEventTime(occurredAt...)
 	if idx := latestNarrativeFinalTargetIndex(b.Events, kind); idx >= 0 {
 		b.Events[idx].Text = collapseRepeatedNarrativeText(chunk)
+		markNarrativeTiming(&b.Events[idx], at)
 		return
 	}
-	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	ev := SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)}
+	markNarrativeTiming(&ev, at)
+	b.Events = append(b.Events, ev)
 }
 
 func (b *MainACPTurnBlock) UpdateTool(callID, name, args, output string, final bool, err bool) {
@@ -428,7 +438,9 @@ func (b *MainACPTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		HideCompletedRow:       true,
 		ToolOutputPanels:       true,
 		ToolPanelExpanded:      b.toolPanelExpanded,
+		ExplorationExpanded:    b.explorationExpanded,
 		ToolPanelScrollState:   b.toolPanelScrollState,
+		ReasoningExpanded:      b.reasoningExpanded,
 	})
 }
 
@@ -447,6 +459,8 @@ type ParticipantTurnBlock struct {
 	Events          []SubagentEvent
 	ExpandedTools   map[string]bool
 	ToolPanelScroll map[string]toolPanelScrollState
+	ExpandedThought map[string]bool
+	ExpandedExplore map[string]bool
 }
 
 func NewParticipantTurnBlock(sessionID, actor string) *ParticipantTurnBlock {
@@ -463,29 +477,37 @@ func NewParticipantTurnBlock(sessionID, actor string) *ParticipantTurnBlock {
 func (b *ParticipantTurnBlock) BlockID() string { return b.id }
 func (b *ParticipantTurnBlock) Kind() BlockKind { return BlockParticipantTurn }
 
-func (b *ParticipantTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+func (b *ParticipantTurnBlock) AppendStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	if b == nil {
 		return
 	}
+	at := narrativeEventTime(occurredAt...)
 	if idx := latestNarrativeAppendTargetIndex(b.Events, kind); idx >= 0 {
 		b.Events[idx].Text = collapseRepeatedNarrativeText(appendDeltaStreamChunk(b.Events[idx].Text, chunk))
+		markNarrativeTiming(&b.Events[idx], at)
 		return
 	}
-	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	ev := SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)}
+	markNarrativeTiming(&ev, at)
+	b.Events = append(b.Events, ev)
 }
 
-func (b *ParticipantTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+func (b *ParticipantTurnBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	if b == nil {
 		return
 	}
 	if strings.TrimSpace(chunk) == "" {
 		return
 	}
+	at := narrativeEventTime(occurredAt...)
 	if idx := latestNarrativeFinalTargetIndex(b.Events, kind); idx >= 0 {
 		b.Events[idx].Text = collapseRepeatedNarrativeText(chunk)
+		markNarrativeTiming(&b.Events[idx], at)
 		return
 	}
-	b.Events = append(b.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	ev := SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)}
+	markNarrativeTiming(&ev, at)
+	b.Events = append(b.Events, ev)
 }
 
 func (b *ParticipantTurnBlock) UpdateTool(callID, name, args, output string, final bool, err bool) {
@@ -651,7 +673,9 @@ func (b *ParticipantTurnBlock) Render(ctx BlockRenderContext) []RenderedRow {
 		HideCompletedRow:       true,
 		ToolOutputPanels:       true,
 		ToolPanelExpanded:      b.toolPanelExpanded,
+		ExplorationExpanded:    b.explorationExpanded,
 		ToolPanelScrollState:   b.toolPanelScrollState,
+		ReasoningExpanded:      b.reasoningExpanded,
 	})...)
 	if b.Expanded && participantTurnIsTerminal(b.Status) {
 		rows = append(rows, StyledRow(b.id, renderParticipantTurnFooter(b, ctx)))
@@ -779,6 +803,45 @@ func (b *MainACPTurnBlock) setToolPanelExpanded(callID string, expanded bool) {
 	b.ExpandedTools[strings.TrimSpace(callID)] = expanded
 }
 
+func (b *MainACPTurnBlock) reasoningExpanded(key string) bool {
+	if b == nil || strings.TrimSpace(key) == "" || b.ExpandedThought == nil {
+		return false
+	}
+	return b.ExpandedThought[strings.TrimSpace(key)]
+}
+
+func (b *MainACPTurnBlock) toggleReasoningExpanded(key string) bool {
+	key = strings.TrimSpace(key)
+	if b == nil || key == "" {
+		return false
+	}
+	if b.ExpandedThought == nil {
+		b.ExpandedThought = map[string]bool{}
+	}
+	next := !b.ExpandedThought[key]
+	b.ExpandedThought[key] = next
+	return true
+}
+
+func (b *MainACPTurnBlock) explorationExpanded(key string) bool {
+	if b == nil || strings.TrimSpace(key) == "" || b.ExpandedExplore == nil {
+		return false
+	}
+	return b.ExpandedExplore[strings.TrimSpace(key)]
+}
+
+func (b *MainACPTurnBlock) toggleExplorationExpanded(key string) bool {
+	key = strings.TrimSpace(key)
+	if b == nil || key == "" {
+		return false
+	}
+	if b.ExpandedExplore == nil {
+		b.ExpandedExplore = map[string]bool{}
+	}
+	b.ExpandedExplore[key] = !b.ExpandedExplore[key]
+	return true
+}
+
 func (b *MainACPTurnBlock) toolPanelScrollState(callID string) toolPanelScrollState {
 	if b == nil {
 		return defaultToolPanelScrollState()
@@ -787,20 +850,11 @@ func (b *MainACPTurnBlock) toolPanelScrollState(callID string) toolPanelScrollSt
 }
 
 func (b *MainACPTurnBlock) ScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
-	if b == nil {
-		return false
-	}
-	total := terminalToolPanelLineCount(b.Events, callID, ctx)
-	return scrollToolPanelState(&b.ToolPanelScroll, callID, total, delta)
+	return false
 }
 
 func (b *MainACPTurnBlock) CanScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
-	if b == nil {
-		return false
-	}
-	state := b.toolPanelScrollState(callID)
-	total := terminalToolPanelLineCount(b.Events, callID, ctx)
-	return canScrollPanelState(state.Offset, state.FollowTail, total, acpTerminalPanelMaxLines, delta)
+	return false
 }
 
 func (b *MainACPTurnBlock) collapseAllToolPanels() {
@@ -834,6 +888,45 @@ func (b *ParticipantTurnBlock) setToolPanelExpanded(callID string, expanded bool
 	b.ExpandedTools[strings.TrimSpace(callID)] = expanded
 }
 
+func (b *ParticipantTurnBlock) reasoningExpanded(key string) bool {
+	if b == nil || strings.TrimSpace(key) == "" || b.ExpandedThought == nil {
+		return false
+	}
+	return b.ExpandedThought[strings.TrimSpace(key)]
+}
+
+func (b *ParticipantTurnBlock) toggleReasoningExpanded(key string) bool {
+	key = strings.TrimSpace(key)
+	if b == nil || key == "" {
+		return false
+	}
+	if b.ExpandedThought == nil {
+		b.ExpandedThought = map[string]bool{}
+	}
+	next := !b.ExpandedThought[key]
+	b.ExpandedThought[key] = next
+	return true
+}
+
+func (b *ParticipantTurnBlock) explorationExpanded(key string) bool {
+	if b == nil || strings.TrimSpace(key) == "" || b.ExpandedExplore == nil {
+		return false
+	}
+	return b.ExpandedExplore[strings.TrimSpace(key)]
+}
+
+func (b *ParticipantTurnBlock) toggleExplorationExpanded(key string) bool {
+	key = strings.TrimSpace(key)
+	if b == nil || key == "" {
+		return false
+	}
+	if b.ExpandedExplore == nil {
+		b.ExpandedExplore = map[string]bool{}
+	}
+	b.ExpandedExplore[key] = !b.ExpandedExplore[key]
+	return true
+}
+
 func (b *ParticipantTurnBlock) toolPanelScrollState(callID string) toolPanelScrollState {
 	if b == nil {
 		return defaultToolPanelScrollState()
@@ -842,20 +935,11 @@ func (b *ParticipantTurnBlock) toolPanelScrollState(callID string) toolPanelScro
 }
 
 func (b *ParticipantTurnBlock) ScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
-	if b == nil {
-		return false
-	}
-	total := terminalToolPanelLineCount(b.Events, callID, ctx)
-	return scrollToolPanelState(&b.ToolPanelScroll, callID, total, delta)
+	return false
 }
 
 func (b *ParticipantTurnBlock) CanScrollToolPanel(callID string, delta int, ctx BlockRenderContext) bool {
-	if b == nil {
-		return false
-	}
-	state := b.toolPanelScrollState(callID)
-	total := terminalToolPanelLineCount(b.Events, callID, ctx)
-	return canScrollPanelState(state.Offset, state.FollowTail, total, acpTerminalPanelMaxLines, delta)
+	return false
 }
 
 func (b *ParticipantTurnBlock) collapseAllToolPanels() {
@@ -874,9 +958,24 @@ func collapseToolPanelsForEvents(state map[string]bool, events []SubagentEvent) 
 		state = map[string]bool{}
 	}
 	for _, callID := range callIDs {
+		if !shouldDefaultCollapseCallID(events, callID) {
+			continue
+		}
 		state[callID] = false
 	}
 	return state
+}
+
+func shouldDefaultCollapseCallID(events []SubagentEvent, callID string) bool {
+	for _, ev := range events {
+		if ev.Kind != SEToolCall || strings.TrimSpace(ev.CallID) != strings.TrimSpace(callID) {
+			continue
+		}
+		if strings.TrimSpace(ev.Name) != "" {
+			return shouldDefaultCollapseToolPanel(ev.Name)
+		}
+	}
+	return false
 }
 
 func collectToolPanelCallIDs(events []SubagentEvent) []string {
@@ -1203,7 +1302,9 @@ type SubagentEvent struct {
 	Kind SubagentEventKind
 
 	// Assistant/Reasoning: accumulated text.
-	Text string
+	Text      string
+	StartedAt time.Time
+	EndedAt   time.Time
 
 	// ToolCall fields.
 	CallID string
@@ -1220,6 +1321,48 @@ type SubagentEvent struct {
 	// Approval fields (derived from context when status becomes waiting_approval).
 	ApprovalTool    string
 	ApprovalCommand string
+}
+
+func narrativeEventTime(values ...time.Time) time.Time {
+	if len(values) > 0 {
+		for _, value := range values {
+			if !value.IsZero() {
+				return value
+			}
+		}
+		return time.Time{}
+	}
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Now()
+}
+
+func markNarrativeTiming(ev *SubagentEvent, occurredAt time.Time) {
+	if ev == nil || ev.Kind != SEReasoning || occurredAt.IsZero() {
+		return
+	}
+	if ev.StartedAt.IsZero() || occurredAt.Before(ev.StartedAt) {
+		ev.StartedAt = occurredAt
+	}
+	if ev.EndedAt.IsZero() || occurredAt.After(ev.EndedAt) {
+		ev.EndedAt = occurredAt
+	}
+}
+
+func closeLatestReasoningTiming(events []SubagentEvent, occurredAt time.Time) {
+	if occurredAt.IsZero() {
+		return
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Kind != SEReasoning {
+			continue
+		}
+		markNarrativeTiming(&events[i], occurredAt)
+		return
+	}
 }
 
 type SubagentSessionState struct {
@@ -1245,7 +1388,7 @@ func NewSubagentSessionState(spawnID, attachID, agent string) *SubagentSessionSt
 	}
 }
 
-func (s *SubagentSessionState) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+func (s *SubagentSessionState) AppendStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	if s == nil {
 		return
 	}
@@ -1253,16 +1396,20 @@ func (s *SubagentSessionState) AppendStreamChunk(kind SubagentEventKind, chunk s
 	if chunk == "" {
 		return
 	}
+	at := narrativeEventTime(occurredAt...)
 	if idx := latestNarrativeAppendTargetIndex(s.Events, kind); idx >= 0 {
 		s.Events[idx].Text = collapseRepeatedNarrativeText(mergeSubagentStreamChunk(s.Events[idx].Text, chunk))
+		markNarrativeTiming(&s.Events[idx], at)
 		s.eventsGen++
 		return
 	}
-	s.Events = append(s.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	ev := SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)}
+	markNarrativeTiming(&ev, at)
+	s.Events = append(s.Events, ev)
 	s.eventsGen++
 }
 
-func (s *SubagentSessionState) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+func (s *SubagentSessionState) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	if s == nil {
 		return
 	}
@@ -1270,12 +1417,16 @@ func (s *SubagentSessionState) ReplaceFinalStreamChunk(kind SubagentEventKind, c
 	if strings.TrimSpace(chunk) == "" {
 		return
 	}
+	at := narrativeEventTime(occurredAt...)
 	if idx := latestNarrativeFinalTargetIndex(s.Events, kind); idx >= 0 {
 		s.Events[idx].Text = collapseRepeatedNarrativeText(chunk)
+		markNarrativeTiming(&s.Events[idx], at)
 		s.eventsGen++
 		return
 	}
-	s.Events = append(s.Events, SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)})
+	ev := SubagentEvent{Kind: kind, Text: collapseRepeatedNarrativeText(chunk)}
+	markNarrativeTiming(&ev, at)
+	s.Events = append(s.Events, ev)
 	s.eventsGen++
 }
 
@@ -1544,15 +1695,15 @@ func (b *SubagentPanelBlock) syncSessionMirror() {
 // AppendStreamChunk appends a streaming text chunk (assistant or reasoning).
 // If the most recent event is the same kind, the chunk is concatenated;
 // otherwise a new event is created, preserving chronological ordering.
-func (b *SubagentPanelBlock) AppendStreamChunk(kind SubagentEventKind, chunk string) {
+func (b *SubagentPanelBlock) AppendStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	state := b.sessionState()
-	state.AppendStreamChunk(kind, chunk)
+	state.AppendStreamChunk(kind, chunk, occurredAt...)
 	b.syncSessionMirror()
 }
 
-func (b *SubagentPanelBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string) {
+func (b *SubagentPanelBlock) ReplaceFinalStreamChunk(kind SubagentEventKind, chunk string, occurredAt ...time.Time) {
 	state := b.sessionState()
-	state.ReplaceFinalStreamChunk(kind, chunk)
+	state.ReplaceFinalStreamChunk(kind, chunk, occurredAt...)
 	b.syncSessionMirror()
 }
 
@@ -1676,13 +1827,8 @@ func renderSubagentPanelLines(panel *SubagentPanelBlock, ctx BlockRenderContext)
 		baseWidth = 80
 	}
 	boxWidth := maxInt(20, baseWidth-4)
-	contentWidth, lines, overflow := subagentPanelRenderLines(panel, ctx, boxWidth)
-	totalLines := len(lines)
-	start, end, _ := panelScrollWindow(len(lines), panel.previewLines(), panel.ScrollOffset, panel.FollowTail)
-	lines = lines[start:end]
-	if overflow {
-		lines = addScrollbar(lines, contentWidth, len(lines), start, totalLines, ctx.Theme, panel.shouldShowScrollbar(time.Now()))
-	}
+	_, lines, _ := subagentPanelRenderLines(panel, ctx, boxWidth)
+	lines = tailNonEmptyStyledLines(lines, panel.previewLines())
 	vm := PanelViewModel{
 		Variant: tuikit.PanelShellVariantDrawer,
 		Width:   boxWidth,
@@ -1704,18 +1850,63 @@ func (b *SubagentPanelBlock) previewLines() int {
 
 func subagentPanelRenderLines(panel *SubagentPanelBlock, ctx BlockRenderContext, boxWidth int) (contentWidth int, lines []string, overflow bool) {
 	baseWidth := maxInt(1, boxWidth-4)
-	scrollWidth := maxInt(1, baseWidth-1)
-	scrollLines := renderSubagentInnerLines(panel, ctx, scrollWidth)
-	if len(scrollLines) > subagentOutputPreviewLines {
-		return scrollWidth, scrollLines, true
-	}
 	return baseWidth, renderSubagentInnerLines(panel, ctx, baseWidth), false
 }
 
 func renderSubagentInnerLines(panel *SubagentPanelBlock, ctx BlockRenderContext, contentWidth int) []string {
-	return renderACPTranscriptLines(panel.id, panel.Events, panel.Status, contentWidth, ctx, acpTranscriptRenderOptions{
+	events, status := subagentPanelDisplayEvents(panel)
+	return renderACPTranscriptLines(panel.id, events, status, contentWidth, ctx, acpTranscriptRenderOptions{
 		EmptyPlaceholder: "waiting for subagent output",
+		HideCompletedRow: true,
 	})
+}
+
+func subagentPanelDisplayEvents(panel *SubagentPanelBlock) ([]SubagentEvent, string) {
+	if panel == nil {
+		return nil, ""
+	}
+	status := strings.ToLower(strings.TrimSpace(panel.Status))
+	if status != "completed" {
+		return panel.Events, panel.Status
+	}
+	if ev, ok := latestSubagentNarrativeEvent(panel.Events, SEAssistant); ok {
+		return []SubagentEvent{ev}, panel.Status
+	}
+	if ev, ok := latestSubagentNarrativeEvent(panel.Events, SEReasoning); ok {
+		return []SubagentEvent{ev}, panel.Status
+	}
+	if len(panel.Events) > 0 {
+		return panel.Events, panel.Status
+	}
+	return []SubagentEvent{{Kind: SEAssistant, Text: "completed"}}, panel.Status
+}
+
+func latestSubagentNarrativeEvent(events []SubagentEvent, kind SubagentEventKind) (SubagentEvent, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
+		if ev.Kind == kind && strings.TrimSpace(ev.Text) != "" {
+			return ev, true
+		}
+	}
+	return SubagentEvent{}, false
+}
+
+func tailNonEmptyStyledLines(lines []string, limit int) []string {
+	if limit <= 0 || len(lines) == 0 {
+		return nil
+	}
+	out := make([]string, 0, minInt(len(lines), limit))
+	for _, line := range lines {
+		if strings.TrimSpace(ansi.Strip(line)) == "" {
+			continue
+		}
+		out = append(out, line)
+		if len(out) > limit {
+			copy(out, out[len(out)-limit:])
+			out = out[:limit]
+		}
+	}
+	return out
 }
 
 func narrativeEventActive(events []SubagentEvent, idx int, terminal bool) bool {
@@ -1834,14 +2025,11 @@ func (b *SubagentPanelBlock) scrollableLineCount(ctx BlockRenderContext) int {
 }
 
 func (b *SubagentPanelBlock) Scroll(delta int, ctx BlockRenderContext) bool {
-	return scrollPanelState(&b.ScrollOffset, &b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
+	return false
 }
 
 func (b *SubagentPanelBlock) CanScroll(delta int, ctx BlockRenderContext) bool {
-	if b == nil {
-		return false
-	}
-	return canScrollPanelState(b.ScrollOffset, b.FollowTail, b.scrollableLineCount(ctx), b.previewLines(), delta)
+	return false
 }
 
 func (b *SubagentPanelBlock) scrollState() (*int, *bool) {

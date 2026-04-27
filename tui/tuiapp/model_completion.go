@@ -1134,7 +1134,7 @@ func (m *Model) recordHistoryEntry(value string, attachments []inputAttachment) 
 		return
 	}
 	// Slash commands are control inputs and should not pollute user message history.
-	if strings.HasPrefix(entry, "/") {
+	if m.isConfiguredSlashControlLine(entry) {
 		return
 	}
 	clonedAttachments := cloneInputAttachments(attachments)
@@ -1142,6 +1142,32 @@ func (m *Model) recordHistoryEntry(value string, attachments []inputAttachment) 
 		m.history = append(m.history, entry)
 		m.historyAttachments = append(m.historyAttachments, clonedAttachments)
 	}
+}
+
+func (m *Model) isConfiguredSlashControlLine(line string) bool {
+	name := slashCommandName(line)
+	if name == "" {
+		return false
+	}
+	for _, command := range m.cfg.Commands {
+		if strings.EqualFold(strings.TrimSpace(command), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func slashCommandName(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "/") {
+		return ""
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return ""
+	}
+	name := strings.TrimPrefix(fields[0], "/")
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func inputAttachmentsEqual(left []inputAttachment, right []inputAttachment) bool {

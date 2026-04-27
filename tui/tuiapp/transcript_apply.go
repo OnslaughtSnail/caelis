@@ -68,7 +68,7 @@ func (m *Model) applyTranscriptNarrative(event TranscriptEvent) (tea.Model, tea.
 	m.prepareForTranscriptScope(event.Scope)
 	switch event.Scope {
 	case ACPProjectionParticipant:
-		return m.handleParticipantTurnStream(event.ScopeID, transcriptNarrativeStreamKind(event.NarrativeKind), event.Actor, event.Text, event.Final)
+		return m.handleParticipantTurnStream(event.ScopeID, transcriptNarrativeStreamKind(event.NarrativeKind), event.Actor, event.Text, event.Final, event.OccurredAt)
 	case ACPProjectionSubagent:
 		return m.applyTranscriptSubagentNarrative(event)
 	default:
@@ -94,15 +94,18 @@ func (m *Model) applyTranscriptMainNarrative(event TranscriptEvent) (tea.Model, 
 	text := tuikit.SanitizeLogText(event.Text)
 	if event.NarrativeKind == TranscriptNarrativeReasoning {
 		if event.Final {
-			block.ReplaceFinalStreamChunk(SEReasoning, text)
+			block.ReplaceFinalStreamChunk(SEReasoning, text, event.OccurredAt)
 		} else if text != "" {
-			block.AppendStreamChunk(SEReasoning, text)
+			block.AppendStreamChunk(SEReasoning, text, event.OccurredAt)
 		}
 	} else {
 		if event.Final {
-			block.ReplaceFinalStreamChunk(SEAssistant, text)
+			closeLatestReasoningTiming(block.Events, event.OccurredAt)
+		}
+		if event.Final {
+			block.ReplaceFinalStreamChunk(SEAssistant, text, event.OccurredAt)
 		} else if text != "" {
-			block.AppendStreamChunk(SEAssistant, text)
+			block.AppendStreamChunk(SEAssistant, text, event.OccurredAt)
 		}
 	}
 	return m, m.requestStreamViewportSync()
@@ -300,15 +303,19 @@ func (m *Model) applyTranscriptSubagentNarrative(event TranscriptEvent) (tea.Mod
 	text := tuikit.SanitizeLogText(event.Text)
 	if event.NarrativeKind == TranscriptNarrativeReasoning {
 		if event.Final {
-			panel.ReplaceFinalStreamChunk(SEReasoning, text)
+			panel.ReplaceFinalStreamChunk(SEReasoning, text, event.OccurredAt)
 		} else {
-			panel.AppendStreamChunk(SEReasoning, text)
+			panel.AppendStreamChunk(SEReasoning, text, event.OccurredAt)
 		}
 	} else {
 		if event.Final {
-			panel.ReplaceFinalStreamChunk(SEAssistant, text)
+			closeLatestReasoningTiming(state.Events, event.OccurredAt)
+			state.eventsGen++
+		}
+		if event.Final {
+			panel.ReplaceFinalStreamChunk(SEAssistant, text, event.OccurredAt)
 		} else {
-			panel.AppendStreamChunk(SEAssistant, text)
+			panel.AppendStreamChunk(SEAssistant, text, event.OccurredAt)
 		}
 	}
 	m.reviveSubagentPanel(panel, false)

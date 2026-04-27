@@ -1173,7 +1173,7 @@ func (m *Model) ensureMainACPTurnBlock(sessionID string) *MainACPTurnBlock {
 	return block
 }
 
-func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string, final bool) (tea.Model, tea.Cmd) {
+func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string, final bool, occurredAt ...time.Time) (tea.Model, tea.Cmd) {
 	m.finalizeAssistantBlock()
 	m.finalizeReasoningBlock()
 	text = tuikit.SanitizeLogText(text)
@@ -1190,15 +1190,18 @@ func (m *Model) handleParticipantTurnStream(sessionID, kind, actor, text string,
 	switch normalizeStreamKind(kind) {
 	case "reasoning":
 		if final {
-			block.ReplaceFinalStreamChunk(SEReasoning, text)
+			block.ReplaceFinalStreamChunk(SEReasoning, text, occurredAt...)
 		} else if text != "" {
-			block.AppendStreamChunk(SEReasoning, text)
+			block.AppendStreamChunk(SEReasoning, text, occurredAt...)
 		}
 	default:
 		if final {
-			block.ReplaceFinalStreamChunk(SEAssistant, text)
+			closeLatestReasoningTiming(block.Events, narrativeEventTime(occurredAt...))
+		}
+		if final {
+			block.ReplaceFinalStreamChunk(SEAssistant, text, occurredAt...)
 		} else if text != "" {
-			block.AppendStreamChunk(SEAssistant, text)
+			block.AppendStreamChunk(SEAssistant, text, occurredAt...)
 		}
 	}
 	if final && strings.EqualFold(strings.TrimSpace(block.Status), "waiting_approval") {

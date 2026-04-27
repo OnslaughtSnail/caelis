@@ -201,9 +201,10 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 					status = string(appgateway.ToolStatusCompleted)
 				}
 			}
-			toolOutput := toolDisplayOutput(payload.ToolName, payload.RawInput, payload.RawOutput, acpprojector.FormatToolResult(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, ""), gatewayToolResultMap(payload.OutputText, payload.Error), status), status, payload.Error)
+			toolErr := payload.Error || strings.EqualFold(status, string(appgateway.ToolStatusFailed))
+			toolOutput := toolDisplayOutput(payload.ToolName, payload.RawInput, payload.RawOutput, acpprojector.FormatToolResult(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, ""), gatewayToolResultMap(payload.OutputText, toolErr), status), status, toolErr)
 			toolArgs := toolDisplayArgs(payload.ToolName, payload.RawInput, acpprojector.FormatToolStart(payload.ToolName, gatewayToolArgsMap(payload.CommandPreview, "")))
-			if len(payload.RawInput) > 0 || len(payload.RawOutput) > 0 {
+			if !toolErr && (len(payload.RawInput) > 0 || len(payload.RawOutput) > 0) {
 				if header := toolDisplayResultHeader(payload.ToolName, toolOutput); header != "" {
 					toolArgs = header
 				}
@@ -219,11 +220,11 @@ func ProjectGatewayEventToTranscriptEvents(ev appgateway.Event) []TranscriptEven
 				ToolName:   strings.TrimSpace(payload.ToolName),
 				ToolArgs:   toolArgs,
 				ToolOutput: toolOutput,
-				ToolStream: transcriptToolStream(status, payload.Error),
+				ToolStream: transcriptToolStream(status, toolErr),
 				ToolStatus: status,
-				ToolError:  payload.Error || strings.EqualFold(status, string(appgateway.ToolStatusFailed)),
+				ToolError:  toolErr,
 				ToolTaskID: toolDisplayTaskID(payload.RawInput, payload.RawOutput),
-				Final:      transcriptToolStatusFinal(status, payload.Error),
+				Final:      transcriptToolStatusFinal(status, toolErr),
 			})
 		}
 	case appgateway.EventKindPlanUpdate:

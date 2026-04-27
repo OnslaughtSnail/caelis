@@ -229,6 +229,11 @@ func TestGatewayDriverCompleteSlashArgConnectFlowUsesLegacyCommands(t *testing.T
 	if deepseekModels[0].Value != "deepseek-v4-flash" || deepseekModels[1].Value != "deepseek-v4-pro" {
 		t.Fatalf("deepseek connect model candidates = %#v, want deepseek-v4-flash and deepseek-v4-pro", deepseekModels)
 	}
+	for _, item := range deepseekModels {
+		if !strings.Contains(item.Detail, "catalog preset") {
+			t.Fatalf("deepseek connect model candidate = %#v, want catalog preset detail", item)
+		}
+	}
 
 	codefreeModels, err := driver.CompleteSlashArg(ctx, "connect-model:codefree|https%3A%2F%2Fwww.srdcloud.cn|60||", "", 20)
 	if err != nil {

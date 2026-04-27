@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
@@ -18,6 +19,18 @@ func newGatewayEventTestModel() *Model {
 		Commands:        DefaultCommands(),
 		Wizards:         DefaultWizards(),
 	})
+}
+
+func hasBlankRowBetween(lines []string, start int, end int) bool {
+	if start < 0 || end < 0 || start >= end {
+		return false
+	}
+	for i := start + 1; i < end; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestModelUpdateConsumesGatewayAssistantEventIntoMainTurnBlock(t *testing.T) {
@@ -73,7 +86,6 @@ func TestGatewayContextCanceledRendersUserInterrupt(t *testing.T) {
 	})
 	m = updated.(*Model)
 
-	var sawInterruptNote bool
 	var sawErrorText bool
 	var renderedMain string
 	for _, item := range m.doc.Blocks() {
@@ -86,9 +98,6 @@ func TestGatewayContextCanceledRendersUserInterrupt(t *testing.T) {
 			}
 			renderedMain = strings.Join(plain, "\n")
 		case *TranscriptBlock:
-			if strings.Contains(block.Raw, "User interrupt") {
-				sawInterruptNote = true
-			}
 			if strings.Contains(block.Raw, "context canceled") || strings.HasPrefix(strings.TrimSpace(block.Raw), "error:") {
 				sawErrorText = true
 			}
@@ -100,8 +109,8 @@ func TestGatewayContextCanceledRendersUserInterrupt(t *testing.T) {
 	if strings.Contains(renderedMain, "✗ failed") {
 		t.Fatalf("main turn render = %q, should not show failed", renderedMain)
 	}
-	if !sawInterruptNote {
-		t.Fatalf("doc blocks = %#v, want non-persistent User interrupt note", m.doc.Blocks())
+	if strings.Contains(renderedMain, "User interrupt") {
+		t.Fatalf("main turn render = %q, should not duplicate user interrupt note", renderedMain)
 	}
 	if sawErrorText {
 		t.Fatalf("doc blocks = %#v, should not render context canceled as error", m.doc.Blocks())
@@ -258,25 +267,15 @@ func TestGatewayCompletedExplorationToolDefaultsCollapsed(t *testing.T) {
 
 func TestGatewayCompletedExplorationToolsRenderAsCompactSummary(t *testing.T) {
 	model := newGatewayEventTestModel()
-	tools := []struct {
-		id     string
-		name   string
-		args   string
-		output string
-	}{
-		{id: "read-1", name: "READ", args: "gateway/core/types.go", output: "type Event struct{}"},
-		{id: "rg-1", name: "RG", args: "EventKind", output: "42 matches"},
-		{id: "list-1", name: "LIST", args: "tui/tuiapp", output: "transcript_event.go"},
-	}
-	for _, tool := range tools {
+	sendTool := func(id string, name string, args string, output string) {
 		updated, _ := model.Update(appgateway.EventEnvelope{
 			Event: appgateway.Event{
 				Kind:       appgateway.EventKindToolCall,
 				SessionRef: sdksession.SessionRef{SessionID: "root-session"},
 				ToolCall: &appgateway.ToolCallPayload{
-					CallID:   tool.id,
-					ToolName: tool.name,
-					ArgsText: tool.args,
+					CallID:   id,
+					ToolName: name,
+					ArgsText: args,
 					Status:   appgateway.ToolStatusRunning,
 					Scope:    appgateway.EventScopeMain,
 				},
@@ -288,9 +287,9 @@ func TestGatewayCompletedExplorationToolsRenderAsCompactSummary(t *testing.T) {
 				Kind:       appgateway.EventKindToolResult,
 				SessionRef: sdksession.SessionRef{SessionID: "root-session"},
 				ToolResult: &appgateway.ToolResultPayload{
-					CallID:     tool.id,
-					ToolName:   tool.name,
-					OutputText: tool.output,
+					CallID:     id,
+					ToolName:   name,
+					OutputText: output,
 					Status:     appgateway.ToolStatusCompleted,
 					Scope:      appgateway.EventScopeMain,
 				},
@@ -298,6 +297,28 @@ func TestGatewayCompletedExplorationToolsRenderAsCompactSummary(t *testing.T) {
 		})
 		model = updated.(*Model)
 	}
+	sendReasoning := func(text string) {
+		updated, _ := model.Update(appgateway.EventEnvelope{
+			Event: appgateway.Event{
+				Kind:       appgateway.EventKindAssistantMessage,
+				SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+				Narrative: &appgateway.NarrativePayload{
+					Role:          appgateway.NarrativeRoleAssistant,
+					ReasoningText: text,
+					Final:         true,
+					Scope:         appgateway.EventScopeMain,
+				},
+			},
+		})
+		model = updated.(*Model)
+	}
+	sendReasoning("Now let me explore more to understand the project structure - specifically:\n1. The service layer for config.\n2. The rbac remote client.")
+	sendTool("read-1", "READ", "gateway/core/types.go", "type Event struct{}")
+	sendReasoning("Let me search the event kind references next.")
+	sendTool("rg-1", "RG", "EventKind", "42 matches")
+	sendTool("list-1", "LIST", "tui/tuiapp", "transcript_event.go")
+	sendReasoning("Let me patch the hook implementation next.")
+	sendTool("patch-1", "PATCH", "hooks.go", "patched hooks.go")
 
 	block, ok := model.doc.Blocks()[0].(*MainACPTurnBlock)
 	if !ok {
@@ -309,14 +330,23 @@ func TestGatewayCompletedExplorationToolsRenderAsCompactSummary(t *testing.T) {
 		plain = append(plain, row.Plain)
 	}
 	joined := strings.Join(plain, "\n")
-	if !strings.Contains(joined, "explored 2 files, 1 search") {
+	if !strings.Contains(joined, "• Explored") ||
+		!strings.Contains(joined, "  └ Read gateway/core/types.go") ||
+		!strings.Contains(joined, "    Search EventKind") ||
+		!strings.Contains(joined, "    List tui/tuiapp") {
 		t.Fatalf("rendered rows = %q, want compact exploration summary", joined)
 	}
 	if strings.Contains(joined, "type Event struct{}") || strings.Contains(joined, "42 matches") {
 		t.Fatalf("rendered rows = %q, want exploration details hidden while collapsed", joined)
 	}
-	if !model.tryToggleACPToolPanelToken(block.BlockID(), "acp_exploration_group:read-1,rg-1,list-1") {
-		t.Fatal("expected exploration summary click token to expand grouped tools")
+	if strings.Contains(joined, "Now let me explore more") {
+		t.Fatalf("rendered rows = %q, want leading exploration reasoning hidden while collapsed", joined)
+	}
+	if !strings.Contains(joined, "> Let me patch the hook implementation next.") {
+		t.Fatalf("rendered rows = %q, want first action-loop reasoning after exploration folded", joined)
+	}
+	if !model.tryToggleACPToolPanelToken(block.BlockID(), "acp_exploration_stage:read-1,rg-1,list-1") {
+		t.Fatal("expected exploration summary click token to expand grouped stage")
 	}
 	rows = block.Render(BlockRenderContext{Width: 96, TermWidth: 96, Theme: model.theme})
 	plain = plain[:0]
@@ -324,8 +354,17 @@ func TestGatewayCompletedExplorationToolsRenderAsCompactSummary(t *testing.T) {
 		plain = append(plain, row.Plain)
 	}
 	joined = strings.Join(plain, "\n")
-	if !strings.Contains(joined, "type Event struct{}") || !strings.Contains(joined, "42 matches") {
-		t.Fatalf("expanded rows = %q, want concrete exploration outputs", joined)
+	if !strings.Contains(joined, "  └ Now let me explore more to understand the project structure - specifically:") ||
+		!strings.Contains(joined, "    1. The service layer for config.") ||
+		!strings.Contains(joined, "    2. The rbac remote client.") ||
+		!strings.Contains(joined, "    Let me search the event kind references next.") ||
+		!strings.Contains(joined, "    Read gateway/core/types.go") ||
+		!strings.Contains(joined, "Search EventKind") ||
+		!strings.Contains(joined, "List tui/tuiapp") {
+		t.Fatalf("expanded rows = %q, want ordered exploration stage", joined)
+	}
+	if strings.Contains(joined, "type Event struct{}") || strings.Contains(joined, "42 matches") {
+		t.Fatalf("expanded rows = %q, should show compact calls rather than raw outputs", joined)
 	}
 }
 
@@ -410,7 +449,7 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 					"exit_code":      0,
 				},
 			},
-			want:        []string{`BASH echo "hello"`, "hello"},
+			want:        []string{`• Ran echo "hello"`, "  └ hello"},
 			forbidden:   []string{"session_id", "supports_input", "737bc26a"},
 			expandPanel: true,
 		},
@@ -436,7 +475,7 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 					"result":  "child line 1\nchild line 2\n",
 				},
 			},
-			want:        []string{"SPAWN", "child line 1", "child line 2"},
+			want:        []string{"• Spawned", "  └ child line 1", "    child line 2"},
 			forbidden:   []string{"task / running", "state completed", "spawn-task-1"},
 			expandPanel: true,
 		},
@@ -464,7 +503,7 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 					"task_id":        "task-9",
 				},
 			},
-			want:        []string{`BASH sleep 10`},
+			want:        []string{`• Ran sleep 10`},
 			forbidden:   []string{"task / running", "task task-9", "state running", "session_id", "supports_input", "556d7447"},
 			expandPanel: true,
 		},
@@ -492,7 +531,7 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 					"task_id":        "task-9",
 				},
 			},
-			want:        []string{"↻ WAIT 5 s"},
+			want:        []string{"• Task WAIT 5 s"},
 			forbidden:   []string{"TASK", "task-9", "task / control", "state running", "session_id", "supports_input", "556d7447"},
 			expandPanel: true,
 		},
@@ -518,8 +557,29 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 					"removed_lines": 0,
 				},
 			},
-			want:        []string{"WRITE tool_demo_summary.md +2 -0", "diff / hunk", "+one", "+two"},
+			want:        []string{"• Wrote tool_demo_summary.md +2 -0", "diff / hunk", "+one", "+two"},
 			forbidden:   []string{"│", "╭", "╰", "tool_demo_summary.md +2 -0\n  tool_demo_summary.md +2 -0"},
+			expandPanel: true,
+		},
+		{
+			name: "failed write does not claim success",
+			call: &appgateway.ToolCallPayload{
+				CallID:   "write-failed-1",
+				ToolName: "WRITE",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"path": "/tmp/workspace/workflow.go", "content": "package workflow\n"},
+			},
+			result: &appgateway.ToolResultPayload{
+				CallID:     "write-failed-1",
+				ToolName:   "WRITE",
+				Status:     appgateway.ToolStatusFailed,
+				Scope:      appgateway.EventScopeMain,
+				OutputText: "Sandbox permission denied. Use a writable workspace path or request elevated permissions.",
+				RawInput:   map[string]any{"path": "/tmp/workspace/workflow.go", "content": "package workflow\n"},
+			},
+			want:        []string{"• Write failed workflow.go", "└ Sandbox permission denied"},
+			forbidden:   []string{"• Wrote workflow.go", "╭", "╰", "│ ! workflow.go"},
 			expandPanel: true,
 		},
 		{
@@ -544,7 +604,7 @@ func TestGatewayToolDisplayMetaRendersActionableSummaries(t *testing.T) {
 					"removed_lines": 1,
 				},
 			},
-			want:        []string{"PATCH demo.py +1 -1", "diff / hunk", "-old line", "+new line"},
+			want:        []string{"• Patched demo.py +1 -1", "diff / hunk", "-old line", "+new line"},
 			forbidden:   []string{"│", "╭", "╰", "demo.py +1 -1\n  demo.py +1 -1"},
 			expandPanel: true,
 		},
@@ -657,7 +717,7 @@ func TestGatewayConsecutiveTaskControlsMergeIntoOneInstructionRow(t *testing.T) 
 		plain = append(plain, row.Plain)
 	}
 	joined := strings.Join(plain, "\n")
-	if !strings.Contains(joined, `↻ WRITE "Alice" · WAIT 5 s · WAIT 8 s`) {
+	if !strings.Contains(joined, `• Task WRITE "Alice" · WAIT 5 s · WAIT 8 s`) {
 		t.Fatalf("rendered rows = %q, want merged TASK controls", joined)
 	}
 	if strings.Contains(joined, "TASK") || strings.Contains(joined, "task-9") {
@@ -739,7 +799,7 @@ func TestGatewayTaskSnapshotRefreshesBashPanelOutput(t *testing.T) {
 		plain = append(plain, row.Plain)
 	}
 	joined := strings.Join(plain, "\n")
-	for _, want := range []string{"  进度: 1/30", "  进度: 3/30", "↻ WAIT 5 s"} {
+	for _, want := range []string{"  └ 进度: 1/30", "    进度: 3/30", "• Task WAIT 5 s"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("rendered rows = %q, want %q", joined, want)
 		}
@@ -819,7 +879,7 @@ func TestGatewayBashTerminalDeltasPreserveLineBreaks(t *testing.T) {
 	if strings.Contains(joined, "09:05:53 [步骤 9/10]") {
 		t.Fatalf("rendered rows = %q, terminal delta lines were merged", joined)
 	}
-	for _, want := range []string{"  [步骤 8/10] 正在处理... 09:05:53", "  [步骤 9/10] 正在处理... 09:05:55"} {
+	for _, want := range []string{"  └ [步骤 8/10] 正在处理... 09:05:53", "    [步骤 9/10] 正在处理... 09:05:55"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("rendered rows = %q, want %q", joined, want)
 		}
@@ -884,10 +944,13 @@ func TestGatewayPlanToolRendersOnlyPlanEntries(t *testing.T) {
 		plain = append(plain, row.Plain)
 	}
 	joined := strings.Join(plain, "\n")
-	for _, want := range []string{"✓ Inspect files", "▸ Run validation"} {
+	for _, want := range []string{"• Updated Plan", "  └ ✔ Inspect files", "    ▸ Run validation"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("rendered rows = %q, want %q", joined, want)
 		}
+	}
+	if len(plain) < 5 || plain[0] != "" || plain[len(plain)-1] != "" {
+		t.Fatalf("rendered rows = %#v, want blank lines around plan block", plain)
 	}
 	for _, forbidden := range []string{"PLAN", `"entries"`, "Plan updated"} {
 		if strings.Contains(joined, forbidden) {
@@ -915,7 +978,7 @@ func TestGatewayBashPanelRendersRawTerminalOutput(t *testing.T) {
 				"supports_input": true,
 				"output_preview": "进度: 1/5\n",
 			},
-			want:   []string{"BASH for i in 1 2", "  进度: 1/5"},
+			want:   []string{"• Ran for i in 1 2", "  └ 进度: 1/5"},
 			forbid: []string{"|_", "BASH output", "│", "task / running", "task task-7", "state running", "stdout 进度", "supports_input"},
 		},
 		{
@@ -927,7 +990,7 @@ func TestGatewayBashPanelRendersRawTerminalOutput(t *testing.T) {
 				"stdout":    "ignored stdout\n",
 				"exit_code": 1,
 			},
-			want:   []string{"  permission denied"},
+			want:   []string{"  └ permission denied"},
 			forbid: []string{"|_", "BASH output", "│", "stderr permission denied", "ignored stdout", "exit 1"},
 		},
 	}
@@ -991,6 +1054,36 @@ func TestGatewayBashPanelRendersRawTerminalOutput(t *testing.T) {
 	}
 }
 
+func TestToolGroupsUseActionColorAndBlankSeparation(t *testing.T) {
+	model := newGatewayEventTestModel()
+	ctx := BlockRenderContext{Width: 110, TermWidth: 110, Theme: model.theme}
+	block := NewMainACPTurnBlock("session-1")
+	block.UpdateTool("bash-1", "BASH", "echo hi", "hi", false, false)
+	block.UpdateTool("bash-1", "BASH", "echo hi", "hi", true, false)
+	block.UpdateTool("read-1", "READ", "README.md", "README.md 1~20", false, false)
+	block.UpdateTool("read-1", "READ", "README.md", "README.md 1~20", true, false)
+	block.UpdateTool("write-1", "WRITE", "out.txt", "+1 -0", false, false)
+	block.UpdateTool("write-1", "WRITE", "out.txt", "+1 -0", true, false)
+
+	rows := block.Render(ctx)
+	plain := renderedPlainRows(rows)
+	ranIdx := indexOfRowContaining(plain, "• Ran echo hi")
+	readIdx := indexOfRowContaining(plain, "READ")
+	wroteIdx := indexOfRowContaining(plain, "• Wrote")
+	if ranIdx < 0 || readIdx < 0 || wroteIdx < 0 {
+		t.Fatalf("rendered rows = %#v, want Ran, READ, and Wrote tool groups", plain)
+	}
+	if !hasBlankRowBetween(plain, ranIdx, readIdx) || !hasBlankRowBetween(plain, readIdx, wroteIdx) {
+		t.Fatalf("rendered rows = %#v, want blank rows between tool groups", plain)
+	}
+
+	for _, idx := range []int{ranIdx, wroteIdx} {
+		if rows[idx].Styled == rows[idx].Plain || !strings.Contains(rows[idx].Styled, "\x1b[") {
+			t.Fatalf("styled row %q = %q, want themed action label", rows[idx].Plain, rows[idx].Styled)
+		}
+	}
+}
+
 func TestGatewayAssistantFinalKeepsReasoningVisible(t *testing.T) {
 	model := newGatewayEventTestModel()
 
@@ -1041,6 +1134,174 @@ func TestGatewayAssistantFinalKeepsReasoningVisible(t *testing.T) {
 	}
 	if !strings.Contains(joined, "final answer") {
 		t.Fatalf("rendered rows = %q, want assistant text", joined)
+	}
+}
+
+func TestGatewayReasoningFoldsAfterAttentionToolLoopAndTogglesInline(t *testing.T) {
+	model := newGatewayEventTestModel()
+	for _, env := range []appgateway.EventEnvelope{
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:          appgateway.NarrativeRoleAssistant,
+				ReasoningText: "thinking through the command choice",
+				Final:         true,
+				Scope:         appgateway.EventScopeMain,
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:  appgateway.NarrativeRoleAssistant,
+				Text:  "I will run the test.",
+				Final: true,
+				Scope: appgateway.EventScopeMain,
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolCall,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolCall: &appgateway.ToolCallPayload{
+				CallID:   "bash-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"command": "go test ./tui/..."},
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "bash-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusCompleted,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"command": "go test ./tui/..."},
+				RawOutput: map[string]any{
+					"stdout":    "ok github.com/OnslaughtSnail/caelis/tui/tuiapp\n",
+					"exit_code": 0,
+				},
+			},
+		}},
+	} {
+		updated, _ := model.Update(env)
+		model = updated.(*Model)
+	}
+
+	block, ok := model.doc.Blocks()[0].(*MainACPTurnBlock)
+	if !ok {
+		t.Fatalf("first block = %#v, want MainACPTurnBlock", model.doc.Blocks()[0])
+	}
+	rows := block.Render(BlockRenderContext{Width: 110, TermWidth: 110, Theme: model.theme})
+	plain := renderedPlainRows(rows)
+	joined := strings.Join(plain, "\n")
+	if !strings.Contains(joined, "> thinking through the command choice") {
+		t.Fatalf("rendered rows = %q, want folded reasoning preview", joined)
+	}
+	if strings.Contains(joined, "Thought a few seconds") {
+		t.Fatalf("rendered rows = %q, should not show reasoning duration", joined)
+	}
+	bashIdx := indexOfRowContaining(plain, "• Ran go test ./tui/...")
+	if bashIdx <= 0 || plain[bashIdx-1] != "" {
+		t.Fatalf("rendered rows = %#v, want blank row before attention tool loop", plain)
+	}
+
+	if !model.tryToggleACPToolPanelToken(block.BlockID(), "acp_reasoning:0") {
+		t.Fatal("expected reasoning click token to toggle")
+	}
+	rows = block.Render(BlockRenderContext{Width: 110, TermWidth: 110, Theme: model.theme})
+	joined = strings.Join(renderedPlainRows(rows), "\n")
+	if !strings.Contains(joined, "∨ thinking through the command choice") {
+		t.Fatalf("expanded rows = %q, want expanded reasoning preview", joined)
+	}
+	if strings.Count(joined, "thinking through the command choice") != 1 {
+		t.Fatalf("expanded rows = %q, want single-line reasoning rendered once", joined)
+	}
+}
+
+func TestGatewayReasoningFoldUsesTimedDurationWhenAvailable(t *testing.T) {
+	model := newGatewayEventTestModel()
+	start := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	for _, env := range []appgateway.EventEnvelope{
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			OccurredAt: start,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:          appgateway.NarrativeRoleAssistant,
+				ReasoningText: "first ",
+				Final:         false,
+				Scope:         appgateway.EventScopeMain,
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			OccurredAt: start.Add(900 * time.Millisecond),
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:          appgateway.NarrativeRoleAssistant,
+				ReasoningText: "last",
+				Final:         false,
+				Scope:         appgateway.EventScopeMain,
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			OccurredAt: start.Add(1500 * time.Millisecond),
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:  appgateway.NarrativeRoleAssistant,
+				Text:  "done thinking",
+				Final: true,
+				Scope: appgateway.EventScopeMain,
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolCall,
+			OccurredAt: start.Add(1600 * time.Millisecond),
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolCall: &appgateway.ToolCallPayload{
+				CallID:   "bash-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"command": "echo ok"},
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			OccurredAt: start.Add(1700 * time.Millisecond),
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "bash-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusCompleted,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"command": "echo ok"},
+				RawOutput: map[string]any{
+					"stdout": "ok\n",
+				},
+			},
+		}},
+	} {
+		updated, _ := model.Update(env)
+		model = updated.(*Model)
+	}
+
+	block, ok := model.doc.Blocks()[0].(*MainACPTurnBlock)
+	if !ok {
+		t.Fatalf("first block = %#v, want MainACPTurnBlock", model.doc.Blocks()[0])
+	}
+	rows := block.Render(BlockRenderContext{Width: 110, TermWidth: 110, Theme: model.theme})
+	joined := strings.Join(renderedPlainRows(rows), "\n")
+	if !strings.Contains(joined, "> first last") {
+		t.Fatalf("rendered rows = %q, want folded reasoning preview", joined)
+	}
+	if strings.Contains(joined, "Thought") || strings.Contains(joined, "1.5s") {
+		t.Fatalf("rendered rows = %q, should not show reasoning duration", joined)
 	}
 }
 

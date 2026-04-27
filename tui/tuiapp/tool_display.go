@@ -52,6 +52,11 @@ func toolDisplayArgs(name string, raw map[string]any, fallback ...string) string
 
 func toolDisplayOutput(name string, input map[string]any, output map[string]any, fallback string, status string, isErr bool) string {
 	name = strings.ToUpper(strings.TrimSpace(name))
+	if isErr && (name == "WRITE" || name == "PATCH") {
+		if text := strings.TrimSpace(fallback); text != "" {
+			return text
+		}
+	}
 	switch name {
 	case "READ":
 		if summary := readDisplaySummary(input, output); summary != "" {
@@ -81,6 +86,11 @@ func toolDisplayOutput(name string, input map[string]any, output map[string]any,
 		}
 		if len(output) > 0 && looksLikeRawToolJSON(fallback) {
 			return terminalEmptySummary(name, output, isErr)
+		}
+	}
+	if isErr {
+		if text := strings.TrimSpace(fallback); text != "" {
+			return text
 		}
 	}
 	if text := strings.TrimSpace(fallback); text != "" {

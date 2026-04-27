@@ -372,9 +372,6 @@ func buildConnectModelChoices(provider string, fallbackModels []string) []connec
 }
 
 func fallbackConnectModels(tpl providerTemplate) []string {
-	if len(tpl.commonModels) > 0 {
-		return append([]string(nil), tpl.commonModels...)
-	}
 	if models := modelcatalog.ListCatalogModels(tpl.provider); len(models) > 0 {
 		return models
 	}

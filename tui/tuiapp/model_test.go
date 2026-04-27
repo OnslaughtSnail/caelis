@@ -8,6 +8,7 @@ import (
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestModelViewShowsWelcomeCard(t *testing.T) {
@@ -86,6 +87,44 @@ func TestBTWCommandIsHiddenByDefault(t *testing.T) {
 	model := NewModel(Config{Commands: DefaultCommands()})
 	if got := model.submissionModeForLine("/btw summarize that"); got != SubmissionModeDefault {
 		t.Fatalf("submissionModeForLine(/btw ...) = %q, want default hidden-command handling", got)
+	}
+}
+
+func TestUnknownSlashUserMessageUsesNormalPromptBehavior(t *testing.T) {
+	model := NewModel(Config{
+		Commands:    DefaultCommands(),
+		ExecuteLine: func(Submission) TaskResultMsg { return TaskResultMsg{} },
+	})
+	line := "/rbac/inner/workflow/switch Query 参数"
+
+	_, cmd := model.submitLine(line)
+	if cmd == nil {
+		t.Fatal("submitLine() command = nil, want ExecuteLine command")
+	}
+	if !model.showTurnDivider {
+		t.Fatal("showTurnDivider = false, want normal user prompt divider")
+	}
+	if len(model.history) != 1 || model.history[0] != line {
+		t.Fatalf("history = %#v, want unknown slash user message recorded", model.history)
+	}
+}
+
+func TestKnownSlashCommandKeepsControlPromptBehavior(t *testing.T) {
+	model := NewModel(Config{
+		Commands:    DefaultCommands(),
+		ExecuteLine: func(Submission) TaskResultMsg { return TaskResultMsg{} },
+	})
+
+	_, cmd := model.submitLine("/help")
+	if cmd == nil {
+		t.Fatal("submitLine() command = nil, want ExecuteLine command")
+	}
+
+	if model.showTurnDivider {
+		t.Fatal("showTurnDivider = true, want control command to suppress user prompt divider")
+	}
+	if len(model.history) != 0 {
+		t.Fatalf("history = %#v, want control command omitted", model.history)
 	}
 }
 
@@ -236,8 +275,8 @@ func TestRunningGatewayToolCallIsVisibleBeforeTaskCompletes(t *testing.T) {
 	})
 	m = updated.(*Model)
 
-	view := m.View().Content
-	if !strings.Contains(view, "BASH") {
+	view := ansi.Strip(m.View().Content)
+	if !strings.Contains(view, `• Ran echo "hi"`) {
 		t.Fatalf("view = %q, want running tool call before task result", view)
 	}
 }

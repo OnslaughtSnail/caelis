@@ -345,6 +345,8 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addTime(b.StartedAt)
 		builder.addTime(b.EndedAt)
 		writeExpandedTools(builder, b.ExpandedTools)
+		writeExpandedTools(builder, b.ExpandedThought)
+		writeExpandedTools(builder, b.ExpandedExplore)
 		writeToolPanelScrollStates(builder, b.ToolPanelScroll)
 		writeSubagentEvents(builder, b.Events)
 	case *DividerBlock:
@@ -372,6 +374,8 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addTime(b.StartedAt)
 		builder.addTime(b.EndedAt)
 		writeExpandedTools(builder, b.ExpandedTools)
+		writeExpandedTools(builder, b.ExpandedThought)
+		writeExpandedTools(builder, b.ExpandedExplore)
 		writeToolPanelScrollStates(builder, b.ToolPanelScroll)
 		writeSubagentEvents(builder, b.Events)
 	case *WelcomeBlock:
@@ -434,6 +438,8 @@ func writeSubagentEvents(builder *blockKeyBuilder, events []SubagentEvent) {
 	for _, event := range events {
 		builder.addInt(int(event.Kind))
 		builder.addString(event.Text)
+		builder.addTime(event.StartedAt)
+		builder.addTime(event.EndedAt)
 		builder.addString(event.CallID)
 		builder.addString(event.Name)
 		builder.addString(event.Args)

@@ -97,7 +97,7 @@ func (r *Runtime) Run(ctx context.Context, req sdksandbox.CommandRequest) (sdksa
 	if result.Backend == "" {
 		result.Backend = r.backend
 	}
-	return result, err
+	return sdksandbox.NormalizeSandboxPermissionFailure(result, err)
 }
 
 func (r *Runtime) Start(ctx context.Context, req sdksandbox.CommandRequest) (sdksandbox.Session, error) {
@@ -164,7 +164,9 @@ func (s *session) WriteInput(_ context.Context, input []byte) error {
 }
 
 func (s *session) ReadOutput(_ context.Context, stdoutMarker, stderrMarker int64) ([]byte, []byte, int64, int64, error) {
-	return s.runner.ReadOutput(s.sessionID, stdoutMarker, stderrMarker)
+	stdout, stderr, nextStdout, nextStderr, err := s.runner.ReadOutput(s.sessionID, stdoutMarker, stderrMarker)
+	stderr = sdksandbox.NormalizeSandboxPermissionOutput("stderr", stderr)
+	return stdout, stderr, nextStdout, nextStderr, err
 }
 
 func (s *session) Status(_ context.Context) (sdksandbox.SessionStatus, error) {
@@ -202,7 +204,7 @@ func (s *session) Result(ctx context.Context) (sdksandbox.CommandResult, error) 
 	if result.Backend == "" {
 		result.Backend = s.backend
 	}
-	return result, err
+	return sdksandbox.NormalizeSandboxPermissionFailure(result, err)
 }
 
 func (s *session) Terminate(_ context.Context) error {
@@ -222,6 +224,9 @@ func translateRequest(req sdksandbox.CommandRequest) Request {
 		OnOutput: func(chunk OutputChunk) {
 			if req.OnOutput == nil {
 				return
+			}
+			if strings.EqualFold(strings.TrimSpace(chunk.Stream), "stderr") {
+				chunk.Text = string(sdksandbox.NormalizeSandboxPermissionOutput("stderr", []byte(chunk.Text)))
 			}
 			req.OnOutput(sdksandbox.OutputChunk{Stream: chunk.Stream, Text: chunk.Text})
 		},

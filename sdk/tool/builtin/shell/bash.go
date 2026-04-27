@@ -125,7 +125,19 @@ func (t *BashTool) Call(ctx context.Context, call sdktool.Call) (sdktool.Result,
 		})
 	}
 	if err != nil {
-		return sdktool.Result{}, err
+		payload := map[string]any{
+			"stdout":    result.Stdout,
+			"stderr":    result.Stderr,
+			"exit_code": result.ExitCode,
+			"route":     result.Route,
+			"backend":   result.Backend,
+			"error":     err.Error(),
+		}
+		if detail, ok := sdksandbox.SandboxPermissionDetail(result, err); ok {
+			payload["sandbox_permission_denied"] = true
+			payload["error"] = detail
+		}
+		return toolutil.JSONErrorResult(BashToolName, payload)
 	}
 	return toolutil.JSONResult(BashToolName, map[string]any{
 		"stdout":    result.Stdout,

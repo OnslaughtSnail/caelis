@@ -26,17 +26,22 @@ func (r *compositeRuntime) FileSystem() FileSystem {
 
 func (r *compositeRuntime) FileSystemFor(constraints Constraints) FileSystem {
 	if runtime := r.runtimeForConstraints(constraints); runtime != nil {
-		return runtime.FileSystem()
+		return runtime.FileSystemFor(constraints)
 	}
 	return nil
 }
 
 func (r *compositeRuntime) Run(ctx context.Context, req CommandRequest) (CommandResult, error) {
-	runtime := r.runtimeForConstraints(EffectiveConstraints(req))
+	constraints := EffectiveConstraints(req)
+	runtime := r.runtimeForConstraints(constraints)
 	if runtime == nil {
 		return CommandResult{}, fmt.Errorf("sdk/sandbox: runtime is unavailable")
 	}
-	return runtime.Run(ctx, req)
+	result, err := runtime.Run(ctx, req)
+	if runtime != r.host && constraints.Route != RouteHost && constraints.Permission != PermissionFullAccess {
+		return NormalizeSandboxPermissionFailure(result, err)
+	}
+	return result, err
 }
 
 func (r *compositeRuntime) Start(ctx context.Context, req CommandRequest) (Session, error) {

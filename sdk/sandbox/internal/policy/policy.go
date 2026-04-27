@@ -51,11 +51,30 @@ func Default(cfg sdksandbox.Config, constraints sdksandbox.Constraints) Policy {
 		if constraints.Network == "" {
 			p.NetworkAccess = true
 		}
+		applyPathRules(&p, constraints.PathRules)
 	}
 	p.ReadableRoots = normalizeStringList(p.ReadableRoots)
 	p.WritableRoots = normalizeStringList(p.WritableRoots)
 	p.ReadOnlySubpaths = normalizeStringList(p.ReadOnlySubpaths)
 	return p
+}
+
+func applyPathRules(p *Policy, rules []sdksandbox.PathRule) {
+	if p == nil || len(rules) == 0 {
+		return
+	}
+	for _, rule := range rules {
+		path := strings.TrimSpace(rule.Path)
+		if path == "" {
+			continue
+		}
+		switch rule.Access {
+		case sdksandbox.PathAccessReadWrite:
+			p.WritableRoots = append(p.WritableRoots, path)
+		case sdksandbox.PathAccessReadOnly:
+			p.ReadableRoots = append(p.ReadableRoots, path)
+		}
+	}
 }
 
 func HasExplicitReadableRoots(p Policy) bool {

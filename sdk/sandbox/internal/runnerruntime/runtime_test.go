@@ -2,6 +2,8 @@ package runnerruntime
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,10 +13,14 @@ import (
 
 type waitResultTestRunner struct {
 	session *cmdsession.AsyncSession
+	result  sdksandbox.CommandResult
+	err     error
+	stdout  []byte
+	stderr  []byte
 }
 
 func (r *waitResultTestRunner) Run(context.Context, Request) (sdksandbox.CommandResult, error) {
-	return sdksandbox.CommandResult{}, nil
+	return r.result, r.err
 }
 
 func (r *waitResultTestRunner) StartAsync(context.Context, Request) (string, error) {
@@ -24,7 +30,7 @@ func (r *waitResultTestRunner) StartAsync(context.Context, Request) (string, err
 func (r *waitResultTestRunner) WriteInput(string, []byte) error { return nil }
 
 func (r *waitResultTestRunner) ReadOutput(string, int64, int64) ([]byte, []byte, int64, int64, error) {
-	return nil, nil, 0, 0, nil
+	return r.stdout, r.stderr, int64(len(r.stdout)), int64(len(r.stderr)), nil
 }
 
 func (r *waitResultTestRunner) GetSessionStatus(string) (cmdsession.SessionStatus, error) {
@@ -85,5 +91,50 @@ func TestSessionWaitDoesNotConsumeExitForResult(t *testing.T) {
 	}
 	if result.Stdout != "ok\n" {
 		t.Fatalf("Result().Stdout = %q, want %q", result.Stdout, "ok\n")
+	}
+}
+
+func TestRuntimeRunPreservesSandboxCommandPermissionDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	deniedPath := "/sandbox-denied-home/.gitconfig"
+	raw := "错误：无法锁定配置文件 " + deniedPath + ": 只读文件系统"
+	rt := New(Config{
+		Backend: sdksandbox.BackendBwrap,
+		Runner: &waitResultTestRunner{
+			result: sdksandbox.CommandResult{Stderr: raw, ExitCode: 1},
+			err:    fmt.Errorf("tool: bwrap sandbox command failed: stderr=%s", raw),
+		},
+	})
+	result, err := rt.Run(context.Background(), sdksandbox.CommandRequest{Command: "git config --global user.name test"})
+	if err == nil {
+		t.Fatal("Run() error = nil, want command error")
+	}
+	if !strings.Contains(result.Stderr, deniedPath) || !strings.Contains(err.Error(), deniedPath) {
+		t.Fatalf("Run() lost command diagnostics: stderr=%q err=%q", result.Stderr, err.Error())
+	}
+	if result.Stderr != raw {
+		t.Fatalf("Run().Stderr = %q, want raw command stderr %q", result.Stderr, raw)
+	}
+}
+
+func TestSessionReadOutputPreservesSandboxCommandPermissionDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	deniedPath := "/sandbox-denied-home/.gitconfig"
+	raw := "fatal: cannot lock config file " + deniedPath + ": Read-only file system"
+	sess := &session{
+		backend: sdksandbox.BackendBwrap,
+		runner:  &waitResultTestRunner{stderr: []byte(raw)},
+	}
+	_, stderr, _, _, err := sess.ReadOutput(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatalf("ReadOutput() error = %v", err)
+	}
+	if !strings.Contains(string(stderr), deniedPath) {
+		t.Fatalf("ReadOutput() lost command diagnostics: %q", string(stderr))
+	}
+	if strings.TrimSpace(string(stderr)) != raw {
+		t.Fatalf("ReadOutput() stderr = %q, want raw command stderr %q", string(stderr), raw)
 	}
 }

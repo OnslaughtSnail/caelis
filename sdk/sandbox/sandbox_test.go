@@ -2,8 +2,12 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"maps"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,6 +81,28 @@ func TestFuncRunnerClonesRequestBeforeInvoke(t *testing.T) {
 	}
 }
 
+func TestNormalizeSandboxPermissionFailurePreservesCommandDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	deniedPath := "/sandbox-denied-home/.gitconfig"
+	raw := "错误：无法锁定配置文件 " + deniedPath + ": 只读文件系统"
+	result, err := NormalizeSandboxPermissionFailure(CommandResult{
+		Stderr:   raw,
+		ExitCode: 1,
+		Route:    RouteSandbox,
+		Backend:  BackendBwrap,
+	}, errors.New("tool: bwrap sandbox command failed: exit status 255; stderr="+raw))
+	if err == nil {
+		t.Fatal("NormalizeSandboxPermissionFailure() error = nil, want command error")
+	}
+	if !strings.Contains(result.Stderr, deniedPath) || !strings.Contains(err.Error(), deniedPath) {
+		t.Fatalf("normalized output lost command diagnostics: stderr=%q err=%q", result.Stderr, err.Error())
+	}
+	if result.Stderr != raw {
+		t.Fatalf("stderr = %q, want raw command stderr %q", result.Stderr, raw)
+	}
+}
+
 func TestCloneSessionStatusNormalizesSessionRef(t *testing.T) {
 	t.Parallel()
 
@@ -132,6 +158,43 @@ func TestEffectiveConstraintsMergesLegacyFields(t *testing.T) {
 	}
 	if len(got.PathRules) != 1 || got.PathRules[0].Path != "/workspace" {
 		t.Fatalf("PathRules = %+v, want normalized workspace rule", got.PathRules)
+	}
+}
+
+func TestCompositeRuntimeFileSystemForPreservesConstraints(t *testing.T) {
+	t.Parallel()
+
+	hostFS := sentinelFileSystem{name: "host"}
+	defaultSandboxFS := sentinelFileSystem{name: "sandbox-default"}
+	constrainedSandboxFS := sentinelFileSystem{name: "sandbox-constrained"}
+	hostRuntime := fakeRuntime{backend: BackendHost, fs: hostFS}
+	sandboxRuntime := fakeRuntime{
+		backend: BackendBwrap,
+		fs:      defaultSandboxFS,
+		fsFor: func(constraints Constraints) FileSystem {
+			if len(constraints.PathRules) > 0 {
+				return constrainedSandboxFS
+			}
+			return defaultSandboxFS
+		},
+	}
+	rt := &compositeRuntime{
+		host:    hostRuntime,
+		sandbox: sandboxRuntime,
+		backends: map[Backend]Runtime{
+			BackendHost:  hostRuntime,
+			BackendBwrap: sandboxRuntime,
+		},
+	}
+
+	got := rt.FileSystemFor(Constraints{
+		Route: RouteSandbox,
+		PathRules: []PathRule{
+			{Path: "/workspace", Access: PathAccessReadWrite},
+		},
+	})
+	if got != constrainedSandboxFS {
+		t.Fatalf("FileSystemFor() = %#v, want constrained sandbox filesystem", got)
 	}
 }
 
@@ -204,16 +267,23 @@ type fakeBackendFactory struct {
 func (f fakeBackendFactory) Backend() Backend { return f.backend }
 
 func (f fakeBackendFactory) Build(Config) (Runtime, error) {
-	return fakeRuntime(f), nil
+	return &fakeRuntime{backend: f.backend}, nil
 }
 
 type fakeRuntime struct {
 	backend Backend
+	fs      FileSystem
+	fsFor   func(Constraints) FileSystem
 }
 
-func (r fakeRuntime) Describe() Descriptor                 { return Descriptor{Backend: r.backend} }
-func (r fakeRuntime) FileSystem() FileSystem               { return nil }
-func (r fakeRuntime) FileSystemFor(Constraints) FileSystem { return nil }
+func (r fakeRuntime) Describe() Descriptor   { return Descriptor{Backend: r.backend} }
+func (r fakeRuntime) FileSystem() FileSystem { return r.fs }
+func (r fakeRuntime) FileSystemFor(constraints Constraints) FileSystem {
+	if r.fsFor != nil {
+		return r.fsFor(constraints)
+	}
+	return r.fs
+}
 func (r fakeRuntime) Run(context.Context, CommandRequest) (CommandResult, error) {
 	return CommandResult{Backend: r.backend}, nil
 }
@@ -225,3 +295,27 @@ func (r fakeRuntime) Status() Status {
 	return Status{RequestedBackend: r.backend, ResolvedBackend: r.backend}
 }
 func (r fakeRuntime) Close() error { return nil }
+
+type sentinelFileSystem struct {
+	name string
+}
+
+func (f sentinelFileSystem) Getwd() (string, error)        { return f.name, nil }
+func (f sentinelFileSystem) UserHomeDir() (string, error)  { return f.name, nil }
+func (f sentinelFileSystem) Open(string) (*os.File, error) { return nil, errors.New("not implemented") }
+func (f sentinelFileSystem) ReadDir(string) ([]os.DirEntry, error) {
+	return nil, errors.New("not implemented")
+}
+func (f sentinelFileSystem) Stat(string) (os.FileInfo, error) {
+	return nil, errors.New("not implemented")
+}
+func (f sentinelFileSystem) ReadFile(string) ([]byte, error) {
+	return nil, errors.New("not implemented")
+}
+func (f sentinelFileSystem) WriteFile(string, []byte, os.FileMode) error {
+	return errors.New("not implemented")
+}
+func (f sentinelFileSystem) Glob(string) ([]string, error) { return nil, errors.New("not implemented") }
+func (f sentinelFileSystem) WalkDir(string, fs.WalkDirFunc) error {
+	return errors.New("not implemented")
+}

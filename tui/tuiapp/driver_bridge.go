@@ -203,7 +203,7 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 	text := strings.TrimSpace(sub.Text)
 
 	// Slash command dispatch.
-	if strings.HasPrefix(text, "/") {
+	if isDispatchableSlashCommand(driver, text) {
 		return dispatchSlashCommand(driver, sender, text)
 	}
 	if strings.HasPrefix(text, "@") {
@@ -292,6 +292,17 @@ func dispatchSlashCommand(driver tuiadapterruntime.Driver, sender *ProgramSender
 	default:
 		return slashDynamicAgent(driver, send, cmd, args)
 	}
+}
+
+func isDispatchableSlashCommand(driver tuiadapterruntime.Driver, text string) bool {
+	cmd, _ := splitSlash(text)
+	if cmd == "" {
+		return false
+	}
+	if _, ok := lookupSlashCommandSpec(cmd); ok {
+		return true
+	}
+	return isRegisteredAgentCommand(driver, cmd)
 }
 
 func slashHelp(send func(tea.Msg)) TaskResultMsg {
@@ -477,7 +488,7 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 	if err != nil {
 		sendNotice(send, fmt.Sprintf("warning: replay failed: %v", err))
 	} else if len(events) > 0 {
-		for _, env := range events {
+		for _, env := range resumeTranscriptReplayEvents(events) {
 			if send != nil {
 				send(env)
 			}
@@ -486,6 +497,51 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 
 	refreshStatusViaSend(driver, send)
 	return TaskResultMsg{SuppressTurnDivider: true}
+}
+
+func resumeTranscriptReplayEvents(events []appgateway.EventEnvelope) []appgateway.EventEnvelope {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]appgateway.EventEnvelope, 0, len(events))
+	for _, env := range events {
+		if shouldReplayEventInTUIResume(env.Event) {
+			out = append(out, env)
+		}
+	}
+	return out
+}
+
+func shouldReplayEventInTUIResume(event appgateway.Event) bool {
+	switch event.Kind {
+	case appgateway.EventKindUserMessage:
+		return strings.TrimSpace(gatewayUserText(event)) != ""
+	case appgateway.EventKindAssistantMessage:
+		payload := event.Narrative
+		if payload == nil {
+			return false
+		}
+		switch payload.Role {
+		case appgateway.NarrativeRoleUser:
+			return strings.TrimSpace(payload.Text) != ""
+		case appgateway.NarrativeRoleAssistant:
+			if !payload.Final || strings.TrimSpace(payload.Text) == "" {
+				return false
+			}
+			if strings.EqualFold(strings.TrimSpace(payload.Visibility), "ui_only") {
+				return false
+			}
+			scope := payload.Scope
+			if scope == "" && event.Origin != nil {
+				scope = event.Origin.Scope
+			}
+			return scope == "" || scope == appgateway.EventScopeMain
+		default:
+			return false
+		}
+	default:
+		return false
+	}
 }
 
 func slashStatus(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg {

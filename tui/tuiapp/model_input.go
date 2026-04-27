@@ -686,7 +686,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		mode := m.submissionModeForLine(line)
 		if m.running {
-			if strings.HasPrefix(line, "/") && mode != SubmissionModeOverlay {
+			if m.isConfiguredSlashControlLine(line) && mode != SubmissionModeOverlay {
 				return m, m.showHint("slash commands are unavailable while running", hintOptions{
 					priority:       HintPriorityHigh,
 					clearOnMessage: true,
@@ -903,7 +903,7 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 	if !alreadyRunning {
 		m.runStartedAt = time.Now()
 		m.hasLastRunDuration = false
-		m.showTurnDivider = mode == SubmissionModeDefault && !strings.HasPrefix(strings.TrimSpace(execLine), "/")
+		m.showTurnDivider = mode == SubmissionModeDefault && !m.isConfiguredSlashControlLine(execLine)
 		m.startRunningAnimation()
 		m.userScrolledUp = false
 	}
@@ -941,6 +941,12 @@ func (m *Model) allowsBTWSubmission() bool {
 }
 
 func (m *Model) tryToggleACPToolPanelToken(blockID string, token string) bool {
+	if key, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_reasoning:"); ok {
+		return m.tryToggleACPReasoningToken(blockID, key)
+	}
+	if key, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_exploration_stage:"); ok {
+		return m.tryToggleACPExplorationStageToken(blockID, key)
+	}
 	if rawIDs, ok := strings.CutPrefix(strings.TrimSpace(token), "acp_exploration_group:"); ok {
 		return m.tryToggleACPExplorationGroupToken(blockID, rawIDs)
 	}
@@ -955,6 +961,36 @@ func (m *Model) tryToggleACPToolPanelToken(blockID string, token string) bool {
 	case *MainACPTurnBlock:
 		blk.toggleToolPanelExpanded(callID)
 		return true
+	default:
+		return false
+	}
+}
+
+func (m *Model) tryToggleACPReasoningToken(blockID string, key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	switch blk := m.doc.Find(strings.TrimSpace(blockID)).(type) {
+	case *ParticipantTurnBlock:
+		return blk.toggleReasoningExpanded(key)
+	case *MainACPTurnBlock:
+		return blk.toggleReasoningExpanded(key)
+	default:
+		return false
+	}
+}
+
+func (m *Model) tryToggleACPExplorationStageToken(blockID string, key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	switch blk := m.doc.Find(strings.TrimSpace(blockID)).(type) {
+	case *ParticipantTurnBlock:
+		return blk.toggleExplorationExpanded(key)
+	case *MainACPTurnBlock:
+		return blk.toggleExplorationExpanded(key)
 	default:
 		return false
 	}

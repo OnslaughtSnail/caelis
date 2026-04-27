@@ -121,12 +121,8 @@ func (f *policyFileSystem) checkReadPath(path string) error {
 	return permissionError("read", targetPath, "path is outside readable sandbox roots")
 }
 
-func permissionError(op string, path string, reason string) error {
-	return &fs.PathError{
-		Op:   op,
-		Path: path,
-		Err:  fmt.Errorf("%w: %s", os.ErrPermission, reason),
-	}
+func permissionError(_ string, _ string, _ string) error {
+	return fmt.Errorf("%w: %s", os.ErrPermission, sdksandbox.SandboxPermissionDeniedMessage)
 }
 
 func globReadRoot(pattern string, fsys sdksandbox.FileSystem) string {

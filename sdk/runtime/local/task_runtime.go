@@ -788,6 +788,10 @@ func (tm *taskRuntime) waitBash(ctx context.Context, task *bashTask, yield time.
 	if resultErr != nil {
 		task.result["error"] = strings.TrimSpace(resultErr.Error())
 	}
+	if detail, ok := sdksandbox.SandboxPermissionDetail(result, resultErr); ok {
+		task.result["sandbox_permission_denied"] = true
+		task.result["error"] = detail
+	}
 	snapshot := task.snapshotLocked(status)
 	entry := task.entrySnapshot(tm.runtime.now())
 	task.mu.Unlock()
@@ -1117,6 +1121,9 @@ func taskToolPayload(snapshot sdktask.Snapshot) map[string]any {
 	}
 	if errText, _ := snapshot.Result["error"].(string); strings.TrimSpace(errText) != "" {
 		payload["error"] = strings.TrimSpace(errText)
+	}
+	if denied, ok := snapshot.Result["sandbox_permission_denied"].(bool); ok {
+		payload["sandbox_permission_denied"] = denied
 	}
 	return payload
 }
