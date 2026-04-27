@@ -203,7 +203,10 @@ func (m *Model) handleStreamBlock(kind string, actor string, text string, final 
 }
 
 func (m *Model) applyStreamBlockImmediate(streamKind string, actor string, text string, final bool) (tea.Model, tea.Cmd) {
-	if text == "" && (streamKind != "reasoning" || !final) {
+	if text == "" && !final {
+		return m, nil
+	}
+	if text == "" && final && streamKind != "reasoning" && m.activeAssistantID == "" {
 		return m, nil
 	}
 	if streamKind == "reasoning" {
@@ -223,10 +226,12 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 
 	if m.activeAssistantID == "" {
 		block := NewAssistantBlock(actor)
-		block.Raw = text
 		block.Streaming = !final
 		if final {
+			block.Raw = text
 			block.LastFinal = text
+		} else {
+			block.appendActiveDelta(text)
 		}
 		m.doc.Append(block)
 		m.activeAssistantID = block.BlockID()
@@ -250,10 +255,12 @@ func (m *Model) handleAnswerStream(actor string, text string, final bool) (tea.M
 	}
 	ab := block.(*AssistantBlock)
 	ab.Actor = actor
-	ab.Raw = mergeStreamChunk(ab.Raw, text, final)
 	if final {
+		ab.Raw = ab.finalizeActiveText(text)
 		ab.Streaming = false
 		ab.LastFinal = ab.Raw
+	} else {
+		ab.appendActiveDelta(text)
 	}
 	if final {
 		m.activeAssistantID = ""
@@ -325,9 +332,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 		}
 		rb := block.(*ReasoningBlock)
 		rb.Actor = actor
-		if strings.TrimSpace(text) != "" {
-			rb.Raw = mergeStreamChunk(rb.Raw, text, true)
-		}
+		rb.Raw = rb.finalizeActiveText(text)
 		rb.Streaming = false
 		m.activeReasoningID = ""
 		m.activeReasoningActor = ""
@@ -339,7 +344,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 
 	if m.activeReasoningID == "" {
 		block := NewReasoningBlock(actor)
-		block.Raw = text
+		block.appendActiveDelta(text)
 		m.doc.Append(block)
 		m.activeReasoningID = block.BlockID()
 		m.activeReasoningActor = actor
@@ -358,7 +363,7 @@ func (m *Model) handleReasoningStream(actor string, text string, final bool) (te
 	}
 	rb := block.(*ReasoningBlock)
 	rb.Actor = actor
-	rb.Raw = mergeStreamChunk(rb.Raw, text, final)
+	rb.appendActiveDelta(text)
 	m.lastCommittedStyle = tuikit.LineStyleReasoning
 	m.lastCommittedRaw = "│ "
 	m.markViewportBlockDirty(rb.BlockID())

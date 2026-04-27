@@ -145,6 +145,16 @@ func BenchmarkAssistantTailIncrementalSync(b *testing.B) {
 	}
 }
 
+func BenchmarkAssistantActiveBufferLongStream(b *testing.B) {
+	m := newPerfTestModel()
+	seedLongTranscript(m, 2000)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = m.handleStreamBlock("answer", "assistant", "token ", false)
+		_, _ = m.Update(perfTickAt(frameTickViewportSync, time.Now()))
+	}
+}
+
 func BenchmarkVisibleSelectionRenderLongTranscript(b *testing.B) {
 	m := newPerfTestModel()
 	seedLongTranscript(m, 2000)

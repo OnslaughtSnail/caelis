@@ -457,13 +457,21 @@ func viewportBlockRenderKey(block Block, ctx BlockRenderContext) string {
 		builder.addString(b.Raw)
 	case *AssistantBlock:
 		builder.addString(b.Actor)
-		builder.addString(b.Raw)
 		builder.addBool(b.Streaming)
+		if b.Streaming && b.activeBuffer != nil && !b.activeBuffer.Empty() {
+			builder.addString(b.activeBuffer.CacheKey())
+		} else {
+			builder.addString(b.Raw)
+		}
 		builder.addString(b.LastFinal)
 	case *ReasoningBlock:
 		builder.addString(b.Actor)
-		builder.addString(b.Raw)
 		builder.addBool(b.Streaming)
+		if b.Streaming && b.activeBuffer != nil && !b.activeBuffer.Empty() {
+			builder.addString(b.activeBuffer.CacheKey())
+		} else {
+			builder.addString(b.Raw)
+		}
 	case *ParticipantTurnBlock:
 		builder.addString(b.SessionID)
 		builder.addString(b.Actor)

@@ -108,12 +108,13 @@ func (c *narrativeBlockRenderCache) cachedRows(raw, rolePrefix string, width int
 // ---------------------------------------------------------------------------
 
 type AssistantBlock struct {
-	id          string
-	Actor       string
-	Raw         string
-	Streaming   bool
-	LastFinal   string // dedup for duplicate final events
-	renderCache narrativeBlockRenderCache
+	id           string
+	Actor        string
+	Raw          string
+	Streaming    bool
+	LastFinal    string // dedup for duplicate final events
+	renderCache  narrativeBlockRenderCache
+	activeBuffer *activeNarrativeBuffer
 }
 
 func NewAssistantBlock(actor ...string) *AssistantBlock {
@@ -127,10 +128,14 @@ func NewAssistantBlock(actor ...string) *AssistantBlock {
 func (b *AssistantBlock) BlockID() string { return b.id }
 func (b *AssistantBlock) Kind() BlockKind { return BlockAssistant }
 func (b *AssistantBlock) Render(ctx BlockRenderContext) []RenderedRow {
+	rolePrefix := "* " + assistantActorPrefix(b.Actor)
+	if b.Streaming && b.activeBuffer != nil && !b.activeBuffer.Empty() {
+		return b.activeBuffer.RenderRows(b.id, rolePrefix, tuikit.LineStyleAssistant, ctx.Width, ctx.Theme)
+	}
 	return b.renderCache.renderNarrativeRows(
 		b.id,
 		b.Raw,
-		"* "+assistantActorPrefix(b.Actor),
+		rolePrefix,
 		tuikit.LineStyleAssistant,
 		ctx,
 		b.Streaming,
@@ -149,11 +154,12 @@ func assistantActorPrefix(actor string) string {
 // ---------------------------------------------------------------------------
 
 type ReasoningBlock struct {
-	id          string
-	Actor       string
-	Raw         string
-	Streaming   bool
-	renderCache narrativeBlockRenderCache
+	id           string
+	Actor        string
+	Raw          string
+	Streaming    bool
+	renderCache  narrativeBlockRenderCache
+	activeBuffer *activeNarrativeBuffer
 }
 
 func NewReasoningBlock(actor ...string) *ReasoningBlock {
@@ -170,6 +176,9 @@ func (b *ReasoningBlock) Render(ctx BlockRenderContext) []RenderedRow {
 	prefix := "· "
 	if actor := strings.TrimSpace(b.Actor); actor != "" && !strings.EqualFold(actor, "assistant") {
 		prefix += actor + ": "
+	}
+	if b.Streaming && b.activeBuffer != nil && !b.activeBuffer.Empty() {
+		return b.activeBuffer.RenderRows(b.id, prefix, tuikit.LineStyleReasoning, ctx.Width, ctx.Theme)
 	}
 	return b.renderCache.renderNarrativeRows(b.id, b.Raw, prefix, tuikit.LineStyleReasoning, ctx, b.Streaming)
 }
