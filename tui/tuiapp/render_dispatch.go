@@ -199,7 +199,17 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	if shouldInvalidateUserDisplayDedup(msg) {
 		m.invalidateUserDisplayDedup()
 	}
-	policyCmd := m.applyRenderEventPolicy(policy)
+	if m.shouldEnqueueRenderEvent(msg, policy) {
+		if policy.dismissHints {
+			m.dismissMessageHints()
+		}
+		return m, m.enqueueRenderEvent(msg, policy.lane), true
+	}
+	preCmd := tea.Cmd(nil)
+	if m.shouldFlushPendingRenderEventsBefore(msg, policy) {
+		preCmd = m.drainPendingRenderEvents(time.Now())
+	}
+	policyCmd := tea.Batch(preCmd, m.applyRenderEventPolicy(policy))
 
 	switch typed := msg.(type) {
 	case appgateway.EventEnvelope:
@@ -303,6 +313,9 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		}
 		if legacyBroadcast || typed.kind == frameTickStreamSmoothing {
 			cmds = append(cmds, m.drainPendingStreamSmoothing(typed.at))
+		}
+		if legacyBroadcast || typed.kind == frameTickRenderDrain {
+			cmds = append(cmds, m.drainPendingRenderEvents(typed.at))
 		}
 		if legacyBroadcast || typed.kind == frameTickPanelAnimation {
 			cmds = append(cmds, m.advancePanelAnimations(typed.at))

@@ -374,6 +374,8 @@ type Model struct {
 
 	streamSmoothing                map[string]*streamSmoothingState
 	streamSmoothingTickScheduled   bool
+	pendingRenderEvents            pendingRenderEvents
+	renderDrainTickScheduled       bool
 	spinnerTickScheduled           bool
 	deferredBatchTickScheduled     bool
 	offscreenViewportDirty         bool

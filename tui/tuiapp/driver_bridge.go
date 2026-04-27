@@ -77,6 +77,9 @@ type subagentStreamDriver interface {
 // but before the user can trigger ExecuteLine.
 func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, base Config) Config {
 	base.Driver = driver
+	if base.StreamTickInterval <= 0 {
+		base.StreamTickInterval = streamSmoothingTickIntervalDefault
+	}
 	ctx := contextOrBackground(base.Context)
 	base.Commands = appendAgentSlashCommandsWithContext(ctx, driver, base.Commands)
 	var cachedModeLabel string
