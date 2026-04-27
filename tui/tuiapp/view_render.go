@@ -806,10 +806,10 @@ func (m *Model) footerContextText() string {
 }
 
 func (m *Model) modeLabel() string {
-	if m.cfg.ModeLabel == nil {
+	if m == nil {
 		return ""
 	}
-	return strings.TrimSpace(m.cfg.ModeLabel())
+	return strings.TrimSpace(m.statusModeLabel)
 }
 
 func composeStyledFooter(width int, left string, right string) string {

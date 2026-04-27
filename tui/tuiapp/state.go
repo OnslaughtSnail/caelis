@@ -1,6 +1,7 @@
 package tuiapp
 
 import (
+	"context"
 	"time"
 
 	"charm.land/bubbles/v2/help"
@@ -79,6 +80,7 @@ type Diagnostics struct {
 }
 
 type Config struct {
+	Context              context.Context
 	AppName              string
 	Version              string
 	Workspace            string
@@ -345,11 +347,12 @@ type Model struct {
 	runningTick uint64
 	runningTip  int
 
-	statusModel   string
-	statusContext string
-	hint          string
-	hintEntries   []hintEntry
-	nextHintID    uint64
+	statusModel     string
+	statusContext   string
+	statusModeLabel string
+	hint            string
+	hintEntries     []hintEntry
+	nextHintID      uint64
 
 	pendingInputAt     time.Time
 	inputLatencyWindow []time.Duration
@@ -380,6 +383,7 @@ type Model struct {
 	lastViewportContentVersion     uint64
 	viewportSelectionVersion       uint64
 	lastViewportContent            string
+	lastViewportStreamLine         string
 	lastViewportViewKey            string
 	lastViewportViewRendered       string
 	viewportSyncDepth              int

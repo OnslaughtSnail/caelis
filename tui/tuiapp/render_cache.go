@@ -53,6 +53,29 @@ func (m *Model) rebuildViewportRenderCache(ctx BlockRenderContext) {
 	m.viewportRenderEntries = nextEntries
 }
 
+func (m *Model) viewportRenderCacheMatchesDocument(ctx BlockRenderContext) bool {
+	if m == nil || m.doc == nil {
+		return false
+	}
+	blocks := m.doc.Blocks()
+	if len(m.viewportRenderEntries) != len(blocks) {
+		return false
+	}
+	for i, block := range blocks {
+		if block == nil {
+			return false
+		}
+		entry := m.viewportRenderEntries[i]
+		if entry.blockID != block.BlockID() {
+			return false
+		}
+		if entry.cacheKey != viewportBlockRenderKey(block, ctx) {
+			return false
+		}
+	}
+	return true
+}
+
 func (m *Model) renderViewportEntry(block Block, cacheKey string, ctx BlockRenderContext) viewportRenderEntry {
 	styledLines, plainLines, clickTokens := m.wrapRenderedRowsForViewport(block, block.Render(ctx), ctx.Width)
 	return viewportRenderEntry{

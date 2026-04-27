@@ -84,6 +84,60 @@ func TestWelcomeCardUpdatesWhenStatusChanges(t *testing.T) {
 	}
 }
 
+func TestModelViewDoesNotCallModeLabelCallback(t *testing.T) {
+	model := NewModel(Config{
+		ModeLabel: func() string {
+			return "plan"
+		},
+	})
+	model.cfg.ModeLabel = func() string {
+		panic("View must not call ModeLabel")
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	view := updated.View().Content
+	if !strings.Contains(view, "plan") {
+		t.Fatalf("expected cached mode label in view, got %q", view)
+	}
+}
+
+func TestSetStatusMsgClearsModeLabel(t *testing.T) {
+	model := NewModel(Config{})
+	model.handleSetStatusMsg(SetStatusMsg{ModeLabel: "plan"})
+	model.handleSetStatusMsg(SetStatusMsg{ModeLabel: ""})
+
+	if got := model.modeLabel(); got != "" {
+		t.Fatalf("modeLabel() = %q, want empty after status clears it", got)
+	}
+}
+
+func TestStatusTickNoChangeDoesNotFullSyncViewport(t *testing.T) {
+	model := NewModel(Config{
+		Workspace: "/tmp/workspace",
+		RefreshWorkspace: func() string {
+			return "/tmp/workspace"
+		},
+		RefreshStatus: func() (string, string) {
+			return "gpt-4o", "12/128k(0%)"
+		},
+	})
+	model.viewport.SetWidth(80)
+	model.viewport.SetHeight(20)
+	model.syncViewportContent()
+
+	versionBefore := model.viewportContentVersion
+	fullSyncsBefore := model.diag.ViewportFullSyncs
+
+	model.handleStatusTickMsg()
+
+	if got := model.viewportContentVersion; got != versionBefore {
+		t.Fatalf("viewportContentVersion = %d, want unchanged %d", got, versionBefore)
+	}
+	if got := model.diag.ViewportFullSyncs; got != fullSyncsBefore {
+		t.Fatalf("ViewportFullSyncs = %d, want unchanged %d", got, fullSyncsBefore)
+	}
+}
+
 func TestMainColumnUsesFullTerminalWidth(t *testing.T) {
 	model := NewModel(Config{})
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 200, Height: 40})

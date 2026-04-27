@@ -23,6 +23,7 @@ type SetStatusMsg struct {
 	Workspace string
 	Model     string
 	Context   string
+	ModeLabel string
 }
 
 type SetCommandsMsg struct {

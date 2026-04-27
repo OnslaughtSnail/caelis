@@ -488,8 +488,11 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.cfg.RefreshStatus != nil {
-			m.statusModel, m.statusContext = m.cfg.RefreshStatus()
+			modelText, contextText := m.cfg.RefreshStatus()
+			m.statusModel = normalizeStatusModel(modelText)
+			m.statusContext = strings.TrimSpace(contextText)
 		}
+		m.refreshModeLabelFromConfig()
 		return m, m.showHint(hint, hintOptions{
 			priority:       HintPriorityNormal,
 			clearOnMessage: true,

@@ -125,15 +125,15 @@ func NewModel(cfg Config) *Model {
 	}
 
 	if cfg.RefreshStatus != nil {
-		m.statusModel, m.statusContext = cfg.RefreshStatus()
+		modelText, contextText := cfg.RefreshStatus()
+		m.statusModel = normalizeStatusModel(modelText)
+		m.statusContext = strings.TrimSpace(contextText)
 	}
+	m.refreshModeLabelFromConfig()
 	if cfg.RefreshWorkspace != nil {
 		if workspace := strings.TrimSpace(cfg.RefreshWorkspace()); workspace != "" {
 			m.cfg.Workspace = workspace
 		}
-	}
-	if strings.TrimSpace(m.statusModel) == "" {
-		m.statusModel = "not configured (/connect)"
 	}
 	m.setCommands(cfg.Commands)
 	m.syncTextareaChrome()
@@ -194,20 +194,27 @@ func (m *Model) currentWelcomeModelName() string {
 	return modelName
 }
 
-func (m *Model) syncWelcomeCardBlock() {
+func (m *Model) syncWelcomeCardBlock() bool {
 	if m == nil || m.doc == nil {
-		return
+		return false
 	}
 	blocks := m.doc.FindByKind(BlockWelcome)
 	if len(blocks) == 0 {
-		return
+		return false
 	}
 	welcome, ok := blocks[0].(*WelcomeBlock)
 	if !ok {
-		return
+		return false
 	}
-	welcome.Workspace = strings.TrimSpace(m.cfg.Workspace)
-	welcome.ModelName = m.currentWelcomeModelName()
+	workspace := strings.TrimSpace(m.cfg.Workspace)
+	modelName := m.currentWelcomeModelName()
+	if welcome.Workspace == workspace && welcome.ModelName == modelName {
+		return false
+	}
+	welcome.Workspace = workspace
+	welcome.ModelName = modelName
+	m.markViewportBlockDirty(welcome.BlockID())
+	return true
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

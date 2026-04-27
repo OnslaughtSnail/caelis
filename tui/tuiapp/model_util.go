@@ -1,6 +1,7 @@
 package tuiapp
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -75,6 +76,32 @@ func (m *Model) observeInputLatency() {
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
+
+func normalizeStatusModel(model string) string {
+	if model = strings.TrimSpace(model); model != "" {
+		return model
+	}
+	return "not configured (/connect)"
+}
+
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
+func (m *Model) refreshModeLabelFromConfig() bool {
+	if m == nil || m.cfg.ModeLabel == nil {
+		return false
+	}
+	next := strings.TrimSpace(m.cfg.ModeLabel())
+	if next == m.statusModeLabel {
+		return false
+	}
+	m.statusModeLabel = next
+	return true
+}
 
 func mentionQueryAtCursor(input []rune, cursor int) (int, int, string, bool) {
 	start, end, query, _, ok := mentionQueryAtCursorWithPrefix(input, cursor)

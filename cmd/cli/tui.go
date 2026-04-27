@@ -17,8 +17,11 @@ func runTUI(ctx context.Context, stack *gatewayapp.Stack, sessionID string, mode
 	if err != nil {
 		return err
 	}
+	programCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	sender := &tuiapp.ProgramSender{}
 	cfg := tuiapp.ConfigFromDriver(driver, sender, tuiapp.Config{
+		Context:         programCtx,
 		AppName:         "CAELIS",
 		Version:         envOr("CAELIS_VERSION", "dev"),
 		Workspace:       stack.Workspace.CWD,
@@ -26,17 +29,11 @@ func runTUI(ctx context.Context, stack *gatewayapp.Stack, sessionID string, mode
 		ShowWelcomeCard: true,
 		Commands:        tuiapp.DefaultCommands(),
 		Wizards:         tuiapp.DefaultWizards(),
-		ModeLabel: func() string {
-			status, err := driver.Status(context.Background())
-			if err != nil {
-				return ""
-			}
-			return strings.TrimSpace(status.ModeLabel)
-		},
 	})
 	model := tuiapp.NewModel(cfg)
-	program := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout))
+	program := tea.NewProgram(model, tea.WithInput(stdin), tea.WithOutput(stdout), tea.WithContext(programCtx))
 	sender.Send = program.Send
+	defer sender.Close()
 	_, err = program.Run()
 	return err
 }

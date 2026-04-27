@@ -85,6 +85,12 @@ func renderEventPolicyForGatewayEnvelope(env appgateway.EventEnvelope) renderEve
 	}
 	switch env.Event.Kind {
 	case appgateway.EventKindAssistantMessage, appgateway.EventKindUserMessage:
+		if env.Event.Kind == appgateway.EventKindAssistantMessage &&
+			env.Event.Narrative != nil &&
+			env.Event.Narrative.Role == appgateway.NarrativeRoleAssistant &&
+			!env.Event.Narrative.Final {
+			return renderEventPolicy{lane: renderLaneMainStream, flushLogChunks: true, dismissHints: true}
+		}
 		return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
 	case appgateway.EventKindToolCall, appgateway.EventKindToolResult, appgateway.EventKindApprovalRequested:
 		return renderEventPolicy{lane: renderLaneToolStream, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
@@ -117,16 +123,40 @@ func renderEventPolicyForTranscriptEvents(msg TranscriptEventsMsg) renderEventPo
 			hasTool = true
 		}
 	}
+	flushSmoothing := transcriptEventsNeedSmoothingFlush(msg.Events)
 	switch {
 	case hasSubagent:
-		return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+		return renderEventPolicy{lane: renderLaneSubagent, flushSmoothing: flushSmoothing, flushLogChunks: true, dismissHints: true}
 	case hasParticipant:
-		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+		return renderEventPolicy{lane: renderLaneParticipant, flushSmoothing: flushSmoothing, flushLogChunks: true, dismissHints: true}
 	case hasTool:
 		return renderEventPolicy{lane: renderLaneToolStream, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
 	default:
-		return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: true, flushLogChunks: true, dismissHints: true}
+		return renderEventPolicy{lane: renderLaneMainStream, flushSmoothing: flushSmoothing, flushLogChunks: true, dismissHints: true}
 	}
+}
+
+func transcriptEventsNeedSmoothingFlush(events []TranscriptEvent) bool {
+	if len(events) == 0 {
+		return false
+	}
+	for _, event := range events {
+		switch event.Kind {
+		case TranscriptEventNarrative:
+			if event.NarrativeKind == TranscriptNarrativeAssistant || event.NarrativeKind == TranscriptNarrativeReasoning {
+				if event.Final {
+					return true
+				}
+				continue
+			}
+			return true
+		case TranscriptEventUsage:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func renderEventPolicyForFrameTick(msg frameTickMsg) renderEventPolicy {
@@ -188,7 +218,7 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, tea.Batch(policyCmd, m.ensureDeferredBatchTick()), true
 
 	case AssistantStreamMsg:
-		model, cmd := m.handleStreamBlock(typed.Kind, typed.Actor, typed.Text, typed.Final)
+		model, cmd := m.enqueueMainDelta(typed.Kind, typed.Actor, typed.Text, typed.Final)
 		return model, tea.Batch(policyCmd, cmd), true
 
 	case RawDeltaMsg:
@@ -196,7 +226,7 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return model, tea.Batch(policyCmd, cmd), true
 
 	case ReasoningStreamMsg:
-		model, cmd := m.handleStreamBlock("reasoning", typed.Actor, typed.Text, typed.Final)
+		model, cmd := m.enqueueMainDelta("reasoning", typed.Actor, typed.Text, typed.Final)
 		return model, tea.Batch(policyCmd, cmd), true
 
 	case ParticipantStatusMsg:
@@ -372,16 +402,23 @@ func (m *Model) handleSetRunningMsg(msg SetRunningMsg) tea.Model {
 }
 
 func (m *Model) handleSetStatusMsg(msg SetStatusMsg) tea.Model {
+	welcomeMayChange := false
 	if workspace := strings.TrimSpace(msg.Workspace); workspace != "" {
-		m.cfg.Workspace = workspace
+		if workspace != m.cfg.Workspace {
+			m.cfg.Workspace = workspace
+			welcomeMayChange = true
+		}
 	}
-	m.statusModel = strings.TrimSpace(msg.Model)
-	if m.statusModel == "" {
-		m.statusModel = "not configured (/connect)"
+	nextModel := normalizeStatusModel(msg.Model)
+	if nextModel != m.statusModel {
+		m.statusModel = nextModel
+		welcomeMayChange = true
 	}
 	m.statusContext = strings.TrimSpace(msg.Context)
-	m.syncWelcomeCardBlock()
-	m.syncViewportContent()
+	m.statusModeLabel = strings.TrimSpace(msg.ModeLabel)
+	if welcomeMayChange && m.syncWelcomeCardBlock() {
+		m.syncViewportContent()
+	}
 	return m
 }
 
@@ -421,21 +458,28 @@ func (m *Model) handleBTWErrorMsg(msg BTWErrorMsg) tea.Model {
 }
 
 func (m *Model) handleStatusTickMsg() (tea.Model, tea.Cmd) {
+	welcomeMayChange := false
 	if m.cfg.RefreshWorkspace != nil {
 		if workspace := strings.TrimSpace(m.cfg.RefreshWorkspace()); workspace != "" {
-			m.cfg.Workspace = workspace
+			if workspace != m.cfg.Workspace {
+				m.cfg.Workspace = workspace
+				welcomeMayChange = true
+			}
 		}
 	}
 	if m.cfg.RefreshStatus != nil {
 		modelText, contextText := m.cfg.RefreshStatus()
-		m.statusModel = strings.TrimSpace(modelText)
-		if m.statusModel == "" {
-			m.statusModel = "not configured (/connect)"
+		nextModel := normalizeStatusModel(modelText)
+		if nextModel != m.statusModel {
+			m.statusModel = nextModel
+			welcomeMayChange = true
 		}
 		m.statusContext = strings.TrimSpace(contextText)
 	}
-	m.syncWelcomeCardBlock()
-	m.syncViewportContent()
+	m.refreshModeLabelFromConfig()
+	if welcomeMayChange && m.syncWelcomeCardBlock() {
+		m.syncViewportContent()
+	}
 	return m, tickStatusCmd()
 }
 

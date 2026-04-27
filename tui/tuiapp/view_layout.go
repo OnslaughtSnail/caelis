@@ -101,7 +101,20 @@ func (m *Model) syncViewportContent() {
 		TermWidth: m.width,
 		Theme:     m.theme,
 	}
-	incremental := m.syncDirtyViewportRenderEntries(ctx)
+	contextKey := viewportRenderContextKey(ctx)
+	incremental := false
+	if len(m.dirtyViewportBlocks) == 0 &&
+		!m.viewportStructureDirty &&
+		m.lastViewportRenderContextKey == contextKey &&
+		m.viewportRenderCacheMatchesDocument(ctx) {
+		if m.streamLine == m.lastViewportStreamLine {
+			return
+		}
+		m.rebuildViewportLineCaches(ctx)
+		incremental = true
+	} else {
+		incremental = m.syncDirtyViewportRenderEntries(ctx)
+	}
 	if !incremental {
 		m.rebuildViewportRenderCache(ctx)
 		m.rebuildViewportLineCaches(ctx)
@@ -110,9 +123,10 @@ func (m *Model) syncViewportContent() {
 	} else {
 		m.diag.ViewportIncrementalSyncs++
 	}
-	m.lastViewportRenderContextKey = viewportRenderContextKey(ctx)
+	m.lastViewportRenderContextKey = contextKey
 	clear(m.dirtyViewportBlocks)
 	m.viewportContentVersion++
+	m.lastViewportStreamLine = m.streamLine
 
 	m.renderViewportContent()
 }
@@ -276,10 +290,13 @@ func (m *Model) renderViewportContent() {
 	start := time.Now()
 	lines := m.viewportStyledLines
 	if m.lastViewportContentVersion != m.viewportContentVersion {
-		m.viewport.SetContentLines(append([]string(nil), lines...))
+		fingerprint := viewportLinesFingerprint(lines)
+		if fingerprint != m.lastViewportContent {
+			m.viewport.SetContentLines(append([]string(nil), lines...))
+			m.lastViewportContent = fingerprint
+			m.lastViewportViewKey = ""
+		}
 		m.lastViewportContentVersion = m.viewportContentVersion
-		m.lastViewportContent = strconv.FormatUint(m.viewportContentVersion, 10)
-		m.lastViewportViewKey = ""
 	}
 
 	// Auto-scroll: decide based on current state AFTER SetContent so

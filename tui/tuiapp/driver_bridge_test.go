@@ -49,6 +49,63 @@ func TestSlashHelpListsMinimalCoreCommands(t *testing.T) {
 	}
 }
 
+func TestGatewayTerminalBatcherMergesRunningFrames(t *testing.T) {
+	var sent []tea.Msg
+	send := func(msg tea.Msg) {
+		sent = append(sent, msg)
+	}
+	var batcher gatewayTerminalBatcher
+
+	if !batcher.enqueue(testTerminalFrame("hello ", 1), send) {
+		t.Fatal("first running frame was not accepted for batching")
+	}
+	if !batcher.enqueue(testTerminalFrame("world", 2), send) {
+		t.Fatal("second running frame was not accepted for batching")
+	}
+	if len(sent) != 0 {
+		t.Fatalf("batcher sent before flush: got %d messages", len(sent))
+	}
+
+	batcher.flush(send)
+	if len(sent) != 1 {
+		t.Fatalf("flush sent %d messages, want 1", len(sent))
+	}
+	env, ok := sent[0].(appgateway.EventEnvelope)
+	if !ok {
+		t.Fatalf("sent msg = %#v, want EventEnvelope", sent[0])
+	}
+	if got := rawString(env.Event.ToolResult.RawOutput, "text"); got != "hello world" {
+		t.Fatalf("merged text = %q, want hello world", got)
+	}
+	if got := env.Event.ToolResult.RawOutput["stdout_cursor"]; got != int64(2) {
+		t.Fatalf("stdout_cursor = %#v, want int64(2)", got)
+	}
+}
+
+func testTerminalFrame(text string, cursor int64) appgateway.EventEnvelope {
+	return appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			HandleID:   "h1",
+			RunID:      "r1",
+			TurnID:     "t1",
+			SessionRef: sdksession.SessionRef{SessionID: "s1"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				RawOutput: map[string]any{
+					"running":       true,
+					"text":          text,
+					"task_id":       "task-1",
+					"terminal_id":   "term-1",
+					"stream":        "stdout",
+					"stdout_cursor": cursor,
+				},
+			},
+		},
+	}
+}
+
 func TestDefaultCommandsStayInHelpText(t *testing.T) {
 	helpText := defaultHelpText()
 	for _, command := range DefaultCommands() {

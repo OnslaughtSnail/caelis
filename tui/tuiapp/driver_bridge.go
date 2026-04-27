@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,7 +20,44 @@ import (
 // ProgramSender is set after the tea.Program is created so that the
 // ExecuteLine goroutine can send intermediate TUI messages.
 type ProgramSender struct {
-	Send func(tea.Msg)
+	Send              func(tea.Msg)
+	closed            atomic.Bool
+	droppedAfterClose atomic.Uint64
+}
+
+func (s *ProgramSender) sendFunc() func(tea.Msg) {
+	if s == nil {
+		return nil
+	}
+	return func(msg tea.Msg) {
+		s.SendMsg(msg)
+	}
+}
+
+func (s *ProgramSender) SendMsg(msg tea.Msg) {
+	if s == nil {
+		return
+	}
+	if s.closed.Load() {
+		s.droppedAfterClose.Add(1)
+		return
+	}
+	if s.Send != nil {
+		s.Send(msg)
+	}
+}
+
+func (s *ProgramSender) Close() {
+	if s != nil {
+		s.closed.Store(true)
+	}
+}
+
+func (s *ProgramSender) DroppedAfterClose() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.droppedAfterClose.Load()
 }
 
 type streamDriver interface {
@@ -39,21 +77,30 @@ type subagentStreamDriver interface {
 // but before the user can trigger ExecuteLine.
 func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, base Config) Config {
 	base.Driver = driver
-	base.Commands = appendAgentSlashCommands(driver, base.Commands)
+	ctx := contextOrBackground(base.Context)
+	base.Commands = appendAgentSlashCommandsWithContext(ctx, driver, base.Commands)
+	var cachedModeLabel string
 
 	if base.ExecuteLine == nil {
 		base.ExecuteLine = func(sub Submission) TaskResultMsg {
-			return executeLineViaDriver(driver, sender, sub)
+			return executeLineViaDriverWithContext(ctx, driver, sender, sub)
 		}
 	}
 
 	if base.RefreshStatus == nil {
 		base.RefreshStatus = func() (string, string) {
-			status, err := driver.Status(context.Background())
+			status, err := driver.Status(ctx)
 			if err != nil {
+				cachedModeLabel = ""
 				return "not configured", ""
 			}
+			cachedModeLabel = strings.TrimSpace(status.ModeLabel)
 			return statusModelDisplay(status.Model), formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens)
+		}
+	}
+	if base.ModeLabel == nil {
+		base.ModeLabel = func() string {
+			return cachedModeLabel
 		}
 	}
 
@@ -65,7 +112,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 
 	if base.MentionComplete == nil {
 		base.MentionComplete = func(query string, limit int) ([]CompletionCandidate, error) {
-			candidates, err := driver.CompleteMention(context.Background(), query, limit)
+			candidates, err := driver.CompleteMention(ctx, query, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -84,7 +131,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 
 	if base.FileComplete == nil {
 		base.FileComplete = func(query string, limit int) ([]CompletionCandidate, error) {
-			candidates, err := driver.CompleteFile(context.Background(), query, limit)
+			candidates, err := driver.CompleteFile(ctx, query, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -103,7 +150,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 
 	if base.SkillComplete == nil {
 		base.SkillComplete = func(query string, limit int) ([]CompletionCandidate, error) {
-			candidates, err := driver.CompleteSkill(context.Background(), query, limit)
+			candidates, err := driver.CompleteSkill(ctx, query, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -122,7 +169,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 
 	if base.ResumeComplete == nil {
 		base.ResumeComplete = func(query string, limit int) ([]ResumeCandidate, error) {
-			candidates, err := driver.CompleteResume(context.Background(), query, limit)
+			candidates, err := driver.CompleteResume(ctx, query, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -144,7 +191,7 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 
 	if base.SlashArgComplete == nil {
 		base.SlashArgComplete = func(command string, query string, limit int) ([]SlashArgCandidate, error) {
-			candidates, err := driver.CompleteSlashArg(context.Background(), command, query, limit)
+			candidates, err := driver.CompleteSlashArg(ctx, command, query, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -163,14 +210,14 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 
 	if base.CancelRunning == nil {
 		base.CancelRunning = func() bool {
-			err := driver.Interrupt(context.Background())
+			err := driver.Interrupt(ctx)
 			return err == nil
 		}
 	}
 
 	if base.ToggleMode == nil {
 		base.ToggleMode = func() (string, error) {
-			status, err := driver.CycleSessionMode(context.Background())
+			status, err := driver.CycleSessionMode(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -201,18 +248,22 @@ func ConfigFromDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, ba
 // ---------------------------------------------------------------------------
 
 func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender, sub Submission) TaskResultMsg {
+	return executeLineViaDriverWithContext(context.Background(), driver, sender, sub)
+}
+
+func executeLineViaDriverWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, sub Submission) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	text := strings.TrimSpace(sub.Text)
 
 	// Slash command dispatch.
-	if isDispatchableSlashCommand(driver, text) {
-		return dispatchSlashCommand(driver, sender, text)
+	if isDispatchableSlashCommandWithContext(ctx, driver, text) {
+		return dispatchSlashCommandWithContext(ctx, driver, sender, text)
 	}
 	if strings.HasPrefix(text, "@") {
-		return dispatchMentionCommand(driver, sender, text)
+		return dispatchMentionCommandWithContext(ctx, driver, sender, text)
 	}
 
 	// Normal submission → Driver.Submit → streaming events.
-	ctx := context.Background()
 	turn, err := driver.Submit(ctx, tuiadapterruntime.Submission{
 		Text:        sub.Text,
 		DisplayText: "",
@@ -227,7 +278,7 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 	}
 	defer turn.Close()
 
-	send := sender.Send
+	send := sender.sendFunc()
 	if send != nil {
 		forwardGatewayTurnEvents(ctx, driver, turn, send)
 	} else {
@@ -275,7 +326,7 @@ func forwardGatewayTurnEvents(ctx context.Context, driver tuiadapterruntime.Driv
 			send(env)
 			startTerminalStreamForwarder(ctx, driver, env, send)
 			if env.Event.Kind == appgateway.EventKindApprovalRequested {
-				sendApprovalPrompt(turn, env.Event.ApprovalPayload, send)
+				sendApprovalPrompt(ctx, turn, env.Event.ApprovalPayload, send)
 			}
 		}
 	}
@@ -384,10 +435,165 @@ func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.
 		return
 	}
 	go func() {
-		for terminalEnv := range events {
-			send(terminalEnv)
+		ticker := time.NewTicker(gatewayNarrativeBatchInterval)
+		defer ticker.Stop()
+		var batcher gatewayTerminalBatcher
+		for events != nil {
+			select {
+			case <-ctx.Done():
+				batcher.flush(send)
+				return
+			case <-ticker.C:
+				batcher.flush(send)
+			case terminalEnv, ok := <-events:
+				if !ok {
+					events = nil
+					continue
+				}
+				if batcher.enqueue(terminalEnv, send) {
+					continue
+				}
+				send(terminalEnv)
+			}
 		}
+		batcher.flush(send)
 	}()
+}
+
+type gatewayTerminalBatcher struct {
+	pending *appgateway.EventEnvelope
+	key     string
+}
+
+func (b *gatewayTerminalBatcher) enqueue(env appgateway.EventEnvelope, send func(tea.Msg)) bool {
+	key, ok := gatewayTerminalBatchKey(env)
+	if !ok {
+		b.flush(send)
+		return false
+	}
+	if b.pending == nil {
+		copy := cloneGatewayTerminalEnvelope(env)
+		b.pending = &copy
+		b.key = key
+		return true
+	}
+	if b.key != key {
+		b.flush(send)
+		copy := cloneGatewayTerminalEnvelope(env)
+		b.pending = &copy
+		b.key = key
+		return true
+	}
+	mergeGatewayTerminalEnvelope(b.pending, env)
+	return true
+}
+
+func (b *gatewayTerminalBatcher) flush(send func(tea.Msg)) {
+	if b == nil || b.pending == nil {
+		return
+	}
+	if send != nil {
+		send(*b.pending)
+	}
+	b.pending = nil
+	b.key = ""
+}
+
+func gatewayTerminalBatchKey(env appgateway.EventEnvelope) (string, bool) {
+	if env.Err != nil || env.Event.Kind != appgateway.EventKindToolResult || env.Event.ToolResult == nil {
+		return "", false
+	}
+	payload := env.Event.ToolResult
+	if !rawBool(payload.RawOutput, "running") {
+		return "", false
+	}
+	text := rawString(payload.RawOutput, "text")
+	if text == "" {
+		return "", false
+	}
+	return strings.Join([]string{
+		strings.TrimSpace(env.Event.HandleID),
+		strings.TrimSpace(env.Event.RunID),
+		strings.TrimSpace(env.Event.TurnID),
+		strings.TrimSpace(env.Event.SessionRef.SessionID),
+		strings.TrimSpace(payload.CallID),
+		strings.TrimSpace(payload.ToolName),
+		rawString(payload.RawOutput, "task_id"),
+		rawString(payload.RawOutput, "terminal_id"),
+		rawString(payload.RawOutput, "stream"),
+	}, "\x00"), true
+}
+
+func cloneGatewayTerminalEnvelope(env appgateway.EventEnvelope) appgateway.EventEnvelope {
+	out := env
+	if env.Event.ToolResult != nil {
+		payload := *env.Event.ToolResult
+		payload.RawInput = cloneAnyMap(payload.RawInput)
+		payload.RawOutput = cloneAnyMap(payload.RawOutput)
+		out.Event.ToolResult = &payload
+	}
+	if env.Event.Meta != nil {
+		out.Event.Meta = cloneAnyMap(env.Event.Meta)
+	}
+	return out
+}
+
+func mergeGatewayTerminalEnvelope(dst *appgateway.EventEnvelope, src appgateway.EventEnvelope) {
+	if dst == nil || dst.Event.ToolResult == nil || src.Event.ToolResult == nil {
+		return
+	}
+	dst.Cursor = src.Cursor
+	dst.Event.OccurredAt = src.Event.OccurredAt
+	dstPayload := dst.Event.ToolResult
+	srcPayload := src.Event.ToolResult
+	if dstPayload.RawOutput == nil {
+		dstPayload.RawOutput = map[string]any{}
+	}
+	dstPayload.RawOutput["text"] = rawString(dstPayload.RawOutput, "text") + rawString(srcPayload.RawOutput, "text")
+	for _, key := range []string{"running", "state", "stdout_cursor", "stderr_cursor", "exit_code"} {
+		if value, ok := srcPayload.RawOutput[key]; ok {
+			dstPayload.RawOutput[key] = value
+		}
+	}
+}
+
+func rawString(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	switch value := values[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
+	}
+}
+
+func rawBool(values map[string]any, key string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	switch value := values[key].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	default:
+		return false
+	}
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -395,36 +601,45 @@ func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.
 // ---------------------------------------------------------------------------
 
 func dispatchSlashCommand(driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
+	return dispatchSlashCommandWithContext(context.Background(), driver, sender, text)
+}
+
+func dispatchSlashCommandWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	cmd, args := splitSlash(text)
-	send := sender.Send
+	send := sender.sendFunc()
 
 	switch cmd {
 	case "help":
 		return slashHelp(send)
 	case "agent":
-		return slashAgent(driver, send, args)
+		return slashAgentWithContext(ctx, driver, send, args)
 	case "new":
-		return slashNew(driver, send)
+		return slashNewWithContext(ctx, driver, send)
 	case "resume":
-		return slashResume(driver, send, args)
+		return slashResumeWithContext(ctx, driver, send, args)
 	case "status":
-		return slashStatus(driver, send)
+		return slashStatusWithContext(ctx, driver, send)
 	case "connect":
-		return slashConnect(driver, send, args)
+		return slashConnectWithContext(ctx, driver, send, args)
 	case "model":
-		return slashModel(driver, send, args)
+		return slashModelWithContext(ctx, driver, send, args)
 	case "sandbox":
-		return slashSandbox(driver, send, args)
+		return slashSandboxWithContext(ctx, driver, send, args)
 	case "compact":
-		return slashCompact(driver, send, args)
+		return slashCompactWithContext(ctx, driver, send, args)
 	case "exit", "quit":
 		return TaskResultMsg{ExitNow: true}
 	default:
-		return slashDynamicAgent(driver, send, cmd, args)
+		return slashDynamicAgentWithContext(ctx, driver, send, cmd, args)
 	}
 }
 
 func isDispatchableSlashCommand(driver tuiadapterruntime.Driver, text string) bool {
+	return isDispatchableSlashCommandWithContext(context.Background(), driver, text)
+}
+
+func isDispatchableSlashCommandWithContext(ctx context.Context, driver tuiadapterruntime.Driver, text string) bool {
 	cmd, _ := splitSlash(text)
 	if cmd == "" {
 		return false
@@ -432,7 +647,7 @@ func isDispatchableSlashCommand(driver tuiadapterruntime.Driver, text string) bo
 	if _, ok := lookupSlashCommandSpec(cmd); ok {
 		return true
 	}
-	return isRegisteredAgentCommand(driver, cmd)
+	return isRegisteredAgentCommandWithContext(ctx, driver, cmd)
 }
 
 func slashHelp(send func(tea.Msg)) TaskResultMsg {
@@ -441,6 +656,11 @@ func slashHelp(send func(tea.Msg)) TaskResultMsg {
 }
 
 func slashDynamicAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), agent string, prompt string) TaskResultMsg {
+	return slashDynamicAgentWithContext(context.Background(), driver, send, agent, prompt)
+}
+
+func slashDynamicAgentWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), agent string, prompt string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -451,21 +671,26 @@ func slashDynamicAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), agen
 		}
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
-	snapshot, err := driver.StartAgentSubagent(context.Background(), agent, prompt)
+	snapshot, err := driver.StartAgentSubagent(ctx, agent, prompt)
 	if err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("/"+agent, err)}
 	}
 	sendDynamicSubagentStarted(send, snapshot, true)
-	startDynamicSubagentOutputBridge(driver, send, snapshot)
+	startDynamicSubagentOutputBridge(ctx, driver, send, snapshot)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
 func isRegisteredAgentCommand(driver tuiadapterruntime.Driver, agent string) bool {
+	return isRegisteredAgentCommandWithContext(context.Background(), driver, agent)
+}
+
+func isRegisteredAgentCommandWithContext(ctx context.Context, driver tuiadapterruntime.Driver, agent string) bool {
+	ctx = contextOrBackground(ctx)
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	if agent == "" {
 		return false
 	}
-	agents, err := driver.ListAgents(context.Background(), 200)
+	agents, err := driver.ListAgents(ctx, 200)
 	if err != nil {
 		return false
 	}
@@ -478,27 +703,33 @@ func isRegisteredAgentCommand(driver tuiadapterruntime.Driver, agent string) boo
 }
 
 func dispatchMentionCommand(driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
-	var send func(tea.Msg)
-	if sender != nil {
-		send = sender.Send
-	}
+	return dispatchMentionCommandWithContext(context.Background(), driver, sender, text)
+}
+
+func dispatchMentionCommandWithContext(ctx context.Context, driver tuiadapterruntime.Driver, sender *ProgramSender, text string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
+	send := sender.sendFunc()
 	handle, prompt := splitFirst(strings.TrimSpace(text))
 	handle = strings.TrimPrefix(strings.TrimSpace(handle), "@")
 	if handle == "" || strings.TrimSpace(prompt) == "" {
 		sendNotice(send, "usage: @handle <prompt>")
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
-	snapshot, err := driver.ContinueSubagent(context.Background(), handle, prompt)
+	snapshot, err := driver.ContinueSubagent(ctx, handle, prompt)
 	if err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("@"+handle, err)}
 	}
 	sendDynamicSubagentStarted(send, snapshot, false)
-	startDynamicSubagentOutputBridge(driver, send, snapshot)
+	startDynamicSubagentOutputBridge(ctx, driver, send, snapshot)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
 func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
-	ctx := context.Background()
+	return slashAgentWithContext(context.Background(), driver, send, args)
+}
+
+func slashAgentWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	sub, rest := splitFirst(strings.TrimSpace(args))
 	switch sub {
 	case "", "help":
@@ -527,7 +758,7 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		}
 		sendNotice(send, fmt.Sprintf("agent registered: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
-		refreshAgentSlashCommandsViaSend(driver, send)
+		refreshAgentSlashCommandsViaSendWithContext(ctx, driver, send)
 		return TaskResultMsg{SuppressTurnDivider: true}
 	case "remove":
 		target := strings.TrimSpace(rest)
@@ -541,7 +772,7 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 		}
 		sendNotice(send, fmt.Sprintf("agent unregistered: %s", target))
 		sendNotice(send, formatAgentStatusSnapshot(status))
-		refreshAgentSlashCommandsViaSend(driver, send)
+		refreshAgentSlashCommandsViaSendWithContext(ctx, driver, send)
 		return TaskResultMsg{SuppressTurnDivider: true}
 	case "use":
 		target := strings.TrimSpace(rest)
@@ -563,7 +794,11 @@ func slashAgent(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 }
 
 func slashNew(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg {
-	ctx := context.Background()
+	return slashNewWithContext(context.Background(), driver, send)
+}
+
+func slashNewWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	session, err := driver.NewSession(ctx)
 	if err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("new session", err)}
@@ -572,12 +807,16 @@ func slashNew(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg
 		send(ClearHistoryMsg{})
 	}
 	sendNotice(send, fmt.Sprintf("new session: %s", session.SessionID))
-	refreshStatusViaSend(driver, send)
+	refreshStatusViaSendWithContext(ctx, driver, send)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
 func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
-	ctx := context.Background()
+	return slashResumeWithContext(context.Background(), driver, send, args)
+}
+
+func slashResumeWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	sessionID := strings.TrimSpace(args)
 	if sessionID == "" {
 		// List available sessions.
@@ -625,7 +864,7 @@ func slashResume(driver tuiadapterruntime.Driver, send func(tea.Msg), args strin
 		}
 	}
 
-	refreshStatusViaSend(driver, send)
+	refreshStatusViaSendWithContext(ctx, driver, send)
 	return TaskResultMsg{SuppressTurnDivider: true}
 }
 
@@ -675,7 +914,11 @@ func shouldReplayEventInTUIResume(event appgateway.Event) bool {
 }
 
 func slashStatus(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg {
-	ctx := context.Background()
+	return slashStatusWithContext(context.Background(), driver, send)
+}
+
+func slashStatusWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	status, err := driver.Status(ctx)
 	if err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("status", err)}
@@ -685,7 +928,11 @@ func slashStatus(driver tuiadapterruntime.Driver, send func(tea.Msg)) TaskResult
 }
 
 func slashConnect(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
-	ctx := context.Background()
+	return slashConnectWithContext(context.Background(), driver, send, args)
+}
+
+func slashConnectWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	cfg := parseConnectArgs(args)
 	if cfg.Provider == "" || cfg.Model == "" {
 		sendNotice(send, "usage: /connect\nrun /connect to open the guided setup wizard")
@@ -704,7 +951,11 @@ func slashConnect(driver tuiadapterruntime.Driver, send func(tea.Msg), args stri
 }
 
 func slashModel(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
-	ctx := context.Background()
+	return slashModelWithContext(context.Background(), driver, send, args)
+}
+
+func slashModelWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	sub, rest := splitFirst(strings.TrimSpace(args))
 	switch sub {
 	case "use":
@@ -733,7 +984,7 @@ func slashModel(driver tuiadapterruntime.Driver, send func(tea.Msg), args string
 			return TaskResultMsg{Err: friendlyCommandError("model delete", err)}
 		}
 		sendNotice(send, fmt.Sprintf("model deleted: %s", alias))
-		refreshStatusViaSend(driver, send)
+		refreshStatusViaSendWithContext(ctx, driver, send)
 	default:
 		sendNotice(send, "usage: /model use|del <alias>")
 	}
@@ -746,7 +997,11 @@ func parseModelUseArgs(args string) (alias string, reasoning string) {
 }
 
 func slashSandbox(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
-	ctx := context.Background()
+	return slashSandboxWithContext(context.Background(), driver, send, args)
+}
+
+func slashSandboxWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	backend := strings.TrimSpace(args)
 	if backend == "" {
 		status, err := driver.Status(ctx)
@@ -782,11 +1037,15 @@ func slashSandbox(driver tuiadapterruntime.Driver, send func(tea.Msg), args stri
 }
 
 func slashCompact(driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	return slashCompactWithContext(context.Background(), driver, send, args)
+}
+
+func slashCompactWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), args string) TaskResultMsg {
+	ctx = contextOrBackground(ctx)
 	if strings.TrimSpace(args) != "" {
 		sendNotice(send, "usage: /compact")
 		return TaskResultMsg{SuppressTurnDivider: true}
 	}
-	ctx := context.Background()
 	if err := driver.Compact(ctx); err != nil {
 		return TaskResultMsg{Err: friendlyCommandError("compact", err)}
 	}
@@ -820,7 +1079,8 @@ func sendDynamicSubagentStarted(send func(tea.Msg), snapshot tuiadapterruntime.S
 	sendNotice(send, fmt.Sprintf("subagent %s continued: %s", mention, agent))
 }
 
-func startDynamicSubagentOutputBridge(driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+func startDynamicSubagentOutputBridge(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+	ctx = contextOrBackground(ctx)
 	if send == nil {
 		return
 	}
@@ -833,30 +1093,38 @@ func startDynamicSubagentOutputBridge(driver tuiadapterruntime.Driver, send func
 		return
 	}
 	if streamer, ok := driver.(subagentStreamDriver); ok {
-		if frames, ok := streamer.SubscribeSubagentStream(context.Background(), taskID); ok && frames != nil {
+		if frames, ok := streamer.SubscribeSubagentStream(ctx, taskID); ok && frames != nil {
 			actor := subagentMention(snapshot)
 			go func() {
-				for frame := range frames {
-					if frame.Event != nil && gatewayEnvelopeHasRenderableTranscript(*frame.Event) {
-						send(*frame.Event)
-						continue
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case frame, ok := <-frames:
+						if !ok {
+							return
+						}
+						if frame.Event != nil && gatewayEnvelopeHasRenderableTranscript(*frame.Event) {
+							send(*frame.Event)
+							continue
+						}
+						if strings.TrimSpace(frame.Text) == "" {
+							continue
+						}
+						send(AssistantStreamMsg{
+							Kind:  firstNonEmpty(strings.TrimSpace(frame.Stream), "answer"),
+							Actor: actor,
+							Text:  frame.Text,
+							Final: !frame.Running && frame.Closed,
+						})
 					}
-					if strings.TrimSpace(frame.Text) == "" {
-						continue
-					}
-					send(AssistantStreamMsg{
-						Kind:  firstNonEmpty(strings.TrimSpace(frame.Stream), "answer"),
-						Actor: actor,
-						Text:  frame.Text,
-						Final: !frame.Running && frame.Closed,
-					})
 				}
 			}()
 			return
 		}
 	}
 	sendDynamicSubagentSnapshotOutput(send, snapshot)
-	startDynamicSubagentSnapshotWatcher(driver, send, snapshot)
+	startDynamicSubagentSnapshotWatcher(ctx, driver, send, snapshot)
 }
 
 func gatewayEnvelopeHasRenderableTranscript(env appgateway.EventEnvelope) bool {
@@ -888,7 +1156,8 @@ func sendDynamicSubagentSnapshotOutput(send func(tea.Msg), snapshot tuiadapterru
 	return true
 }
 
-func startDynamicSubagentSnapshotWatcher(driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+func startDynamicSubagentSnapshotWatcher(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg), snapshot tuiadapterruntime.SubagentSnapshot) {
+	ctx = contextOrBackground(ctx)
 	if send == nil || !snapshot.Running || strings.TrimSpace(snapshot.TaskID) == "" {
 		return
 	}
@@ -899,8 +1168,14 @@ func startDynamicSubagentSnapshotWatcher(driver tuiadapterruntime.Driver, send f
 	taskID := strings.TrimSpace(snapshot.TaskID)
 	go func() {
 		for {
-			next, err := waiter.WaitSubagent(context.Background(), taskID)
+			if ctx.Err() != nil {
+				return
+			}
+			next, err := waiter.WaitSubagent(ctx, taskID)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				sendNotice(send, fmt.Sprintf("subagent %s wait failed: %v", taskID, err))
 				return
 			}
@@ -924,6 +1199,11 @@ func subagentMention(snapshot tuiadapterruntime.SubagentSnapshot) string {
 }
 
 func appendAgentSlashCommands(driver tuiadapterruntime.Driver, commands []string) []string {
+	return appendAgentSlashCommandsWithContext(context.Background(), driver, commands)
+}
+
+func appendAgentSlashCommandsWithContext(ctx context.Context, driver tuiadapterruntime.Driver, commands []string) []string {
+	ctx = contextOrBackground(ctx)
 	if len(commands) == 0 {
 		commands = DefaultCommands()
 	}
@@ -932,7 +1212,7 @@ func appendAgentSlashCommands(driver tuiadapterruntime.Driver, commands []string
 	for _, command := range out {
 		seen[strings.ToLower(strings.TrimSpace(command))] = struct{}{}
 	}
-	agents, err := driver.ListAgents(context.Background(), 200)
+	agents, err := driver.ListAgents(ctx, 200)
 	if err != nil {
 		return out
 	}
@@ -951,10 +1231,14 @@ func appendAgentSlashCommands(driver tuiadapterruntime.Driver, commands []string
 }
 
 func refreshAgentSlashCommandsViaSend(driver tuiadapterruntime.Driver, send func(tea.Msg)) {
+	refreshAgentSlashCommandsViaSendWithContext(context.Background(), driver, send)
+}
+
+func refreshAgentSlashCommandsViaSendWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg)) {
 	if send == nil {
 		return
 	}
-	send(SetCommandsMsg{Commands: appendAgentSlashCommands(driver, DefaultCommands())})
+	send(SetCommandsMsg{Commands: appendAgentSlashCommandsWithContext(ctx, driver, DefaultCommands())})
 }
 
 func sendStatusUpdate(send func(tea.Msg), status tuiadapterruntime.StatusSnapshot) {
@@ -963,15 +1247,13 @@ func sendStatusUpdate(send func(tea.Msg), status tuiadapterruntime.StatusSnapsho
 			Workspace: status.Workspace,
 			Model:     statusModelDisplay(status.Model),
 			Context:   formatContextUsageStatus(status.TotalTokens, status.ContextWindowTokens),
+			ModeLabel: strings.TrimSpace(status.ModeLabel),
 		})
 	}
 }
 
 func statusModelDisplay(model string) string {
-	if model = strings.TrimSpace(model); model != "" {
-		return model
-	}
-	return "not configured (/connect)"
+	return normalizeStatusModel(model)
 }
 
 func formatContextUsageStatus(totalTokens int, contextWindow int) string {
@@ -1001,29 +1283,41 @@ func formatCompactTokenCount(tokens int) string {
 }
 
 func refreshStatusViaSend(driver tuiadapterruntime.Driver, send func(tea.Msg)) {
-	status, err := driver.Status(context.Background())
+	refreshStatusViaSendWithContext(context.Background(), driver, send)
+}
+
+func refreshStatusViaSendWithContext(ctx context.Context, driver tuiadapterruntime.Driver, send func(tea.Msg)) {
+	ctx = contextOrBackground(ctx)
+	status, err := driver.Status(ctx)
 	if err != nil {
 		return
 	}
 	sendStatusUpdate(send, status)
 }
 
-func sendApprovalPrompt(turn tuiadapterruntime.Turn, req *appgateway.ApprovalPayload, send func(tea.Msg)) {
+func sendApprovalPrompt(ctx context.Context, turn tuiadapterruntime.Turn, req *appgateway.ApprovalPayload, send func(tea.Msg)) {
 	if turn == nil || req == nil || send == nil {
 		return
 	}
 	responses := make(chan PromptResponse, 1)
 	send(approvalToPromptRequest(req, responses))
-	go awaitApprovalPrompt(turn, req, responses, send)
+	go awaitApprovalPrompt(ctx, turn, req, responses, send)
 }
 
-func awaitApprovalPrompt(turn tuiadapterruntime.Turn, req *appgateway.ApprovalPayload, responses <-chan PromptResponse, send func(tea.Msg)) {
-	response, ok := <-responses
-	if !ok {
+func awaitApprovalPrompt(ctx context.Context, turn tuiadapterruntime.Turn, req *appgateway.ApprovalPayload, responses <-chan PromptResponse, send func(tea.Msg)) {
+	ctx = contextOrBackground(ctx)
+	var response PromptResponse
+	select {
+	case <-ctx.Done():
 		return
+	case next, ok := <-responses:
+		if !ok {
+			return
+		}
+		response = next
 	}
 	decision := approvalDecisionFromPrompt(req, response)
-	if err := turn.Submit(context.Background(), appgateway.SubmitRequest{
+	if err := turn.Submit(ctx, appgateway.SubmitRequest{
 		Kind:     appgateway.SubmissionKindApproval,
 		Approval: &decision,
 	}); err != nil {
