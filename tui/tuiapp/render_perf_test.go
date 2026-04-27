@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	appgateway "github.com/OnslaughtSnail/caelis/gateway"
+	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
 	"github.com/OnslaughtSnail/caelis/tui/tuikit"
 	"github.com/charmbracelet/colorprofile"
 )
@@ -180,6 +182,33 @@ func BenchmarkVisibleSelectionRenderLongTranscript(b *testing.B) {
 	}
 }
 
+func BenchmarkRenderSchedulerMixedStreams(b *testing.B) {
+	m := newPerfTestModel()
+	m.cfg.StreamTickInterval = 16 * time.Millisecond
+	seedLongTranscript(m, 2000)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, msg := range []tea.Msg{
+			AssistantStreamMsg{Kind: "answer", Actor: "assistant", Text: "answer "},
+			ReasoningStreamMsg{Actor: "assistant", Text: "reason "},
+			LogChunkMsg{Chunk: "log line\n"},
+			perfGatewayNarrativeFrame("gateway "),
+			perfTerminalFrame("terminal\n", int64(i+1)),
+		} {
+			updated, _, handled := m.dispatchRenderEvent(msg)
+			if !handled {
+				b.Fatalf("dispatchRenderEvent(%T) was not handled", msg)
+			}
+			m = updated.(*Model)
+		}
+		updated, _ := m.Update(perfTickAt(frameTickRenderDrain, time.Now()))
+		m = updated.(*Model)
+		updated, _ = m.Update(perfTickAt(frameTickViewportSync, time.Now()))
+		m = updated.(*Model)
+	}
+}
+
 func newPerfTestModel() *Model {
 	m := NewModel(Config{NoColor: true})
 	m.theme = tuikit.ResolveThemeFromOptions(true, colorprofile.NoTTY)
@@ -200,4 +229,48 @@ func seedLongTranscript(m *Model, lines int) {
 
 func perfTickAt(kind frameTickKind, at time.Time) tea.Msg {
 	return frameTickMsg{kind: kind, at: at}
+}
+
+func perfGatewayNarrativeFrame(text string) appgateway.EventEnvelope {
+	return appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			HandleID:   "handle-1",
+			RunID:      "run-1",
+			TurnID:     "turn-1",
+			SessionRef: sdksession.SessionRef{SessionID: "session-1"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:       appgateway.NarrativeRoleAssistant,
+				Text:       text,
+				Visibility: string(sdksession.VisibilityUIOnly),
+				UpdateType: string(sdksession.ProtocolUpdateTypeAgentMessage),
+				Scope:      appgateway.EventScopeMain,
+			},
+		},
+	}
+}
+
+func perfTerminalFrame(text string, cursor int64) appgateway.EventEnvelope {
+	return appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			HandleID:   "handle-1",
+			RunID:      "run-1",
+			TurnID:     "turn-1",
+			SessionRef: sdksession.SessionRef{SessionID: "session-1"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "call-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusRunning,
+				RawOutput: map[string]any{
+					"running":       true,
+					"text":          text,
+					"task_id":       "task-1",
+					"terminal_id":   "terminal-1",
+					"stream":        "stdout",
+					"stdout_cursor": cursor,
+				},
+			},
+		},
+	}
 }
