@@ -29,16 +29,14 @@ func (m *Model) queueLogChunk(chunk string) bool {
 	if m == nil || chunk == "" {
 		return false
 	}
-	m.pendingLogChunk += chunk
-	return true
+	return m.pendingLogBuffer.Append(chunk)
 }
 
 func (m *Model) flushPendingLogChunks() tea.Cmd {
-	if m == nil || m.pendingLogChunk == "" {
+	if m == nil || m.pendingLogBuffer.Empty() {
 		return nil
 	}
-	chunk := m.pendingLogChunk
-	m.pendingLogChunk = ""
+	chunk := m.pendingLogBuffer.Drain()
 	_, cmd := m.handleLogChunk(chunk)
 	return cmd
 }
@@ -48,7 +46,7 @@ func (m *Model) flushPendingDeferredBatches() tea.Cmd {
 		return nil
 	}
 	cmd := m.flushPendingLogChunks()
-	if m.pendingLogChunk == "" {
+	if m.pendingLogBuffer.Empty() {
 		m.deferredBatchTickScheduled = false
 	}
 	return cmd
@@ -61,7 +59,7 @@ func (m *Model) ensureDeferredBatchTick() tea.Cmd {
 	if m.deferredBatchTickScheduled {
 		return nil
 	}
-	if m.pendingLogChunk == "" {
+	if m.pendingLogBuffer.Empty() {
 		return nil
 	}
 	m.deferredBatchTickScheduled = true
@@ -80,16 +78,11 @@ func (m *Model) handleLogChunk(chunk string) (tea.Model, tea.Cmd) {
 	chunk = tuikit.SanitizeLogText(chunk)
 	normalized := strings.ReplaceAll(strings.ReplaceAll(chunk, "\r\n", "\n"), "\r", "\n")
 
-	m.streamLine += normalized
+	lines := m.logStreamBuffer.Append(normalized)
+	m.streamLine = m.logStreamBuffer.Tail()
 	var cmds []tea.Cmd
 
-	for {
-		idx := strings.IndexByte(m.streamLine, '\n')
-		if idx < 0 {
-			break
-		}
-		line := m.streamLine[:idx]
-		m.streamLine = m.streamLine[idx+1:]
+	for _, line := range lines {
 		if strings.TrimSpace(line) != "" && m.transientBlockID != "" && m.transientRemove && !isTransientWarningLine(line) {
 			m.removeTransientLogLine()
 		}
@@ -111,6 +104,7 @@ func (m *Model) finalizeAssistantBlock() {
 
 func (m *Model) discardActiveAssistantStream() {
 	m.streamLine = ""
+	m.logStreamBuffer.Reset()
 	// Remove active assistant block from doc.
 	if m.activeAssistantID != "" {
 		m.doc.Remove(m.activeAssistantID)
@@ -1515,8 +1509,10 @@ func shouldInsertBlockGap(prev tuikit.LineStyle, current tuikit.LineStyle) bool 
 func (m *Model) flushStream() {
 	if strings.TrimSpace(m.streamLine) == "" {
 		m.streamLine = ""
+		m.logStreamBuffer.Reset()
 		return
 	}
 	m.commitLine(m.streamLine)
 	m.streamLine = ""
+	m.logStreamBuffer.Reset()
 }

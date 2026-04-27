@@ -65,7 +65,9 @@ func TestRenderSchedulerCoalescesLogChunksToOneDrainItem(t *testing.T) {
 
 func TestRenderSchedulerPreservesDeferredCommands(t *testing.T) {
 	m := NewModel(Config{NoColor: true, StreamTickInterval: 16 * time.Millisecond})
-	m.pendingLogChunk = "hello\n"
+	if !m.queueLogChunk("hello\n") {
+		t.Fatal("queueLogChunk returned false")
+	}
 
 	if cmd := m.flushPendingDeferredBatches(); cmd == nil {
 		t.Fatal("flushPendingDeferredBatches returned nil command")

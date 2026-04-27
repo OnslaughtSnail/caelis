@@ -193,7 +193,6 @@ func (m *Model) syncDirtyViewportRenderEntries(ctx BlockRenderContext) bool {
 	if m == nil ||
 		len(m.dirtyViewportBlocks) == 0 ||
 		m.viewportStructureDirty ||
-		strings.TrimSpace(m.streamLine) != "" ||
 		m.lastViewportRenderContextKey != viewportRenderContextKey(ctx) {
 		return false
 	}
@@ -243,6 +242,9 @@ func (m *Model) syncDirtyViewportRenderEntries(ctx BlockRenderContext) bool {
 		if delta := next.lineCount - count; delta != 0 {
 			m.shiftViewportEntryLineStartsAfter(start, idx, delta)
 		}
+	}
+	if m.streamLine != m.lastViewportStreamLine {
+		m.rebuildViewportLineCaches(ctx)
 	}
 	return true
 }

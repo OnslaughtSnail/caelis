@@ -300,7 +300,8 @@ type Model struct {
 	callAnchorIndex map[string]string
 
 	streamLine          string
-	pendingLogChunk     string
+	pendingLogBuffer    logChunkBuffer
+	logStreamBuffer     logStreamBuffer
 	lastCommittedStyle  tuikit.LineStyle
 	lastCommittedRaw    string
 	lastUserDisplayLine string
