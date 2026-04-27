@@ -308,7 +308,7 @@ func (m *Model) renderViewportContent(reason string) {
 	// that scroll decisions use the up-to-date content length. The
 	// previous approach sampled AtBottom() before SetContent, which
 	// could produce the wrong decision when content/height changed.
-	if !m.userScrolledUp {
+	if m.isViewportFollowTail() {
 		m.viewport.GotoBottom()
 	}
 	m.streamPlayback.LastFrameRenderCost = time.Since(start)
@@ -335,7 +335,7 @@ func (m *Model) shouldDeferStreamViewportSync() bool {
 	if m.hasSelectionRange() {
 		return true
 	}
-	return m.userScrolledUp
+	return !m.isViewportFollowTail()
 }
 
 func (m *Model) ensureViewportSyncTick() tea.Cmd {
@@ -429,6 +429,9 @@ func (m *Model) clearSelection() {
 	m.selecting = false
 	m.selectionStart = textSelectionPoint{line: -1, col: -1}
 	m.selectionEnd = textSelectionPoint{line: -1, col: -1}
+	if m.viewportFollowState == viewportSelecting {
+		m.leaveViewportSelecting()
+	}
 	if changed {
 		m.bumpViewportSelectionVersion()
 	}

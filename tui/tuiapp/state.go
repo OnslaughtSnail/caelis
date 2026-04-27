@@ -88,6 +88,14 @@ type Diagnostics struct {
 	RedrawMode                  string
 }
 
+type viewportFollowState int
+
+const (
+	viewportFollowTail viewportFollowState = iota
+	viewportPinnedHistory
+	viewportSelecting
+)
+
 type Config struct {
 	Context              context.Context
 	AppName              string
@@ -326,6 +334,7 @@ type Model struct {
 	viewportClickTokens           []string
 	frameTopTrim                  int
 	viewport                      viewport.Model
+	viewportFollowState           viewportFollowState
 	userScrolledUp                bool
 	ready                         bool
 	viewportScrollbarVisibleUntil time.Time

@@ -28,14 +28,14 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if handled, changed := m.tryScrollPanelAtMouse(typed.Mouse()); handled {
 			if changed {
 				offset := m.viewport.YOffset()
-				keepScrolledUp := m.userScrolledUp
+				keepFollowState := m.viewportFollowState
 				m.syncViewportContent()
 				maxOffset := maxInt(0, m.viewport.TotalLineCount()-m.viewport.Height())
 				if offset > maxOffset {
 					offset = maxOffset
 				}
 				m.viewport.SetYOffset(offset)
-				m.userScrolledUp = keepScrolledUp
+				m.setViewportFollowState(keepFollowState)
 			}
 			if changed {
 				return m, m.ensureScrollbarTick()
@@ -43,14 +43,14 @@ func (m *Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		var cmd tea.Cmd
-		wasScrolledUp := m.userScrolledUp
+		wasFollowTail := m.isViewportFollowTail()
 		m.viewport, cmd = m.viewport.Update(msg)
-		m.userScrolledUp = !m.viewport.AtBottom()
+		m.refreshViewportFollowStateFromOffset()
 		var resumeCmd tea.Cmd
-		if !m.userScrolledUp && m.offscreenViewportDirty {
+		if m.isViewportFollowTail() && m.offscreenViewportDirty {
 			m.syncViewportContent()
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
-		} else if wasScrolledUp && !m.userScrolledUp {
+		} else if !wasFollowTail && m.isViewportFollowTail() {
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
 		}
 		return m, tea.Batch(cmd, m.touchViewportScrollbar(), resumeCmd)
@@ -186,6 +186,7 @@ func (m *Model) handleViewportMousePress(mouse tea.Mouse) tea.Cmd {
 	m.selecting = true
 	m.selectionStart = point
 	m.selectionEnd = point
+	m.enterViewportSelecting()
 	m.bumpViewportSelectionVersion()
 	return nil
 }
@@ -501,35 +502,42 @@ func (m *Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
+	case isViewportEndKey(msg) && (!m.isViewportFollowTail() || !m.viewport.AtBottom()):
+		m.setViewportFollowState(viewportFollowTail)
+		if m.offscreenViewportDirty || m.viewportSyncPending {
+			m.syncViewportContent()
+		}
+		m.viewport.GotoBottom()
+		return m, tea.Batch(m.touchViewportScrollbar(), m.resumeRunningAnimationIfNeeded())
 	case key.Matches(msg, m.keys.HalfPageUp):
 		m.viewport.HalfPageUp()
-		m.userScrolledUp = !m.viewport.AtBottom()
+		m.refreshViewportFollowStateFromOffset()
 		return m, m.touchViewportScrollbar()
 	case key.Matches(msg, m.keys.HalfPageDown):
-		wasScrolledUp := m.userScrolledUp
+		wasFollowTail := m.isViewportFollowTail()
 		m.viewport.HalfPageDown()
-		m.userScrolledUp = !m.viewport.AtBottom()
+		m.refreshViewportFollowStateFromOffset()
 		var resumeCmd tea.Cmd
-		if !m.userScrolledUp && m.offscreenViewportDirty {
+		if m.isViewportFollowTail() && m.offscreenViewportDirty {
 			m.syncViewportContent()
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
-		} else if wasScrolledUp && !m.userScrolledUp {
+		} else if !wasFollowTail && m.isViewportFollowTail() {
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
 		}
 		return m, tea.Batch(m.touchViewportScrollbar(), resumeCmd)
 	case key.Matches(msg, m.keys.PageUp):
 		m.viewport.PageUp()
-		m.userScrolledUp = !m.viewport.AtBottom()
+		m.refreshViewportFollowStateFromOffset()
 		return m, m.touchViewportScrollbar()
 	case key.Matches(msg, m.keys.PageDown):
-		wasScrolledUp := m.userScrolledUp
+		wasFollowTail := m.isViewportFollowTail()
 		m.viewport.PageDown()
-		m.userScrolledUp = !m.viewport.AtBottom()
+		m.refreshViewportFollowStateFromOffset()
 		var resumeCmd tea.Cmd
-		if !m.userScrolledUp && m.offscreenViewportDirty {
+		if m.isViewportFollowTail() && m.offscreenViewportDirty {
 			m.syncViewportContent()
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
-		} else if wasScrolledUp && !m.userScrolledUp {
+		} else if !wasFollowTail && m.isViewportFollowTail() {
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
 		}
 		return m, tea.Batch(m.touchViewportScrollbar(), resumeCmd)
@@ -915,7 +923,6 @@ func (m *Model) submitLineWithDisplayAndAttachments(execLine string, displayLine
 		m.hasLastRunDuration = false
 		m.showTurnDivider = mode == SubmissionModeDefault && !m.isConfiguredSlashControlLine(execLine)
 		m.startRunningAnimation()
-		m.userScrolledUp = false
 	}
 	m.syncViewportContent()
 
@@ -1215,4 +1222,13 @@ func (m *Model) tryOpenSlashArgPicker(line string) bool {
 		}
 	}
 	return false
+}
+
+func isViewportEndKey(msg tea.KeyMsg) bool {
+	press, ok := msg.(tea.KeyPressMsg)
+	if !ok {
+		return false
+	}
+	key := tea.Key(press)
+	return key.Code == tea.KeyEnd && key.Mod == 0
 }

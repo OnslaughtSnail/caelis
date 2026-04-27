@@ -1329,7 +1329,7 @@ func (m *Model) resetConversationView() {
 	m.hasLastRunDuration = false
 	m.clearSelection()
 	m.clearInputSelection()
-	m.userScrolledUp = false
+	m.setViewportFollowState(viewportFollowTail)
 	if m.cfg.ShowWelcomeCard {
 		if m.viewport.Width() > 0 {
 			m.appendWelcomeCard()

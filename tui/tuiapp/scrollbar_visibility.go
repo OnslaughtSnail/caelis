@@ -145,12 +145,12 @@ func (m *Model) beginScrollbarDrag(mouse tea.Mouse) (bool, tea.Cmd) {
 	}
 	m.scrollbarDrag = scrollbarDragState{active: true, target: target}
 	cmd := m.touchScrollbarTarget(target)
-	wasScrolledUp := m.userScrolledUp
+	wasFollowTail := m.isViewportFollowTail()
 	changed := m.applyScrollbarDrag(mouse)
 	var resumeCmd tea.Cmd
 	if changed {
 		m.syncViewportContent()
-		if wasScrolledUp && !m.userScrolledUp {
+		if !wasFollowTail && m.isViewportFollowTail() {
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
 		}
 	}
@@ -161,12 +161,12 @@ func (m *Model) updateScrollbarDrag(mouse tea.Mouse) tea.Cmd {
 	if !m.scrollbarDrag.active {
 		return nil
 	}
-	wasScrolledUp := m.userScrolledUp
+	wasFollowTail := m.isViewportFollowTail()
 	changed := m.applyScrollbarDrag(mouse)
 	var resumeCmd tea.Cmd
 	if changed {
 		m.syncViewportContent()
-		if wasScrolledUp && !m.userScrolledUp {
+		if !wasFollowTail && m.isViewportFollowTail() {
 			resumeCmd = m.resumeRunningAnimationIfNeeded()
 		}
 	}
@@ -211,7 +211,7 @@ func (m *Model) dragViewportScrollbarTo(y int) bool {
 		return false
 	}
 	m.viewport.SetYOffset(next)
-	m.userScrolledUp = !m.viewport.AtBottom()
+	m.refreshViewportFollowStateFromOffset()
 	return true
 }
 
