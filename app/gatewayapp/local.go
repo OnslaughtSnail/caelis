@@ -3,6 +3,7 @@ package gatewayapp
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -53,6 +54,9 @@ type ModelConfig struct {
 	API      sdkproviders.APIType `json:"api,omitempty"`
 	Model    string               `json:"model,omitempty"`
 	BaseURL  string               `json:"base_url,omitempty"`
+	// HTTPClient is an in-memory transport override for this process. It is
+	// intentionally never persisted.
+	HTTPClient *http.Client `json:"-"`
 	// Token is an in-memory secret used for the current process. It is not
 	// persisted unless PersistToken is explicitly enabled.
 	Token    string `json:"token,omitempty"`
@@ -1129,6 +1133,7 @@ func (l *modelLookup) ResolveModel(ctx context.Context, alias string, contextWin
 				BaseURL:         cfg.BaseURL,
 				APIKey:          cfg.Token,
 				HeaderKey:       cfg.HeaderKey,
+				HTTPClient:      cfg.HTTPClient,
 				Timeout:         cfg.Timeout,
 				MaxTokens:       cfg.MaxOutputTok,
 				ReasoningEffort: cfg.ReasoningEffort,
@@ -1151,6 +1156,7 @@ func (l *modelLookup) ResolveModel(ctx context.Context, alias string, contextWin
 		API:                       cfg.API,
 		Model:                     cfg.Model,
 		BaseURL:                   cfg.BaseURL,
+		HTTPClient:                cfg.HTTPClient,
 		Timeout:                   cfg.Timeout,
 		MaxOutputTok:              cfg.MaxOutputTok,
 		ContextWindowTokens:       effectiveContextWindow,
@@ -1565,6 +1571,7 @@ func sanitizePersistedModelConfig(cfg ModelConfig) ModelConfig {
 		cfg.MaxOutputTok = 0
 	}
 	cfg.PersistToken = false
+	cfg.HTTPClient = nil
 	cfg.Timeout = 0
 	return cfg
 }

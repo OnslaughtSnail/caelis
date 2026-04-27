@@ -355,10 +355,11 @@ func TestLocalStackDefaultRuntimeAutoCompactionEnabled(t *testing.T) {
 		ContextWindow:  64,
 		Assembly:       sdkplugin.ResolvedAssembly{},
 		Model: ModelConfig{
-			Provider: "ollama",
-			API:      sdkproviders.APIOllama,
-			Model:    "compact-test",
-			BaseURL:  server.URL,
+			Provider:   "ollama",
+			API:        sdkproviders.APIOllama,
+			Model:      "compact-test",
+			BaseURL:    server.URL,
+			HTTPClient: server.Client(),
 		},
 	})
 	if err != nil {
@@ -411,10 +412,11 @@ func TestLocalStackManualCompactUsesStructuredRuntimeCompaction(t *testing.T) {
 		ContextWindow:  4096,
 		Assembly:       sdkplugin.ResolvedAssembly{},
 		Model: ModelConfig{
-			Provider: "ollama",
-			API:      sdkproviders.APIOllama,
-			Model:    "compact-test",
-			BaseURL:  server.URL,
+			Provider:   "ollama",
+			API:        sdkproviders.APIOllama,
+			Model:      "compact-test",
+			BaseURL:    server.URL,
+			HTTPClient: server.Client(),
 		},
 	})
 	if err != nil {
@@ -522,7 +524,8 @@ func newLocalStateTestStack(t *testing.T) (*Stack, sdksession.Session) {
 }
 
 type gatewayAppCompactionOllamaServer struct {
-	*httptest.Server
+	URL             string
+	client          *http.Client
 	compactionCalls atomic.Int64
 	normalCalls     atomic.Int64
 }
@@ -530,7 +533,7 @@ type gatewayAppCompactionOllamaServer struct {
 func newGatewayAppCompactionOllamaServer(t *testing.T) *gatewayAppCompactionOllamaServer {
 	t.Helper()
 	out := &gatewayAppCompactionOllamaServer{}
-	out.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat" {
 			http.NotFound(w, r)
 			return
@@ -554,9 +557,35 @@ func newGatewayAppCompactionOllamaServer(t *testing.T) *gatewayAppCompactionOlla
 		}
 		out.normalCalls.Add(1)
 		fmt.Fprint(w, `{"model":"compact-test","message":{"role":"assistant","content":"app turn ok"},"done":true,"prompt_eval_count":32,"eval_count":8}`)
-	}))
-	t.Cleanup(out.Close)
+	})
+	out.URL = "http://gatewayapp.test"
+	out.client = &http.Client{Transport: gatewayAppRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			handler.ServeHTTP(recorder, req)
+		}()
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-done:
+			resp := recorder.Result()
+			resp.Request = req
+			return resp, nil
+		}
+	})}
 	return out
+}
+
+func (s *gatewayAppCompactionOllamaServer) Client() *http.Client {
+	return s.client
+}
+
+type gatewayAppRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f gatewayAppRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func gatewayAppOllamaMessages(messages []struct {

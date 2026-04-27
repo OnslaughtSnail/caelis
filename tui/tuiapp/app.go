@@ -426,29 +426,17 @@ func (m *Model) viewportContentWidth() int {
 }
 
 func (m *Model) readableContentWidth() int {
-	available := maxInt(1, m.width-tuikit.GutterNarrative-m.viewportScrollbarWidth())
-	if available <= tuikit.ReadableContentWideMaxWidth {
-		return available
-	}
-	sidePadding := minInt(
-		tuikit.ReadableContentMaxSidePadding,
-		maxInt(0, (available-tuikit.ReadableContentWideMaxWidth)/2),
-	)
-	width := available - (sidePadding * 2)
-	return minInt(maxInt(1, tuikit.ReadableContentWideMaxWidth), width)
+	return maxInt(1, m.width-tuikit.GutterNarrative-m.viewportScrollbarWidth())
 }
 
 func (m *Model) mainColumnWidth() int {
+	if m.width > 0 {
+		return m.width
+	}
 	return maxInt(1, m.readableContentWidth()+tuikit.GutterNarrative+m.viewportScrollbarWidth())
 }
 
 func (m *Model) mainColumnX() int {
-	if m.width <= 0 {
-		return 0
-	}
-	if pad := (m.width - m.mainColumnWidth()) / 2; pad > 0 {
-		return pad
-	}
 	return 0
 }
 

@@ -34,7 +34,12 @@ func DiscoverModels(ctx context.Context, cfg Config) ([]RemoteModel, error) {
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
-	client := &http.Client{Timeout: timeout}
+	client := coalesceHTTPClient(cfg.HTTPClient)
+	if timeout > 0 && client.Timeout == 0 {
+		clone := *client
+		clone.Timeout = timeout
+		client = &clone
+	}
 	switch cfg.API {
 	case APIOpenAI, APIOpenAICompatible, APIOpenRouter, APIDeepSeek, APIMimo, APIVolcengine, APIVolcengineCoding:
 		return discoverOpenAIModels(ctx, client, cfg, token)

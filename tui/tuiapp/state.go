@@ -105,7 +105,6 @@ type Config struct {
 	ClearAttachments     func() []string
 	SetAttachments       func([]string) []string
 	OnDiagnostics        func(Diagnostics)
-	FrameBatchMainStream bool
 	StreamTickInterval   time.Duration
 	StreamWarmDelay      time.Duration
 	StreamNormalCPS      float64

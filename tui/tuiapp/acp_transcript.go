@@ -49,21 +49,20 @@ func renderACPTranscriptRows(blockID string, events []SubagentEvent, status stri
 				i = consumed
 				continue
 			}
-			if text := strings.TrimSpace(ev.Text); text != "" {
+			if strings.TrimSpace(ev.Text) != "" {
+				text := ev.Text
 				if reasoningShouldFold(visible, i, status) {
 					expanded := reasoningExpanded(opts, reasoningFoldKey(i))
-					rows = append(rows, renderACPReasoningSummaryRow(blockID, visible[i], i, width, ctx, expanded))
 					if !expanded {
+						rows = append(rows, renderACPReasoningSummaryRow(blockID, visible[i], i, width, ctx, expanded))
 						hasContent = true
 						continue
 					}
 				}
 				if !reasoningShouldFold(visible, i, status) {
 					rows = append(rows, renderParticipantTurnNarrativeRows(blockID, text, tuikit.LineStyleReasoning, width, ctx, participantNarrativeEventActive(visible, i, status))...)
-				} else if reasoningExpandedBodyVisible(text, width) {
-					reasoningRows := renderParticipantTurnNarrativeRows(blockID, text, tuikit.LineStyleReasoning, width, ctx, participantNarrativeEventActive(visible, i, status))
-					reasoningRows = applyClickTokenToRows(reasoningRows, acpReasoningClickToken(reasoningFoldKey(i)))
-					rows = append(rows, reasoningRows...)
+				} else {
+					rows = append(rows, renderACPReasoningExpandedRows(blockID, text, i, width, ctx, participantNarrativeEventActive(visible, i, status))...)
 				}
 				hasContent = true
 			}
@@ -194,6 +193,23 @@ func reasoningExpandedBodyVisible(text string, width int) bool {
 		return false
 	}
 	return normalized != reasoningPreviewText(text, width)
+}
+
+func renderACPReasoningExpandedRows(blockID string, text string, idx int, width int, ctx BlockRenderContext, active bool) []RenderedRow {
+	rows := renderParticipantTurnNarrativeRows(blockID, text, tuikit.LineStyleReasoning, width, ctx, active)
+	rows = applyClickTokenToRows(rows, acpReasoningClickToken(reasoningFoldKey(idx)))
+	if len(rows) == 0 {
+		return rows
+	}
+	firstPlain := strings.TrimPrefix(rows[0].Plain, "· ")
+	firstPlain = strings.TrimPrefix(firstPlain, "  ")
+	plain := strings.TrimSpace("∨ " + firstPlain)
+	styled := ctx.Theme.ToolNameStyle().Bold(true).Render("∨")
+	if firstPlain != "" {
+		styled += ctx.Theme.ReasoningStyle().Render(" " + firstPlain)
+	}
+	rows[0] = StyledPlainClickableRow(blockID, plain, styled, acpReasoningClickToken(reasoningFoldKey(idx)))
+	return rows
 }
 
 func truncateReasoningPreviewMiddle(text string, budget int) string {
@@ -327,7 +343,7 @@ func compactExplorationStage(events []SubagentEvent, idx int) ([]SubagentEvent, 
 	if idx < 0 || idx >= len(events) {
 		return nil, idx
 	}
-	if !isCompactExplorationTool(events[idx]) && !(isExplorationNarrativeEvent(events[idx]) && hasLaterExplorationTool(events, idx+1)) {
+	if !isCompactExplorationTool(events[idx]) && (!isExplorationNarrativeEvent(events[idx]) || !hasLaterExplorationTool(events, idx+1)) {
 		return nil, idx
 	}
 	stage := make([]SubagentEvent, 0, 8)

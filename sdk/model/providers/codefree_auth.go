@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,6 +32,7 @@ const (
 
 type CodeFreeLoginOptions struct {
 	BaseURL          string
+	HTTPClient       *http.Client
 	CredentialPath   string
 	ClientID         string
 	ClientSecret     string
@@ -44,6 +46,7 @@ type CodeFreeLoginOptions struct {
 
 type CodeFreeRefreshOptions struct {
 	BaseURL          string
+	HTTPClient       *http.Client
 	CredentialPath   string
 	ClientID         string
 	ClientSecret     string
@@ -52,6 +55,7 @@ type CodeFreeRefreshOptions struct {
 
 type CodeFreeEnsureAuthOptions struct {
 	BaseURL          string
+	HTTPClient       *http.Client
 	CredentialPath   string
 	ClientID         string
 	ClientSecret     string
@@ -112,6 +116,7 @@ func (e *codeFreeTokenEndpointError) Error() string {
 
 type codeFreeOAuthConfig struct {
 	BaseURL          string
+	HTTPClient       *http.Client
 	CredentialPath   string
 	ClientID         string
 	ClientSecret     string
@@ -126,6 +131,18 @@ type codeFreeOAuthCallback struct {
 
 var codeFreeOpenBrowser = defaultCodeFreeOpenBrowser
 
+type codeFreeLoginFlowSession interface {
+	State() string
+	CodeChallenge() string
+	CodeVerifier() string
+	Wait(context.Context) (codeFreeOAuthCallback, error)
+	Close() error
+}
+
+var newCodeFreeLoginFlowSession = func(host string, port int) (codeFreeLoginFlowSession, error) {
+	return newCodeFreeLoginFlow(host, port)
+}
+
 var (
 	codeFreeEnsureAuthMu       sync.Mutex
 	codeFreeEnsureAuthInflight = map[string]*codeFreeEnsureAuthCall{}
@@ -138,7 +155,7 @@ type codeFreeEnsureAuthCall struct {
 }
 
 func CodeFreeEnsureAuth(ctx context.Context, opts CodeFreeEnsureAuthOptions) (CodeFreeAuthResult, error) {
-	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
+	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.HTTPClient, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
 	if err != nil {
 		return CodeFreeAuthResult{}, err
 	}
@@ -186,6 +203,7 @@ func codeFreeEnsureAuthWithLogin(ctx context.Context, cfg codeFreeOAuthConfig, o
 
 	result, err := CodeFreeLogin(ctx, CodeFreeLoginOptions{
 		BaseURL:          cfg.BaseURL,
+		HTTPClient:       cfg.HTTPClient,
 		CredentialPath:   cfg.CredentialPath,
 		ClientID:         cfg.ClientID,
 		ClientSecret:     cfg.ClientSecret,
@@ -205,7 +223,7 @@ func codeFreeEnsureAuthWithLogin(ctx context.Context, cfg codeFreeOAuthConfig, o
 }
 
 func CodeFreeEnsureModelSelectionAuth(ctx context.Context, opts CodeFreeEnsureAuthOptions) (bool, error) {
-	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
+	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.HTTPClient, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
 	if err != nil {
 		return false, err
 	}
@@ -219,7 +237,7 @@ func CodeFreeEnsureModelSelectionAuth(ctx context.Context, opts CodeFreeEnsureAu
 }
 
 func CodeFreeLogin(ctx context.Context, opts CodeFreeLoginOptions) (CodeFreeAuthResult, error) {
-	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
+	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.HTTPClient, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
 	if err != nil {
 		return CodeFreeAuthResult{}, err
 	}
@@ -231,13 +249,13 @@ func CodeFreeLogin(ctx context.Context, opts CodeFreeLoginOptions) (CodeFreeAuth
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	flow, err := newCodeFreeLoginFlow(host, opts.RedirectPort)
+	flow, err := newCodeFreeLoginFlowSession(host, opts.RedirectPort)
 	if err != nil {
 		return CodeFreeAuthResult{}, err
 	}
 	defer flow.Close()
 
-	authURL := buildCodeFreeAuthorizationURL(cfg, flow.state, flow.codeChallenge)
+	authURL := buildCodeFreeAuthorizationURL(cfg, flow.State(), flow.CodeChallenge())
 	if opts.NotifyAuthURL != nil {
 		opts.NotifyAuthURL(authURL)
 	}
@@ -259,10 +277,10 @@ func CodeFreeLogin(ctx context.Context, opts CodeFreeLoginOptions) (CodeFreeAuth
 	// SRDCloud's registered redirect forwards the local callback URL from state,
 	// but the final localhost request may omit the state query parameter entirely.
 	// The random local path still binds the callback to this login flow.
-	if callback.State != "" && callback.State != flow.state {
+	if callback.State != "" && callback.State != flow.State() {
 		return CodeFreeAuthResult{}, fmt.Errorf("providers: codefree oauth state mismatch")
 	}
-	tokens, err := exchangeCodeFreeAuthorizationCode(ctx, cfg, flow.codeVerifier, callback.Code)
+	tokens, err := exchangeCodeFreeAuthorizationCode(ctx, cfg, flow.CodeVerifier(), callback.Code)
 	if err != nil {
 		return CodeFreeAuthResult{}, err
 	}
@@ -276,7 +294,7 @@ func CodeFreeLogin(ctx context.Context, opts CodeFreeLoginOptions) (CodeFreeAuth
 }
 
 func CodeFreeRefresh(ctx context.Context, opts CodeFreeRefreshOptions) (CodeFreeAuthResult, error) {
-	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
+	cfg, err := resolveCodeFreeOAuthConfig(opts.BaseURL, opts.HTTPClient, opts.CredentialPath, opts.ClientID, opts.ClientSecret, opts.ClientAuthMethod)
 	if err != nil {
 		return CodeFreeAuthResult{}, err
 	}
@@ -298,7 +316,7 @@ func CodeFreeRefresh(ctx context.Context, opts CodeFreeRefreshOptions) (CodeFree
 }
 
 func refreshCodeFreeStoredCredentials(ctx context.Context, stored codeFreeStoredCredentials) (codeFreeStoredCredentials, error) {
-	cfg, err := resolveCodeFreeOAuthConfig(codeFreeFirstNonEmpty(stored.Cached.BaseURL, codeFreeDefaultBaseURL), stored.Path, "", "", "")
+	cfg, err := resolveCodeFreeOAuthConfig(codeFreeFirstNonEmpty(stored.Cached.BaseURL, codeFreeDefaultBaseURL), nil, stored.Path, "", "", "")
 	if err != nil {
 		return codeFreeStoredCredentials{}, err
 	}
@@ -344,7 +362,7 @@ func persistCodeFreeTokenSet(ctx context.Context, cfg codeFreeOAuthConfig, previ
 	if sessionID == "" {
 		return codeFreeStoredCredentials{}, fmt.Errorf("providers: codefree oauth response missing session token")
 	}
-	encryptedAPIKey, err := fetchCodeFreeEncryptedAPIKey(ctx, cfg.BaseURL, sessionID, userID)
+	encryptedAPIKey, err := fetchCodeFreeEncryptedAPIKey(ctx, cfg, sessionID, userID)
 	if err != nil {
 		if strings.TrimSpace(tokens.RawDebug) != "" {
 			return codeFreeStoredCredentials{}, fmt.Errorf("%w token response=%s", err, tokens.RawDebug)
@@ -377,15 +395,15 @@ func persistCodeFreeTokenSet(ctx context.Context, cfg codeFreeOAuthConfig, previ
 	return readCodeFreeStoredCredentialsAtPath(cfg.CredentialPath)
 }
 
-func fetchCodeFreeEncryptedAPIKey(ctx context.Context, baseURL string, accessToken string, userID string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codeFreeAPIKeyEndpoint(baseURL), nil)
+func fetchCodeFreeEncryptedAPIKey(ctx context.Context, cfg codeFreeOAuthConfig, accessToken string, userID string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codeFreeAPIKeyEndpoint(cfg.BaseURL), nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("sessionId", strings.TrimSpace(accessToken))
 	req.Header.Set("userId", strings.TrimSpace(userID))
 	req.Header.Set("projectId", "0")
-	resp, err := newCodeFreeControlHTTPClient().Do(req)
+	resp, err := coalesceCodeFreeControlHTTPClient(cfg.HTTPClient).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -438,7 +456,7 @@ func doCodeFreeAuthCodeTokenRequest(ctx context.Context, cfg codeFreeOAuthConfig
 	if err != nil {
 		return codeFreeOAuthTokenResponse{}, err
 	}
-	resp, err := newCodeFreeControlHTTPClient().Do(req)
+	resp, err := coalesceCodeFreeControlHTTPClient(cfg.HTTPClient).Do(req)
 	if err != nil {
 		return codeFreeOAuthTokenResponse{}, err
 	}
@@ -473,7 +491,7 @@ func doCodeFreeTokenRequest(ctx context.Context, cfg codeFreeOAuthConfig, values
 		return codeFreeOAuthTokenResponse{}, err
 	}
 	req.Header = headers
-	resp, err := newCodeFreeControlHTTPClient().Do(req)
+	resp, err := coalesceCodeFreeControlHTTPClient(cfg.HTTPClient).Do(req)
 	if err != nil {
 		return codeFreeOAuthTokenResponse{}, err
 	}
@@ -519,11 +537,7 @@ func asCodeFreeTokenEndpointError(err error, target **codeFreeTokenEndpointError
 	if err == nil || target == nil {
 		return false
 	}
-	if endpointErr, ok := err.(*codeFreeTokenEndpointError); ok {
-		*target = endpointErr
-		return true
-	}
-	return false
+	return errors.As(err, target)
 }
 
 func decodeCodeFreeTokenResponse(raw []byte) (codeFreeOAuthTokenResponse, error) {
@@ -622,7 +636,7 @@ func extractCodeFreeJSONTokenField(raw []byte, key string) string {
 	return strings.TrimSpace(value)
 }
 
-func resolveCodeFreeOAuthConfig(baseURL string, credentialPath string, clientID string, clientSecret string, authMethod CodeFreeClientAuthMethod) (codeFreeOAuthConfig, error) {
+func resolveCodeFreeOAuthConfig(baseURL string, httpClient *http.Client, credentialPath string, clientID string, clientSecret string, authMethod CodeFreeClientAuthMethod) (codeFreeOAuthConfig, error) {
 	path := strings.TrimSpace(credentialPath)
 	if path == "" {
 		var err error
@@ -634,6 +648,7 @@ func resolveCodeFreeOAuthConfig(baseURL string, credentialPath string, clientID 
 	resolvedClientSecret := strings.TrimSpace(codeFreeFirstNonEmpty(clientSecret, os.Getenv(codeFreeClientSecretEnv)))
 	cfg := codeFreeOAuthConfig{
 		BaseURL:          normalizeCodeFreeBaseURL(baseURL),
+		HTTPClient:       httpClient,
 		CredentialPath:   path,
 		ClientID:         codeFreeFirstNonEmpty(clientID, os.Getenv(codeFreeClientIDEnv), codeFreeDefaultOAuthClientID),
 		ClientSecret:     resolvedClientSecret,
@@ -781,6 +796,27 @@ func (f *codeFreeLoginFlow) Close() error {
 	return f.listener.Close()
 }
 
+func (f *codeFreeLoginFlow) State() string {
+	if f == nil {
+		return ""
+	}
+	return f.state
+}
+
+func (f *codeFreeLoginFlow) CodeChallenge() string {
+	if f == nil {
+		return ""
+	}
+	return f.codeChallenge
+}
+
+func (f *codeFreeLoginFlow) CodeVerifier() string {
+	if f == nil {
+		return ""
+	}
+	return f.codeVerifier
+}
+
 func codeFreeRandomURLSafe(size int) (string, error) {
 	buf := make([]byte, size)
 	if _, err := rand.Read(buf); err != nil {
@@ -799,7 +835,7 @@ func codeFreeRandomDigits(length int) (string, error) {
 	}
 	out := make([]byte, length)
 	for i := range buf {
-		out[i] = byte('0' + (buf[i] % 10))
+		out[i] = '0' + (buf[i] % 10)
 	}
 	return string(out), nil
 }

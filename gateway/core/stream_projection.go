@@ -197,7 +197,7 @@ func int64FromAny(value any) int64 {
 	case uint32:
 		return int64(typed)
 	case uint64:
-		if typed > uint64(^uint64(0)>>1) {
+		if typed > ^uint64(0)>>1 {
 			return 0
 		}
 		return int64(typed)

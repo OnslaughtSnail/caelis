@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -227,18 +228,147 @@ func executeLineViaDriver(driver tuiadapterruntime.Driver, sender *ProgramSender
 	defer turn.Close()
 
 	send := sender.Send
-	for env := range turn.Events() {
-		if send == nil {
-			continue
-		}
-		send(env)
-		startTerminalStreamForwarder(ctx, driver, env, send)
-		if env.Event.Kind == appgateway.EventKindApprovalRequested {
-			sendApprovalPrompt(turn, env.Event.ApprovalPayload, send)
+	if send != nil {
+		forwardGatewayTurnEvents(ctx, driver, turn, send)
+	} else {
+		for range turn.Events() {
 		}
 	}
 
 	return TaskResultMsg{}
+}
+
+const gatewayNarrativeBatchInterval = 16 * time.Millisecond
+
+type gatewayNarrativeBatcher struct {
+	pending *appgateway.EventEnvelope
+	key     string
+}
+
+func forwardGatewayTurnEvents(ctx context.Context, driver tuiadapterruntime.Driver, turn tuiadapterruntime.Turn, send func(tea.Msg)) {
+	if turn == nil || send == nil {
+		return
+	}
+	events := turn.Events()
+	if events == nil {
+		return
+	}
+	ticker := time.NewTicker(gatewayNarrativeBatchInterval)
+	defer ticker.Stop()
+
+	var batcher gatewayNarrativeBatcher
+	for events != nil {
+		select {
+		case <-ctx.Done():
+			batcher.flush(send)
+			return
+		case <-ticker.C:
+			batcher.flush(send)
+		case env, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			if batcher.enqueue(env, send) {
+				continue
+			}
+			send(env)
+			startTerminalStreamForwarder(ctx, driver, env, send)
+			if env.Event.Kind == appgateway.EventKindApprovalRequested {
+				sendApprovalPrompt(turn, env.Event.ApprovalPayload, send)
+			}
+		}
+	}
+	batcher.flush(send)
+}
+
+func (b *gatewayNarrativeBatcher) enqueue(env appgateway.EventEnvelope, send func(tea.Msg)) bool {
+	key, ok := gatewayNarrativeBatchKey(env)
+	if !ok {
+		b.flush(send)
+		return false
+	}
+	if b.pending == nil {
+		copy := cloneGatewayNarrativeEnvelope(env)
+		b.pending = &copy
+		b.key = key
+		return true
+	}
+	if b.key != key {
+		b.flush(send)
+		copy := cloneGatewayNarrativeEnvelope(env)
+		b.pending = &copy
+		b.key = key
+		return true
+	}
+	mergeGatewayNarrativeEnvelope(b.pending, env)
+	return true
+}
+
+func (b *gatewayNarrativeBatcher) flush(send func(tea.Msg)) {
+	if b == nil || b.pending == nil {
+		return
+	}
+	if send != nil {
+		send(*b.pending)
+	}
+	b.pending = nil
+	b.key = ""
+}
+
+func gatewayNarrativeBatchKey(env appgateway.EventEnvelope) (string, bool) {
+	if env.Err != nil || env.Event.Kind != appgateway.EventKindAssistantMessage || env.Event.Narrative == nil {
+		return "", false
+	}
+	payload := env.Event.Narrative
+	if payload.Role != appgateway.NarrativeRoleAssistant || payload.Final || strings.TrimSpace(payload.Visibility) != "ui_only" {
+		return "", false
+	}
+	stream := ""
+	switch {
+	case payload.ReasoningText != "" && payload.Text == "":
+		stream = "reasoning"
+	case payload.Text != "" && payload.ReasoningText == "":
+		stream = "answer"
+	default:
+		return "", false
+	}
+	scope := string(payload.Scope)
+	if env.Event.Origin != nil && env.Event.Origin.Scope != "" {
+		scope = string(env.Event.Origin.Scope)
+	}
+	scopeID := gatewayEventScopeID(env.Event)
+	return strings.Join([]string{
+		strings.TrimSpace(env.Event.HandleID),
+		strings.TrimSpace(env.Event.RunID),
+		strings.TrimSpace(env.Event.TurnID),
+		strings.TrimSpace(env.Event.SessionRef.SessionID),
+		strings.TrimSpace(scope),
+		strings.TrimSpace(scopeID),
+		strings.TrimSpace(payload.ParticipantID),
+		strings.TrimSpace(payload.Actor),
+		strings.TrimSpace(payload.UpdateType),
+		stream,
+	}, "\x00"), true
+}
+
+func cloneGatewayNarrativeEnvelope(env appgateway.EventEnvelope) appgateway.EventEnvelope {
+	out := env
+	if env.Event.Narrative != nil {
+		payload := *env.Event.Narrative
+		out.Event.Narrative = &payload
+	}
+	return out
+}
+
+func mergeGatewayNarrativeEnvelope(dst *appgateway.EventEnvelope, src appgateway.EventEnvelope) {
+	if dst == nil || dst.Event.Narrative == nil || src.Event.Narrative == nil {
+		return
+	}
+	dst.Cursor = src.Cursor
+	dst.Event.OccurredAt = src.Event.OccurredAt
+	dst.Event.Narrative.Text += src.Event.Narrative.Text
+	dst.Event.Narrative.ReasoningText += src.Event.Narrative.ReasoningText
 }
 
 func startTerminalStreamForwarder(ctx context.Context, driver tuiadapterruntime.Driver, env appgateway.EventEnvelope, send func(tea.Msg)) {

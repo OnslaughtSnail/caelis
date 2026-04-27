@@ -193,7 +193,7 @@ func writeOSC52ClipboardText(text string) error {
 		seq = seq.Screen()
 	}
 
-	var out io.Writer = clipboardOSC52Writer
+	out := clipboardOSC52Writer
 	if out == nil {
 		terminal, err := clipboardOpenTerminal()
 		if err == nil {

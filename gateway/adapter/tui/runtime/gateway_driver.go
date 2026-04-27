@@ -134,7 +134,7 @@ func (d *GatewayDriver) SubscribeSubagentStream(ctx context.Context, taskID stri
 		return nil, false
 	}
 	ref := sdkstream.Ref{
-		SessionID: strings.TrimSpace(session.SessionRef.SessionID),
+		SessionID: strings.TrimSpace(session.SessionID),
 		TaskID:    taskID,
 	}
 	key := strings.Join([]string{"subagent", ref.SessionID, ref.TaskID}, "|")
@@ -875,8 +875,6 @@ func (d *GatewayDriver) CompleteFile(ctx context.Context, query string, limit in
 
 func (d *GatewayDriver) CompleteSkill(ctx context.Context, query string, limit int) ([]CompletionCandidate, error) {
 	limit = normalizeCompletionLimit(limit)
-	ctx, cancel := completionContext(ctx, skillCompletionTimeout)
-	defer cancel()
 
 	skills, err := gatewayapp.DiscoverSkillMeta(nil, d.WorkspaceDir())
 	if err != nil {

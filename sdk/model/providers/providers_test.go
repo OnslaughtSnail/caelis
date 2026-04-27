@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -155,13 +154,51 @@ func writeCodeFreeRefreshableCredsForTest(t *testing.T, baseURL string, userID s
 	return path
 }
 
+type codeFreeLoginFlowStub struct {
+	state         string
+	codeVerifier  string
+	codeChallenge string
+	callback      codeFreeOAuthCallback
+}
+
+func (f *codeFreeLoginFlowStub) State() string         { return f.state }
+func (f *codeFreeLoginFlowStub) CodeChallenge() string { return f.codeChallenge }
+func (f *codeFreeLoginFlowStub) CodeVerifier() string  { return f.codeVerifier }
+func (f *codeFreeLoginFlowStub) Close() error          { return nil }
+
+func (f *codeFreeLoginFlowStub) Wait(context.Context) (codeFreeOAuthCallback, error) {
+	return f.callback, nil
+}
+
+func withCodeFreeLoginFlowForTest(t *testing.T, callback func(state string) codeFreeOAuthCallback) {
+	t.Helper()
+	state := base64.StdEncoding.EncodeToString([]byte("http://127.0.0.1/callback"))
+	old := newCodeFreeLoginFlowSession
+	newCodeFreeLoginFlowSession = func(string, int) (codeFreeLoginFlowSession, error) {
+		return &codeFreeLoginFlowStub{
+			state:         state,
+			codeVerifier:  "verifier",
+			codeChallenge: "challenge",
+			callback:      callback(state),
+		}, nil
+	}
+	t.Cleanup(func() { newCodeFreeLoginFlowSession = old })
+}
+
+func withCodeFreeControlHTTPClientForTest(t *testing.T, client *http.Client) {
+	t.Helper()
+	old := newCodeFreeControlHTTPClientFunc
+	newCodeFreeControlHTTPClientFunc = func() *http.Client { return client }
+	t.Cleanup(func() { newCodeFreeControlHTTPClientFunc = old })
+}
+
 func TestCodeFreeNonStream_UsesLocalOAuthCredsAndEndpoint(t *testing.T) {
 	credsPath := writeCodeFreeCredsForTest(t, "272182", "76475baf-3659-488a-932d-0971ae103591")
 	t.Setenv(codeFreeCredsPathEnv, credsPath)
 	t.Setenv(codeFreeClientVersionEnv, "0.3.6")
 
 	var seenHeaders http.Header
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != codeFreeChatCompletionsPath {
 			http.NotFound(w, r)
 			return
@@ -173,10 +210,11 @@ func TestCodeFreeNonStream_UsesLocalOAuthCredsAndEndpoint(t *testing.T) {
 	defer server.Close()
 
 	llm := newCodeFree(Config{
-		Provider: "codefree",
-		Model:    "GLM-4.7",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "codefree",
+		Model:      "GLM-4.7",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	})
 
 	var final *model.Response
@@ -269,7 +307,7 @@ func TestCodeFreeStream_ParsesSSE(t *testing.T) {
 	credsPath := writeCodeFreeCredsForTest(t, "272182", "76475baf-3659-488a-932d-0971ae103591")
 	t.Setenv(codeFreeCredsPathEnv, credsPath)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != codeFreeChatCompletionsPath {
 			http.NotFound(w, r)
 			return
@@ -283,10 +321,11 @@ func TestCodeFreeStream_ParsesSSE(t *testing.T) {
 	defer server.Close()
 
 	llm := newCodeFree(Config{
-		Provider: "codefree",
-		Model:    "GLM-4.7",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "codefree",
+		Model:      "GLM-4.7",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	})
 
 	var (
@@ -326,7 +365,7 @@ func TestCodeFreeStream_FallsBackToJSONWhenBackendDoesNotUseSSE(t *testing.T) {
 	credsPath := writeCodeFreeCredsForTest(t, "272182", "76475baf-3659-488a-932d-0971ae103591")
 	t.Setenv(codeFreeCredsPathEnv, credsPath)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != codeFreeChatCompletionsPath {
 			http.NotFound(w, r)
 			return
@@ -337,10 +376,11 @@ func TestCodeFreeStream_FallsBackToJSONWhenBackendDoesNotUseSSE(t *testing.T) {
 	defer server.Close()
 
 	llm := newCodeFree(Config{
-		Provider: "codefree",
-		Model:    "GLM-5.1",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "codefree",
+		Model:      "GLM-5.1",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	})
 
 	var (
@@ -387,7 +427,7 @@ func TestCodeFreeLogin_PersistsRefreshableOAuthCredentials(t *testing.T) {
 
 	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")
 	var tokenRequests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case codeFreeOAuthTokenPath:
 			tokenRequests++
@@ -423,6 +463,9 @@ func TestCodeFreeLogin_PersistsRefreshableOAuthCredentials(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	withCodeFreeLoginFlowForTest(t, func(state string) codeFreeOAuthCallback {
+		return codeFreeOAuthCallback{Code: "auth-code", State: state}
+	})
 
 	codeFreeOpenBrowser = func(authURL string) error {
 		parsed, err := url.Parse(authURL)
@@ -455,18 +498,12 @@ func TestCodeFreeLogin_PersistsRefreshableOAuthCredentials(t *testing.T) {
 		if callbackURL.Scheme != "http" || callbackURL.Host == "" || callbackURL.Path == "" {
 			t.Fatalf("decoded local callback url = %q, want http://host/path", callbackURL.String())
 		}
-		callbackQuery := callbackURL.Query()
-		callbackQuery.Set("code", "auth-code")
-		callbackQuery.Set("state", state)
-		callbackURL.RawQuery = callbackQuery.Encode()
-		go func() {
-			_, _ = http.Get(callbackURL.String())
-		}()
 		return nil
 	}
 
 	result, err := CodeFreeLogin(context.Background(), CodeFreeLoginOptions{
 		BaseURL:        server.URL,
+		HTTPClient:     server.Client(),
 		CredentialPath: credsPath,
 		OpenBrowser:    true,
 	})
@@ -496,7 +533,7 @@ func TestCodeFreeLogin_PersistsRefreshableOAuthCredentials(t *testing.T) {
 }
 
 func TestResolveCodeFreeOAuthConfig_DefaultsAuthCodeExchangeToNoneWithoutClientSecret(t *testing.T) {
-	cfg, err := resolveCodeFreeOAuthConfig("https://www.srdcloud.cn", filepath.Join(t.TempDir(), "oauth_creds.json"), "", "", "")
+	cfg, err := resolveCodeFreeOAuthConfig("https://www.srdcloud.cn", nil, filepath.Join(t.TempDir(), "oauth_creds.json"), "", "", "")
 	if err != nil {
 		t.Fatalf("resolveCodeFreeOAuthConfig() error = %v", err)
 	}
@@ -510,7 +547,7 @@ func TestCodeFreeLogin_AcceptsLocalCallbackWithoutState(t *testing.T) {
 	defer func() { codeFreeOpenBrowser = oldOpenBrowser }()
 
 	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case codeFreeOAuthTokenPath:
 			w.Header().Set("Content-Type", "application/json")
@@ -523,6 +560,9 @@ func TestCodeFreeLogin_AcceptsLocalCallbackWithoutState(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	withCodeFreeLoginFlowForTest(t, func(string) codeFreeOAuthCallback {
+		return codeFreeOAuthCallback{Code: "auth-code"}
+	})
 
 	codeFreeOpenBrowser = func(authURL string) error {
 		parsed, err := url.Parse(authURL)
@@ -541,18 +581,13 @@ func TestCodeFreeLogin_AcceptsLocalCallbackWithoutState(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		callbackQuery := callbackURL.Query()
-		callbackQuery.Set("code", "auth-code")
-		callbackQuery.Del("state")
-		callbackURL.RawQuery = callbackQuery.Encode()
-		go func() {
-			_, _ = http.Get(callbackURL.String())
-		}()
+		_ = callbackURL
 		return nil
 	}
 
 	result, err := CodeFreeLogin(context.Background(), CodeFreeLoginOptions{
 		BaseURL:        server.URL,
+		HTTPClient:     server.Client(),
 		CredentialPath: credsPath,
 		OpenBrowser:    true,
 	})
@@ -572,7 +607,7 @@ func TestCodeFreeLogin_AcceptsFormEncodedTokenResponse(t *testing.T) {
 	defer func() { codeFreeOpenBrowser = oldOpenBrowser }()
 
 	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case codeFreeOAuthTokenPath:
 			w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
@@ -585,6 +620,9 @@ func TestCodeFreeLogin_AcceptsFormEncodedTokenResponse(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	withCodeFreeLoginFlowForTest(t, func(state string) codeFreeOAuthCallback {
+		return codeFreeOAuthCallback{Code: "auth-code", State: state}
+	})
 
 	codeFreeOpenBrowser = func(authURL string) error {
 		parsed, err := url.Parse(authURL)
@@ -600,17 +638,13 @@ func TestCodeFreeLogin_AcceptsFormEncodedTokenResponse(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		callbackQuery := callbackURL.Query()
-		callbackQuery.Set("code", "auth-code")
-		callbackURL.RawQuery = callbackQuery.Encode()
-		go func() {
-			_, _ = http.Get(callbackURL.String())
-		}()
+		_ = callbackURL
 		return nil
 	}
 
 	result, err := CodeFreeLogin(context.Background(), CodeFreeLoginOptions{
 		BaseURL:        server.URL,
+		HTTPClient:     server.Client(),
 		CredentialPath: credsPath,
 		OpenBrowser:    true,
 	})
@@ -630,7 +664,7 @@ func TestCodeFreeLogin_UsesOriSessionIDForAPIKeyAndStoredAccessToken(t *testing.
 	defer func() { codeFreeOpenBrowser = oldOpenBrowser }()
 
 	credsPath := filepath.Join(t.TempDir(), "oauth_creds.json")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case codeFreeOAuthTokenPath:
 			w.Header().Set("Content-Type", "application/x-www-form-urlencoded")
@@ -649,6 +683,9 @@ func TestCodeFreeLogin_UsesOriSessionIDForAPIKeyAndStoredAccessToken(t *testing.
 		}
 	}))
 	defer server.Close()
+	withCodeFreeLoginFlowForTest(t, func(state string) codeFreeOAuthCallback {
+		return codeFreeOAuthCallback{Code: "auth-code", State: state}
+	})
 
 	codeFreeOpenBrowser = func(authURL string) error {
 		parsed, err := url.Parse(authURL)
@@ -664,17 +701,13 @@ func TestCodeFreeLogin_UsesOriSessionIDForAPIKeyAndStoredAccessToken(t *testing.
 		if err != nil {
 			return err
 		}
-		callbackQuery := callbackURL.Query()
-		callbackQuery.Set("code", "auth-code")
-		callbackURL.RawQuery = callbackQuery.Encode()
-		go func() {
-			_, _ = http.Get(callbackURL.String())
-		}()
+		_ = callbackURL
 		return nil
 	}
 
 	result, err := CodeFreeLogin(context.Background(), CodeFreeLoginOptions{
 		BaseURL:        server.URL,
+		HTTPClient:     server.Client(),
 		CredentialPath: credsPath,
 		OpenBrowser:    true,
 	})
@@ -702,7 +735,7 @@ func TestCodeFreeLogin_UsesOriSessionIDForAPIKeyAndStoredAccessToken(t *testing.
 
 func TestLoadCodeFreeCredentials_RefreshesExpiredToken(t *testing.T) {
 	var tokenRequests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case codeFreeOAuthTokenPath:
 			tokenRequests++
@@ -727,6 +760,7 @@ func TestLoadCodeFreeCredentials_RefreshesExpiredToken(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	withCodeFreeControlHTTPClientForTest(t, server.Client())
 
 	credsPath := writeCodeFreeRefreshableCredsForTest(t, server.URL, "272182", "stale-api-key", "refresh-1", time.Now().Add(-time.Minute))
 	t.Setenv(codeFreeCredsPathEnv, credsPath)
@@ -807,7 +841,7 @@ func TestCodeFreeEnsureAuth_SkipsLoginWhenUsableCredsLackRefreshToken(t *testing
 }
 
 func TestOpenAICompatStream_PropagatesSSEErrorsWithoutTurnComplete(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -820,10 +854,11 @@ func TestOpenAICompatStream_PropagatesSSEErrorsWithoutTurnComplete(t *testing.T)
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	var (
@@ -851,7 +886,7 @@ func TestOpenAICompatStream_PropagatesSSEErrorsWithoutTurnComplete(t *testing.T)
 }
 
 func TestOpenAICompatStream_DoesNotApplyRequestTimeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -872,10 +907,11 @@ func TestOpenAICompatStream_DoesNotApplyRequestTimeout(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  50 * time.Millisecond,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    50 * time.Millisecond,
 	}, "token")
 
 	var (
@@ -904,7 +940,7 @@ func TestOpenAICompatStream_DoesNotApplyRequestTimeout(t *testing.T) {
 
 func TestOpenAICompatStream_IncludesUsageRequestOptionAndPropagatesUsage(t *testing.T) {
 	var includeUsage bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -924,10 +960,11 @@ func TestOpenAICompatStream_IncludesUsageRequestOptionAndPropagatesUsage(t *test
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	var (
@@ -958,7 +995,7 @@ func TestOpenAICompatStream_IncludesUsageRequestOptionAndPropagatesUsage(t *test
 }
 
 func TestOpenAICompatNonStream_PropagatesFinishReason(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -969,10 +1006,11 @@ func TestOpenAICompatNonStream_PropagatesFinishReason(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	var final *model.Response
@@ -999,7 +1037,7 @@ func TestOpenAICompatNonStream_PropagatesFinishReason(t *testing.T) {
 }
 
 func TestOpenAICompatStream_PropagatesTerminalFinishReason(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -1012,10 +1050,11 @@ func TestOpenAICompatStream_PropagatesTerminalFinishReason(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	var final *model.Response
@@ -1043,7 +1082,7 @@ func TestOpenAICompatStream_PropagatesTerminalFinishReason(t *testing.T) {
 
 func TestOpenAICompatRequest_IncludesMaxTokens(t *testing.T) {
 	var gotMax float64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -1063,6 +1102,7 @@ func TestOpenAICompatRequest_IncludesMaxTokens(t *testing.T) {
 		Provider:     "openai-compatible",
 		Model:        "test-model",
 		BaseURL:      server.URL,
+		HTTPClient:   server.Client(),
 		Timeout:      2 * time.Second,
 		MaxOutputTok: 2048,
 	}, "token")
@@ -1093,7 +1133,7 @@ func TestOpenRouterRequest_AppliesConfiguredHeaders(t *testing.T) {
 	var gotTransforms []any
 	var gotProvider map[string]any
 	var gotPlugins []any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -1116,10 +1156,11 @@ func TestOpenRouterRequest_AppliesConfiguredHeaders(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenRouter(Config{
-		Provider: "openrouter",
-		API:      APIOpenRouter,
-		Model:    "openrouter/healer-alpha",
-		BaseURL:  server.URL,
+		Provider:   "openrouter",
+		API:        APIOpenRouter,
+		Model:      "openrouter/healer-alpha",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
 		Headers: map[string]string{
 			"HTTP-Referer": "https://example.com/app",
 			"X-Title":      "caelis",
@@ -1180,7 +1221,7 @@ func TestOpenRouterRequest_AppliesConfiguredHeaders(t *testing.T) {
 }
 
 func TestOpenRouterStream_PropagatesTerminalFinishReason(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -1193,11 +1234,12 @@ func TestOpenRouterStream_PropagatesTerminalFinishReason(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenRouter(Config{
-		Provider: "openrouter",
-		API:      APIOpenRouter,
-		Model:    "openrouter/test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "openrouter",
+		API:        APIOpenRouter,
+		Model:      "openrouter/test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	var final *model.Response
@@ -1221,7 +1263,7 @@ func TestOpenRouterStream_PropagatesTerminalFinishReason(t *testing.T) {
 }
 
 func TestOpenAICompatNonStream_AppliesRequestTimeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -1233,10 +1275,11 @@ func TestOpenAICompatNonStream_AppliesRequestTimeout(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  50 * time.Millisecond,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    50 * time.Millisecond,
 	}, "token")
 
 	var gotErr error
@@ -1257,7 +1300,7 @@ func TestOpenAICompatNonStream_AppliesRequestTimeout(t *testing.T) {
 }
 
 func TestOpenAICompatNonStream_DefaultDoesNotApplyRequestTimeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
 			http.NotFound(w, r)
 			return
@@ -1269,9 +1312,10 @@ func TestOpenAICompatNonStream_DefaultDoesNotApplyRequestTimeout(t *testing.T) {
 	defer server.Close()
 
 	llm := newOpenAICompat(Config{
-		Provider: "openai-compatible",
-		Model:    "test-model",
-		BaseURL:  server.URL,
+		Provider:   "openai-compatible",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
 	}, "token")
 
 	var (
@@ -1299,7 +1343,7 @@ func TestOpenAICompatNonStream_DefaultDoesNotApplyRequestTimeout(t *testing.T) {
 }
 
 func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/test-model:streamGenerateContent") {
 			http.NotFound(w, r)
 			return
@@ -1319,10 +1363,11 @@ func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
 	defer server.Close()
 
 	llm := newGemini(Config{
-		Provider: "gemini",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  50 * time.Millisecond,
+		Provider:   "gemini",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    50 * time.Millisecond,
 	}, "token")
 
 	var (
@@ -1350,7 +1395,7 @@ func TestGeminiStream_DoesNotApplyRequestTimeout(t *testing.T) {
 }
 
 func TestGeminiStream_EmitsReasoningChunks(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/test-model:streamGenerateContent") {
 			http.NotFound(w, r)
 			return
@@ -1369,10 +1414,11 @@ func TestGeminiStream_EmitsReasoningChunks(t *testing.T) {
 	defer server.Close()
 
 	llm := newGemini(Config{
-		Provider: "gemini",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "gemini",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	var (
@@ -1417,7 +1463,7 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 	var gotThinkingLevel string
 	var gotIncludeThoughts bool
 	var gotThinkingBudget any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/test-model:generateContent") {
 			http.NotFound(w, r)
 			return
@@ -1443,6 +1489,7 @@ func TestGeminiRequest_IncludesMaxOutputTokens(t *testing.T) {
 		Provider:     "gemini",
 		Model:        "test-model",
 		BaseURL:      server.URL,
+		HTTPClient:   server.Client(),
 		Timeout:      2 * time.Second,
 		MaxOutputTok: 3072,
 	}, "token")
@@ -1480,7 +1527,7 @@ func TestGeminiRequest_Pre3UsesThinkingBudget(t *testing.T) {
 	var gotThinkingLevel string
 	var gotThinkingBudget float64
 	var gotIncludeThoughts bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/v1beta/models/gemini-2.5-flash:generateContent") {
 			http.NotFound(w, r)
 			return
@@ -1502,10 +1549,11 @@ func TestGeminiRequest_Pre3UsesThinkingBudget(t *testing.T) {
 	defer server.Close()
 
 	llm := newGemini(Config{
-		Provider: "gemini",
-		Model:    "gemini-2.5-flash",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "gemini",
+		Model:      "gemini-2.5-flash",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
@@ -1532,7 +1580,7 @@ func TestGeminiRequest_Pre3UsesThinkingBudget(t *testing.T) {
 func TestGeminiRequest_Pre3DisableReasoningUsesZeroBudget(t *testing.T) {
 	var gotThinkingBudget float64
 	var gotIncludeThoughts bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request payload: %v", err)
@@ -1549,10 +1597,11 @@ func TestGeminiRequest_Pre3DisableReasoningUsesZeroBudget(t *testing.T) {
 	defer server.Close()
 
 	llm := newGemini(Config{
-		Provider: "gemini",
-		Model:    "gemini-2.5-pro",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "gemini",
+		Model:      "gemini-2.5-pro",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
@@ -1577,7 +1626,7 @@ func TestGeminiRequest_Pre3DisableReasoningUsesZeroBudget(t *testing.T) {
 
 func TestGeminiRequest_BaseURLWithVersionPath(t *testing.T) {
 	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}`)
@@ -1585,10 +1634,11 @@ func TestGeminiRequest_BaseURLWithVersionPath(t *testing.T) {
 	defer server.Close()
 
 	llm := newGemini(Config{
-		Provider: "gemini",
-		Model:    "test-model",
-		BaseURL:  server.URL + "/v1beta",
-		Timeout:  2 * time.Second,
+		Provider:   "gemini",
+		Model:      "test-model",
+		BaseURL:    server.URL + "/v1beta",
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
@@ -1607,7 +1657,7 @@ func TestGeminiRequest_BaseURLWithVersionPath(t *testing.T) {
 
 func TestGeminiRequest_XHighEffortFallsBackToHighLevel(t *testing.T) {
 	var gotThinkingLevel string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request payload: %v", err)
@@ -1623,10 +1673,11 @@ func TestGeminiRequest_XHighEffortFallsBackToHighLevel(t *testing.T) {
 	defer server.Close()
 
 	llm := newGemini(Config{
-		Provider: "gemini",
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "gemini",
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "token")
 
 	for _, err := range llm.Generate(context.Background(), &model.Request{
@@ -2032,7 +2083,7 @@ func TestAnthropicMessageTransform(t *testing.T) {
 
 func TestAnthropicSDKNonStream_NormalizesBaseURLAndMapsParts(t *testing.T) {
 	var sawCustomTool bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -2095,11 +2146,12 @@ func TestAnthropicSDKNonStream_NormalizesBaseURLAndMapsParts(t *testing.T) {
 	defer server.Close()
 
 	llm := newAnthropic(Config{
-		Provider: "anthropic",
-		API:      APIAnthropic,
-		Model:    "test-model",
-		BaseURL:  server.URL + "/v1",
-		Timeout:  2 * time.Second,
+		Provider:   "anthropic",
+		API:        APIAnthropic,
+		Model:      "test-model",
+		BaseURL:    server.URL + "/v1",
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 		Auth: AuthConfig{
 			Type:  AuthAPIKey,
 			Token: "sk-anthropic",
@@ -2169,7 +2221,7 @@ func TestAnthropicSDKNonStream_NormalizesBaseURLAndMapsParts(t *testing.T) {
 }
 
 func TestAnthropicSDKStream_MapsThinkingDeltasAndSignature(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -2204,11 +2256,12 @@ func TestAnthropicSDKStream_MapsThinkingDeltasAndSignature(t *testing.T) {
 	defer server.Close()
 
 	llm := newAnthropic(Config{
-		Provider: "anthropic-compatible",
-		API:      APIAnthropicCompatible,
-		Model:    "test-model",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "anthropic-compatible",
+		API:        APIAnthropicCompatible,
+		Model:      "test-model",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 		Auth: AuthConfig{
 			Type:      AuthAPIKey,
 			Token:     "compat-token",
@@ -2266,7 +2319,7 @@ func TestAnthropicSDKStream_MapsThinkingDeltasAndSignature(t *testing.T) {
 }
 
 func TestMiniMaxStream_EmitsStartBlockTextWithoutSmoothingAtProviderLayer(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/messages" && r.URL.Path != "/v1/messages" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -2287,11 +2340,12 @@ func TestMiniMaxStream_EmitsStartBlockTextWithoutSmoothingAtProviderLayer(t *tes
 	defer server.Close()
 
 	llm := newAnthropic(Config{
-		Provider: "minimax",
-		API:      APIAnthropicCompatible,
-		Model:    "MiniMax-M2.5",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "minimax",
+		API:        APIAnthropicCompatible,
+		Model:      "MiniMax-M2.5",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 		Auth: AuthConfig{
 			Type:      AuthAPIKey,
 			Token:     "compat-token",

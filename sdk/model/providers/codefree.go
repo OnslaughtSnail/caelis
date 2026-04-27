@@ -118,13 +118,29 @@ func newCodeFree(cfg Config) model.LLM {
 		name:                strings.TrimSpace(cfg.Model),
 		provider:            cfg.Provider,
 		baseURL:             strings.TrimSpace(cfg.BaseURL),
-		client:              newCodeFreeChatHTTPClient(),
+		client:              coalesceCodeFreeChatHTTPClient(cfg.HTTPClient),
 		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
 		options:             options,
 	}
 }
+
+func coalesceCodeFreeChatHTTPClient(client *http.Client) *http.Client {
+	if client != nil {
+		return client
+	}
+	return newCodeFreeChatHTTPClient()
+}
+
+func coalesceCodeFreeControlHTTPClient(client *http.Client) *http.Client {
+	if client != nil {
+		return client
+	}
+	return newCodeFreeControlHTTPClientFunc()
+}
+
+var newCodeFreeControlHTTPClientFunc = newCodeFreeControlHTTPClient
 
 func (l *codeFreeLLM) Name() string {
 	return l.name

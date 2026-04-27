@@ -25,6 +25,7 @@ type geminiLLM struct {
 	provider            string
 	token               string
 	httpOptions         genai.HTTPOptions
+	httpClient          *http.Client
 	requestTimeout      time.Duration
 	maxOutputTok        int
 	contextWindowTokens int
@@ -36,6 +37,7 @@ func newGemini(cfg Config, token string) model.LLM {
 		provider:            cfg.Provider,
 		token:               token,
 		httpOptions:         buildGeminiHTTPOptions(cfg.BaseURL, cfg.Headers),
+		httpClient:          cfg.HTTPClient,
 		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,
@@ -192,6 +194,7 @@ func (l *geminiLLM) newClient(ctx context.Context) (*genai.Client, error) {
 		Backend:     genai.BackendGeminiAPI,
 		APIKey:      l.token,
 		HTTPOptions: l.httpOptions,
+		HTTPClient:  l.httpClient,
 	})
 }
 

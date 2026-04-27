@@ -216,7 +216,7 @@ func runDoctor(ctx context.Context, stack *gatewayapp.Stack, sessionID string, f
 	if err != nil {
 		return err
 	}
-	return writeDoctorResult(stdout, format, doctorResult(report))
+	return writeDoctorResult(stdout, format, report)
 }
 
 func runInteractive(ctx context.Context, stack *gatewayapp.Stack, sessionID string, cfg gatewayapp.Config, displayModelText string, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
@@ -288,7 +288,7 @@ func writeDoctorResult(w io.Writer, format outputFormat, result doctorResult) er
 		enc.SetEscapeHTML(false)
 		return enc.Encode(result)
 	default:
-		_, err := fmt.Fprintln(w, gatewayapp.FormatDoctorText(gatewayapp.DoctorReport(result)))
+		_, err := fmt.Fprintln(w, gatewayapp.FormatDoctorText(result))
 		return err
 	}
 }

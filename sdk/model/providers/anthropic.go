@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"net/http"
 	"strings"
 	"time"
 
@@ -37,7 +36,7 @@ func newAnthropic(cfg Config, token string) model.LLM {
 	}
 	opts := make([]option.RequestOption, 0, 8+len(cfg.Headers))
 	opts = append(opts, option.WithBaseURL(anthropicSDKBaseURL(cfg.BaseURL)))
-	opts = append(opts, option.WithHTTPClient(&http.Client{}))
+	opts = append(opts, option.WithHTTPClient(coalesceHTTPClient(cfg.HTTPClient)))
 	opts = append(opts, anthropicAuthOptions(cfg, token)...)
 	for key, value := range cfg.Headers {
 		key = strings.TrimSpace(key)

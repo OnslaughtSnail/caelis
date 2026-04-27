@@ -102,7 +102,7 @@ func newOpenRouter(cfg Config, token string) model.LLM {
 		baseURL:             strings.TrimRight(cfg.BaseURL, "/"),
 		token:               token,
 		headers:             cloneHeaders(cfg.Headers),
-		client:              &http.Client{},
+		client:              coalesceHTTPClient(cfg.HTTPClient),
 		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,

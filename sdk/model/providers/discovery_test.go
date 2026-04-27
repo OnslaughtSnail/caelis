@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
 func TestDiscoverGeminiModels_UsesAPIKeyHeader(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("x-goog-api-key"); got != "token" {
 			t.Fatalf("expected x-goog-api-key header, got %q", got)
 		}
@@ -22,9 +21,10 @@ func TestDiscoverGeminiModels_UsesAPIKeyHeader(t *testing.T) {
 	defer server.Close()
 
 	got, err := discoverGeminiModels(context.Background(), server.Client(), Config{
-		Provider: "gemini",
-		API:      APIGemini,
-		BaseURL:  server.URL,
+		Provider:   "gemini",
+		API:        APIGemini,
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
 		Auth: AuthConfig{
 			Type:  AuthAPIKey,
 			Token: "token",
@@ -39,7 +39,7 @@ func TestDiscoverGeminiModels_UsesAPIKeyHeader(t *testing.T) {
 }
 
 func TestDiscoverOpenRouterModels_ParsesOpenRouterShapeAndConfiguredHeaders(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer token" {
 			t.Fatalf("expected bearer auth header, got %q", got)
 		}
@@ -55,9 +55,10 @@ func TestDiscoverOpenRouterModels_ParsesOpenRouterShapeAndConfiguredHeaders(t *t
 	defer server.Close()
 
 	got, err := discoverOpenAIModels(context.Background(), server.Client(), Config{
-		Provider: "openrouter",
-		API:      APIOpenRouter,
-		BaseURL:  server.URL,
+		Provider:   "openrouter",
+		API:        APIOpenRouter,
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
 		Headers: map[string]string{
 			"HTTP-Referer": "https://example.com/caelis",
 			"X-Title":      "caelis",

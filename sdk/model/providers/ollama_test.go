@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -42,7 +41,7 @@ func TestIsOllamaProvider(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOllamaRegisterAndCreate(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat" {
 			http.NotFound(w, r)
 			return
@@ -54,11 +53,12 @@ func TestOllamaRegisterAndCreate(t *testing.T) {
 
 	factory := NewFactory()
 	cfg := Config{
-		Alias:    "ollama/qwen2.5:7b",
-		Provider: "ollama",
-		API:      APIOllama,
-		Model:    "qwen2.5:7b",
-		BaseURL:  server.URL,
+		Alias:      "ollama/qwen2.5:7b",
+		Provider:   "ollama",
+		API:        APIOllama,
+		Model:      "qwen2.5:7b",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
 		Auth: AuthConfig{
 			Type: AuthNone,
 		},
@@ -124,7 +124,7 @@ func TestOllamaAuthNoneAllowsEmptyToken(t *testing.T) {
 
 func TestOllamaBaseURLGetsV1Suffix(t *testing.T) {
 	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true}`)
@@ -132,9 +132,10 @@ func TestOllamaBaseURLGetsV1Suffix(t *testing.T) {
 	defer server.Close()
 
 	llm := newOllama(Config{
-		Provider: "ollama",
-		Model:    "test",
-		BaseURL:  server.URL, // no /v1 suffix
+		Provider:   "ollama",
+		Model:      "test",
+		BaseURL:    server.URL, // no /v1 suffix
+		HTTPClient: server.Client(),
 	}, "")
 
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
@@ -152,7 +153,7 @@ func TestOllamaBaseURLGetsV1Suffix(t *testing.T) {
 
 func TestOllamaBaseURLDoesNotDoubleV1(t *testing.T) {
 	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"model":"test","message":{"role":"assistant","content":"ok"},"done":true}`)
@@ -160,9 +161,10 @@ func TestOllamaBaseURLDoesNotDoubleV1(t *testing.T) {
 	defer server.Close()
 
 	llm := newOllama(Config{
-		Provider: "ollama",
-		Model:    "test",
-		BaseURL:  server.URL + "/v1", // already has /v1 suffix
+		Provider:   "ollama",
+		Model:      "test",
+		BaseURL:    server.URL + "/v1", // already has /v1 suffix
+		HTTPClient: server.Client(),
 	}, "")
 
 	for resp, err := range llm.Generate(context.Background(), &model.Request{
@@ -183,7 +185,7 @@ func TestOllamaBaseURLDoesNotDoubleV1(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDiscoverOllamaModels(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tags" {
 			http.NotFound(w, r)
 			return
@@ -214,9 +216,10 @@ func TestDiscoverOllamaModels(t *testing.T) {
 	defer server.Close()
 
 	models, err := DiscoverModels(context.Background(), Config{
-		API:     APIOllama,
-		BaseURL: server.URL,
-		Auth:    AuthConfig{Type: AuthNone},
+		API:        APIOllama,
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Auth:       AuthConfig{Type: AuthNone},
 	})
 	if err != nil {
 		t.Fatalf("discover ollama models: %v", err)
@@ -235,16 +238,17 @@ func TestDiscoverOllamaModels(t *testing.T) {
 }
 
 func TestDiscoverOllamaModelsEmpty(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"models":[]}`)
 	}))
 	defer server.Close()
 
 	models, err := DiscoverModels(context.Background(), Config{
-		API:     APIOllama,
-		BaseURL: server.URL,
-		Auth:    AuthConfig{Type: AuthNone},
+		API:        APIOllama,
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Auth:       AuthConfig{Type: AuthNone},
 	})
 	if err != nil {
 		t.Fatalf("discover should not error on empty list: %v", err)
@@ -256,7 +260,7 @@ func TestDiscoverOllamaModelsEmpty(t *testing.T) {
 
 func TestDiscoverOllamaModelsWithV1BaseURL(t *testing.T) {
 	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		if r.URL.Path != "/api/tags" {
 			http.NotFound(w, r)
@@ -268,9 +272,10 @@ func TestDiscoverOllamaModelsWithV1BaseURL(t *testing.T) {
 	defer server.Close()
 
 	models, err := DiscoverModels(context.Background(), Config{
-		API:     APIOllama,
-		BaseURL: server.URL + "/v1",
-		Auth:    AuthConfig{Type: AuthNone},
+		API:        APIOllama,
+		BaseURL:    server.URL + "/v1",
+		HTTPClient: server.Client(),
+		Auth:       AuthConfig{Type: AuthNone},
 	})
 	if err != nil {
 		t.Fatalf("discover with /v1 base url: %v", err)
@@ -288,7 +293,7 @@ func TestDiscoverOllamaModelsWithV1BaseURL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOllamaStream(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat" {
 			http.NotFound(w, r)
 			return
@@ -308,10 +313,11 @@ func TestOllamaStream(t *testing.T) {
 	defer server.Close()
 
 	llm := newOllama(Config{
-		Provider: "ollama",
-		Model:    "qwen2.5:7b",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "ollama",
+		Model:      "qwen2.5:7b",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "")
 
 	var parts []string
@@ -341,7 +347,7 @@ func TestOllamaStream(t *testing.T) {
 
 func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
 	var gotThink *bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat" {
 			http.NotFound(w, r)
 			return
@@ -359,10 +365,11 @@ func TestOllamaReasoningEnabledUsesThinkAndReturnsReasoning(t *testing.T) {
 	defer server.Close()
 
 	llm := newOllama(Config{
-		Provider: "ollama",
-		Model:    "qwen3.5:4b",
-		BaseURL:  server.URL,
-		Timeout:  2 * time.Second,
+		Provider:   "ollama",
+		Model:      "qwen3.5:4b",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		Timeout:    2 * time.Second,
 	}, "")
 	var gotResp *model.Response
 	for resp, err := range llm.Generate(context.Background(), &model.Request{

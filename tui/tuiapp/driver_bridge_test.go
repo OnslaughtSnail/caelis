@@ -195,6 +195,151 @@ func TestExecuteLineViaDriverStreamsGatewayEventsDirectly(t *testing.T) {
 	}
 }
 
+func TestExecuteLineViaDriverCoalescesUIOnlyReasoningBeforeToolEvent(t *testing.T) {
+	turn := &bridgeTestTurn{
+		events: make(chan appgateway.EventEnvelope, 4),
+	}
+	for _, text := range []string{"think ", "fast ", "now"} {
+		turn.events <- appgateway.EventEnvelope{
+			Event: appgateway.Event{
+				Kind:       appgateway.EventKindAssistantMessage,
+				SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+				Narrative: &appgateway.NarrativePayload{
+					Role:          appgateway.NarrativeRoleAssistant,
+					ReasoningText: text,
+					Visibility:    "ui_only",
+					UpdateType:    string(sdksession.ProtocolUpdateTypeAgentThought),
+					Scope:         appgateway.EventScopeMain,
+				},
+			},
+		}
+	}
+	turn.events <- appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolCall,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolCall: &appgateway.ToolCallPayload{
+				CallID:   "call-1",
+				ToolName: "READ",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeMain,
+			},
+		},
+	}
+	close(turn.events)
+
+	driver := &bridgeSubmitDriver{turn: turn}
+	var msgs []tea.Msg
+	result := executeLineViaDriver(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, Submission{Text: "hello"})
+	if result.Err != nil {
+		t.Fatalf("executeLineViaDriver() err = %v", result.Err)
+	}
+	if got := len(msgs); got != 2 {
+		t.Fatalf("executeLineViaDriver() emitted %d msgs, want 2: %#v", got, msgs)
+	}
+	reasoning, ok := msgs[0].(appgateway.EventEnvelope)
+	if !ok || reasoning.Event.Narrative == nil {
+		t.Fatalf("first msg = %#v, want coalesced reasoning EventEnvelope", msgs[0])
+	}
+	if got := reasoning.Event.Narrative.ReasoningText; got != "think fast now" {
+		t.Fatalf("coalesced reasoning = %q, want %q", got, "think fast now")
+	}
+	tool, ok := msgs[1].(appgateway.EventEnvelope)
+	if !ok || tool.Event.Kind != appgateway.EventKindToolCall {
+		t.Fatalf("second msg = %#v, want tool event after reasoning flush", msgs[1])
+	}
+}
+
+func TestExecuteLineViaDriverCoalescesUIOnlyReasoningPreservesLeadingSpaces(t *testing.T) {
+	turn := &bridgeTestTurn{
+		events: make(chan appgateway.EventEnvelope, 7),
+	}
+	for _, text := range []string{"Now", " let", " me", " verify", " the", " DDL", " matches"} {
+		turn.events <- appgateway.EventEnvelope{
+			Event: appgateway.Event{
+				Kind:       appgateway.EventKindAssistantMessage,
+				SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+				Narrative: &appgateway.NarrativePayload{
+					Role:          appgateway.NarrativeRoleAssistant,
+					ReasoningText: text,
+					Visibility:    "ui_only",
+					UpdateType:    string(sdksession.ProtocolUpdateTypeAgentThought),
+					Scope:         appgateway.EventScopeMain,
+				},
+			},
+		}
+	}
+	close(turn.events)
+
+	driver := &bridgeSubmitDriver{turn: turn}
+	var msgs []tea.Msg
+	result := executeLineViaDriver(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, Submission{Text: "hello"})
+	if result.Err != nil {
+		t.Fatalf("executeLineViaDriver() err = %v", result.Err)
+	}
+	if got := len(msgs); got != 1 {
+		t.Fatalf("executeLineViaDriver() emitted %d msgs, want 1: %#v", got, msgs)
+	}
+	reasoning, ok := msgs[0].(appgateway.EventEnvelope)
+	if !ok || reasoning.Event.Narrative == nil {
+		t.Fatalf("first msg = %#v, want coalesced reasoning EventEnvelope", msgs[0])
+	}
+	if got := reasoning.Event.Narrative.ReasoningText; got != "Now let me verify the DDL matches" {
+		t.Fatalf("coalesced reasoning = %q, want boundary spaces preserved", got)
+	}
+}
+
+func TestExecuteLineViaDriverDoesNotCoalesceReasoningWithAnswerDelta(t *testing.T) {
+	turn := &bridgeTestTurn{
+		events: make(chan appgateway.EventEnvelope, 2),
+	}
+	turn.events <- appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:          appgateway.NarrativeRoleAssistant,
+				ReasoningText: "think",
+				Visibility:    "ui_only",
+				UpdateType:    string(sdksession.ProtocolUpdateTypeAgentThought),
+				Scope:         appgateway.EventScopeMain,
+			},
+		},
+	}
+	turn.events <- appgateway.EventEnvelope{
+		Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:       appgateway.NarrativeRoleAssistant,
+				Text:       "answer",
+				Visibility: "ui_only",
+				UpdateType: string(sdksession.ProtocolUpdateTypeAgentMessage),
+				Scope:      appgateway.EventScopeMain,
+			},
+		},
+	}
+	close(turn.events)
+
+	driver := &bridgeSubmitDriver{turn: turn}
+	var msgs []tea.Msg
+	result := executeLineViaDriver(driver, &ProgramSender{Send: func(msg tea.Msg) { msgs = append(msgs, msg) }}, Submission{Text: "hello"})
+	if result.Err != nil {
+		t.Fatalf("executeLineViaDriver() err = %v", result.Err)
+	}
+	if got := len(msgs); got != 2 {
+		t.Fatalf("executeLineViaDriver() emitted %d msgs, want 2: %#v", got, msgs)
+	}
+	first := msgs[0].(appgateway.EventEnvelope)
+	second := msgs[1].(appgateway.EventEnvelope)
+	if first.Event.Narrative == nil || first.Event.Narrative.ReasoningText != "think" {
+		t.Fatalf("first narrative = %#v, want reasoning", first.Event.Narrative)
+	}
+	if second.Event.Narrative == nil || second.Event.Narrative.Text != "answer" {
+		t.Fatalf("second narrative = %#v, want answer", second.Event.Narrative)
+	}
+}
+
 func TestExecuteLineViaDriverTreatsUnknownSlashAsUserMessage(t *testing.T) {
 	driver := &bridgeSubmitDriver{}
 	text := "/rbac/inner/workflow/switch Query 参数"

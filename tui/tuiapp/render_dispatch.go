@@ -188,10 +188,6 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return m, tea.Batch(policyCmd, m.ensureDeferredBatchTick()), true
 
 	case AssistantStreamMsg:
-		if m.cfg.FrameBatchMainStream {
-			model, cmd := m.enqueueMainDelta(typed.Kind, typed.Actor, typed.Text, typed.Final)
-			return model, tea.Batch(policyCmd, cmd), true
-		}
 		model, cmd := m.handleStreamBlock(typed.Kind, typed.Actor, typed.Text, typed.Final)
 		return model, tea.Batch(policyCmd, cmd), true
 
@@ -200,10 +196,6 @@ func (m *Model) dispatchRenderEvent(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return model, tea.Batch(policyCmd, cmd), true
 
 	case ReasoningStreamMsg:
-		if m.cfg.FrameBatchMainStream {
-			model, cmd := m.enqueueMainDelta("reasoning", typed.Actor, typed.Text, typed.Final)
-			return model, tea.Batch(policyCmd, cmd), true
-		}
 		model, cmd := m.handleStreamBlock("reasoning", typed.Actor, typed.Text, typed.Final)
 		return model, tea.Batch(policyCmd, cmd), true
 

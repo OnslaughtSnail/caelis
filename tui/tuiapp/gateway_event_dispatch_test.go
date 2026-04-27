@@ -1222,6 +1222,71 @@ func TestGatewayReasoningFoldsAfterAttentionToolLoopAndTogglesInline(t *testing.
 	}
 }
 
+func TestGatewayExpandedReasoningReplacesFoldedPreviewInPlace(t *testing.T) {
+	model := newGatewayEventTestModel()
+	reasoning := "Now let me verify the DDL matches every field in the entity.\nEntity field -> DDL column\nID -> id varchar(64) NOT NULL"
+	for _, env := range []appgateway.EventEnvelope{
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindAssistantMessage,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			Narrative: &appgateway.NarrativePayload{
+				Role:          appgateway.NarrativeRoleAssistant,
+				ReasoningText: reasoning,
+				Final:         true,
+				Scope:         appgateway.EventScopeMain,
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolCall,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolCall: &appgateway.ToolCallPayload{
+				CallID:   "bash-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusRunning,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"command": "go test ./..."},
+			},
+		}},
+		{Event: appgateway.Event{
+			Kind:       appgateway.EventKindToolResult,
+			SessionRef: sdksession.SessionRef{SessionID: "root-session"},
+			ToolResult: &appgateway.ToolResultPayload{
+				CallID:   "bash-1",
+				ToolName: "BASH",
+				Status:   appgateway.ToolStatusCompleted,
+				Scope:    appgateway.EventScopeMain,
+				RawInput: map[string]any{"command": "go test ./..."},
+				RawOutput: map[string]any{
+					"stdout":    "ok\n",
+					"exit_code": 0,
+				},
+			},
+		}},
+	} {
+		updated, _ := model.Update(env)
+		model = updated.(*Model)
+	}
+
+	block, ok := model.doc.Blocks()[0].(*MainACPTurnBlock)
+	if !ok {
+		t.Fatalf("first block = %#v, want MainACPTurnBlock", model.doc.Blocks()[0])
+	}
+	if !model.tryToggleACPToolPanelToken(block.BlockID(), "acp_reasoning:0") {
+		t.Fatal("expected reasoning click token to toggle")
+	}
+	rows := block.Render(BlockRenderContext{Width: 90, TermWidth: 90, Theme: model.theme})
+	plain := strings.Join(renderedPlainRows(rows), "\n")
+	if !strings.Contains(plain, "∨ Now let me verify the DDL matches every field in the entity.") {
+		t.Fatalf("expanded rows = %q, want first reasoning row to replace folded preview", plain)
+	}
+	if strings.Contains(plain, "\n· Now let me verify the DDL matches every field in the entity.") {
+		t.Fatalf("expanded rows = %q, duplicated folded preview as body first line", plain)
+	}
+	if strings.Contains(plain, "Nowletme") || strings.Contains(plain, "idvarchar") || strings.Contains(plain, "NOTNULL") {
+		t.Fatalf("expanded rows = %q, lost token boundary spaces", plain)
+	}
+}
+
 func TestGatewayReasoningFoldUsesTimedDurationWhenAvailable(t *testing.T) {
 	model := newGatewayEventTestModel()
 	start := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)

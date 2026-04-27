@@ -1,6 +1,9 @@
 package providers
 
-import "time"
+import (
+	"net/http"
+	"time"
+)
 
 // APIType defines protocol dialect used by a model provider.
 type APIType string
@@ -58,6 +61,7 @@ type Config struct {
 	Model                     string
 	BaseURL                   string
 	Headers                   map[string]string
+	HTTPClient                *http.Client
 	Timeout                   time.Duration
 	MaxOutputTok              int
 	ContextWindowTokens       int

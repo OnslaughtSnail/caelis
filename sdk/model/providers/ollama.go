@@ -78,7 +78,7 @@ func newOllama(cfg Config, _ string) model.LLM {
 		name:                cfg.Model,
 		provider:            cfg.Provider,
 		baseURL:             baseURL,
-		client:              &http.Client{},
+		client:              coalesceHTTPClient(cfg.HTTPClient),
 		requestTimeout:      cfg.Timeout,
 		maxOutputTok:        cfg.MaxOutputTok,
 		contextWindowTokens: cfg.ContextWindowTokens,

@@ -426,7 +426,7 @@ func (r *Runtime) buildControllerHandoffContext(
 	b.WriteString("\nprevious_controller: ")
 	b.WriteString(firstNonEmpty(strings.TrimSpace(from.AgentName), strings.TrimSpace(from.Label), strings.TrimSpace(from.ControllerID), string(from.Kind)))
 	b.WriteString("\ncontext_sync_seq: ")
-	b.WriteString(fmt.Sprintf("%d", seq))
+	fmt.Fprintf(&b, "%d", seq)
 	if len(session.Participants) > 0 {
 		b.WriteString("\nchild_handles:")
 		for _, participant := range session.Participants {

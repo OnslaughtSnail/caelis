@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 func TestGenerateStreamingEmitsStartBlockText(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/messages" && r.URL.Path != "/v1/messages" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -77,7 +76,7 @@ func TestGenerateStreamingEmitsStartBlockText(t *testing.T) {
 func TestGenerateNonStreaming_DefaultDoesNotApplyRequestTimeout(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newProviderTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/messages" && r.URL.Path != "/v1/messages" {
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}

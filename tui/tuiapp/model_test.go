@@ -8,6 +8,7 @@ import (
 
 	appgateway "github.com/OnslaughtSnail/caelis/gateway"
 	sdksession "github.com/OnslaughtSnail/caelis/sdk/session"
+	"github.com/OnslaughtSnail/caelis/tui/tuikit"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -80,6 +81,26 @@ func TestWelcomeCardUpdatesWhenStatusChanges(t *testing.T) {
 	}
 	if strings.Contains(view, "not configured (/connect)") {
 		t.Fatalf("welcome card still shows not configured after status update: %q", view)
+	}
+}
+
+func TestMainColumnUsesFullTerminalWidth(t *testing.T) {
+	model := NewModel(Config{})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 200, Height: 40})
+	m := updated.(*Model)
+
+	if got := m.mainColumnX(); got != 0 {
+		t.Fatalf("mainColumnX() = %d, want 0", got)
+	}
+	if got := m.mainColumnWidth(); got != 200 {
+		t.Fatalf("mainColumnWidth() = %d, want terminal width 200", got)
+	}
+	wantViewport := 200 - tuikit.GutterNarrative - m.viewportScrollbarWidth()
+	if got := m.viewportContentWidth(); got != wantViewport {
+		t.Fatalf("viewportContentWidth() = %d, want %d", got, wantViewport)
+	}
+	if got := m.viewport.Width(); got != wantViewport {
+		t.Fatalf("viewport.Width() = %d, want %d", got, wantViewport)
 	}
 }
 
